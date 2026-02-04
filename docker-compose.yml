@@ -1,0 +1,76 @@
+services:
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: music-ai-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-music_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-musicai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - music-ai-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-musicai} -d ${POSTGRES_DB:-music_ai}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: music-ai-backend
+    environment:
+      # Database configuration
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-music_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-musicai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+
+      # Music library path (inside container)
+      MUSIC_LIBRARY_PATH: /music
+
+      # API Keys
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+
+      # GPU configuration
+      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+
+      # Application settings
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./backend:/app
+      - ./data/cache:/root/.cache
+      # Mount music library as read-only
+      # Windows path: E:\Music -> /music in container
+      - ${MUSIC_LIBRARY_PATH:-E:\Music}:/music:ro
+    ports:
+      - "8000:8000"
+    networks:
+      - music-ai-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+networks:
+  music-ai-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+    driver: local
