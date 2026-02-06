@@ -26,13 +26,36 @@ class QualitySource(str, enum.Enum):
     MP3 = "MP3"
 
 
+class Genre(Base):
+    """Genre model (normalized)."""
+    __tablename__ = "genres"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False, unique=True)
+    description = Column(Text)
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    track_associations = relationship("TrackGenre", back_populates="genre", cascade="all, delete-orphan")
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_genres_name", "name"),
+    )
+
+    def __repr__(self):
+        return f"<Genre(id={self.id}, name='{self.name}')>"
+
+
 class Artist(Base):
     """Artist model."""
     __tablename__ = "artists"
 
     id = Column(Integer, primary_key=True)
     name = Column(String(500), nullable=False, unique=True)
-    sort_name = Column(String(500))
 
     # External service IDs (Phase 2)
     spotify_id = Column(String(100))
@@ -41,7 +64,6 @@ class Artist(Base):
 
     # Metadata
     bio = Column(Text)
-    genre = Column(String(200))
     country = Column(String(100))
 
     # Timestamps
@@ -49,8 +71,13 @@ class Artist(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
-    albums = relationship("Album", back_populates="artist", cascade="all, delete-orphan")
     track_associations = relationship("TrackArtist", back_populates="artist", cascade="all, delete-orphan")
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_artists_name", "name"),
+        Index("idx_artists_spotify_id", "spotify_id"),
+    )
 
     def __repr__(self):
         return f"<Artist(id={self.id}, name='{self.name}')>"
@@ -62,26 +89,24 @@ class Album(Base):
 
     id = Column(Integer, primary_key=True)
     title = Column(String(500), nullable=False)
-    artist_id = Column(Integer, ForeignKey("artists.id"), nullable=False)
 
     # Album details
     release_year = Column(Integer)
-    genre = Column(String(200))
     label = Column(String(200))
     catalog_number = Column(String(100))
     total_tracks = Column(Integer)
 
     # Quality information
     quality_source = Column(SQLEnum(QualitySource, name="quality_source_type"), default=QualitySource.CD)
-    sample_rate = Column(Integer)  # Hz
-    bit_depth = Column(Integer)    # bits
+    sample_rate = Column(Integer)
+    bit_depth = Column(Integer)
 
     # External service IDs (Phase 2)
     spotify_id = Column(String(100))
     musicbrainz_id = Column(String(100))
 
     # File system information
-    directory_path = Column(Text, nullable=False)
+    directory_path = Column(Text, nullable=False, unique=True)
 
     # User data (Phase 4)
     user_rating = Column(Numeric(3, 2))
@@ -92,15 +117,12 @@ class Album(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
-    artist = relationship("Artist", back_populates="albums")
     tracks = relationship("Track", back_populates="album", cascade="all, delete-orphan")
 
-    # Constraints
+    # Constraints and indexes
     __table_args__ = (
         CheckConstraint("user_rating >= 0 AND user_rating <= 5", name="check_album_rating"),
         Index("idx_albums_title", "title"),
-        Index("idx_albums_artist_id", "artist_id"),
-        Index("idx_albums_genre", "genre"),
         Index("idx_albums_release_year", "release_year"),
         Index("idx_albums_quality_source", "quality_source"),
     )
@@ -121,12 +143,11 @@ class Track(Base):
     track_number = Column(Integer)
     disc_number = Column(Integer, default=1)
     duration_seconds = Column(Numeric(10, 2))
-    genre = Column(String(200))
 
     # Audio characteristics
     sample_rate = Column(Integer)
     bit_depth = Column(Integer)
-    bitrate = Column(Integer)  # kbps
+    bitrate = Column(Integer)
     channels = Column(Integer)
 
     # File information
@@ -172,8 +193,9 @@ class Track(Base):
     # Relationships
     album = relationship("Album", back_populates="tracks")
     artist_associations = relationship("TrackArtist", back_populates="track", cascade="all, delete-orphan")
+    genre_associations = relationship("TrackGenre", back_populates="track", cascade="all, delete-orphan")
 
-    # Constraints
+    # Constraints and indexes
     __table_args__ = (
         CheckConstraint("user_rating >= 0 AND user_rating <= 5", name="check_track_rating"),
         CheckConstraint("spotify_energy >= 0 AND spotify_energy <= 1", name="check_energy"),
@@ -185,13 +207,33 @@ class Track(Base):
         CheckConstraint("spotify_speechiness >= 0 AND spotify_speechiness <= 1", name="check_speechiness"),
         Index("idx_tracks_title", "title"),
         Index("idx_tracks_album_id", "album_id"),
-        Index("idx_tracks_genre", "genre"),
         Index("idx_tracks_file_path", "file_path"),
         Index("idx_tracks_play_count", "play_count"),
     )
 
     def __repr__(self):
         return f"<Track(id={self.id}, title='{self.title}')>"
+
+
+class TrackGenre(Base):
+    """Track-Genre association (many-to-many)."""
+    __tablename__ = "track_genres"
+
+    track_id = Column(Integer, ForeignKey("tracks.id"), primary_key=True)
+    genre_id = Column(Integer, ForeignKey("genres.id"), primary_key=True)
+
+    # Relationships
+    track = relationship("Track", back_populates="genre_associations")
+    genre = relationship("Genre", back_populates="track_associations")
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_track_genres_track_id", "track_id"),
+        Index("idx_track_genres_genre_id", "genre_id"),
+    )
+
+    def __repr__(self):
+        return f"<TrackGenre(track_id={self.track_id}, genre_id={self.genre_id})>"
 
 
 class TrackArtist(Base):
@@ -214,44 +256,3 @@ class TrackArtist(Base):
 
     def __repr__(self):
         return f"<TrackArtist(track_id={self.track_id}, artist_id={self.artist_id}, role='{self.role}')>"
-
-
-class Playlist(Base):
-    """Playlist model (Phase 3/4)."""
-    __tablename__ = "playlists"
-
-    id = Column(Integer, primary_key=True)
-    name = Column(String(200), nullable=False)
-    description = Column(Text)
-
-    # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    # Relationships
-    track_associations = relationship("PlaylistTrack", back_populates="playlist", cascade="all, delete-orphan")
-
-    def __repr__(self):
-        return f"<Playlist(id={self.id}, name='{self.name}')>"
-
-
-class PlaylistTrack(Base):
-    """Playlist-Track association."""
-    __tablename__ = "playlist_tracks"
-
-    playlist_id = Column(Integer, ForeignKey("playlists.id"), primary_key=True)
-    track_id = Column(Integer, ForeignKey("tracks.id"), primary_key=True)
-    position = Column(Integer, nullable=False)
-    added_at = Column(DateTime, default=datetime.utcnow)
-
-    # Relationships
-    playlist = relationship("Playlist", back_populates="track_associations")
-
-    # Indexes
-    __table_args__ = (
-        Index("idx_playlist_tracks_playlist_id", "playlist_id"),
-        Index("idx_playlist_tracks_track_id", "track_id"),
-    )
-
-    def __repr__(self):
-        return f"<PlaylistTrack(playlist_id={self.playlist_id}, track_id={self.track_id}, position={self.position})>"

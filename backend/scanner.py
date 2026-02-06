@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from tqdm import tqdm
 
 from config import settings
-from models import Artist, Album, Track, TrackArtist, QualitySource
+from models import Artist, Album, Track, TrackArtist, TrackGenre, Genre, QualitySource
 from database import get_db_context
 
 logger = logging.getLogger(__name__)
@@ -154,18 +154,28 @@ class LibraryScanner:
         return flac_files
 
     @staticmethod
-    def get_or_create_artist(db: Session, artist_name: str, genre: Optional[str] = None) -> Artist:
+    def get_or_create_genre(db: Session, genre_name: str) -> Genre:
+        """Get existing genre or create new one."""
+        name = genre_name.strip()
+        genre = db.query(Genre).filter(Genre.name == name).first()
+
+        if not genre:
+            genre = Genre(name=name)
+            db.add(genre)
+            db.flush()
+            logger.debug(f"Created genre: {name}")
+
+        return genre
+
+    @staticmethod
+    def get_or_create_artist(db: Session, artist_name: str) -> Artist:
         """Get existing artist or create new one."""
         artist = db.query(Artist).filter(Artist.name == artist_name).first()
 
         if not artist:
-            artist = Artist(
-                name=artist_name,
-                sort_name=artist_name,  # TODO: Implement better sort name logic
-                genre=genre
-            )
+            artist = Artist(name=artist_name)
             db.add(artist)
-            db.flush()  # Get ID without committing
+            db.flush()
             logger.debug(f"Created artist: {artist_name}")
 
         return artist
@@ -174,23 +184,19 @@ class LibraryScanner:
     def get_or_create_album(
         db: Session,
         album_title: str,
-        artist: Artist,
         directory_path: str,
         metadata: Dict[str, Any]
     ) -> Album:
-        """Get existing album or create new one."""
+        """Get existing album or create new one (identified by directory_path)."""
         album = db.query(Album).filter(
-            Album.title == album_title,
-            Album.artist_id == artist.id
+            Album.directory_path == directory_path
         ).first()
 
         if not album:
             album = Album(
                 title=album_title,
-                artist_id=artist.id,
                 directory_path=directory_path,
                 release_year=metadata.get("release_year"),
-                genre=metadata.get("genre"),
                 label=metadata.get("label"),
                 catalog_number=metadata.get("catalog_number"),
                 quality_source=metadata.get("quality_source", QualitySource.CD),
@@ -274,17 +280,12 @@ class LibraryScanner:
                         continue
 
                     # Get or create artist
-                    artist = self.get_or_create_artist(
-                        db,
-                        artist_name,
-                        genre=metadata.get("genre")
-                    )
+                    artist = self.get_or_create_artist(db, artist_name)
 
                     # Get or create album
                     album = self.get_or_create_album(
                         db,
                         album_title,
-                        artist,
                         directory_path=str(file_path.parent),
                         metadata=metadata
                     )
@@ -296,7 +297,6 @@ class LibraryScanner:
                         track_number=metadata.get("track_number"),
                         disc_number=metadata.get("disc_number", 1),
                         duration_seconds=metadata.get("duration_seconds"),
-                        genre=metadata.get("genre"),
                         sample_rate=metadata.get("sample_rate"),
                         bit_depth=metadata.get("bit_depth"),
                         bitrate=metadata.get("bitrate"),
@@ -316,6 +316,16 @@ class LibraryScanner:
                         role="primary"
                     )
                     db.add(track_artist)
+
+                    # Create track-genre association
+                    genre_name = metadata.get("genre")
+                    if genre_name and genre_name.strip():
+                        genre = self.get_or_create_genre(db, genre_name)
+                        track_genre = TrackGenre(
+                            track_id=track.id,
+                            genre_id=genre.id
+                        )
+                        db.add(track_genre)
 
                     stats["added"] += 1
 

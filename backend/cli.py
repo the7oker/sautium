@@ -95,13 +95,12 @@ def stats():
 def list_tracks(limit):
     """List recently added tracks."""
     try:
-        from models import Track, Album, Artist
+        from models import Track, Album, TrackArtist, Artist
 
         with get_db_context() as db:
             tracks = (
-                db.query(Track, Album, Artist)
+                db.query(Track, Album)
                 .join(Album, Track.album_id == Album.id)
-                .join(Artist, Album.artist_id == Artist.id)
                 .order_by(Track.created_at.desc())
                 .limit(limit)
                 .all()
@@ -113,11 +112,19 @@ def list_tracks(limit):
 
             click.echo(f"\n🎵 Recently added tracks (showing {len(tracks)}):\n")
 
-            for track, album, artist in tracks:
+            for track, album in tracks:
+                # Get primary artist via track_artists
+                artist_row = (
+                    db.query(Artist.name)
+                    .join(TrackArtist, TrackArtist.artist_id == Artist.id)
+                    .filter(TrackArtist.track_id == track.id, TrackArtist.role == "primary")
+                    .first()
+                )
+                artist_name = artist_row[0] if artist_row else "Unknown"
                 duration = f"{int(track.duration_seconds // 60)}:{int(track.duration_seconds % 60):02d}" if track.duration_seconds else "?"
                 quality = f"{track.sample_rate//1000}kHz/{track.bit_depth}bit" if track.sample_rate and track.bit_depth else "?"
 
-                click.echo(f"   • {artist.name} - {track.title}")
+                click.echo(f"   • {artist_name} - {track.title}")
                 click.echo(f"     Album: {album.title} | {duration} | {quality}")
 
     except Exception as e:
