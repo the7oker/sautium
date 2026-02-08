@@ -57,6 +57,38 @@ def scan(limit, no_skip):
         sys.exit(1)
 
 
+@cli.command("generate-embeddings")
+@click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process (for testing)")
+@click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default from config)")
+def generate_embeddings(limit, batch_size):
+    """Generate audio embeddings for tracks using CLAP model."""
+    from embeddings import generate_embeddings as do_generate
+
+    click.echo("🎵 Starting audio embedding generation...")
+    click.echo(f"🖥️  Model: {settings.embedding_model}")
+    click.echo(f"📦 Batch size: {batch_size or settings.embedding_batch_size}")
+
+    if limit:
+        click.echo(f"⚠️  Limited to {limit} tracks (testing mode)")
+
+    try:
+        stats = do_generate(limit=limit, batch_size=batch_size)
+
+        click.echo("\n✅ Embedding generation complete!")
+        click.echo(f"📊 Statistics:")
+        click.echo(f"   • Processed: {stats['processed']} tracks")
+        click.echo(f"   • Success: {stats['success']} embeddings")
+        click.echo(f"   • Failed: {stats['failed']} tracks")
+
+        if stats['failed'] > 0:
+            click.echo(f"\n⚠️  Check logs for error details")
+
+    except Exception as e:
+        click.echo(f"\n❌ Error: {e}", err=True)
+        logger.exception("Embedding generation failed")
+        sys.exit(1)
+
+
 @cli.command()
 def stats():
     """Show library statistics."""

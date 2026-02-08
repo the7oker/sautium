@@ -208,12 +208,32 @@ async def scan_library_endpoint(
 
 
 @app.post("/embeddings/generate")
-async def generate_embeddings():
-    """Generate audio embeddings (Step 1.3)."""
-    raise HTTPException(
-        status_code=501,
-        detail="Embedding generation will be implemented in Step 1.3"
-    )
+async def generate_embeddings_endpoint(
+    limit: Optional[int] = None,
+    batch_size: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Generate audio embeddings for tracks without embeddings.
+
+    Args:
+        limit: Maximum number of tracks to process.
+        batch_size: Override default batch size.
+
+    Returns:
+        Statistics about the generation run.
+    """
+    from embeddings import generate_embeddings as do_generate
+
+    try:
+        logger.info(f"Starting embedding generation (limit={limit}, batch_size={batch_size})")
+        stats = do_generate(limit=limit, batch_size=batch_size)
+        return {
+            "success": True,
+            "statistics": stats,
+        }
+    except Exception as e:
+        logger.error(f"Embedding generation failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/search/similar")
