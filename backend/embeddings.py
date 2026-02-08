@@ -74,6 +74,32 @@ class AudioEmbeddingGenerator:
                 torch.cuda.empty_cache()
             logger.info("Model unloaded")
 
+    def text_to_embedding(self, text: str) -> np.ndarray:
+        """
+        Encode text to a 512d embedding using CLAP's text encoder.
+
+        The resulting vector lives in the same space as audio embeddings,
+        enabling text-to-audio similarity search.
+
+        Args:
+            text: Natural language description (e.g. "slow emotional blues").
+
+        Returns:
+            L2-normalized numpy array of shape (512,).
+        """
+        self.load_model()
+
+        inputs = self.processor(text=[text], return_tensors="pt", padding=True)
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            text_features = self.model.get_text_features(**inputs)
+
+        # L2 normalize to match audio embeddings
+        text_features = torch.nn.functional.normalize(text_features, p=2, dim=1)
+
+        return text_features[0].cpu().numpy()
+
     def _load_audio(self, file_path: str) -> Optional[np.ndarray]:
         """
         Load audio file and extract middle segment.

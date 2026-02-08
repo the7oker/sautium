@@ -131,20 +131,28 @@ class LibraryScanner:
             logger.error(f"Unexpected error reading {file_path}: {e}")
             return None
 
-    def find_flac_files(self, limit: Optional[int] = None) -> List[Path]:
+    def find_flac_files(self, limit: Optional[int] = None, subpath: Optional[str] = None) -> List[Path]:
         """
         Recursively find all FLAC files in library.
 
         Args:
             limit: Maximum number of files to return (for testing).
+            subpath: Optional subdirectory within library to scan (e.g., "Electronic/Berlin School/Klaus Schulze").
 
         Returns:
             List of Path objects for FLAC files.
         """
-        logger.info(f"Searching for FLAC files in {self.library_path}")
+        if subpath:
+            scan_path = self.library_path / subpath
+            if not scan_path.exists():
+                raise ValueError(f"Subpath does not exist: {scan_path}")
+            logger.info(f"Searching for FLAC files in {scan_path} (subpath: {subpath})")
+        else:
+            scan_path = self.library_path
+            logger.info(f"Searching for FLAC files in {scan_path}")
 
         flac_files = []
-        for file_path in self.library_path.rglob("*.flac"):
+        for file_path in scan_path.rglob("*.flac"):
             if file_path.is_file():
                 flac_files.append(file_path)
                 if limit and len(flac_files) >= limit:
@@ -209,13 +217,14 @@ class LibraryScanner:
 
         return album
 
-    def scan_and_import(self, limit: Optional[int] = None, skip_existing: bool = True) -> Dict[str, int]:
+    def scan_and_import(self, limit: Optional[int] = None, skip_existing: bool = True, subpath: Optional[str] = None) -> Dict[str, int]:
         """
         Scan library and import metadata to database.
 
         Args:
             limit: Maximum number of files to scan (for testing).
             skip_existing: Skip files already in database.
+            subpath: Optional subdirectory within library to scan.
 
         Returns:
             Dictionary with statistics (processed, added, skipped, errors).
@@ -228,7 +237,7 @@ class LibraryScanner:
         }
 
         # Find FLAC files
-        flac_files = self.find_flac_files(limit=limit)
+        flac_files = self.find_flac_files(limit=limit, subpath=subpath)
 
         if not flac_files:
             logger.warning("No FLAC files found")
@@ -351,16 +360,17 @@ class LibraryScanner:
         return stats
 
 
-def scan_library(limit: Optional[int] = None, skip_existing: bool = True) -> Dict[str, int]:
+def scan_library(limit: Optional[int] = None, skip_existing: bool = True, subpath: Optional[str] = None) -> Dict[str, int]:
     """
     Convenience function to scan library.
 
     Args:
         limit: Maximum number of files to scan.
         skip_existing: Skip files already in database.
+        subpath: Optional subdirectory within library to scan.
 
     Returns:
         Statistics dictionary.
     """
     scanner = LibraryScanner()
-    return scanner.scan_and_import(limit=limit, skip_existing=skip_existing)
+    return scanner.scan_and_import(limit=limit, skip_existing=skip_existing, subpath=subpath)

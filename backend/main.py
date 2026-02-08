@@ -181,7 +181,8 @@ async def get_stats() -> Dict[str, Any]:
 @app.post("/scan")
 async def scan_library_endpoint(
     limit: Optional[int] = None,
-    skip_existing: bool = True
+    skip_existing: bool = True,
+    subpath: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Scan music library and import metadata to database.
@@ -189,6 +190,7 @@ async def scan_library_endpoint(
     Args:
         limit: Maximum number of files to scan (for testing).
         skip_existing: Skip files already in database.
+        subpath: Optional subdirectory within library to scan.
 
     Returns:
         Statistics about the scan.
@@ -196,8 +198,8 @@ async def scan_library_endpoint(
     from scanner import scan_library as do_scan
 
     try:
-        logger.info(f"Starting library scan (limit={limit}, skip_existing={skip_existing})")
-        stats = do_scan(limit=limit, skip_existing=skip_existing)
+        logger.info(f"Starting library scan (limit={limit}, skip_existing={skip_existing}, subpath={subpath})")
+        stats = do_scan(limit=limit, skip_existing=skip_existing, subpath=subpath)
         return {
             "success": True,
             "statistics": stats
@@ -237,21 +239,142 @@ async def generate_embeddings_endpoint(
 
 
 @app.post("/search/similar")
-async def search_similar():
-    """Search for similar tracks (Step 1.4)."""
-    raise HTTPException(
-        status_code=501,
-        detail="Similarity search will be implemented in Step 1.4"
-    )
+async def search_similar(
+    track_id: int,
+    limit: Optional[int] = None,
+    min_similarity: Optional[float] = None,
+    artist: Optional[str] = None,
+    genre: Optional[str] = None,
+    quality_source: Optional[str] = None,
+    year_from: Optional[int] = None,
+    year_to: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Find tracks similar to a given track by audio embedding similarity."""
+    from database import get_db_context
+    from search import search_similar_tracks
+
+    filters = {}
+    if artist:
+        filters["artist"] = artist
+    if genre:
+        filters["genre"] = genre
+    if quality_source:
+        filters["quality_source"] = quality_source
+    if year_from:
+        filters["year_from"] = year_from
+    if year_to:
+        filters["year_to"] = year_to
+
+    try:
+        with get_db_context() as db:
+            result = search_similar_tracks(
+                db, track_id, limit=limit, min_similarity=min_similarity, filters=filters
+            )
+            if "error" in result:
+                raise HTTPException(status_code=404, detail=result["error"])
+            return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Similar search failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/search/text")
+async def search_text(
+    query: str,
+    limit: Optional[int] = None,
+    min_similarity: Optional[float] = None,
+    artist: Optional[str] = None,
+    genre: Optional[str] = None,
+    quality_source: Optional[str] = None,
+    year_from: Optional[int] = None,
+    year_to: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Search tracks by text description using CLAP text-to-audio embeddings."""
+    from database import get_db_context
+    from search import search_by_text
+
+    filters = {}
+    if artist:
+        filters["artist"] = artist
+    if genre:
+        filters["genre"] = genre
+    if quality_source:
+        filters["quality_source"] = quality_source
+    if year_from:
+        filters["year_from"] = year_from
+    if year_to:
+        filters["year_to"] = year_to
+
+    try:
+        with get_db_context() as db:
+            return search_by_text(
+                db, query, limit=limit, min_similarity=min_similarity, filters=filters
+            )
+    except Exception as e:
+        logger.error(f"Text search failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/search/metadata")
+async def search_metadata(
+    artist: Optional[str] = None,
+    album: Optional[str] = None,
+    genre: Optional[str] = None,
+    quality_source: Optional[str] = None,
+    year_from: Optional[int] = None,
+    year_to: Optional[int] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """Search tracks by metadata filters only."""
+    from database import get_db_context
+    from search import search_by_metadata
+
+    filters = {}
+    if artist:
+        filters["artist"] = artist
+    if album:
+        filters["album"] = album
+    if genre:
+        filters["genre"] = genre
+    if quality_source:
+        filters["quality_source"] = quality_source
+    if year_from:
+        filters["year_from"] = year_from
+    if year_to:
+        filters["year_to"] = year_to
+
+    try:
+        with get_db_context() as db:
+            return search_by_metadata(db, filters=filters, limit=limit, offset=offset)
+    except Exception as e:
+        logger.error(f"Metadata search failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/search/query")
-async def search_query():
-    """Natural language search with AI (Step 1.5)."""
-    raise HTTPException(
-        status_code=501,
-        detail="AI-powered search will be implemented in Step 1.5"
-    )
+async def search_query(
+    query: str,
+    limit: int = 20,
+) -> Dict[str, Any]:
+    """AI-powered natural language music search using Claude."""
+    from database import get_db_context
+    from assistant import ask_assistant
+
+    if not settings.anthropic_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="ANTHROPIC_API_KEY is not configured"
+        )
+
+    try:
+        with get_db_context() as db:
+            return ask_assistant(db, query, limit=limit)
+    except Exception as e:
+        logger.error(f"AI search failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

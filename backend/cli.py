@@ -27,10 +27,14 @@ def cli():
 @cli.command()
 @click.option("--limit", "-l", type=int, default=None, help="Limit number of files to scan (for testing)")
 @click.option("--no-skip", is_flag=True, help="Don't skip existing files (re-scan all)")
-def scan(limit, no_skip):
+@click.option("--path", "-p", type=str, default=None, help="Scan specific subdirectory (e.g., 'Electronic/Berlin School/Klaus Schulze')")
+def scan(limit, no_skip, path):
     """Scan music library and import metadata to database."""
     click.echo(f"🎵 Starting library scan...")
     click.echo(f"📁 Library path: {settings.music_library_path}")
+
+    if path:
+        click.echo(f"📂 Subdirectory: {path}")
 
     if limit:
         click.echo(f"⚠️  Limited to {limit} files (testing mode)")
@@ -39,7 +43,7 @@ def scan(limit, no_skip):
         click.echo(f"⚠️  Re-scanning all files (not skipping existing)")
 
     try:
-        stats = scan_library(limit=limit, skip_existing=not no_skip)
+        stats = scan_library(limit=limit, skip_existing=not no_skip, subpath=path)
 
         click.echo("\n✅ Scan complete!")
         click.echo(f"📊 Statistics:")
@@ -255,6 +259,149 @@ def test_file(path):
     click.echo(f"\n💿 Quality:")
     click.echo(f"   Source: {metadata.get('quality_source')}")
     click.echo(f"   File Size: {metadata.get('file_size_bytes') / (1024*1024):.2f} MB")
+
+
+@cli.command("search-similar")
+@click.option("--track-id", "-t", type=int, required=True, help="Source track ID")
+@click.option("--limit", "-l", type=int, default=10, help="Number of results")
+@click.option("--min-similarity", type=float, default=None, help="Minimum similarity (0-1)")
+@click.option("--artist", type=str, default=None, help="Filter by artist name (partial match)")
+@click.option("--genre", type=str, default=None, help="Filter by genre (partial match)")
+@click.option("--quality", type=str, default=None, help="Filter by quality source (CD, Vinyl, Hi-Res, MP3)")
+def search_similar(track_id, limit, min_similarity, artist, genre, quality):
+    """Find tracks similar to a given track by audio similarity."""
+    from search import search_similar_tracks
+
+    filters = {}
+    if artist:
+        filters["artist"] = artist
+    if genre:
+        filters["genre"] = genre
+    if quality:
+        filters["quality_source"] = quality
+
+    try:
+        with get_db_context() as db:
+            result = search_similar_tracks(
+                db, track_id, limit=limit, min_similarity=min_similarity, filters=filters
+            )
+
+        if "error" in result:
+            click.echo(f"❌ {result['error']}", err=True)
+            sys.exit(1)
+
+        qt = result["query_track"]
+        click.echo(f"\n🎵 Tracks similar to: {qt['artist']} - {qt['title']}")
+        click.echo(f"   Album: {qt['album']} | Genre: {qt.get('genre', 'N/A')}")
+        click.echo(f"\n{'#':<4} {'Sim':>5}  {'Artist':<25} {'Title':<35} {'Album':<30} {'Quality':<7}")
+        click.echo("-" * 110)
+
+        for i, track in enumerate(result["results"], 1):
+            sim = f"{track['similarity']:.2f}" if track["similarity"] else "N/A"
+            artist_name = (track["artist"] or "Unknown")[:24]
+            title = (track["title"] or "?")[:34]
+            album_name = (track["album"] or "?")[:29]
+            qs = track.get("quality_source") or "?"
+            click.echo(f"{i:<4} {sim:>5}  {artist_name:<25} {title:<35} {album_name:<30} {qs:<7}")
+
+        click.echo(f"\n📊 Found {result['count']} similar tracks")
+
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        logger.exception("Similar search failed")
+        sys.exit(1)
+
+
+@cli.command("search-text")
+@click.option("--query", "-q", type=str, required=True, help="Text description to search for")
+@click.option("--limit", "-l", type=int, default=10, help="Number of results")
+@click.option("--min-similarity", type=float, default=None, help="Minimum similarity (0-1)")
+@click.option("--artist", type=str, default=None, help="Filter by artist name (partial match)")
+@click.option("--genre", type=str, default=None, help="Filter by genre (partial match)")
+@click.option("--quality", type=str, default=None, help="Filter by quality source (CD, Vinyl, Hi-Res, MP3)")
+def search_text(query, limit, min_similarity, artist, genre, quality):
+    """Search tracks by text description using CLAP text-to-audio similarity."""
+    from search import search_by_text
+
+    click.echo(f"🔍 Searching for: \"{query}\"")
+    click.echo("⏳ Loading CLAP model for text encoding...")
+
+    filters = {}
+    if artist:
+        filters["artist"] = artist
+    if genre:
+        filters["genre"] = genre
+    if quality:
+        filters["quality_source"] = quality
+
+    try:
+        with get_db_context() as db:
+            result = search_by_text(
+                db, query, limit=limit, min_similarity=min_similarity, filters=filters
+            )
+
+        click.echo(f"\n{'#':<4} {'Sim':>5}  {'Artist':<25} {'Title':<35} {'Album':<30} {'Quality':<7}")
+        click.echo("-" * 110)
+
+        for i, track in enumerate(result["results"], 1):
+            sim = f"{track['similarity']:.2f}" if track["similarity"] else "N/A"
+            artist_name = (track["artist"] or "Unknown")[:24]
+            title = (track["title"] or "?")[:34]
+            album_name = (track["album"] or "?")[:29]
+            qs = track.get("quality_source") or "?"
+            click.echo(f"{i:<4} {sim:>5}  {artist_name:<25} {title:<35} {album_name:<30} {qs:<7}")
+
+        click.echo(f"\n📊 Found {result['count']} matching tracks")
+
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        logger.exception("Text search failed")
+        sys.exit(1)
+
+
+@cli.command()
+@click.option("--query", "-q", type=str, required=True, help="Natural language question about your music library")
+@click.option("--limit", "-l", type=int, default=20, help="Max tracks to retrieve for context")
+def ask(query, limit):
+    """Ask the AI DJ assistant about your music library."""
+    from assistant import ask_assistant
+
+    if not settings.anthropic_api_key:
+        click.echo("❌ ANTHROPIC_API_KEY is not configured. Set it in .env file.", err=True)
+        sys.exit(1)
+
+    click.echo(f"🎵 Asking AI DJ: \"{query}\"")
+    click.echo("⏳ Retrieving tracks and consulting Claude...\n")
+
+    try:
+        with get_db_context() as db:
+            result = ask_assistant(db, query, limit=limit)
+
+        # Display Claude's response
+        click.echo("🤖 AI DJ Response:\n")
+        click.echo(result["answer"])
+
+        # Display retrieved tracks table
+        tracks = result.get("tracks", [])
+        if tracks:
+            click.echo(f"\n📋 Retrieved tracks ({result['tracks_retrieved']}):\n")
+            click.echo(f"{'#':<4} {'Sim':>5}  {'Artist':<25} {'Title':<35} {'Album':<30} {'Quality':<7}")
+            click.echo("-" * 110)
+
+            for i, track in enumerate(tracks, 1):
+                sim = f"{track['similarity']:.2f}" if track.get("similarity") else "  -  "
+                artist_name = (track.get("artist") or "Unknown")[:24]
+                title = (track.get("title") or "?")[:34]
+                album_name = (track.get("album") or "?")[:29]
+                qs = track.get("quality_source") or "?"
+                click.echo(f"{i:<4} {sim:>5}  {artist_name:<25} {title:<35} {album_name:<30} {qs:<7}")
+
+        click.echo(f"\n📊 Model: {result['model']} | Tracks in context: {result['tracks_retrieved']}")
+
+    except Exception as e:
+        click.echo(f"\n❌ Error: {e}", err=True)
+        logger.exception("Ask failed")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
