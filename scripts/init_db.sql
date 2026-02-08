@@ -6,6 +6,29 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- Create enum for quality sources
 CREATE TYPE quality_source_type AS ENUM ('CD', 'Vinyl', 'Hi-Res', 'MP3');
 
+-- Embedding models table (metadata for CLAP and future models)
+CREATE TABLE IF NOT EXISTS embedding_models (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL UNIQUE,
+    description TEXT,
+    dimension INTEGER NOT NULL,
+
+    -- Timestamps
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Embeddings table (512-dimensional vectors for CLAP)
+CREATE TABLE IF NOT EXISTS embeddings (
+    id SERIAL PRIMARY KEY,
+    vector vector(512) NOT NULL,
+    model_id INTEGER NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+
+    -- Timestamps
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Genres table (normalized)
 CREATE TABLE IF NOT EXISTS genres (
     id SERIAL PRIMARY KEY,
@@ -93,10 +116,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     file_size_bytes BIGINT,
     file_format VARCHAR(10) DEFAULT 'FLAC',
 
-    -- Audio embedding (512-dimensional vector for CLAP)
-    embedding vector(512),
-    embedding_model VARCHAR(100),
-    embedding_generated_at TIMESTAMP,
+    -- Audio embedding reference
+    embedding_id INTEGER REFERENCES embeddings(id) ON DELETE SET NULL,
 
     -- External service IDs (for Phase 2)
     spotify_id VARCHAR(100),
@@ -149,6 +170,16 @@ CREATE TABLE IF NOT EXISTS track_artists (
 
 -- Create indexes for performance
 
+-- Embedding model indexes
+CREATE INDEX IF NOT EXISTS idx_embedding_models_name ON embedding_models(name);
+
+-- Embedding indexes
+-- Vector similarity search index (using HNSW for efficient similarity queries)
+CREATE INDEX IF NOT EXISTS idx_embeddings_vector ON embeddings
+    USING hnsw (vector vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+CREATE INDEX IF NOT EXISTS idx_embeddings_model_id ON embeddings(model_id);
+
 -- Genre indexes
 CREATE INDEX IF NOT EXISTS idx_genres_name ON genres(name);
 
@@ -166,11 +197,7 @@ CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
 CREATE INDEX IF NOT EXISTS idx_tracks_album_id ON tracks(album_id);
 CREATE INDEX IF NOT EXISTS idx_tracks_file_path ON tracks(file_path);
 CREATE INDEX IF NOT EXISTS idx_tracks_play_count ON tracks(play_count);
-
--- Vector similarity search index (using HNSW for efficient similarity queries)
-CREATE INDEX IF NOT EXISTS idx_tracks_embedding ON tracks
-    USING hnsw (embedding vector_cosine_ops)
-    WHERE embedding IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_tracks_embedding_id ON tracks(embedding_id);
 
 -- Track genres indexes
 CREATE INDEX IF NOT EXISTS idx_track_genres_track_id ON track_genres(track_id);
@@ -191,6 +218,12 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Create triggers for automatic timestamp updates
+CREATE TRIGGER update_embedding_models_updated_at BEFORE UPDATE ON embedding_models
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_embeddings_updated_at BEFORE UPDATE ON embeddings
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
 CREATE TRIGGER update_genres_updated_at BEFORE UPDATE ON genres
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
@@ -209,7 +242,7 @@ SELECT
     (SELECT COUNT(*) FROM artists) as total_artists,
     (SELECT COUNT(*) FROM albums) as total_albums,
     (SELECT COUNT(*) FROM tracks) as total_tracks,
-    (SELECT COUNT(*) FROM tracks WHERE embedding IS NOT NULL) as tracks_with_embeddings,
+    (SELECT COUNT(*) FROM tracks WHERE embedding_id IS NOT NULL) as tracks_with_embeddings,
     (SELECT SUM(duration_seconds) FROM tracks) as total_duration_seconds,
     (SELECT SUM(file_size_bytes) FROM tracks) as total_file_size_bytes,
     (SELECT COUNT(*) FROM genres) as unique_genres;

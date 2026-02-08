@@ -26,6 +26,59 @@ class QualitySource(str, enum.Enum):
     MP3 = "MP3"
 
 
+class EmbeddingModel(Base):
+    """Embedding model metadata (CLAP, future models, etc)."""
+    __tablename__ = "embedding_models"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False, unique=True)  # e.g., "laion/clap-htsat-unfused"
+    description = Column(Text)
+    dimension = Column(Integer, nullable=False)  # 512 for CLAP
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    embeddings = relationship("Embedding", back_populates="model")
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_embedding_models_name", "name"),
+    )
+
+    def __repr__(self):
+        return f"<EmbeddingModel(id={self.id}, name='{self.name}')>"
+
+
+class Embedding(Base):
+    """Audio embedding model (512-dimensional vectors for CLAP)."""
+    __tablename__ = "embeddings"
+
+    id = Column(Integer, primary_key=True)
+    vector = Column(Vector(512), nullable=False)
+    model_id = Column(Integer, ForeignKey("embedding_models.id"), nullable=False)
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    model = relationship("EmbeddingModel", back_populates="embeddings")
+    tracks = relationship("Track", back_populates="embedding_obj")
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_embeddings_vector", "vector", postgresql_using="hnsw",
+              postgresql_with={"m": 16, "ef_construction": 64},
+              postgresql_ops={"vector": "vector_cosine_ops"}),
+        Index("idx_embeddings_model_id", "model_id"),
+    )
+
+    def __repr__(self):
+        return f"<Embedding(id={self.id}, model_id={self.model_id})>"
+
+
 class Genre(Base):
     """Genre model (normalized)."""
     __tablename__ = "genres"
@@ -97,7 +150,15 @@ class Album(Base):
     total_tracks = Column(Integer)
 
     # Quality information
-    quality_source = Column(SQLEnum(QualitySource, name="quality_source_type"), default=QualitySource.CD)
+    quality_source = Column(
+        SQLEnum(
+            QualitySource,
+            name="quality_source_type",
+            values_callable=lambda x: [e.value for e in x],
+            create_constraint=False
+        ),
+        default=QualitySource.CD
+    )
     sample_rate = Column(Integer)
     bit_depth = Column(Integer)
 
@@ -155,10 +216,8 @@ class Track(Base):
     file_size_bytes = Column(BigInteger)
     file_format = Column(String(10), default="FLAC")
 
-    # Audio embedding (512-dimensional for CLAP)
-    embedding = Column(Vector(512))
-    embedding_model = Column(String(100))
-    embedding_generated_at = Column(DateTime)
+    # Audio embedding reference
+    embedding_id = Column(Integer, ForeignKey("embeddings.id"))
 
     # External service IDs (Phase 2)
     spotify_id = Column(String(100))
@@ -192,6 +251,7 @@ class Track(Base):
 
     # Relationships
     album = relationship("Album", back_populates="tracks")
+    embedding_obj = relationship("Embedding", back_populates="tracks")
     artist_associations = relationship("TrackArtist", back_populates="track", cascade="all, delete-orphan")
     genre_associations = relationship("TrackGenre", back_populates="track", cascade="all, delete-orphan")
 
