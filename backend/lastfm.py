@@ -854,8 +854,8 @@ class LastFmService:
         self, db: Session, album_id: int, artist_name: str, album_title: str, data: Dict[str, Any]
     ):
         """Store album info (wiki + stats) in album_info table."""
-        wiki = data.get("wiki", {})
-        stats = data.get("stats", {})
+        wiki = data.get("wiki") or {}
+        stats = data.get("stats") or {}
 
         existing = db.query(AlbumInfo).filter(
             AlbumInfo.album_id == album_id,
