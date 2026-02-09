@@ -177,7 +177,7 @@
 ## Next Steps
 
 ### Phase 2: External Data & Text Embeddings
-- Step 2.1: Text embeddings from metadata (sentence-transformers)
-- Step 2.2: Spotify integration (audio features)
-- Step 2.3: Last.fm integration (artist info, tags)
+- Step 2.1: Last.fm integration (artist bios, tags, similar artists)
+- Step 2.2: Spotify integration (audio features, genres)
+- Step 2.3: Text embeddings from metadata (sentence-transformers) — needs rich text from 2.1/2.2
 - Step 2.4: Enhanced RAG (hybrid search, richer context)
