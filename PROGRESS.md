@@ -277,6 +277,23 @@
   - Deleted old JSONB data from `external_metadata`
 - ✅ Statistics: 9 enriched artists, average 18.3 similar artists each
 
+### Genre descriptions normalization
+- ✅ Replaced JSONB storage in `external_metadata` with normalized `genre_descriptions` table
+- ✅ Created `scripts/create_genre_descriptions_table.sql` - normalized schema:
+  - Fields: `summary` (short), `content` (full), `url`, `reach` (Last.fm popularity)
+  - Multi-source support: `source` field ('lastfm', 'wikipedia', 'spotify')
+  - Proper foreign keys, indexes, and unique constraints
+- ✅ Created `scripts/migrate_genre_descriptions.sql` - data migration from JSONB
+- ✅ Updated `backend/lastfm.py`:
+  - Modified `enrich_genre()` to store in `genre_descriptions` table
+  - Returns structured info: summary_length, content_length, reach
+- ✅ Updated `backend/models.py` with `GenreDescription` model and relationships
+- ✅ Migration results:
+  - 13 genre descriptions migrated from external_metadata
+  - Average content length: 1,797 characters
+  - All genres have descriptions from Last.fm
+  - Deleted old JSONB data from `external_metadata`
+
 ---
 
 ## Next Steps

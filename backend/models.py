@@ -121,7 +121,7 @@ class ExternalMetadata(Base):
 
 
 class Genre(Base):
-    """Genre model (normalized). Descriptions stored in external_metadata table."""
+    """Genre model (normalized). Descriptions stored in genre_descriptions table."""
     __tablename__ = "genres"
 
     id = Column(Integer, primary_key=True)
@@ -133,6 +133,7 @@ class Genre(Base):
 
     # Relationships
     track_associations = relationship("TrackGenre", back_populates="genre", cascade="all, delete-orphan")
+    descriptions = relationship("GenreDescription", back_populates="genre", cascade="all, delete-orphan")
 
     # Indexes
     __table_args__ = (
@@ -141,6 +142,41 @@ class Genre(Base):
 
     def __repr__(self):
         return f"<Genre(id={self.id}, name='{self.name}')>"
+
+
+class GenreDescription(Base):
+    """Normalized genre/tag descriptions from multiple sources (Last.fm, Wikipedia, etc.)."""
+    __tablename__ = "genre_descriptions"
+
+    id = Column(Integer, primary_key=True)
+    genre_id = Column(Integer, ForeignKey("genres.id", ondelete="CASCADE"), nullable=False)
+    source = Column(String(50), nullable=False)  # 'lastfm', 'wikipedia', 'spotify', etc.
+
+    # Description fields
+    summary = Column(Text)  # Short description (1-2 paragraphs)
+    content = Column(Text)  # Full description (detailed)
+    url = Column(String(500))  # Link to source page
+
+    # Source-specific metadata
+    reach = Column(Integer)  # Last.fm: tag popularity
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    genre = relationship("Genre", back_populates="descriptions")
+
+    # Indexes and constraints
+    __table_args__ = (
+        Index("idx_genre_descriptions_genre", "genre_id"),
+        Index("idx_genre_descriptions_source", "source"),
+        UniqueConstraint("genre_id", "source", name="uq_genre_descriptions"),
+        CheckConstraint("summary IS NOT NULL OR content IS NOT NULL", name="chk_has_description"),
+    )
+
+    def __repr__(self):
+        return f"<GenreDescription(genre_id={self.genre_id}, source='{self.source}', summary_len={len(self.summary or '')})>"
 
 
 class Artist(Base):

@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from decimal import Decimal
 
 from config import settings
-from models import ExternalMetadata, Artist, SimilarArtist
+from models import ExternalMetadata, Artist, SimilarArtist, Genre, GenreDescription
 
 logger = logging.getLogger(__name__)
 
@@ -418,7 +418,7 @@ class LastFmService:
 
     def enrich_genre(self, db: Session, genre_id: int, genre_name: str) -> Dict[str, Any]:
         """
-        Fetch Last.fm data for a genre/tag and store in database.
+        Fetch Last.fm data for a genre/tag and store in normalized genre_descriptions table.
 
         Returns summary dict with status.
         """
@@ -430,60 +430,54 @@ class LastFmService:
 
             if data is None:
                 # Tag not found
-                self._upsert_metadata(
-                    db,
-                    entity_type="genre",
-                    entity_id=genre_id,
-                    source="lastfm",
-                    metadata_type="description",
-                    data={},
-                    fetch_status="not_found",
-                    error_message="Tag not found on Last.fm",
-                )
-                db.commit()
+                logger.warning(f"Genre not found on Last.fm: {genre_name}")
                 return {
                     "status": "not_found",
                     "genre_id": genre_id,
                     "genre_name": genre_name,
                 }
 
-            # Store in database
-            self._upsert_metadata(
-                db,
-                entity_type="genre",
-                entity_id=genre_id,
-                source="lastfm",
-                metadata_type="description",
-                data=data,
-                fetch_status="success",
-            )
-            db.commit()
+            # Store in normalized table
+            existing = db.query(GenreDescription).filter(
+                GenreDescription.genre_id == genre_id,
+                GenreDescription.source == "lastfm"
+            ).first()
 
-            logger.debug(f"Stored description for genre {genre_id} ({genre_name})")
+            if existing:
+                # Update existing
+                existing.summary = data.get("summary")
+                existing.content = data.get("content")
+                existing.url = data.get("url")
+                existing.reach = data.get("reach")
+                logger.debug(f"Updated description for genre {genre_id} ({genre_name})")
+            else:
+                # Create new
+                description = GenreDescription(
+                    genre_id=genre_id,
+                    source="lastfm",
+                    summary=data.get("summary"),
+                    content=data.get("content"),
+                    url=data.get("url"),
+                    reach=data.get("reach")
+                )
+                db.add(description)
+                logger.debug(f"Created description for genre {genre_id} ({genre_name})")
+
+            db.commit()
 
             return {
                 "status": "success",
                 "genre_id": genre_id,
                 "genre_name": genre_name,
-                "has_description": bool(data.get("summary")),
+                "has_description": bool(data.get("summary") or data.get("content")),
                 "reach": data.get("reach"),
+                "summary_length": len(data.get("summary") or ""),
+                "content_length": len(data.get("content") or ""),
             }
 
         except Exception as e:
             logger.error(f"Failed to enrich genre {genre_name}: {e}")
-
-            # Store error
-            self._upsert_metadata(
-                db,
-                entity_type="genre",
-                entity_id=genre_id,
-                source="lastfm",
-                metadata_type="description",
-                data={},
-                fetch_status="error",
-                error_message=str(e),
-            )
-            db.commit()
+            db.rollback()
 
             return {
                 "status": "error",
