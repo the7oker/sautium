@@ -13,7 +13,10 @@ from sqlalchemy.orm import Session
 from decimal import Decimal
 
 from config import settings
-from models import ExternalMetadata, Artist, SimilarArtist, Genre, GenreDescription, ArtistBio, Tag, ArtistTag
+from models import (
+    ExternalMetadata, Artist, SimilarArtist, Genre, GenreDescription,
+    ArtistBio, Tag, ArtistTag, Album, AlbumInfo, AlbumTag
+)
 
 logger = logging.getLogger(__name__)
 
@@ -693,3 +696,247 @@ class LastFmService:
         )
 
         return stats
+
+    def get_album_info(self, artist_name: str, album_title: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch album info from Last.fm.
+
+        Returns dict with:
+        - mbid: MusicBrainz ID
+        - wiki: {summary, content, url}
+        - tags: [{name, count}, ...]
+        - stats: {listeners, playcount}
+        - tracks: [{name, duration}, ...] (optional)
+        """
+        try:
+            album = self.network.get_album(artist_name, album_title)
+
+            # Get MBID
+            mbid = None
+            try:
+                mbid = album.get_mbid()
+            except Exception as e:
+                logger.debug(f"No MBID for {artist_name} - {album_title}: {e}")
+
+            # Get wiki
+            wiki_data = None
+            try:
+                summary = album.get_wiki_summary()
+                content = album.get_wiki_content()
+                if summary or content:
+                    wiki_data = {
+                        "summary": summary,
+                        "content": content,
+                        "url": album.get_url(),
+                    }
+            except Exception as e:
+                logger.debug(f"No wiki for {artist_name} - {album_title}: {e}")
+
+            # Get stats
+            stats_data = {}
+            try:
+                stats_data = {
+                    "listeners": int(album.get_listener_count()),
+                    "playcount": int(album.get_playcount()),
+                }
+            except Exception as e:
+                logger.debug(f"No stats for {artist_name} - {album_title}: {e}")
+
+            # Get tags
+            tags_data = []
+            try:
+                top_tags = album.get_top_tags(limit=30)
+                tags_data = [
+                    {"name": tag.item.get_name(), "count": int(tag.weight)}
+                    for tag in top_tags
+                ]
+            except Exception as e:
+                logger.debug(f"No tags for {artist_name} - {album_title}: {e}")
+
+            # Get tracks (optional, can fail)
+            tracks_data = []
+            try:
+                tracks = album.get_tracks()
+                tracks_data = [
+                    {
+                        "name": track.get_name(),
+                        "duration": track.get_duration() // 1000 if track.get_duration() else None
+                    }
+                    for track in tracks
+                ]
+            except Exception as e:
+                logger.debug(f"No tracks for {artist_name} - {album_title}: {e}")
+
+            return {
+                "mbid": mbid,
+                "wiki": wiki_data,
+                "tags": tags_data,
+                "stats": stats_data,
+                "tracks": tracks_data,
+            }
+
+        except pylast.WSError as e:
+            if "Album not found" in str(e):
+                logger.info(f"Album not found on Last.fm: {artist_name} - {album_title}")
+                return None
+            else:
+                logger.error(f"Last.fm API error for {artist_name} - {album_title}: {e}")
+                raise
+        except Exception as e:
+            logger.error(f"Error fetching Last.fm data for {artist_name} - {album_title}: {e}")
+            raise
+
+    def enrich_album(self, db: Session, album_id: int, artist_name: str, album_title: str) -> Dict[str, Any]:
+        """
+        Fetch Last.fm data for an album and store in database.
+
+        Returns summary dict with status and stored flags.
+        """
+        logger.info(f"Enriching album: {artist_name} - {album_title} (ID: {album_id})")
+
+        try:
+            # Fetch from Last.fm
+            data = self.get_album_info(artist_name, album_title)
+
+            if data is None:
+                # Album not found
+                logger.warning(f"Album not found on Last.fm: {artist_name} - {album_title}")
+                return {
+                    "status": "not_found",
+                    "album_id": album_id,
+                    "artist_name": artist_name,
+                    "album_title": album_title,
+                }
+
+            # Update album.lastfm_id with MBID
+            if data.get("mbid"):
+                album_record = db.query(Album).filter(Album.id == album_id).first()
+                if album_record:
+                    album_record.lastfm_id = data["mbid"]
+                    logger.debug(f"Updated lastfm_id for album {album_id}: {data['mbid']}")
+
+            # Store album info (wiki + stats)
+            if data.get("wiki") or data.get("stats"):
+                self._store_album_info(db, album_id, artist_name, album_title, data)
+
+            # Store album tags
+            tags_count = 0
+            if data.get("tags"):
+                tags_count = self._store_album_tags(db, album_id, album_title, data["tags"])
+
+            db.commit()
+
+            return {
+                "status": "success",
+                "album_id": album_id,
+                "artist_name": artist_name,
+                "album_title": album_title,
+                "mbid": data.get("mbid"),
+                "has_wiki": bool(data.get("wiki")),
+                "tags_count": tags_count,
+                "listeners": data.get("stats", {}).get("listeners"),
+                "playcount": data.get("stats", {}).get("playcount"),
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to enrich album {artist_name} - {album_title}: {e}")
+            db.rollback()
+
+            return {
+                "status": "error",
+                "album_id": album_id,
+                "artist_name": artist_name,
+                "album_title": album_title,
+                "error": str(e),
+            }
+
+    def _store_album_info(
+        self, db: Session, album_id: int, artist_name: str, album_title: str, data: Dict[str, Any]
+    ):
+        """Store album info (wiki + stats) in album_info table."""
+        wiki = data.get("wiki", {})
+        stats = data.get("stats", {})
+
+        existing = db.query(AlbumInfo).filter(
+            AlbumInfo.album_id == album_id,
+            AlbumInfo.source == "lastfm"
+        ).first()
+
+        if existing:
+            # Update existing
+            existing.summary = wiki.get("summary")
+            existing.content = wiki.get("content")
+            existing.url = wiki.get("url")
+            existing.listeners = stats.get("listeners")
+            existing.playcount = stats.get("playcount")
+            logger.debug(f"Updated album info for album {album_id} ({album_title})")
+        else:
+            # Create new
+            album_info = AlbumInfo(
+                album_id=album_id,
+                source="lastfm",
+                summary=wiki.get("summary"),
+                content=wiki.get("content"),
+                url=wiki.get("url"),
+                listeners=stats.get("listeners"),
+                playcount=stats.get("playcount")
+            )
+            db.add(album_info)
+            logger.debug(f"Created album info for album {album_id} ({album_title})")
+
+    def _store_album_tags(
+        self, db: Session, album_id: int, album_title: str, tags_data: List[Dict[str, Any]]
+    ) -> int:
+        """
+        Store album tags in normalized tags/album_tags tables.
+        Creates tag records as needed.
+
+        Returns number of tags stored.
+        """
+        stored_count = 0
+
+        for tag_item in tags_data:
+            tag_name = tag_item.get("name")
+            tag_weight = tag_item.get("count", 50)
+
+            if not tag_name or not tag_name.strip():
+                continue
+
+            tag_name = tag_name.strip()
+
+            # Get or create tag
+            tag = db.query(Tag).filter(
+                Tag.name.ilike(tag_name)
+            ).first()
+
+            if not tag:
+                tag = Tag(name=tag_name)
+                db.add(tag)
+                db.flush()
+                logger.debug(f"Created new tag: {tag_name} (ID: {tag.id})")
+
+            # Check if album_tag relationship already exists
+            existing = db.query(AlbumTag).filter(
+                AlbumTag.album_id == album_id,
+                AlbumTag.tag_id == tag.id,
+                AlbumTag.source == "lastfm"
+            ).first()
+
+            if existing:
+                # Update weight if changed
+                if existing.weight != tag_weight:
+                    existing.weight = tag_weight
+                    logger.debug(f"Updated tag weight for album {album_id} - {tag_name}: {tag_weight}")
+            else:
+                # Create new relationship
+                album_tag = AlbumTag(
+                    album_id=album_id,
+                    tag_id=tag.id,
+                    weight=tag_weight,
+                    source="lastfm"
+                )
+                db.add(album_tag)
+                stored_count += 1
+                logger.debug(f"Added tag: album {album_id} - {tag_name} (weight: {tag_weight})")
+
+        return stored_count

@@ -360,6 +360,66 @@
 
 ---
 
+## Step 2.1b: Album Enrichment from Last.fm - DONE
+
+### What was done
+- **Database schema**: Created normalized tables for album metadata
+  - `album_info` table for album descriptions and stats
+  - `album_tags` table for album tagging (uses existing `tags` table)
+  - Added `lastfm_id` (MBID) column to `albums` table
+- **Migration scripts**:
+  - `scripts/create_album_enrichment_tables.sql` - table creation
+- **SQLAlchemy models**: Added `AlbumInfo` and `AlbumTag` models
+- **Last.fm service** (`backend/lastfm.py`):
+  - `get_album_info(artist_name, album_title)` - fetches all album data
+  - `enrich_album(db, album_id, artist_name, album_title)` - stores in database
+  - `_store_album_info()` - stores wiki + stats in `album_info` table
+  - `_store_album_tags()` - stores tags in `album_tags` table
+- **CLI command**: `enrich-albums`
+  - `--album "Title"` - enrich specific album
+  - `--limit N` - batch enrich N albums
+  - `--no-skip` - re-fetch existing data
+  - `--delay` - rate limit delay (seconds)
+
+### Design decisions
+- **Shared tag system**: Albums use the same `tags` table as artists
+  - Universal tagging: tags can describe artists, albums, tracks
+  - Tag reuse: "ambient" tag applies to both artists and albums
+  - Extensible: easy to add track tags in future
+- **Multi-source ready**: `album_info` and `album_tags` support multiple sources
+- **MBID storage**: `albums.lastfm_id` for MusicBrainz integration
+
+### Testing status - SUCCESSFUL
+- ✅ Tested with "Timewind" by Klaus Schulze
+- ✅ Wiki summary (703 chars) and content (2,566 chars) stored
+- ✅ Stats: 40,222 listeners, 169,077 playcount
+- ✅ 10 tags stored: ambient (100), electronic (73), 1975 (22), etc.
+- ✅ MBID: 60f7f643-dab5-3108-a257-d6b66f7833ca
+- ✅ Tag system: 6 new tags added (total 61 unique tags)
+
+### Data structure
+```sql
+album_info:
+  album_id → albums
+  source ('lastfm', 'musicbrainz', 'spotify')
+  summary, content, url
+  listeners, playcount
+
+album_tags:
+  album_id → albums
+  tag_id → tags (shared with artists)
+  weight (0-100)
+  source ('lastfm', 'spotify', 'user')
+```
+
+### Statistics
+- **118 albums** in database
+- **1 album enriched** (Timewind - test)
+- **61 unique tags** (55 artist tags + 6 album tags)
+- **10 album-tag relationships**
+
+---
+
 ## Next Steps
 
 ### Phase 2: External Data & Text Embeddings (continued)

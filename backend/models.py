@@ -192,6 +192,7 @@ class Tag(Base):
 
     # Relationships
     artist_associations = relationship("ArtistTag", back_populates="tag", cascade="all, delete-orphan")
+    album_associations = relationship("AlbumTag", back_populates="tag", cascade="all, delete-orphan")
 
     # Indexes
     __table_args__ = (
@@ -310,6 +311,76 @@ class ArtistBio(Base):
         return f"<ArtistBio(artist_id={self.artist_id}, source='{self.source}', listeners={self.listeners})>"
 
 
+class AlbumInfo(Base):
+    """Normalized album information from multiple sources (Last.fm, MusicBrainz, Wikipedia, etc.)."""
+    __tablename__ = "album_info"
+
+    id = Column(Integer, primary_key=True)
+    album_id = Column(Integer, ForeignKey("albums.id", ondelete="CASCADE"), nullable=False)
+    source = Column(String(50), nullable=False)  # 'lastfm', 'musicbrainz', 'wikipedia', 'spotify'
+
+    # Album info fields
+    summary = Column(Text)  # Short description (1-2 paragraphs)
+    content = Column(Text)  # Full description (detailed)
+    url = Column(String(500))  # Link to source page
+
+    # Source-specific metadata (Last.fm stats)
+    listeners = Column(Integer)  # Last.fm: total unique listeners
+    playcount = Column(BigInteger)  # Last.fm: total play count
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    album = relationship("Album", back_populates="info_records")
+
+    # Indexes and constraints
+    __table_args__ = (
+        Index("idx_album_info_album", "album_id"),
+        Index("idx_album_info_source", "source"),
+        Index("idx_album_info_listeners", "listeners", postgresql_where=(Column("listeners") != None)),
+        Index("idx_album_info_playcount", "playcount", postgresql_where=(Column("playcount") != None)),
+        UniqueConstraint("album_id", "source", name="uq_album_info"),
+        CheckConstraint("summary IS NOT NULL OR content IS NOT NULL", name="chk_has_album_info"),
+    )
+
+    def __repr__(self):
+        return f"<AlbumInfo(album_id={self.album_id}, source='{self.source}', listeners={self.listeners})>"
+
+
+class AlbumTag(Base):
+    """Many-to-many relationship between albums and tags with weight (relevance)."""
+    __tablename__ = "album_tags"
+
+    id = Column(Integer, primary_key=True)
+    album_id = Column(Integer, ForeignKey("albums.id", ondelete="CASCADE"), nullable=False)
+    tag_id = Column(Integer, ForeignKey("tags.id", ondelete="CASCADE"), nullable=False)
+    weight = Column(Integer, nullable=False)  # 0-100 (Last.fm scale)
+    source = Column(String(50), nullable=False)  # 'lastfm', 'spotify', 'musicbrainz', 'user'
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    album = relationship("Album", back_populates="tag_associations")
+    tag = relationship("Tag", back_populates="album_associations")
+
+    # Indexes and constraints
+    __table_args__ = (
+        Index("idx_album_tags_album", "album_id"),
+        Index("idx_album_tags_tag", "tag_id"),
+        Index("idx_album_tags_source", "source"),
+        Index("idx_album_tags_weight", "weight"),
+        UniqueConstraint("album_id", "tag_id", "source", name="uq_album_tags"),
+        CheckConstraint("weight >= 0 AND weight <= 100", name="chk_album_tag_weight_range"),
+    )
+
+    def __repr__(self):
+        return f"<AlbumTag(album_id={self.album_id}, tag_id={self.tag_id}, weight={self.weight}, source='{self.source}')>"
+
+
 class SimilarArtist(Base):
     """Normalized similar artist relationships from multiple sources (Last.fm, Spotify, etc.)."""
     __tablename__ = "similar_artists"
@@ -372,6 +443,7 @@ class Album(Base):
     # External service IDs (Phase 2)
     spotify_id = Column(String(100))
     musicbrainz_id = Column(String(100))
+    lastfm_id = Column(String(100))  # Last.fm MBID
 
     # File system information
     directory_path = Column(Text, nullable=False, unique=True)
@@ -386,6 +458,8 @@ class Album(Base):
 
     # Relationships
     tracks = relationship("Track", back_populates="album", cascade="all, delete-orphan")
+    info_records = relationship("AlbumInfo", back_populates="album", cascade="all, delete-orphan")
+    tag_associations = relationship("AlbumTag", back_populates="album", cascade="all, delete-orphan")
 
     # Constraints and indexes
     __table_args__ = (
@@ -393,6 +467,7 @@ class Album(Base):
         Index("idx_albums_title", "title"),
         Index("idx_albums_release_year", "release_year"),
         Index("idx_albums_quality_source", "quality_source"),
+        Index("idx_albums_lastfm_id", "lastfm_id"),
     )
 
     def __repr__(self):
