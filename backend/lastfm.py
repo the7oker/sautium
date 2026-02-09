@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from decimal import Decimal
 
 from config import settings
-from models import ExternalMetadata, Artist, SimilarArtist, Genre, GenreDescription
+from models import ExternalMetadata, Artist, SimilarArtist, Genre, GenreDescription, ArtistBio
 
 logger = logging.getLogger(__name__)
 
@@ -130,26 +130,38 @@ class LastFmService:
         """
         stored = {}
 
-        # Store bio
+        # Store bio in normalized table
         if data.get("bio"):
-            bio_record = {
-                "summary": data["bio"].get("summary"),
-                "content": data["bio"].get("content"),
-                "url": data["bio"].get("url"),
-                "stats": data.get("stats", {}),
-            }
+            existing = db.query(ArtistBio).filter(
+                ArtistBio.artist_id == artist_id,
+                ArtistBio.source == "lastfm"
+            ).first()
 
-            self._upsert_metadata(
-                db,
-                entity_type="artist",
-                entity_id=artist_id,
-                source="lastfm",
-                metadata_type="bio",
-                data=bio_record,
-                fetch_status="success",
-            )
+            stats = data.get("stats", {})
+
+            if existing:
+                # Update existing
+                existing.summary = data["bio"].get("summary")
+                existing.content = data["bio"].get("content")
+                existing.url = data["bio"].get("url")
+                existing.listeners = stats.get("listeners")
+                existing.playcount = stats.get("playcount")
+                logger.debug(f"Updated bio for artist {artist_id} ({artist_name})")
+            else:
+                # Create new
+                bio = ArtistBio(
+                    artist_id=artist_id,
+                    source="lastfm",
+                    summary=data["bio"].get("summary"),
+                    content=data["bio"].get("content"),
+                    url=data["bio"].get("url"),
+                    listeners=stats.get("listeners"),
+                    playcount=stats.get("playcount")
+                )
+                db.add(bio)
+                logger.debug(f"Created bio for artist {artist_id} ({artist_name})")
+
             stored["bio"] = True
-            logger.debug(f"Stored bio for artist {artist_id} ({artist_name})")
         else:
             stored["bio"] = False
 

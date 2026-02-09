@@ -180,7 +180,7 @@ class GenreDescription(Base):
 
 
 class Artist(Base):
-    """Artist model. Bio and metadata stored in external_metadata table."""
+    """Artist model. Bio and metadata stored in normalized tables (artist_bios, artist_tags, etc.)."""
     __tablename__ = "artists"
 
     id = Column(Integer, primary_key=True)
@@ -202,6 +202,7 @@ class Artist(Base):
     track_associations = relationship("TrackArtist", back_populates="artist", cascade="all, delete-orphan")
     similar_to = relationship("SimilarArtist", foreign_keys="SimilarArtist.artist_id", back_populates="artist", cascade="all, delete-orphan")
     similar_from = relationship("SimilarArtist", foreign_keys="SimilarArtist.similar_artist_id", back_populates="similar_artist", cascade="all, delete-orphan")
+    bios = relationship("ArtistBio", back_populates="artist", cascade="all, delete-orphan")
 
     # Indexes
     __table_args__ = (
@@ -211,6 +212,44 @@ class Artist(Base):
 
     def __repr__(self):
         return f"<Artist(id={self.id}, name='{self.name}')>"
+
+
+class ArtistBio(Base):
+    """Normalized artist biographies from multiple sources (Last.fm, MusicBrainz, Wikipedia, etc.)."""
+    __tablename__ = "artist_bios"
+
+    id = Column(Integer, primary_key=True)
+    artist_id = Column(Integer, ForeignKey("artists.id", ondelete="CASCADE"), nullable=False)
+    source = Column(String(50), nullable=False)  # 'lastfm', 'musicbrainz', 'wikipedia', etc.
+
+    # Bio fields
+    summary = Column(Text)  # Short bio (1-2 paragraphs)
+    content = Column(Text)  # Full biography (detailed)
+    url = Column(String(500))  # Link to source page
+
+    # Source-specific metadata (Last.fm stats)
+    listeners = Column(Integer)  # Last.fm: total unique listeners
+    playcount = Column(BigInteger)  # Last.fm: total play count
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    artist = relationship("Artist", back_populates="bios")
+
+    # Indexes and constraints
+    __table_args__ = (
+        Index("idx_artist_bios_artist", "artist_id"),
+        Index("idx_artist_bios_source", "source"),
+        Index("idx_artist_bios_listeners", "listeners", postgresql_where=(Column("listeners") != None)),
+        Index("idx_artist_bios_playcount", "playcount", postgresql_where=(Column("playcount") != None)),
+        UniqueConstraint("artist_id", "source", name="uq_artist_bios"),
+        CheckConstraint("summary IS NOT NULL OR content IS NOT NULL", name="chk_has_bio"),
+    )
+
+    def __repr__(self):
+        return f"<ArtistBio(artist_id={self.artist_id}, source='{self.source}', listeners={self.listeners})>"
 
 
 class SimilarArtist(Base):

@@ -294,6 +294,31 @@
   - All genres have descriptions from Last.fm
   - Deleted old JSONB data from `external_metadata`
 
+### Artist bios normalization
+- ✅ Replaced JSONB storage in `external_metadata` with normalized `artist_bios` table
+- ✅ Created `scripts/create_artist_bios_table.sql` - normalized schema:
+  - Fields: `summary` (short), `content` (full), `url`
+  - Last.fm stats: `listeners`, `playcount` (separate columns for queries/sorting)
+  - Multi-source support: `source` field ('lastfm', 'musicbrainz', 'wikipedia')
+  - Indexes on `listeners` and `playcount` for popularity ranking
+- ✅ Created `scripts/migrate_artist_bios.sql` - data migration from JSONB
+- ✅ Updated `backend/lastfm.py`:
+  - Modified `store_artist_metadata()` to store bios in `artist_bios` table
+  - Extracts stats from nested JSON to separate columns
+- ✅ Updated `backend/models.py` with `ArtistBio` model and relationships
+- ✅ Migration results:
+  - 9 artist bios migrated from external_metadata
+  - Average summary length: 450 characters
+  - Average content length: 2,424 characters
+  - Total listeners across all artists: 3.3M
+  - Total playcount: 55.6M
+  - Top artist: Joe Cocker (1.5M listeners, 19.5M plays)
+  - Deleted old JSONB data from `external_metadata`
+
+### Remaining in external_metadata
+- Only `artist` + `tags` records remain (13 records)
+- Tags will be normalized next (many-to-many `artist_tags` table)
+
 ---
 
 ## Next Steps
