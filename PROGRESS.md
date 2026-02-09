@@ -315,9 +315,48 @@
   - Top artist: Joe Cocker (1.5M listeners, 19.5M plays)
   - Deleted old JSONB data from `external_metadata`
 
-### Remaining in external_metadata
-- Only `artist` + `tags` records remain (13 records)
-- Tags will be normalized next (many-to-many `artist_tags` table)
+### Artist tags normalization
+- ✅ Replaced JSONB storage in `external_metadata` with normalized `tags` + `artist_tags` tables
+- ✅ Created `scripts/create_tags_tables.sql` - normalized schema:
+  - `tags` table: universal tag library (id, name, timestamps)
+  - `artist_tags` table: many-to-many with weight (0-100 scale)
+  - Multi-source support: `source` field ('lastfm', 'spotify', 'user')
+  - Future-ready: tags can be applied to albums, tracks
+- ✅ Created `scripts/migrate_artist_tags.sql` - data migration from JSONB
+- ✅ Updated `backend/lastfm.py`:
+  - Added `_store_artist_tags()` method
+  - Creates tags as needed (case-insensitive lookup)
+  - Stores relationships with weight from Last.fm
+- ✅ Updated `backend/models.py` with `Tag` and `ArtistTag` models
+- ✅ Migration results:
+  - 55 unique tags created (electronic, ambient, krautrock, blues, etc.)
+  - 90 artist-tag relationships
+  - Top tags: "electronic" (5 artists), "ambient" (5 artists), "experimental" (5 artists)
+  - Average 10 tags per artist
+
+### Database normalization complete! 🎉
+- ✅ **All data migrated from `external_metadata` JSONB → normalized tables**
+- ✅ **`external_metadata` table now empty (0 records)**
+- ✅ Normalized tables:
+  - `similar_artists` - 165 records (9 artists)
+  - `artist_tags` - 90 records (9 artists, 55 unique tags)
+  - `tags` - 55 unique tags
+  - `artist_bios` - 9 records
+  - `genre_descriptions` - 13 records
+- ✅ Benefits:
+  - Proper foreign keys and CASCADE DELETE
+  - Efficient indexes for queries
+  - No data duplication
+  - Ready for multi-source enrichment (Spotify, MusicBrainz, Wikipedia)
+
+### external_metadata - new role
+- 🔧 **Keeping as staging/experimental table** for new metadata types
+- Purpose:
+  - Quick integration of new API sources (Spotify, MusicBrainz, Wikipedia)
+  - Explore data structure before designing normalized schema
+  - Temporary storage for experimental features
+  - Once structure is clear → normalize into dedicated tables
+- Workflow: `API → external_metadata (staging) → analyze → normalize → dedicated table`
 
 ---
 

@@ -179,6 +179,31 @@ class GenreDescription(Base):
         return f"<GenreDescription(genre_id={self.genre_id}, source='{self.source}', summary_len={len(self.summary or '')})>"
 
 
+class Tag(Base):
+    """Universal tag system for artists, albums, tracks. Tags from Last.fm, Spotify, user-defined, etc."""
+    __tablename__ = "tags"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False, unique=True)
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    artist_associations = relationship("ArtistTag", back_populates="tag", cascade="all, delete-orphan")
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_tags_name", "name"),
+        Index("idx_tags_name_lower", "name", postgresql_ops={"name": "text_pattern_ops"}),
+        CheckConstraint("LENGTH(TRIM(name)) > 0", name="chk_tag_name_not_empty"),
+    )
+
+    def __repr__(self):
+        return f"<Tag(id={self.id}, name='{self.name}')>"
+
+
 class Artist(Base):
     """Artist model. Bio and metadata stored in normalized tables (artist_bios, artist_tags, etc.)."""
     __tablename__ = "artists"
@@ -203,6 +228,7 @@ class Artist(Base):
     similar_to = relationship("SimilarArtist", foreign_keys="SimilarArtist.artist_id", back_populates="artist", cascade="all, delete-orphan")
     similar_from = relationship("SimilarArtist", foreign_keys="SimilarArtist.similar_artist_id", back_populates="similar_artist", cascade="all, delete-orphan")
     bios = relationship("ArtistBio", back_populates="artist", cascade="all, delete-orphan")
+    tag_associations = relationship("ArtistTag", back_populates="artist", cascade="all, delete-orphan")
 
     # Indexes
     __table_args__ = (
@@ -212,6 +238,38 @@ class Artist(Base):
 
     def __repr__(self):
         return f"<Artist(id={self.id}, name='{self.name}')>"
+
+
+class ArtistTag(Base):
+    """Many-to-many relationship between artists and tags with weight (relevance)."""
+    __tablename__ = "artist_tags"
+
+    id = Column(Integer, primary_key=True)
+    artist_id = Column(Integer, ForeignKey("artists.id", ondelete="CASCADE"), nullable=False)
+    tag_id = Column(Integer, ForeignKey("tags.id", ondelete="CASCADE"), nullable=False)
+    weight = Column(Integer, nullable=False)  # 0-100 (Last.fm scale)
+    source = Column(String(50), nullable=False)  # 'lastfm', 'spotify', 'musicbrainz', 'user'
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    artist = relationship("Artist", back_populates="tag_associations")
+    tag = relationship("Tag", back_populates="artist_associations")
+
+    # Indexes and constraints
+    __table_args__ = (
+        Index("idx_artist_tags_artist", "artist_id"),
+        Index("idx_artist_tags_tag", "tag_id"),
+        Index("idx_artist_tags_source", "source"),
+        Index("idx_artist_tags_weight", "weight"),
+        UniqueConstraint("artist_id", "tag_id", "source", name="uq_artist_tags"),
+        CheckConstraint("weight >= 0 AND weight <= 100", name="chk_weight_range"),
+    )
+
+    def __repr__(self):
+        return f"<ArtistTag(artist_id={self.artist_id}, tag_id={self.tag_id}, weight={self.weight}, source='{self.source}')>"
 
 
 class ArtistBio(Base):

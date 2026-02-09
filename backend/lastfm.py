@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from decimal import Decimal
 
 from config import settings
-from models import ExternalMetadata, Artist, SimilarArtist, Genre, GenreDescription, ArtistBio
+from models import ExternalMetadata, Artist, SimilarArtist, Genre, GenreDescription, ArtistBio, Tag, ArtistTag
 
 logger = logging.getLogger(__name__)
 
@@ -165,21 +165,11 @@ class LastFmService:
         else:
             stored["bio"] = False
 
-        # Store tags
+        # Store tags in normalized tables
         if data.get("tags"):
-            tags_record = {"tags": data["tags"]}
-
-            self._upsert_metadata(
-                db,
-                entity_type="artist",
-                entity_id=artist_id,
-                source="lastfm",
-                metadata_type="tags",
-                data=tags_record,
-                fetch_status="success",
-            )
-            stored["tags"] = True
-            logger.debug(f"Stored {len(data['tags'])} tags for artist {artist_id} ({artist_name})")
+            tags_count = self._store_artist_tags(db, artist_id, artist_name, data["tags"])
+            stored["tags"] = tags_count > 0
+            logger.debug(f"Stored {tags_count} tags for artist {artist_id} ({artist_name})")
         else:
             stored["tags"] = False
 
@@ -265,6 +255,65 @@ class LastFmService:
                 db.add(similar_rel)
                 stored_count += 1
                 logger.debug(f"Added similar artist: {artist_name} -> {similar_name} (match: {match_score})")
+
+        return stored_count
+
+    def _store_artist_tags(
+        self, db: Session, artist_id: int, artist_name: str, tags_data: List[Dict[str, Any]]
+    ) -> int:
+        """
+        Store artist tags in normalized tags/artist_tags tables.
+        Creates tag records as needed.
+
+        Returns number of tags stored.
+        """
+        stored_count = 0
+
+        for tag_item in tags_data:
+            tag_name = tag_item.get("name")
+            tag_weight = tag_item.get("count", 50)  # Default weight if missing
+
+            if not tag_name or not tag_name.strip():
+                continue
+
+            # Normalize tag name
+            tag_name = tag_name.strip()
+
+            # Get or create tag
+            tag = db.query(Tag).filter(
+                Tag.name.ilike(tag_name)
+            ).first()
+
+            if not tag:
+                # Create new tag
+                tag = Tag(name=tag_name)
+                db.add(tag)
+                db.flush()  # Get ID without committing
+                logger.debug(f"Created new tag: {tag_name} (ID: {tag.id})")
+
+            # Check if artist_tag relationship already exists
+            existing = db.query(ArtistTag).filter(
+                ArtistTag.artist_id == artist_id,
+                ArtistTag.tag_id == tag.id,
+                ArtistTag.source == "lastfm"
+            ).first()
+
+            if existing:
+                # Update weight if changed
+                if existing.weight != tag_weight:
+                    existing.weight = tag_weight
+                    logger.debug(f"Updated tag weight for {artist_name} - {tag_name}: {tag_weight}")
+            else:
+                # Create new relationship
+                artist_tag = ArtistTag(
+                    artist_id=artist_id,
+                    tag_id=tag.id,
+                    weight=tag_weight,
+                    source="lastfm"
+                )
+                db.add(artist_tag)
+                stored_count += 1
+                logger.debug(f"Added tag: {artist_name} - {tag_name} (weight: {tag_weight})")
 
         return stored_count
 
