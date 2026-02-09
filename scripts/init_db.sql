@@ -29,18 +29,17 @@ CREATE TABLE IF NOT EXISTS embeddings (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Genres table (normalized)
+-- Genres table (normalized, descriptions stored in external_metadata table)
 CREATE TABLE IF NOT EXISTS genres (
     id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL UNIQUE,
-    description TEXT,
 
     -- Timestamps
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Artists table
+-- Artists table (bio and metadata stored in external_metadata table)
 CREATE TABLE IF NOT EXISTS artists (
     id SERIAL PRIMARY KEY,
     name VARCHAR(500) NOT NULL,
@@ -50,8 +49,7 @@ CREATE TABLE IF NOT EXISTS artists (
     lastfm_id VARCHAR(100),
     musicbrainz_id VARCHAR(100),
 
-    -- Metadata
-    bio TEXT,
+    -- Basic metadata
     country VARCHAR(100),
 
     -- Timestamps

@@ -174,10 +174,114 @@
 
 ---
 
+## Step 2.1: Last.fm Integration - DONE
+
+### What was done
+- **Database schema**: Created `external_metadata` table for multi-source metadata storage
+  - Flexible JSONB data field for any metadata structure
+  - entity_type + entity_id + source + metadata_type uniqueness
+  - GIN index on JSONB for fast queries
+  - fetch_status tracking (success, not_found, error)
+- **Migration scripts**:
+  - `scripts/add_external_metadata.sql` - table creation
+  - `scripts/add_metadata_functions.sql` - aggregation functions and views
+- **PostgreSQL functions** for metadata aggregation:
+  - `get_artist_bio(artist_id)` - combines bio from all sources
+  - `get_artist_tags(artist_id)` - merges tags/genres from all sources with weights
+  - `get_artist_similar(artist_id)` - aggregates similar artists with avg match scores
+  - `get_artist_stats(artist_id)` - returns listeners/playcount stats
+- **View**: `artists_enriched` - artists with pre-aggregated metadata
+- **SQLAlchemy model**: `ExternalMetadata` with JSONB support
+- **Last.fm service** (`backend/lastfm.py`):
+  - `LastFmService` class using pylast SDK
+  - Fetches: bio, tags, similar artists, stats
+  - Stores in JSONB format: `{summary, content, url, stats}`, `{tags: [...]}`, `{similar: [...]}`
+  - Batch enrichment with rate limiting (default 0.2s delay)
+  - Graceful error handling (not_found, error status)
+- **CLI command**: `enrich-lastfm`
+  - `--artist "Name"` - enrich specific artist
+  - `--limit N` - batch enrich N artists
+  - `--no-skip` - re-fetch existing data
+  - `--delay` - rate limit delay (seconds)
+- **Configuration**: Added `LASTFM_API_KEY` to docker-compose.yml environment
+
+### Design decisions
+- **Multi-source architecture**: Each source (Last.fm, Spotify, MusicBrainz) stores separate records
+  - Enables data provenance tracking
+  - Allows re-fetching from specific sources
+  - Aggregation happens via PostgreSQL functions
+- **JSONB format**: Flexible schema for different metadata types
+  - Bio: `{summary, content, url, stats: {listeners, playcount}}`
+  - Tags: `{tags: [{name, count}, ...]}`
+  - Similar: `{similar: [{name, match, mbid}, ...]}`
+- **Incremental enrichment**: Skip artists that already have successful Last.fm data
+- **Rate limiting**: Default 0.2s delay to respect Last.fm API limits (~5 req/sec)
+
+### Testing status - SUCCESSFUL
+- ✅ Table and functions created successfully
+- ✅ Enriched 6 artists: Joe Cocker, Klaus Schulze, Beth Hart & Joe Bonamassa, Hidden Orchestra, etc.
+- ✅ Joe Cocker: 10 tags (blues, rock, soul, etc.), 20 similar artists (Eric Clapton, Rod Stewart, etc.)
+- ✅ Klaus Schulze: 10 tags (electronic, berlin school, ambient, krautrock, etc.)
+- ✅ Aggregation functions work correctly
+- ✅ artists_enriched view returns combined data
+
+### Data quality
+- **Bio coverage**: Good for popular artists, sparse for obscure ones
+- **Tags quality**: Excellent semantic tags (genre, mood, era, nationality)
+- **Similar artists**: High-quality recommendations with match scores
+- **Stats**: Listeners/playcount useful for popularity ranking
+
+### Genre enrichment
+- ✅ Added `get_tag_info()` and `enrich_genre()` methods to Last.fm service
+- ✅ CLI command: `enrich-lastfm --genres`
+- ✅ All 12 genres enriched with descriptions from Last.fm
+- ✅ Examples: Ambient (606 chars), Jazz (597 chars), IDM (527 chars)
+
+### Database cleanup
+- ✅ Removed deprecated `artists.bio` and `genres.description` fields
+- ✅ Migration script: `scripts/remove_deprecated_fields.sql`
+- ✅ All metadata now stored in `external_metadata` table
+- ✅ Updated SQLAlchemy models
+
+### Genre normalization
+- ✅ Created `backend/normalize_genres.py` script
+- ✅ Normalizes compound genre names: `"A/B/C"` → separate genres `A`, `B`, `C`
+- ✅ Handles delimiters: `/`, `,`, `&`, `+`
+- ✅ Creates proper many-to-many relationships in `track_genres`
+- ✅ CLI command: `normalize-genres --dry-run`
+- ✅ Results: 4 compound genres split into 13 individual genres
+  - `"Progressive Electronic/Berlin School"` → `Progressive Electronic`, `Berlin School`
+  - `"Krautrock/Electro/Experimental/Ambient"` → `Krautrock`, `Electro`, `Experimental`, `Ambient`
+  - `"Electronic, Ambient"` → `Electronic`, `Ambient`
+  - `"Ambient, Électronique"` → `Ambient`, `Électronique`
+- ✅ Track relationships updated: 461 → 498 (tracks now have proper multi-genre tags)
+- ✅ New genres enriched with Last.fm descriptions
+
+### Similar artists normalization
+- ✅ Replaced JSONB storage in `external_metadata` with normalized `similar_artists` table
+- ✅ Created `scripts/create_similar_artists_table.sql` - normalized schema:
+  - Many-to-many relationship: `artist_id` ↔ `similar_artist_id`
+  - `match_score` (0.0-1.0) from Last.fm similarity
+  - `source` field ('lastfm', 'spotify', etc.) for multi-source support
+  - Proper foreign keys, indexes, and constraints
+- ✅ Created `scripts/migrate_similar_artists.sql` - data migration from JSONB
+- ✅ Updated `backend/lastfm.py`:
+  - `_store_similar_artists()` method filters compound artists automatically
+  - Creates artist records for similar artists if they don't exist
+  - Stores relationships in `similar_artists` table instead of JSONB
+- ✅ Updated `backend/models.py` with `SimilarArtist` model and relationships
+- ✅ Migration results:
+  - 165 similar artist relationships migrated
+  - 139 new artists created from similar artist names
+  - 15 compound artists filtered out (e.g., "Pete Namlook & Klaus Schulze")
+  - Deleted old JSONB data from `external_metadata`
+- ✅ Statistics: 9 enriched artists, average 18.3 similar artists each
+
+---
+
 ## Next Steps
 
-### Phase 2: External Data & Text Embeddings
-- Step 2.1: Last.fm integration (artist bios, tags, similar artists)
+### Phase 2: External Data & Text Embeddings (continued)
 - Step 2.2: Spotify integration (audio features, genres)
 - Step 2.3: Text embeddings from metadata (sentence-transformers) — needs rich text from 2.1/2.2
 - Step 2.4: Enhanced RAG (hybrid search, richer context)

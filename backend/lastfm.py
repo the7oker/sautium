@@ -1,0 +1,640 @@
+"""
+Last.fm API integration for Music AI DJ.
+Fetches artist bios, tags, and similar artists, storing in external_metadata table.
+"""
+
+import logging
+import time
+from typing import Dict, List, Optional, Any
+
+import pylast
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+from decimal import Decimal
+
+from config import settings
+from models import ExternalMetadata, Artist, SimilarArtist
+
+logger = logging.getLogger(__name__)
+
+
+class LastFmService:
+    """Service for fetching and storing Last.fm metadata."""
+
+    def __init__(self):
+        """Initialize Last.fm network connection."""
+        if not settings.lastfm_api_key:
+            raise ValueError("LASTFM_API_KEY is not configured")
+
+        self.network = pylast.LastFMNetwork(
+            api_key=settings.lastfm_api_key,
+            api_secret=None,  # Not needed for read-only access
+        )
+        logger.info("Last.fm service initialized")
+
+    def get_artist_info(self, artist_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch artist info from Last.fm.
+
+        Returns dict with:
+        - bio: {summary, content, published, url}
+        - tags: [{name, count}, ...]
+        - stats: {listeners, playcount}
+        - similar: [{name, match, mbid}, ...]
+        """
+        try:
+            artist = self.network.get_artist(artist_name)
+
+            # Get MBID (MusicBrainz ID)
+            mbid = None
+            try:
+                mbid = artist.get_mbid()
+            except Exception as e:
+                logger.debug(f"No MBID for {artist_name}: {e}")
+
+            # Get bio
+            bio_data = None
+            try:
+                bio = artist.get_bio_summary()
+                content = artist.get_bio_content()
+                bio_data = {
+                    "summary": bio,
+                    "content": content,
+                    "url": artist.get_url(),
+                }
+            except Exception as e:
+                logger.debug(f"No bio for {artist_name}: {e}")
+
+            # Get tags
+            tags_data = []
+            try:
+                top_tags = artist.get_top_tags(limit=30)
+                tags_data = [
+                    {"name": tag.item.get_name(), "count": int(tag.weight)}
+                    for tag in top_tags
+                ]
+            except Exception as e:
+                logger.debug(f"No tags for {artist_name}: {e}")
+
+            # Get stats
+            stats_data = {}
+            try:
+                stats_data = {
+                    "listeners": int(artist.get_listener_count()),
+                    "playcount": int(artist.get_playcount()),
+                }
+            except Exception as e:
+                logger.debug(f"No stats for {artist_name}: {e}")
+
+            # Get similar artists
+            similar_data = []
+            try:
+                similar = artist.get_similar(limit=20)
+                similar_data = [
+                    {
+                        "name": similar_artist.item.get_name(),
+                        "match": float(similar_artist.match),
+                        "mbid": similar_artist.item.get_mbid() or None,
+                    }
+                    for similar_artist in similar
+                ]
+            except Exception as e:
+                logger.debug(f"No similar artists for {artist_name}: {e}")
+
+            return {
+                "mbid": mbid,
+                "bio": bio_data,
+                "tags": tags_data,
+                "stats": stats_data,
+                "similar": similar_data,
+            }
+
+        except pylast.WSError as e:
+            if "Artist not found" in str(e):
+                logger.info(f"Artist not found on Last.fm: {artist_name}")
+                return None
+            else:
+                logger.error(f"Last.fm API error for {artist_name}: {e}")
+                raise
+        except Exception as e:
+            logger.error(f"Error fetching Last.fm data for {artist_name}: {e}")
+            raise
+
+    def store_artist_metadata(
+        self, db: Session, artist_id: int, artist_name: str, data: Dict[str, Any]
+    ) -> Dict[str, bool]:
+        """
+        Store Last.fm data in external_metadata table.
+
+        Returns dict indicating what was stored: {bio: True, tags: True, similar: False, ...}
+        """
+        stored = {}
+
+        # Store bio
+        if data.get("bio"):
+            bio_record = {
+                "summary": data["bio"].get("summary"),
+                "content": data["bio"].get("content"),
+                "url": data["bio"].get("url"),
+                "stats": data.get("stats", {}),
+            }
+
+            self._upsert_metadata(
+                db,
+                entity_type="artist",
+                entity_id=artist_id,
+                source="lastfm",
+                metadata_type="bio",
+                data=bio_record,
+                fetch_status="success",
+            )
+            stored["bio"] = True
+            logger.debug(f"Stored bio for artist {artist_id} ({artist_name})")
+        else:
+            stored["bio"] = False
+
+        # Store tags
+        if data.get("tags"):
+            tags_record = {"tags": data["tags"]}
+
+            self._upsert_metadata(
+                db,
+                entity_type="artist",
+                entity_id=artist_id,
+                source="lastfm",
+                metadata_type="tags",
+                data=tags_record,
+                fetch_status="success",
+            )
+            stored["tags"] = True
+            logger.debug(f"Stored {len(data['tags'])} tags for artist {artist_id} ({artist_name})")
+        else:
+            stored["tags"] = False
+
+        # Store similar artists in normalized table
+        if data.get("similar"):
+            similar_count = self._store_similar_artists(db, artist_id, artist_name, data["similar"])
+            stored["similar_artists"] = similar_count > 0
+            logger.debug(
+                f"Stored {similar_count}/{len(data['similar'])} similar artists for artist {artist_id} ({artist_name})"
+            )
+        else:
+            stored["similar_artists"] = False
+
+        # Update artist.lastfm_id with MBID if available
+        if data.get("mbid"):
+            artist_record = db.query(Artist).filter(Artist.id == artist_id).first()
+            if artist_record:
+                artist_record.lastfm_id = data["mbid"]
+                logger.debug(f"Updated lastfm_id for artist {artist_id}: {data['mbid']}")
+
+        db.commit()
+        return stored
+
+    def _store_similar_artists(
+        self, db: Session, artist_id: int, artist_name: str, similar_data: List[Dict[str, Any]]
+    ) -> int:
+        """
+        Store similar artists in normalized similar_artists table.
+        Filters out compound artists and creates artist records as needed.
+
+        Returns number of similar artists stored.
+        """
+        # Import here to avoid circular dependency
+        from normalize_artists import is_compound_artist, normalize_artist_name
+
+        stored_count = 0
+
+        for similar in similar_data:
+            similar_name = similar.get("name")
+            match_score = similar.get("match", 0.0)
+
+            if not similar_name:
+                continue
+
+            # Skip compound artists (e.g., "Pete Namlook & Klaus Schulze")
+            if is_compound_artist(similar_name):
+                logger.debug(f"Skipping compound similar artist: {similar_name}")
+                continue
+
+            # Get or create similar artist
+            normalized_name = normalize_artist_name(similar_name)
+            similar_artist = db.query(Artist).filter(
+                Artist.name.ilike(normalized_name)
+            ).first()
+
+            if not similar_artist:
+                # Create new artist
+                similar_artist = Artist(name=normalized_name)
+                db.add(similar_artist)
+                db.flush()  # Get ID without committing
+                logger.info(f"Created new artist from similar: {normalized_name} (ID: {similar_artist.id})")
+
+            # Check if relationship already exists
+            existing = db.query(SimilarArtist).filter(
+                SimilarArtist.artist_id == artist_id,
+                SimilarArtist.similar_artist_id == similar_artist.id,
+                SimilarArtist.source == "lastfm"
+            ).first()
+
+            if existing:
+                # Update match score if changed
+                if abs(float(existing.match_score) - match_score) > 0.0001:
+                    existing.match_score = Decimal(str(match_score))
+                    logger.debug(f"Updated match score for {artist_name} -> {similar_name}: {match_score}")
+            else:
+                # Create new relationship
+                similar_rel = SimilarArtist(
+                    artist_id=artist_id,
+                    similar_artist_id=similar_artist.id,
+                    match_score=Decimal(str(match_score)),
+                    source="lastfm"
+                )
+                db.add(similar_rel)
+                stored_count += 1
+                logger.debug(f"Added similar artist: {artist_name} -> {similar_name} (match: {match_score})")
+
+        return stored_count
+
+    def _upsert_metadata(
+        self,
+        db: Session,
+        entity_type: str,
+        entity_id: int,
+        source: str,
+        metadata_type: str,
+        data: Dict[str, Any],
+        fetch_status: str = "success",
+        error_message: Optional[str] = None,
+    ):
+        """Insert or update metadata record."""
+        # Check if record exists
+        existing = (
+            db.query(ExternalMetadata)
+            .filter_by(
+                entity_type=entity_type,
+                entity_id=entity_id,
+                source=source,
+                metadata_type=metadata_type,
+            )
+            .first()
+        )
+
+        if existing:
+            # Update
+            existing.data = data
+            existing.fetch_status = fetch_status
+            existing.error_message = error_message
+        else:
+            # Insert
+            record = ExternalMetadata(
+                entity_type=entity_type,
+                entity_id=entity_id,
+                source=source,
+                metadata_type=metadata_type,
+                data=data,
+                fetch_status=fetch_status,
+                error_message=error_message,
+            )
+            db.add(record)
+
+    def enrich_artist(self, db: Session, artist_id: int, artist_name: str) -> Dict[str, Any]:
+        """
+        Fetch Last.fm data for an artist and store in database.
+
+        Returns summary dict with status and stored flags.
+        """
+        logger.info(f"Enriching artist: {artist_name} (ID: {artist_id})")
+
+        try:
+            # Fetch from Last.fm
+            data = self.get_artist_info(artist_name)
+
+            if data is None:
+                # Artist not found
+                self._upsert_metadata(
+                    db,
+                    entity_type="artist",
+                    entity_id=artist_id,
+                    source="lastfm",
+                    metadata_type="bio",
+                    data={},
+                    fetch_status="not_found",
+                    error_message="Artist not found on Last.fm",
+                )
+                db.commit()
+                return {
+                    "status": "not_found",
+                    "artist_id": artist_id,
+                    "artist_name": artist_name,
+                    "stored": {},
+                }
+
+            # Store in database (also updates lastfm_id)
+            stored = self.store_artist_metadata(db, artist_id, artist_name, data)
+
+            return {
+                "status": "success",
+                "artist_id": artist_id,
+                "artist_name": artist_name,
+                "stored": stored,
+                "mbid": data.get("mbid"),
+                "tags_count": len(data.get("tags", [])),
+                "similar_count": len(data.get("similar", [])),
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to enrich artist {artist_name}: {e}")
+
+            # Store error
+            self._upsert_metadata(
+                db,
+                entity_type="artist",
+                entity_id=artist_id,
+                source="lastfm",
+                metadata_type="bio",
+                data={},
+                fetch_status="error",
+                error_message=str(e),
+            )
+            db.commit()
+
+            return {
+                "status": "error",
+                "artist_id": artist_id,
+                "artist_name": artist_name,
+                "error": str(e),
+            }
+
+    def get_tag_info(self, tag_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch tag/genre info from Last.fm.
+
+        Returns dict with:
+        - summary: Short description
+        - content: Full wiki text
+        - reach: How many items have this tag
+        - url: Last.fm tag page URL
+        """
+        try:
+            tag = self.network.get_tag(tag_name)
+
+            # Get wiki info
+            summary = None
+            content = None
+            try:
+                summary = tag.get_wiki_summary()
+                content = tag.get_wiki_content()
+            except Exception as e:
+                logger.debug(f"No wiki for tag {tag_name}: {e}")
+
+            # Get reach (popularity)
+            reach = None
+            try:
+                reach = int(tag.get_reach())
+            except Exception as e:
+                logger.debug(f"No reach for tag {tag_name}: {e}")
+
+            if not summary and not content:
+                return None
+
+            return {
+                "summary": summary,
+                "content": content,
+                "reach": reach,
+                "url": tag.get_url(),
+            }
+
+        except pylast.WSError as e:
+            if "Tag not found" in str(e):
+                logger.info(f"Tag not found on Last.fm: {tag_name}")
+                return None
+            else:
+                logger.error(f"Last.fm API error for tag {tag_name}: {e}")
+                raise
+        except Exception as e:
+            logger.error(f"Error fetching Last.fm data for tag {tag_name}: {e}")
+            raise
+
+    def enrich_genre(self, db: Session, genre_id: int, genre_name: str) -> Dict[str, Any]:
+        """
+        Fetch Last.fm data for a genre/tag and store in database.
+
+        Returns summary dict with status.
+        """
+        logger.info(f"Enriching genre: {genre_name} (ID: {genre_id})")
+
+        try:
+            # Fetch from Last.fm
+            data = self.get_tag_info(genre_name)
+
+            if data is None:
+                # Tag not found
+                self._upsert_metadata(
+                    db,
+                    entity_type="genre",
+                    entity_id=genre_id,
+                    source="lastfm",
+                    metadata_type="description",
+                    data={},
+                    fetch_status="not_found",
+                    error_message="Tag not found on Last.fm",
+                )
+                db.commit()
+                return {
+                    "status": "not_found",
+                    "genre_id": genre_id,
+                    "genre_name": genre_name,
+                }
+
+            # Store in database
+            self._upsert_metadata(
+                db,
+                entity_type="genre",
+                entity_id=genre_id,
+                source="lastfm",
+                metadata_type="description",
+                data=data,
+                fetch_status="success",
+            )
+            db.commit()
+
+            logger.debug(f"Stored description for genre {genre_id} ({genre_name})")
+
+            return {
+                "status": "success",
+                "genre_id": genre_id,
+                "genre_name": genre_name,
+                "has_description": bool(data.get("summary")),
+                "reach": data.get("reach"),
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to enrich genre {genre_name}: {e}")
+
+            # Store error
+            self._upsert_metadata(
+                db,
+                entity_type="genre",
+                entity_id=genre_id,
+                source="lastfm",
+                metadata_type="description",
+                data={},
+                fetch_status="error",
+                error_message=str(e),
+            )
+            db.commit()
+
+            return {
+                "status": "error",
+                "genre_id": genre_id,
+                "genre_name": genre_name,
+                "error": str(e),
+            }
+
+    def enrich_genres_batch(
+        self,
+        db: Session,
+        limit: Optional[int] = None,
+        skip_existing: bool = True,
+        rate_limit_delay: float = 0.2,
+    ) -> Dict[str, Any]:
+        """
+        Enrich multiple genres with Last.fm tag data.
+
+        Args:
+            db: Database session
+            limit: Max number of genres to process
+            skip_existing: Skip genres that already have Last.fm data
+            rate_limit_delay: Delay between requests (seconds)
+
+        Returns:
+            Statistics dict
+        """
+        # Get genres to enrich
+        if skip_existing:
+            query = text("""
+                SELECT DISTINCT g.id, g.name
+                FROM genres g
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM external_metadata em
+                    WHERE em.entity_type = 'genre'
+                      AND em.entity_id = g.id
+                      AND em.source = 'lastfm'
+                      AND em.metadata_type = 'description'
+                      AND em.fetch_status = 'success'
+                )
+                ORDER BY g.name
+            """)
+        else:
+            query = text("SELECT id, name FROM genres ORDER BY name")
+
+        if limit:
+            query = text(str(query) + f" LIMIT {limit}")
+
+        genres = db.execute(query).fetchall()
+
+        if not genres:
+            logger.info("No genres to enrich")
+            return {"processed": 0, "success": 0, "not_found": 0, "errors": 0}
+
+        logger.info(f"Enriching {len(genres)} genres from Last.fm")
+
+        stats = {"processed": 0, "success": 0, "not_found": 0, "errors": 0}
+
+        for genre_id, genre_name in genres:
+            result = self.enrich_genre(db, genre_id, genre_name)
+
+            stats["processed"] += 1
+
+            if result["status"] == "success":
+                stats["success"] += 1
+            elif result["status"] == "not_found":
+                stats["not_found"] += 1
+            elif result["status"] == "error":
+                stats["errors"] += 1
+
+            # Rate limiting
+            if rate_limit_delay > 0:
+                time.sleep(rate_limit_delay)
+
+        logger.info(
+            f"Last.fm genre enrichment complete: {stats['success']} success, "
+            f"{stats['not_found']} not found, {stats['errors']} errors"
+        )
+
+        return stats
+
+    def enrich_artists_batch(
+        self,
+        db: Session,
+        limit: Optional[int] = None,
+        skip_existing: bool = True,
+        rate_limit_delay: float = 0.2,
+    ) -> Dict[str, Any]:
+        """
+        Enrich multiple artists with Last.fm data.
+
+        Args:
+            db: Database session
+            limit: Max number of artists to process
+            skip_existing: Skip artists that already have Last.fm data
+            rate_limit_delay: Delay between requests (seconds)
+
+        Returns:
+            Statistics dict
+        """
+        # Get artists to enrich
+        if skip_existing:
+            # Find artists without Last.fm bio
+            query = text("""
+                SELECT DISTINCT a.id, a.name
+                FROM artists a
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM external_metadata em
+                    WHERE em.entity_type = 'artist'
+                      AND em.entity_id = a.id
+                      AND em.source = 'lastfm'
+                      AND em.metadata_type = 'bio'
+                      AND em.fetch_status = 'success'
+                )
+                ORDER BY a.name
+            """)
+        else:
+            query = text("SELECT id, name FROM artists ORDER BY name")
+
+        if limit:
+            query = text(str(query) + f" LIMIT {limit}")
+
+        artists = db.execute(query).fetchall()
+
+        if not artists:
+            logger.info("No artists to enrich")
+            return {"processed": 0, "success": 0, "not_found": 0, "errors": 0}
+
+        logger.info(f"Enriching {len(artists)} artists from Last.fm")
+
+        stats = {"processed": 0, "success": 0, "not_found": 0, "errors": 0}
+
+        for artist_id, artist_name in artists:
+            result = self.enrich_artist(db, artist_id, artist_name)
+
+            stats["processed"] += 1
+
+            if result["status"] == "success":
+                stats["success"] += 1
+            elif result["status"] == "not_found":
+                stats["not_found"] += 1
+            elif result["status"] == "error":
+                stats["errors"] += 1
+
+            # Rate limiting
+            if rate_limit_delay > 0:
+                time.sleep(rate_limit_delay)
+
+        logger.info(
+            f"Last.fm enrichment complete: {stats['success']} success, "
+            f"{stats['not_found']} not found, {stats['errors']} errors"
+        )
+
+        return stats

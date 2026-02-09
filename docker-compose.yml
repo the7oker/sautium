@@ -38,6 +38,7 @@ services:
 
       # API Keys
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LASTFM_API_KEY: ${LASTFM_API_KEY}
 
       # GPU configuration
       CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}

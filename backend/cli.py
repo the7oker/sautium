@@ -404,5 +404,194 @@ def ask(query, limit):
         sys.exit(1)
 
 
+@cli.command("normalize-artists")
+@click.option("--dry-run", is_flag=True, help="Show what would be done without making changes")
+@click.option("--verify-lastfm", is_flag=True, help="Verify individual artists exist on Last.fm (slow)")
+def normalize_artists_cmd(dry_run, verify_lastfm):
+    """Normalize compound artist names (split 'A & B' into separate artists)."""
+    from normalize_artists import normalize_artists, show_artist_statistics
+
+    click.echo("🎵 Normalizing compound artist names...")
+    if dry_run:
+        click.echo("⚠️  DRY RUN MODE - no changes will be made")
+    if verify_lastfm:
+        click.echo("🔍 Will verify artists on Last.fm (this will be slow)")
+    click.echo()
+
+    try:
+        with get_db_context() as db:
+            click.echo("📊 Current state:")
+            show_artist_statistics(db)
+
+            click.echo("\n" + "="*60)
+
+            stats = normalize_artists(db, dry_run=dry_run, verify_on_lastfm=verify_lastfm)
+
+            click.echo("\n" + "="*60)
+            click.echo("\n📊 Statistics:")
+            click.echo(f"   • Compound artists found: {stats['compound_artists_found']}")
+            click.echo(f"   • Compound artists processed: {stats['compound_artists_processed']}")
+            click.echo(f"   • New artists created: {stats['new_artists_created']}")
+            click.echo(f"   • Track relationships updated: {stats['track_relationships_updated']}")
+            click.echo(f"   • Compound artists deleted: {stats['compound_artists_deleted']}")
+
+            if verify_lastfm:
+                click.echo(f"   • Last.fm verified: {stats['lastfm_verified']}")
+                click.echo(f"   • Last.fm not found: {stats['lastfm_not_found']}")
+
+            if not dry_run and stats['compound_artists_processed'] > 0:
+                click.echo("\n📊 After normalization:")
+                show_artist_statistics(db)
+                click.echo("\n✅ Artist normalization complete!")
+                click.echo("💡 Tip: Run 'enrich-lastfm' to fetch data for new artists")
+            elif stats['compound_artists_found'] == 0:
+                click.echo("\n✅ No compound artists found - database is already normalized")
+            elif dry_run:
+                click.echo("\n⚠️  Dry run complete - no changes made")
+
+    except Exception as e:
+        click.echo(f"\n❌ Error: {e}", err=True)
+        logger.exception("Artist normalization failed")
+        sys.exit(1)
+
+
+@cli.command("normalize-genres")
+@click.option("--dry-run", is_flag=True, help="Show what would be done without making changes")
+def normalize_genres_cmd(dry_run):
+    """Normalize compound genre names (split 'A/B/C' into separate genres)."""
+    from normalize_genres import normalize_genres, show_genre_statistics
+
+    click.echo("🎵 Normalizing compound genre names...")
+    if dry_run:
+        click.echo("⚠️  DRY RUN MODE - no changes will be made\n")
+
+    try:
+        with get_db_context() as db:
+            click.echo("📊 Current state:")
+            show_genre_statistics(db)
+
+            click.echo("\n" + "="*60)
+
+            stats = normalize_genres(db, dry_run=dry_run)
+
+            click.echo("\n" + "="*60)
+            click.echo("\n📊 Statistics:")
+            click.echo(f"   • Compound genres found: {stats['compound_genres_found']}")
+            click.echo(f"   • Compound genres processed: {stats['compound_genres_processed']}")
+            click.echo(f"   • New genres created: {stats['new_genres_created']}")
+            click.echo(f"   • Track relationships updated: {stats['track_relationships_updated']}")
+            click.echo(f"   • Compound genres deleted: {stats['compound_genres_deleted']}")
+
+            if not dry_run and stats['compound_genres_processed'] > 0:
+                click.echo("\n📊 After normalization:")
+                show_genre_statistics(db)
+                click.echo("\n✅ Genre normalization complete!")
+                click.echo("💡 Tip: Run 'enrich-lastfm --genres' to fetch descriptions for new genres")
+            elif stats['compound_genres_found'] == 0:
+                click.echo("\n✅ No compound genres found - database is already normalized")
+            elif dry_run:
+                click.echo("\n⚠️  Dry run complete - no changes made")
+
+    except Exception as e:
+        click.echo(f"\n❌ Error: {e}", err=True)
+        logger.exception("Genre normalization failed")
+        sys.exit(1)
+
+
+@cli.command("enrich-lastfm")
+@click.option("--limit", "-l", type=int, default=None, help="Limit number of artists/genres to enrich")
+@click.option("--artist", "-a", type=str, default=None, help="Enrich specific artist by name")
+@click.option("--genres", is_flag=True, help="Enrich genres instead of artists")
+@click.option("--no-skip", is_flag=True, help="Re-fetch data that already exists")
+@click.option("--delay", type=float, default=0.2, help="Delay between requests (seconds)")
+def enrich_lastfm(limit, artist, genres, no_skip, delay):
+    """Enrich artists or genres with Last.fm data."""
+    from lastfm import LastFmService
+
+    if not settings.lastfm_api_key:
+        click.echo("❌ LASTFM_API_KEY is not configured. Set it in .env file.", err=True)
+        sys.exit(1)
+
+    try:
+        service = LastFmService()
+
+        with get_db_context() as db:
+            if genres:
+                # Enrich genres
+                click.echo("🎵 Enriching genres with Last.fm tag data...")
+                skip_existing = not no_skip
+                click.echo(f"{'⚠️  Re-fetching all genres' if no_skip else '✓ Skipping genres with existing data'}")
+                click.echo(f"⏱️  Rate limit: {delay}s between requests")
+                if limit:
+                    click.echo(f"⚠️  Limited to {limit} genres")
+
+                click.echo()
+
+                stats = service.enrich_genres_batch(
+                    db, limit=limit, skip_existing=skip_existing, rate_limit_delay=delay
+                )
+
+                click.echo("\n✅ Last.fm genre enrichment complete!")
+                click.echo(f"📊 Statistics:")
+                click.echo(f"   • Processed: {stats['processed']} genres")
+                click.echo(f"   • Success: {stats['success']}")
+                click.echo(f"   • Not found: {stats['not_found']}")
+                click.echo(f"   • Errors: {stats['errors']}")
+
+            elif artist:
+                # Enrich specific artist
+                click.echo(f"🔍 Looking for artist: {artist}")
+                result = db.execute(
+                    text("SELECT id, name FROM artists WHERE name ILIKE :name"),
+                    {"name": f"%{artist}%"}
+                ).fetchone()
+
+                if not result:
+                    click.echo(f"❌ Artist '{artist}' not found in database", err=True)
+                    sys.exit(1)
+
+                artist_id, artist_name = result
+                click.echo(f"✓ Found: {artist_name} (ID: {artist_id})")
+
+                result = service.enrich_artist(db, artist_id, artist_name)
+
+                if result["status"] == "success":
+                    click.echo(f"\n✅ Successfully enriched {artist_name}:")
+                    click.echo(f"   • Bio: {'✓' if result['stored'].get('bio') else '✗'}")
+                    click.echo(f"   • Tags: {result.get('tags_count', 0)} tags")
+                    click.echo(f"   • Similar artists: {result.get('similar_count', 0)}")
+                elif result["status"] == "not_found":
+                    click.echo(f"\n⚠️  Artist not found on Last.fm: {artist_name}")
+                else:
+                    click.echo(f"\n❌ Error enriching {artist_name}: {result.get('error')}")
+
+            else:
+                # Batch enrich artists
+                click.echo("🎵 Enriching artists with Last.fm data...")
+                skip_existing = not no_skip
+                click.echo(f"{'⚠️  Re-fetching all artists' if no_skip else '✓ Skipping artists with existing data'}")
+                click.echo(f"⏱️  Rate limit: {delay}s between requests")
+                if limit:
+                    click.echo(f"⚠️  Limited to {limit} artists")
+
+                click.echo()
+
+                stats = service.enrich_artists_batch(
+                    db, limit=limit, skip_existing=skip_existing, rate_limit_delay=delay
+                )
+
+                click.echo("\n✅ Last.fm artist enrichment complete!")
+                click.echo(f"📊 Statistics:")
+                click.echo(f"   • Processed: {stats['processed']} artists")
+                click.echo(f"   • Success: {stats['success']}")
+                click.echo(f"   • Not found: {stats['not_found']}")
+                click.echo(f"   • Errors: {stats['errors']}")
+
+    except Exception as e:
+        click.echo(f"\n❌ Error: {e}", err=True)
+        logger.exception("Last.fm enrichment failed")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     cli()

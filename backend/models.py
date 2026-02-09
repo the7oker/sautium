@@ -9,8 +9,9 @@ from typing import Optional, List
 
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, Numeric, BigInteger,
-    ForeignKey, CheckConstraint, Index, Enum as SQLEnum, ARRAY
+    ForeignKey, CheckConstraint, Index, Enum as SQLEnum, ARRAY, UniqueConstraint
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from pgvector.sqlalchemy import Vector
@@ -79,13 +80,52 @@ class Embedding(Base):
         return f"<Embedding(id={self.id}, model_id={self.model_id})>"
 
 
+class ExternalMetadata(Base):
+    """External metadata from various sources (Last.fm, Spotify, MusicBrainz, etc.)."""
+    __tablename__ = "external_metadata"
+
+    id = Column(Integer, primary_key=True)
+
+    # What entity we're describing
+    entity_type = Column(String(50), nullable=False)  # 'artist', 'album', 'track', 'genre'
+    entity_id = Column(Integer, nullable=False)
+
+    # Source of the data
+    source = Column(String(50), nullable=False)  # 'lastfm', 'spotify', 'musicbrainz'
+
+    # Type of metadata
+    metadata_type = Column(String(50), nullable=False)  # 'bio', 'tags', 'genres', 'audio_features', 'similar_artists'
+
+    # The actual data (flexible JSON structure)
+    data = Column(JSONB, nullable=False)
+
+    # Fetch metadata
+    fetched_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    fetch_status = Column(String(20), default='success')  # 'success', 'not_found', 'error'
+    error_message = Column(Text)
+
+    # Indexes and constraints
+    __table_args__ = (
+        Index('idx_external_metadata_entity', 'entity_type', 'entity_id'),
+        Index('idx_external_metadata_source', 'source'),
+        Index('idx_external_metadata_type', 'metadata_type'),
+        Index('idx_external_metadata_status', 'fetch_status'),
+        Index('idx_external_metadata_data', 'data', postgresql_using='gin'),
+        UniqueConstraint('entity_type', 'entity_id', 'source', 'metadata_type',
+                        name='uq_external_metadata'),
+    )
+
+    def __repr__(self):
+        return f"<ExternalMetadata(id={self.id}, entity={self.entity_type}/{self.entity_id}, source={self.source}, type={self.metadata_type})>"
+
+
 class Genre(Base):
-    """Genre model (normalized)."""
+    """Genre model (normalized). Descriptions stored in external_metadata table."""
     __tablename__ = "genres"
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False, unique=True)
-    description = Column(Text)
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -104,7 +144,7 @@ class Genre(Base):
 
 
 class Artist(Base):
-    """Artist model."""
+    """Artist model. Bio and metadata stored in external_metadata table."""
     __tablename__ = "artists"
 
     id = Column(Integer, primary_key=True)
@@ -115,8 +155,7 @@ class Artist(Base):
     lastfm_id = Column(String(100))
     musicbrainz_id = Column(String(100))
 
-    # Metadata
-    bio = Column(Text)
+    # Basic metadata
     country = Column(String(100))
 
     # Timestamps
@@ -125,6 +164,8 @@ class Artist(Base):
 
     # Relationships
     track_associations = relationship("TrackArtist", back_populates="artist", cascade="all, delete-orphan")
+    similar_to = relationship("SimilarArtist", foreign_keys="SimilarArtist.artist_id", back_populates="artist", cascade="all, delete-orphan")
+    similar_from = relationship("SimilarArtist", foreign_keys="SimilarArtist.similar_artist_id", back_populates="similar_artist", cascade="all, delete-orphan")
 
     # Indexes
     __table_args__ = (
@@ -134,6 +175,39 @@ class Artist(Base):
 
     def __repr__(self):
         return f"<Artist(id={self.id}, name='{self.name}')>"
+
+
+class SimilarArtist(Base):
+    """Normalized similar artist relationships from multiple sources (Last.fm, Spotify, etc.)."""
+    __tablename__ = "similar_artists"
+
+    id = Column(Integer, primary_key=True)
+    artist_id = Column(Integer, ForeignKey("artists.id", ondelete="CASCADE"), nullable=False)
+    similar_artist_id = Column(Integer, ForeignKey("artists.id", ondelete="CASCADE"), nullable=False)
+    match_score = Column(Numeric(5, 4), nullable=False)  # 0.0000 to 1.0000
+    source = Column(String(50), nullable=False)  # 'lastfm', 'spotify', 'musicbrainz', etc.
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    artist = relationship("Artist", foreign_keys=[artist_id], back_populates="similar_to")
+    similar_artist = relationship("Artist", foreign_keys=[similar_artist_id], back_populates="similar_from")
+
+    # Indexes and constraints
+    __table_args__ = (
+        Index("idx_similar_artists_artist", "artist_id"),
+        Index("idx_similar_artists_similar", "similar_artist_id"),
+        Index("idx_similar_artists_source", "source"),
+        Index("idx_similar_artists_match", "match_score"),
+        UniqueConstraint("artist_id", "similar_artist_id", "source", name="uq_similar_artists"),
+        CheckConstraint("artist_id != similar_artist_id", name="chk_not_self_similar"),
+        CheckConstraint("match_score >= 0 AND match_score <= 1", name="chk_match_score_range"),
+    )
+
+    def __repr__(self):
+        return f"<SimilarArtist(artist_id={self.artist_id}, similar_artist_id={self.similar_artist_id}, match={self.match_score}, source='{self.source}')>"
 
 
 class Album(Base):
