@@ -746,5 +746,116 @@ def enrich_albums(limit, album, no_skip, delay):
         sys.exit(1)
 
 
+@cli.command("enrich-tracks")
+@click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to enrich")
+@click.option("--artist", "-a", type=str, default=None, help="Enrich tracks by specific artist")
+@click.option("--album", "-al", type=str, default=None, help="Enrich tracks from specific album")
+@click.option("--no-skip", is_flag=True, help="Re-fetch data that already exists")
+@click.option("--delay", type=float, default=0.2, help="Delay between requests (seconds)")
+def enrich_tracks(limit, artist, album, no_skip, delay):
+    """Enrich tracks with Last.fm statistics (listeners, playcount)."""
+    from lastfm import LastFmService
+
+    if not settings.lastfm_api_key:
+        click.echo("❌ LASTFM_API_KEY is not configured. Set it in .env file.", err=True)
+        sys.exit(1)
+
+    try:
+        service = LastFmService()
+
+        with get_db_context() as db:
+            # Build query based on filters
+            query = text("""
+                SELECT DISTINCT
+                    t.id,
+                    t.title,
+                    STRING_AGG(DISTINCT ar.name, ', ' ORDER BY ar.name) as artist_names,
+                    al.title as album_title
+                FROM tracks t
+                JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+                JOIN artists ar ON ta.artist_id = ar.id
+                JOIN albums al ON t.album_id = al.id
+                WHERE 1=1
+            """)
+
+            params = {}
+
+            # Filter by artist if specified
+            if artist:
+                query = text(str(query).replace("WHERE 1=1", "WHERE ar.name ILIKE :artist_name"))
+                params["artist_name"] = f"%{artist}%"
+
+            # Filter by album if specified
+            if album:
+                if "WHERE ar.name" in str(query):
+                    query = text(str(query) + " AND al.title ILIKE :album_title")
+                else:
+                    query = text(str(query).replace("WHERE 1=1", "WHERE al.title ILIKE :album_title"))
+                params["album_title"] = f"%{album}%"
+
+            # Skip already enriched unless --no-skip
+            if not no_skip:
+                query = text(str(query) + """
+                    AND NOT EXISTS (
+                        SELECT 1 FROM track_stats ts
+                        WHERE ts.track_id = t.id AND ts.source = 'lastfm'
+                    )
+                """)
+
+            query = text(str(query) + """
+                GROUP BY t.id, t.title, al.title
+                ORDER BY t.title
+            """)
+
+            if limit:
+                query = text(str(query) + f" LIMIT {limit}")
+
+            tracks = db.execute(query, params).fetchall()
+
+            if not tracks:
+                click.echo("✓ No tracks to enrich")
+                return
+
+            click.echo(f"Found {len(tracks)} tracks to enrich\n")
+
+            stats = {"processed": 0, "success": 0, "not_found": 0, "errors": 0}
+
+            for track_id, track_title, artist_names, album_title in tracks:
+                # Take first artist if multiple
+                artist_name = artist_names.split(', ')[0]
+
+                result = service.enrich_track(db, track_id, artist_name, track_title)
+
+                stats["processed"] += 1
+
+                if result["status"] == "success":
+                    stats["success"] += 1
+                    listeners = result.get("listeners", 0)
+                    playcount = result.get("playcount", 0)
+                    click.echo(f"✓ {artist_name} - {track_title}: {listeners:,} listeners, {playcount:,} plays")
+                elif result["status"] == "not_found":
+                    stats["not_found"] += 1
+                    click.echo(f"⚠ {artist_name} - {track_title}: not found")
+                elif result["status"] == "error":
+                    stats["errors"] += 1
+                    click.echo(f"✗ {artist_name} - {track_title}: {result.get('error', 'unknown error')}")
+
+                # Rate limiting
+                if delay > 0:
+                    time.sleep(delay)
+
+            click.echo("\n✅ Last.fm track enrichment complete!")
+            click.echo(f"📊 Statistics:")
+            click.echo(f"   • Processed: {stats['processed']} tracks")
+            click.echo(f"   • Success: {stats['success']}")
+            click.echo(f"   • Not found: {stats['not_found']}")
+            click.echo(f"   • Errors: {stats['errors']}")
+
+    except Exception as e:
+        click.echo(f"\n❌ Error: {e}", err=True)
+        logger.exception("Track enrichment failed")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     cli()

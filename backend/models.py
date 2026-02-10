@@ -536,6 +536,7 @@ class Track(Base):
     embedding_obj = relationship("Embedding", back_populates="tracks")
     artist_associations = relationship("TrackArtist", back_populates="track", cascade="all, delete-orphan")
     genre_associations = relationship("TrackGenre", back_populates="track", cascade="all, delete-orphan")
+    stats = relationship("TrackStats", back_populates="track", cascade="all, delete-orphan")
 
     # Constraints and indexes
     __table_args__ = (
@@ -598,3 +599,36 @@ class TrackArtist(Base):
 
     def __repr__(self):
         return f"<TrackArtist(track_id={self.track_id}, artist_id={self.artist_id}, role='{self.role}')>"
+
+
+class TrackStats(Base):
+    """Track popularity statistics from external sources (Last.fm, Spotify, etc)."""
+    __tablename__ = "track_stats"
+
+    id = Column(Integer, primary_key=True)
+    track_id = Column(Integer, ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False)
+    source = Column(String(50), nullable=False)  # 'lastfm', 'spotify', etc.
+
+    # Popularity metrics
+    listeners = Column(Integer)  # Number of unique listeners
+    playcount = Column(BigInteger)  # Total play count
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    track = relationship("Track", back_populates="stats")
+
+    # Constraints and indexes
+    __table_args__ = (
+        UniqueConstraint("track_id", "source", name="uq_track_stats"),
+        CheckConstraint("listeners IS NOT NULL OR playcount IS NOT NULL", name="chk_has_track_stats"),
+        Index("idx_track_stats_track", "track_id"),
+        Index("idx_track_stats_source", "source"),
+        Index("idx_track_stats_listeners", "listeners"),
+        Index("idx_track_stats_playcount", "playcount"),
+    )
+
+    def __repr__(self):
+        return f"<TrackStats(track_id={self.track_id}, source='{self.source}', listeners={self.listeners}, playcount={self.playcount})>"

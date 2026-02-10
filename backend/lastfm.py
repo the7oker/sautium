@@ -940,3 +940,140 @@ class LastFmService:
                 logger.debug(f"Added tag: album {album_id} - {tag_name} (weight: {tag_weight})")
 
         return stored_count
+
+    # =============================================================================
+    # Track enrichment methods
+    # =============================================================================
+
+    def get_track_stats(self, artist_name: str, track_title: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch track statistics from Last.fm (listeners and playcount only).
+
+        Returns dict with:
+        - listeners: int
+        - playcount: int
+        - mbid: str (optional)
+
+        Returns None if track not found.
+        """
+        try:
+            track = self.network.get_track(artist_name, track_title)
+
+            # Get statistics
+            listeners = None
+            playcount = None
+
+            try:
+                listeners = int(track.get_listener_count())
+            except Exception as e:
+                logger.debug(f"No listeners for {artist_name} - {track_title}: {e}")
+
+            try:
+                playcount = int(track.get_playcount())
+            except Exception as e:
+                logger.debug(f"No playcount for {artist_name} - {track_title}: {e}")
+
+            # Get MBID (optional)
+            mbid = None
+            try:
+                mbid = track.get_mbid()
+            except Exception as e:
+                logger.debug(f"No MBID for {artist_name} - {track_title}: {e}")
+
+            # Return None if no stats available
+            if listeners is None and playcount is None:
+                return None
+
+            return {
+                "listeners": listeners,
+                "playcount": playcount,
+                "mbid": mbid,
+            }
+
+        except pylast.WSError as e:
+            if "Track not found" in str(e):
+                logger.info(f"Track not found on Last.fm: {artist_name} - {track_title}")
+                return None
+            else:
+                logger.error(f"Last.fm API error for {artist_name} - {track_title}: {e}")
+                raise
+        except Exception as e:
+            logger.error(f"Error fetching Last.fm data for {artist_name} - {track_title}: {e}")
+            raise
+
+    def enrich_track(self, db: Session, track_id: int, artist_name: str, track_title: str) -> Dict[str, Any]:
+        """
+        Fetch Last.fm statistics for a track and store in database.
+
+        Returns summary dict with status.
+        """
+        logger.info(f"Enriching track: {artist_name} - {track_title} (ID: {track_id})")
+
+        try:
+            # Fetch from Last.fm
+            stats = self.get_track_stats(artist_name, track_title)
+
+            if stats is None:
+                # Track not found or no stats
+                logger.warning(f"No stats found for track: {artist_name} - {track_title}")
+                return {
+                    "status": "not_found",
+                    "track_id": track_id,
+                    "artist_name": artist_name,
+                    "track_title": track_title,
+                }
+
+            # Store track stats
+            self._store_track_stats(db, track_id, stats)
+
+            db.commit()
+
+            return {
+                "status": "success",
+                "track_id": track_id,
+                "artist_name": artist_name,
+                "track_title": track_title,
+                "listeners": stats.get("listeners"),
+                "playcount": stats.get("playcount"),
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to enrich track {artist_name} - {track_title}: {e}")
+            db.rollback()
+
+            return {
+                "status": "error",
+                "track_id": track_id,
+                "artist_name": artist_name,
+                "track_title": track_title,
+                "error": str(e),
+            }
+
+    def _store_track_stats(self, db: Session, track_id: int, stats: Dict[str, Any]):
+        """Store track statistics in track_stats table."""
+        from models import TrackStats
+
+        listeners = stats.get("listeners")
+        playcount = stats.get("playcount")
+
+        # Check if already exists
+        existing = db.query(TrackStats).filter(
+            TrackStats.track_id == track_id,
+            TrackStats.source == "lastfm"
+        ).first()
+
+        if existing:
+            # Update existing
+            existing.listeners = listeners
+            existing.playcount = playcount
+            logger.debug(f"Updated track stats for track {track_id}")
+        else:
+            # Create new
+            track_stats = TrackStats(
+                track_id=track_id,
+                source="lastfm",
+                listeners=listeners,
+                playcount=playcount
+            )
+            db.add(track_stats)
+            logger.debug(f"Created track stats for track {track_id}")
