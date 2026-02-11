@@ -295,3 +295,166 @@ def search_by_metadata(
     results = [_build_track_result(row) for row in rows]
 
     return {"results": results, "count": len(results), "total": total}
+
+
+def search_by_text_semantic(
+    db: Session,
+    query_text: str,
+    limit: int = None,
+    min_similarity: float = None,
+    filters: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Search tracks by text description using sentence-transformers text embeddings.
+
+    Uses the text_embedding column (384d, all-MiniLM-L6-v2) which encodes
+    track metadata (title, artist, genre, tags, bios) for semantic matching.
+
+    Args:
+        db: Database session.
+        query_text: Natural language description.
+        limit: Max results to return.
+        min_similarity: Minimum similarity score (0-1).
+        filters: Optional metadata filters.
+
+    Returns:
+        Dict with results list, count, and query_text.
+    """
+    from text_embeddings import TextEmbeddingGenerator
+
+    limit = limit or settings.default_search_limit
+    min_similarity = min_similarity if min_similarity is not None else 0.3
+    filters = filters or {}
+
+    # Generate query embedding
+    generator = TextEmbeddingGenerator()
+    query_vector = generator.query_to_embedding(query_text)
+    generator.unload_model()
+
+    # Format vector as pgvector literal
+    vector_str = "'" + "[" + ",".join(str(float(x)) for x in query_vector) + "]" + "'::vector"
+
+    filter_sql, filter_params = _apply_filters(filters)
+
+    similarity_sql = text(f"""
+        SELECT * FROM (
+            SELECT DISTINCT ON (t.id) t.id, t.title, a2.name as artist, al.title as album,
+                   g.name as genre, al.quality_source,
+                   t.duration_seconds, t.sample_rate, t.bit_depth,
+                   1 - (t.text_embedding <=> {vector_str}) as similarity
+            FROM tracks t
+            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+            JOIN artists a2 ON ta.artist_id = a2.id
+            JOIN albums al ON t.album_id = al.id
+            LEFT JOIN track_genres tg ON t.id = tg.track_id
+            LEFT JOIN genres g ON tg.genre_id = g.id
+            WHERE t.text_embedding IS NOT NULL
+              AND 1 - (t.text_embedding <=> {vector_str}) >= :min_similarity
+              {filter_sql}
+        ) sub
+        ORDER BY similarity DESC
+        LIMIT :limit
+    """)
+
+    params = {"min_similarity": min_similarity, "limit": limit}
+    params.update(filter_params)
+
+    rows = db.execute(similarity_sql, params).fetchall()
+
+    results = [_build_track_result(row) for row in rows]
+
+    return {"results": results, "count": len(results), "query_text": query_text}
+
+
+def search_hybrid(
+    db: Session,
+    query_text: str,
+    limit: int = None,
+    min_similarity: float = None,
+    filters: Optional[Dict[str, Any]] = None,
+    audio_weight: float = 0.3,
+    text_weight: float = 0.7,
+) -> Dict[str, Any]:
+    """
+    Hybrid search combining CLAP audio embeddings and text semantic embeddings.
+
+    Runs both search_by_text (CLAP) and search_by_text_semantic (MiniLM),
+    merges results with weighted scoring.
+
+    Args:
+        db: Database session.
+        query_text: Natural language description.
+        limit: Max results to return.
+        min_similarity: Minimum combined score.
+        filters: Optional metadata filters.
+        audio_weight: Weight for CLAP audio similarity (default 0.3).
+        text_weight: Weight for text semantic similarity (default 0.7).
+
+    Returns:
+        Dict with results list, count, query_text, and weights.
+    """
+    limit = limit or settings.default_search_limit
+    min_similarity = min_similarity if min_similarity is not None else 0.15
+    filters = filters or {}
+
+    # Fetch wider net from both search types
+    wide_limit = limit * 3
+    low_threshold = 0.1
+
+    # Collect results from both searches
+    audio_results = {}
+    text_results = {}
+
+    # CLAP audio search
+    try:
+        audio_resp = search_by_text(
+            db, query_text, limit=wide_limit, min_similarity=low_threshold, filters=filters
+        )
+        for t in audio_resp.get("results", []):
+            audio_results[t["id"]] = t
+        logger.info(f"Hybrid: CLAP audio returned {len(audio_results)} tracks")
+    except Exception as e:
+        logger.warning(f"Hybrid: CLAP audio search failed: {e}")
+
+    # Text semantic search
+    try:
+        text_resp = search_by_text_semantic(
+            db, query_text, limit=wide_limit, min_similarity=low_threshold, filters=filters
+        )
+        for t in text_resp.get("results", []):
+            text_results[t["id"]] = t
+        logger.info(f"Hybrid: text semantic returned {len(text_results)} tracks")
+    except Exception as e:
+        logger.warning(f"Hybrid: text semantic search failed: {e}")
+
+    # Merge results with weighted scoring
+    all_track_ids = set(audio_results.keys()) | set(text_results.keys())
+    merged = []
+
+    for tid in all_track_ids:
+        audio_sim = audio_results[tid]["similarity"] if tid in audio_results and audio_results[tid].get("similarity") else 0.0
+        text_sim = text_results[tid]["similarity"] if tid in text_results and text_results[tid].get("similarity") else 0.0
+
+        combined = audio_weight * audio_sim + text_weight * text_sim
+
+        if combined < min_similarity:
+            continue
+
+        # Use text result as base if available, else audio
+        track = text_results.get(tid) or audio_results.get(tid)
+        track = dict(track)  # copy
+        track["similarity"] = round(combined, 4)
+
+        merged.append(track)
+
+    # Sort by combined score
+    merged.sort(key=lambda t: t["similarity"], reverse=True)
+    merged = merged[:limit]
+
+    return {
+        "results": merged,
+        "count": len(merged),
+        "query_text": query_text,
+        "audio_weight": audio_weight,
+        "text_weight": text_weight,
+    }

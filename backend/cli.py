@@ -499,6 +499,139 @@ def normalize_genres_cmd(dry_run):
         sys.exit(1)
 
 
+@cli.command("generate-text-embeddings")
+@click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process")
+@click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default: 64)")
+@click.option("--force", is_flag=True, help="Regenerate embeddings even if already exists")
+def generate_text_embeddings(limit, batch_size, force):
+    """Generate text embeddings from track metadata using sentence-transformers."""
+    from text_embeddings import generate_text_embeddings as do_generate
+
+    click.echo("🔤 Starting text embedding generation...")
+    click.echo(f"🖥️  Model: {settings.text_embedding_model}")
+    click.echo(f"📦 Batch size: {batch_size or settings.text_embedding_batch_size}")
+
+    if limit:
+        click.echo(f"⚠️  Limited to {limit} tracks")
+    if force:
+        click.echo(f"⚠️  Force mode: regenerating all embeddings")
+
+    try:
+        stats = do_generate(limit=limit, batch_size=batch_size, force=force)
+
+        click.echo("\n✅ Text embedding generation complete!")
+        click.echo(f"📊 Statistics:")
+        click.echo(f"   • Processed: {stats['processed']} tracks")
+        click.echo(f"   • Success: {stats['success']} embeddings")
+        click.echo(f"   • Failed: {stats['failed']} tracks")
+
+        if stats['failed'] > 0:
+            click.echo(f"\n⚠️  Check logs for error details")
+
+    except Exception as e:
+        click.echo(f"\n❌ Error: {e}", err=True)
+        logger.exception("Text embedding generation failed")
+        sys.exit(1)
+
+
+@cli.command("search-semantic")
+@click.option("--query", "-q", type=str, required=True, help="Text description to search for")
+@click.option("--limit", "-l", type=int, default=10, help="Number of results")
+@click.option("--min-similarity", type=float, default=None, help="Minimum similarity (0-1)")
+@click.option("--artist", type=str, default=None, help="Filter by artist name")
+@click.option("--genre", type=str, default=None, help="Filter by genre")
+@click.option("--quality", type=str, default=None, help="Filter by quality source")
+def search_semantic(query, limit, min_similarity, artist, genre, quality):
+    """Search tracks by text description using semantic text embeddings."""
+    from search import search_by_text_semantic
+
+    click.echo(f"🔍 Semantic search: \"{query}\"")
+    click.echo("⏳ Loading text embedding model...")
+
+    filters = {}
+    if artist:
+        filters["artist"] = artist
+    if genre:
+        filters["genre"] = genre
+    if quality:
+        filters["quality_source"] = quality
+
+    try:
+        with get_db_context() as db:
+            result = search_by_text_semantic(
+                db, query, limit=limit, min_similarity=min_similarity, filters=filters
+            )
+
+        click.echo(f"\n{'#':<4} {'Sim':>5}  {'Artist':<25} {'Title':<35} {'Album':<30} {'Quality':<7}")
+        click.echo("-" * 110)
+
+        for i, track in enumerate(result["results"], 1):
+            sim = f"{track['similarity']:.2f}" if track["similarity"] else "N/A"
+            artist_name = (track["artist"] or "Unknown")[:24]
+            title = (track["title"] or "?")[:34]
+            album_name = (track["album"] or "?")[:29]
+            qs = track.get("quality_source") or "?"
+            click.echo(f"{i:<4} {sim:>5}  {artist_name:<25} {title:<35} {album_name:<30} {qs:<7}")
+
+        click.echo(f"\n📊 Found {result['count']} matching tracks")
+
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        logger.exception("Semantic search failed")
+        sys.exit(1)
+
+
+@cli.command("search-hybrid")
+@click.option("--query", "-q", type=str, required=True, help="Text description to search for")
+@click.option("--limit", "-l", type=int, default=10, help="Number of results")
+@click.option("--min-similarity", type=float, default=None, help="Minimum combined score (0-1)")
+@click.option("--audio-weight", type=float, default=0.3, help="Weight for CLAP audio similarity (default: 0.3)")
+@click.option("--text-weight", type=float, default=0.7, help="Weight for text semantic similarity (default: 0.7)")
+@click.option("--artist", type=str, default=None, help="Filter by artist name")
+@click.option("--genre", type=str, default=None, help="Filter by genre")
+@click.option("--quality", type=str, default=None, help="Filter by quality source")
+def search_hybrid_cmd(query, limit, min_similarity, audio_weight, text_weight, artist, genre, quality):
+    """Search tracks using hybrid audio + text similarity."""
+    from search import search_hybrid
+
+    click.echo(f"🔍 Hybrid search: \"{query}\"")
+    click.echo(f"⚖️  Weights: audio={audio_weight}, text={text_weight}")
+    click.echo("⏳ Loading models...")
+
+    filters = {}
+    if artist:
+        filters["artist"] = artist
+    if genre:
+        filters["genre"] = genre
+    if quality:
+        filters["quality_source"] = quality
+
+    try:
+        with get_db_context() as db:
+            result = search_hybrid(
+                db, query, limit=limit, min_similarity=min_similarity,
+                filters=filters, audio_weight=audio_weight, text_weight=text_weight,
+            )
+
+        click.echo(f"\n{'#':<4} {'Score':>5}  {'Artist':<25} {'Title':<35} {'Album':<30} {'Quality':<7}")
+        click.echo("-" * 110)
+
+        for i, track in enumerate(result["results"], 1):
+            sim = f"{track['similarity']:.2f}" if track["similarity"] else "N/A"
+            artist_name = (track["artist"] or "Unknown")[:24]
+            title = (track["title"] or "?")[:34]
+            album_name = (track["album"] or "?")[:29]
+            qs = track.get("quality_source") or "?"
+            click.echo(f"{i:<4} {sim:>5}  {artist_name:<25} {title:<35} {album_name:<30} {qs:<7}")
+
+        click.echo(f"\n📊 Found {result['count']} matching tracks (audio_w={audio_weight}, text_w={text_weight})")
+
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        logger.exception("Hybrid search failed")
+        sys.exit(1)
+
+
 @cli.command("enrich-lastfm")
 @click.option("--limit", "-l", type=int, default=None, help="Limit number of artists/genres to enrich")
 @click.option("--artist", "-a", type=str, default=None, help="Enrich specific artist by name")

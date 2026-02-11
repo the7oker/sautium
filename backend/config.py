@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     audio_sample_duration: int = 30  # seconds
     embedding_batch_size: int = 16
 
+    # Text Embedding Configuration
+    text_embedding_model: str = "all-MiniLM-L6-v2"
+    text_embedding_dimension: int = 384
+    text_embedding_batch_size: int = 64
+
     # Search Configuration
     default_search_limit: int = 20
     min_similarity_threshold: float = 0.5

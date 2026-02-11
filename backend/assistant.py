@@ -11,7 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config import settings
-from search import search_by_text, search_by_metadata
+from search import search_by_text, search_by_metadata, search_hybrid
 
 logger = logging.getLogger(__name__)
 
@@ -147,14 +147,22 @@ def ask_assistant(
     # 1. Retrieve tracks using multiple strategies
     all_tracks: Dict[int, Dict[str, Any]] = {}  # track_id -> track dict
 
-    # Always run text-to-audio similarity search (CLAP)
+    # PRIMARY: Hybrid search (text semantic + CLAP audio)
     try:
-        text_results = search_by_text(db, query, limit=limit, min_similarity=0.3)
-        for t in text_results.get("results", []):
+        hybrid_results = search_hybrid(db, query, limit=limit, min_similarity=0.2)
+        for t in hybrid_results.get("results", []):
             all_tracks[t["id"]] = t
-        logger.info(f"Text search returned {text_results.get('count', 0)} tracks")
+        logger.info(f"Hybrid search returned {hybrid_results.get('count', 0)} tracks")
     except Exception as e:
-        logger.warning(f"Text search failed: {e}")
+        logger.warning(f"Hybrid search failed, falling back to CLAP-only: {e}")
+        # Fallback to CLAP-only text search
+        try:
+            text_results = search_by_text(db, query, limit=limit, min_similarity=0.3)
+            for t in text_results.get("results", []):
+                all_tracks[t["id"]] = t
+            logger.info(f"CLAP text search returned {text_results.get('count', 0)} tracks")
+        except Exception as e2:
+            logger.warning(f"CLAP text search also failed: {e2}")
 
     # Also run metadata search if we can extract filters
     filters = _extract_filters(db, query)

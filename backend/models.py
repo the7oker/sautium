@@ -501,6 +501,10 @@ class Track(Base):
     # Audio embedding reference
     embedding_id = Column(Integer, ForeignKey("embeddings.id"))
 
+    # Text embedding (sentence-transformers, 384d)
+    text_embedding = Column(Vector(384))
+    text_embedding_model_id = Column(Integer, ForeignKey("embedding_models.id"))
+
     # External service IDs (Phase 2)
     spotify_id = Column(String(100))
     isrc = Column(String(20))
