@@ -31,6 +31,7 @@ Rules:
 - Only recommend tracks that appear in the provided library context below. Never invent tracks.
 - Include track titles and artists in your recommendations.
 - Explain why each recommendation matches the request, referencing genre, mood, style, tags, or audio characteristics.
+- Use audio features when available: BPM, key, instruments, mood, danceability, vocal/instrumental status.
 - If popularity data is available (listeners/plays), you may mention it to highlight popular picks or hidden gems.
 - Use artist bio info and tags when they help explain why a track fits.
 - If the user asks about a specific artist, use the artist context provided.
@@ -106,6 +107,50 @@ def _extract_filters(db: Session, query: str) -> Dict[str, Any]:
             filters["year_to"] = year
         elif "after" in query_lower or "since" in query_lower:
             filters["year_from"] = year
+
+    # Audio feature keywords
+    # Vocal/instrumental
+    if any(w in query_lower for w in ["instrumental", "no vocals", "without vocals"]):
+        filters["vocal"] = "instrumental"
+    elif any(w in query_lower for w in ["with vocals", "vocal", "singing"]):
+        filters["vocal"] = "vocal"
+
+    # Danceability
+    if any(w in query_lower for w in ["danceable", "dance music", "dance track"]):
+        filters["danceable"] = True
+
+    # Key detection: "in D minor", "in the key of A", "key of F#"
+    key_match = re.search(r'(?:in|key of)\s+([A-G]#?)\s*(major|minor|m)?', query, re.IGNORECASE)
+    if key_match:
+        filters["key"] = key_match.group(1)
+        mode_str = key_match.group(2)
+        if mode_str:
+            filters["mode"] = "minor" if mode_str.lower() in ("minor", "m") else "major"
+
+    # Instrument detection
+    instrument_keywords = [
+        "piano", "guitar", "drums", "bass", "saxophone", "violin",
+        "trumpet", "flute", "organ", "cello", "harmonica", "harp",
+        "clarinet", "trombone", "accordion", "synthesizer",
+    ]
+    for inst in instrument_keywords:
+        if inst in query_lower:
+            # Map to full label names
+            inst_map = {
+                "guitar": "acoustic guitar",  # could be either, default to acoustic
+                "bass": "bass guitar",
+                "drums": "drums and percussion",
+                "violin": "violin and strings",
+                "synthesizer": "keyboards and synthesizer",
+            }
+            filters["instrument"] = inst_map.get(inst, inst)
+            break
+
+    # BPM hints
+    if any(w in query_lower for w in ["fast", "upbeat", "uptempo", "high energy"]):
+        filters["bpm_min"] = 120
+    elif any(w in query_lower for w in ["slow", "downtempo", "laid back", "chill"]):
+        filters["bpm_max"] = 100
 
     return filters
 
@@ -230,6 +275,28 @@ def _get_track_enrichment(db: Session, track_ids: List[int]) -> Dict[int, Dict[s
     except Exception as e:
         logger.debug(f"Artist tags query failed: {e}")
 
+    # 4. Audio features
+    try:
+        af_sql = text("""
+            SELECT track_id, bpm, key, mode, vocal_instrumental, danceability,
+                   instruments, moods
+            FROM audio_features WHERE track_id = ANY(:ids)
+        """)
+        rows = db.execute(af_sql, {"ids": track_ids}).fetchall()
+        for row in rows:
+            enrichment[row.track_id]["bpm"] = row.bpm
+            enrichment[row.track_id]["key_mode"] = f"{row.key} {row.mode}" if row.key else None
+            enrichment[row.track_id]["vocal"] = row.vocal_instrumental
+            enrichment[row.track_id]["danceability"] = row.danceability
+            if row.instruments:
+                top3 = sorted(row.instruments.items(), key=lambda x: -x[1])[:3]
+                enrichment[row.track_id]["instruments"] = ", ".join(k for k, v in top3)
+            if row.moods:
+                top_mood = max(row.moods.items(), key=lambda x: x[1])
+                enrichment[row.track_id]["mood"] = top_mood[0]
+    except Exception as e:
+        logger.debug(f"Audio features query failed: {e}")
+
     return enrichment
 
 
@@ -335,6 +402,25 @@ def _format_track_context(
 
         # Enrichment details
         details = []
+
+        # Audio features line
+        af_parts = []
+        if enrich.get("bpm"):
+            af_parts.append(f"BPM: {enrich['bpm']:.0f}")
+        if enrich.get("key_mode"):
+            af_parts.append(f"Key: {enrich['key_mode']}")
+        if enrich.get("vocal"):
+            af_parts.append(enrich["vocal"].capitalize())
+        if enrich.get("danceability") is not None:
+            af_parts.append(f"Danceability: {enrich['danceability']:.2f}")
+        if af_parts:
+            details.append(" | ".join(af_parts))
+
+        if enrich.get("instruments"):
+            details.append(f"Instruments: {enrich['instruments']}")
+
+        if enrich.get("mood"):
+            details.append(f"Mood: {enrich['mood']}")
 
         # Tags (combine artist + album, deduplicate)
         all_tags = set()

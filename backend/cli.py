@@ -1046,6 +1046,172 @@ def enrich_tracks(limit, artist, album, no_skip, delay):
         sys.exit(1)
 
 
+@cli.command("analyze-audio")
+@click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process")
+@click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default from config)")
+@click.option("--force", is_flag=True, help="Re-analyze tracks that already have features")
+@click.option("--newest-first", is_flag=True, help="Process newest tracks first (by file modification date)")
+@click.option("--librosa-only", is_flag=True, help="Skip CLAP classification (faster, DSP features only)")
+def analyze_audio(limit, batch_size, force, newest_first, librosa_only):
+    """Extract audio features (BPM, key, instruments, mood, etc.) from tracks."""
+    from audio_analysis import AudioAnalyzer
+
+    click.echo("🎵 Starting audio feature extraction...")
+    click.echo(f"🖥️  librosa DSP + {'CLAP zero-shot' if not librosa_only else 'librosa only'}")
+
+    if limit:
+        click.echo(f"⚠️  Limited to {limit} tracks")
+    if force:
+        click.echo(f"⚠️  Force mode: re-analyzing all tracks")
+    if newest_first:
+        click.echo(f"🆕 Processing newest tracks first")
+    if librosa_only:
+        click.echo(f"⚡ Skipping CLAP classification (DSP features only)")
+
+    try:
+        analyzer = AudioAnalyzer()
+        stats = analyzer.analyze_all(
+            limit=limit, force=force,
+            order_by_date=newest_first, librosa_only=librosa_only,
+        )
+
+        click.echo("\n✅ Audio analysis complete!")
+        click.echo(f"📊 Statistics:")
+        click.echo(f"   • Processed: {stats['processed']} tracks")
+        click.echo(f"   • Success: {stats['success']}")
+        click.echo(f"   • Failed: {stats['failed']}")
+
+        # Show sample results
+        if stats['success'] > 0:
+            try:
+                with get_db_context() as db:
+                    rows = db.execute(text("""
+                        SELECT t.title, a2.name as artist,
+                               af.bpm, af.key, af.mode, af.vocal_instrumental,
+                               af.danceability, af.instruments
+                        FROM audio_features af
+                        JOIN tracks t ON af.track_id = t.id
+                        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+                        JOIN artists a2 ON ta.artist_id = a2.id
+                        ORDER BY af.created_at DESC
+                        LIMIT 5
+                    """)).fetchall()
+
+                    if rows:
+                        click.echo(f"\n🎧 Sample results:")
+                        for row in rows:
+                            instruments = ""
+                            if row.instruments:
+                                top3 = sorted(row.instruments.items(), key=lambda x: -x[1])[:3]
+                                instruments = ", ".join(k for k, v in top3)
+                            click.echo(
+                                f"   • {row.artist} - {row.title}"
+                                f"\n     BPM: {row.bpm or '?'} | Key: {row.key or '?'} {row.mode or ''}"
+                                f" | {row.vocal_instrumental or '?'}"
+                                f" | Dance: {row.danceability or '?'}"
+                                f"\n     Instruments: {instruments or 'N/A'}"
+                            )
+            except Exception:
+                pass  # sample display is best-effort
+
+    except Exception as e:
+        click.echo(f"\n❌ Error: {e}", err=True)
+        logger.exception("Audio analysis failed")
+        sys.exit(1)
+
+
+@cli.command("search-features")
+@click.option("--bpm-min", type=float, default=None, help="Minimum BPM")
+@click.option("--bpm-max", type=float, default=None, help="Maximum BPM")
+@click.option("--key", "-k", type=str, default=None, help="Musical key (e.g. 'Am', 'C', 'F#m', 'D major')")
+@click.option("--instrument", type=str, default=None, help="Instrument name (e.g. 'piano', 'saxophone')")
+@click.option("--vocal", is_flag=True, default=False, help="Only vocal tracks")
+@click.option("--instrumental", is_flag=True, default=False, help="Only instrumental tracks")
+@click.option("--danceable", is_flag=True, default=False, help="Only danceable tracks (danceability >= 0.5)")
+@click.option("--limit", "-l", type=int, default=20, help="Number of results")
+@click.option("--artist", type=str, default=None, help="Filter by artist name")
+@click.option("--genre", type=str, default=None, help="Filter by genre")
+def search_features(bpm_min, bpm_max, key, instrument, vocal, instrumental, danceable, limit, artist, genre):
+    """Search tracks by audio features (BPM, key, instruments, etc.)."""
+    from search import search_by_features
+
+    filters = {}
+    if bpm_min:
+        filters["bpm_min"] = bpm_min
+    if bpm_max:
+        filters["bpm_max"] = bpm_max
+    if instrument:
+        filters["instrument"] = instrument
+    if vocal:
+        filters["vocal"] = "vocal"
+    elif instrumental:
+        filters["vocal"] = "instrumental"
+    if danceable:
+        filters["danceable"] = True
+    if artist:
+        filters["artist"] = artist
+    if genre:
+        filters["genre"] = genre
+
+    # Parse key string (e.g. "Am" -> key=A, mode=minor; "C" -> key=C; "F# major" -> key=F#, mode=major)
+    if key:
+        key_str = key.strip()
+        if " " in key_str:
+            parts = key_str.split()
+            filters["key"] = parts[0]
+            filters["mode"] = parts[1].lower()
+        elif key_str.endswith("m") and len(key_str) >= 2 and key_str[-2] != "#":
+            filters["key"] = key_str[:-1]
+            filters["mode"] = "minor"
+        else:
+            filters["key"] = key_str
+
+    if not filters:
+        click.echo("❌ Specify at least one filter (--bpm-min, --key, --instrument, etc.)", err=True)
+        sys.exit(1)
+
+    desc_parts = []
+    if filters.get("bpm_min") or filters.get("bpm_max"):
+        bpm_str = f"{filters.get('bpm_min', '?')}-{filters.get('bpm_max', '?')} BPM"
+        desc_parts.append(bpm_str)
+    if filters.get("key"):
+        k = filters["key"]
+        m = filters.get("mode", "")
+        desc_parts.append(f"Key: {k} {m}".strip())
+    if filters.get("instrument"):
+        desc_parts.append(f"Instrument: {filters['instrument']}")
+    if filters.get("vocal"):
+        desc_parts.append(filters["vocal"])
+    if filters.get("danceable"):
+        desc_parts.append("danceable")
+
+    click.echo(f"🔍 Feature search: {', '.join(desc_parts)}")
+
+    try:
+        with get_db_context() as db:
+            result = search_by_features(db, filters=filters, limit=limit)
+
+        click.echo(f"\n{'#':<4} {'BPM':>5} {'Key':>4} {'Mode':>5} {'Vocal':>12} {'Dance':>5}  {'Artist':<25} {'Title':<35}")
+        click.echo("-" * 100)
+
+        for i, track in enumerate(result["results"], 1):
+            bpm = f"{track.get('bpm', 0):.0f}" if track.get("bpm") else "?"
+            k = track.get("key") or "?"
+            m = track.get("mode") or "?"
+            v = (track.get("vocal_instrumental") or "?")[:12]
+            d = f"{track.get('danceability', 0):.2f}" if track.get("danceability") is not None else "?"
+            artist_name = (track.get("artist") or "Unknown")[:24]
+            title = (track.get("title") or "?")[:34]
+            click.echo(f"{i:<4} {bpm:>5} {k:>4} {m:>5} {v:>12} {d:>5}  {artist_name:<25} {title:<35}")
+
+        click.echo(f"\n📊 Found {result['count']} matching tracks")
+
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        logger.exception("Feature search failed")
+        sys.exit(1)
+
+
 @cli.command()
 @click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to update")
 def update_file_dates(limit):

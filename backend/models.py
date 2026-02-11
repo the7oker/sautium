@@ -8,8 +8,9 @@ from datetime import datetime
 from typing import Optional, List
 
 from sqlalchemy import (
-    Column, Integer, String, Text, DateTime, Numeric, BigInteger,
-    ForeignKey, CheckConstraint, Index, Enum as SQLEnum, ARRAY, UniqueConstraint
+    Column, Integer, String, Text, DateTime, Numeric, BigInteger, Float,
+    ForeignKey, CheckConstraint, Index, Enum as SQLEnum, ARRAY, UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
@@ -530,6 +531,7 @@ class Track(Base):
     artist_associations = relationship("TrackArtist", back_populates="track", cascade="all, delete-orphan")
     genre_associations = relationship("TrackGenre", back_populates="track", cascade="all, delete-orphan")
     stats = relationship("TrackStats", back_populates="track", cascade="all, delete-orphan")
+    audio_feature = relationship("AudioFeature", back_populates="track", uselist=False, cascade="all, delete-orphan")
 
     # Constraints and indexes
     __table_args__ = (
@@ -618,3 +620,49 @@ class TrackStats(Base):
 
     def __repr__(self):
         return f"<TrackStats(track_id={self.track_id}, source='{self.source}', listeners={self.listeners}, playcount={self.playcount})>"
+
+
+class AudioFeature(Base):
+    """Audio features extracted from FLAC files using librosa DSP and CLAP zero-shot classification."""
+    __tablename__ = "audio_features"
+
+    id = Column(Integer, primary_key=True)
+    track_id = Column(Integer, ForeignKey("tracks.id", ondelete="CASCADE"), unique=True, nullable=False)
+
+    # librosa DSP features
+    bpm = Column(Float)
+    key = Column(String(3))
+    mode = Column(String(5))
+    key_confidence = Column(Float)
+    energy = Column(Float)
+    energy_db = Column(Float)
+    brightness = Column(Float)
+    dynamic_range_db = Column(Float)
+    zero_crossing_rate = Column(Float)
+
+    # CLAP zero-shot classifications
+    instruments = Column(JSONB)
+    moods = Column(JSONB)
+    vocal_instrumental = Column(String(20))
+    vocal_score = Column(Float)
+    danceability = Column(Float)
+
+    # Timestamps
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    track = relationship("Track", back_populates="audio_feature")
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_audio_features_track_id", "track_id"),
+        Index("idx_audio_features_bpm", "bpm"),
+        Index("idx_audio_features_key", "key", "mode"),
+        Index("idx_audio_features_energy", "energy_db"),
+        Index("idx_audio_features_danceability", "danceability"),
+        Index("idx_audio_features_vocal", "vocal_instrumental"),
+    )
+
+    def __repr__(self):
+        return f"<AudioFeature(track_id={self.track_id}, bpm={self.bpm}, key={self.key} {self.mode})>"

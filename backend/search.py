@@ -31,11 +31,12 @@ def _build_track_result(row) -> Dict[str, Any]:
     }
 
 
-def _apply_filters(filters: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+def _apply_filters(filters: Dict[str, Any], has_audio_features_join: bool = False) -> tuple[str, Dict[str, Any]]:
     """
     Build SQL WHERE clauses and params from filter dict.
 
-    Supported keys: artist, album, genre, quality_source, year_from, year_to.
+    Supported keys: artist, album, genre, quality_source, year_from, year_to,
+                    bpm_min, bpm_max, key, mode, instrument, vocal, danceable, energy_min.
     Returns (sql_fragment, params_dict).
     """
     clauses = []
@@ -65,8 +66,46 @@ def _apply_filters(filters: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
         clauses.append("al.release_year <= :f_year_to")
         params["f_year_to"] = filters["year_to"]
 
+    # Audio feature filters (require af alias in query)
+    if filters.get("bpm_min"):
+        clauses.append("af.bpm >= :f_bpm_min")
+        params["f_bpm_min"] = filters["bpm_min"]
+
+    if filters.get("bpm_max"):
+        clauses.append("af.bpm <= :f_bpm_max")
+        params["f_bpm_max"] = filters["bpm_max"]
+
+    if filters.get("key"):
+        clauses.append("af.key = :f_key")
+        params["f_key"] = filters["key"]
+
+    if filters.get("mode"):
+        clauses.append("af.mode = :f_mode")
+        params["f_mode"] = filters["mode"]
+
+    if filters.get("instrument"):
+        clauses.append("af.instruments ? :f_instrument")
+        params["f_instrument"] = filters["instrument"]
+
+    if filters.get("vocal"):
+        clauses.append("af.vocal_instrumental = :f_vocal")
+        params["f_vocal"] = filters["vocal"]
+
+    if filters.get("danceable"):
+        clauses.append("af.danceability >= 0.5")
+
+    if filters.get("energy_min"):
+        clauses.append("af.energy_db >= :f_energy_min")
+        params["f_energy_min"] = filters["energy_min"]
+
     sql = (" AND " + " AND ".join(clauses)) if clauses else ""
     return sql, params
+
+
+def _needs_audio_features_join(filters: Dict[str, Any]) -> bool:
+    """Check if any audio feature filters are present."""
+    af_keys = {"bpm_min", "bpm_max", "key", "mode", "instrument", "vocal", "danceable", "energy_min"}
+    return bool(af_keys & set(filters.keys()))
 
 
 def search_similar_tracks(
@@ -123,6 +162,8 @@ def search_similar_tracks(
     # Build filter clauses
     filter_sql, filter_params = _apply_filters(filters)
 
+    af_join = "LEFT JOIN audio_features af ON t.id = af.track_id" if _needs_audio_features_join(filters) else ""
+
     similarity_sql = text(f"""
         WITH target AS (
             SELECT e.vector
@@ -141,6 +182,7 @@ def search_similar_tracks(
         JOIN albums al ON t.album_id = al.id
         LEFT JOIN track_genres tg ON t.id = tg.track_id
         LEFT JOIN genres g ON tg.genre_id = g.id
+        {af_join}
         WHERE t.id != :track_id
           AND 1 - (e.vector <=> (SELECT vector FROM target)) >= :min_similarity
           {filter_sql}
@@ -202,6 +244,7 @@ def search_by_text(
     vector_str = "'" + "[" + ",".join(str(float(x)) for x in text_vector) + "]" + "'::vector"
 
     filter_sql, filter_params = _apply_filters(filters)
+    af_join = "LEFT JOIN audio_features af ON t.id = af.track_id" if _needs_audio_features_join(filters) else ""
 
     similarity_sql = text(f"""
         SELECT t.id, t.title, a2.name as artist, al.title as album,
@@ -215,6 +258,7 @@ def search_by_text(
         JOIN albums al ON t.album_id = al.id
         LEFT JOIN track_genres tg ON t.id = tg.track_id
         LEFT JOIN genres g ON tg.genre_id = g.id
+        {af_join}
         WHERE 1 - (e.vector <=> {vector_str}) >= :min_similarity
           {filter_sql}
         ORDER BY e.vector <=> {vector_str}
@@ -253,6 +297,7 @@ def search_by_metadata(
     filters = filters or {}
 
     filter_sql, filter_params = _apply_filters(filters)
+    af_join = "LEFT JOIN audio_features af ON t.id = af.track_id" if _needs_audio_features_join(filters) else ""
 
     # Remove leading " AND " for WHERE clause
     where_clause = "WHERE " + filter_sql.lstrip(" AND ") if filter_sql else ""
@@ -265,6 +310,7 @@ def search_by_metadata(
         JOIN albums al ON t.album_id = al.id
         LEFT JOIN track_genres tg ON t.id = tg.track_id
         LEFT JOIN genres g ON tg.genre_id = g.id
+        {af_join}
         {where_clause}
     """)
 
@@ -282,6 +328,7 @@ def search_by_metadata(
         JOIN albums al ON t.album_id = al.id
         LEFT JOIN track_genres tg ON t.id = tg.track_id
         LEFT JOIN genres g ON tg.genre_id = g.id
+        {af_join}
         {where_clause}
         ORDER BY a2.name, al.title, t.track_number
         LIMIT :limit OFFSET :offset
@@ -335,6 +382,7 @@ def search_by_text_semantic(
     vector_str = "'" + "[" + ",".join(str(float(x)) for x in query_vector) + "]" + "'::vector"
 
     filter_sql, filter_params = _apply_filters(filters)
+    af_join = "LEFT JOIN audio_features af ON t.id = af.track_id" if _needs_audio_features_join(filters) else ""
 
     similarity_sql = text(f"""
         SELECT * FROM (
@@ -348,6 +396,7 @@ def search_by_text_semantic(
             JOIN albums al ON t.album_id = al.id
             LEFT JOIN track_genres tg ON t.id = tg.track_id
             LEFT JOIN genres g ON tg.genre_id = g.id
+            {af_join}
             WHERE t.text_embedding IS NOT NULL
               AND 1 - (t.text_embedding <=> {vector_str}) >= :min_similarity
               {filter_sql}
@@ -458,3 +507,73 @@ def search_hybrid(
         "audio_weight": audio_weight,
         "text_weight": text_weight,
     }
+
+
+def _build_feature_result(row) -> Dict[str, Any]:
+    """Format a database row from feature search into a result dict."""
+    return {
+        "id": row.id,
+        "title": row.title,
+        "artist": row.artist,
+        "album": row.album,
+        "genre": row.genre,
+        "quality_source": row.quality_source,
+        "duration_seconds": float(row.duration_seconds) if row.duration_seconds else None,
+        "bpm": float(row.bpm) if row.bpm else None,
+        "key": row.key,
+        "mode": row.mode,
+        "vocal_instrumental": row.vocal_instrumental,
+        "danceability": float(row.danceability) if row.danceability else None,
+        "instruments": row.instruments if hasattr(row, "instruments") else None,
+    }
+
+
+def search_by_features(
+    db: Session,
+    filters: Dict[str, Any],
+    limit: int = None,
+) -> Dict[str, Any]:
+    """
+    Search tracks by audio features (BPM, key, instruments, vocal, danceability).
+
+    Args:
+        db: Database session.
+        filters: Feature filters (bpm_min, bpm_max, key, mode, instrument, vocal, danceable,
+                                  plus standard: artist, genre, quality_source).
+        limit: Max results.
+
+    Returns:
+        Dict with results list and count.
+    """
+    limit = limit or settings.default_search_limit
+
+    filter_sql, filter_params = _apply_filters(filters)
+
+    # Remove leading " AND " for WHERE clause
+    where_clause = "WHERE " + filter_sql.lstrip(" AND ") if filter_sql else ""
+
+    query_sql = text(f"""
+        SELECT DISTINCT t.id, t.title, a2.name as artist, al.title as album,
+               g.name as genre, al.quality_source,
+               t.duration_seconds,
+               af.bpm, af.key, af.mode, af.vocal_instrumental,
+               af.danceability, af.instruments
+        FROM tracks t
+        JOIN audio_features af ON t.id = af.track_id
+        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+        JOIN artists a2 ON ta.artist_id = a2.id
+        JOIN albums al ON t.album_id = al.id
+        LEFT JOIN track_genres tg ON t.id = tg.track_id
+        LEFT JOIN genres g ON tg.genre_id = g.id
+        {where_clause}
+        ORDER BY af.bpm, a2.name, t.title
+        LIMIT :limit
+    """)
+
+    params = {"limit": limit}
+    params.update(filter_params)
+
+    rows = db.execute(query_sql, params).fetchall()
+    results = [_build_feature_result(row) for row in rows]
+
+    return {"results": results, "count": len(results)}
