@@ -65,7 +65,8 @@ def scan(limit, no_skip, path):
 @cli.command("generate-embeddings")
 @click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process (for testing)")
 @click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default from config)")
-def generate_embeddings(limit, batch_size):
+@click.option("--newest-first", is_flag=True, help="Process newest tracks first (by file modification date)")
+def generate_embeddings(limit, batch_size, newest_first):
     """Generate audio embeddings for tracks using CLAP model."""
     from embeddings import generate_embeddings as do_generate
 
@@ -76,8 +77,11 @@ def generate_embeddings(limit, batch_size):
     if limit:
         click.echo(f"⚠️  Limited to {limit} tracks (testing mode)")
 
+    if newest_first:
+        click.echo(f"🆕 Processing newest tracks first (by file modification date)")
+
     try:
-        stats = do_generate(limit=limit, batch_size=batch_size)
+        stats = do_generate(limit=limit, batch_size=batch_size, order_by_date=newest_first)
 
         click.echo("\n✅ Embedding generation complete!")
         click.echo(f"📊 Statistics:")
@@ -503,7 +507,8 @@ def normalize_genres_cmd(dry_run):
 @click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process")
 @click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default: 64)")
 @click.option("--force", is_flag=True, help="Regenerate embeddings even if already exists")
-def generate_text_embeddings(limit, batch_size, force):
+@click.option("--newest-first", is_flag=True, help="Process newest tracks first (by file modification date)")
+def generate_text_embeddings(limit, batch_size, force, newest_first):
     """Generate text embeddings from track metadata using sentence-transformers."""
     from text_embeddings import generate_text_embeddings as do_generate
 
@@ -515,9 +520,11 @@ def generate_text_embeddings(limit, batch_size, force):
         click.echo(f"⚠️  Limited to {limit} tracks")
     if force:
         click.echo(f"⚠️  Force mode: regenerating all embeddings")
+    if newest_first:
+        click.echo(f"🆕 Processing newest tracks first (by file modification date)")
 
     try:
-        stats = do_generate(limit=limit, batch_size=batch_size, force=force)
+        stats = do_generate(limit=limit, batch_size=batch_size, force=force, order_by_date=newest_first)
 
         click.echo("\n✅ Text embedding generation complete!")
         click.echo(f"📊 Statistics:")
@@ -987,6 +994,71 @@ def enrich_tracks(limit, artist, album, no_skip, delay):
     except Exception as e:
         click.echo(f"\n❌ Error: {e}", err=True)
         logger.exception("Track enrichment failed")
+        sys.exit(1)
+
+
+@cli.command()
+@click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to update")
+def update_file_dates(limit):
+    """Update file_modified_at for existing tracks from filesystem."""
+    from pathlib import Path
+    from datetime import datetime
+    from models import Track
+
+    click.echo("🔄 Updating file modification dates from filesystem...")
+
+    try:
+        with get_db_context() as db:
+            # Query tracks without file_modified_at
+            query = db.query(Track).filter(Track.file_modified_at.is_(None))
+
+            if limit:
+                query = query.limit(limit)
+
+            tracks = query.all()
+            total = len(tracks)
+
+            if total == 0:
+                click.echo("✅ All tracks already have file modification dates!")
+                return
+
+            click.echo(f"📊 Found {total} tracks to update")
+
+            updated = 0
+            errors = 0
+
+            for track in tracks:
+                try:
+                    file_path = Path(track.file_path)
+
+                    if file_path.exists():
+                        # Get file modification time
+                        mtime = file_path.stat().st_mtime
+                        track.file_modified_at = datetime.fromtimestamp(mtime)
+                        updated += 1
+
+                        if updated % 100 == 0:
+                            click.echo(f"   • Updated {updated}/{total} tracks...")
+                            db.commit()
+                    else:
+                        logger.warning(f"File not found: {track.file_path}")
+                        errors += 1
+
+                except Exception as e:
+                    logger.error(f"Failed to update track {track.id}: {e}")
+                    errors += 1
+
+            # Final commit
+            db.commit()
+
+            click.echo("\n✅ File dates update complete!")
+            click.echo(f"📊 Statistics:")
+            click.echo(f"   • Updated: {updated} tracks")
+            click.echo(f"   • Errors: {errors}")
+
+    except Exception as e:
+        click.echo(f"\n❌ Error: {e}", err=True)
+        logger.exception("File dates update failed")
         sys.exit(1)
 
 

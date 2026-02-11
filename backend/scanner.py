@@ -5,6 +5,7 @@ Music library scanner for extracting metadata from FLAC files.
 import logging
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -66,11 +67,13 @@ class LibraryScanner:
             audio = FLAC(file_path)
 
             # Extract basic tags
+            file_stat = file_path.stat()
             metadata = {
                 # File information
                 "file_path": str(file_path.absolute()),
-                "file_size_bytes": file_path.stat().st_size,
+                "file_size_bytes": file_stat.st_size,
                 "file_format": "FLAC",
+                "file_modified_at": datetime.fromtimestamp(file_stat.st_mtime),
 
                 # Audio properties
                 "duration_seconds": round(audio.info.length, 2) if audio.info else None,

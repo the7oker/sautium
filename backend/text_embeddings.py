@@ -246,6 +246,7 @@ class TextEmbeddingGenerator:
         db: Session,
         limit: Optional[int] = None,
         force: bool = False,
+        order_by_date: bool = False,
     ) -> Dict[str, int]:
         """
         Generate text embeddings for all tracks (or those missing them).
@@ -254,6 +255,7 @@ class TextEmbeddingGenerator:
             db: Database session.
             limit: Max tracks to process.
             force: If True, regenerate even if embedding exists.
+            order_by_date: If True, process newest tracks first (by file_modified_at).
 
         Returns:
             Stats dict with processed, success, failed counts.
@@ -261,10 +263,12 @@ class TextEmbeddingGenerator:
         stats = {"processed": 0, "success": 0, "failed": 0}
 
         # Get tracks to process
+        order_clause = "ORDER BY file_modified_at DESC NULLS LAST" if order_by_date else "ORDER BY id"
+
         if force:
-            query = sa_text("SELECT id FROM tracks ORDER BY id")
+            query = sa_text(f"SELECT id FROM tracks {order_clause}")
         else:
-            query = sa_text("SELECT id FROM tracks WHERE text_embedding IS NULL ORDER BY id")
+            query = sa_text(f"SELECT id FROM tracks WHERE text_embedding IS NULL {order_clause}")
 
         if limit:
             query = sa_text(str(query) + f" LIMIT {limit}")
@@ -357,6 +361,7 @@ def generate_text_embeddings(
     limit: Optional[int] = None,
     batch_size: Optional[int] = None,
     force: bool = False,
+    order_by_date: bool = False,
 ) -> Dict[str, int]:
     """
     Convenience function to generate text embeddings.
@@ -365,6 +370,7 @@ def generate_text_embeddings(
         limit: Max tracks to process.
         batch_size: Override default batch size.
         force: Regenerate even if already exists.
+        order_by_date: If True, process newest tracks first (by file_modified_at).
 
     Returns:
         Statistics dictionary.
@@ -372,6 +378,6 @@ def generate_text_embeddings(
     generator = TextEmbeddingGenerator(batch_size=batch_size)
     try:
         with get_db_context() as db:
-            return generator.generate_all(db, limit=limit, force=force)
+            return generator.generate_all(db, limit=limit, force=force, order_by_date=order_by_date)
     finally:
         generator.unload_model()

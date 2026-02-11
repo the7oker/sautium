@@ -195,12 +195,13 @@ class AudioEmbeddingGenerator:
 
         track.embedding_id = embedding.id
 
-    def generate_embeddings(self, limit: Optional[int] = None) -> Dict[str, int]:
+    def generate_embeddings(self, limit: Optional[int] = None, order_by_date: bool = False) -> Dict[str, int]:
         """
         Generate embeddings for tracks that don't have them yet.
 
         Args:
             limit: Maximum number of tracks to process.
+            order_by_date: If True, process newest tracks first (by file_modified_at).
 
         Returns:
             Statistics dict with keys: processed, success, failed, skipped.
@@ -215,6 +216,11 @@ class AudioEmbeddingGenerator:
 
                 # Query tracks without embeddings
                 query = db.query(Track).filter(Track.embedding_id.is_(None))
+
+                # Sort by file modification date (newest first) if requested
+                if order_by_date:
+                    query = query.order_by(Track.file_modified_at.desc().nulls_last())
+
                 if limit:
                     query = query.limit(limit)
 
@@ -301,7 +307,7 @@ class AudioEmbeddingGenerator:
 
 
 def generate_embeddings(
-    limit: Optional[int] = None, batch_size: Optional[int] = None
+    limit: Optional[int] = None, batch_size: Optional[int] = None, order_by_date: bool = False
 ) -> Dict[str, int]:
     """
     Convenience function to generate embeddings.
@@ -309,9 +315,10 @@ def generate_embeddings(
     Args:
         limit: Maximum number of tracks to process.
         batch_size: Override default batch size.
+        order_by_date: If True, process newest tracks first (by file_modified_at).
 
     Returns:
         Statistics dictionary.
     """
     generator = AudioEmbeddingGenerator(batch_size=batch_size)
-    return generator.generate_embeddings(limit=limit)
+    return generator.generate_embeddings(limit=limit, order_by_date=order_by_date)

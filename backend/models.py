@@ -497,6 +497,7 @@ class Track(Base):
     file_path = Column(Text, nullable=False, unique=True)
     file_size_bytes = Column(BigInteger)
     file_format = Column(String(10), default="FLAC")
+    file_modified_at = Column(DateTime)  # File modification time from filesystem (mtime)
 
     # Audio embedding reference
     embedding_id = Column(Integer, ForeignKey("embeddings.id"))
