@@ -165,6 +165,7 @@
 - **185 tracks** with CLAP audio embeddings (512d)
 - **685 tracks** with text semantic embeddings (384d)
 - **185 tracks** with both (hybrid search enabled)
+- **682 tracks** with Last.fm stats (listeners, playcount)
 - **9 artists** enriched with Last.fm data (bios, tags, similar artists)
 - **1 album** enriched with Last.fm data (wiki, tags, stats)
 - **61 unique tags** from Last.fm (artist + album tags)
@@ -182,8 +183,8 @@
 - [x] Step 2.1a: Last.fm Integration (artists, genres)
 - [x] Step 2.1b: Album Enrichment from Last.fm
 - [x] Step 2.1c: Text Embeddings from Metadata (sentence-transformers)
-- [ ] Step 2.2: Track Stats from Last.fm
-- [ ] Step 2.3: Spotify Integration (optional)
+- [x] Step 2.2: Track Stats from Last.fm
+- [x] ~~Step 2.3: Spotify Integration~~ (removed - API deprecated)
 - [ ] Step 2.4: Enhanced RAG features
 
 ---
@@ -638,15 +639,75 @@ Attempted to integrate Spotify Web API for audio features (tempo, energy, dancea
 
 ---
 
+## Step 2.2: Track Stats from Last.fm - DONE
+
+### What was done
+- **Database schema**: Created `track_stats` table for track popularity metrics
+  - `track_id` → tracks (FK)
+  - `source` ('lastfm', 'spotify', 'musicbrainz')
+  - `listeners` - unique listeners count
+  - `playcount` - total play count
+  - Unique constraint on (track_id, source)
+  - Indexes on track_id and source for fast queries
+- **Migration script**: `scripts/create_track_stats_table.sql`
+- **SQLAlchemy model**: Added `TrackStats` model in `backend/models.py`
+- **Last.fm service** (`backend/lastfm.py`):
+  - `get_track_stats(artist_name, track_title)` - fetches track popularity data
+  - `_store_track_stats()` - stores stats in database with source tracking
+  - Integrated into existing `enrich_track()` method
+- **CLI command**: `enrich-tracks` (already existed, now stores track stats)
+  - `--limit N` - batch enrich N tracks
+  - `--delay` - rate limit delay (default 0.2s, ~3 tracks/sec)
+  - Shows progress with track name, listeners, playcount
+  - Handles not found tracks gracefully
+- **Bug fix**: Fixed `None` value handling in stats output formatting
+  - Changed `.get("listeners", 0)` to `.get("listeners") or 0`
+  - Prevents TypeError when Last.fm returns `None` for stats
+
+### Design decisions
+- **Multi-source ready**: `track_stats` supports multiple sources (Last.fm, Spotify, etc.)
+- **Nullable fields**: `listeners` and `playcount` can be NULL (track exists but no stats)
+- **Separate table**: Track stats separate from main `tracks` table for flexibility
+- **Rate limiting**: 0.2s delay between requests respects Last.fm API limits
+
+### Testing status - SUCCESSFUL ✅
+- ✅ **682/685 tracks** enriched with Last.fm stats
+- ✅ **3 tracks** not found on Last.fm
+- ✅ Test examples:
+  - Joe Cocker - "You Can Leave Your Hat On": 300,391 listeners, 1,170,323 plays
+  - Hidden Orchestra - "Overture": 52,957 listeners, 290,121 plays
+  - Hidden Orchestra - "Tired and Awake": 39,203 listeners, 240,814 plays
+  - Klaus Schulze - "Wahnfried 1883": 26,791 listeners, 76,907 plays
+- ✅ Batch processing: ~212 tracks processed in ~2 minutes (3 tracks/sec)
+- ✅ Error handling: Graceful handling of missing stats (returns 0 instead of crashing)
+
+### Performance metrics
+- **Enrichment speed**: ~3 tracks/second (with 0.2s delay)
+- **Total time**: 682 tracks in ~4-5 minutes (2 batch runs)
+- **API reliability**: 99.6% success rate (3 not found out of 685)
+
+### Data quality
+- **Coverage**: 99.6% of tracks have stats
+- **Popularity range**:
+  - Most popular: Joe Cocker - "You Can Leave Your Hat On" (300k+ listeners)
+  - Least popular: Some Klaus Schulze obscure tracks (4-6 listeners)
+- **Use cases**:
+  - Popularity-based ranking
+  - Recommendation weighting
+  - "Hidden gems" discovery (high quality, low playcount)
+
+### Statistics
+- **682 tracks** with Last.fm stats
+- **3 tracks** not found on Last.fm
+- **685 total tracks** in database
+- **Coverage**: 99.6%
+
+---
+
 ## Next Steps
 
 ### Phase 2: External Data & Text Embeddings (continued)
-- **Step 2.4: Track Stats from Last.fm**
-  - Enrich tracks with listeners/playcount data
-  - Track popularity metrics for ranking
-  - CLI: `enrich-tracks` (batch processing with rate limiting)
-  - Already have test scripts: `backend/test_lastfm_track.py`
-- **Step 2.5: Enhanced RAG features**
+- **Step 2.4: Enhanced RAG features**
   - Popularity-weighted retrieval (boost popular tracks)
   - Multi-turn conversation memory
   - Playlist generation based on queries

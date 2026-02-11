@@ -963,8 +963,8 @@ def enrich_tracks(limit, artist, album, no_skip, delay):
 
                 if result["status"] == "success":
                     stats["success"] += 1
-                    listeners = result.get("listeners", 0)
-                    playcount = result.get("playcount", 0)
+                    listeners = result.get("listeners") or 0
+                    playcount = result.get("playcount") or 0
                     click.echo(f"✓ {artist_name} - {track_title}: {listeners:,} listeners, {playcount:,} plays")
                 elif result["status"] == "not_found":
                     stats["not_found"] += 1
