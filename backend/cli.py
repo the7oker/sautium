@@ -365,9 +365,10 @@ def search_text(query, limit, min_similarity, artist, genre, quality):
 
 
 @cli.command()
-@click.option("--query", "-q", type=str, required=True, help="Natural language question about your music library")
+@click.option("--query", "-q", type=str, default=None, help="Natural language question about your music library")
 @click.option("--limit", "-l", type=int, default=20, help="Max tracks to retrieve for context")
-def ask(query, limit):
+@click.option("--interactive", "-i", is_flag=True, help="Interactive mode: ask follow-up questions")
+def ask(query, limit, interactive):
     """Ask the AI DJ assistant about your music library."""
     from assistant import ask_assistant
 
@@ -375,33 +376,81 @@ def ask(query, limit):
         click.echo("❌ ANTHROPIC_API_KEY is not configured. Set it in .env file.", err=True)
         sys.exit(1)
 
-    click.echo(f"🎵 Asking AI DJ: \"{query}\"")
-    click.echo("⏳ Retrieving tracks and consulting Claude...\n")
+    if not query and not interactive:
+        click.echo("❌ Provide --query or use --interactive mode.", err=True)
+        sys.exit(1)
 
-    try:
-        with get_db_context() as db:
-            result = ask_assistant(db, query, limit=limit)
-
-        # Display Claude's response
-        click.echo("🤖 AI DJ Response:\n")
+    def _display_result(result):
+        """Display Claude's response and track table."""
+        click.echo("\n🤖 AI DJ Response:\n")
         click.echo(result["answer"])
+
+        # Show detected filters/references
+        if result.get("filters_detected"):
+            filters_str = ", ".join(f"{k}={v}" for k, v in result["filters_detected"].items())
+            click.echo(f"\n🔍 Filters detected: {filters_str}")
+        if result.get("track_reference"):
+            click.echo(f"🎯 Track similarity reference: ID {result['track_reference']}")
 
         # Display retrieved tracks table
         tracks = result.get("tracks", [])
         if tracks:
             click.echo(f"\n📋 Retrieved tracks ({result['tracks_retrieved']}):\n")
-            click.echo(f"{'#':<4} {'Sim':>5}  {'Artist':<25} {'Title':<35} {'Album':<30} {'Quality':<7}")
-            click.echo("-" * 110)
+            click.echo(f"{'#':<4} {'Score':>6}  {'Artist':<25} {'Title':<35} {'Album':<30} {'Quality':<7}")
+            click.echo("-" * 112)
 
-            for i, track in enumerate(tracks, 1):
-                sim = f"{track['similarity']:.2f}" if track.get("similarity") else "  -  "
+            for i, track in enumerate(tracks[:20], 1):
+                sim = f"{track['similarity']:.3f}" if track.get("similarity") else "  -  "
                 artist_name = (track.get("artist") or "Unknown")[:24]
                 title = (track.get("title") or "?")[:34]
                 album_name = (track.get("album") or "?")[:29]
                 qs = track.get("quality_source") or "?"
-                click.echo(f"{i:<4} {sim:>5}  {artist_name:<25} {title:<35} {album_name:<30} {qs:<7}")
+                click.echo(f"{i:<4} {sim:>6}  {artist_name:<25} {title:<35} {album_name:<30} {qs:<7}")
 
         click.echo(f"\n📊 Model: {result['model']} | Tracks in context: {result['tracks_retrieved']}")
+
+    try:
+        if interactive:
+            click.echo("🎵 AI DJ Interactive Mode (type 'quit' or 'exit' to stop)\n")
+            history = []
+
+            while True:
+                if query is None:
+                    try:
+                        query = click.prompt("🎧 You", type=str)
+                    except (EOFError, click.Abort):
+                        break
+
+                if query.lower() in ("quit", "exit", "q"):
+                    click.echo("👋 Goodbye!")
+                    break
+
+                click.echo("⏳ Thinking...\n")
+
+                with get_db_context() as db:
+                    result = ask_assistant(db, query, limit=limit, history=history)
+
+                _display_result(result)
+
+                # Save conversation history for follow-up questions
+                history.append({"role": "user", "content": query})
+                history.append({"role": "assistant", "content": result["answer"]})
+
+                # Keep history reasonable (last 6 turns = 3 exchanges)
+                if len(history) > 6:
+                    history = history[-6:]
+
+                query = None
+                click.echo("")
+
+        else:
+            click.echo(f"🎵 Asking AI DJ: \"{query}\"")
+            click.echo("⏳ Retrieving tracks and consulting Claude...\n")
+
+            with get_db_context() as db:
+                result = ask_assistant(db, query, limit=limit)
+
+            _display_result(result)
 
     except Exception as e:
         click.echo(f"\n❌ Error: {e}", err=True)
