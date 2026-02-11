@@ -578,30 +578,97 @@ audio_results       text_results
 
 ---
 
+## Spotify Removal & Audio Analysis Decision (Feb 2026)
+
+### What happened
+Attempted to integrate Spotify Web API for audio features (tempo, energy, danceability, valence, etc.). However, discovered that Spotify **deprecated the Audio Features API** on **November 27, 2024** for all new applications.
+
+**Technical details:**
+- New apps created after Nov 27, 2024 receive `403 Forbidden` on `/v1/audio-features` endpoint
+- Only apps created before this date retain access
+- This is a permanent Spotify API change, not a configuration issue
+
+### Decision
+**Removed Spotify integration entirely** from the project and plan.
+
+**What was removed:**
+- ❌ Spotify credentials from `.env` and `docker-compose.yml`
+- ❌ `spotipy` library from `requirements.txt`
+- ❌ Spotify config fields from `config.py`
+- ❌ Test file `test_spotify_connection.py`
+- ❌ 13 Spotify columns from `tracks` table via migration:
+  - `spotify_id`, `spotify_tempo`, `spotify_energy`, `spotify_danceability`
+  - `spotify_valence`, `spotify_acousticness`, `spotify_instrumentalness`
+  - `spotify_liveness`, `spotify_speechiness`, `spotify_loudness`
+  - `spotify_key`, `spotify_mode`, `spotify_time_signature`
+- ❌ 7 CHECK constraints for Spotify fields
+- ❌ Updated `models.py` Track model
+
+**Migration:** `scripts/remove_spotify_fields.sql` (executed successfully)
+
+### Replacement Plan
+**Phase 3: Own Audio Analysis** using open-source tools:
+
+**Libraries:**
+- **librosa** (already in requirements) - tempo, beat tracking, spectral features
+- **essentia** (to be added) - advanced MIR, key detection, mood, danceability
+
+**Features to extract:**
+- Tempo & rhythm (BPM, beat positions)
+- Harmonic features (key, mode, chroma)
+- Spectral features (brightness, timbre)
+- Energy & dynamics (loudness, dynamic range)
+- High-level descriptors (danceability, aggressiveness, mood)
+
+**Database:** New `audio_features` table (Phase 3)
+
+**Benefits over Spotify:**
+- ✅ No API limitations or deprecation risk
+- ✅ Works directly on FLAC files
+- ✅ Offline analysis
+- ✅ Customizable and extensible
+- ✅ Open source
+
+**Trade-offs:**
+- ⏱️ Slower (1-3 sec/track vs instant API)
+- 🎯 May require tuning per genre
+- 📊 One-time cost: ~20-40 min for 685 tracks
+
+**Implementation:** See CLAUDE.md Phase 3, Step 3.1
+
+---
+
 ## Next Steps
 
 ### Phase 2: External Data & Text Embeddings (continued)
-- **Step 2.2: Track Stats from Last.fm**
+- **Step 2.4: Track Stats from Last.fm**
   - Enrich tracks with listeners/playcount data
   - Track popularity metrics for ranking
   - CLI: `enrich-tracks` (batch processing with rate limiting)
   - Already have test scripts: `backend/test_lastfm_track.py`
-- **Step 2.3: Spotify Integration (optional)**
-  - Audio features: tempo, energy, danceability, valence, acousticness, etc.
-  - Match library tracks to Spotify catalog
-  - Enrich search with Spotify features
-  - Free tier, batch processing
-- **Step 2.4: Enhanced RAG features**
+- **Step 2.5: Enhanced RAG features**
   - Popularity-weighted retrieval (boost popular tracks)
   - Multi-turn conversation memory
   - Playlist generation based on queries
   - Export recommendations to M3U/HQPlayer queue
 
-### Phase 3: HQPlayer Integration & Web UI
-- Research HQPlayer Desktop API/CLI
-- Implement playback controls (play, pause, stop, queue)
-- Minimal web UI (Streamlit or FastAPI + Vue.js)
-- Music player interface with search and recommendations
+### Phase 3: Audio Analysis & Playback
+- **Step 3.1: Audio Feature Extraction (librosa/essentia)**
+  - Extract tempo, key, energy, danceability from FLAC files
+  - Create `audio_features` table
+  - Batch processing pipeline (~1-3 sec/track)
+  - Feature-based search and filtering
+  - Integration with hybrid search
+  - See detailed plan in CLAUDE.md
+- **Step 3.2: HQPlayer Control**
+  - Research HQPlayer Desktop API/CLI
+  - Implement playback controls (play, pause, stop, queue)
+  - Integration with search and recommendations
+- **Step 3.3: MCP Server for HQPlayer (optional)**
+  - Natural language playback commands
+- **Step 3.4: Minimal Web UI**
+  - Streamlit or FastAPI + Vue.js
+  - Music player interface with search and recommendations
 
 ### Phase 4: Voice Interface & Advanced Features
 - Whisper for voice input (Ukrainian/English)

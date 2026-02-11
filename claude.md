@@ -24,8 +24,11 @@ An AI-powered music library management system for a personal FLAC collection (~3
 - **LLM Integration**: anthropic SDK (Claude API)
 
 ### External APIs (Phase 2)
-- Spotify Web API (free tier)
 - Last.fm API (free tier)
+
+### Audio Analysis (Phase 3)
+- **librosa**: Audio feature extraction (tempo, beat detection, spectral features)
+- **essentia**: Advanced music information retrieval (key detection, mood, danceability)
 
 ### Development Tools
 - **MCP Integration**: Optional PostgreSQL MCP server for Claude Code to interact with database during development
@@ -226,28 +229,23 @@ music-ai-dj/
 
 **Goal**: Enhance search quality with external data sources and text-based semantic search
 
-### Step 2.1: Text Embeddings from Metadata
-- Generate text embeddings using sentence-transformers
-- Embed artist names, album names, genres, descriptions
-- Enable semantic text search ("melancholic piano music")
-- Combine with audio embeddings for hybrid search
-
-### Step 2.2: Spotify Integration
-- Fetch Spotify audio features (tempo, energy, danceability, valence, etc.)
-- Match library tracks to Spotify catalog
-- Enrich database with Spotify IDs and features
-- Use features to improve recommendations
-- Free tier, batch processing (100 tracks per request)
-
-### Step 2.3: Last.fm Integration
+### Step 2.1: Last.fm Integration
 - Fetch artist information, biographies, tags
 - Get similar artists data
-- Popular track information
+- Album information and tags
+- Track popularity statistics
+- Genre descriptions
 - User-generated tags and descriptions
 - Free tier, rate-limited API
 
-### Step 2.4: Enhanced RAG
-- Combine audio embeddings, text embeddings, and external features
+### Step 2.2: Text Embeddings from Metadata
+- Generate text embeddings using sentence-transformers
+- Embed artist names, album names, genres, descriptions, tags, bios
+- Enable semantic text search ("melancholic piano music")
+- Combine with audio embeddings for hybrid search
+
+### Step 2.3: Enhanced RAG
+- Combine audio embeddings, text embeddings, and Last.fm metadata
 - Hybrid search strategies (weighted combinations)
 - Better semantic understanding of user queries
 - Richer context for Claude with multiple data sources
@@ -255,24 +253,238 @@ music-ai-dj/
 
 ---
 
-## PHASE 3: HQPlayer Integration & Web UI
+## PHASE 3: Audio Analysis & Playback
 
-**Goal**: Control music playback and create user interface
+**Goal**: Extract audio features from FLAC files and integrate playback controls
 
-### Step 3.1: HQPlayer Control
+### Step 3.1: Audio Feature Extraction (librosa/essentia)
+
+**Deliverable**: Comprehensive audio analysis pipeline extracting musical characteristics from FLAC files
+
+**Why**: Spotify Audio Features API is deprecated for new apps (Nov 2024). We extract features directly from our FLAC files using open-source tools.
+
+**Libraries**:
+- **librosa** (already in requirements): Basic audio analysis, tempo, beat tracking, spectral features
+- **essentia** (to be added): Advanced music information retrieval, trained ML models
+
+**Features to Extract**:
+
+**Tempo & Rhythm** (librosa):
+- BPM (beats per minute) - `librosa.beat.beat_track()`
+- Beat positions and strength
+- Onset detection (attack times)
+
+**Harmonic Features** (librosa + essentia):
+- Key detection (C, C#, D, etc.) - `essentia.KeyExtractor`
+- Mode (Major/Minor) - `essentia.KeyExtractor`
+- Chroma features (pitch class distribution)
+- Harmonic/percussive separation
+
+**Spectral Features** (librosa):
+- Spectral centroid (brightness)
+- Spectral rolloff (high-frequency content)
+- Spectral contrast (peaks vs valleys)
+- Zero-crossing rate (noisiness/percussiveness)
+- MFCC (timbre characteristics)
+
+**Energy & Dynamics** (librosa + essentia):
+- RMS energy (overall loudness)
+- Dynamic range (difference between loud and quiet parts)
+- Energy distribution over time
+
+**High-Level Descriptors** (essentia trained models):
+- Danceability (0-1) - `essentia.Danceability`
+- Aggressiveness (0-1) - similar to Spotify's "energy"
+- Mood classification (happy/sad, relaxed/energetic)
+- Voice/instrumental detection
+- Acoustic vs electronic classification
+
+**Database Schema**:
+```sql
+-- New table: audio_features
+CREATE TABLE audio_features (
+    id SERIAL PRIMARY KEY,
+    track_id INTEGER REFERENCES tracks(id) ON DELETE CASCADE,
+
+    -- Tempo & Rhythm
+    tempo NUMERIC(6, 2),           -- BPM (e.g., 120.50)
+    tempo_confidence NUMERIC(3, 2), -- 0-1, confidence score
+
+    -- Harmonic
+    key INTEGER,                    -- 0=C, 1=C#, ..., 11=B
+    mode INTEGER,                   -- 0=Minor, 1=Major
+    key_confidence NUMERIC(3, 2),   -- 0-1
+
+    -- Energy & Dynamics
+    energy NUMERIC(3, 2),           -- 0-1 (RMS normalized)
+    loudness NUMERIC(6, 2),         -- dB
+    dynamic_range NUMERIC(6, 2),    -- dB difference
+
+    -- Spectral characteristics
+    brightness NUMERIC(3, 2),       -- 0-1 (spectral centroid normalized)
+    timbre_vector VECTOR(13),       -- MFCC coefficients for similarity
+
+    -- High-level descriptors (essentia)
+    danceability NUMERIC(3, 2),     -- 0-1
+    aggressiveness NUMERIC(3, 2),   -- 0-1
+    acousticness NUMERIC(3, 2),     -- 0-1 (acoustic vs electronic)
+    voice_instrumental NUMERIC(3, 2), -- 0=instrumental, 1=vocal
+
+    -- Mood (optional, if using mood models)
+    mood_happy NUMERIC(3, 2),       -- 0-1
+    mood_sad NUMERIC(3, 2),         -- 0-1
+    mood_relaxed NUMERIC(3, 2),     -- 0-1
+    mood_aggressive NUMERIC(3, 2),  -- 0-1
+
+    -- Metadata
+    analysis_model_version VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    UNIQUE(track_id)
+);
+
+CREATE INDEX idx_audio_features_track ON audio_features(track_id);
+CREATE INDEX idx_audio_features_tempo ON audio_features(tempo);
+CREATE INDEX idx_audio_features_key ON audio_features(key, mode);
+CREATE INDEX idx_audio_features_energy ON audio_features(energy);
+CREATE INDEX idx_audio_features_danceability ON audio_features(danceability);
+```
+
+**Implementation Module**: `backend/audio_analysis.py`
+
+```python
+class AudioAnalyzer:
+    """Extract audio features from FLAC files using librosa and essentia."""
+
+    def __init__(self):
+        self.sample_rate = 44100  # Resample to consistent rate
+        # Load essentia models (pre-trained)
+        self.key_extractor = essentia.KeyExtractor()
+        self.danceability_extractor = essentia.Danceability()
+        # ... other extractors
+
+    def analyze_track(self, file_path: str) -> dict:
+        """
+        Analyze single track and return all features.
+
+        Returns dict with:
+            - tempo, tempo_confidence
+            - key, mode, key_confidence
+            - energy, loudness, dynamic_range
+            - brightness, timbre_vector
+            - danceability, aggressiveness, acousticness
+            - mood scores
+        """
+        # Load audio
+        y, sr = librosa.load(file_path, sr=self.sample_rate, mono=True)
+
+        # Extract features (parallel processing for speed)
+        features = {}
+
+        # Tempo
+        tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
+        features['tempo'] = float(tempo)
+
+        # Key detection (essentia)
+        key, scale, strength = self.key_extractor(y)
+        features['key'] = key  # 0-11
+        features['mode'] = 1 if scale == 'major' else 0
+        features['key_confidence'] = strength
+
+        # Energy & dynamics
+        rms = librosa.feature.rms(y=y)[0]
+        features['energy'] = float(np.mean(rms))
+        features['loudness'] = float(librosa.amplitude_to_db(rms).mean())
+        features['dynamic_range'] = float(rms.max() - rms.min())
+
+        # Spectral
+        spectral_centroid = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
+        features['brightness'] = float(np.mean(spectral_centroid) / (sr/2))
+
+        # MFCCs for timbre
+        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+        features['timbre_vector'] = np.mean(mfccs, axis=1).tolist()
+
+        # Danceability (essentia)
+        features['danceability'] = float(self.danceability_extractor(y))
+
+        # ... other features
+
+        return features
+
+    def analyze_batch(self, db: Session, limit: int = None, batch_size: int = 10):
+        """Batch process tracks without audio features."""
+        # Similar to embedding generation pipeline
+        # Process in parallel where possible
+        # Store results in audio_features table
+```
+
+**CLI Commands**:
+```bash
+# Analyze all tracks
+docker exec music-ai-backend python cli.py analyze-audio
+
+# Analyze specific track
+docker exec music-ai-backend python cli.py analyze-audio --track-id 123
+
+# Re-analyze with updated models
+docker exec music-ai-backend python cli.py analyze-audio --force
+
+# Search by features
+docker exec music-ai-backend python cli.py search-features --tempo 120-140 --key C --mode major
+docker exec music-ai-backend python cli.py search-features --danceability 0.7-1.0 --energy 0.8-1.0
+```
+
+**Performance Considerations**:
+- **Speed**: ~1-3 seconds per track (RTX 4090 can help with some features)
+- **Parallel processing**: Process multiple tracks simultaneously
+- **Incremental**: Only analyze tracks without features
+- **For 685 tracks**: ~20-40 minutes initial analysis
+- **For 30k tracks**: ~10-25 hours (run overnight)
+
+**Testing Strategy**:
+1. Start with 10-20 test tracks from different genres
+2. Validate tempo against known BPM (check with online tools)
+3. Validate key detection against manual listening
+4. Compare danceability/energy with intuitive expectations
+5. Check if similar tracks have similar features
+
+**Integration with Search**:
+- Add feature-based search: `search_by_features(tempo_range, key, energy_min, danceability_min)`
+- Enhance hybrid search with feature similarity
+- Use in RAG context: "energetic tracks" → filter by energy > 0.7
+- Playlist generation: "high-energy workout mix" → sort by energy + tempo
+
+**Benefits over Spotify**:
+✅ Works on our FLAC files directly (no API limitations)
+✅ No rate limits
+✅ Offline analysis
+✅ Customizable (can add more features)
+✅ Open source, no vendor lock-in
+✅ Can re-run with improved models
+
+**Challenges**:
+⚠️ Slower than API calls (but one-time cost)
+⚠️ Model accuracy varies (but good enough for recommendations)
+⚠️ Need to tune thresholds per genre
+
+---
+
+### Step 3.2: HQPlayer Control
 - Research HQPlayer Desktop v5.16.3 API/CLI capabilities
 - Implement control functions (play, pause, stop, next, volume)
 - Queue management
 - Current track info retrieval
 - Integration with search and recommendations
 
-### Step 3.2: MCP Server for HQPlayer (Optional)
+### Step 3.3: MCP Server for HQPlayer (Optional)
 - Create MCP tools for HQPlayer control
 - Allow Claude to control playback directly
 - Natural language playback commands
 - "Play something similar", "Skip to next album", etc.
 
-### Step 3.3: Minimal Web UI
+### Step 3.4: Minimal Web UI
 - Technology choice: Streamlit (quick) or FastAPI + Vue.js (flexible)
 - Basic features:
   - Search interface

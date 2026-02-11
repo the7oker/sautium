@@ -506,23 +506,11 @@ class Track(Base):
     text_embedding_model_id = Column(Integer, ForeignKey("embedding_models.id"))
 
     # External service IDs (Phase 2)
-    spotify_id = Column(String(100))
     isrc = Column(String(20))
     musicbrainz_id = Column(String(100))
 
-    # Spotify audio features (Phase 2)
-    spotify_tempo = Column(Numeric(6, 2))
-    spotify_energy = Column(Numeric(3, 2))
-    spotify_danceability = Column(Numeric(3, 2))
-    spotify_valence = Column(Numeric(3, 2))
-    spotify_acousticness = Column(Numeric(3, 2))
-    spotify_instrumentalness = Column(Numeric(3, 2))
-    spotify_liveness = Column(Numeric(3, 2))
-    spotify_speechiness = Column(Numeric(3, 2))
-    spotify_loudness = Column(Numeric(6, 2))
-    spotify_key = Column(Integer)
-    spotify_mode = Column(Integer)
-    spotify_time_signature = Column(Integer)
+    # Note: Audio features will be stored in audio_features table (Phase 3)
+    # using own analysis (librosa/essentia) instead of Spotify API
 
     # User data (Phase 4)
     play_count = Column(Integer, default=0)
@@ -545,13 +533,6 @@ class Track(Base):
     # Constraints and indexes
     __table_args__ = (
         CheckConstraint("user_rating >= 0 AND user_rating <= 5", name="check_track_rating"),
-        CheckConstraint("spotify_energy >= 0 AND spotify_energy <= 1", name="check_energy"),
-        CheckConstraint("spotify_danceability >= 0 AND spotify_danceability <= 1", name="check_danceability"),
-        CheckConstraint("spotify_valence >= 0 AND spotify_valence <= 1", name="check_valence"),
-        CheckConstraint("spotify_acousticness >= 0 AND spotify_acousticness <= 1", name="check_acousticness"),
-        CheckConstraint("spotify_instrumentalness >= 0 AND spotify_instrumentalness <= 1", name="check_instrumentalness"),
-        CheckConstraint("spotify_liveness >= 0 AND spotify_liveness <= 1", name="check_liveness"),
-        CheckConstraint("spotify_speechiness >= 0 AND spotify_speechiness <= 1", name="check_speechiness"),
         Index("idx_tracks_title", "title"),
         Index("idx_tracks_album_id", "album_id"),
         Index("idx_tracks_file_path", "file_path"),

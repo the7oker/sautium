@@ -52,8 +52,6 @@ class Settings(BaseSettings):
     min_similarity_threshold: float = 0.5
 
     # External APIs (Phase 2)
-    spotify_client_id: Optional[str] = None
-    spotify_client_secret: Optional[str] = None
     lastfm_api_key: Optional[str] = None
 
     model_config = SettingsConfigDict(
