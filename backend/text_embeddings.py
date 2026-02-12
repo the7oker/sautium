@@ -247,6 +247,7 @@ class TextEmbeddingGenerator:
         limit: Optional[int] = None,
         force: bool = False,
         order_by_date: bool = False,
+        max_duration_seconds: Optional[int] = None,
     ) -> Dict[str, int]:
         """
         Generate text embeddings for all tracks (or those missing them).
@@ -256,11 +257,15 @@ class TextEmbeddingGenerator:
             limit: Max tracks to process.
             force: If True, regenerate even if embedding exists.
             order_by_date: If True, process newest tracks first (by file_modified_at).
+            max_duration_seconds: Maximum duration in seconds. Process will stop gracefully after this time.
 
         Returns:
             Stats dict with processed, success, failed counts.
         """
+        import time
+
         stats = {"processed": 0, "success": 0, "failed": 0}
+        start_time = time.time()
 
         # Get tracks to process
         order_clause = "ORDER BY file_modified_at DESC NULLS LAST" if order_by_date else "ORDER BY id"
@@ -281,6 +286,8 @@ class TextEmbeddingGenerator:
             return stats
 
         logger.info(f"Processing {len(track_ids)} tracks for text embeddings")
+        if max_duration_seconds:
+            logger.info(f"Time limit: {max_duration_seconds} seconds ({max_duration_seconds/60:.1f} minutes)")
 
         self.load_model()
         model_record = self._get_or_create_model_record(db)
@@ -292,6 +299,13 @@ class TextEmbeddingGenerator:
             desc="Generating text embeddings",
             unit="batch",
         ):
+            # Check time limit before starting new batch
+            if max_duration_seconds:
+                elapsed = time.time() - start_time
+                if elapsed >= max_duration_seconds:
+                    logger.info(f"Time limit reached ({elapsed:.1f}s), stopping gracefully")
+                    break
+
             batch_ids = track_ids[batch_start:batch_start + batch_size]
 
             # Compose text for batch
@@ -362,6 +376,7 @@ def generate_text_embeddings(
     batch_size: Optional[int] = None,
     force: bool = False,
     order_by_date: bool = False,
+    max_duration_seconds: Optional[int] = None,
 ) -> Dict[str, int]:
     """
     Convenience function to generate text embeddings.
@@ -371,6 +386,7 @@ def generate_text_embeddings(
         batch_size: Override default batch size.
         force: Regenerate even if already exists.
         order_by_date: If True, process newest tracks first (by file_modified_at).
+        max_duration_seconds: Maximum duration in seconds.
 
     Returns:
         Statistics dictionary.
@@ -378,6 +394,6 @@ def generate_text_embeddings(
     generator = TextEmbeddingGenerator(batch_size=batch_size)
     try:
         with get_db_context() as db:
-            return generator.generate_all(db, limit=limit, force=force, order_by_date=order_by_date)
+            return generator.generate_all(db, limit=limit, force=force, order_by_date=order_by_date, max_duration_seconds=max_duration_seconds)
     finally:
         generator.unload_model()

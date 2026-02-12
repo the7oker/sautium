@@ -336,6 +336,7 @@ class AudioAnalyzer:
         force: bool = False,
         order_by_date: bool = False,
         librosa_only: bool = False,
+        max_duration_seconds: Optional[int] = None,
     ) -> Dict[str, int]:
         """
         Batch analyze tracks and store results in audio_features table.
@@ -345,11 +346,15 @@ class AudioAnalyzer:
             force: Re-analyze even if features exist.
             order_by_date: Process newest tracks first.
             librosa_only: Skip CLAP classification (faster, DSP only).
+            max_duration_seconds: Maximum duration in seconds. Process will stop gracefully after this time.
 
         Returns:
             Statistics dict.
         """
+        import time
+
         stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0}
+        start_time = time.time()
 
         if not librosa_only:
             self.load_model()
@@ -380,8 +385,17 @@ class AudioAnalyzer:
                     return stats
 
                 logger.info(f"Analyzing {total} tracks (librosa_only={librosa_only})")
+                if max_duration_seconds:
+                    logger.info(f"Time limit: {max_duration_seconds} seconds ({max_duration_seconds/60:.1f} minutes)")
 
                 for track in tqdm(tracks, desc="Analyzing audio", unit="track"):
+                    # Check time limit before starting new track
+                    if max_duration_seconds:
+                        elapsed = time.time() - start_time
+                        if elapsed >= max_duration_seconds:
+                            logger.info(f"Time limit reached ({elapsed:.1f}s), stopping gracefully")
+                            break
+
                     stats["processed"] += 1
 
                     try:

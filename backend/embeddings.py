@@ -195,18 +195,22 @@ class AudioEmbeddingGenerator:
 
         track.embedding_id = embedding.id
 
-    def generate_embeddings(self, limit: Optional[int] = None, order_by_date: bool = False) -> Dict[str, int]:
+    def generate_embeddings(self, limit: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None) -> Dict[str, int]:
         """
         Generate embeddings for tracks that don't have them yet.
 
         Args:
             limit: Maximum number of tracks to process.
             order_by_date: If True, process newest tracks first (by file_modified_at).
+            max_duration_seconds: Maximum duration in seconds. Process will stop gracefully after this time.
 
         Returns:
             Statistics dict with keys: processed, success, failed, skipped.
         """
+        import time
+
         stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0}
+        start_time = time.time()
 
         self.load_model()
 
@@ -234,6 +238,8 @@ class AudioEmbeddingGenerator:
                 logger.info(
                     f"Processing {total} tracks (batch_size={self.batch_size})"
                 )
+                if max_duration_seconds:
+                    logger.info(f"Time limit: {max_duration_seconds} seconds ({max_duration_seconds/60:.1f} minutes)")
 
                 # Process in batches
                 for batch_start in tqdm(
@@ -241,6 +247,12 @@ class AudioEmbeddingGenerator:
                     desc="Generating embeddings",
                     unit="batch",
                 ):
+                    # Check time limit before starting new batch
+                    if max_duration_seconds:
+                        elapsed = time.time() - start_time
+                        if elapsed >= max_duration_seconds:
+                            logger.info(f"Time limit reached ({elapsed:.1f}s), stopping gracefully")
+                            break
                     batch_tracks = tracks[
                         batch_start : batch_start + self.batch_size
                     ]
@@ -307,7 +319,7 @@ class AudioEmbeddingGenerator:
 
 
 def generate_embeddings(
-    limit: Optional[int] = None, batch_size: Optional[int] = None, order_by_date: bool = False
+    limit: Optional[int] = None, batch_size: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None
 ) -> Dict[str, int]:
     """
     Convenience function to generate embeddings.
@@ -316,9 +328,10 @@ def generate_embeddings(
         limit: Maximum number of tracks to process.
         batch_size: Override default batch size.
         order_by_date: If True, process newest tracks first (by file_modified_at).
+        max_duration_seconds: Maximum duration in seconds.
 
     Returns:
         Statistics dictionary.
     """
     generator = AudioEmbeddingGenerator(batch_size=batch_size)
-    return generator.generate_embeddings(limit=limit, order_by_date=order_by_date)
+    return generator.generate_embeddings(limit=limit, order_by_date=order_by_date, max_duration_seconds=max_duration_seconds)

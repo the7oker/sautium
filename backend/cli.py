@@ -66,7 +66,8 @@ def scan(limit, no_skip, path):
 @click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process (for testing)")
 @click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default from config)")
 @click.option("--newest-first", is_flag=True, help="Process newest tracks first (by file modification date)")
-def generate_embeddings(limit, batch_size, newest_first):
+@click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 1800 for 30 minutes)")
+def generate_embeddings(limit, batch_size, newest_first, max_duration):
     """Generate audio embeddings for tracks using CLAP model."""
     from embeddings import generate_embeddings as do_generate
 
@@ -80,8 +81,11 @@ def generate_embeddings(limit, batch_size, newest_first):
     if newest_first:
         click.echo(f"🆕 Processing newest tracks first (by file modification date)")
 
+    if max_duration:
+        click.echo(f"⏱️  Time limit: {max_duration} seconds ({max_duration/60:.1f} minutes)")
+
     try:
-        stats = do_generate(limit=limit, batch_size=batch_size, order_by_date=newest_first)
+        stats = do_generate(limit=limit, batch_size=batch_size, order_by_date=newest_first, max_duration_seconds=max_duration)
 
         click.echo("\n✅ Embedding generation complete!")
         click.echo(f"📊 Statistics:")
@@ -557,7 +561,8 @@ def normalize_genres_cmd(dry_run):
 @click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default: 64)")
 @click.option("--force", is_flag=True, help="Regenerate embeddings even if already exists")
 @click.option("--newest-first", is_flag=True, help="Process newest tracks first (by file modification date)")
-def generate_text_embeddings(limit, batch_size, force, newest_first):
+@click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 1800 for 30 minutes)")
+def generate_text_embeddings(limit, batch_size, force, newest_first, max_duration):
     """Generate text embeddings from track metadata using sentence-transformers."""
     from text_embeddings import generate_text_embeddings as do_generate
 
@@ -571,9 +576,11 @@ def generate_text_embeddings(limit, batch_size, force, newest_first):
         click.echo(f"⚠️  Force mode: regenerating all embeddings")
     if newest_first:
         click.echo(f"🆕 Processing newest tracks first (by file modification date)")
+    if max_duration:
+        click.echo(f"⏱️  Time limit: {max_duration} seconds ({max_duration/60:.1f} minutes)")
 
     try:
-        stats = do_generate(limit=limit, batch_size=batch_size, force=force, order_by_date=newest_first)
+        stats = do_generate(limit=limit, batch_size=batch_size, force=force, order_by_date=newest_first, max_duration_seconds=max_duration)
 
         click.echo("\n✅ Text embedding generation complete!")
         click.echo(f"📊 Statistics:")
@@ -1052,7 +1059,8 @@ def enrich_tracks(limit, artist, album, no_skip, delay):
 @click.option("--force", is_flag=True, help="Re-analyze tracks that already have features")
 @click.option("--newest-first", is_flag=True, help="Process newest tracks first (by file modification date)")
 @click.option("--librosa-only", is_flag=True, help="Skip CLAP classification (faster, DSP features only)")
-def analyze_audio(limit, batch_size, force, newest_first, librosa_only):
+@click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 1800 for 30 minutes)")
+def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_duration):
     """Extract audio features (BPM, key, instruments, mood, etc.) from tracks."""
     from audio_analysis import AudioAnalyzer
 
@@ -1067,12 +1075,15 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only):
         click.echo(f"🆕 Processing newest tracks first")
     if librosa_only:
         click.echo(f"⚡ Skipping CLAP classification (DSP features only)")
+    if max_duration:
+        click.echo(f"⏱️  Time limit: {max_duration} seconds ({max_duration/60:.1f} minutes)")
 
     try:
         analyzer = AudioAnalyzer()
         stats = analyzer.analyze_all(
             limit=limit, force=force,
             order_by_date=newest_first, librosa_only=librosa_only,
+            max_duration_seconds=max_duration,
         )
 
         click.echo("\n✅ Audio analysis complete!")

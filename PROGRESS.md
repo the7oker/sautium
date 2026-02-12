@@ -164,8 +164,9 @@
 - **685 tracks** indexed (Blues, Electronic, Nu Jazz, and more genres)
 - **185 tracks** with CLAP audio embeddings (512d)
 - **685 tracks** with text semantic embeddings (384d)
-- **185 tracks** with both (hybrid search enabled)
+- **185 tracks** with both audio + text (hybrid search enabled)
 - **682 tracks** with Last.fm stats (listeners, playcount)
+- **0 tracks** with audio features (ready to extract - Phase 3.1 implemented)
 - **10 artists** enriched with Last.fm data (bios, tags, similar artists)
 - **125 albums** enriched with Last.fm data (wiki, tags, stats)
 - **150 unique tags** from Last.fm (artist + album tags)
@@ -180,13 +181,16 @@
 - [x] Step 1.4: Semantic Search by Audio
 - [x] Step 1.5: Claude Integration (RAG for Music)
 
-### Phase 2: External Data & Text Embeddings - IN PROGRESS
+### Phase 2: External Data & Text Embeddings - COMPLETE ✅
 - [x] Step 2.1a: Last.fm Integration (artists, genres)
 - [x] Step 2.1b: Album Enrichment from Last.fm
 - [x] Step 2.1c: Text Embeddings from Metadata (sentence-transformers)
 - [x] Step 2.2: Track Stats from Last.fm
 - [x] ~~Step 2.3: Spotify Integration~~ (removed - API deprecated)
 - [x] Step 2.4: Enhanced RAG features
+
+### Phase 3: Audio Analysis & Playback - IN PROGRESS
+- [x] Step 3.1: Audio Feature Extraction (librosa + CLAP zero-shot)
 
 ---
 
@@ -836,25 +840,187 @@ User Query
 
 ---
 
+## Step 3.1: Audio Feature Extraction (librosa + CLAP zero-shot) - DONE
+
+### What was done
+- **Database schema**: Created `audio_features` table for DSP features and AI classifications
+  - librosa DSP features: `bpm`, `key`, `mode`, `key_confidence`, `energy`, `energy_db`, `brightness`, `dynamic_range_db`, `zero_crossing_rate`
+  - CLAP zero-shot: `instruments` (JSONB), `moods` (JSONB), `vocal_instrumental`, `vocal_score`, `danceability`
+  - GIN indexes on JSONB columns for efficient querying (`instruments ? 'piano'`)
+  - Standard indexes on numeric fields (bpm, key, energy, danceability, vocal)
+- **Migration script**: `scripts/create_audio_features.sql`
+- **SQLAlchemy model**: Added `AudioFeature` model with relationship to Track
+- **Core module**: `backend/audio_analysis.py` (~380 lines)
+  - `AudioAnalyzer` class with two-phase pipeline:
+    - **Phase 1 (CPU)**: librosa at 22kHz - BPM, key/mode, energy, brightness, dynamic range, ZCR
+    - **Phase 2 (GPU)**: CLAP zero-shot at 48kHz - instruments, moods, vocal/instrumental, danceability
+  - **Key detection**: Krumhansl-Schmuckler algorithm using chroma_cqt + Pearson correlation with key profiles
+  - **CLAP text caching**: All label sets (17 instruments, 8 moods, 2 vocal, 2 dance) pre-encoded once, reused for all tracks
+  - **Zero-shot classification**: Cosine similarity + softmax with learned logit_scale
+  - **Label sets**:
+    - 17 instruments: guitar, piano, drums, saxophone, violin, etc.
+    - 8 moods: happy/sad/energetic/calm/dark/romantic/aggressive/mysterious
+    - Vocal: singing vs instrumental
+    - Dance: danceable vs not danceable
+  - **JSONB storage**: Top instruments/moods with scores > 0.05, sorted by confidence
+  - `analyze_track()` - single track full pipeline
+  - `analyze_all()` - batch processing with progress tracking, force/limit/ordering options
+- **Search integration** (`backend/search.py`):
+  - Extended `_apply_filters()` with audio feature filters: `bpm_min/max`, `key`, `mode`, `instrument`, `vocal`, `danceable`, `energy_min`
+  - Added `_needs_audio_features_join()` helper
+  - All search functions conditionally add `LEFT JOIN audio_features` when audio filters present
+  - New `search_by_features()` function for pure feature-based search
+- **RAG integration** (`backend/assistant.py`):
+  - `_get_track_enrichment()` fetches audio features in enrichment batch
+  - `_format_track_context()` adds "BPM: 120 | Key: Am | Vocal | Danceability: 0.72" + instruments + mood
+  - `_extract_filters()` detects audio keywords:
+    - "fast"/"upbeat" → bpm_min=120
+    - "slow"/"chill" → bpm_max=100
+    - "instrumental" → vocal filter
+    - "in D minor" → key+mode filter
+    - Instrument names → instrument filter
+    - "danceable" → danceable filter
+  - System prompt updated to mention audio features
+- **CLI commands** (`backend/cli.py`):
+  - `analyze-audio`: Extract features with `--limit`, `--force`, `--newest-first`, `--librosa-only` flags
+  - `search-features`: Search by audio features with `--bpm-min/max`, `--key`, `--instrument`, `--vocal/--instrumental`, `--danceable`
+  - Smart key parsing: "Am" → A minor, "F# major" → F# major, "C" → C (any mode)
+  - Sample results display after analysis completion
+- **Configuration** (`backend/config.py`):
+  - `audio_analysis_sample_rate: 22050` (librosa)
+  - `audio_analysis_duration: 30` (middle segment)
+  - `audio_analysis_batch_size: 8` (CLAP)
+
+### Design decisions
+- **Two sample rates**: 22kHz for librosa (sufficient for DSP, faster) vs 48kHz for CLAP (model requirement)
+- **Text caching strategy**: Pre-encode all labels once → massive speedup (only audio encoding per track)
+- **JSONB for AI classifications**: Flexible, queryable with GIN indexes, stores top N results with scores
+- **Softmax normalization**: CLAP zero-shot uses learned logit_scale for sharper probability distributions
+- **No essentia**: Used CLAP zero-shot instead of essentia for high-level descriptors (simpler, no TensorFlow dependency)
+- **Per-track commits**: Audio loading is slow (~2s), batch commits wouldn't help much
+- **Vocal detection thresholds**: >0.65 = vocal, <0.35 = instrumental, 0.35-0.65 = mixed
+
+### Testing status - READY FOR TESTING ⏳
+- ✅ Code implementation complete
+- ✅ SQL migration ready
+- ✅ All integrations (search, RAG, CLI) implemented
+- ⏳ Awaiting initial test run on 10 tracks
+- ⏳ Awaiting full batch run on 685 tracks
+
+### Expected performance
+- **Per track**: ~2 seconds (1.5s librosa CPU + 0.1s CLAP GPU with cached text)
+- **685 tracks**: ~23 minutes
+- **30,000 tracks**: ~17 hours (can be parallelized or run overnight)
+
+### Architecture
+```
+FLAC file
+    ↓
+┌──────────────────────────────┐
+│ Phase 1: librosa @ 22kHz     │
+│ ├── Load middle 30s          │
+│ ├── BPM detection            │
+│ ├── Key detection (K-S)      │
+│ ├── Energy (RMS)             │
+│ ├── Brightness (centroid)    │
+│ ├── Dynamic range            │
+│ └── Zero-crossing rate       │
+└──────────────┬───────────────┘
+               ↓
+┌──────────────────────────────┐
+│ Phase 2: CLAP @ 48kHz        │
+│ ├── Load middle 30s          │
+│ ├── Audio encode (GPU)       │
+│ ├── Instruments (17 labels)  │
+│ │   → JSONB top scores       │
+│ ├── Moods (8 labels)         │
+│ │   → JSONB top scores       │
+│ ├── Vocal/Instrumental       │
+│ │   → category + score       │
+│ └── Danceability             │
+│     → 0-1 score              │
+└──────────────┬───────────────┘
+               ↓
+┌──────────────────────────────┐
+│ audio_features table         │
+│ (track_id, bpm, key, mode,   │
+│  instruments JSONB, moods,   │
+│  vocal, danceability, etc.)  │
+└──────────────────────────────┘
+```
+
+### Feature extraction details
+**librosa DSP (CPU @ 22kHz)**:
+- BPM: `beat_track()` with onset detection
+- Key: Krumhansl-Schmuckler via `chroma_cqt()` + Pearson correlation
+- Energy: RMS mean (linear + dB)
+- Dynamic range: 95th - 5th percentile RMS in dB
+- Brightness: Spectral centroid normalized to 0-1
+- ZCR: Zero-crossing rate mean
+
+**CLAP zero-shot (GPU @ 48kHz)**:
+- Prompt templates: "This is a sound of {instrument}", "This is {mood} music"
+- Text embeddings cached once, reused for all tracks
+- Audio embedding L2-normalized, cosine similarity with text
+- Logit scale applied, softmax for probabilities
+- JSONB stores all scores > 0.05 (5% threshold)
+
+### Usage examples
+```bash
+# Run migration
+docker exec music-ai-postgres psql -U musicai -d music_ai -f /scripts/create_audio_features.sql
+
+# Test with 10 tracks
+docker exec music-ai-backend python cli.py analyze-audio --limit 10
+
+# Analyze all tracks
+docker exec music-ai-backend python cli.py analyze-audio
+
+# Skip CLAP, only DSP features (faster)
+docker exec music-ai-backend python cli.py analyze-audio --librosa-only
+
+# Search by features
+docker exec music-ai-backend python cli.py search-features --bpm-min 120 --bpm-max 140
+docker exec music-ai-backend python cli.py search-features --key Am
+docker exec music-ai-backend python cli.py search-features --instrument saxophone --vocal
+docker exec music-ai-backend python cli.py search-features --danceable --genre electronic
+
+# RAG now understands audio features
+docker exec music-ai-backend python cli.py ask -q "Find me a fast instrumental track with piano"
+docker exec music-ai-backend python cli.py ask -q "Something danceable in D minor"
+docker exec music-ai-backend python cli.py ask -q "Slow atmospheric music with saxophone"
+```
+
+### Benefits
+- ✅ No external API dependencies (works offline)
+- ✅ Direct FLAC analysis (no lossy conversion)
+- ✅ Open source, customizable
+- ✅ No rate limits or deprecation risk
+- ✅ Richer features than Spotify had (instrument detection, mood classification)
+- ✅ JSONB flexibility (can store any number of instruments/moods with confidence scores)
+
+### Next: HQPlayer Integration
+After audio features are extracted and tested, next step is HQPlayer control for actual playback.
+
+---
+
 ## Next Steps
 
 ### Phase 2: External Data & Text Embeddings - COMPLETE ✅
 
-### Phase 3: Audio Analysis & Playback
-- **Step 3.1: Audio Feature Extraction (librosa/essentia)**
-  - Extract tempo, key, energy, danceability from FLAC files
-  - Create `audio_features` table
-  - Batch processing pipeline (~1-3 sec/track)
+### Phase 3: Audio Analysis & Playback - IN PROGRESS
+- [x] **Step 3.1: Audio Feature Extraction (librosa + CLAP zero-shot)** ✅
+  - librosa DSP: BPM, key, energy, brightness, dynamic range
+  - CLAP zero-shot: instruments, moods, vocal detection, danceability
   - Feature-based search and filtering
-  - Integration with hybrid search
-  - See detailed plan in CLAUDE.md
-- **Step 3.2: HQPlayer Control**
+  - Integration with RAG assistant
+- [ ] **Step 3.2: HQPlayer Control**
   - Research HQPlayer Desktop API/CLI
   - Implement playback controls (play, pause, stop, queue)
   - Integration with search and recommendations
-- **Step 3.3: MCP Server for HQPlayer (optional)**
+- [ ] **Step 3.3: MCP Server for HQPlayer (optional)**
   - Natural language playback commands
-- **Step 3.4: Minimal Web UI**
+- [ ] **Step 3.4: Minimal Web UI**
   - Streamlit or FastAPI + Vue.js
   - Music player interface with search and recommendations
 
