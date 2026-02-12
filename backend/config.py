@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     # External APIs (Phase 2)
     lastfm_api_key: Optional[str] = None
 
+    # HQPlayer Integration (Phase 3.2)
+    hqplayer_host: str = "localhost"
+    hqplayer_port: int = 4321
+    hqplayer_enabled: bool = False
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

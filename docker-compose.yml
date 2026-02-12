@@ -45,6 +45,14 @@ services:
 
       # Application settings
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      # HQPlayer integration
+      HQPLAYER_HOST: ${HQPLAYER_HOST:-host.docker.internal}
+      HQPLAYER_PORT: ${HQPLAYER_PORT:-4321}
+      HQPLAYER_ENABLED: ${HQPLAYER_ENABLED:-false}
+    extra_hosts:
+      # Allow container to access Windows host services (like HQPlayer)
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./backend:/app
       - ./data/cache:/root/.cache
