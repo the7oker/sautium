@@ -81,6 +81,34 @@ class Embedding(Base):
         return f"<Embedding(id={self.id}, model_id={self.model_id})>"
 
 
+class TextEmbedding(Base):
+    """Text embeddings (384-dimensional vectors from sentence-transformers)."""
+    __tablename__ = "text_embeddings"
+
+    id = Column(Integer, primary_key=True)
+    vector = Column(Vector(384), nullable=False)
+    model_id = Column(Integer, ForeignKey("embedding_models.id"), nullable=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    model = relationship("EmbeddingModel", backref="text_embeddings")
+    tracks = relationship("Track", back_populates="text_embedding_obj")
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_text_embeddings_vector", "vector",
+              postgresql_using="hnsw",
+              postgresql_with={"m": 16, "ef_construction": 64},
+              postgresql_ops={"vector": "vector_cosine_ops"}),
+        Index("idx_text_embeddings_model_id", "model_id"),
+    )
+
+    def __repr__(self):
+        return f"<TextEmbedding(id={self.id}, model_id={self.model_id})>"
+
+
 class ExternalMetadata(Base):
     """External metadata from various sources (Last.fm, Spotify, MusicBrainz, etc.)."""
     __tablename__ = "external_metadata"
@@ -214,7 +242,6 @@ class Artist(Base):
     name = Column(String(500), nullable=False, unique=True)
 
     # External service IDs (Phase 2)
-    spotify_id = Column(String(100))
     lastfm_id = Column(String(100))
     musicbrainz_id = Column(String(100))
 
@@ -235,7 +262,6 @@ class Artist(Base):
     # Indexes
     __table_args__ = (
         Index("idx_artists_name", "name"),
-        Index("idx_artists_spotify_id", "spotify_id"),
     )
 
     def __repr__(self):
@@ -442,7 +468,6 @@ class Album(Base):
     bit_depth = Column(Integer)
 
     # External service IDs (Phase 2)
-    spotify_id = Column(String(100))
     musicbrainz_id = Column(String(100))
     lastfm_id = Column(String(100))  # Last.fm MBID
 
@@ -451,7 +476,7 @@ class Album(Base):
 
     # User data (Phase 4)
     user_rating = Column(Numeric(3, 2))
-    user_notes = Column(Text)
+    # Note: user_notes will be implemented as separate table in future if needed
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -503,9 +528,8 @@ class Track(Base):
     # Audio embedding reference
     embedding_id = Column(Integer, ForeignKey("embeddings.id"))
 
-    # Text embedding (sentence-transformers, 384d)
-    text_embedding = Column(Vector(384))
-    text_embedding_model_id = Column(Integer, ForeignKey("embedding_models.id"))
+    # Text embedding reference (sentence-transformers, 384d)
+    text_embedding_id = Column(Integer, ForeignKey("text_embeddings.id"))
 
     # External service IDs (Phase 2)
     isrc = Column(String(20))
@@ -518,8 +542,7 @@ class Track(Base):
     play_count = Column(Integer, default=0)
     last_played_at = Column(DateTime)
     user_rating = Column(Numeric(3, 2))
-    user_notes = Column(Text)
-    user_tags = Column(ARRAY(Text))
+    # Note: user_notes will be implemented as separate table in future
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -528,6 +551,7 @@ class Track(Base):
     # Relationships
     album = relationship("Album", back_populates="tracks")
     embedding_obj = relationship("Embedding", back_populates="tracks")
+    text_embedding_obj = relationship("TextEmbedding", back_populates="tracks")
     artist_associations = relationship("TrackArtist", back_populates="track", cascade="all, delete-orphan")
     genre_associations = relationship("TrackGenre", back_populates="track", cascade="all, delete-orphan")
     stats = relationship("TrackStats", back_populates="track", cascade="all, delete-orphan")

@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from tqdm import tqdm
 
 from database import get_db_context
-from models import Track, Album, Artist, TrackArtist, AudioFeature
+from models import Track, Album, Artist, TrackArtist, AudioFeature, TextEmbedding
 from embeddings import AudioEmbeddingGenerator
 from text_embeddings import TextEmbeddingGenerator
 from audio_analysis import AudioAnalyzer
@@ -123,7 +123,7 @@ class TrackEnrichmentPipeline:
         # Text embedding
         status['needs_text_embedding'] = (
             not self.skip_text_embeddings and
-            (self.force_text_embeddings or track.text_embedding is None)
+            (self.force_text_embeddings or track.text_embedding_id is None)
         )
 
         # Audio features
@@ -282,20 +282,18 @@ class TrackEnrichmentPipeline:
                     embedding = generator.encode([text])[0]
 
                     model_record = generator._get_or_create_model_record(db)
-                    from sqlalchemy import text as sa_text
-                    db.execute(
-                        sa_text("""
-                            UPDATE tracks
-                            SET text_embedding = :vector,
-                                text_embedding_model_id = :model_id
-                            WHERE id = :track_id
-                        """),
-                        {
-                            "vector": str(embedding.tolist()),
-                            "model_id": model_record.id,
-                            "track_id": track.id,
-                        },
+
+                    # Create TextEmbedding record
+                    text_embedding = TextEmbedding(
+                        vector=embedding.tolist(),
+                        model_id=model_record.id,
                     )
+                    db.add(text_embedding)
+                    db.flush()
+
+                    # Link track to text embedding
+                    track.text_embedding_id = text_embedding.id
+
                     db.commit()
                     results['text_embedding'] = 'success'
                 else:

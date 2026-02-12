@@ -316,6 +316,7 @@ class LibraryScanner:
                         file_path=metadata["file_path"],
                         file_size_bytes=metadata.get("file_size_bytes"),
                         file_format=metadata.get("file_format", "FLAC"),
+                        file_modified_at=metadata.get("file_modified_at"),
                         isrc=metadata.get("isrc"),
                     )
                     db.add(track)

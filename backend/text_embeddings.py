@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from config import settings
 from database import get_db_context
-from models import EmbeddingModel
+from models import EmbeddingModel, TextEmbedding, Track
 
 logger = logging.getLogger(__name__)
 
@@ -276,7 +276,7 @@ class TextEmbeddingGenerator:
         params: Dict[str, Any] = {}
 
         if not force:
-            where_parts.append("text_embedding IS NULL")
+            where_parts.append("text_embedding_id IS NULL")
 
         if track_ids is not None:
             where_parts.append("id = ANY(:filter_track_ids)")
@@ -346,24 +346,27 @@ class TextEmbeddingGenerator:
                 stats["failed"] += len(ordered_ids)
                 continue
 
-            # Update tracks with embeddings
+            # Create text embeddings and link to tracks
             for tid, vector in zip(ordered_ids, embeddings):
                 try:
-                    vector_list = vector.tolist()
-                    db.execute(
-                        sa_text("""
-                            UPDATE tracks
-                            SET text_embedding = :vector,
-                                text_embedding_model_id = :model_id
-                            WHERE id = :track_id
-                        """),
-                        {
-                            "vector": str(vector_list),
-                            "model_id": model_record.id,
-                            "track_id": tid,
-                        },
+                    # Create TextEmbedding record
+                    text_embedding = TextEmbedding(
+                        vector=vector.tolist(),
+                        model_id=model_record.id,
                     )
-                    stats["success"] += 1
+                    db.add(text_embedding)
+                    db.flush()
+
+                    # Link track to text embedding
+                    track = db.query(Track).filter_by(id=tid).first()
+                    if track:
+                        track.text_embedding_id = text_embedding.id
+                        db.add(track)  # Explicitly add to session
+                        db.flush()  # Flush to ensure update is queued
+                        stats["success"] += 1
+                    else:
+                        logger.error(f"Track {tid} not found")
+                        stats["failed"] += 1
                 except Exception as e:
                     logger.error(f"Failed to save embedding for track {tid}: {e}")
                     stats["failed"] += 1

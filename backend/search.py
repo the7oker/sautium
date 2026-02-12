@@ -389,16 +389,17 @@ def search_by_text_semantic(
             SELECT DISTINCT ON (t.id) t.id, t.title, a2.name as artist, al.title as album,
                    g.name as genre, al.quality_source,
                    t.duration_seconds, t.sample_rate, t.bit_depth,
-                   1 - (t.text_embedding <=> {vector_str}) as similarity
+                   1 - (te.vector <=> {vector_str}) as similarity
             FROM tracks t
+            JOIN text_embeddings te ON t.text_embedding_id = te.id
             JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
             JOIN artists a2 ON ta.artist_id = a2.id
             JOIN albums al ON t.album_id = al.id
             LEFT JOIN track_genres tg ON t.id = tg.track_id
             LEFT JOIN genres g ON tg.genre_id = g.id
             {af_join}
-            WHERE t.text_embedding IS NOT NULL
-              AND 1 - (t.text_embedding <=> {vector_str}) >= :min_similarity
+            WHERE t.text_embedding_id IS NOT NULL
+              AND 1 - (te.vector <=> {vector_str}) >= :min_similarity
               {filter_sql}
         ) sub
         ORDER BY similarity DESC
