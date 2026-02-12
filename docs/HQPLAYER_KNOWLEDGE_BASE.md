@@ -34,8 +34,39 @@
 
 ### 3. **SDM (DSD)**
 - Конвертація в DSD (Direct Stream Digital)
-- Delta-Sigma модуляція
+- **1-bit format** - кожен sample це 0 або 1
+- Delta-Sigma модуляція (Sigma-Delta Modulation)
 - Підтримка до DSD2048 (90.3168 MHz)
+
+**Що таке DSD:**
+- **1-bit audio format** - на відміну від PCM (16/24/32-bit)
+- Дуже високі sample rates (мегагерци замість кілогерц)
+- Аудіо сигнал кодується через **щільність** одиниць (PDM - Pulse Density Modulation)
+- Більше одиниць = вища амплітуда, менше одиниць = нижча амплітуда
+
+**ВАЖЛИВО - Base Rate для DSD:**
+- **Base rate = 44.1 kHz** (CD sample rate)
+- Число в назві (64, 128, 256, 512...) = множник base rate
+- Формула: **DSDxxx = 44.1 kHz × xxx**
+
+**Формати DSD (розрахунок):**
+- **DSD64** = 44.1k × **64** = 2822400 Hz = 2.8224 MHz (base SACD rate)
+- **DSD128** = 44.1k × **128** = 5644800 Hz = 5.6448 MHz
+- **DSD256** = 44.1k × **256** = 11289600 Hz = 11.2896 MHz
+- **DSD512** = 44.1k × **512** = 22579200 Hz = 22.5792 MHz
+- **DSD1024** = 44.1k × **1024** = 45158400 Hz = 45.1584 MHz
+- **DSD2048** = 44.1k × **2048** = 90316800 Hz = 90.3168 MHz
+
+**Еквівалентність запису:**
+- DSD256(1bit 11.2MHz) = 44.1k × 256 = 11289600 Hz = 11.2896 MHz
+- DSD512(1bit 22.4MHz) = 44.1k × 512 = 22579200 Hz = 22.5792 MHz
+
+**Приклад розрахунку:**
+```
+DSD256 → 44100 × 256 = 11,289,600 Hz = 11.2896 MHz ≈ 11.2 MHz
+```
+
+**Примітка:** У специфікаціях часто округлюють (11.2 MHz замість 11.2896 MHz), але точна частота завжди: **44.1 kHz × multiplier**
 
 ---
 
@@ -168,14 +199,16 @@
 
 ### DSD (SDM) Sample Rates (6 rates)
 
-| Rate (Hz) | Rate (MHz) | DSD Name | Multiplier | Опис |
-|-----------|------------|----------|------------|------|
-| 2822400 | 2.8224 | DSD64 | 64x | Base DSD rate |
-| 5644800 | 5.6448 | DSD128 | 128x | 2x DSD64 |
-| 11289600 | 11.2896 | DSD256 | 256x | 4x DSD64 |
-| 22579200 | 22.5792 | DSD512 | 512x | 8x DSD64 (recommended!) |
-| 45158400 | 45.1584 | DSD1024 | 1024x | 16x DSD64 (high-end) |
-| 90316800 | 90.3168 | DSD2048 | 2048x | 32x DSD64 (extreme) |
+| Rate (Hz) | Rate (MHz) | DSD Name | Multiplier | Формула | Опис |
+|-----------|------------|----------|------------|---------|------|
+| 2822400 | 2.8224 | DSD64 | 64x | 44.1k × 64 | Base DSD rate (SACD) |
+| 5644800 | 5.6448 | DSD128 | 128x | 44.1k × 128 | 2x base rate |
+| 11289600 | 11.2896 | DSD256 | 256x | 44.1k × 256 | 4x base rate |
+| 22579200 | 22.5792 | DSD512 | 512x | 44.1k × 512 | 8x base rate (recommended!) |
+| 45158400 | 45.1584 | DSD1024 | 1024x | 44.1k × 1024 | 16x base rate (high-end) |
+| 90316800 | 90.3168 | DSD2048 | 2048x | 44.1k × 2048 | 32x base rate (extreme) |
+
+**ВАЖЛИВО: Base rate = 44.1 kHz (CD sample rate)**
 
 ### Вибір Sample Rate
 
@@ -411,12 +444,17 @@
 - **Ratio**: Підтримувані коефіцієнти конвертації
   - **Integer**: Тільки цілочисельні (2x, 4x, 8x, 16x)
   - **Any**: Будь-які коефіцієнти
-  - **2x up**: Тільки upsampling в 2 рази
+  - **2x up**: Тільки upsampling в 2 рази (⚠️ потребує matching base rate!)
   - **Integer up**: Цілочисельний upsampling
 - **Apod**: Apodizing capability
   - **Y**: Має аподизацію (видаляє pre-ringing)
   - **N**: Без аподизації
   - **½**: Часткова аподизація
+
+**⚠️ ВАЖЛИВО - Base Rate Compatibility:**
+- **sinc-*** фільтри (всі що починаються з "sinc-"): працюють ТІЛЬКИ з matching base rate (44.1k→44.1k або 48k→48k)
+- **closed-form*** фільтри: працюють ТІЛЬКИ з matching base rate
+- **poly-sinc-***, **IIR***, **FIR*** фільтри: universal (працюють з будь-якими base rates)
 
 ### SDM Output Processing
 
@@ -702,18 +740,97 @@ Focus: Transients + Timbre
 
 ## Terminology для AI
 
-**Важливі терміни:**
+### Аудіо формати
+
+**PCM (Pulse Code Modulation):**
+- Multi-bit format (16-bit, 24-bit, 32-bit)
+- Кожен sample - це число (amplitude value)
+- Sample rates: 44.1 kHz, 48 kHz, 96 kHz, 192 kHz, 384 kHz, 768 kHz
+- Приклад: CD = 16-bit @ 44.1 kHz
+- Приклад: Hi-Res = 24-bit @ 192 kHz
+
+**DSD (Direct Stream Digital) / SDM (Sigma-Delta Modulation):**
+- **1-bit format** - кожен sample це 0 або 1
+- Дуже високі sample rates (мегагерци)
+- Аудіо кодується через pulse density (PDM)
+- **Base rate = 44.1 kHz** (CD sample rate)
+- Число в назві = множник: DSD64 = 44.1k × 64, DSD256 = 44.1k × 256
+- Приклад: DSD256 = 44.1k × 256 = 11.2896 MHz (1-bit)
+- Приклад: DSD512 = 44.1k × 512 = 22.5792 MHz (1-bit)
+
+**Як читати DSD формат:**
+- `DSD256(1bit 11.2MHz)` означає:
+  - DSD**256** = **44.1 kHz × 256** multiplier
+  - Розрахунок: 44100 × 256 = 11,289,600 Hz
+  - 1-bit = кожен sample один біт
+  - 11.2MHz = 11.2896 MHz sample rate (округлено в специфікації)
+  - Точна частота: **11289600 Hz**
+
+**Розрахунок DSD частот (КРИТИЧНО для AI):**
+```
+Формула: DSDxxx = 44100 Hz × xxx
+
+Приклади:
+DSD64   = 44100 × 64   = 2,822,400 Hz  = 2.8224 MHz
+DSD128  = 44100 × 128  = 5,644,800 Hz  = 5.6448 MHz
+DSD256  = 44100 × 256  = 11,289,600 Hz = 11.2896 MHz ≈ 11.2 MHz
+DSD512  = 44100 × 512  = 22,579,200 Hz = 22.5792 MHz ≈ 22.4 MHz
+DSD1024 = 44100 × 1024 = 45,158,400 Hz = 45.1584 MHz ≈ 45.2 MHz
+```
+
+**Коли в специфікації DAC вказано:**
+- `DSD256(1bit 11.2MHz)` → розуміти як **44.1k × 256 = 11289600 Hz**
+- `DSD512(1bit 22.4MHz)` → розуміти як **44.1k × 512 = 22579200 Hz**
+- Округлення в MHz - це нормально, але точна частота завжди кратна 44.1k
+
+**Конвертація між форматами:**
+- PCM → DSD: Delta-Sigma modulation (потрібен modulator)
+- DSD → PCM: Decimation (потрібен integrator + noise filter)
+- PCM → PCM: Upsampling (потрібен filter)
+- DSD → DSD: Remodulation (потрібен integrator + modulator)
+
+### Обробка сигналу
 
 - **Upsampling** = Збільшення sample rate
 - **Oversampling** = Те саме що upsampling
-- **Noise shaping** = Зсув quantization noise у вищі частоти
-- **Dithering** = Додавання шуму для лінеаризації
-- **Delta-Sigma modulation** = Конвертація в 1-bit DSD
-- **Apodizing** = Видалення pre-ringing artifacts
-- **R2R DAC** = Resistor ladder DAC (multibit)
-- **SDM** = Sigma-Delta Modulation (DSD)
-- **EC** = Extended Compensation
-- **Adaptive** (ASDM) = Адаптується до сигналу
+- **Noise shaping** = Зсув quantization noise у вищі частоти (для PCM)
+- **Dithering** = Додавання шуму для лінеаризації (для PCM)
+- **Delta-Sigma modulation** = Конвертація PCM в 1-bit DSD
+- **Apodizing** = Видалення pre-ringing artifacts (коли Apod counter > 10)
+- **Pre-ringing** = Artifacts перед transients (типово від CD filters)
+- **Post-ringing** = Artifacts після transients
+
+### Типи DAC
+
+- **R2R DAC** = Resistor ladder DAC (multibit, discrete)
+  - Приклади: Holo Audio, Denafrips, LAiV Harmony
+  - Optimal: PCM з high rates (768 kHz) + noise shaping (LNS15)
+  - Linearity errors → корегуються через noise shaping
+
+- **ESS Sabre DAC** = Delta-Sigma DAC від ESS Technology
+  - Приклади: ES9038PRO, ES9028PRO, ES9018
+  - Optimal: DSD з 5th order modulators (ASDM5EC-super)
+
+- **Multi-element DAC** = DAC з multiple converter elements
+  - Optimal: DSD з 7th order modulators (ASDM7EC-super)
+
+### Характеристики фільтрів
+
+- **Linear Phase** (lp) = Рівна фазова затримка всіх частот, симетричний ring
+- **Minimum Phase** (mp) = Без pre-ring, весь ring після transient
+- **Intermediate Phase** (ip) = Між linear та minimum phase
+- **Transients** = Атаки звуків, швидкі зміни сигналу
+- **Timbre** = Тембр, гармонічна структура звуку
+- **Space** = Просторові характеристики, стереобаза, reverb tails
+
+### Специфічні терміни
+
+- **EC** = Extended Compensation (покращена корекція в modulators)
+- **Adaptive** (ASDM) = Адаптується до сигналу в реальному часі
+- **Apod counter** = Лічильник apodizing потреби (>10 = потрібен apodizing filter)
+- **Constant time filter** = Фільтр з фіксованим числом taps незалежно від rate
+- **Half-band filter** (hb) = Фільтр з cutoff на половині Nyquist frequency
+- **2-stage processing** (*-2s) = Два етапи: ≥8x upsampling, потім фінальний filter
 
 ---
 
@@ -769,7 +886,33 @@ def auto_select_settings(track_info, user_preferences=None):
     else:
         mode = "PCM"  # Безпечний вибір
 
-    # 4. Вибрати фільтр
+    # 4. Визначити base rate families
+    def get_base_family(rate):
+        if rate % 44100 == 0:
+            return '44.1k'
+        elif rate % 48000 == 0:
+            return '48k'
+        else:
+            return 'other'
+
+    source_family = get_base_family(sample_rate)
+
+    # Target family залежить від режиму
+    if mode == "SDM":
+        # DSD зазвичай 44.1k family (стандарт)
+        target_family = '44.1k'
+    else:
+        # PCM - визначаємо з target rate
+        if cpu_power in ['high', 'extreme'] and dac_type == 'R2R':
+            target_rate = 768000  # 44.1k × 16 або 48k × 16
+            target_family = get_base_family(target_rate) if target_rate else source_family
+        else:
+            target_family = source_family  # Зберігаємо ту ж family
+
+    # Перевірка чи base rates співпадають
+    base_rates_match = (source_family == target_family)
+
+    # 5. Вибрати фільтр
     filter_name = None
     if mode == "PCM" or is_dsd:  # Фільтр потрібен для PCM джерел
         # Визначити apodizing потребу (симулюємо Apod counter)
@@ -777,7 +920,11 @@ def auto_select_settings(track_info, user_preferences=None):
 
         # За жанром та фокусом
         if genre in ['classical', 'jazz', 'blues'] or focus == 'space':
-            if cpu_power == 'extreme':
+            if cpu_power == 'extreme' and base_rates_match:
+                # sinc-MGa працює ТІЛЬКИ якщо base rates співпадають
+                filter_name = "sinc-MGa" if needs_apodizing else "sinc-MG"
+            elif cpu_power == 'extreme':
+                # Fallback to universal filter якщо base rates різні
                 filter_name = "poly-sinc-gauss-xla" if needs_apodizing else "poly-sinc-gauss-xl"
             elif cpu_power == 'high':
                 filter_name = "poly-sinc-gauss-long"
@@ -878,7 +1025,7 @@ def auto_select_settings(track_info, user_preferences=None):
 #### Приклад 1: Hi-Res FLAC (192kHz/24bit) + R2R DAC + Потужний CPU
 ```python
 track = {
-    'sample_rate': 192000,
+    'sample_rate': 192000,  # 48k × 4 → 48k family
     'bit_depth': 24,
     'format': 'FLAC',
     'genre': 'Classical',
@@ -886,19 +1033,25 @@ track = {
 }
 prefs = {'dac_type': 'R2R', 'cpu_power': 'high', 'focus': 'space'}
 
+# Аналіз AI:
+# Source: 192000 Hz (48k family)
+# Target: 768000 Hz (48k × 16 = 48k family)
+# Base rates MATCH ✅ → можна використати будь-який фільтр
+
 # Результат:
 {
     'mode': 'PCM',
-    'filter': 'poly-sinc-gauss-long',
+    'filter': 'poly-sinc-gauss-long',  # Universal filter
     'modulator_or_shaper': 'LNS15',
-    'output_rate': 768000
+    'output_rate': 768000,
+    'base_rate_match': True
 }
 ```
 
 #### Приклад 2: CD FLAC (44.1kHz/16bit) + ESS DAC
 ```python
 track = {
-    'sample_rate': 44100,
+    'sample_rate': 44100,  # 44.1k × 1 → 44.1k family
     'bit_depth': 16,
     'format': 'FLAC',
     'genre': 'Jazz',
@@ -906,12 +1059,45 @@ track = {
 }
 prefs = {'dac_type': 'ESS', 'cpu_power': 'medium', 'focus': 'balanced'}
 
+# Аналіз AI:
+# Source: 44100 Hz (44.1k family)
+# Target: DSD512 = 22579200 Hz (44.1k × 512 = 44.1k family)
+# Base rates MATCH ✅ → можна використати будь-який фільтр
+
 # Результат:
 {
     'mode': 'SDM',
     'filter': 'poly-sinc-gauss-medium',  # Для PCM → DSD конвертації
     'modulator_or_shaper': 'ASDM5EC-super',
-    'output_rate': 22579200  # DSD512
+    'output_rate': 22579200,  # DSD512
+    'base_rate_match': True
+}
+```
+
+#### Приклад 2b: Hi-Res 96k → DSD (різні base families!)
+```python
+track = {
+    'sample_rate': 96000,  # 48k × 2 → 48k family ⚠️
+    'bit_depth': 24,
+    'format': 'FLAC',
+    'genre': 'Classical',
+    'quality_source': 'Hi-Res'
+}
+prefs = {'dac_type': 'Delta-Sigma', 'cpu_power': 'extreme', 'focus': 'space'}
+
+# Аналіз AI:
+# Source: 96000 Hz (48k family)
+# Target: DSD512 = 22579200 Hz (44.1k × 512 = 44.1k family)
+# Base rates NOT MATCH ❌ → НЕ можна використати sinc-MGa!
+
+# AI автоматично вибирає universal filter:
+{
+    'mode': 'SDM',
+    'filter': 'poly-sinc-gauss-xla',  # ✅ Universal (не sinc-MGa!)
+    'modulator_or_shaper': 'ASDM7EC-super 512+fs',
+    'output_rate': 22579200,  # DSD512
+    'base_rate_match': False,  # ⚠️ Різні families
+    'reasoning': 'Cannot use sinc-MGa: source is 48k family, target is 44.1k family. Using poly-sinc-gauss-xla instead.'
 }
 ```
 
@@ -1007,6 +1193,280 @@ prefs = {'dac_type': 'Delta-Sigma', 'cpu_power': 'extreme', 'focus': 'space'}
 - **SDK**: hqp-control-5292-src (engine 5.29.2)
 - **Форум**: HQPlayer Community Forum
 - **Розробник**: Jussi Laako / Signalyst
+
+---
+
+## Base Rate Families (44.1k vs 48k) - КРИТИЧНО!
+
+### Дві базові частоти в цифровому аудіо
+
+**ВАЖЛИВО:** Всі sample rates відштовхуються від двох base rates:
+- **44.1 kHz family** - CD standard
+- **48 kHz family** - DAT/Video standard
+
+### 44.1 kHz Family
+
+**PCM rates:**
+- 44100 Hz = 44.1k × 1
+- 88200 Hz = 44.1k × 2
+- 176400 Hz = 44.1k × 4
+- 352800 Hz = 44.1k × 8
+- 705600 Hz = 44.1k × 16
+
+**DSD rates (базуються на 44.1k):**
+- DSD64 = 44.1k × 64 = 2822400 Hz
+- DSD128 = 44.1k × 128 = 5644800 Hz
+- DSD256 = 44.1k × 256 = 11289600 Hz
+- DSD512 = 44.1k × 512 = 22579200 Hz
+- DSD1024/2048 = 44.1k × 1024/2048
+
+### 48 kHz Family
+
+**PCM rates:**
+- 48000 Hz = 48k × 1
+- 96000 Hz = 48k × 2
+- 192000 Hz = 48k × 4
+- 384000 Hz = 48k × 8
+- 768000 Hz = 48k × 16
+
+**DSD rates (рідше, але існують):**
+- DSD64 = 48k × 64 = 3072000 Hz
+- DSD128 = 48k × 128 = 6144000 Hz
+- тощо (рідко використовується)
+
+### Як визначити family треку
+
+```python
+def get_base_rate_family(sample_rate: int) -> str:
+    """
+    Визначити до якої base rate family належить трек
+
+    Returns: '44.1k' або '48k'
+    """
+    # Перевірка чи кратне 44100
+    if sample_rate % 44100 == 0:
+        return '44.1k'
+    # Перевірка чи кратне 48000
+    elif sample_rate % 48000 == 0:
+        return '48k'
+    else:
+        # Рідкісні випадки (32k, 22.05k, etc.)
+        return 'other'
+
+# Приклади:
+get_base_rate_family(88200)   # → '44.1k' (88200 = 44100 × 2)
+get_base_rate_family(96000)   # → '48k'  (96000 = 48000 × 2)
+get_base_rate_family(176400)  # → '44.1k' (176400 = 44100 × 4)
+get_base_rate_family(192000)  # → '48k'  (192000 = 48000 × 4)
+get_base_rate_family(2822400) # → '44.1k' (DSD64 = 44100 × 64)
+```
+
+### Сумісність фільтрів з base rate families
+
+**⚠️ КРИТИЧНО ДЛЯ ВИБОРУ ФІЛЬТРУ:**
+
+#### Фільтри що ПОТРЕБУЮТЬ matching base rate (sinc-*)
+
+Ці фільтри працюють ТІЛЬКИ коли base rate треку = base rate DAC output:
+
+- ❌ **sinc-S, sinc-M, sinc-Mx** - потребують matching base rate
+- ❌ **sinc-MG, sinc-MGa** - потребують matching base rate
+- ❌ **sinc-L, sinc-Ls, sinc-Lm, sinc-Ll, sinc-Lh** - потребують matching base rate
+- ❌ **closed-form, closed-form-M, closed-form-16M** - потребують matching base rate
+
+**Приклад проблеми:**
+```
+Source: 96 kHz FLAC (48k family)
+Target: DSD256 = 11.2896 MHz (44.1k family)
+Filter: sinc-MGa ← ❌ НЕ ПРАЦЮВАТИМЕ (різні base rates!)
+
+Помилка: 48k family → 44.1k family conversion неможлива для sinc filters
+```
+
+#### Фільтри що працюють з ОБОМА families (universal)
+
+Ці фільтри можуть конвертувати між різними base rates:
+
+- ✅ **poly-sinc-gauss-*** - працюють з будь-якими base rates
+  - poly-sinc-gauss-short, medium, long, xla, xl
+  - poly-sinc-gauss-hires-lp/ip/mp
+  - poly-sinc-gauss-halfband, halfband-s
+
+- ✅ **poly-sinc-ext2-*** - працюють з будь-якими base rates
+  - poly-sinc-ext2, ext2-short, ext2-medium, ext2-long
+  - poly-sinc-ext2-xla, ext2-xl
+  - poly-sinc-ext2-hires-lp/ip/mp
+
+- ✅ **poly-sinc-xtr-*** - працюють з будь-якими base rates
+- ✅ **poly-sinc-lp/mp/shrt-lp/shrt-mp** - працюють з будь-якими base rates
+- ✅ **IIR, IIR2** - працюють з будь-якими base rates
+- ✅ **FIR, asymFIR, minphaseFIR** - працюють з будь-якими base rates
+
+**Приклад правильного вибору:**
+```
+Source: 96 kHz FLAC (48k family)
+Target: DSD256 = 11.2896 MHz (44.1k family)
+Filter: poly-sinc-gauss-xla ← ✅ ПРАЦЮЄ (universal filter)
+
+Conversion: 48k family → 44.1k family OK!
+```
+
+### Логіка вибору фільтру з урахуванням base rate
+
+```python
+def select_filter_with_base_rate_check(source_rate: int, target_rate: int, preferred_filter: str):
+    """
+    Вибрати фільтр з перевіркою base rate compatibility
+    """
+    source_family = get_base_rate_family(source_rate)
+    target_family = get_base_rate_family(target_rate)
+
+    # Перевірити чи це sinc filter
+    is_sinc_filter = preferred_filter.startswith('sinc-') or preferred_filter.startswith('closed-form')
+
+    if is_sinc_filter and source_family != target_family:
+        # Base rates не співпадають - sinc filter НЕ МОЖНА використати
+        print(f"⚠️ Warning: {preferred_filter} requires matching base rates")
+        print(f"   Source: {source_rate} Hz ({source_family} family)")
+        print(f"   Target: {target_rate} Hz ({target_family} family)")
+        print(f"   Switching to universal filter: poly-sinc-gauss-xla")
+        return "poly-sinc-gauss-xla"  # Fallback to universal filter
+
+    return preferred_filter
+
+# Приклади:
+select_filter_with_base_rate_check(96000, 11289600, "sinc-MGa")
+# → "poly-sinc-gauss-xla" (автоматична заміна, бо base rates різні)
+
+select_filter_with_base_rate_check(88200, 11289600, "sinc-MGa")
+# → "sinc-MGa" (OK, обидва 44.1k family)
+
+select_filter_with_base_rate_check(96000, 11289600, "poly-sinc-gauss-xla")
+# → "poly-sinc-gauss-xla" (OK, universal filter)
+```
+
+### Практичні сценарії
+
+#### Сценарій 1: CD rip (44.1k) → DSD256 (44.1k family)
+```
+Source: 44100 Hz (44.1k family)
+Target: DSD256 = 11289600 Hz (44.1k family)
+Base rates: MATCH ✅
+
+Можна використати:
+✅ sinc-MGa (matching base rates)
+✅ sinc-MG
+✅ poly-sinc-gauss-xla (universal)
+✅ poly-sinc-ext2-xla (universal)
+```
+
+#### Сценарій 2: Hi-Res 96k → DSD256 (різні families)
+```
+Source: 96000 Hz (48k family)
+Target: DSD256 = 11289600 Hz (44.1k family)
+Base rates: NOT MATCH ❌
+
+НЕ можна використати:
+❌ sinc-MGa (потребує matching base rate)
+❌ sinc-MG
+❌ sinc-M, sinc-S, sinc-L series
+
+Можна використати:
+✅ poly-sinc-gauss-xla (universal filter - рекомендовано!)
+✅ poly-sinc-ext2-xla (universal)
+✅ poly-sinc-gauss-long
+✅ IIR2
+```
+
+#### Сценарій 3: Mixed library (44.1k + 48k tracks) → DSD DAC
+```
+Library містить:
+- CD rips: 44.1k family
+- Hi-Res downloads: 48k family (96k, 192k)
+- Vinyl rips: 96k (48k family)
+
+DAC output: DSD512 (44.1k family)
+
+Рішення AI:
+- Використовувати ТІЛЬКИ universal filters:
+  ✅ poly-sinc-gauss-xla (найкраще для обох families)
+  ✅ poly-sinc-ext2-long (альтернатива)
+
+- НЕ використовувати:
+  ❌ sinc-MGa (не працюватиме для 48k треків)
+```
+
+### Рекомендації для AI агента
+
+**Коли вибирати фільтр:**
+
+1. **Визначити base rate family** джерела та виходу
+2. **Якщо families співпадають:**
+   - Можна використовувати будь-які фільтри (включно з sinc-*)
+   - sinc-MGa - найкраща якість для matching base rates
+
+3. **Якщо families НЕ співпадають:**
+   - ❌ НІКОЛИ не використовувати sinc-* filters
+   - ✅ Використовувати poly-sinc-gauss-* (рекомендовано)
+   - ✅ Або poly-sinc-ext2-*
+
+4. **Для mixed library (44.1k + 48k треки):**
+   - Завжди використовувати universal filters
+   - poly-sinc-gauss-xla - найкращий вибір для всіх випадків
+
+**Тому користувач використовує poly-sinc-gauss-xla або sinc-MGa в залежності від формату:**
+- **Якщо source і DAC - обидва 44.1k family** → sinc-MGa (найкраща якість)
+- **Якщо різні families** → poly-sinc-gauss-xla (universal, працює завжди)
+
+---
+
+## Швидка довідка DSD для AI (самоперевірка)
+
+**Питання для перевірки розуміння:**
+
+Q: Що означає DSD256(1bit 11.2MHz)?
+A: 44.1 kHz × 256 = 11,289,600 Hz = 11.2896 MHz, 1-bit формат
+
+Q: Яка base rate для всіх DSD форматів?
+A: 44.1 kHz (CD sample rate)
+
+Q: Як розрахувати DSD512?
+A: 44100 × 512 = 22,579,200 Hz = 22.5792 MHz
+
+Q: Чому в специфікації написано "11.2 MHz" а не "11.2896 MHz"?
+A: Округлення для зручності, точна частота завжди 44.1k × multiplier
+
+Q: DAC підтримує DSD256. Який rate вибрати в HQPlayer?
+A: output_rate = 11289600 (Hz), це буде DSD256
+
+**Швидка таблиця для копіювання:**
+```
+DSD64   → 2822400 Hz   (44.1k family)
+DSD128  → 5644800 Hz   (44.1k family)
+DSD256  → 11289600 Hz  (44.1k family) ← коли бачиш "DSD256(1bit 11.2MHz)"
+DSD512  → 22579200 Hz  (44.1k family) ← коли бачиш "DSD512(1bit 22.4MHz)"
+DSD1024 → 45158400 Hz  (44.1k family)
+DSD2048 → 90316800 Hz  (44.1k family)
+```
+
+**Base Rate Families - швидка перевірка:**
+```
+44.1k family: 44100, 88200, 176400, 352800, 705600, + всі DSD
+48k family:   48000, 96000, 192000, 384000, 768000
+
+Перевірка: sample_rate % 44100 == 0 → 44.1k family
+           sample_rate % 48000 == 0 → 48k family
+```
+
+**Filter Compatibility - швидка перевірка:**
+```
+sinc-* filters (sinc-MGa, sinc-MG, sinc-M, etc.):
+  ✅ Працюють: якщо source family == target family
+  ❌ НЕ працюють: якщо source family != target family
+
+poly-sinc-gauss-*, poly-sinc-ext2-*, IIR*, FIR*:
+  ✅ Працюють ЗАВЖДИ (universal filters)
+```
 
 ---
 
