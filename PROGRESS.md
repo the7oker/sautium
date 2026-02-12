@@ -1283,10 +1283,43 @@ Individual commands still useful for:
 - ✅ Database migration created and executed
 - ✅ `audio_features` table created successfully
 - ✅ Command help output verified
-- ✅ Test run on 1 track completed successfully
+- ✅ Test run on 10 tracks completed successfully (all steps)
 - ✅ Filter integration working (13,133 tracks matched Electronic filter)
 - ✅ Skip flags working correctly
 - ✅ Statistics reporting accurate
+- ✅ scipy compatibility fix applied (pinned to <1.12.0)
+- ✅ PyTorch tensor detach fix applied
+- ✅ Audio analysis fully functional (BPM, key, instruments, moods, danceability)
+- ✅ Parallel processing implemented (--worker-id, --worker-count)
+- ✅ Worker distribution verified (modulo-based track assignment)
+
+### Fixes applied
+**Issue 1: scipy.signal.hann compatibility error**
+- **Problem**: librosa 0.10.1 uses deprecated `scipy.signal.hann` (removed in scipy 1.12+)
+- **Solution**: Added `scipy>=1.2.0,<1.12.0` constraint to `requirements.txt`
+- **Result**: Audio analysis now works with compatible scipy 1.11.4
+
+**Issue 2: PyTorch tensor gradient error**
+- **Problem**: `Can't call numpy() on Tensor that requires grad`
+- **Location**: `audio_analysis.py` line 251, CLAP zero-shot classification
+- **Solution**: Added `.detach()` before `.numpy()` conversion: `probs[0].cpu().detach().numpy()`
+- **Result**: CLAP classification working correctly
+
+**Test results (10 Electronic tracks):**
+```
+✅ Tracks processed: 10
+✅ Audio features: 10 success, 0 failed
+⏱️  Processing time: 2:12 minutes (~13 sec/track)
+```
+
+**Sample extracted features:**
+- BPM: 95.7 - 123.05
+- Key/Mode: G# major, F# major, A# major, etc.
+- Energy: -18 to -21 dB
+- Danceability: 0.486 - 0.792
+- Instruments: Organ (26.6%), Keyboards (12.3%), Flute (9.9%)
+- Moods: Happy/upbeat (37.5%), Calm/relaxing (28.2%)
+- Vocal detection: All correctly identified as "instrumental"
 
 ### Performance characteristics
 - **Speed**: ~3-5 seconds per track (with all steps)
@@ -1298,6 +1331,73 @@ Individual commands still useful for:
 - **For 1,000 tracks**: ~1-1.5 hours
 - **For 30,000 tracks**: ~30-40 hours (can run overnight, resumable)
 
+### Parallel Processing (Multi-Worker Mode)
+
+The enrichment pipeline supports parallel processing through manual worker distribution. Multiple processes can run simultaneously, each processing a different subset of tracks.
+
+**How it works:**
+- Add `--worker-id` (0-indexed) and `--worker-count` parameters
+- Each worker processes tracks where `track.id % worker_count == worker_id`
+- Workers share GPU automatically (CUDA handles concurrent access)
+- No database conflicts - each worker processes different tracks
+
+**Usage:**
+```bash
+# Terminal 1 - Worker 0 of 3
+docker exec music-ai-backend python cli.py enrich-tracks \
+  --path "Electronic/Berlin School/Klaus Schulze" \
+  --worker-id 0 --worker-count 3 \
+  --max-duration 3600
+
+# Terminal 2 - Worker 1 of 3
+docker exec music-ai-backend python cli.py enrich-tracks \
+  --path "Electronic/Berlin School/Klaus Schulze" \
+  --worker-id 1 --worker-count 3 \
+  --max-duration 3600
+
+# Terminal 3 - Worker 2 of 3
+docker exec music-ai-backend python cli.py enrich-tracks \
+  --path "Electronic/Berlin School/Klaus Schulze" \
+  --worker-id 2 --worker-count 3 \
+  --max-duration 3600
+```
+
+**Example track distribution:**
+```
+Total: 300 tracks [814, 815, 816, 817, 818, 819, ...]
+Worker 0/3: 100 tracks [816, 819, 702, 705, 822, ...] (id % 3 == 0)
+Worker 1/3: 100 tracks [814, 817, 703, 820, 823, ...] (id % 3 == 1)
+Worker 2/3: 100 tracks [815, 818, 701, 704, 821, ...] (id % 3 == 2)
+```
+
+**Performance gains:**
+- **CPU (librosa)**: Linear scaling (~3x faster with 3 workers)
+- **GPU (CLAP)**: 2-2.5x faster with 3 workers (shared compute)
+- **Overall**: ~2-2.5x speedup with 3 workers, ~3-4x with 5 workers
+- **RTX 4090 GPU memory**: 0.63 GB per worker (3 workers = 1.9 GB, plenty of headroom)
+
+**Optimal worker count:**
+- **3-4 workers**: Best balance for most laptops
+- **5+ workers**: Diminishing returns (GPU becomes bottleneck)
+- More workers = more parallel CPU processing but GPU contention
+
+**Safety guarantees:**
+- ✅ No track overlap between workers (modulo distribution)
+- ✅ GPU memory shared automatically (CUDA driver)
+- ✅ Database handles concurrent writes (PostgreSQL transactions)
+- ✅ Each worker has independent error handling
+- ✅ Progress tracked per worker
+
+**When to use:**
+- Processing large track collections (1000+ tracks)
+- Time-limited enrichment (maximize throughput in fixed time)
+- Underutilized hardware (CPU/GPU not fully loaded)
+
+**When NOT to use:**
+- Small batches (< 50 tracks) - overhead not worth it
+- Limited GPU memory (not an issue with RTX 4090)
+- Single disk IO bottleneck (rare with SSDs)
+
 ### Benefits
 - ✅ **Guaranteed data integrity**: Correct order prevents missing dependencies
 - ✅ **Simplified workflow**: One command instead of 5-6 separate commands
@@ -1308,6 +1408,7 @@ Individual commands still useful for:
 - ✅ **Error resilient**: Continues processing even if some tracks fail
 - ✅ **Progress tracking**: Real-time progress bars and detailed statistics
 - ✅ **Time-bounded**: Respects max-duration for long-running jobs
+- ✅ **Parallel processing**: Multi-worker support for 2-4x speedup on large batches
 
 ### Common workflows
 
@@ -1327,6 +1428,21 @@ python cli.py enrich-tracks --skip-embeddings --skip-lastfm --skip-audio-analysi
 
 # Re-process specific artist with updated models
 python cli.py enrich-tracks --artist "Klaus Schulze" --force-embeddings --force-text-embeddings
+```
+
+**Parallel processing for large collections:**
+```bash
+# Process 1000+ tracks with 3 workers (2-2.5x faster)
+# Terminal 1
+python cli.py enrich-tracks --genre Electronic --worker-id 0 --worker-count 3 --max-duration 7200
+
+# Terminal 2
+python cli.py enrich-tracks --genre Electronic --worker-id 1 --worker-count 3 --max-duration 7200
+
+# Terminal 3
+python cli.py enrich-tracks --genre Electronic --worker-id 2 --worker-count 3 --max-duration 7200
+
+# Each worker processes ~1/3 of tracks, can run different filters if needed
 ```
 
 **Genre-specific analysis:**

@@ -1206,10 +1206,13 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
 @click.option("--force-text-embeddings", is_flag=True, help="Regenerate text embeddings even if exist")
 @click.option("--force-audio-analysis", is_flag=True, help="Re-analyze audio even if features exist")
 @click.option("--lastfm-delay", type=float, default=0.2, help="Delay between Last.fm requests (seconds)")
+@click.option("--worker-id", type=int, default=None, help="Worker ID for parallel processing (0-indexed, use with --worker-count)")
+@click.option("--worker-count", type=int, default=None, help="Total number of workers for parallel processing (use with --worker-id)")
 @track_filter_options
 def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastfm,
                   skip_text_embeddings, skip_audio_analysis, force_embeddings,
                   force_text_embeddings, force_audio_analysis, lastfm_delay,
+                  worker_id, worker_count,
                   filter_artist, filter_album, filter_genre, filter_path,
                   filter_tag, filter_track_number, filter_quality):
     """
@@ -1225,10 +1228,28 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
 
     Only processes missing data unless --force flags are used.
     Supports all filter options for targeted processing.
+
+    Parallel processing: Use --worker-id and --worker-count to split work across multiple processes.
     """
     from track_enrichment import TrackEnrichmentPipeline
 
+    # Validate worker parameters
+    if (worker_id is not None) != (worker_count is not None):
+        click.echo("❌ Error: --worker-id and --worker-count must be used together", err=True)
+        sys.exit(1)
+
+    if worker_count is not None:
+        if worker_count < 1:
+            click.echo("❌ Error: --worker-count must be at least 1", err=True)
+            sys.exit(1)
+        if worker_id < 0 or worker_id >= worker_count:
+            click.echo(f"❌ Error: --worker-id must be between 0 and {worker_count - 1}", err=True)
+            sys.exit(1)
+
     click.echo("🎵 Starting comprehensive track enrichment...")
+
+    if worker_count is not None:
+        click.echo(f"👷 Worker mode: {worker_id + 1}/{worker_count} (processing tracks where id % {worker_count} == {worker_id})")
 
     # Show configuration
     skip_steps = []
@@ -1292,6 +1313,8 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
             order_by_date=newest_first,
             max_duration_seconds=max_duration,
             track_ids=track_ids,
+            worker_id=worker_id,
+            worker_count=worker_count,
         )
 
         click.echo("\n✅ Track enrichment complete!")

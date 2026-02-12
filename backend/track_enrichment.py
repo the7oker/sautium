@@ -352,6 +352,8 @@ class TrackEnrichmentPipeline:
         order_by_date: bool = False,
         max_duration_seconds: Optional[int] = None,
         track_ids: Optional[List[int]] = None,
+        worker_id: Optional[int] = None,
+        worker_count: Optional[int] = None,
     ) -> Dict[str, int]:
         """
         Run comprehensive enrichment pipeline on tracks.
@@ -361,6 +363,8 @@ class TrackEnrichmentPipeline:
             order_by_date: Process newest tracks first
             max_duration_seconds: Maximum duration in seconds
             track_ids: Specific track IDs to process (from filters)
+            worker_id: Worker ID for parallel processing (0-indexed)
+            worker_count: Total number of workers for parallel processing
 
         Returns:
             Statistics dict with counts per step
@@ -395,6 +399,13 @@ class TrackEnrichmentPipeline:
                     query = query.limit(limit)
 
                 tracks = query.all()
+                total_before_worker_filter = len(tracks)
+
+                # Worker filtering: assign tracks to workers based on track.id modulo
+                if worker_count is not None:
+                    tracks = [t for t in tracks if t.id % worker_count == worker_id]
+                    logger.info(f"Worker {worker_id}/{worker_count}: filtered to {len(tracks)} tracks (from {total_before_worker_filter} total)")
+
                 total = len(tracks)
 
                 if total == 0:
