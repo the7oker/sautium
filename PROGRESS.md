@@ -1004,6 +1004,132 @@ After audio features are extracted and tested, next step is HQPlayer control for
 
 ---
 
+## Track Filtering for Batch Processing - DONE
+
+### What was done
+- **New module**: `backend/track_filter.py` - Shared filtering logic for all batch processing commands
+  - `get_filtered_track_ids(db, ...)` - SQL-based filtering returning matching track IDs
+    - Returns `None` if no filters active (= "all tracks")
+    - Returns `List[int]` (possibly empty) if any filter is active
+    - Dynamic JOIN construction - only adds tables when needed by filters
+    - All string filters use ILIKE (case-insensitive partial match)
+  - `track_filter_options` - Click decorator adding 7 filter options to commands
+  - `describe_filters(**kwargs)` - Human-readable description of active filters
+- **Filter parameters** (7 options):
+  - `--artist` - Filter by artist name (partial match)
+  - `--album` - Filter by album title (partial match)
+  - `--genre` - Filter by genre name (partial match)
+  - `--path` - Filter by file path (e.g. "Electronic/Berlin School")
+  - `--tag` - Filter by Last.fm tag (searches artist_tags + album_tags)
+  - `--track-number/-n` - Filter by track number (e.g. 1 for first tracks)
+  - `--quality` - Filter by quality source (CD, Vinyl, Hi-Res, MP3)
+- **Updated batch processors**:
+  - `embeddings.py`: Added `track_ids` parameter to `generate_embeddings()` and wrapper
+  - `text_embeddings.py`: Added `track_ids` parameter to `generate_all()` and wrapper
+  - `audio_analysis.py`: Added `track_ids` parameter to `analyze_all()`
+- **Updated CLI commands**: All 3 batch commands now support filtering:
+  - `generate-embeddings` + `@track_filter_options`
+  - `generate-text-embeddings` + `@track_filter_options`
+  - `analyze-audio` + `@track_filter_options`
+- **CLI helper**: `_resolve_filters()` function
+  - Resolves filter options into track IDs
+  - Prints filter description and match count
+  - Early exits if no matches found
+
+### Design decisions
+- **Shared module**: Single source of truth for filter logic - DRY principle
+- **Dynamic SQL**: JOINs added only when needed for better performance
+- **Backward compatible**: No filters = exact same behavior as before
+- **Filter precedence**: Filters apply BEFORE `--limit` (limit applies to filtered set)
+- **Tag search**: Searches both artist_tags and album_tags using EXISTS subqueries
+- **Track number = 0**: Handled correctly with `is not None` checks (0 is a valid track number)
+
+### Usage examples
+```bash
+# Scan specific directory/subdirectory (not affected by new filters)
+python cli.py scan --path "Electronic/Berlin School/Klaus Schulze"
+python cli.py scan --path "Blues/Beth Hart & Joe Bonamassa"
+
+# Generate embeddings only for Klaus Schulze
+python cli.py generate-embeddings --artist "Klaus Schulze"
+
+# Analyze audio for Electronic/Berlin School folder
+python cli.py analyze-audio --path "Electronic/Berlin School"
+
+# First track of each album in IDM genre
+python cli.py generate-embeddings --genre IDM --track-number 1
+
+# First tracks of albums tagged as psychill (Last.fm tags)
+python cli.py analyze-audio --tag psychill --track-number 1
+
+# Vinyl rips only
+python cli.py generate-text-embeddings --quality Vinyl
+
+# Combine with existing flags
+python cli.py analyze-audio --genre electronic --limit 50 --max-duration 600 --newest-first
+```
+
+### Integration with existing flags
+- `--force` + filters: Re-process matching tracks even if already done
+- `--limit` applies AFTER filtering (500 match, --limit 10 → process 10)
+- `--newest-first` orders within filtered set
+- `--max-duration` still applies for time-limiting
+- No filters = exact same behavior as before (backward compatible)
+
+### Testing status - READY FOR TESTING ⏳
+- ✅ Code implementation complete
+- ✅ All files pass syntax checks
+- ✅ Imports verified
+- ✅ Type hints consistent
+- ⏳ Awaiting real-world testing with actual filtering
+
+### Benefits
+- 🎯 **Targeted processing**: Process only what you need
+- ⚡ **Time savings**: No need to process entire library when testing or fixing specific artists
+- 🔍 **Exploration**: Easy to process samples from different genres/artists for comparison
+- 🏷️ **Tag-based workflows**: "Process all IDM first tracks" for genre-specific analysis
+- 📁 **Folder-based workflows**: Process specific folder hierarchies
+- 💿 **Quality-based workflows**: Process vinyl rips separately from CD rips
+
+### Architecture
+```
+CLI command
+    ↓
+┌──────────────────────────────┐
+│ _resolve_filters()           │
+│ ├── describe_filters()       │ → "artist~'Klaus', genre~'IDM'"
+│ └── get_filtered_track_ids() │ → [123, 456, 789]
+│     ├── Dynamic SQL          │
+│     ├── Conditional JOINs    │
+│     └── ILIKE matching       │
+└──────────────┬───────────────┘
+               ↓
+┌──────────────────────────────┐
+│ Batch processor              │
+│ ├── embeddings.py            │
+│ ├── text_embeddings.py       │
+│ └── audio_analysis.py        │
+│                              │
+│ WHERE track_id IN (...)      │
+└──────────────────────────────┘
+```
+
+### SQL optimization
+```sql
+-- Example: --artist "Klaus" --genre "IDM" --track-number 1
+SELECT DISTINCT t.id
+FROM tracks t
+JOIN track_artists ta ON t.id = ta.track_id
+JOIN artists a ON ta.artist_id = a.id
+JOIN track_genres tg ON t.id = tg.track_id
+JOIN genres g ON tg.genre_id = g.id
+WHERE a.name ILIKE '%Klaus%'
+  AND g.name ILIKE '%IDM%'
+  AND t.track_number = 1
+```
+
+---
+
 ## Next Steps
 
 ### Phase 2: External Data & Text Embeddings - COMPLETE ✅
