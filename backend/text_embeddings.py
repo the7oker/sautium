@@ -248,6 +248,7 @@ class TextEmbeddingGenerator:
         force: bool = False,
         order_by_date: bool = False,
         max_duration_seconds: Optional[int] = None,
+        track_ids: Optional[List[int]] = None,
     ) -> Dict[str, int]:
         """
         Generate text embeddings for all tracks (or those missing them).
@@ -258,6 +259,7 @@ class TextEmbeddingGenerator:
             force: If True, regenerate even if embedding exists.
             order_by_date: If True, process newest tracks first (by file_modified_at).
             max_duration_seconds: Maximum duration in seconds. Process will stop gracefully after this time.
+            track_ids: If provided, only process these track IDs.
 
         Returns:
             Stats dict with processed, success, failed counts.
@@ -270,15 +272,23 @@ class TextEmbeddingGenerator:
         # Get tracks to process
         order_clause = "ORDER BY file_modified_at DESC NULLS LAST" if order_by_date else "ORDER BY id"
 
-        if force:
-            query = sa_text(f"SELECT id FROM tracks {order_clause}")
-        else:
-            query = sa_text(f"SELECT id FROM tracks WHERE text_embedding IS NULL {order_clause}")
+        where_parts = []
+        params: Dict[str, Any] = {}
+
+        if not force:
+            where_parts.append("text_embedding IS NULL")
+
+        if track_ids is not None:
+            where_parts.append("id = ANY(:filter_track_ids)")
+            params["filter_track_ids"] = track_ids
+
+        where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+        query = sa_text(f"SELECT id FROM tracks {where_clause} {order_clause}")
 
         if limit:
             query = sa_text(str(query) + f" LIMIT {limit}")
 
-        rows = db.execute(query).fetchall()
+        rows = db.execute(query, params).fetchall()
         track_ids = [r[0] for r in rows]
 
         if not track_ids:
@@ -377,6 +387,7 @@ def generate_text_embeddings(
     force: bool = False,
     order_by_date: bool = False,
     max_duration_seconds: Optional[int] = None,
+    track_ids: Optional[List[int]] = None,
 ) -> Dict[str, int]:
     """
     Convenience function to generate text embeddings.
@@ -387,6 +398,7 @@ def generate_text_embeddings(
         force: Regenerate even if already exists.
         order_by_date: If True, process newest tracks first (by file_modified_at).
         max_duration_seconds: Maximum duration in seconds.
+        track_ids: If provided, only process these track IDs.
 
     Returns:
         Statistics dictionary.
@@ -394,6 +406,6 @@ def generate_text_embeddings(
     generator = TextEmbeddingGenerator(batch_size=batch_size)
     try:
         with get_db_context() as db:
-            return generator.generate_all(db, limit=limit, force=force, order_by_date=order_by_date, max_duration_seconds=max_duration_seconds)
+            return generator.generate_all(db, limit=limit, force=force, order_by_date=order_by_date, max_duration_seconds=max_duration_seconds, track_ids=track_ids)
     finally:
         generator.unload_model()

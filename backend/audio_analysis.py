@@ -337,6 +337,7 @@ class AudioAnalyzer:
         order_by_date: bool = False,
         librosa_only: bool = False,
         max_duration_seconds: Optional[int] = None,
+        track_ids: Optional[List[int]] = None,
     ) -> Dict[str, int]:
         """
         Batch analyze tracks and store results in audio_features table.
@@ -347,6 +348,7 @@ class AudioAnalyzer:
             order_by_date: Process newest tracks first.
             librosa_only: Skip CLAP classification (faster, DSP only).
             max_duration_seconds: Maximum duration in seconds. Process will stop gracefully after this time.
+            track_ids: If provided, only process these track IDs.
 
         Returns:
             Statistics dict.
@@ -370,6 +372,9 @@ class AudioAnalyzer:
                             db.query(AudioFeature.track_id)
                         )
                     )
+
+                if track_ids is not None:
+                    query = query.filter(Track.id.in_(track_ids))
 
                 if order_by_date:
                     query = query.order_by(Track.file_modified_at.desc().nulls_last())

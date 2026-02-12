@@ -13,6 +13,7 @@ from sqlalchemy import text
 from config import settings, LOGGING_CONFIG
 from database import get_db_context, engine
 from scanner import scan_library
+from track_filter import get_filtered_track_ids, describe_filters, track_filter_options
 
 # Configure logging
 logging.config.dictConfig(LOGGING_CONFIG)
@@ -23,6 +24,35 @@ logger = logging.getLogger(__name__)
 def cli():
     """Music AI DJ - AI-powered music library management."""
     pass
+
+
+def _resolve_filters(filter_artist, filter_album, filter_genre, filter_path,
+                     filter_tag, filter_track_number, filter_quality):
+    """
+    Resolve track filter options into a list of track IDs.
+
+    Returns None if no filters are active, or a list of matching track IDs.
+    Prints filter info and early-exits with empty list if nothing matched.
+    """
+    filter_kwargs = dict(
+        artist=filter_artist, album=filter_album, genre=filter_genre,
+        path=filter_path, tag=filter_tag, track_number=filter_track_number,
+        quality=filter_quality,
+    )
+    filter_desc = describe_filters(**filter_kwargs)
+    if not filter_desc:
+        return None
+
+    click.echo(f"🔍 Filters: {filter_desc}")
+    with get_db_context() as db:
+        track_ids = get_filtered_track_ids(db, **filter_kwargs)
+
+    if track_ids is not None and len(track_ids) == 0:
+        click.echo("⚠️  No tracks match the specified filters")
+        return track_ids
+
+    click.echo(f"📋 {len(track_ids)} tracks match filters")
+    return track_ids
 
 
 @cli.command()
@@ -67,7 +97,10 @@ def scan(limit, no_skip, path):
 @click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default from config)")
 @click.option("--newest-first", is_flag=True, help="Process newest tracks first (by file modification date)")
 @click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 1800 for 30 minutes)")
-def generate_embeddings(limit, batch_size, newest_first, max_duration):
+@track_filter_options
+def generate_embeddings(limit, batch_size, newest_first, max_duration,
+                        filter_artist, filter_album, filter_genre, filter_path,
+                        filter_tag, filter_track_number, filter_quality):
     """Generate audio embeddings for tracks using CLAP model."""
     from embeddings import generate_embeddings as do_generate
 
@@ -84,8 +117,16 @@ def generate_embeddings(limit, batch_size, newest_first, max_duration):
     if max_duration:
         click.echo(f"⏱️  Time limit: {max_duration} seconds ({max_duration/60:.1f} minutes)")
 
+    # Resolve track filters
+    track_ids = _resolve_filters(
+        filter_artist, filter_album, filter_genre, filter_path,
+        filter_tag, filter_track_number, filter_quality,
+    )
+    if track_ids is not None and len(track_ids) == 0:
+        return
+
     try:
-        stats = do_generate(limit=limit, batch_size=batch_size, order_by_date=newest_first, max_duration_seconds=max_duration)
+        stats = do_generate(limit=limit, batch_size=batch_size, order_by_date=newest_first, max_duration_seconds=max_duration, track_ids=track_ids)
 
         click.echo("\n✅ Embedding generation complete!")
         click.echo(f"📊 Statistics:")
@@ -562,7 +603,10 @@ def normalize_genres_cmd(dry_run):
 @click.option("--force", is_flag=True, help="Regenerate embeddings even if already exists")
 @click.option("--newest-first", is_flag=True, help="Process newest tracks first (by file modification date)")
 @click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 1800 for 30 minutes)")
-def generate_text_embeddings(limit, batch_size, force, newest_first, max_duration):
+@track_filter_options
+def generate_text_embeddings(limit, batch_size, force, newest_first, max_duration,
+                             filter_artist, filter_album, filter_genre, filter_path,
+                             filter_tag, filter_track_number, filter_quality):
     """Generate text embeddings from track metadata using sentence-transformers."""
     from text_embeddings import generate_text_embeddings as do_generate
 
@@ -579,8 +623,16 @@ def generate_text_embeddings(limit, batch_size, force, newest_first, max_duratio
     if max_duration:
         click.echo(f"⏱️  Time limit: {max_duration} seconds ({max_duration/60:.1f} minutes)")
 
+    # Resolve track filters
+    track_ids = _resolve_filters(
+        filter_artist, filter_album, filter_genre, filter_path,
+        filter_tag, filter_track_number, filter_quality,
+    )
+    if track_ids is not None and len(track_ids) == 0:
+        return
+
     try:
-        stats = do_generate(limit=limit, batch_size=batch_size, force=force, order_by_date=newest_first, max_duration_seconds=max_duration)
+        stats = do_generate(limit=limit, batch_size=batch_size, force=force, order_by_date=newest_first, max_duration_seconds=max_duration, track_ids=track_ids)
 
         click.echo("\n✅ Text embedding generation complete!")
         click.echo(f"📊 Statistics:")
@@ -1060,7 +1112,10 @@ def enrich_tracks(limit, artist, album, no_skip, delay):
 @click.option("--newest-first", is_flag=True, help="Process newest tracks first (by file modification date)")
 @click.option("--librosa-only", is_flag=True, help="Skip CLAP classification (faster, DSP features only)")
 @click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 1800 for 30 minutes)")
-def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_duration):
+@track_filter_options
+def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_duration,
+                  filter_artist, filter_album, filter_genre, filter_path,
+                  filter_tag, filter_track_number, filter_quality):
     """Extract audio features (BPM, key, instruments, mood, etc.) from tracks."""
     from audio_analysis import AudioAnalyzer
 
@@ -1078,12 +1133,20 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
     if max_duration:
         click.echo(f"⏱️  Time limit: {max_duration} seconds ({max_duration/60:.1f} minutes)")
 
+    # Resolve track filters
+    track_ids = _resolve_filters(
+        filter_artist, filter_album, filter_genre, filter_path,
+        filter_tag, filter_track_number, filter_quality,
+    )
+    if track_ids is not None and len(track_ids) == 0:
+        return
+
     try:
         analyzer = AudioAnalyzer()
         stats = analyzer.analyze_all(
             limit=limit, force=force,
             order_by_date=newest_first, librosa_only=librosa_only,
-            max_duration_seconds=max_duration,
+            max_duration_seconds=max_duration, track_ids=track_ids,
         )
 
         click.echo("\n✅ Audio analysis complete!")
