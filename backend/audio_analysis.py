@@ -248,7 +248,7 @@ class AudioAnalyzer:
         logits = logits * logit_scale
 
         probs = torch.nn.functional.softmax(logits, dim=-1)
-        probs = probs[0].cpu().numpy()
+        probs = probs[0].cpu().detach().numpy()
 
         return {label: round(float(prob), 3) for label, prob in zip(labels, probs)}
 

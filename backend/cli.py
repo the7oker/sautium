@@ -1194,6 +1194,130 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
         sys.exit(1)
 
 
+@cli.command("enrich-tracks")
+@click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process")
+@click.option("--newest-first", is_flag=True, help="Process newest tracks first (by file modification date)")
+@click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 1800 for 30 minutes)")
+@click.option("--skip-embeddings", is_flag=True, help="Skip audio embedding generation")
+@click.option("--skip-lastfm", is_flag=True, help="Skip Last.fm enrichment (artist, album, track)")
+@click.option("--skip-text-embeddings", is_flag=True, help="Skip text embedding generation")
+@click.option("--skip-audio-analysis", is_flag=True, help="Skip audio feature extraction")
+@click.option("--force-embeddings", is_flag=True, help="Regenerate audio embeddings even if exist")
+@click.option("--force-text-embeddings", is_flag=True, help="Regenerate text embeddings even if exist")
+@click.option("--force-audio-analysis", is_flag=True, help="Re-analyze audio even if features exist")
+@click.option("--lastfm-delay", type=float, default=0.2, help="Delay between Last.fm requests (seconds)")
+@track_filter_options
+def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastfm,
+                  skip_text_embeddings, skip_audio_analysis, force_embeddings,
+                  force_text_embeddings, force_audio_analysis, lastfm_delay,
+                  filter_artist, filter_album, filter_genre, filter_path,
+                  filter_tag, filter_track_number, filter_quality):
+    """
+    Comprehensive track enrichment pipeline.
+
+    Runs all data aggregation steps in correct order for each track:
+    1. Audio Embedding (CLAP) - if missing
+    2. Last.fm Artist Info - if missing
+    3. Last.fm Album Info - if missing
+    4. Last.fm Track Stats - if missing
+    5. Text Embedding - if missing (uses Last.fm data for better context)
+    6. Audio Analysis - if missing
+
+    Only processes missing data unless --force flags are used.
+    Supports all filter options for targeted processing.
+    """
+    from track_enrichment import TrackEnrichmentPipeline
+
+    click.echo("🎵 Starting comprehensive track enrichment...")
+
+    # Show configuration
+    skip_steps = []
+    if skip_embeddings:
+        skip_steps.append("audio embeddings")
+    if skip_lastfm:
+        skip_steps.append("Last.fm")
+    if skip_text_embeddings:
+        skip_steps.append("text embeddings")
+    if skip_audio_analysis:
+        skip_steps.append("audio analysis")
+
+    if skip_steps:
+        click.echo(f"⚠️  Skipping: {', '.join(skip_steps)}")
+
+    force_steps = []
+    if force_embeddings:
+        force_steps.append("audio embeddings")
+    if force_text_embeddings:
+        force_steps.append("text embeddings")
+    if force_audio_analysis:
+        force_steps.append("audio analysis")
+
+    if force_steps:
+        click.echo(f"🔄 Force regenerating: {', '.join(force_steps)}")
+
+    if limit:
+        click.echo(f"⚠️  Limited to {limit} tracks")
+
+    if newest_first:
+        click.echo(f"🆕 Processing newest tracks first")
+
+    if max_duration:
+        click.echo(f"⏱️  Time limit: {max_duration} seconds ({max_duration/60:.1f} minutes)")
+
+    if not skip_lastfm:
+        click.echo(f"⏱️  Last.fm delay: {lastfm_delay}s between requests")
+
+    # Resolve track filters
+    track_ids = _resolve_filters(
+        filter_artist, filter_album, filter_genre, filter_path,
+        filter_tag, filter_track_number, filter_quality,
+    )
+    if track_ids is not None and len(track_ids) == 0:
+        return
+
+    try:
+        pipeline = TrackEnrichmentPipeline(
+            skip_embeddings=skip_embeddings,
+            skip_lastfm=skip_lastfm,
+            skip_text_embeddings=skip_text_embeddings,
+            skip_audio_analysis=skip_audio_analysis,
+            force_embeddings=force_embeddings,
+            force_text_embeddings=force_text_embeddings,
+            force_audio_analysis=force_audio_analysis,
+            lastfm_delay=lastfm_delay,
+        )
+
+        stats = pipeline.enrich_tracks(
+            limit=limit,
+            order_by_date=newest_first,
+            max_duration_seconds=max_duration,
+            track_ids=track_ids,
+        )
+
+        click.echo("\n✅ Track enrichment complete!")
+        click.echo(f"📊 Statistics:")
+        click.echo(f"   • Tracks processed: {stats['processed']}")
+
+        if not skip_embeddings:
+            click.echo(f"   • Audio embeddings: {stats['audio_embedding_success']} success, {stats['audio_embedding_failed']} failed")
+
+        if not skip_lastfm:
+            click.echo(f"   • Last.fm artists: {stats['lastfm_artist_success']} enriched")
+            click.echo(f"   • Last.fm albums: {stats['lastfm_album_success']} enriched")
+            click.echo(f"   • Last.fm tracks: {stats['lastfm_track_success']} enriched")
+
+        if not skip_text_embeddings:
+            click.echo(f"   • Text embeddings: {stats['text_embedding_success']} success, {stats['text_embedding_failed']} failed")
+
+        if not skip_audio_analysis:
+            click.echo(f"   • Audio features: {stats['audio_features_success']} success, {stats['audio_features_failed']} failed")
+
+    except Exception as e:
+        click.echo(f"\n❌ Error: {e}", err=True)
+        logger.exception("Track enrichment failed")
+        sys.exit(1)
+
+
 @cli.command("search-features")
 @click.option("--bpm-min", type=float, default=None, help="Minimum BPM")
 @click.option("--bpm-max", type=float, default=None, help="Maximum BPM")
