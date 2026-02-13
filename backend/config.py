@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     hqplayer_port: int = 4321
     hqplayer_enabled: bool = False
 
+    # Web UI: path prefix for HQPlayer file URIs
+    hqplayer_music_path: str = "E:/Music"
+
+    # Playback tracker daemon URL
+    tracker_url: str = "http://playback-tracker:8765"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

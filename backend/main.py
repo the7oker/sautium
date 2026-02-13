@@ -11,7 +11,8 @@ from typing import Dict, Any, Optional
 import psycopg2
 import torch
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from config import settings, get_settings, LOGGING_CONFIG
 
@@ -76,13 +77,9 @@ def test_db_connection() -> bool:
 
 
 @app.get("/")
-async def root() -> Dict[str, Any]:
-    """Health check endpoint."""
-    return {
-        "status": "healthy",
-        "app": settings.app_name,
-        "version": settings.app_version,
-    }
+async def root():
+    """Redirect to Web UI."""
+    return RedirectResponse(url="/static/index.html")
 
 
 @app.get("/health")
@@ -375,6 +372,16 @@ async def search_query(
     except Exception as e:
         logger.error(f"AI search failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# -- Routers & Static Files ---------------------------------------------------
+
+from routers.player import router as player_router
+from routers.chat import router as chat_router
+
+app.include_router(player_router)
+app.include_router(chat_router)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 if __name__ == "__main__":

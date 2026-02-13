@@ -309,6 +309,48 @@ class HQPlayerClient:
         response = self._execute_command("PlaylistRemove", {"index": str(index)})
         return response is not None
 
+    def get_playlist(self) -> List[Dict[str, Any]]:
+        """
+        Get current playlist from HQPlayer.
+
+        Returns:
+            List of dicts with track info (uri, metadata)
+        """
+        response = self._execute_command("PlaylistGet", {"picture": "0"})
+        if response is None:
+            logger.debug("PlaylistGet returned None")
+            return []
+
+        logger.debug(f"PlaylistGet response tag: {response.tag}, attrib: {response.attrib}")
+
+        if response.tag != "PlaylistGet":
+            logger.warning(f"Unexpected response tag: {response.tag}")
+            return []
+
+        tracks = []
+        items = list(response.findall("PlaylistItem"))
+        logger.debug(f"Found {len(items)} PlaylistItem elements")
+
+        for item in items:
+            track = {
+                "uri": item.get("uri", ""),
+                "artist": "",
+                "album": "",
+                "song": "",
+                "genre": "",
+            }
+            # Parse metadata if present
+            metadata = item.find("metadata")
+            if metadata is not None:
+                track["artist"] = metadata.get("artist", "")
+                track["album"] = metadata.get("album", "")
+                track["song"] = metadata.get("song", "")
+                track["genre"] = metadata.get("genre", "")
+            tracks.append(track)
+            logger.debug(f"Track {len(tracks)}: {track['song']} by {track['artist']}")
+
+        return tracks
+
     # ========== Status & Info ==========
 
     def get_status(self) -> Optional[TrackStatus]:

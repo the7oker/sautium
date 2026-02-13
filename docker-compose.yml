@@ -50,6 +50,10 @@ services:
       HQPLAYER_HOST: ${HQPLAYER_HOST:-host.docker.internal}
       HQPLAYER_PORT: ${HQPLAYER_PORT:-4321}
       HQPLAYER_ENABLED: ${HQPLAYER_ENABLED:-false}
+
+      # Web UI: HQPlayer file path prefix and tracker URL
+      HQPLAYER_MUSIC_PATH: ${HQPLAYER_MUSIC_PATH:-E:/Music}
+      TRACKER_URL: http://playback-tracker:8765
     extra_hosts:
       # Allow container to access Windows host services (like HQPlayer)
       - "host.docker.internal:host-gateway"
@@ -58,9 +62,9 @@ services:
       - ./data/cache:/root/.cache
       # Mount music library as read-only
       # Windows path: E:\Music -> /music in container
-      - ${MUSIC_LIBRARY_PATH:-E:\Music}:/music:ro
+      - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro
     ports:
-      - "8000:8000"
+      - "8800:8000"
     networks:
       - music-ai-network
     depends_on:

@@ -28,6 +28,7 @@ You are an AI music DJ assistant for a personal FLAC music library. \
 Your job is to recommend tracks from the library based on the user's request.
 
 Rules:
+- IMPORTANT: Always respond in the same language as the user's query. If they ask in Ukrainian, respond in Ukrainian. If in English, respond in English.
 - Only recommend tracks that appear in the provided library context below. Never invent tracks.
 - Include track titles and artists in your recommendations.
 - Explain why each recommendation matches the request, referencing genre, mood, style, tags, or audio characteristics.
@@ -80,6 +81,7 @@ def _extract_filters(db: Session, query: str) -> Dict[str, Any]:
             break
 
     # Artist names — check against DB for known artists mentioned in query
+    # Support both exact match and transliteration (e.g., "клаус шульц" → "klaus schulze")
     try:
         rows = db.execute(text("SELECT DISTINCT name FROM artists")).fetchall()
         for row in rows:
@@ -87,6 +89,18 @@ def _extract_filters(db: Session, query: str) -> Dict[str, Any]:
             if artist_name and artist_name.lower() in query_lower:
                 filters["artist"] = artist_name
                 break
+
+        # Fuzzy match if no exact match — use trigram similarity
+        if "artist" not in filters:
+            sql = text("""
+                SELECT name FROM artists
+                WHERE similarity(name, :query) > 0.3
+                ORDER BY similarity(name, :query) DESC
+                LIMIT 1
+            """)
+            fuzzy = db.execute(sql, {"query": query}).fetchone()
+            if fuzzy:
+                filters["artist"] = fuzzy[0]
     except Exception as e:
         logger.debug(f"Artist extraction failed: {e}")
 
@@ -560,6 +574,33 @@ def ask_assistant(
                 f"Metadata search (filters={filters}) returned "
                 f"{meta_results.get('count', 0)} tracks"
             )
+
+            # If artist was detected via fuzzy match, add top tracks from that artist directly
+            if "artist" in filters and len(all_tracks) < 10:
+                try:
+                    artist_tracks = db.execute(text("""
+                        SELECT t.id, t.title, t.track_number, t.duration_seconds,
+                               a2.name as artist, al.title as album, g.name as genre,
+                               al.quality_source, 0.9 as similarity
+                        FROM tracks t
+                        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+                        JOIN artists a2 ON ta.artist_id = a2.id
+                        JOIN albums al ON t.album_id = al.id
+                        LEFT JOIN track_genres tg ON t.id = tg.track_id
+                        LEFT JOIN genres g ON tg.genre_id = g.id
+                        WHERE a2.name = :artist
+                        ORDER BY al.title, t.track_number
+                        LIMIT :limit
+                    """), {"artist": filters["artist"], "limit": 30}).fetchall()
+
+                    for row in artist_tracks:
+                        track = {k: v for k, v in dict(row._mapping).items()}
+                        if track["id"] not in all_tracks:
+                            all_tracks[track["id"]] = track
+                    logger.info(f"Added {len(artist_tracks)} tracks directly from artist: {filters['artist']}")
+                except Exception as e2:
+                    logger.warning(f"Direct artist track query failed: {e2}")
+
         except Exception as e:
             logger.warning(f"Metadata search failed: {e}")
 
