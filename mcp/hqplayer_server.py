@@ -44,6 +44,7 @@ HQPLAYER_HOST = os.getenv("HQPLAYER_HOST", "172.26.80.1")
 HQPLAYER_PORT = int(os.getenv("HQPLAYER_PORT", "4321"))
 MUSIC_WINDOWS_PATH = os.getenv("MUSIC_WINDOWS_PATH", "E:/Music")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+TRACKER_URL = os.getenv("TRACKER_URL", "http://localhost:8765")  # playback tracker daemon
 
 # -- MCP Server ---------------------------------------------------------------
 mcp = FastMCP(
@@ -103,6 +104,33 @@ def _convert_path(db_path: str) -> str:
     """Convert DB path (/music/...) to HQPlayer file URI (file:///E:/Music/...)."""
     win_path = db_path.replace("/music/", MUSIC_WINDOWS_PATH + "/", 1)
     return file_path_to_uri(win_path)
+
+
+def _register_playlist(track_ids: list[int]) -> bool:
+    """Register playlist mapping with playback tracker daemon.
+
+    Args:
+        track_ids: List of track IDs in playlist order
+
+    Returns:
+        True if successfully registered, False otherwise
+    """
+    try:
+        # Build playlist mapping: index → track_id
+        playlist_mapping = {str(i): track_id for i, track_id in enumerate(track_ids)}
+
+        with httpx.Client(timeout=2.0) as client:
+            response = client.post(
+                f"{TRACKER_URL}/playlist",
+                json={"playlist": playlist_mapping}
+            )
+            response.raise_for_status()
+            logger.info(f"📋 Registered playlist with tracker: {len(track_ids)} tracks")
+            return True
+    except Exception as e:
+        logger.warning(f"Failed to register playlist with tracker: {e}")
+        logger.warning("Play counts will not be tracked for this session")
+        return False
 
 
 def _format_track(row: dict) -> str:
@@ -559,6 +587,9 @@ def play_track(track_id: int) -> str:
         hqp.select_track(0)
         hqp.play()
 
+        # Register playlist with tracker
+        _register_playlist([track_id])
+
         return f"Now playing: {row['artist']} - {row['title']}\nAlbum: {row['album']}"
     except Exception as e:
         return f"Error playing track: {e}"
@@ -636,6 +667,10 @@ def play_album(album_name: str, artist_name: str = "") -> str:
         hqp.select_track(0)
         hqp.play()
 
+        # Register playlist with tracker
+        track_ids = [row["id"] for row in rows]
+        _register_playlist(track_ids)
+
         album_title = rows[0]["album"]
         artist = rows[0]["artist"]
         track_list = "\n".join(
@@ -695,6 +730,10 @@ def play_similar(track_id: int, limit: int = 10) -> str:
 
         hqp.select_track(0)
         hqp.play()
+
+        # Register playlist with tracker
+        track_ids = [row["id"] for row in rows]
+        _register_playlist(track_ids)
 
         # Get source track info
         source = _db_query_one("""

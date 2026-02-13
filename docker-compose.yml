@@ -76,6 +76,36 @@ services:
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
+  playback-tracker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: music-ai-playback-tracker
+    environment:
+      # HQPlayer connection
+      HQPLAYER_HOST: ${HQPLAYER_HOST:-host.docker.internal}
+      HQPLAYER_PORT: ${HQPLAYER_PORT:-4321}
+
+      # Database configuration
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-music_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-musicai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8765:8765"  # HTTP API for playlist registration
+    networks:
+      - music-ai-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    command: python playback_tracker.py --hqplayer-host ${HQPLAYER_HOST:-host.docker.internal} --db-host postgres
+
 networks:
   music-ai-network:
     driver: bridge

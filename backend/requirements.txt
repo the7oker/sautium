@@ -39,6 +39,7 @@ scipy>=1.2.0,<1.12.0  # Pin for librosa 0.10.1 compatibility
 # HTTP Client
 httpx==0.26.0
 requests==2.31.0
+aiohttp==3.9.1
 
 # Logging
 python-json-logger==2.0.7
