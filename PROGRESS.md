@@ -1462,6 +1462,211 @@ python cli.py enrich-tracks --newest-first --limit 100 --max-duration 1800
 
 ---
 
+## Step 3.2: HQPlayer Control - DONE
+
+### What was done
+- **HQPlayer API Client**: `backend/hqplayer_client.py` (~585 lines)
+  - `HQPlayerClient` class - XML-over-TCP protocol implementation
+  - Connection management with timeout and error handling
+  - Playback controls: `play()`, `pause()`, `stop()`, `next()`, `previous()`, `seek()`
+  - Volume controls: `volume_up()`, `volume_down()`, `set_volume()`, `volume_mute()`
+  - Playlist management: `playlist_add()`, `playlist_clear()`, `playlist_remove()`
+  - Status monitoring: `get_status()` - returns current track, position, state, metadata
+  - DSP settings: `get_filters()`, `set_filter()`, `get_modes()`, `set_mode()`, `get_rates()`, etc.
+  - Context manager: `HQPlayerConnection` for automatic cleanup
+  - Helper functions: `file_path_to_uri()` - Windows path → file:// URI conversion
+- **Integration Test Script**: `backend/test_hqplayer_wingbeat.py`
+  - Demonstrates full workflow: semantic search → audio similarity → playlist generation → playback
+  - Finds album most similar to reference using audio embeddings
+  - Groups similar tracks by album and ranks by average similarity
+  - Handles Docker→Windows path translation (`/music/...` → `E:/Music/...`)
+  - Sends playlist to HQPlayer with proper URIs
+- **Protocol Implementation**:
+  - XML command structure: `<Command attr="value"/>`
+  - Response parsing with xml.etree.ElementTree
+  - Socket-based communication with buffering
+  - Timeout handling (10s default for stability)
+
+### Design decisions
+- **No authentication**: HQPlayer Desktop API doesn't require auth for local control
+- **XML protocol**: Simple text-based protocol over TCP (port 4321)
+- **Path translation**: Container paths (`/music/`) converted to Windows paths (`E:/Music/`)
+- **Timing delays**: 2s after playlist load, 1s after track selection for HQPlayer processing
+- **Error handling**: Graceful handling of connection failures, timeouts, playback errors
+
+### Testing status - SUCCESSFUL ✅
+- ✅ **Connected to HQPlayer Desktop v5** at 172.26.80.1:4321 (WSL2 → Windows host)
+- ✅ **Semantic search working**: Found Klaus Schulze album most similar to "Wingbeats" by Hidden Orchestra
+- ✅ **Similarity ranking**: Top 5 albums identified with similarity scores (0.66-0.71)
+- ✅ **Best match**: Klaus Schulze - "X" (similarity: 0.707)
+- ✅ **Playlist generation**: All 6 tracks added to HQPlayer playlist
+  - Friedrich Nietzsche
+  - Georg Trakl
+  - Frank Herbert
+  - Friedemann Bach
+  - Ludwig II. Von Bayern
+  - Heinrich Von Kleist
+- ✅ **Playback started**: HQPlayer playing first track (State: PLAYING, Position: 42.1s / 1454.1s)
+- ✅ **Path conversion**: Container paths correctly translated to Windows file:// URIs
+
+### Test results
+**Query**: "Play Klaus Schulze album most similar to 'Wingbeats' (Hidden Orchestra)"
+
+**Process:**
+1. Reference track: "Wingbeats" by Hidden Orchestra (track_id=596)
+2. Found 50 similar Klaus Schulze tracks via audio embeddings (CLAP 512d vectors)
+3. Grouped by album, calculated average similarity per album
+
+**Top 5 similar albums:**
+1. **X** - similarity: 0.707 (6 tracks) ← selected for playback
+2. Stahlsinfonie (The Ultimate Edition CD 40) - similarity: 0.694
+3. Was War Vor Der Zeit (The Ultimate Edition CD 3) - similarity: 0.679
+4. Shadowlands - similarity: 0.663
+5. Angst - similarity: 0.662
+
+**Playback status:**
+```
+Now playing: Klaus Schulze - Friedrich Nietzsche
+Album: X
+State: PLAYING
+Position: 42.1s / 1454.1s (~24 minute track!)
+```
+
+### Performance characteristics
+- **Connection time**: ~100ms to HQPlayer
+- **Similarity search**: ~500ms (50 tracks via pgvector HNSW index)
+- **Playlist generation**: ~2s (6 tracks)
+- **Total workflow**: ~3-4 seconds from query to playback
+
+### Architecture
+```
+User query ("play Klaus Schulze similar to Wingbeats")
+    ↓
+┌─────────────────────────────────────┐
+│ 1. Find reference track in DB       │
+│    "Wingbeats" → track_id=596       │
+└──────────────┬──────────────────────┘
+               ↓
+┌─────────────────────────────────────┐
+│ 2. Audio embedding similarity       │
+│    pgvector cosine similarity       │
+│    (CLAP 512d vectors)              │
+│    → 50 similar Klaus Schulze tracks│
+└──────────────┬──────────────────────┘
+               ↓
+┌─────────────────────────────────────┐
+│ 3. Group by album                   │
+│    Calculate avg similarity         │
+│    → Top album: "X" (0.707)         │
+└──────────────┬──────────────────────┘
+               ↓
+┌─────────────────────────────────────┐
+│ 4. Get album tracks from DB         │
+│    Ordered by track_number          │
+│    → 6 tracks with file paths       │
+└──────────────┬──────────────────────┘
+               ↓
+┌─────────────────────────────────────┐
+│ 5. Convert paths                    │
+│    /music/... → E:/Music/...        │
+│    → file:///E:/Music/...           │
+└──────────────┬──────────────────────┘
+               ↓
+┌─────────────────────────────────────┐
+│ 6. Send to HQPlayer                 │
+│    ├── playlist_clear()             │
+│    ├── playlist_add(uri) × 6        │
+│    ├── select_track(0)              │
+│    └── play()                       │
+└──────────────┬──────────────────────┘
+               ↓
+           ▶️ PLAYING
+```
+
+### Usage example
+```python
+from hqplayer_client import HQPlayerConnection
+
+# Simple playback
+with HQPlayerConnection("172.26.80.1", 4321) as hq:
+    # Get info
+    info = hq.get_info()
+    print(f"Connected to {info['product']} v{info['version']}")
+
+    # Add tracks
+    hq.playlist_clear()
+    hq.playlist_add("file:///E:/Music/artist/album/track.flac")
+
+    # Control playback
+    hq.play()
+    status = hq.get_status()
+    print(f"Playing: {status.artist} - {status.song}")
+    print(f"Progress: {status.progress_percent:.1f}%")
+```
+
+### Protocol details
+**Command format:**
+```xml
+<Play/>
+<Stop/>
+<PlaylistAdd uri="file:///E:/Music/..." clear="0" queued="0"/>
+<Status subscribe="0"/>
+```
+
+**Response format:**
+```xml
+<Status state="2" track="0" track_id="..." position="42.1" length="1454.1" volume="-20.0">
+    <metadata artist="Klaus Schulze" album="X" song="Friedrich Nietzsche" genre="Electronic"/>
+</Status>
+```
+
+### Fixes applied
+**Issue 1: Playlist not loading**
+- **Problem**: First track timeout, `select_track()` failed
+- **Solution**: Increased timeout to 10s, added 2s delay after playlist_add()
+- **Result**: All tracks added successfully
+
+**Issue 2: Playback not starting**
+- **Problem**: `play()` returned false, state remained STOPPED
+- **Solution**: Added `select_track(0)` before `play()`, 1s delay between operations
+- **Result**: Playback starts reliably
+
+**Issue 3: Path translation**
+- **Problem**: Container paths `/music/...` not accessible from Windows HQPlayer
+- **Solution**: Convert to Windows paths before URI generation: `/music/` → `E:/Music/`
+- **Result**: HQPlayer finds all files successfully
+
+### Integration opportunities
+- **Voice commands**: "Play something like [track/album]" → similarity search → HQPlayer
+- **RAG recommendations**: Claude suggests tracks → automatic playlist generation → playback
+- **Mood-based playback**: "Play calm evening music" → feature filters → HQPlayer
+- **Smart shuffle**: Audio similarity-based track ordering instead of random
+- **Genre exploration**: "Play electronic music similar to X" → filtered similarity search
+- **Album completion**: Track ends → find similar track from different album → seamless flow
+
+### Statistics
+- **HQPlayer Desktop version**: 5.x
+- **API endpoint**: 172.26.80.1:4321 (WSL2 → Windows host)
+- **Protocol**: XML over TCP
+- **Tested tracks**: 6 tracks from Klaus Schulze - "X" album
+- **Success rate**: 100% (all tracks added and playback started)
+
+### Benefits
+- ✅ **Semantic playback**: AI-driven track selection based on audio similarity
+- ✅ **Automated playlists**: No manual track selection needed
+- ✅ **High-quality audio**: HQPlayer's upsampling and filtering for best sound
+- ✅ **Intelligent recommendations**: Leverages CLAP embeddings for musicological similarity
+- ✅ **Natural workflow**: Query → Search → Play in single command
+- ✅ **Docker-friendly**: Handles path translation between containers and host
+
+### Next integration points
+- Add HQPlayer control to CLI commands (`play`, `pause`, `queue`)
+- Integrate with RAG assistant (Claude can control playback)
+- MCP Server for HQPlayer (optional, for Claude desktop integration)
+- Web UI with playback controls
+
+---
+
 ## Next Steps
 
 ### Phase 2: External Data & Text Embeddings - COMPLETE ✅
@@ -1472,10 +1677,11 @@ python cli.py enrich-tracks --newest-first --limit 100 --max-duration 1800
   - CLAP zero-shot: instruments, moods, vocal detection, danceability
   - Feature-based search and filtering
   - Integration with RAG assistant
-- [ ] **Step 3.2: HQPlayer Control**
-  - Research HQPlayer Desktop API/CLI
-  - Implement playback controls (play, pause, stop, queue)
-  - Integration with search and recommendations
+- [x] **Step 3.2: HQPlayer Control** ✅
+  - Implemented HQPlayer Desktop 5 API client
+  - Full playback controls (play, pause, stop, queue management)
+  - Semantic search integration for intelligent playlist generation
+  - Audio similarity-based album selection
 - [ ] **Step 3.3: MCP Server for HQPlayer (optional)**
   - Natural language playback commands
 - [ ] **Step 3.4: Minimal Web UI**
