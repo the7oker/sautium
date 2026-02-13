@@ -161,18 +161,17 @@
 ## Current State
 
 ### Library stats
-- **685 tracks** indexed (Blues, Electronic, Nu Jazz, and more genres)
-- **185 tracks** with CLAP audio embeddings (512d)
-- **685 tracks** with text semantic embeddings (384d)
-- **185 tracks** with both audio + text (hybrid search enabled)
-- **682 tracks** with Last.fm stats (listeners, playcount)
-- **0 tracks** with audio features (ready to extract - Phase 3.1 implemented)
-- **10 artists** enriched with Last.fm data (bios, tags, similar artists)
-- **125 albums** enriched with Last.fm data (wiki, tags, stats)
-- **150 unique tags** from Last.fm (artist + album tags)
-- **185 similar artist** relationships
-- **13 genres** with descriptions from Last.fm
-- Genres: Blues, Electronic, Ambient, Jazz, Nu Jazz, IDM, Krautrock, Progressive Electronic, Berlin School, and more
+- **21,583 tracks** indexed (Blues, Electronic, Nu Jazz, Ambient, Soundtrack, and more)
+- **21,583 tracks** with CLAP audio embeddings (512d)
+- **21,583 tracks** with text semantic embeddings (384d)
+- **21,583 tracks** with Last.fm stats (listeners, playcount)
+- **21,583 tracks** with audio features (BPM, key, instruments, moods, danceability)
+- **~500 artists** enriched with Last.fm data (bios, tags, similar artists)
+- **~500 albums** enriched with Last.fm data (wiki, tags, stats)
+- **150+ unique tags** from Last.fm (artist + album tags)
+- **185+ similar artist** relationships
+- **13+ genres** with descriptions from Last.fm
+- Genres: Blues, Electronic, Ambient, Jazz, Nu Jazz, IDM, Krautrock, Progressive Electronic, Berlin School, Soundtrack, Classical, and more
 
 ### Phase 1 MVP - COMPLETE ✅
 - [x] Step 1.1: Project Setup & Docker Environment
@@ -1660,10 +1659,131 @@ with HQPlayerConnection("172.26.80.1", 4321) as hq:
 - ✅ **Docker-friendly**: Handles path translation between containers and host
 
 ### Next integration points
-- Add HQPlayer control to CLI commands (`play`, `pause`, `queue`)
-- Integrate with RAG assistant (Claude can control playback)
-- MCP Server for HQPlayer (optional, for Claude desktop integration)
 - Web UI with playback controls
+- Voice interface (Whisper + TTS)
+
+---
+
+## Step 3.3: MCP Server for HQPlayer - DONE
+
+### What was done
+- **MCP Server**: `mcp/hqplayer_server.py` (~700 lines) — standalone MCP server for Claude Code/Desktop
+  - 19 tools organized into 5 categories
+  - STDIO transport (child process of Claude Code)
+  - Lazy connections: HQPlayer TCP, PostgreSQL psycopg2, FastAPI httpx
+  - All logging to stderr (never stdout — would corrupt STDIO transport)
+  - Path conversion: DB paths (`/music/...`) → HQPlayer URIs (`file:///E:/Music/...`)
+  - Formatted string responses (not JSON) — Claude can naturally read and communicate results
+- **Dependencies**: `mcp/pyproject.toml` — minimal: `mcp[cli]`, `psycopg2-binary`, `httpx`
+- **Configuration**: Updated `.mcp.json` with `hqplayer` server entry using `uv` runner
+- **Fuzzy search**: `pg_trgm` trigram matching for typo-tolerant artist/album search
+  - GIN indexes on `artists.name`, `albums.title`, `tracks.title`
+  - Threshold 0.15 for artist/album, 0.1 for free-text query
+  - Falls back to ILIKE for exact substring matches
+  - Results sorted by similarity score (best match first)
+
+### Architecture
+```
+Claude Code / Desktop
+    ↓ (STDIO transport)
+MCP Server (mcp/hqplayer_server.py)
+    ├── HQPlayer Client (TCP → 172.26.80.1:4321) — imported from backend/
+    ├── PostgreSQL (psycopg2 → localhost:5432) — metadata search, similarity, track lookup
+    └── FastAPI Backend (httpx → localhost:8000) — CLAP text-to-audio semantic search
+```
+
+### Tool inventory (19 tools)
+
+**Playback Control (6)**:
+| Tool | Description |
+|------|-------------|
+| `hqplayer_play` | Start/resume playback |
+| `hqplayer_pause` | Pause playback |
+| `hqplayer_stop` | Stop playback |
+| `hqplayer_next` | Skip to next track |
+| `hqplayer_previous` | Go to previous track |
+| `hqplayer_get_status` | Get current track, position, state, volume |
+
+**Volume (3)**:
+| Tool | Description |
+|------|-------------|
+| `hqplayer_volume_up` | Increase volume |
+| `hqplayer_volume_down` | Decrease volume |
+| `hqplayer_set_volume` | Set exact volume level (dB) |
+
+**Library Search (4)**:
+| Tool | Description |
+|------|-------------|
+| `search_tracks` | Metadata search via SQL (fuzzy, typo-tolerant) |
+| `search_similar` | Audio similarity via pgvector CLAP embeddings |
+| `search_semantic` | Text semantic search via FastAPI backend (CLAP text-to-audio) |
+| `get_track_info` | Full track details with audio features |
+
+**Smart Play (4)**:
+| Tool | Description |
+|------|-------------|
+| `play_track` | Play specific track by ID |
+| `play_album` | Find and play entire album (fuzzy match) |
+| `play_similar` | Find similar tracks and play them |
+| `add_to_queue` | Add tracks to current playlist |
+
+**DSP Settings (2)**:
+| Tool | Description |
+|------|-------------|
+| `hqplayer_get_settings` | Get current filter, rate, mode |
+| `hqplayer_set_filter` | Set upsampling filter by name |
+
+### Fuzzy search (pg_trgm)
+
+Enables typo-tolerant search for artist and album names:
+
+| Misspelled query | Found correctly |
+|---|---|
+| "Kluas Shulze" | Klaus Schulze |
+| "Tangerin Dreem" | Tangerine Dream |
+| "Hanz Tsimer" | Hans Zimmer |
+| "Solar Feelds" | Solar Fields |
+| "Robet Miles" | Robert Miles |
+| "Drem Sequens" | Dream Sequence |
+| "Red Gren Blue" | Red / Green / Blue |
+
+**Implementation**: PostgreSQL `pg_trgm` extension with GIN indexes. Trigram similarity compares character triplet overlap — works well even with significant misspellings. Hybrid approach: `similarity() > threshold OR ILIKE` ensures both fuzzy and exact substring matches work.
+
+### Design decisions
+- **Standalone (not in Docker)**: MCP servers run as child processes of Claude — must be on WSL2 host
+- **No ML dependencies**: All heavy computation delegated to Docker backend via httpx
+- **Lazy connections**: HQPlayer/DB/Backend connect only on first use, auto-reconnect on failure
+- **Stop before play**: `play_track`/`play_album`/`play_similar` all do `stop() → clear → add → select(0) → play()` to ensure correct track starts
+- **Fuzzy + ILIKE**: Dual matching strategy — trigram for misspellings, ILIKE for exact substrings
+- **pg_trgm threshold 0.15**: Low enough to catch heavily misspelled names, but precise enough to rank correct matches first
+
+### Testing status - SUCCESSFUL ✅
+- ✅ 19 tools registered and verified
+- ✅ Database connected (21,583 tracks)
+- ✅ HQPlayer connected at 172.26.80.1:4321 (HQPlayer Desktop v5, engine 5.34.14)
+- ✅ FastAPI backend connected at localhost:8000
+- ✅ `search_tracks` — metadata search with fuzzy matching working
+- ✅ `search_similar` — audio similarity via pgvector working
+- ✅ `search_semantic` — CLAP text-to-audio via FastAPI working
+- ✅ `get_track_info` — full details with audio features
+- ✅ `play_track` / `play_album` — HQPlayer playback confirmed
+- ✅ `hqplayer_get_status` — track info, position, volume
+- ✅ `hqplayer_get_settings` — 77 filters, 3 modes, 5 sample rates
+- ✅ `hqplayer_set_filter` — filter change confirmed (tested: closed-form-fast)
+- ✅ Fuzzy search tested with 7+ misspelled names — all found correctly
+
+### Fixes applied
+1. **FastMCP `description` → `instructions`**: FastMCP constructor doesn't accept `description` kwarg
+2. **DISTINCT + ORDER BY**: `SELECT DISTINCT` requires ORDER BY columns in SELECT list — used `DISTINCT ON` subquery pattern
+3. **Play not starting**: Added `stop() → select_track(0)` before `play()` to ensure new playlist starts from beginning
+4. **pg_trgm threshold tuning**: Lowered from 0.2 to 0.15 to catch more heavily misspelled names
+
+### Files
+| File | Description |
+|------|-------------|
+| `mcp/hqplayer_server.py` | Main MCP server (~700 lines, 19 tools) |
+| `mcp/pyproject.toml` | uv project with dependencies |
+| `.mcp.json` | MCP server configuration (updated) |
 
 ---
 
@@ -1682,8 +1802,11 @@ with HQPlayerConnection("172.26.80.1", 4321) as hq:
   - Full playback controls (play, pause, stop, queue management)
   - Semantic search integration for intelligent playlist generation
   - Audio similarity-based album selection
-- [ ] **Step 3.3: MCP Server for HQPlayer (optional)**
+- [x] **Step 3.3: MCP Server for HQPlayer** ✅
+  - 19 MCP tools for Claude Code/Desktop integration
   - Natural language playback commands
+  - Fuzzy search with pg_trgm (typo-tolerant)
+  - Direct HQPlayer control, library search, smart play
 - [ ] **Step 3.4: Minimal Web UI**
   - Streamlit or FastAPI + Vue.js
   - Music player interface with search and recommendations

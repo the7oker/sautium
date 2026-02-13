@@ -85,11 +85,11 @@ def _get_db() -> psycopg2.extensions.connection:
     return _db_conn
 
 
-def _db_query(sql: str, params: dict | None = None) -> list[dict]:
+def _db_query(sql: str, params: dict | tuple | None = None) -> list[dict]:
     """Execute SQL query and return list of dicts."""
     conn = _get_db()
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, params or {})
+        cur.execute(sql, params)
         return [dict(row) for row in cur.fetchall()]
 
 
@@ -292,47 +292,78 @@ def search_tracks(
     """Search music library by metadata (artist, album, genre, or free text query).
 
     All parameters are optional. The query field searches across artist, album, and title.
+    Tolerant to typos and misspellings (uses fuzzy trigram matching).
 
     Args:
         query: Free text search across artist, album, and track title
-        artist: Filter by artist name (partial match)
-        album: Filter by album name (partial match)
+        artist: Filter by artist name (fuzzy match, typo-tolerant)
+        album: Filter by album name (fuzzy match, typo-tolerant)
         genre: Filter by genre (partial match)
         limit: Maximum number of results (default 20)
     """
     try:
         conditions = ["1=1"]
         params: dict = {"limit": limit}
+        order_scores: list[str] = []
 
         if query:
             conditions.append(
-                "(a2.name ILIKE %(query)s OR al.title ILIKE %(query)s OR t.title ILIKE %(query)s)"
+                "(similarity(a2.name, %(query)s) > 0.1 "
+                "OR similarity(al.title, %(query)s) > 0.1 "
+                "OR similarity(t.title, %(query)s) > 0.1 "
+                "OR a2.name ILIKE %(query_like)s "
+                "OR al.title ILIKE %(query_like)s "
+                "OR t.title ILIKE %(query_like)s)"
             )
-            params["query"] = f"%{query}%"
+            params["query"] = query
+            params["query_like"] = f"%{query}%"
+            order_scores.append(
+                "GREATEST(similarity(a2.name, %(query)s), "
+                "similarity(al.title, %(query)s), "
+                "similarity(t.title, %(query)s))"
+            )
         if artist:
-            conditions.append("a2.name ILIKE %(artist)s")
-            params["artist"] = f"%{artist}%"
+            conditions.append(
+                "(similarity(a2.name, %(artist)s) > 0.15 OR a2.name ILIKE %(artist_like)s)"
+            )
+            params["artist"] = artist
+            params["artist_like"] = f"%{artist}%"
+            order_scores.append("similarity(a2.name, %(artist)s)")
         if album:
-            conditions.append("al.title ILIKE %(album)s")
-            params["album"] = f"%{album}%"
+            conditions.append(
+                "(similarity(al.title, %(album)s) > 0.15 OR al.title ILIKE %(album_like)s)"
+            )
+            params["album"] = album
+            params["album_like"] = f"%{album}%"
+            order_scores.append("similarity(al.title, %(album)s)")
         if genre:
-            conditions.append("g.name ILIKE %(genre)s")
-            params["genre"] = f"%{genre}%"
+            conditions.append("g.name ILIKE %(genre_like)s")
+            params["genre_like"] = f"%{genre}%"
 
         where = " AND ".join(conditions)
 
+        if order_scores:
+            score_expr = f"GREATEST({', '.join(order_scores)})"
+        else:
+            score_expr = "0"
+
         sql = f"""
-            SELECT DISTINCT t.id, t.title, a2.name as artist, al.title as album,
-                   g.name as genre, al.quality_source,
-                   t.duration_seconds, t.track_number
-            FROM tracks t
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a2 ON ta.artist_id = a2.id
-            JOIN albums al ON t.album_id = al.id
-            LEFT JOIN track_genres tg ON t.id = tg.track_id
-            LEFT JOIN genres g ON tg.genre_id = g.id
-            WHERE {where}
-            ORDER BY a2.name, al.title, t.track_number
+            SELECT * FROM (
+                SELECT DISTINCT ON (t.id)
+                       t.id, t.title, a2.name as artist, al.title as album,
+                       g.name as genre, al.quality_source,
+                       t.duration_seconds, t.track_number,
+                       {score_expr} as _score
+                FROM tracks t
+                JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+                JOIN artists a2 ON ta.artist_id = a2.id
+                JOIN albums al ON t.album_id = al.id
+                LEFT JOIN track_genres tg ON t.id = tg.track_id
+                LEFT JOIN genres g ON tg.genre_id = g.id
+                WHERE {where}
+                ORDER BY t.id, _score DESC
+            ) sub
+            ORDER BY _score DESC, artist, album, track_number
             LIMIT %(limit)s
         """
 
@@ -536,31 +567,57 @@ def play_track(track_id: int) -> str:
 @mcp.tool()
 def play_album(album_name: str, artist_name: str = "") -> str:
     """Find an album and play all its tracks on HQPlayer.
+    Tolerant to typos and misspellings (uses fuzzy trigram matching).
 
     Args:
-        album_name: Album name (partial match supported)
-        artist_name: Optional artist name to narrow the search
+        album_name: Album name (fuzzy match, typo-tolerant)
+        artist_name: Optional artist name to narrow the search (fuzzy match)
     """
     try:
-        conditions = ["al.title ILIKE %(album)s"]
-        params: dict = {"album": f"%{album_name}%"}
+        # First, find the best matching album using trigram similarity
+        match_conditions = [
+            "(similarity(al.title, %(album)s) > 0.15 OR al.title ILIKE %(album_like)s)"
+        ]
+        match_params: dict = {"album": album_name, "album_like": f"%{album_name}%"}
+        order_parts = ["similarity(al.title, %(album)s)"]
 
         if artist_name:
-            conditions.append("a2.name ILIKE %(artist)s")
-            params["artist"] = f"%{artist_name}%"
+            match_conditions.append(
+                "(similarity(a2.name, %(artist)s) > 0.15 OR a2.name ILIKE %(artist_like)s)"
+            )
+            match_params["artist"] = artist_name
+            match_params["artist_like"] = f"%{artist_name}%"
+            order_parts.append("similarity(a2.name, %(artist)s)")
 
-        where = " AND ".join(conditions)
+        match_where = " AND ".join(match_conditions)
+        order_expr = " + ".join(order_parts)
 
-        rows = _db_query(f"""
+        # Find the best matching album (by name + optional artist)
+        best_album = _db_query_one(f"""
+            SELECT DISTINCT al.id, al.title as album, a2.name as artist
+            FROM albums al
+            JOIN tracks t ON t.album_id = al.id
+            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+            JOIN artists a2 ON ta.artist_id = a2.id
+            WHERE {match_where}
+            ORDER BY {order_expr} DESC
+            LIMIT 1
+        """, match_params)
+
+        if not best_album:
+            return f"Album '{album_name}' not found."
+
+        # Now get all tracks from that specific album
+        rows = _db_query("""
             SELECT t.id, t.file_path, t.title, t.track_number,
                    a2.name as artist, al.title as album
             FROM tracks t
             JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
             JOIN artists a2 ON ta.artist_id = a2.id
             JOIN albums al ON t.album_id = al.id
-            WHERE {where}
+            WHERE al.id = %(album_id)s
             ORDER BY t.disc_number, t.track_number
-        """, params)
+        """, {"album_id": best_album["id"]})
 
         if not rows:
             return f"Album '{album_name}' not found."
