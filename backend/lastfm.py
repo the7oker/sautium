@@ -272,6 +272,9 @@ class LastFmService:
         """
         stored_count = 0
 
+        # Track tag IDs processed in this batch to avoid duplicates in same transaction
+        processed_tag_ids = set()
+
         for tag_item in tags_data:
             tag_name = tag_item.get("name")
             tag_weight = tag_item.get("count", 50)  # Default weight if missing
@@ -294,7 +297,12 @@ class LastFmService:
                 db.flush()  # Get ID without committing
                 logger.debug(f"Created new tag: {tag_name} (ID: {tag.id})")
 
-            # Check if artist_tag relationship already exists
+            # Check if we already processed this tag in current batch
+            if tag.id in processed_tag_ids:
+                logger.debug(f"Skipping duplicate tag in batch: {artist_name} - {tag_name}")
+                continue
+
+            # Check if artist_tag relationship already exists in database
             existing = db.query(ArtistTag).filter(
                 ArtistTag.artist_id == artist_id,
                 ArtistTag.tag_id == tag.id,
@@ -315,6 +323,7 @@ class LastFmService:
                     source="lastfm"
                 )
                 db.add(artist_tag)
+                processed_tag_ids.add(tag.id)  # Mark as processed
                 stored_count += 1
                 logger.debug(f"Added tag: {artist_name} - {tag_name} (weight: {tag_weight})")
 
@@ -895,6 +904,9 @@ class LastFmService:
         """
         stored_count = 0
 
+        # Track tag IDs processed in this batch to avoid duplicates in same transaction
+        processed_tag_ids = set()
+
         for tag_item in tags_data:
             tag_name = tag_item.get("name")
             tag_weight = tag_item.get("count", 50)
@@ -915,7 +927,12 @@ class LastFmService:
                 db.flush()
                 logger.debug(f"Created new tag: {tag_name} (ID: {tag.id})")
 
-            # Check if album_tag relationship already exists
+            # Check if we already processed this tag in current batch
+            if tag.id in processed_tag_ids:
+                logger.debug(f"Skipping duplicate tag in batch: album {album_id} - {tag_name}")
+                continue
+
+            # Check if album_tag relationship already exists in database
             existing = db.query(AlbumTag).filter(
                 AlbumTag.album_id == album_id,
                 AlbumTag.tag_id == tag.id,
@@ -936,6 +953,7 @@ class LastFmService:
                     source="lastfm"
                 )
                 db.add(album_tag)
+                processed_tag_ids.add(tag.id)  # Mark as processed
                 stored_count += 1
                 logger.debug(f"Added tag: album {album_id} - {tag_name} (weight: {tag_weight})")
 

@@ -190,6 +190,9 @@ class TrackEnrichmentPipeline:
 
         Returns dict with step results (success/failed/skipped).
         """
+        # Save track ID early for safe logging after potential rollback
+        track_id = track.id
+
         results = {}
 
         # Step 1: Audio Embedding
@@ -211,7 +214,7 @@ class TrackEnrichmentPipeline:
                 else:
                     results['audio_embedding'] = 'failed'
             except Exception as e:
-                logger.error(f"Audio embedding failed for track {track.id}: {e}")
+                logger.error(f"Audio embedding failed for track {track_id}: {e}")
                 results['audio_embedding'] = 'failed'
                 db.rollback()
         else:
@@ -234,6 +237,7 @@ class TrackEnrichmentPipeline:
                 except Exception as e:
                     logger.error(f"Last.fm artist enrichment failed: {e}")
                     results['lastfm_artist'] = 'error'
+                    db.rollback()  # Rollback failed transaction
             else:
                 results['lastfm_artist'] = 'skipped'
 
@@ -251,6 +255,7 @@ class TrackEnrichmentPipeline:
                 except Exception as e:
                     logger.error(f"Last.fm album enrichment failed: {e}")
                     results['lastfm_album'] = 'error'
+                    db.rollback()  # Rollback failed transaction
             else:
                 results['lastfm_album'] = 'skipped'
 
@@ -267,6 +272,7 @@ class TrackEnrichmentPipeline:
                 except Exception as e:
                     logger.error(f"Last.fm track enrichment failed: {e}")
                     results['lastfm_track'] = 'error'
+                    db.rollback()  # Rollback failed transaction
             else:
                 results['lastfm_track'] = 'skipped'
 
@@ -299,7 +305,7 @@ class TrackEnrichmentPipeline:
                 else:
                     results['text_embedding'] = 'failed'
             except Exception as e:
-                logger.error(f"Text embedding failed for track {track.id}: {e}")
+                logger.error(f"Text embedding failed for track {track_id}: {e}")
                 results['text_embedding'] = 'failed'
                 db.rollback()
         else:
@@ -336,7 +342,7 @@ class TrackEnrichmentPipeline:
                 else:
                     results['audio_features'] = 'failed'
             except Exception as e:
-                logger.error(f"Audio analysis failed for track {track.id}: {e}")
+                logger.error(f"Audio analysis failed for track {track_id}: {e}")
                 results['audio_features'] = 'failed'
                 db.rollback()
         else:
