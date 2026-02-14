@@ -33,7 +33,28 @@ _db_conn: Optional[psycopg2.extensions.connection] = None
 def _get_hqp() -> HQPlayerClient:
     """Get or create HQPlayer client (lazy, auto-reconnect). Must be called inside _hqp_lock."""
     global _hqp_client
-    if _hqp_client is None or not _hqp_client.is_connected():
+    need_reconnect = _hqp_client is None or not _hqp_client.is_connected()
+
+    # Detect stale connection (broken pipe) by checking socket health
+    if not need_reconnect and _hqp_client and _hqp_client.socket:
+        import select
+        try:
+            ready = select.select([_hqp_client.socket], [], [], 0)
+            if ready[0]:
+                # Data available on socket without request = connection closed by remote
+                peek = _hqp_client.socket.recv(1, 0x02)  # MSG_PEEK
+                if not peek:
+                    logger.info("HQPlayer connection closed by remote, reconnecting...")
+                    need_reconnect = True
+        except Exception:
+            need_reconnect = True
+
+    if need_reconnect:
+        if _hqp_client:
+            try:
+                _hqp_client.disconnect()
+            except Exception:
+                pass
         _hqp_client = HQPlayerClient(
             host=settings.hqplayer_host,
             port=settings.hqplayer_port,
@@ -44,14 +65,32 @@ def _get_hqp() -> HQPlayerClient:
             raise ConnectionError(
                 f"Cannot connect to HQPlayer at {settings.hqplayer_host}:{settings.hqplayer_port}"
             )
+        logger.info("Reconnected to HQPlayer")
     return _hqp_client
 
 
+def _reset_hqp():
+    """Force-close HQPlayer client so next _get_hqp() reconnects."""
+    global _hqp_client
+    if _hqp_client:
+        try:
+            _hqp_client.disconnect()
+        except Exception:
+            pass
+        _hqp_client = None
+
+
 def _hqp_cmd(func):
-    """Execute a function with HQPlayer client under lock. Prevents concurrent TCP access."""
+    """Execute a function with HQPlayer client under lock. Auto-reconnects on broken pipe."""
     with _hqp_lock:
-        hqp = _get_hqp()
-        return func(hqp)
+        try:
+            hqp = _get_hqp()
+            return func(hqp)
+        except (BrokenPipeError, ConnectionError, OSError) as e:
+            logger.warning(f"HQPlayer connection lost ({e}), reconnecting...")
+            _reset_hqp()
+            hqp = _get_hqp()
+            return func(hqp)
 
 
 def _get_db() -> psycopg2.extensions.connection:
