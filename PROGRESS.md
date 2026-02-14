@@ -1787,6 +1787,104 @@ Enables typo-tolerant search for artist and album names:
 
 ---
 
+## Chat History & Feedback - DONE
+
+### What was done
+- **Database schema**: Two new tables for persistent chat
+  - `chat_sessions` — id, title (auto from first message), created_at, updated_at
+  - `chat_messages` — role, content, tracks_data (JSONB), model, filters_detected (JSONB), retrieval_log (JSONB), tracks_retrieved, feedback fields
+  - Indexes on session_id and feedback (partial index on is_not_relevant=TRUE)
+- **Migration script**: `scripts/create_chat_history.sql`
+- **Full rewrite of `backend/routers/chat.py`** (~350 lines):
+  - Sessions CRUD: list, create, delete
+  - Message persistence: user + assistant messages saved with full metadata
+  - History from DB: last 10 messages loaded for Claude context
+  - Feedback endpoint: mark assistant responses as "not relevant" with optional comment
+  - Feedback review: list all flagged responses with original user query for debugging
+  - Legacy endpoint: `POST /api/chat` preserved for backward compatibility with existing frontend
+- **DB helpers**: Own `_get_db()`, `_db_query()`, `_db_execute()` (psycopg2, same pattern as player.py)
+
+### API endpoints (7 new + 1 legacy)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/chat/sessions` | List sessions (newest first, with message count) |
+| `POST` | `/api/chat/sessions` | Create new session |
+| `DELETE` | `/api/chat/sessions/{id}` | Delete session (CASCADE) |
+| `GET` | `/api/chat/sessions/{id}/messages` | Get all messages in session |
+| `POST` | `/api/chat/sessions/{id}/messages` | Send message → AI response (both persisted) |
+| `POST` | `/api/chat/messages/{id}/feedback` | Mark response as not relevant |
+| `GET` | `/api/chat/feedback` | List flagged responses with user queries (for debugging) |
+| `POST` | `/api/chat` | Legacy stateless endpoint (backward compat) |
+
+### Feedback system
+- `is_not_relevant` flag on assistant messages
+- Optional `feedback_comment` explaining why
+- `GET /api/chat/feedback` returns flagged responses with:
+  - Original user query (subquery fetches previous user message)
+  - tracks_data — recommended tracks
+  - retrieval_log — search sources used
+  - filters_detected — extracted filters
+- Purpose: debug RAG quality — identify if search finds wrong tracks, Claude misinterprets query, or tracks missing from library
+
+### Testing status - VERIFIED ✅
+- ✅ Tables created successfully
+- ✅ Session creation with auto-title from first message
+- ✅ Message persistence (user + assistant with tracks_data, model, filters, retrieval_log)
+- ✅ History loaded from DB for Claude context
+- ✅ Feedback saved and retrievable with original user query
+- ✅ Session deletion with CASCADE
+- ✅ Legacy `/api/chat` endpoint still works
+
+### Files
+
+| File | Change |
+|------|--------|
+| `scripts/create_chat_history.sql` | New — SQL schema |
+| `backend/routers/chat.py` | Full rewrite — persistence + feedback |
+
+---
+
+## RAG: Cyrillic Query Translation - DONE
+
+### What was done
+- **Query translation** (`backend/assistant.py`):
+  - `_translate_query()` — uses Claude Haiku (`claude-haiku-4-5-20251001`) to translate Cyrillic queries to English
+  - Specifically tuned for artist names, album titles, band names (system prompt with examples)
+  - Returns `None` for non-Cyrillic queries (no overhead)
+  - Logged in `retrieval_log` for transparency
+- **Integration in `ask_assistant()`**:
+  - Pre-processing step: detect Cyrillic → translate → use for search
+  - `search_query` (translated) used for: hybrid search, text semantic search, metadata filter extraction
+  - `original_query` preserved for: Claude's final response (responds in user's language)
+  - Fallback: if translated query doesn't find artist, tries original query too
+- **Bug fix**: Short artist name false positives in `_extract_filters()`
+  - Artists with names < 4 chars (e.g. "En") matched as substrings of unrelated words ("recomm**en**d")
+  - Fix: require word boundary match (`\b`) for names < 4 characters
+
+### Why this matters
+Algorithmic transliteration is lossy for proper names:
+- "шульце" → "shultse" (transliteration) vs "Schulze" (correct)
+- "бітлз" → "bitlz" (transliteration) vs "The Beatles" (correct)
+- "від шульца" — genitive case makes transliteration even worse
+
+Claude Haiku understands proper names and grammatical cases, producing correct English artist/album names.
+
+### Performance
+- **Cost**: ~$0.001 per translated query (Haiku)
+- **Latency**: ~0.3s additional per Cyrillic query
+- **Non-Cyrillic queries**: zero overhead (early return)
+
+### Testing status - VERIFIED ✅
+- ✅ "порекомендуй щось від клауса шульце" → "Recommend something by Klaus Schulze"
+- ✅ Filters correctly extracted: `artist=Klaus Schulze` (was `En` before fix)
+- ✅ 40 Klaus Schulze tracks found via metadata search
+- ✅ Artist bio loaded from Last.fm
+- ✅ Claude responds in Ukrainian (original query preserved)
+- ✅ Non-Cyrillic queries unaffected (no translation call)
+
+---
+
 ## Next Steps
 
 ### Phase 2: External Data & Text Embeddings - COMPLETE ✅
@@ -1807,9 +1905,14 @@ Enables typo-tolerant search for artist and album names:
   - Natural language playback commands
   - Fuzzy search with pg_trgm (typo-tolerant)
   - Direct HQPlayer control, library search, smart play
-- [ ] **Step 3.4: Minimal Web UI**
-  - Streamlit or FastAPI + Vue.js
-  - Music player interface with search and recommendations
+- [ ] **Step 3.4: Web UI** — IN PROGRESS
+  - FastAPI static files + vanilla JS frontend
+  - Player controls (play/pause/stop/next/prev, volume, progress, playlist)
+  - AI chat with Claude (RAG recommendations)
+  - Track search with album grouping
+  - Chat history persistence (sessions, messages in PostgreSQL)
+  - Feedback system ("not relevant" button for debugging RAG quality)
+  - TODO: frontend integration with new session-based chat API
 
 ### Phase 4: Voice Interface & Advanced Features
 - Whisper for voice input (Ukrainian/English)
