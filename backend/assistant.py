@@ -44,6 +44,43 @@ Rules:
 - If the user references a previous recommendation or conversation, use the conversation history for context."""
 
 CLAUDE_MODEL = "claude-sonnet-4-20250514"
+TRANSLATE_MODEL = "claude-haiku-4-5-20251001"
+
+
+def _has_cyrillic(text: str) -> bool:
+    """Check if text contains Cyrillic characters."""
+    return any('\u0400' <= ch <= '\u04FF' for ch in text)
+
+
+def _translate_query(query: str) -> Optional[str]:
+    """
+    Translate a Cyrillic query to English using Claude Haiku.
+    Returns English translation or None on failure.
+    Handles artist names, album titles, and music terminology correctly.
+    """
+    if not _has_cyrillic(query):
+        return None
+
+    try:
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        resp = client.messages.create(
+            model=TRANSLATE_MODEL,
+            max_tokens=300,
+            messages=[{"role": "user", "content": query}],
+            system=(
+                "Translate the user's music-related query from Ukrainian/Russian to English. "
+                "Pay special attention to artist names, album titles and band names — "
+                "use their correct English/original spellings (e.g. 'клаус шульце' → 'Klaus Schulze', "
+                "'бітлз' → 'The Beatles', 'пінк флойд' → 'Pink Floyd'). "
+                "Keep the query intent intact. Reply ONLY with the English translation, nothing else."
+            ),
+        )
+        translated = resp.content[0].text.strip()
+        logger.info(f"Query translated: '{query}' → '{translated}'")
+        return translated
+    except Exception as e:
+        logger.warning(f"Query translation failed: {e}")
+        return None
 
 
 def _transliterate_ua_to_latin(text: str) -> str:
@@ -110,7 +147,16 @@ def _extract_filters(db: Session, query: str) -> Dict[str, Any]:
         rows = db.execute(text("SELECT DISTINCT name FROM artists")).fetchall()
         for row in rows:
             artist_name = row[0]
-            if artist_name and artist_name.lower() in query_lower:
+            if not artist_name:
+                continue
+            name_lower = artist_name.lower()
+            # Short names (< 4 chars) must match as whole word to avoid false positives
+            # e.g. "En" matching "recommEnd", "Air" matching "repAIR"
+            if len(name_lower) < 4:
+                if re.search(r'\b' + re.escape(name_lower) + r'\b', query_lower):
+                    filters["artist"] = artist_name
+                    break
+            elif name_lower in query_lower:
                 filters["artist"] = artist_name
                 break
 
@@ -593,12 +639,26 @@ def ask_assistant(
     if not settings.anthropic_api_key:
         raise ValueError("ANTHROPIC_API_KEY is not configured")
 
+    # 0. Translate Cyrillic queries to English for better search
+    original_query = query
+    search_query = query
+    translated = _translate_query(query)
+    if translated:
+        search_query = translated
+
     # 1. Multi-source retrieval
     all_tracks: Dict[int, Dict[str, Any]] = {}
     retrieval_log: List[Dict[str, Any]] = []  # Track which sources contributed
 
+    if translated:
+        retrieval_log.append({
+            "source": "Query translation",
+            "description": f"Переклад запиту: '{original_query}' → '{translated}'",
+            "count": 0,
+        })
+
     # 1a. Check if user references a specific track for similarity search
-    ref_track_id = _detect_track_reference(db, query)
+    ref_track_id = _detect_track_reference(db, search_query)
     if ref_track_id:
         try:
             sim_results = search_similar_tracks(db, ref_track_id, limit=limit)
@@ -617,7 +677,7 @@ def ask_assistant(
 
     # 1b. PRIMARY: Hybrid search (text semantic + CLAP audio)
     try:
-        hybrid_results = search_hybrid(db, query, limit=limit, min_similarity=0.2)
+        hybrid_results = search_hybrid(db, search_query, limit=limit, min_similarity=0.2)
         count = 0
         for t in hybrid_results.get("results", []):
             if t["id"] not in all_tracks:
@@ -634,7 +694,7 @@ def ask_assistant(
         # Fallback to text semantic only
         try:
             text_results = search_by_text_semantic(
-                db, query, limit=limit, min_similarity=0.2
+                db, search_query, limit=limit, min_similarity=0.2
             )
             count = 0
             for t in text_results.get("results", []):
@@ -651,7 +711,13 @@ def ask_assistant(
             logger.warning(f"Text semantic search also failed: {e2}")
 
     # 1c. Metadata search if we can extract filters
-    filters = _extract_filters(db, query)
+    # Try translated query first for better artist name matching, fall back to original
+    filters = _extract_filters(db, search_query)
+    if not filters.get("artist") and translated:
+        # Translated query didn't find artist — try original (maybe it has exact Cyrillic match)
+        orig_filters = _extract_filters(db, original_query)
+        if orig_filters.get("artist"):
+            filters.update(orig_filters)
     logger.info(f"Extracted filters from query: {filters}")
 
     if filters:
@@ -938,7 +1004,7 @@ def ask_assistant(
     except Exception:
         pass
 
-    user_message = f"""User query: {query}
+    user_message = f"""User query: {original_query}
 
 Here are the tracks from the library that may be relevant:
 
@@ -972,7 +1038,7 @@ Based on these tracks and their metadata, please answer the user's query with sp
     return {
         "answer": answer,
         "tracks": tracks,
-        "query": query,
+        "query": original_query,
         "model": CLAUDE_MODEL,
         "tracks_retrieved": len(tracks),
         "filters_detected": filters,
