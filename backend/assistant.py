@@ -620,6 +620,241 @@ def _boost_by_popularity(
     return boosted
 
 
+def _is_catalog_query(original_query: str, translated_query: Optional[str]) -> bool:
+    """
+    Detect if the user is asking for a catalog listing (all albums, discography, etc.)
+    rather than a recommendation.
+    """
+    catalog_patterns = [
+        # Ukrainian
+        r'всі\s+альбом',
+        r'все\s+альбом',
+        r'які\s+альбом',
+        r'які.*в\s+мене\s+є',
+        r'що\s+є\s+в\s+мене',
+        r'що\s+в\s+мене\s+є',
+        r'скільки\s+альбомів',
+        r'покажи.*альбом',
+        r'дискографі[яюї]',
+        r'список\s+альбомів',
+        # Russian
+        r'все\s+альбом',
+        r'какие\s+альбом',
+        r'дискографи[яюи]',
+        r'покажи.*альбом',
+    ]
+    translated_patterns = [
+        r'all\s+albums?',
+        r'every\s+album',
+        r'show.*albums?',
+        r'list.*albums?',
+        r'what\s+albums?',
+        r'how\s+many\s+albums?',
+        r'discography',
+        r'what\s+do\s+i\s+have',
+        r'catalog',
+        r'complete\s+collection',
+    ]
+
+    q_lower = original_query.lower()
+    for pat in catalog_patterns:
+        if re.search(pat, q_lower):
+            return True
+
+    # Check English patterns against both original and translated queries
+    for q in [original_query, translated_query]:
+        if q:
+            t_lower = q.lower()
+            for pat in translated_patterns:
+                if re.search(pat, t_lower):
+                    return True
+
+    return False
+
+
+def _get_artist_discography(db: Session, artist_name: str) -> List[Dict[str, Any]]:
+    """
+    Get full discography for an artist: all albums with track counts and durations.
+    Returns album-level data, no track limit.
+    """
+    sql = text("""
+        SELECT al.id, al.title as album_title, al.release_year, al.quality_source,
+               COUNT(t.id) as track_count,
+               COALESCE(SUM(t.duration_seconds), 0) as total_duration,
+               al.label, al.catalog_number
+        FROM albums al
+        JOIN tracks t ON t.album_id = al.id
+        JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+        JOIN artists a ON ta.artist_id = a.id
+        WHERE a.name = :artist
+        GROUP BY al.id, al.title, al.release_year, al.quality_source, al.label, al.catalog_number
+        ORDER BY al.release_year NULLS LAST, al.title
+    """)
+    rows = db.execute(sql, {"artist": artist_name}).fetchall()
+
+    albums = []
+    for row in rows:
+        total_sec = float(row.total_duration)
+        mins = int(total_sec // 60)
+        albums.append({
+            "album_id": row.id,
+            "title": row.album_title,
+            "year": row.release_year,
+            "quality_source": row.quality_source,
+            "track_count": int(row.track_count),
+            "total_duration_min": mins,
+            "label": row.label,
+        })
+
+    return albums
+
+
+def _format_album_context(
+    albums: List[Dict[str, Any]],
+    artist_name: str,
+) -> str:
+    """Format album listing into text block for Claude's context."""
+    if not albums:
+        return f"No albums found for artist '{artist_name}' in the library."
+
+    lines = [f"Complete discography of {artist_name} in the library ({len(albums)} albums/releases):\n"]
+    for i, a in enumerate(albums, 1):
+        year = f" ({a['year']})" if a.get("year") else ""
+        quality = a.get("quality_source", "CD")
+        duration = f"{a['total_duration_min']} min" if a.get("total_duration_min") else "?"
+        label = f" [{a['label']}]" if a.get("label") else ""
+
+        line = (
+            f'{i}. "{a["title"]}"{year} | {quality} | '
+            f'{a["track_count"]} tracks, {duration}{label}'
+        )
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+def _handle_catalog_query(
+    db: Session,
+    original_query: str,
+    translated: Optional[str],
+    filters: Dict[str, Any],
+    history: Optional[List[Dict[str, str]]] = None,
+    player_context: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Handle catalog-type queries (all albums, discography) with album-level retrieval.
+    Bypasses the normal track-level retrieval pipeline.
+    """
+    artist_name = filters["artist"]
+    retrieval_log = []
+
+    if translated:
+        retrieval_log.append({
+            "source": "Query translation",
+            "description": f"Переклад запиту: '{original_query}' → '{translated}'",
+            "count": 0,
+        })
+
+    retrieval_log.append({
+        "source": "Catalog query detected",
+        "description": f"Запит на дискографію/каталог артиста '{artist_name}'",
+        "count": 0,
+    })
+
+    # Get full discography
+    albums = _get_artist_discography(db, artist_name)
+    logger.info(f"Catalog query: found {len(albums)} albums for '{artist_name}'")
+
+    retrieval_log.append({
+        "source": "Artist discography (DB)",
+        "description": f"Знайдено {len(albums)} альбомів/релізів '{artist_name}'",
+        "count": len(albums),
+    })
+
+    # Format album context
+    album_context = _format_album_context(albums, artist_name)
+
+    # Artist bio context
+    artist_context = ""
+    ctx = _get_artist_context(db, artist_name)
+    if ctx:
+        artist_context = f"\n\nArtist Information:\n{ctx}"
+        retrieval_log.append({
+            "source": "Artist bio (Last.fm)",
+            "description": f"Біографія та схожі артисти для '{artist_name}'",
+            "count": 1,
+        })
+
+    # Library summary
+    lib_summary = ""
+    try:
+        row = db.execute(text("SELECT * FROM library_stats")).fetchone()
+        if row:
+            hours = int((row[4] or 0) / 3600)
+            lib_summary = (
+                f"\n\nLibrary overview: {row[2]:,} tracks, {row[0]:,} artists, "
+                f"{row[1]:,} albums, ~{hours} hours of music."
+            )
+    except Exception:
+        pass
+
+    # Player context
+    player_section = ""
+    if player_context:
+        player_section = f"\n\n{player_context}"
+
+    user_message = f"""User query: {original_query}{player_section}
+
+This is a catalog/discography query. Here is the complete album listing from the library:
+
+{album_context}{artist_context}{lib_summary}
+
+Please present the full discography listing to the user. Group by album type if useful (studio albums, singles/EPs, deluxe editions). Mention quality sources (CD, Vinyl, Hi-Res) and years."""
+
+    # Build messages
+    messages = []
+    if history:
+        for msg in history:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": user_message})
+
+    # Call Claude
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    logger.info(f"Catalog query: calling Claude ({CLAUDE_MODEL}) with {len(albums)} albums context")
+
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=2000,
+        system=SYSTEM_PROMPT,
+        messages=messages,
+    )
+
+    answer = response.content[0].text
+
+    # Build tracks_data from albums for UI (compact representation)
+    tracks_data = [
+        {
+            "id": a["album_id"],
+            "title": a["title"],
+            "artist": artist_name,
+            "album": a["title"],
+            "similarity": None,
+        }
+        for a in albums
+    ]
+
+    return {
+        "answer": answer,
+        "tracks": tracks_data,
+        "query": original_query,
+        "model": CLAUDE_MODEL,
+        "tracks_retrieved": len(albums),
+        "filters_detected": filters,
+        "track_reference": None,
+        "retrieval_log": retrieval_log,
+    }
+
+
 def ask_assistant(
     db: Session,
     query: str,
@@ -649,6 +884,20 @@ def ask_assistant(
     translated = _translate_query(query)
     if translated:
         search_query = translated
+
+    # 0b. Detect catalog queries (all albums, discography, etc.)
+    # Extract filters early to check for artist
+    filters = _extract_filters(db, search_query)
+    if not filters.get("artist") and translated:
+        orig_filters = _extract_filters(db, original_query)
+        if orig_filters.get("artist"):
+            filters.update(orig_filters)
+
+    if _is_catalog_query(original_query, translated) and filters.get("artist"):
+        return _handle_catalog_query(
+            db, original_query, translated, filters,
+            history=history, player_context=player_context,
+        )
 
     # 1. Multi-source retrieval
     all_tracks: Dict[int, Dict[str, Any]] = {}
@@ -715,13 +964,7 @@ def ask_assistant(
             logger.warning(f"Text semantic search also failed: {e2}")
 
     # 1c. Metadata search if we can extract filters
-    # Try translated query first for better artist name matching, fall back to original
-    filters = _extract_filters(db, search_query)
-    if not filters.get("artist") and translated:
-        # Translated query didn't find artist — try original (maybe it has exact Cyrillic match)
-        orig_filters = _extract_filters(db, original_query)
-        if orig_filters.get("artist"):
-            filters.update(orig_filters)
+    # (filters already extracted above before catalog query check)
     logger.info(f"Extracted filters from query: {filters}")
 
     if filters:
