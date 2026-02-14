@@ -59,6 +59,64 @@ def _db_execute(sql: str, params=None) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Player context (for AI DJ awareness of what's playing)
+# ---------------------------------------------------------------------------
+
+def _get_player_context() -> Optional[str]:
+    """Get current HQPlayer state by calling player router functions directly."""
+    try:
+        from routers.player import get_status, get_playlist
+
+        status = get_status()
+
+        if status.get("state") == "disconnected":
+            return None
+
+        parts = []
+
+        # Now playing
+        state = status.get("state", "unknown")
+        song = status.get("song")
+        artist = status.get("artist")
+        album = status.get("album")
+        genre = status.get("genre")
+
+        if song:
+            np = f"Now playing ({state}): \"{song}\" by {artist or 'Unknown'}"
+            if album:
+                np += f" | Album: {album}"
+            if genre:
+                np += f" | Genre: {genre}"
+            pos = status.get("position_formatted", "")
+            length = status.get("length_formatted", "")
+            if pos and length:
+                np += f" | Position: {pos}/{length}"
+            parts.append(np)
+        else:
+            parts.append(f"Player state: {state} (no track loaded)")
+
+        # Playlist
+        try:
+            pl = get_playlist()
+            pl_tracks = pl.get("tracks", [])
+            if pl_tracks:
+                current_idx = status.get("track_index")
+                playlist_lines = [f"Playlist ({len(pl_tracks)} tracks):"]
+                for t in pl_tracks:
+                    marker = " >>> " if t.get("index") == (current_idx - 1 if current_idx else -1) else "     "
+                    playlist_lines.append(f"{marker}{t.get('artist', '?')} - {t.get('title', '?')}")
+                parts.append("\n".join(playlist_lines))
+        except Exception:
+            pass
+
+        return "\n".join(parts)
+
+    except Exception as e:
+        logger.debug(f"Failed to get player context: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
 
@@ -191,13 +249,16 @@ async def send_message(session_id: int, req: ChatMessageRequest):
 
     history = [{"role": r["role"], "content": r["content"]} for r in history_rows] if history_rows else None
 
-    # 3. Call ask_assistant
+    # 3. Gather player context (non-blocking, best-effort)
+    player_context = _get_player_context()
+
+    # 4. Call ask_assistant
     from database import get_db_context
     from assistant import ask_assistant
 
     try:
         with get_db_context() as db:
-            result = ask_assistant(db, req.message, limit=20, history=history)
+            result = ask_assistant(db, req.message, limit=20, history=history, player_context=player_context)
     except Exception as e:
         logger.error(f"ask_assistant failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -335,9 +396,10 @@ async def legacy_chat(req: LegacyChatRequest):
 
     try:
         history = req.history[-10:] if req.history else None
+        player_context = _get_player_context()
 
         with get_db_context() as db:
-            result = ask_assistant(db, req.message, limit=20, history=history)
+            result = ask_assistant(db, req.message, limit=20, history=history, player_context=player_context)
 
         return {
             "answer": result.get("answer", ""),

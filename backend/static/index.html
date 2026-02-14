@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#0f0f23">
   <title>Music AI DJ</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=4">
 </head>
 <body>
   <div class="container">
@@ -61,6 +61,10 @@
 
     <!-- AI DJ Tab -->
     <div class="tab-content" id="tab-chat">
+      <div class="session-bar" id="sessionBar">
+        <div class="session-list" id="sessionList"></div>
+        <button class="new-chat-btn" onclick="startNewChat()">+ New</button>
+      </div>
       <div class="chat-messages" id="chatMessages">
         <div class="empty-state">Ask the AI DJ for recommendations</div>
       </div>
@@ -79,6 +83,6 @@
 
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=6"></script>
 </body>
 </html>

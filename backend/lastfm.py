@@ -15,7 +15,7 @@ from decimal import Decimal
 from config import settings
 from models import (
     ExternalMetadata, Artist, SimilarArtist, Genre, GenreDescription,
-    ArtistBio, Tag, ArtistTag, Album, AlbumInfo, AlbumTag
+    ArtistBio, Tag, ArtistTag, Album, AlbumInfo, AlbumTag, TrackArtist
 )
 
 logger = logging.getLogger(__name__)
@@ -124,10 +124,15 @@ class LastFmService:
             raise
 
     def store_artist_metadata(
-        self, db: Session, artist_id: int, artist_name: str, data: Dict[str, Any]
+        self, db: Session, artist_id: int, artist_name: str, data: Dict[str, Any],
+        store_similar: bool = True,
     ) -> Dict[str, bool]:
         """
         Store Last.fm data in external_metadata table.
+
+        Args:
+            store_similar: If False, skip storing similar artists (prevents recursion
+                          for artists not in the music library).
 
         Returns dict indicating what was stored: {bio: True, tags: True, similar: False, ...}
         """
@@ -176,8 +181,8 @@ class LastFmService:
         else:
             stored["tags"] = False
 
-        # Store similar artists in normalized table
-        if data.get("similar"):
+        # Store similar artists in normalized table (only for library artists)
+        if store_similar and data.get("similar"):
             similar_count = self._store_similar_artists(db, artist_id, artist_name, data["similar"])
             stored["similar_artists"] = similar_count > 0
             logger.debug(
@@ -229,10 +234,10 @@ class LastFmService:
             ).first()
 
             if not similar_artist:
-                # Create new artist
+                # Create new artist (useful for recommendations)
                 similar_artist = Artist(name=normalized_name)
                 db.add(similar_artist)
-                db.flush()  # Get ID without committing
+                db.flush()
                 logger.info(f"Created new artist from similar: {normalized_name} (ID: {similar_artist.id})")
 
             # Check if relationship already exists
@@ -371,9 +376,16 @@ class LastFmService:
             )
             db.add(record)
 
-    def enrich_artist(self, db: Session, artist_id: int, artist_name: str) -> Dict[str, Any]:
+    def enrich_artist(
+        self, db: Session, artist_id: int, artist_name: str,
+        skip_similar: bool = False,
+    ) -> Dict[str, Any]:
         """
         Fetch Last.fm data for an artist and store in database.
+
+        Args:
+            skip_similar: If True, fetch bio/tags but don't store similar artists.
+                         Use for external artists not in the music library.
 
         Returns summary dict with status and stored flags.
         """
@@ -404,7 +416,9 @@ class LastFmService:
                 }
 
             # Store in database (also updates lastfm_id)
-            stored = self.store_artist_metadata(db, artist_id, artist_name, data)
+            stored = self.store_artist_metadata(
+                db, artist_id, artist_name, data, store_similar=not skip_similar
+            )
 
             return {
                 "status": "success",

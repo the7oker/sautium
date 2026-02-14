@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from tqdm import tqdm
 
 from database import get_db_context
-from models import Track, Album, Artist, TrackArtist, AudioFeature, TextEmbedding
+from models import Track, Album, Artist, TrackArtist, AudioFeature, TextEmbedding, SimilarArtist, ArtistBio
 from embeddings import AudioEmbeddingGenerator
 from text_embeddings import TextEmbeddingGenerator
 from audio_analysis import AudioAnalyzer
@@ -104,6 +104,39 @@ class TrackEnrichmentPipeline:
             from lastfm import LastFmService
             self._lastfm_service = LastFmService()
         return self._lastfm_service
+
+    def _enrich_new_similar_artists(self, db: Session, artist_id: int, lastfm) -> int:
+        """Enrich similar artists that don't have bios yet (bio+tags only, no recursion)."""
+        similar_ids = db.query(SimilarArtist.similar_artist_id).filter(
+            SimilarArtist.artist_id == artist_id,
+            SimilarArtist.source == "lastfm",
+        ).all()
+
+        enriched = 0
+        for (sim_id,) in similar_ids:
+            # Skip if already has bio
+            has_bio = db.query(ArtistBio).filter(
+                ArtistBio.artist_id == sim_id,
+                ArtistBio.source == "lastfm",
+            ).first()
+            if has_bio:
+                continue
+
+            sim_artist = db.query(Artist).get(sim_id)
+            if not sim_artist:
+                continue
+
+            try:
+                lastfm.enrich_artist(db, sim_id, sim_artist.name, skip_similar=True)
+                enriched += 1
+                time.sleep(self.lastfm_delay)
+            except Exception as e:
+                logger.debug(f"Failed to enrich similar artist {sim_artist.name}: {e}")
+                db.rollback()
+
+        if enriched:
+            logger.info(f"Enriched {enriched} similar artists for artist_id={artist_id}")
+        return enriched
 
     def _check_track_status(self, db: Session, track: Track) -> Dict[str, bool]:
         """
@@ -234,6 +267,10 @@ class TrackEnrichmentPipeline:
                     )
                     results['lastfm_artist'] = result['status']
                     time.sleep(self.lastfm_delay)
+
+                    # Enrich newly created similar artists (bio only, no recursion)
+                    self._enrich_new_similar_artists(db, status['artist_id'], lastfm)
+
                 except Exception as e:
                     logger.error(f"Last.fm artist enrichment failed: {e}")
                     results['lastfm_artist'] = 'error'

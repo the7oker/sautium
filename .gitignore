@@ -63,3 +63,4 @@ htmlcov/
 *.ckpt
 /prompt.txt
 /backend/.cache
+/tmp/

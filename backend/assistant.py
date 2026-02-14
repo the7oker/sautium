@@ -41,7 +41,9 @@ Rules:
 - You can comment on audio quality (CD, Vinyl, Hi-Res) when relevant.
 - Format track references as: "Title" by Artist (Album).
 - When listing multiple recommendations, briefly explain each choice.
-- If the user references a previous recommendation or conversation, use the conversation history for context."""
+- If the user references a previous recommendation or conversation, use the conversation history for context.
+- If player state info is provided (currently playing track, playlist), use it to answer questions like "what's playing now", "play something similar to this", "what album is this", etc.
+- When recommending "more like this" or "similar to what's playing", reference the currently playing track."""
 
 CLAUDE_MODEL = "claude-sonnet-4-20250514"
 TRANSLATE_MODEL = "claude-haiku-4-5-20251001"
@@ -623,6 +625,7 @@ def ask_assistant(
     query: str,
     limit: int = 20,
     history: Optional[List[Dict[str, str]]] = None,
+    player_context: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Enhanced RAG pipeline: multi-source retrieval, enriched context, Claude.
@@ -632,6 +635,7 @@ def ask_assistant(
         query: Natural language question about the music library.
         limit: Max tracks to retrieve for context.
         history: Optional conversation history (list of {role, content} dicts).
+        player_context: Optional string with current HQPlayer state (now playing, playlist).
 
     Returns:
         Dict with answer, tracks, query, model, tracks_retrieved, and metadata.
@@ -1004,7 +1008,12 @@ def ask_assistant(
     except Exception:
         pass
 
-    user_message = f"""User query: {original_query}
+    # Player state context (now playing, playlist)
+    player_section = ""
+    if player_context:
+        player_section = f"\n\n{player_context}"
+
+    user_message = f"""User query: {original_query}{player_section}
 
 Here are the tracks from the library that may be relevant:
 

@@ -287,9 +287,9 @@ class LibraryScanner:
 
                     album_title = metadata.get("album")
                     if not album_title:
-                        logger.warning(f"Missing album for {file_path}, skipping")
-                        stats["errors"] += 1
-                        continue
+                        # Treat as a single — use track title as album name
+                        album_title = metadata["title"]
+                        logger.info(f"No album tag, using title as album: {album_title}")
 
                     # Get or create artist
                     artist = self.get_or_create_artist(db, artist_name)

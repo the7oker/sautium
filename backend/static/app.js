@@ -3,7 +3,9 @@
 // -- State -------------------------------------------------------------------
 
 let currentState = "disconnected";
-let chatHistory = [];
+let currentSessionId = null;
+let sessions = [];
+let sessionsLoaded = false;
 let currentPlaylist = [];
 
 // -- DOM refs ----------------------------------------------------------------
@@ -179,6 +181,9 @@ function switchTab(name) {
   document.querySelectorAll(".tab-content").forEach((div) => {
     div.classList.toggle("active", div.id === "tab-" + name);
   });
+  if (name === "chat" && !sessionsLoaded) {
+    loadSessions();
+  }
 }
 
 // -- Search ------------------------------------------------------------------
@@ -226,6 +231,7 @@ function groupTracksByAlbum(tracks) {
       id: t.id,
       title: t.title,
       track_number: t.track_number,
+      disc_number: t.disc_number,
       duration_seconds: t.duration_seconds,
     });
   }
@@ -252,7 +258,7 @@ function renderAlbumList(container, albums) {
 
     html +=
       '<div class="album-card">' +
-        '<div class="album-header" onclick="toggleAlbumTracks(' + albumId + ')">' +
+        '<div class="album-header" onclick="toggleAlbumTracks(\'' + albumId + '\')">' +
           '<div class="album-info">' +
             '<div class="album-title">' + esc(album.artist) + " \u2014 " + esc(album.album) + "</div>" +
             '<div class="album-meta">' + esc(meta) + "</div>" +
@@ -262,7 +268,15 @@ function renderAlbumList(container, albums) {
         "</div>" +
         '<div class="album-tracks" id="tracks-' + albumId + '" style="display:none">';
 
+    const hasMultipleDiscs = album.tracks.some(t => t.disc_number && t.disc_number > 1);
+    let lastDisc = 0;
+
     for (const t of album.tracks) {
+      // Disc separator
+      if (hasMultipleDiscs && t.disc_number && t.disc_number !== lastDisc) {
+        lastDisc = t.disc_number;
+        html += '<div class="disc-header">Disc ' + t.disc_number + '</div>';
+      }
       const trackDur = t.duration_seconds ? formatTime(t.duration_seconds) : "";
       html +=
         '<div class="track-row" onclick="playTrack(' + t.id + ')">' +
@@ -310,6 +324,143 @@ function renderTrackList(container, tracks) {
   container.innerHTML = html;
 }
 
+// -- Sessions ----------------------------------------------------------------
+
+async function loadSessions() {
+  try {
+    const resp = await fetch("/api/chat/sessions");
+    sessions = await resp.json();
+    sessionsLoaded = true;
+    renderSessionList();
+    // Auto-select the most recent session
+    if (sessions.length > 0 && !currentSessionId) {
+      selectSession(sessions[0].id);
+    }
+  } catch (e) {
+    console.error("Failed to load sessions:", e);
+  }
+}
+
+function renderSessionList() {
+  const container = document.getElementById("sessionList");
+  if (!container) return;
+  let html = "";
+  for (const s of sessions) {
+    const title = s.title || "New chat";
+    const isActive = s.id === currentSessionId;
+    html +=
+      '<div class="session-pill' + (isActive ? " active" : "") + '" data-sid="' + s.id + '" onclick="selectSession(' + s.id + ')">' +
+        '<span class="session-pill-title">' + esc(title) + '</span>' +
+        '<span class="session-pill-delete" onclick="event.stopPropagation(); deleteSession(' + s.id + ')">&times;</span>' +
+      '</div>';
+  }
+  container.innerHTML = html;
+}
+
+async function selectSession(id) {
+  currentSessionId = id;
+  renderSessionList();
+  chatMessages.innerHTML = '<div class="loading"><span class="spinner"></span>Loading...</div>';
+
+  try {
+    const resp = await fetch("/api/chat/sessions/" + id + "/messages");
+    const messages = await resp.json();
+
+    chatMessages.innerHTML = "";
+    if (messages.length === 0) {
+      chatMessages.innerHTML = '<div class="empty-state">Ask the AI DJ for recommendations</div>';
+      return;
+    }
+
+    for (const m of messages) {
+      const tracks = m.tracks_data ? (typeof m.tracks_data === "string" ? JSON.parse(m.tracks_data) : m.tracks_data) : null;
+      appendChatBubble(m.role, m.content, tracks, null, null, null, m.id, m.is_not_relevant);
+    }
+  } catch (e) {
+    chatMessages.innerHTML = '<div class="empty-state">Error loading messages</div>';
+    console.error("Failed to load messages:", e);
+  }
+}
+
+function startNewChat() {
+  currentSessionId = null;
+  renderSessionList();
+  chatMessages.innerHTML = '<div class="empty-state">Ask the AI DJ for recommendations</div>';
+  chatInput.focus();
+}
+
+async function deleteSession(id) {
+  try {
+    await fetch("/api/chat/sessions/" + id, { method: "DELETE" });
+    sessions = sessions.filter(s => s.id !== id);
+    if (currentSessionId === id) {
+      currentSessionId = null;
+      chatMessages.innerHTML = '<div class="empty-state">Ask the AI DJ for recommendations</div>';
+      if (sessions.length > 0) {
+        selectSession(sessions[0].id);
+      }
+    }
+    renderSessionList();
+  } catch (e) {
+    console.error("Failed to delete session:", e);
+  }
+}
+
+function openFeedbackForm(messageId, btn) {
+  // Don't open twice
+  if (btn.parentElement.querySelector(".feedback-form")) return;
+
+  btn.style.display = "none";
+
+  const form = document.createElement("div");
+  form.className = "feedback-form";
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "feedback-input";
+  input.placeholder = "What was wrong? (optional)";
+
+  const sendBtn = document.createElement("button");
+  sendBtn.className = "feedback-send";
+  sendBtn.textContent = "Send";
+  sendBtn.onclick = () => submitFeedback(messageId, input.value.trim(), form, btn);
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.className = "feedback-cancel";
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.onclick = () => { form.remove(); btn.style.display = ""; };
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submitFeedback(messageId, input.value.trim(), form, btn);
+    }
+  });
+
+  form.appendChild(input);
+  form.appendChild(sendBtn);
+  form.appendChild(cancelBtn);
+  btn.parentElement.appendChild(form);
+  input.focus();
+}
+
+async function submitFeedback(messageId, comment, form, btn) {
+  try {
+    await fetch("/api/chat/messages/" + messageId + "/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_not_relevant: true, comment: comment || null }),
+    });
+    form.remove();
+    btn.classList.add("sent");
+    btn.disabled = true;
+    btn.textContent = "Not relevant";
+    btn.style.display = "";
+  } catch (e) {
+    console.error("Failed to send feedback:", e);
+  }
+}
+
 // -- Chat --------------------------------------------------------------------
 
 async function sendChat(e) {
@@ -317,13 +468,28 @@ async function sendChat(e) {
   const msg = chatInput.value.trim();
   if (!msg) return;
 
-  // Clear empty state on first message
-  if (chatHistory.length === 0) {
-    chatMessages.innerHTML = "";
+  // Create session if needed
+  if (!currentSessionId) {
+    try {
+      const resp = await fetch("/api/chat/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const session = await resp.json();
+      currentSessionId = session.id;
+      chatMessages.innerHTML = "";
+    } catch (err) {
+      appendChatBubble("assistant", "Error creating session: " + err.message);
+      return;
+    }
   }
 
-  // Add user message
-  chatHistory.push({ role: "user", content: msg });
+  // Clear empty state
+  const emptyState = chatMessages.querySelector(".empty-state");
+  if (emptyState) emptyState.remove();
+
+  // Add user message bubble
   appendChatBubble("user", msg);
   chatInput.value = "";
   chatSendBtn.disabled = true;
@@ -338,10 +504,10 @@ async function sendChat(e) {
   chatMessages.scrollTop = chatMessages.scrollHeight;
 
   try {
-    const resp = await fetch("/api/chat", {
+    const resp = await fetch("/api/chat/sessions/" + currentSessionId + "/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: msg, history: chatHistory.slice(-10) }),
+      body: JSON.stringify({ message: msg }),
     });
     const data = await resp.json();
 
@@ -349,12 +515,23 @@ async function sendChat(e) {
     const el = document.getElementById(loadingId);
     if (el) el.remove();
 
-    if (data.error || data.detail) {
-      appendChatBubble("assistant", "Error: " + (data.detail || data.error));
+    if (data.detail) {
+      appendChatBubble("assistant", "Error: " + data.detail);
     } else {
-      chatHistory.push({ role: "assistant", content: data.answer });
-      appendChatBubble("assistant", data.answer, data.tracks, data.retrieval_log, data.model, data.tracks_retrieved);
+      const assistantId = data.assistant_msg ? data.assistant_msg.id : null;
+      appendChatBubble(
+        "assistant",
+        data.assistant_msg ? data.assistant_msg.content : "",
+        data.tracks,
+        data.retrieval_log,
+        data.model,
+        data.tracks_retrieved,
+        assistantId
+      );
     }
+
+    // Refresh session list
+    loadSessions();
   } catch (err) {
     const el = document.getElementById(loadingId);
     if (el) el.remove();
@@ -364,7 +541,7 @@ async function sendChat(e) {
   chatSendBtn.disabled = false;
 }
 
-function appendChatBubble(role, text, tracks, retrievalLog, model, tracksRetrieved) {
+function appendChatBubble(role, text, tracks, retrievalLog, model, tracksRetrieved, messageId, alreadyFlagged) {
   const div = document.createElement("div");
   div.className = "chat-msg " + role;
 
@@ -399,7 +576,7 @@ function appendChatBubble(role, text, tracks, retrievalLog, model, tracksRetriev
     // Add "Play All" button
     const playAllBtn = document.createElement("button");
     playAllBtn.className = "play-all-btn";
-    playAllBtn.textContent = "▶ Play Recommendations (" + tracks.length + " tracks)";
+    playAllBtn.textContent = "\u25b6 Play Recommendations (" + tracks.length + " tracks)";
     playAllBtn.onclick = () => playRecommendations(tracks);
     div.appendChild(playAllBtn);
 
@@ -409,6 +586,18 @@ function appendChatBubble(role, text, tracks, retrievalLog, model, tracksRetriev
     const albums = groupTracksByAlbum(tracks);
     renderAlbumList(tracksDiv, albums);
     div.appendChild(tracksDiv);
+  }
+
+  // Add feedback button for assistant messages
+  if (role === "assistant" && messageId) {
+    const feedbackBtn = document.createElement("button");
+    feedbackBtn.className = "feedback-btn" + (alreadyFlagged ? " sent" : "");
+    feedbackBtn.textContent = alreadyFlagged ? "Not relevant" : "\ud83d\udc4e Not relevant";
+    feedbackBtn.disabled = !!alreadyFlagged;
+    if (!alreadyFlagged) {
+      feedbackBtn.onclick = () => openFeedbackForm(messageId, feedbackBtn);
+    }
+    div.appendChild(feedbackBtn);
   }
 
   chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -443,7 +632,7 @@ function updateQueueDisplay() {
 
   for (let i = 0; i < currentPlaylist.length; i++) {
     const t = currentPlaylist[i];
-    const num = t.track_number || (i + 1);
+    const num = i + 1;
     const isCurrent = false; // Will be updated from status polling
     html +=
       '<div class="queue-item' + (isCurrent ? ' playing' : '') + '" data-index="' + i + '">' +

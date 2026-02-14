@@ -183,7 +183,7 @@ async def search_tracks(q: str = "", limit: int = 20):
     where_exact = " AND ".join(word_conditions)
 
     rows = _db_query(f"""
-        SELECT t.id, t.title, t.track_number, t.duration_seconds,
+        SELECT t.id, t.title, t.track_number, t.disc_number, t.duration_seconds,
                a2.name as artist, al.id as album_id, al.title as album,
                g.name as genre, al.quality_source
         FROM tracks t
@@ -193,14 +193,14 @@ async def search_tracks(q: str = "", limit: int = 20):
         LEFT JOIN track_genres tg ON t.id = tg.track_id
         LEFT JOIN genres g ON tg.genre_id = g.id
         WHERE {where_exact}
-        ORDER BY a2.name, al.title, t.track_number
+        ORDER BY a2.name, al.title, t.disc_number, t.track_number
     """, params)
 
     if not rows:
         # Stage 2: Fuzzy trigram fallback
         params = {"query": q, "query_like": f"%{q}%", "limit": limit * 10}
         rows = _db_query("""
-            SELECT t.id, t.title, t.track_number, t.duration_seconds,
+            SELECT t.id, t.title, t.track_number, t.disc_number, t.duration_seconds,
                    a2.name as artist, al.id as album_id, al.title as album,
                    g.name as genre, al.quality_source,
                    GREATEST(
@@ -217,13 +217,13 @@ async def search_tracks(q: str = "", limit: int = 20):
             WHERE similarity(a2.name, %(query)s) > 0.25
                OR similarity(al.title, %(query)s) > 0.25
                OR similarity(t.title, %(query)s) > 0.25
-            ORDER BY _score DESC, a2.name, al.title, t.track_number
+            ORDER BY _score DESC, a2.name, al.title, t.disc_number, t.track_number
         """, params)
 
-    # Group by album
+    # Group by album (merge multi-disc albums, but keep CD/Vinyl/Hi-Res separate)
     albums_dict = {}
     for row in rows:
-        key = (row["artist"], row["album_id"])
+        key = (row["artist"], row["album"], row["quality_source"])
         if key not in albums_dict:
             albums_dict[key] = {
                 "artist": row["artist"],
@@ -237,6 +237,7 @@ async def search_tracks(q: str = "", limit: int = 20):
             "id": row["id"],
             "title": row["title"],
             "track_number": row["track_number"],
+            "disc_number": row["disc_number"],
             "duration_seconds": row["duration_seconds"],
         })
 
