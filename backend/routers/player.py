@@ -6,6 +6,8 @@ but exposed as HTTP endpoints for the Web UI.
 """
 
 import logging
+import threading
+import time
 from typing import Optional
 
 import httpx
@@ -24,11 +26,12 @@ router = APIRouter(prefix="/api/player", tags=["player"])
 # -- Lazy singletons ----------------------------------------------------------
 
 _hqp_client: Optional[HQPlayerClient] = None
+_hqp_lock = threading.Lock()  # Prevent concurrent HQPlayer TCP commands
 _db_conn: Optional[psycopg2.extensions.connection] = None
 
 
 def _get_hqp() -> HQPlayerClient:
-    """Get or create HQPlayer client (lazy, auto-reconnect)."""
+    """Get or create HQPlayer client (lazy, auto-reconnect). Must be called inside _hqp_lock."""
     global _hqp_client
     if _hqp_client is None or not _hqp_client.is_connected():
         _hqp_client = HQPlayerClient(
@@ -42,6 +45,13 @@ def _get_hqp() -> HQPlayerClient:
                 f"Cannot connect to HQPlayer at {settings.hqplayer_host}:{settings.hqplayer_port}"
             )
     return _hqp_client
+
+
+def _hqp_cmd(func):
+    """Execute a function with HQPlayer client under lock. Prevents concurrent TCP access."""
+    with _hqp_lock:
+        hqp = _get_hqp()
+        return func(hqp)
 
 
 def _get_db() -> psycopg2.extensions.connection:
@@ -204,11 +214,12 @@ async def search_tracks(q: str = "", limit: int = 20):
 # -- Transport controls -------------------------------------------------------
 
 @router.get("/playlist")
-async def get_playlist():
+def get_playlist():
     """Get current playlist from HQPlayer with track details from DB."""
     try:
-        hqp = _get_hqp()
-        hqp_tracks = hqp.get_playlist()
+        with _hqp_lock:
+            hqp = _get_hqp()
+            hqp_tracks = hqp.get_playlist()
         logger.info(f"HQPlayer returned {len(hqp_tracks)} tracks")
 
         if not hqp_tracks:
@@ -230,8 +241,9 @@ async def get_playlist():
                 logger.warning(f"Unsupported URI format: {uri}")
                 continue
 
-            # Replace backslashes with forward slashes
+            # Replace backslashes with forward slashes and decode percent-encoded brackets
             win_path = win_path.replace("\\", "/")
+            win_path = win_path.replace("%5B", "[").replace("%5D", "]")
             db_path = win_path.replace(settings.hqplayer_music_path + "/", "/music/", 1)
             logger.debug(f"  Converted: {uri} -> {db_path}")
 
@@ -274,11 +286,12 @@ async def get_playlist():
 
 
 @router.get("/status")
-async def get_status():
+def get_status():
     """Get current HQPlayer status. Returns {state: 'disconnected'} on connection failure."""
     try:
-        hqp = _get_hqp()
-        status = hqp.get_status()
+        with _hqp_lock:
+            hqp = _get_hqp()
+            status = hqp.get_status()
         if status is None:
             return {"state": "unknown"}
 
@@ -308,81 +321,65 @@ async def get_status():
 
 
 @router.post("/play")
-async def play():
+def play():
     try:
-        hqp = _get_hqp()
-        ok = hqp.play()
-        return {"ok": ok}
+        return {"ok": _hqp_cmd(lambda h: h.play())}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/pause")
-async def pause():
+def pause():
     try:
-        hqp = _get_hqp()
-        ok = hqp.pause()
-        return {"ok": ok}
+        return {"ok": _hqp_cmd(lambda h: h.pause())}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/stop")
-async def stop():
+def stop():
     try:
-        hqp = _get_hqp()
-        ok = hqp.stop()
-        return {"ok": ok}
+        return {"ok": _hqp_cmd(lambda h: h.stop())}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/next")
-async def next_track():
+def next_track():
     try:
-        hqp = _get_hqp()
-        ok = hqp.next()
-        return {"ok": ok}
+        return {"ok": _hqp_cmd(lambda h: h.next())}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/previous")
-async def previous_track():
+def previous_track():
     try:
-        hqp = _get_hqp()
-        ok = hqp.previous()
-        return {"ok": ok}
+        return {"ok": _hqp_cmd(lambda h: h.previous())}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/volume/up")
-async def volume_up():
+def volume_up():
     try:
-        hqp = _get_hqp()
-        ok = hqp.volume_up()
-        return {"ok": ok}
+        return {"ok": _hqp_cmd(lambda h: h.volume_up())}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/volume/down")
-async def volume_down():
+def volume_down():
     try:
-        hqp = _get_hqp()
-        ok = hqp.volume_down()
-        return {"ok": ok}
+        return {"ok": _hqp_cmd(lambda h: h.volume_down())}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/volume")
-async def set_volume(req: VolumeRequest):
+def set_volume(req: VolumeRequest):
     try:
-        hqp = _get_hqp()
-        ok = hqp.set_volume(req.level)
-        return {"ok": ok}
+        return {"ok": _hqp_cmd(lambda h: h.set_volume(req.level))}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -390,7 +387,7 @@ async def set_volume(req: VolumeRequest):
 # -- Smart play ----------------------------------------------------------------
 
 @router.post("/play-track")
-async def play_track(req: PlayTrackRequest):
+def play_track(req: PlayTrackRequest):
     """Clear playlist, add single track, play, register with tracker."""
     row = _db_query_one("""
         SELECT t.file_path, t.title, a2.name as artist, al.title as album
@@ -406,11 +403,11 @@ async def play_track(req: PlayTrackRequest):
 
     try:
         uri = _convert_path(row["file_path"])
-        hqp = _get_hqp()
-        hqp.stop()
-        hqp.playlist_add(uri, clear=True)
-        hqp.select_track(0)
-        hqp.play()
+        with _hqp_lock:
+            hqp = _get_hqp()
+            hqp.stop()
+            hqp.playlist_add(uri, clear=True)
+            hqp.play()
         _register_playlist([req.track_id])
 
         return {
@@ -424,7 +421,7 @@ async def play_track(req: PlayTrackRequest):
 
 
 @router.post("/play-album")
-async def play_album(req: PlayAlbumRequest):
+def play_album(req: PlayAlbumRequest):
     """Fuzzy-match album, load all tracks, play."""
     match_conditions = [
         "(similarity(al.title, %(album)s) > 0.15 OR al.title ILIKE %(album_like)s)"
@@ -473,13 +470,13 @@ async def play_album(req: PlayAlbumRequest):
         raise HTTPException(status_code=404, detail="Album has no tracks")
 
     try:
-        hqp = _get_hqp()
-        hqp.stop()
-        hqp.playlist_add(_convert_path(rows[0]["file_path"]), clear=True)
-        for row in rows[1:]:
-            hqp.playlist_add(_convert_path(row["file_path"]))
-        hqp.select_track(0)
-        hqp.play()
+        with _hqp_lock:
+            hqp = _get_hqp()
+            hqp.stop()
+            hqp.playlist_add(_convert_path(rows[0]["file_path"]), clear=True)
+            for row in rows[1:]:
+                hqp.playlist_add(_convert_path(row["file_path"]))
+            hqp.play()
 
         track_ids = [r["id"] for r in rows]
         _register_playlist(track_ids)
@@ -499,7 +496,7 @@ async def play_album(req: PlayAlbumRequest):
 
 
 @router.post("/play-similar")
-async def play_similar(req: PlaySimilarRequest):
+def play_similar(req: PlaySimilarRequest):
     """Find similar tracks via pgvector cosine search, queue and play."""
     rows = _db_query("""
         WITH target AS (
@@ -524,13 +521,13 @@ async def play_similar(req: PlaySimilarRequest):
         raise HTTPException(status_code=404, detail="No similar tracks found")
 
     try:
-        hqp = _get_hqp()
-        hqp.stop()
-        hqp.playlist_add(_convert_path(rows[0]["file_path"]), clear=True)
-        for row in rows[1:]:
-            hqp.playlist_add(_convert_path(row["file_path"]))
-        hqp.select_track(0)
-        hqp.play()
+        with _hqp_lock:
+            hqp = _get_hqp()
+            hqp.stop()
+            hqp.playlist_add(_convert_path(rows[0]["file_path"]), clear=True)
+            for row in rows[1:]:
+                hqp.playlist_add(_convert_path(row["file_path"]))
+            hqp.play()
 
         track_ids = [r["id"] for r in rows]
         _register_playlist(track_ids)
@@ -554,7 +551,7 @@ async def play_similar(req: PlaySimilarRequest):
 
 
 @router.post("/play-tracks")
-async def play_tracks(req: PlayTracksRequest):
+def play_tracks(req: PlayTracksRequest):
     """Play multiple tracks by IDs."""
     if not req.track_ids:
         raise HTTPException(status_code=400, detail="No track IDs provided")
@@ -574,13 +571,34 @@ async def play_tracks(req: PlayTracksRequest):
         raise HTTPException(status_code=404, detail="No tracks found")
 
     try:
-        hqp = _get_hqp()
-        hqp.stop()
-        hqp.playlist_add(_convert_path(rows[0]["file_path"]), clear=True)
-        for row in rows[1:]:
-            hqp.playlist_add(_convert_path(row["file_path"]))
-        hqp.select_track(0)
-        hqp.play()
+        with _hqp_lock:
+            hqp = _get_hqp()
+            logger.info(f"play-tracks: stopping playback")
+            hqp.stop()
+            first_path = _convert_path(rows[0]["file_path"])
+            logger.info(f"play-tracks: adding first track (clear=True): {first_path}")
+            result = hqp.playlist_add(first_path, clear=True)
+            logger.info(f"play-tracks: playlist_add result: {result}")
+            for i, row in enumerate(rows[1:], 2):
+                path = _convert_path(row["file_path"])
+                hqp.playlist_add(path)
+            logger.info(f"play-tracks: added {len(rows)} tracks total")
+            hqp.play()
+
+            # Verify playback started; if first track fails (e.g. [Vinyl] path),
+            # try skipping to next tracks until one plays
+            time.sleep(0.5)
+            status = hqp.get_status()
+            if status and status.state == PlaybackState.STOPPED and len(rows) > 1:
+                logger.warning("play-tracks: first track didn't start, trying next tracks")
+                for skip_idx in range(2, min(len(rows) + 1, 6)):  # try up to 5 tracks
+                    hqp.select_track(skip_idx)
+                    hqp.play()
+                    time.sleep(0.5)
+                    status = hqp.get_status()
+                    if status and status.state != PlaybackState.STOPPED:
+                        logger.info(f"play-tracks: track {skip_idx} started successfully")
+                        break
 
         track_ids = [r["id"] for r in rows]
         _register_playlist(track_ids)
@@ -594,4 +612,5 @@ async def play_tracks(req: PlayTracksRequest):
             ],
         }
     except Exception as e:
+        logger.error(f"play-tracks failed: {e}")
         raise HTTPException(status_code=503, detail=str(e))

@@ -42,6 +42,9 @@ async def chat(req: ChatRequest):
             "answer": result.get("answer", ""),
             "tracks": result.get("tracks", []),
             "filters_detected": result.get("filters_detected", {}),
+            "retrieval_log": result.get("retrieval_log", []),
+            "model": result.get("model", ""),
+            "tracks_retrieved": result.get("tracks_retrieved", 0),
         }
     except Exception as e:
         logger.error(f"Chat failed: {e}")

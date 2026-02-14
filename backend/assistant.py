@@ -46,6 +46,30 @@ Rules:
 CLAUDE_MODEL = "claude-sonnet-4-20250514"
 
 
+def _transliterate_ua_to_latin(text: str) -> str:
+    """
+    Transliterate Ukrainian Cyrillic to Latin for artist name matching.
+    Simple mapping for common names like "клаус шульц" → "klaus schulz"
+    """
+    ua_to_lat = {
+        'а': 'a', 'б': 'b', 'в': 'v', 'г': 'h', 'ґ': 'g', 'д': 'd', 'е': 'e',
+        'є': 'ye', 'ж': 'zh', 'з': 'z', 'и': 'y', 'і': 'i', 'ї': 'yi', 'й': 'y',
+        'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r',
+        'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'kh', 'ц': 'ts', 'ч': 'ch',
+        'ш': 'sh', 'щ': 'shch', 'ь': '', 'ю': 'yu', 'я': 'ya',
+        'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'H', 'Ґ': 'G', 'Д': 'D', 'Е': 'E',
+        'Є': 'Ye', 'Ж': 'Zh', 'З': 'Z', 'И': 'Y', 'І': 'I', 'Ї': 'Yi', 'Й': 'Y',
+        'К': 'K', 'Л': 'L', 'М': 'M', 'Н': 'N', 'О': 'O', 'П': 'P', 'Р': 'R',
+        'С': 'S', 'Т': 'T', 'У': 'U', 'Ф': 'F', 'Х': 'Kh', 'Ц': 'Ts', 'Ч': 'Ch',
+        'Ш': 'Sh', 'Щ': 'Shch', 'Ь': '', 'Ю': 'Yu', 'Я': 'Ya',
+    }
+
+    result = []
+    for char in text:
+        result.append(ua_to_lat.get(char, char))
+    return ''.join(result)
+
+
 def _extract_filters(db: Session, query: str) -> Dict[str, Any]:
     """
     Extract metadata filters from a natural language query.
@@ -91,18 +115,63 @@ def _extract_filters(db: Session, query: str) -> Dict[str, Any]:
                 break
 
         # Fuzzy match if no exact match — use trigram similarity
+        # Extract 2-3 word combinations from query and try fuzzy matching
         if "artist" not in filters:
-            sql = text("""
-                SELECT name FROM artists
-                WHERE similarity(name, :query) > 0.3
-                ORDER BY similarity(name, :query) DESC
-                LIMIT 1
-            """)
-            fuzzy = db.execute(sql, {"query": query}).fetchone()
-            if fuzzy:
-                filters["artist"] = fuzzy[0]
+            # Transliterate if query contains Cyrillic
+            search_query = query
+            if any('\u0400' <= char <= '\u04FF' for char in query):
+                # Normalize Ukrainian case endings before transliteration
+                # Replace genitive endings: "клауса" → "клаус", "шульца" → "шульц"
+                normalized = re.sub(r'\b(\w+)а\b', r'\1', query)  # remove trailing 'а'
+                search_query = _transliterate_ua_to_latin(normalized)
+                logger.info(f"Query contains Cyrillic, normalizing and transliterating: '{query}' → '{normalized}' → '{search_query}'")
+
+            # Extract all 2-3 word combinations as potential artist names
+            words = search_query.lower().split()
+            artist_candidates = []
+
+            # 2-word combinations
+            for i in range(len(words) - 1):
+                artist_candidates.append(" ".join(words[i:i+2]))
+
+            # 3-word combinations (for names like "Klaus Schulze's U.S.O.")
+            for i in range(len(words) - 2):
+                artist_candidates.append(" ".join(words[i:i+3]))
+
+            # Try fuzzy matching for each candidate and pick best match
+            best_match = None
+            best_similarity = 0.4  # threshold (raised to avoid false matches like "shchos z" → "Shio-Z")
+
+            for candidate in artist_candidates:
+                sql = text("""
+                    SELECT name, similarity(name, :query) as sim FROM artists
+                    WHERE similarity(name, :query) > :threshold
+                    ORDER BY similarity(name, :query) DESC
+                    LIMIT 1
+                """)
+                fuzzy = db.execute(sql, {"query": candidate, "threshold": best_similarity}).fetchone()
+                if fuzzy and fuzzy[1] > best_similarity:
+                    best_match = (fuzzy[0], fuzzy[1], candidate)
+                    best_similarity = fuzzy[1]
+
+            if best_match:
+                filters["artist"] = best_match[0]
+                logger.info(f"Fuzzy match: candidate='{best_match[2]}' matched artist='{best_match[0]}' with similarity={best_match[1]:.3f}")
     except Exception as e:
         logger.debug(f"Artist extraction failed: {e}")
+
+    # Album name — try to detect album references in query
+    # Look for patterns like "альбом X", "album X", or known album titles
+    # Capture until end of sentence or next clause
+    album_pattern = re.search(
+        r'(?:альбом[уі]?\s+|album\s+)["«]?([^"»,!?]+?)["»]?(?:\s*$|[,!?.])',
+        query, re.IGNORECASE,
+    )
+    if album_pattern:
+        album_name = album_pattern.group(1).strip()
+        if album_name and len(album_name) > 2:
+            filters["album_hint"] = album_name
+            logger.info(f"Detected album reference: '{album_name}'")
 
     # Year patterns
     # "from the 1970s" / "70s" / "80s"
@@ -526,27 +595,39 @@ def ask_assistant(
 
     # 1. Multi-source retrieval
     all_tracks: Dict[int, Dict[str, Any]] = {}
+    retrieval_log: List[Dict[str, Any]] = []  # Track which sources contributed
 
     # 1a. Check if user references a specific track for similarity search
     ref_track_id = _detect_track_reference(db, query)
     if ref_track_id:
         try:
             sim_results = search_similar_tracks(db, ref_track_id, limit=limit)
+            count = 0
             for t in sim_results.get("results", []):
                 all_tracks[t["id"]] = t
-            logger.info(
-                f"Track similarity search (ref={ref_track_id}) returned "
-                f"{sim_results.get('count', 0)} tracks"
-            )
+                count += 1
+            retrieval_log.append({
+                "source": "CLAP audio similarity",
+                "description": f"Знайдено {count} треків схожих за звучанням (ref track_id={ref_track_id})",
+                "count": count,
+            })
+            logger.info(f"Track similarity search (ref={ref_track_id}) returned {count} tracks")
         except Exception as e:
             logger.warning(f"Track similarity search failed: {e}")
 
     # 1b. PRIMARY: Hybrid search (text semantic + CLAP audio)
     try:
         hybrid_results = search_hybrid(db, query, limit=limit, min_similarity=0.2)
+        count = 0
         for t in hybrid_results.get("results", []):
             if t["id"] not in all_tracks:
                 all_tracks[t["id"]] = t
+                count += 1
+        retrieval_log.append({
+            "source": "Hybrid search (CLAP audio + text embeddings)",
+            "description": f"CLAP audio embeddings + text semantic search повернули {hybrid_results.get('count', 0)} треків, {count} нових додано",
+            "count": count,
+        })
         logger.info(f"Hybrid search returned {hybrid_results.get('count', 0)} tracks")
     except Exception as e:
         logger.warning(f"Hybrid search failed, falling back: {e}")
@@ -555,21 +636,41 @@ def ask_assistant(
             text_results = search_by_text_semantic(
                 db, query, limit=limit, min_similarity=0.2
             )
+            count = 0
             for t in text_results.get("results", []):
                 if t["id"] not in all_tracks:
                     all_tracks[t["id"]] = t
+                    count += 1
+            retrieval_log.append({
+                "source": "Text semantic search (fallback)",
+                "description": f"Text embeddings (all-MiniLM-L6-v2) повернули {text_results.get('count', 0)} треків, {count} нових",
+                "count": count,
+            })
             logger.info(f"Text semantic search returned {text_results.get('count', 0)} tracks")
         except Exception as e2:
             logger.warning(f"Text semantic search also failed: {e2}")
 
     # 1c. Metadata search if we can extract filters
     filters = _extract_filters(db, query)
+    logger.info(f"Extracted filters from query: {filters}")
+
     if filters:
         try:
-            meta_results = search_by_metadata(db, filters=filters, limit=limit)
+            # Use higher limit for metadata when artist is detected to capture more albums
+            meta_limit = min(limit * 2, 40) if "artist" in filters else limit
+            meta_results = search_by_metadata(db, filters=filters, limit=meta_limit)
+            count = 0
             for t in meta_results.get("results", []):
                 if t["id"] not in all_tracks:
+                    t["similarity"] = 0.85
                     all_tracks[t["id"]] = t
+                    count += 1
+            filter_desc = ", ".join(f"{k}={v}" for k, v in filters.items() if k != "album_hint")
+            retrieval_log.append({
+                "source": "Metadata DB search",
+                "description": f"PostgreSQL ILIKE фільтр ({filter_desc}) повернув {meta_results.get('count', 0)} треків, {count} нових",
+                "count": count,
+            })
             logger.info(
                 f"Metadata search (filters={filters}) returned "
                 f"{meta_results.get('count', 0)} tracks"
@@ -594,7 +695,12 @@ def ask_assistant(
                     """), {"artist": filters["artist"], "limit": 30}).fetchall()
 
                     for row in artist_tracks:
-                        track = {k: v for k, v in dict(row._mapping).items()}
+                        track = {}
+                        for k, v in dict(row._mapping).items():
+                            if hasattr(v, 'as_integer_ratio'):
+                                track[k] = float(v)
+                            else:
+                                track[k] = v
                         if track["id"] not in all_tracks:
                             all_tracks[track["id"]] = track
                     logger.info(f"Added {len(artist_tracks)} tracks directly from artist: {filters['artist']}")
@@ -604,9 +710,182 @@ def ask_assistant(
         except Exception as e:
             logger.warning(f"Metadata search failed: {e}")
 
-    # 2. Enrich tracks with Last.fm data
+    # 1d. If a specific album is referenced, use its CLAP embedding as anchor
+    # to find the most sonically similar tracks across the artist's catalog
+    if filters.get("album_hint"):
+        album_hint = filters["album_hint"]
+        artist_filter = filters.get("artist", "")
+
+        # 1d-i. Add the referenced album's own tracks to context
+        try:
+            album_sql = text("""
+                SELECT t.id, t.title, t.track_number, t.duration_seconds,
+                       a2.name as artist, al.title as album, g.name as genre,
+                       al.quality_source, 0.95 as similarity
+                FROM tracks t
+                JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+                JOIN artists a2 ON ta.artist_id = a2.id
+                JOIN albums al ON t.album_id = al.id
+                LEFT JOIN track_genres tg ON t.id = tg.track_id
+                LEFT JOIN genres g ON tg.genre_id = g.id
+                WHERE al.title ILIKE :album_hint
+                  AND (:artist = '' OR a2.name = :artist)
+                ORDER BY t.track_number
+                LIMIT 20
+            """)
+            album_rows = db.execute(album_sql, {
+                "album_hint": f"%{album_hint}%",
+                "artist": artist_filter,
+            }).fetchall()
+
+            album_track_ids = []
+            added = 0
+            for row in album_rows:
+                track = {}
+                for k, v in dict(row._mapping).items():
+                    if hasattr(v, 'as_integer_ratio'):
+                        track[k] = float(v)
+                    else:
+                        track[k] = v
+                album_track_ids.append(track["id"])
+                if track["id"] not in all_tracks:
+                    all_tracks[track["id"]] = track
+                    added += 1
+            if added:
+                retrieval_log.append({
+                    "source": "Album reference lookup",
+                    "description": f"Прямий пошук альбому '{album_hint}' додав {added} треків",
+                    "count": added,
+                })
+                logger.info(f"Added {added} tracks from referenced album '{album_hint}'")
+        except Exception as e:
+            album_track_ids = []
+            logger.warning(f"Album hint search failed: {e}")
+
+        # 1d-ii. CLAP similarity: rank ALL artist tracks by audio similarity
+        # to the referenced album (averaged embedding)
+        if album_track_ids and artist_filter:
+            try:
+                placeholders = ", ".join(str(int(tid)) for tid in album_track_ids)
+                sim_sql = text(f"""
+                    WITH album_avg AS (
+                        SELECT avg(e.vector) as avg_vec
+                        FROM tracks t
+                        JOIN embeddings e ON t.embedding_id = e.id
+                        WHERE t.id IN ({placeholders})
+                    )
+                    SELECT t.id, t.title, t.track_number, t.duration_seconds,
+                           a2.name as artist, al.title as album, g.name as genre,
+                           al.quality_source,
+                           round((1 - (e.vector <=> (SELECT avg_vec FROM album_avg)))::numeric, 4) as similarity
+                    FROM tracks t
+                    JOIN embeddings e ON t.embedding_id = e.id
+                    JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+                    JOIN artists a2 ON ta.artist_id = a2.id
+                    JOIN albums al ON t.album_id = al.id
+                    LEFT JOIN track_genres tg ON t.id = tg.track_id
+                    LEFT JOIN genres g ON tg.genre_id = g.id
+                    WHERE a2.name = :artist
+                      AND t.id NOT IN ({placeholders})
+                    ORDER BY e.vector <=> (SELECT avg_vec FROM album_avg)
+                    LIMIT :lim
+                """)
+                sim_rows = db.execute(sim_sql, {
+                    "artist": artist_filter,
+                    "lim": limit * 3,  # get more, will be trimmed later
+                }).fetchall()
+
+                sim_added = 0
+                for row in sim_rows:
+                    track = {}
+                    for k, v in dict(row._mapping).items():
+                        if hasattr(v, 'as_integer_ratio'):
+                            track[k] = float(v)
+                        else:
+                            track[k] = v
+                    if track["id"] not in all_tracks:
+                        all_tracks[track["id"]] = track
+                        sim_added += 1
+                    else:
+                        # Update similarity if CLAP score is available and old was a placeholder
+                        existing = all_tracks[track["id"]]
+                        if existing.get("similarity", 0) == 0.85:
+                            existing["similarity"] = float(track["similarity"])
+
+                retrieval_log.append({
+                    "source": "CLAP album similarity",
+                    "description": (
+                        f"Cosine similarity до '{album_hint}' ранжувала "
+                        f"{len(sim_rows)} треків {artist_filter}, {sim_added} нових додано"
+                    ),
+                    "count": sim_added,
+                })
+                logger.info(
+                    f"CLAP album similarity: ranked {len(sim_rows)} tracks by similarity "
+                    f"to '{album_hint}', {sim_added} new added"
+                )
+            except Exception as e:
+                logger.warning(f"CLAP album similarity search failed: {e}")
+
+    # 1e. Deduplicate quality variants (prefer CD over Vinyl/Hi-Res/MP3)
+    # HQPlayer can't play files with [Vinyl]/[TR24]/[MP3] brackets in paths
+    quality_priority = {"CD": 0, "Hi-Res": 1, "Vinyl": 2, "MP3": 3}
+    seen_track_keys = {}  # (artist, title, album_base) -> (track_id, quality_priority)
+    ids_to_remove = []
+    for tid, t in all_tracks.items():
+        key = (t.get("artist", ""), t.get("title", ""), t.get("album", ""))
+        qs = t.get("quality_source", "CD")
+        prio = quality_priority.get(qs, 0)
+        if key in seen_track_keys:
+            existing_tid, existing_prio = seen_track_keys[key]
+            if prio < existing_prio:
+                # Current track has better priority, remove old one
+                ids_to_remove.append(existing_tid)
+                seen_track_keys[key] = (tid, prio)
+            else:
+                # Existing track has better priority, remove current
+                ids_to_remove.append(tid)
+        else:
+            seen_track_keys[key] = (tid, prio)
+    for tid in ids_to_remove:
+        all_tracks.pop(tid, None)
+    if ids_to_remove:
+        logger.info(f"Deduplicated {len(ids_to_remove)} quality variants (kept CD over Vinyl/Hi-Res)")
+
+    # 2. Enrich tracks with Last.fm data, audio features, tags
     track_ids = list(all_tracks.keys())
     enrichment = _get_track_enrichment(db, track_ids)
+
+    # Count enrichment sources
+    enrichment_stats = {"audio_features": 0, "tags": 0, "popularity": 0, "artist_bio": 0}
+    for tid, enrich in enrichment.items():
+        if enrich.get("bpm") or enrich.get("key_mode") or enrich.get("danceability") is not None:
+            enrichment_stats["audio_features"] += 1
+        if enrich.get("album_tags") or enrich.get("artist_tags"):
+            enrichment_stats["tags"] += 1
+        if enrich.get("listeners") or enrich.get("playcount"):
+            enrichment_stats["popularity"] += 1
+
+    enrichment_parts = []
+    if enrichment_stats["audio_features"]:
+        enrichment_parts.append(f"audio features (BPM, key, mood, instruments) для {enrichment_stats['audio_features']} треків")
+    if enrichment_stats["tags"]:
+        enrichment_parts.append(f"Last.fm теги для {enrichment_stats['tags']} треків")
+    if enrichment_stats["popularity"]:
+        enrichment_parts.append(f"Last.fm popularity для {enrichment_stats['popularity']} треків")
+    if enrichment_parts:
+        retrieval_log.append({
+            "source": "Enrichment",
+            "description": "Збагачення контексту: " + "; ".join(enrichment_parts),
+            "count": len(track_ids),
+        })
+
+    # Debug: Log artists in retrieved tracks
+    artists_in_context = {}
+    for track in all_tracks.values():
+        artist = track.get("artist", "Unknown")
+        artists_in_context[artist] = artists_in_context.get(artist, 0) + 1
+    logger.info(f"Artists in retrieved tracks (before ranking): {artists_in_context}")
 
     # 3. Sort by similarity, then boost by popularity
     tracks = sorted(
@@ -618,8 +897,21 @@ def ask_assistant(
     tracks = _boost_by_popularity(tracks, enrichment)
     tracks = tracks[:30]  # final cap
 
+    # Debug: Log artists in final context sent to Claude
+    final_artists = {}
+    for track in tracks:
+        artist = track.get("artist", "Unknown")
+        final_artists[artist] = final_artists.get(artist, 0) + 1
+    logger.info(f"Artists in final context (top 30): {final_artists}")
+
     # 4. Build enriched context
     track_context = _format_track_context(tracks, enrichment)
+
+    # Debug: Log first 3 tracks in formatted context
+    if tracks:
+        logger.info(f"First 3 tracks in formatted context:")
+        for i, t in enumerate(tracks[:3], 1):
+            logger.info(f"  {i}. {t.get('artist')} - {t.get('album')} - {t.get('title')}")
 
     # Artist-specific context if query mentions a known artist
     artist_context = ""
@@ -627,6 +919,11 @@ def ask_assistant(
         ctx = _get_artist_context(db, filters["artist"])
         if ctx:
             artist_context = f"\n\nArtist Information:\n{ctx}"
+            retrieval_log.append({
+                "source": "Artist bio (Last.fm)",
+                "description": f"Біографія та схожі артисти для '{filters['artist']}'",
+                "count": 1,
+            })
 
     # Library summary for context
     lib_summary = ""
@@ -680,4 +977,5 @@ Based on these tracks and their metadata, please answer the user's query with sp
         "tracks_retrieved": len(tracks),
         "filters_detected": filters,
         "track_reference": ref_track_id,
+        "retrieval_log": retrieval_log,
     }
