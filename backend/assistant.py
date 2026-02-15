@@ -989,13 +989,15 @@ def ask_assistant(
                 f"{meta_results.get('count', 0)} tracks"
             )
 
-            # If artist was detected via fuzzy match, add top tracks from that artist directly
-            if "artist" in filters and len(all_tracks) < 10:
+            # Album sampling: ensure all albums by the artist are represented
+            # Pick one representative track per album to give Claude full discography visibility
+            if "artist" in filters:
                 try:
-                    artist_tracks = db.execute(text("""
-                        SELECT t.id, t.title, t.track_number, t.duration_seconds,
+                    sample_sql = text("""
+                        SELECT DISTINCT ON (al.id)
+                               t.id, t.title, t.track_number, t.duration_seconds,
                                a2.name as artist, al.title as album, g.name as genre,
-                               al.quality_source, 0.9 as similarity
+                               al.quality_source, al.release_year, 0.85 as similarity
                         FROM tracks t
                         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
                         JOIN artists a2 ON ta.artist_id = a2.id
@@ -1003,11 +1005,12 @@ def ask_assistant(
                         LEFT JOIN track_genres tg ON t.id = tg.track_id
                         LEFT JOIN genres g ON tg.genre_id = g.id
                         WHERE a2.name = :artist
-                        ORDER BY al.title, t.track_number
-                        LIMIT :limit
-                    """), {"artist": filters["artist"], "limit": 30}).fetchall()
+                        ORDER BY al.id, t.track_number
+                    """)
+                    sample_rows = db.execute(sample_sql, {"artist": filters["artist"]}).fetchall()
 
-                    for row in artist_tracks:
+                    sample_added = 0
+                    for row in sample_rows:
                         track = {}
                         for k, v in dict(row._mapping).items():
                             if hasattr(v, 'as_integer_ratio'):
@@ -1016,9 +1019,16 @@ def ask_assistant(
                                 track[k] = v
                         if track["id"] not in all_tracks:
                             all_tracks[track["id"]] = track
-                    logger.info(f"Added {len(artist_tracks)} tracks directly from artist: {filters['artist']}")
+                            sample_added += 1
+                    if sample_added:
+                        logger.info(f"Album sampling: added {sample_added} tracks (1 per album) for '{filters['artist']}'")
+                        retrieval_log.append({
+                            "source": "Album sampling",
+                            "description": f"По 1 треку з кожного альбому '{filters['artist']}' — {sample_added} нових додано для повноти дискографії",
+                            "count": sample_added,
+                        })
                 except Exception as e2:
-                    logger.warning(f"Direct artist track query failed: {e2}")
+                    logger.warning(f"Album sampling query failed: {e2}")
 
         except Exception as e:
             logger.warning(f"Metadata search failed: {e}")
@@ -1210,12 +1220,34 @@ def ask_assistant(
     tracks = _boost_by_popularity(tracks, enrichment)
     tracks = tracks[:30]  # final cap
 
+    # 3b. For artist-specific queries, ensure every album has at least 1 playable track
+    # Add back album sample tracks that were cut by the cap
+    if "artist" in filters:
+        artist_name = filters["artist"]
+        track_ids_in_final = {t["id"] for t in tracks}
+        albums_covered = {t.get("album") for t in tracks if t.get("artist") == artist_name}
+        missing = [
+            t for t in all_tracks.values()
+            if t.get("artist") == artist_name
+            and t.get("album") not in albums_covered
+            and t["id"] not in track_ids_in_final
+        ]
+        # Deduplicate: pick one per missing album
+        seen_albums = set()
+        for t in missing:
+            album = t.get("album")
+            if album and album not in seen_albums:
+                tracks.append(t)
+                seen_albums.add(album)
+        if seen_albums:
+            logger.info(f"Added {len(seen_albums)} tracks from albums missing in final list: {seen_albums}")
+
     # Debug: Log artists in final context sent to Claude
     final_artists = {}
     for track in tracks:
         artist = track.get("artist", "Unknown")
         final_artists[artist] = final_artists.get(artist, 0) + 1
-    logger.info(f"Artists in final context (top 30): {final_artists}")
+    logger.info(f"Artists in final context (top {len(tracks)}): {final_artists}")
 
     # 4. Build enriched context
     track_context = _format_track_context(tracks, enrichment)
@@ -1237,6 +1269,12 @@ def ask_assistant(
                 "description": f"Біографія та схожі артисти для '{filters['artist']}'",
                 "count": 1,
             })
+
+        # Always add compact album listing so Claude sees full discography
+        albums = _get_artist_discography(db, filters["artist"])
+        if albums:
+            album_listing = _format_album_context(albums, filters["artist"])
+            artist_context += f"\n\n{album_listing}"
 
     # Library summary for context
     lib_summary = ""
