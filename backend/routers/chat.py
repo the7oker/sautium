@@ -117,6 +117,59 @@ def _get_player_context() -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Claude Code DJ integration
+# ---------------------------------------------------------------------------
+
+def _get_claude_session_id(session_id: int) -> Optional[str]:
+    """Get Claude Code session ID mapped to our chat session."""
+    row = _db_query_one(
+        "SELECT claude_session_id FROM chat_sessions WHERE id = %(id)s",
+        {"id": session_id},
+    )
+    return row["claude_session_id"] if row and row.get("claude_session_id") else None
+
+
+def _save_claude_session_id(session_id: int, claude_sid: str):
+    """Save Claude Code session ID for continuity."""
+    _db_execute(
+        "UPDATE chat_sessions SET claude_session_id = %(csid)s WHERE id = %(id)s",
+        {"csid": claude_sid, "id": session_id},
+    )
+
+
+def _call_claude_code_dj(session_id: int, message: str, player_context: Optional[str]) -> dict:
+    """Call Claude Code as AI DJ backend."""
+    from claude_code_runner import call_claude_code
+    from claude_dj_prompt import CLAUDE_DJ_SYSTEM_PROMPT
+
+    claude_sid = _get_claude_session_id(session_id)
+
+    # Format system prompt with player context
+    pc_block = f"\n\nCurrently playing:\n{player_context}" if player_context else ""
+    prompt = CLAUDE_DJ_SYSTEM_PROMPT.format(player_context=pc_block)
+
+    result = call_claude_code(
+        message=message,
+        system_prompt=prompt,
+        session_id=claude_sid,
+        resume=bool(claude_sid),
+    )
+
+    # Save Claude session ID for future messages
+    if result.get("claude_session_id"):
+        _save_claude_session_id(session_id, result["claude_session_id"])
+
+    return {
+        "answer": result.get("answer", ""),
+        "tracks": result.get("tracks", []),
+        "model": result.get("model", "claude-code"),
+        "filters_detected": {},
+        "retrieval_log": [],
+        "tracks_retrieved": len(result.get("tracks", [])),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
 
@@ -208,7 +261,7 @@ async def send_message(session_id: int, req: ChatMessageRequest):
     4. Save assistant response (content, tracks_data, model, filters, retrieval_log)
     5. Return both messages with DB IDs
     """
-    if not settings.anthropic_api_key:
+    if not settings.claude_code_enabled and not settings.anthropic_api_key:
         raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY is not configured")
 
     # Verify session exists
@@ -252,16 +305,22 @@ async def send_message(session_id: int, req: ChatMessageRequest):
     # 3. Gather player context (non-blocking, best-effort)
     player_context = _get_player_context()
 
-    # 4. Call ask_assistant
-    from database import get_db_context
-    from assistant import ask_assistant
-
-    try:
-        with get_db_context() as db:
-            result = ask_assistant(db, req.message, limit=20, history=history, player_context=player_context)
-    except Exception as e:
-        logger.error(f"ask_assistant failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    # 4. Call AI backend (Claude Code agent or RAG fallback)
+    if settings.claude_code_enabled:
+        try:
+            result = _call_claude_code_dj(session_id, req.message, player_context)
+        except Exception as e:
+            logger.error(f"Claude Code DJ failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+    else:
+        from database import get_db_context
+        from assistant import ask_assistant
+        try:
+            with get_db_context() as db:
+                result = ask_assistant(db, req.message, limit=20, history=history, player_context=player_context)
+        except Exception as e:
+            logger.error(f"ask_assistant failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
 
     answer = result.get("answer", "")
     tracks = result.get("tracks", [])
@@ -388,6 +447,33 @@ class LegacyChatRequest(BaseModel):
 @router.post("")
 async def legacy_chat(req: LegacyChatRequest):
     """Stateless chat endpoint for backward compatibility with existing frontend."""
+    player_context = _get_player_context()
+
+    if settings.claude_code_enabled:
+        try:
+            from claude_code_runner import call_claude_code
+            from claude_dj_prompt import CLAUDE_DJ_SYSTEM_PROMPT
+
+            pc_block = f"\n\nCurrently playing:\n{player_context}" if player_context else ""
+            prompt = CLAUDE_DJ_SYSTEM_PROMPT.format(player_context=pc_block)
+
+            result = call_claude_code(
+                message=req.message,
+                system_prompt=prompt,
+            )
+            return {
+                "answer": result.get("answer", ""),
+                "tracks": result.get("tracks", []),
+                "filters_detected": {},
+                "retrieval_log": [],
+                "model": result.get("model", "claude-code"),
+                "tracks_retrieved": len(result.get("tracks", [])),
+            }
+        except Exception as e:
+            logger.error(f"Claude Code chat failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # RAG fallback
     if not settings.anthropic_api_key:
         raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY is not configured")
 
@@ -396,7 +482,6 @@ async def legacy_chat(req: LegacyChatRequest):
 
     try:
         history = req.history[-10:] if req.history else None
-        player_context = _get_player_context()
 
         with get_db_context() as db:
             result = ask_assistant(db, req.message, limit=20, history=history, player_context=player_context)

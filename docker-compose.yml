@@ -54,15 +54,21 @@ services:
       # Web UI: HQPlayer file path prefix and tracker URL
       HQPLAYER_MUSIC_PATH: ${HQPLAYER_MUSIC_PATH:-E:/Music}
       TRACKER_URL: http://playback-tracker:8765
+
+      # Claude Code integration
+      CLAUDE_CODE_ENABLED: ${CLAUDE_CODE_ENABLED:-true}
     extra_hosts:
       # Allow container to access Windows host services (like HQPlayer)
       - "host.docker.internal:host-gateway"
     volumes:
       - ./backend:/app
+      - ./mcp:/app/mcp
       - ./data/cache:/root/.cache
       # Mount music library as read-only
       # Windows path: E:\Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro
+      # Claude Code auth (OAuth tokens)
+      - ${HOME}/.claude/.credentials.json:/root/.claude/.credentials.json:ro
     ports:
       - "8800:8000"
     networks:

@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     # Playback tracker daemon URL
     tracker_url: str = "http://playback-tracker:8765"
 
+    # Claude Code integration (agent-based AI DJ)
+    claude_code_enabled: bool = False
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

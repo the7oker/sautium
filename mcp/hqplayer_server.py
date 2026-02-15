@@ -23,7 +23,8 @@ import psycopg2.extras
 from mcp.server.fastmcp import FastMCP
 
 # -- HQPlayer client import (stdlib only, safe to import from backend) --------
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+backend_path = os.environ.get("BACKEND_PATH", os.path.join(os.path.dirname(__file__), "..", "backend"))
+sys.path.insert(0, backend_path)
 from hqplayer_client import HQPlayerClient, PlaybackState, format_time, file_path_to_uri
 
 # -- Logging to stderr (NEVER stdout — would corrupt STDIO transport) ---------
