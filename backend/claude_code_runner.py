@@ -7,6 +7,8 @@ Parses JSON output, extracts track recommendations from [DJ_TRACKS] marker.
 
 import json
 import logging
+import os
+import pwd
 import re
 import subprocess
 from typing import Any, Dict, List, Optional
@@ -16,6 +18,7 @@ logger = logging.getLogger(__name__)
 MCP_CONFIG_PATH = "/app/mcp-docker.json"
 CLAUDE_MODEL = "sonnet"
 TIMEOUT_SECONDS = 120
+CLAUDE_USER = "claudeuser"  # non-root user (--dangerously-skip-permissions requires non-root)
 
 
 def call_claude_code(
@@ -52,12 +55,23 @@ def call_claude_code(
     logger.info(f"Claude Code call: message={message[:80]!r}, resume={resume}, session={session_id}")
 
     try:
+        # Run as non-root user (Claude Code blocks --dangerously-skip-permissions as root)
+        pw = pwd.getpwnam(CLAUDE_USER)
+
+        def demote():
+            os.setgid(pw.pw_gid)
+            os.setuid(pw.pw_uid)
+
+        env = os.environ.copy()
+        env["HOME"] = pw.pw_dir
+
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=TIMEOUT_SECONDS,
-            env=None,  # inherit parent environment
+            preexec_fn=demote,
+            env=env,
         )
 
         if result.returncode != 0:

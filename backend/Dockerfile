@@ -32,7 +32,15 @@ RUN apt-get update && apt-get install -y \
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && npm install -g @anthropic-ai/claude-code \
+    && npm install -g postgres-mcp-server \
     && npm cache clean --force
+
+# Non-root user for Claude Code (--dangerously-skip-permissions requires non-root)
+RUN useradd -m -s /bin/bash claudeuser \
+    && mkdir -p /home/claudeuser/.claude/debug \
+    && mkdir -p /home/claudeuser/.claude/projects \
+    && echo '{}' > /home/claudeuser/.claude/settings.json \
+    && chown -R claudeuser:claudeuser /home/claudeuser/.claude
 
 # Set Python 3.11 as default
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \

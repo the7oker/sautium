@@ -67,8 +67,8 @@ services:
       # Mount music library as read-only
       # Windows path: E:\Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro
-      # Claude Code auth (OAuth tokens)
-      - ${HOME}/.claude/.credentials.json:/root/.claude/.credentials.json:ro
+      # Claude Code auth (OAuth tokens) — mounted to non-root user home
+      - ${HOME}/.claude/.credentials.json:/home/claudeuser/.claude/.credentials.json:ro
     ports:
       - "8800:8000"
     networks:
