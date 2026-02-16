@@ -1885,6 +1885,87 @@ Claude Haiku understands proper names and grammatical cases, producing correct E
 
 ---
 
+## Architecture Refactoring: RAG → Claude Code - DONE
+
+### What was done
+Повністю переробили архітектуру AI DJ - замінили RAG реалізацію на Claude Code як основний AI backend.
+
+**Видалені компоненти (>2200 рядків коду):**
+
+1. **Файли:**
+   - `backend/assistant.py` (1338 рядків) — стара RAG реалізація
+   - `backend/text_embeddings.py` (415 рядків) — sentence-transformers text embeddings
+
+2. **Функції з `backend/search.py`:**
+   - `search_by_text_semantic()` — пошук за text embeddings (all-MiniLM-L6-v2)
+   - `search_hybrid()` — комбінований пошук (CLAP + text embeddings)
+
+3. **Endpoints з `backend/main.py`:**
+   - `/search/query` — AI-пошук через RAG
+
+4. **CLI команди з `backend/cli.py`:**
+   - `ask` — інтерактивний AI асистент (RAG)
+   - `generate-text-embeddings` — генерація text embeddings
+   - `search-semantic` — пошук за текстом
+   - `search-hybrid` — гібридний пошук
+   - Дубльована стара команда `enrich-tracks`
+   - Опції `--skip-text-embeddings` та `--force-text-embeddings`
+
+5. **Логіка з `backend/track_enrichment.py`:**
+   - Генерація text embeddings у pipeline
+   - Метод `_get_text_embedding_generator()`
+   - Step 5 (Text Embedding generation)
+   - Статистика text embeddings
+
+6. **Налаштування з `backend/config.py`:**
+   - `text_embedding_model`, `text_embedding_dimension`, `text_embedding_batch_size`
+
+**Змінена поведінка:**
+
+- **`backend/routers/chat.py`:**
+  - Видалено RAG fallback — тепер обов'язково потрібен Claude Code
+  - Обидва endpoints (session-based + legacy) працюють лише через Claude Code
+  - Перевірка `settings.claude_code_enabled` з HTTP 503 якщо вимкнено
+
+- **`backend/claude_code_runner.py`:**
+  - Залишається основним AI backend
+  - Викликає `claude -p` з MCP tools (PostgreSQL + HQPlayer)
+  - Claude Code сам робить запити до БД, шукає треки, аналізує
+  - Повертає відповідь + треки у маркері `[DJ_TRACKS]...[/DJ_TRACKS]`
+
+**Збережено для сумісності:**
+- `models.TextEmbedding` — модель БД залишена для існуючих даних
+- Базові функції пошуку в `search.py`:
+  - `search_similar_tracks()` — CLAP audio similarity
+  - `search_by_text()` — CLAP text-to-audio
+  - `search_by_metadata()` — фільтри по метаданим
+  - `search_by_features()` — пошук по audio features
+
+### Why this change
+
+**Проблеми старої RAG реалізації:**
+- Складність підтримки: multi-source retrieval, hybrid search, enrichment pipeline
+- Дублювання функціоналу: Claude Code має прямий доступ до БД через MCP
+- Обмеження RAG: фіксована логіка retrieval, важко адаптується до різних запитів
+- Надлишковість text embeddings: CLAP вже дає семантичний пошук
+
+**Переваги Claude Code:**
+- **Простота:** Claude сам пише SQL запити, шукає треки, аналізує дані
+- **Гнучкість:** може обробляти складні запити ("знайди всі альбоми Klaus Schulze, відсортуй за роком")
+- **Прозорість:** бачимо які tool calls виконались (через MCP logs)
+- **Менше коду:** не потрібен custom retrieval pipeline
+- **MCP інтеграція:** PostgreSQL + HQPlayer tools вже налаштовані
+
+### Testing status - VERIFIED ✅
+- ✅ Chat endpoints працюють через Claude Code
+- ✅ Claude Code успішно шукає треки через PostgreSQL MCP
+- ✅ Видалено всі RAG fallback шляхи
+- ✅ CLI команди очищені від RAG функціоналу
+- ✅ Track enrichment pipeline працює без text embeddings
+- ✅ Базові функції пошуку (CLAP, metadata, features) збережені
+
+---
+
 ## Next Steps
 
 ### Phase 2: External Data & Text Embeddings - COMPLETE ✅
