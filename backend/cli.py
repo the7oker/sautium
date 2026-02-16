@@ -409,100 +409,6 @@ def search_text(query, limit, min_similarity, artist, genre, quality):
         sys.exit(1)
 
 
-@cli.command()
-@click.option("--query", "-q", type=str, default=None, help="Natural language question about your music library")
-@click.option("--limit", "-l", type=int, default=20, help="Max tracks to retrieve for context")
-@click.option("--interactive", "-i", is_flag=True, help="Interactive mode: ask follow-up questions")
-def ask(query, limit, interactive):
-    """Ask the AI DJ assistant about your music library."""
-    from assistant import ask_assistant
-
-    if not settings.anthropic_api_key:
-        click.echo("❌ ANTHROPIC_API_KEY is not configured. Set it in .env file.", err=True)
-        sys.exit(1)
-
-    if not query and not interactive:
-        click.echo("❌ Provide --query or use --interactive mode.", err=True)
-        sys.exit(1)
-
-    def _display_result(result):
-        """Display Claude's response and track table."""
-        click.echo("\n🤖 AI DJ Response:\n")
-        click.echo(result["answer"])
-
-        # Show detected filters/references
-        if result.get("filters_detected"):
-            filters_str = ", ".join(f"{k}={v}" for k, v in result["filters_detected"].items())
-            click.echo(f"\n🔍 Filters detected: {filters_str}")
-        if result.get("track_reference"):
-            click.echo(f"🎯 Track similarity reference: ID {result['track_reference']}")
-
-        # Display retrieved tracks table
-        tracks = result.get("tracks", [])
-        if tracks:
-            click.echo(f"\n📋 Retrieved tracks ({result['tracks_retrieved']}):\n")
-            click.echo(f"{'#':<4} {'Score':>6}  {'Artist':<25} {'Title':<35} {'Album':<30} {'Quality':<7}")
-            click.echo("-" * 112)
-
-            for i, track in enumerate(tracks[:20], 1):
-                sim = f"{track['similarity']:.3f}" if track.get("similarity") else "  -  "
-                artist_name = (track.get("artist") or "Unknown")[:24]
-                title = (track.get("title") or "?")[:34]
-                album_name = (track.get("album") or "?")[:29]
-                qs = track.get("quality_source") or "?"
-                click.echo(f"{i:<4} {sim:>6}  {artist_name:<25} {title:<35} {album_name:<30} {qs:<7}")
-
-        click.echo(f"\n📊 Model: {result['model']} | Tracks in context: {result['tracks_retrieved']}")
-
-    try:
-        if interactive:
-            click.echo("🎵 AI DJ Interactive Mode (type 'quit' or 'exit' to stop)\n")
-            history = []
-
-            while True:
-                if query is None:
-                    try:
-                        query = click.prompt("🎧 You", type=str)
-                    except (EOFError, click.Abort):
-                        break
-
-                if query.lower() in ("quit", "exit", "q"):
-                    click.echo("👋 Goodbye!")
-                    break
-
-                click.echo("⏳ Thinking...\n")
-
-                with get_db_context() as db:
-                    result = ask_assistant(db, query, limit=limit, history=history)
-
-                _display_result(result)
-
-                # Save conversation history for follow-up questions
-                history.append({"role": "user", "content": query})
-                history.append({"role": "assistant", "content": result["answer"]})
-
-                # Keep history reasonable (last 6 turns = 3 exchanges)
-                if len(history) > 6:
-                    history = history[-6:]
-
-                query = None
-                click.echo("")
-
-        else:
-            click.echo(f"🎵 Asking AI DJ: \"{query}\"")
-            click.echo("⏳ Retrieving tracks and consulting Claude...\n")
-
-            with get_db_context() as db:
-                result = ask_assistant(db, query, limit=limit)
-
-            _display_result(result)
-
-    except Exception as e:
-        click.echo(f"\n❌ Error: {e}", err=True)
-        logger.exception("Ask failed")
-        sys.exit(1)
-
-
 @cli.command("normalize-artists")
 @click.option("--dry-run", is_flag=True, help="Show what would be done without making changes")
 @click.option("--verify-lastfm", is_flag=True, help="Verify individual artists exist on Last.fm (slow)")
@@ -594,156 +500,6 @@ def normalize_genres_cmd(dry_run):
     except Exception as e:
         click.echo(f"\n❌ Error: {e}", err=True)
         logger.exception("Genre normalization failed")
-        sys.exit(1)
-
-
-@cli.command("generate-text-embeddings")
-@click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process")
-@click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default: 64)")
-@click.option("--force", is_flag=True, help="Regenerate embeddings even if already exists")
-@click.option("--newest-first", is_flag=True, help="Process newest tracks first (by file modification date)")
-@click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 1800 for 30 minutes)")
-@track_filter_options
-def generate_text_embeddings(limit, batch_size, force, newest_first, max_duration,
-                             filter_artist, filter_album, filter_genre, filter_path,
-                             filter_tag, filter_track_number, filter_quality):
-    """Generate text embeddings from track metadata using sentence-transformers."""
-    from text_embeddings import generate_text_embeddings as do_generate
-
-    click.echo("🔤 Starting text embedding generation...")
-    click.echo(f"🖥️  Model: {settings.text_embedding_model}")
-    click.echo(f"📦 Batch size: {batch_size or settings.text_embedding_batch_size}")
-
-    if limit:
-        click.echo(f"⚠️  Limited to {limit} tracks")
-    if force:
-        click.echo(f"⚠️  Force mode: regenerating all embeddings")
-    if newest_first:
-        click.echo(f"🆕 Processing newest tracks first (by file modification date)")
-    if max_duration:
-        click.echo(f"⏱️  Time limit: {max_duration} seconds ({max_duration/60:.1f} minutes)")
-
-    # Resolve track filters
-    track_ids = _resolve_filters(
-        filter_artist, filter_album, filter_genre, filter_path,
-        filter_tag, filter_track_number, filter_quality,
-    )
-    if track_ids is not None and len(track_ids) == 0:
-        return
-
-    try:
-        stats = do_generate(limit=limit, batch_size=batch_size, force=force, order_by_date=newest_first, max_duration_seconds=max_duration, track_ids=track_ids)
-
-        click.echo("\n✅ Text embedding generation complete!")
-        click.echo(f"📊 Statistics:")
-        click.echo(f"   • Processed: {stats['processed']} tracks")
-        click.echo(f"   • Success: {stats['success']} embeddings")
-        click.echo(f"   • Failed: {stats['failed']} tracks")
-
-        if stats['failed'] > 0:
-            click.echo(f"\n⚠️  Check logs for error details")
-
-    except Exception as e:
-        click.echo(f"\n❌ Error: {e}", err=True)
-        logger.exception("Text embedding generation failed")
-        sys.exit(1)
-
-
-@cli.command("search-semantic")
-@click.option("--query", "-q", type=str, required=True, help="Text description to search for")
-@click.option("--limit", "-l", type=int, default=10, help="Number of results")
-@click.option("--min-similarity", type=float, default=None, help="Minimum similarity (0-1)")
-@click.option("--artist", type=str, default=None, help="Filter by artist name")
-@click.option("--genre", type=str, default=None, help="Filter by genre")
-@click.option("--quality", type=str, default=None, help="Filter by quality source")
-def search_semantic(query, limit, min_similarity, artist, genre, quality):
-    """Search tracks by text description using semantic text embeddings."""
-    from search import search_by_text_semantic
-
-    click.echo(f"🔍 Semantic search: \"{query}\"")
-    click.echo("⏳ Loading text embedding model...")
-
-    filters = {}
-    if artist:
-        filters["artist"] = artist
-    if genre:
-        filters["genre"] = genre
-    if quality:
-        filters["quality_source"] = quality
-
-    try:
-        with get_db_context() as db:
-            result = search_by_text_semantic(
-                db, query, limit=limit, min_similarity=min_similarity, filters=filters
-            )
-
-        click.echo(f"\n{'#':<4} {'Sim':>5}  {'Artist':<25} {'Title':<35} {'Album':<30} {'Quality':<7}")
-        click.echo("-" * 110)
-
-        for i, track in enumerate(result["results"], 1):
-            sim = f"{track['similarity']:.2f}" if track["similarity"] else "N/A"
-            artist_name = (track["artist"] or "Unknown")[:24]
-            title = (track["title"] or "?")[:34]
-            album_name = (track["album"] or "?")[:29]
-            qs = track.get("quality_source") or "?"
-            click.echo(f"{i:<4} {sim:>5}  {artist_name:<25} {title:<35} {album_name:<30} {qs:<7}")
-
-        click.echo(f"\n📊 Found {result['count']} matching tracks")
-
-    except Exception as e:
-        click.echo(f"❌ Error: {e}", err=True)
-        logger.exception("Semantic search failed")
-        sys.exit(1)
-
-
-@cli.command("search-hybrid")
-@click.option("--query", "-q", type=str, required=True, help="Text description to search for")
-@click.option("--limit", "-l", type=int, default=10, help="Number of results")
-@click.option("--min-similarity", type=float, default=None, help="Minimum combined score (0-1)")
-@click.option("--audio-weight", type=float, default=0.3, help="Weight for CLAP audio similarity (default: 0.3)")
-@click.option("--text-weight", type=float, default=0.7, help="Weight for text semantic similarity (default: 0.7)")
-@click.option("--artist", type=str, default=None, help="Filter by artist name")
-@click.option("--genre", type=str, default=None, help="Filter by genre")
-@click.option("--quality", type=str, default=None, help="Filter by quality source")
-def search_hybrid_cmd(query, limit, min_similarity, audio_weight, text_weight, artist, genre, quality):
-    """Search tracks using hybrid audio + text similarity."""
-    from search import search_hybrid
-
-    click.echo(f"🔍 Hybrid search: \"{query}\"")
-    click.echo(f"⚖️  Weights: audio={audio_weight}, text={text_weight}")
-    click.echo("⏳ Loading models...")
-
-    filters = {}
-    if artist:
-        filters["artist"] = artist
-    if genre:
-        filters["genre"] = genre
-    if quality:
-        filters["quality_source"] = quality
-
-    try:
-        with get_db_context() as db:
-            result = search_hybrid(
-                db, query, limit=limit, min_similarity=min_similarity,
-                filters=filters, audio_weight=audio_weight, text_weight=text_weight,
-            )
-
-        click.echo(f"\n{'#':<4} {'Score':>5}  {'Artist':<25} {'Title':<35} {'Album':<30} {'Quality':<7}")
-        click.echo("-" * 110)
-
-        for i, track in enumerate(result["results"], 1):
-            sim = f"{track['similarity']:.2f}" if track["similarity"] else "N/A"
-            artist_name = (track["artist"] or "Unknown")[:24]
-            title = (track["title"] or "?")[:34]
-            album_name = (track["album"] or "?")[:29]
-            qs = track.get("quality_source") or "?"
-            click.echo(f"{i:<4} {sim:>5}  {artist_name:<25} {title:<35} {album_name:<30} {qs:<7}")
-
-        click.echo(f"\n📊 Found {result['count']} matching tracks (audio_w={audio_weight}, text_w={text_weight})")
-
-    except Exception as e:
-        click.echo(f"❌ Error: {e}", err=True)
-        logger.exception("Hybrid search failed")
         sys.exit(1)
 
 
@@ -994,117 +750,6 @@ def enrich_albums(limit, album, no_skip, delay):
         sys.exit(1)
 
 
-@cli.command("enrich-tracks")
-@click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to enrich")
-@click.option("--artist", "-a", type=str, default=None, help="Enrich tracks by specific artist")
-@click.option("--album", "-al", type=str, default=None, help="Enrich tracks from specific album")
-@click.option("--no-skip", is_flag=True, help="Re-fetch data that already exists")
-@click.option("--delay", type=float, default=0.2, help="Delay between requests (seconds)")
-def enrich_tracks(limit, artist, album, no_skip, delay):
-    """Enrich tracks with Last.fm statistics (listeners, playcount)."""
-    from lastfm import LastFmService
-
-    if not settings.lastfm_api_key:
-        click.echo("❌ LASTFM_API_KEY is not configured. Set it in .env file.", err=True)
-        sys.exit(1)
-
-    try:
-        service = LastFmService()
-
-        with get_db_context() as db:
-            # Build query based on filters
-            query = text("""
-                SELECT DISTINCT
-                    t.id,
-                    t.title,
-                    STRING_AGG(DISTINCT ar.name, ', ' ORDER BY ar.name) as artist_names,
-                    al.title as album_title
-                FROM tracks t
-                JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-                JOIN artists ar ON ta.artist_id = ar.id
-                JOIN albums al ON t.album_id = al.id
-                WHERE 1=1
-            """)
-
-            params = {}
-
-            # Filter by artist if specified
-            if artist:
-                query = text(str(query).replace("WHERE 1=1", "WHERE ar.name ILIKE :artist_name"))
-                params["artist_name"] = f"%{artist}%"
-
-            # Filter by album if specified
-            if album:
-                if "WHERE ar.name" in str(query):
-                    query = text(str(query) + " AND al.title ILIKE :album_title")
-                else:
-                    query = text(str(query).replace("WHERE 1=1", "WHERE al.title ILIKE :album_title"))
-                params["album_title"] = f"%{album}%"
-
-            # Skip already enriched unless --no-skip
-            if not no_skip:
-                query = text(str(query) + """
-                    AND NOT EXISTS (
-                        SELECT 1 FROM track_stats ts
-                        WHERE ts.track_id = t.id AND ts.source = 'lastfm'
-                    )
-                """)
-
-            query = text(str(query) + """
-                GROUP BY t.id, t.title, al.title
-                ORDER BY t.title
-            """)
-
-            if limit:
-                query = text(str(query) + f" LIMIT {limit}")
-
-            tracks = db.execute(query, params).fetchall()
-
-            if not tracks:
-                click.echo("✓ No tracks to enrich")
-                return
-
-            click.echo(f"Found {len(tracks)} tracks to enrich\n")
-
-            stats = {"processed": 0, "success": 0, "not_found": 0, "errors": 0}
-
-            for track_id, track_title, artist_names, album_title in tracks:
-                # Take first artist if multiple
-                artist_name = artist_names.split(', ')[0]
-
-                result = service.enrich_track(db, track_id, artist_name, track_title)
-
-                stats["processed"] += 1
-
-                if result["status"] == "success":
-                    stats["success"] += 1
-                    listeners = result.get("listeners") or 0
-                    playcount = result.get("playcount") or 0
-                    click.echo(f"✓ {artist_name} - {track_title}: {listeners:,} listeners, {playcount:,} plays")
-                elif result["status"] == "not_found":
-                    stats["not_found"] += 1
-                    click.echo(f"⚠ {artist_name} - {track_title}: not found")
-                elif result["status"] == "error":
-                    stats["errors"] += 1
-                    click.echo(f"✗ {artist_name} - {track_title}: {result.get('error', 'unknown error')}")
-
-                # Rate limiting
-                if delay > 0:
-                    time.sleep(delay)
-
-            click.echo("\n✅ Last.fm track enrichment complete!")
-            click.echo(f"📊 Statistics:")
-            click.echo(f"   • Processed: {stats['processed']} tracks")
-            click.echo(f"   • Success: {stats['success']}")
-            click.echo(f"   • Not found: {stats['not_found']}")
-            click.echo(f"   • Errors: {stats['errors']}")
-
-    except Exception as e:
-        click.echo(f"\n❌ Error: {e}", err=True)
-        logger.exception("Track enrichment failed")
-        sys.exit(1)
-
-
 @cli.command("analyze-audio")
 @click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process")
 @click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default from config)")
@@ -1200,18 +845,16 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
 @click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 1800 for 30 minutes)")
 @click.option("--skip-embeddings", is_flag=True, help="Skip audio embedding generation")
 @click.option("--skip-lastfm", is_flag=True, help="Skip Last.fm enrichment (artist, album, track)")
-@click.option("--skip-text-embeddings", is_flag=True, help="Skip text embedding generation")
 @click.option("--skip-audio-analysis", is_flag=True, help="Skip audio feature extraction")
 @click.option("--force-embeddings", is_flag=True, help="Regenerate audio embeddings even if exist")
-@click.option("--force-text-embeddings", is_flag=True, help="Regenerate text embeddings even if exist")
 @click.option("--force-audio-analysis", is_flag=True, help="Re-analyze audio even if features exist")
 @click.option("--lastfm-delay", type=float, default=0.2, help="Delay between Last.fm requests (seconds)")
 @click.option("--worker-id", type=int, default=None, help="Worker ID for parallel processing (0-indexed, use with --worker-count)")
 @click.option("--worker-count", type=int, default=None, help="Total number of workers for parallel processing (use with --worker-id)")
 @track_filter_options
 def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastfm,
-                  skip_text_embeddings, skip_audio_analysis, force_embeddings,
-                  force_text_embeddings, force_audio_analysis, lastfm_delay,
+                  skip_audio_analysis, force_embeddings,
+                  force_audio_analysis, lastfm_delay,
                   worker_id, worker_count,
                   filter_artist, filter_album, filter_genre, filter_path,
                   filter_tag, filter_track_number, filter_quality):
@@ -1223,8 +866,7 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
     2. Last.fm Artist Info - if missing
     3. Last.fm Album Info - if missing
     4. Last.fm Track Stats - if missing
-    5. Text Embedding - if missing (uses Last.fm data for better context)
-    6. Audio Analysis - if missing
+    5. Audio Analysis - if missing
 
     Only processes missing data unless --force flags are used.
     Supports all filter options for targeted processing.
@@ -1257,8 +899,6 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
         skip_steps.append("audio embeddings")
     if skip_lastfm:
         skip_steps.append("Last.fm")
-    if skip_text_embeddings:
-        skip_steps.append("text embeddings")
     if skip_audio_analysis:
         skip_steps.append("audio analysis")
 
@@ -1268,8 +908,6 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
     force_steps = []
     if force_embeddings:
         force_steps.append("audio embeddings")
-    if force_text_embeddings:
-        force_steps.append("text embeddings")
     if force_audio_analysis:
         force_steps.append("audio analysis")
 
@@ -1300,10 +938,8 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
         pipeline = TrackEnrichmentPipeline(
             skip_embeddings=skip_embeddings,
             skip_lastfm=skip_lastfm,
-            skip_text_embeddings=skip_text_embeddings,
             skip_audio_analysis=skip_audio_analysis,
             force_embeddings=force_embeddings,
-            force_text_embeddings=force_text_embeddings,
             force_audio_analysis=force_audio_analysis,
             lastfm_delay=lastfm_delay,
         )
@@ -1328,9 +964,6 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
             click.echo(f"   • Last.fm artists: {stats['lastfm_artist_success']} enriched")
             click.echo(f"   • Last.fm albums: {stats['lastfm_album_success']} enriched")
             click.echo(f"   • Last.fm tracks: {stats['lastfm_track_success']} enriched")
-
-        if not skip_text_embeddings:
-            click.echo(f"   • Text embeddings: {stats['text_embedding_success']} success, {stats['text_embedding_failed']} failed")
 
         if not skip_audio_analysis:
             click.echo(f"   • Audio features: {stats['audio_features_success']} success, {stats['audio_features_failed']} failed")

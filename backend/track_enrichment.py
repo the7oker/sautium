@@ -6,8 +6,7 @@ Orchestrates all data aggregation steps in the correct order:
 2. Last.fm Artist Info - artist metadata
 3. Last.fm Album Info - album metadata
 4. Last.fm Track Stats - track popularity
-5. Text Embedding - semantic search (uses Last.fm data)
-6. Audio Analysis - DSP features + CLAP classification
+5. Audio Analysis - DSP features + CLAP classification
 
 Each step is conditional - only runs if data is missing.
 Supports filters, limits, time constraints, and graceful error handling.
@@ -21,9 +20,8 @@ from sqlalchemy.orm import Session
 from tqdm import tqdm
 
 from database import get_db_context
-from models import Track, Album, Artist, TrackArtist, AudioFeature, TextEmbedding, SimilarArtist, ArtistBio
+from models import Track, Album, Artist, TrackArtist, AudioFeature, SimilarArtist, ArtistBio
 from embeddings import AudioEmbeddingGenerator
-from text_embeddings import TextEmbeddingGenerator
 from audio_analysis import AudioAnalyzer
 
 logger = logging.getLogger(__name__)
@@ -41,10 +39,8 @@ class TrackEnrichmentPipeline:
         self,
         skip_embeddings: bool = False,
         skip_lastfm: bool = False,
-        skip_text_embeddings: bool = False,
         skip_audio_analysis: bool = False,
         force_embeddings: bool = False,
-        force_text_embeddings: bool = False,
         force_audio_analysis: bool = False,
         lastfm_delay: float = 0.2,
     ):
@@ -54,25 +50,20 @@ class TrackEnrichmentPipeline:
         Args:
             skip_embeddings: Skip audio embedding generation
             skip_lastfm: Skip Last.fm enrichment
-            skip_text_embeddings: Skip text embedding generation
             skip_audio_analysis: Skip audio feature extraction
             force_embeddings: Regenerate audio embeddings even if exist
-            force_text_embeddings: Regenerate text embeddings even if exist
             force_audio_analysis: Re-analyze audio even if features exist
             lastfm_delay: Delay between Last.fm requests (seconds)
         """
         self.skip_embeddings = skip_embeddings
         self.skip_lastfm = skip_lastfm
-        self.skip_text_embeddings = skip_text_embeddings
         self.skip_audio_analysis = skip_audio_analysis
         self.force_embeddings = force_embeddings
-        self.force_text_embeddings = force_text_embeddings
         self.force_audio_analysis = force_audio_analysis
         self.lastfm_delay = lastfm_delay
 
         # Lazy-loaded components
         self._audio_embedding_generator = None
-        self._text_embedding_generator = None
         self._audio_analyzer = None
         self._lastfm_service = None
 
@@ -82,13 +73,6 @@ class TrackEnrichmentPipeline:
             self._audio_embedding_generator = AudioEmbeddingGenerator()
             self._audio_embedding_generator.load_model()
         return self._audio_embedding_generator
-
-    def _get_text_embedding_generator(self) -> TextEmbeddingGenerator:
-        """Lazy-load text embedding generator."""
-        if self._text_embedding_generator is None:
-            self._text_embedding_generator = TextEmbeddingGenerator()
-            self._text_embedding_generator.load_model()
-        return self._text_embedding_generator
 
     def _get_audio_analyzer(self) -> AudioAnalyzer:
         """Lazy-load audio analyzer."""
@@ -143,7 +127,7 @@ class TrackEnrichmentPipeline:
         Check what data is missing for a track.
 
         Returns dict with keys: needs_audio_embedding, needs_artist_info,
-        needs_album_info, needs_track_stats, needs_text_embedding, needs_audio_features
+        needs_album_info, needs_track_stats, needs_audio_features
         """
         status = {}
 
@@ -151,12 +135,6 @@ class TrackEnrichmentPipeline:
         status['needs_audio_embedding'] = (
             not self.skip_embeddings and
             (self.force_embeddings or track.embedding_id is None)
-        )
-
-        # Text embedding
-        status['needs_text_embedding'] = (
-            not self.skip_text_embeddings and
-            (self.force_text_embeddings or track.text_embedding_id is None)
         )
 
         # Audio features
@@ -313,42 +291,7 @@ class TrackEnrichmentPipeline:
             else:
                 results['lastfm_track'] = 'skipped'
 
-        # Step 5: Text Embedding (after Last.fm for better context)
-        if status['needs_text_embedding']:
-            if progress_callback:
-                progress_callback("Text embedding")
-            try:
-                generator = self._get_text_embedding_generator()
-                texts_map = generator.compose_tracks_text_batch(db, [track.id])
-                if track.id in texts_map:
-                    text = texts_map[track.id]
-                    embedding = generator.encode([text])[0]
-
-                    model_record = generator._get_or_create_model_record(db)
-
-                    # Create TextEmbedding record
-                    text_embedding = TextEmbedding(
-                        vector=embedding.tolist(),
-                        model_id=model_record.id,
-                    )
-                    db.add(text_embedding)
-                    db.flush()
-
-                    # Link track to text embedding
-                    track.text_embedding_id = text_embedding.id
-
-                    db.commit()
-                    results['text_embedding'] = 'success'
-                else:
-                    results['text_embedding'] = 'failed'
-            except Exception as e:
-                logger.error(f"Text embedding failed for track {track_id}: {e}")
-                results['text_embedding'] = 'failed'
-                db.rollback()
-        else:
-            results['text_embedding'] = 'skipped'
-
-        # Step 6: Audio Analysis
+        # Step 5: Audio Analysis
         if status['needs_audio_features']:
             if progress_callback:
                 progress_callback("Audio analysis")
@@ -417,8 +360,6 @@ class TrackEnrichmentPipeline:
             'lastfm_artist_success': 0,
             'lastfm_album_success': 0,
             'lastfm_track_success': 0,
-            'text_embedding_success': 0,
-            'text_embedding_failed': 0,
             'audio_features_success': 0,
             'audio_features_failed': 0,
         }
@@ -487,11 +428,6 @@ class TrackEnrichmentPipeline:
                     if results.get('lastfm_track') == 'success':
                         stats['lastfm_track_success'] += 1
 
-                    if results.get('text_embedding') == 'success':
-                        stats['text_embedding_success'] += 1
-                    elif results.get('text_embedding') == 'failed':
-                        stats['text_embedding_failed'] += 1
-
                     if results.get('audio_features') == 'success':
                         stats['audio_features_success'] += 1
                     elif results.get('audio_features') == 'failed':
@@ -503,8 +439,6 @@ class TrackEnrichmentPipeline:
             # Cleanup
             if self._audio_embedding_generator:
                 self._audio_embedding_generator.unload_model()
-            if self._text_embedding_generator:
-                self._text_embedding_generator.unload_model()
             if self._audio_analyzer:
                 self._audio_analyzer.unload_model()
 

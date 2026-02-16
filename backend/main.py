@@ -351,29 +351,6 @@ async def search_metadata(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/search/query")
-async def search_query(
-    query: str,
-    limit: int = 20,
-) -> Dict[str, Any]:
-    """AI-powered natural language music search using Claude."""
-    from database import get_db_context
-    from assistant import ask_assistant
-
-    if not settings.anthropic_api_key:
-        raise HTTPException(
-            status_code=503,
-            detail="ANTHROPIC_API_KEY is not configured"
-        )
-
-    try:
-        with get_db_context() as db:
-            return ask_assistant(db, query, limit=limit)
-    except Exception as e:
-        logger.error(f"AI search failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 # -- Routers & Static Files ---------------------------------------------------
 
 from routers.player import router as player_router

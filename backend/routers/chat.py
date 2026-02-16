@@ -305,22 +305,15 @@ async def send_message(session_id: int, req: ChatMessageRequest):
     # 3. Gather player context (non-blocking, best-effort)
     player_context = _get_player_context()
 
-    # 4. Call AI backend (Claude Code agent or RAG fallback)
-    if settings.claude_code_enabled:
-        try:
-            result = _call_claude_code_dj(session_id, req.message, player_context)
-        except Exception as e:
-            logger.error(f"Claude Code DJ failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-    else:
-        from database import get_db_context
-        from assistant import ask_assistant
-        try:
-            with get_db_context() as db:
-                result = ask_assistant(db, req.message, limit=20, history=history, player_context=player_context)
-        except Exception as e:
-            logger.error(f"ask_assistant failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+    # 4. Call Claude Code DJ backend
+    if not settings.claude_code_enabled:
+        raise HTTPException(status_code=503, detail="Claude Code is not enabled")
+
+    try:
+        result = _call_claude_code_dj(session_id, req.message, player_context)
+    except Exception as e:
+        logger.error(f"Claude Code DJ failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
     answer = result.get("answer", "")
     tracks = result.get("tracks", [])
@@ -449,51 +442,28 @@ async def legacy_chat(req: LegacyChatRequest):
     """Stateless chat endpoint for backward compatibility with existing frontend."""
     player_context = _get_player_context()
 
-    if settings.claude_code_enabled:
-        try:
-            from claude_code_runner import call_claude_code
-            from claude_dj_prompt import CLAUDE_DJ_SYSTEM_PROMPT
-
-            pc_block = f"\n\nCurrently playing:\n{player_context}" if player_context else ""
-            prompt = CLAUDE_DJ_SYSTEM_PROMPT.format(player_context=pc_block)
-
-            result = call_claude_code(
-                message=req.message,
-                system_prompt=prompt,
-            )
-            return {
-                "answer": result.get("answer", ""),
-                "tracks": result.get("tracks", []),
-                "filters_detected": {},
-                "retrieval_log": [],
-                "model": result.get("model", "claude-code"),
-                "tracks_retrieved": len(result.get("tracks", [])),
-            }
-        except Exception as e:
-            logger.error(f"Claude Code chat failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-
-    # RAG fallback
-    if not settings.anthropic_api_key:
-        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY is not configured")
-
-    from database import get_db_context
-    from assistant import ask_assistant
+    if not settings.claude_code_enabled:
+        raise HTTPException(status_code=503, detail="Claude Code is not enabled")
 
     try:
-        history = req.history[-10:] if req.history else None
+        from claude_code_runner import call_claude_code
+        from claude_dj_prompt import CLAUDE_DJ_SYSTEM_PROMPT
 
-        with get_db_context() as db:
-            result = ask_assistant(db, req.message, limit=20, history=history, player_context=player_context)
+        pc_block = f"\n\nCurrently playing:\n{player_context}" if player_context else ""
+        prompt = CLAUDE_DJ_SYSTEM_PROMPT.format(player_context=pc_block)
 
+        result = call_claude_code(
+            message=req.message,
+            system_prompt=prompt,
+        )
         return {
             "answer": result.get("answer", ""),
             "tracks": result.get("tracks", []),
-            "filters_detected": result.get("filters_detected", {}),
-            "retrieval_log": result.get("retrieval_log", []),
-            "model": result.get("model", ""),
-            "tracks_retrieved": result.get("tracks_retrieved", 0),
+            "filters_detected": {},
+            "retrieval_log": [],
+            "model": result.get("model", "claude-code"),
+            "tracks_retrieved": len(result.get("tracks", [])),
         }
     except Exception as e:
-        logger.error(f"Chat failed: {e}")
+        logger.error(f"Claude Code chat failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
