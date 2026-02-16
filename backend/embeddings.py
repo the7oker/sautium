@@ -195,7 +195,7 @@ class AudioEmbeddingGenerator:
 
         track.embedding_id = embedding.id
 
-    def generate_embeddings(self, limit: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[List[int]] = None) -> Dict[str, int]:
+    def generate_embeddings(self, limit: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[List[int]] = None, worker_id: Optional[int] = None, worker_count: Optional[int] = None) -> Dict[str, int]:
         """
         Generate embeddings for tracks that don't have them yet.
 
@@ -204,6 +204,8 @@ class AudioEmbeddingGenerator:
             order_by_date: If True, process newest tracks first (by file_modified_at).
             max_duration_seconds: Maximum duration in seconds. Process will stop gracefully after this time.
             track_ids: If provided, only process these track IDs.
+            worker_id: Worker index (0-based) for parallel processing.
+            worker_count: Total number of workers for parallel processing.
 
         Returns:
             Statistics dict with keys: processed, success, failed, skipped.
@@ -224,6 +226,9 @@ class AudioEmbeddingGenerator:
 
                 if track_ids is not None:
                     query = query.filter(Track.id.in_(track_ids))
+
+                if worker_count is not None and worker_id is not None:
+                    query = query.filter(Track.id % worker_count == worker_id)
 
                 # Sort by file modification date (newest first) if requested
                 if order_by_date:
@@ -323,7 +328,8 @@ class AudioEmbeddingGenerator:
 
 
 def generate_embeddings(
-    limit: Optional[int] = None, batch_size: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[List[int]] = None
+    limit: Optional[int] = None, batch_size: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[List[int]] = None,
+    worker_id: Optional[int] = None, worker_count: Optional[int] = None,
 ) -> Dict[str, int]:
     """
     Convenience function to generate embeddings.
@@ -334,9 +340,11 @@ def generate_embeddings(
         order_by_date: If True, process newest tracks first (by file_modified_at).
         max_duration_seconds: Maximum duration in seconds.
         track_ids: If provided, only process these track IDs.
+        worker_id: Worker index (0-based) for parallel processing.
+        worker_count: Total number of workers for parallel processing.
 
     Returns:
         Statistics dictionary.
     """
     generator = AudioEmbeddingGenerator(batch_size=batch_size)
-    return generator.generate_embeddings(limit=limit, order_by_date=order_by_date, max_duration_seconds=max_duration_seconds, track_ids=track_ids)
+    return generator.generate_embeddings(limit=limit, order_by_date=order_by_date, max_duration_seconds=max_duration_seconds, track_ids=track_ids, worker_id=worker_id, worker_count=worker_count)

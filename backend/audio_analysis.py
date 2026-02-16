@@ -338,6 +338,8 @@ class AudioAnalyzer:
         librosa_only: bool = False,
         max_duration_seconds: Optional[int] = None,
         track_ids: Optional[List[int]] = None,
+        worker_id: Optional[int] = None,
+        worker_count: Optional[int] = None,
     ) -> Dict[str, int]:
         """
         Batch analyze tracks and store results in audio_features table.
@@ -349,6 +351,8 @@ class AudioAnalyzer:
             librosa_only: Skip CLAP classification (faster, DSP only).
             max_duration_seconds: Maximum duration in seconds. Process will stop gracefully after this time.
             track_ids: If provided, only process these track IDs.
+            worker_id: Worker index (0-based) for parallel processing.
+            worker_count: Total number of workers for parallel processing.
 
         Returns:
             Statistics dict.
@@ -375,6 +379,9 @@ class AudioAnalyzer:
 
                 if track_ids is not None:
                     query = query.filter(Track.id.in_(track_ids))
+
+                if worker_count is not None and worker_id is not None:
+                    query = query.filter(Track.id % worker_count == worker_id)
 
                 if order_by_date:
                     query = query.order_by(Track.file_modified_at.desc().nulls_last())

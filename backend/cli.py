@@ -97,8 +97,11 @@ def scan(limit, no_skip, path):
 @click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default from config)")
 @click.option("--newest-first", is_flag=True, help="Process newest tracks first (by file modification date)")
 @click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 1800 for 30 minutes)")
+@click.option("--worker-id", type=int, default=None, help="Worker index (0-based) for parallel processing")
+@click.option("--worker-count", type=int, default=None, help="Total number of workers for parallel processing")
 @track_filter_options
 def generate_embeddings(limit, batch_size, newest_first, max_duration,
+                        worker_id, worker_count,
                         filter_artist, filter_album, filter_genre, filter_path,
                         filter_tag, filter_track_number, filter_quality):
     """Generate audio embeddings for tracks using CLAP model."""
@@ -117,6 +120,19 @@ def generate_embeddings(limit, batch_size, newest_first, max_duration,
     if max_duration:
         click.echo(f"⏱️  Time limit: {max_duration} seconds ({max_duration/60:.1f} minutes)")
 
+    # Validate worker options
+    if (worker_id is not None) != (worker_count is not None):
+        click.echo("❌ Both --worker-id and --worker-count must be specified together", err=True)
+        sys.exit(1)
+    if worker_count is not None:
+        if worker_count < 1:
+            click.echo("❌ --worker-count must be >= 1", err=True)
+            sys.exit(1)
+        if worker_id < 0 or worker_id >= worker_count:
+            click.echo(f"❌ --worker-id must be in range [0, {worker_count - 1}]", err=True)
+            sys.exit(1)
+        click.echo(f"👷 Worker {worker_id + 1}/{worker_count}")
+
     # Resolve track filters
     track_ids = _resolve_filters(
         filter_artist, filter_album, filter_genre, filter_path,
@@ -126,7 +142,7 @@ def generate_embeddings(limit, batch_size, newest_first, max_duration,
         return
 
     try:
-        stats = do_generate(limit=limit, batch_size=batch_size, order_by_date=newest_first, max_duration_seconds=max_duration, track_ids=track_ids)
+        stats = do_generate(limit=limit, batch_size=batch_size, order_by_date=newest_first, max_duration_seconds=max_duration, track_ids=track_ids, worker_id=worker_id, worker_count=worker_count)
 
         click.echo("\n✅ Embedding generation complete!")
         click.echo(f"📊 Statistics:")
@@ -757,8 +773,11 @@ def enrich_albums(limit, album, no_skip, delay):
 @click.option("--newest-first", is_flag=True, help="Process newest tracks first (by file modification date)")
 @click.option("--librosa-only", is_flag=True, help="Skip CLAP classification (faster, DSP features only)")
 @click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 1800 for 30 minutes)")
+@click.option("--worker-id", type=int, default=None, help="Worker index (0-based) for parallel processing")
+@click.option("--worker-count", type=int, default=None, help="Total number of workers for parallel processing")
 @track_filter_options
 def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_duration,
+                  worker_id, worker_count,
                   filter_artist, filter_album, filter_genre, filter_path,
                   filter_tag, filter_track_number, filter_quality):
     """Extract audio features (BPM, key, instruments, mood, etc.) from tracks."""
@@ -778,6 +797,19 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
     if max_duration:
         click.echo(f"⏱️  Time limit: {max_duration} seconds ({max_duration/60:.1f} minutes)")
 
+    # Validate worker options
+    if (worker_id is not None) != (worker_count is not None):
+        click.echo("❌ Both --worker-id and --worker-count must be specified together", err=True)
+        sys.exit(1)
+    if worker_count is not None:
+        if worker_count < 1:
+            click.echo("❌ --worker-count must be >= 1", err=True)
+            sys.exit(1)
+        if worker_id < 0 or worker_id >= worker_count:
+            click.echo(f"❌ --worker-id must be in range [0, {worker_count - 1}]", err=True)
+            sys.exit(1)
+        click.echo(f"👷 Worker {worker_id + 1}/{worker_count}")
+
     # Resolve track filters
     track_ids = _resolve_filters(
         filter_artist, filter_album, filter_genre, filter_path,
@@ -792,6 +824,7 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
             limit=limit, force=force,
             order_by_date=newest_first, librosa_only=librosa_only,
             max_duration_seconds=max_duration, track_ids=track_ids,
+            worker_id=worker_id, worker_count=worker_count,
         )
 
         click.echo("\n✅ Audio analysis complete!")
