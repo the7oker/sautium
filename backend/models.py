@@ -68,7 +68,7 @@ class Embedding(Base):
 
     # Relationships
     model = relationship("EmbeddingModel", back_populates="embeddings")
-    tracks = relationship("Track", back_populates="embedding_obj")
+    tracks = relationship("Track", back_populates="embedding_obj", foreign_keys=[track_id])
 
     # Indexes
     __table_args__ = (
@@ -96,7 +96,7 @@ class TextEmbedding(Base):
 
     # Relationships
     model = relationship("EmbeddingModel", backref="text_embeddings")
-    tracks = relationship("Track", back_populates="text_embedding_obj")
+    tracks = relationship("Track", back_populates="text_embedding_obj", foreign_keys=[track_id])
 
     # Indexes
     __table_args__ = (
@@ -552,8 +552,8 @@ class Track(Base):
 
     # Relationships
     album = relationship("Album", back_populates="tracks")
-    embedding_obj = relationship("Embedding", back_populates="tracks")
-    text_embedding_obj = relationship("TextEmbedding", back_populates="tracks")
+    embedding_obj = relationship("Embedding", back_populates="tracks", foreign_keys="[Embedding.track_id]")
+    text_embedding_obj = relationship("TextEmbedding", back_populates="tracks", foreign_keys="[TextEmbedding.track_id]")
     artist_associations = relationship("TrackArtist", back_populates="track", cascade="all, delete-orphan")
     genre_associations = relationship("TrackGenre", back_populates="track", cascade="all, delete-orphan")
     stats = relationship("TrackStats", back_populates="track", cascade="all, delete-orphan")
