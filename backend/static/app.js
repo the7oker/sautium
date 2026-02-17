@@ -7,6 +7,7 @@ let currentSessionId = null;
 let sessions = [];
 let sessionsLoaded = false;
 let currentPlaylist = [];
+let selectedModel = localStorage.getItem("djModel") || "sonnet";
 
 // -- DOM refs ----------------------------------------------------------------
 
@@ -507,7 +508,7 @@ async function sendChat(e) {
     const resp = await fetch("/api/chat/sessions/" + currentSessionId + "/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: msg }),
+      body: JSON.stringify({ message: msg, model: selectedModel }),
     });
     const data = await resp.json();
 
@@ -661,6 +662,23 @@ function esc(str) {
   el.textContent = str;
   return el.innerHTML;
 }
+
+// -- Model selector ----------------------------------------------------------
+
+function selectModel(model) {
+  selectedModel = model;
+  localStorage.setItem("djModel", model);
+  document.querySelectorAll(".model-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.model === model);
+  });
+}
+
+// Restore saved model selection on load
+(function initModelSelector() {
+  document.querySelectorAll(".model-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.model === selectedModel);
+  });
+})();
 
 // -- Init --------------------------------------------------------------------
 

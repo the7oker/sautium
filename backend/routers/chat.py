@@ -137,7 +137,7 @@ def _save_claude_session_id(session_id: int, claude_sid: str):
     )
 
 
-def _call_claude_code_dj(session_id: int, message: str, player_context: Optional[str]) -> dict:
+def _call_claude_code_dj(session_id: int, message: str, player_context: Optional[str], model: Optional[str] = None) -> dict:
     """Call Claude Code as AI DJ backend."""
     from claude_code_runner import call_claude_code
     from claude_dj_prompt import CLAUDE_DJ_SYSTEM_PROMPT
@@ -153,6 +153,7 @@ def _call_claude_code_dj(session_id: int, message: str, player_context: Optional
         system_prompt=prompt,
         session_id=claude_sid,
         resume=bool(claude_sid),
+        model=model,
     )
 
     # Save Claude session ID for future messages
@@ -179,6 +180,7 @@ class CreateSessionRequest(BaseModel):
 
 class ChatMessageRequest(BaseModel):
     message: str
+    model: Optional[str] = None
 
 
 class FeedbackRequest(BaseModel):
@@ -310,7 +312,7 @@ async def send_message(session_id: int, req: ChatMessageRequest):
         raise HTTPException(status_code=503, detail="Claude Code is not enabled")
 
     try:
-        result = _call_claude_code_dj(session_id, req.message, player_context)
+        result = _call_claude_code_dj(session_id, req.message, player_context, model=req.model)
     except Exception as e:
         logger.error(f"Claude Code DJ failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))

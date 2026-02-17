@@ -16,7 +16,8 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 MCP_CONFIG_PATH = "/app/mcp-docker.json"
-CLAUDE_MODEL = "sonnet"
+DEFAULT_MODEL = "sonnet"
+ALLOWED_MODELS = {"sonnet", "haiku"}
 TIMEOUT_SECONDS = 120
 CLAUDE_USER = "claudeuser"  # non-root user (--dangerously-skip-permissions requires non-root)
 
@@ -26,6 +27,7 @@ def call_claude_code(
     system_prompt: str,
     session_id: Optional[str] = None,
     resume: bool = False,
+    model: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Call Claude Code CLI in headless mode.
@@ -35,16 +37,19 @@ def call_claude_code(
         system_prompt: System prompt for AI DJ context
         session_id: Previous Claude Code session ID for continuity
         resume: Whether to resume a previous session
+        model: Model to use (sonnet or haiku). Defaults to DEFAULT_MODEL.
 
     Returns:
         dict with keys: answer, tracks, claude_session_id, model
     """
+    use_model = model if model in ALLOWED_MODELS else DEFAULT_MODEL
+
     cmd = [
         "claude",
         "-p", message,
         "--output-format", "json",
         "--mcp-config", MCP_CONFIG_PATH,
-        "--model", CLAUDE_MODEL,
+        "--model", use_model,
         "--system-prompt", system_prompt,
         "--dangerously-skip-permissions",
     ]
@@ -81,7 +86,7 @@ def call_claude_code(
                 "answer": f"Claude Code error: {stderr or 'unknown error'}",
                 "tracks": [],
                 "claude_session_id": None,
-                "model": CLAUDE_MODEL,
+                "model": use_model,
             }
 
         # Parse JSON output
@@ -93,7 +98,7 @@ def call_claude_code(
                 "answer": result.stdout.strip() or "Failed to parse Claude Code response",
                 "tracks": [],
                 "claude_session_id": None,
-                "model": CLAUDE_MODEL,
+                "model": use_model,
             }
 
         raw_answer = output.get("result", "")
@@ -114,7 +119,7 @@ def call_claude_code(
             "answer": clean_answer,
             "tracks": tracks,
             "claude_session_id": claude_sid,
-            "model": CLAUDE_MODEL,
+            "model": use_model,
         }
 
     except subprocess.TimeoutExpired:
@@ -123,7 +128,7 @@ def call_claude_code(
             "answer": "Request timed out. Please try a simpler query.",
             "tracks": [],
             "claude_session_id": None,
-            "model": CLAUDE_MODEL,
+            "model": use_model,
         }
     except FileNotFoundError:
         logger.error("Claude Code CLI not found. Is it installed?")
@@ -131,7 +136,7 @@ def call_claude_code(
             "answer": "Claude Code CLI is not installed in this environment.",
             "tracks": [],
             "claude_session_id": None,
-            "model": CLAUDE_MODEL,
+            "model": use_model,
         }
     except Exception as e:
         logger.error(f"Unexpected error calling Claude Code: {e}")
@@ -139,7 +144,7 @@ def call_claude_code(
             "answer": f"Error: {e}",
             "tracks": [],
             "claude_session_id": None,
-            "model": CLAUDE_MODEL,
+            "model": use_model,
         }
 
 

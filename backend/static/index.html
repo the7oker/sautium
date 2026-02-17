@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#0f0f23">
   <title>Music AI DJ</title>
-  <link rel="stylesheet" href="/static/style.css?v=4">
+  <link rel="stylesheet" href="/static/style.css?v=5">
 </head>
 <body>
   <div class="container">
@@ -68,10 +68,16 @@
       <div class="chat-messages" id="chatMessages">
         <div class="empty-state">Ask the AI DJ for recommendations</div>
       </div>
-      <form class="chat-form" onsubmit="sendChat(event)">
-        <input type="text" class="search-input" id="chatInput" placeholder="What should I play?" autocomplete="off">
-        <button type="submit" class="submit-btn" id="chatSendBtn">&#10148;</button>
-      </form>
+      <div class="chat-bottom">
+        <div class="model-selector">
+          <button class="model-btn active" data-model="sonnet" onclick="selectModel('sonnet')">Sonnet</button>
+          <button class="model-btn" data-model="haiku" onclick="selectModel('haiku')">Haiku</button>
+        </div>
+        <form class="chat-form" onsubmit="sendChat(event)">
+          <input type="text" class="search-input" id="chatInput" placeholder="What should I play?" autocomplete="off">
+          <button type="submit" class="submit-btn" id="chatSendBtn">&#10148;</button>
+        </form>
+      </div>
     </div>
 
     <!-- Queue Tab -->
@@ -83,6 +89,6 @@
 
   </div>
 
-  <script src="/static/app.js?v=6"></script>
+  <script src="/static/app.js?v=7"></script>
 </body>
 </html>

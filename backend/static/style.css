@@ -592,14 +592,47 @@ header h1 {
   margin-top: 4px;
 }
 
-.chat-form {
-  display: flex;
-  gap: 8px;
-  margin-top: 10px;
+/* Model selector */
+.chat-bottom {
   position: sticky;
   bottom: 0;
   background: var(--bg);
-  padding: 8px 0;
+  padding: 4px 0 8px;
+}
+
+.model-selector {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.model-btn {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.model-btn:hover {
+  border-color: var(--accent-dim);
+  color: var(--text);
+}
+
+.model-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(0, 212, 170, 0.1);
+}
+
+.chat-form {
+  display: flex;
+  gap: 8px;
 }
 
 /* Loading spinner */
