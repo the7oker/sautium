@@ -1,0 +1,3 @@
+# HQPlayer Playback Tracker — minimal dependencies only
+psycopg2-binary==2.9.9
+aiohttp==3.9.1

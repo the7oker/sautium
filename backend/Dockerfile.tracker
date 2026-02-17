@@ -1,0 +1,27 @@
+# Lightweight image for HQPlayer Playback Tracker daemon
+# Needs only: psycopg2 (DB) + aiohttp (HTTP API)
+# NO CUDA, NO PyTorch, NO ML libraries
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Only curl is needed for healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.tracker.txt .
+RUN pip install --no-cache-dir -r requirements.tracker.txt
+
+COPY . .
+
+EXPOSE 8765
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD curl -f http://localhost:8765/stats || exit 1
+
+CMD ["python", "playback_tracker.py"]
