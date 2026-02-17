@@ -189,6 +189,7 @@ class AudioEmbeddingGenerator:
         embedding = Embedding(
             vector=vector.tolist(),
             model_id=model.id,
+            track_id=track.id,
         )
         db.add(embedding)
         db.flush()

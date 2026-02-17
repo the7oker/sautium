@@ -60,6 +60,7 @@ class Embedding(Base):
     id = Column(Integer, primary_key=True)
     vector = Column(Vector(512), nullable=False)
     model_id = Column(Integer, ForeignKey("embedding_models.id"), nullable=False)
+    track_id = Column(Integer, ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False, unique=True)
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -88,6 +89,7 @@ class TextEmbedding(Base):
     id = Column(Integer, primary_key=True)
     vector = Column(Vector(384), nullable=False)
     model_id = Column(Integer, ForeignKey("embedding_models.id"), nullable=False)
+    track_id = Column(Integer, ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False, unique=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
