@@ -21,7 +21,7 @@ from sqlalchemy import or_, and_, exists, select
 from tqdm import tqdm
 
 from database import get_db_context
-from models import Track, Album, Artist, TrackArtist, AudioFeature, SimilarArtist, ArtistBio, AlbumInfo, TrackStats
+from models import Track, Album, Artist, TrackArtist, AudioFeature, SimilarArtist, ArtistBio, AlbumInfo, TrackStats, ExternalMetadata
 from embeddings import AudioEmbeddingGenerator
 from audio_analysis import AudioAnalyzer
 
@@ -156,33 +156,57 @@ class TrackEnrichmentPipeline:
             ).first()
 
             if artist_row:
-                # Check if artist has bio
-                from models import ArtistBio
+                # Check if artist has bio OR a recorded attempt in external_metadata
                 artist_bio = db.query(ArtistBio).filter(
                     ArtistBio.artist_id == artist_row.id,
                     ArtistBio.source == 'lastfm'
                 ).first()
-                status['needs_artist_info'] = artist_bio is None
+                if artist_bio:
+                    status['needs_artist_info'] = False
+                else:
+                    artist_meta = db.query(ExternalMetadata).filter(
+                        ExternalMetadata.entity_type == 'artist',
+                        ExternalMetadata.entity_id == artist_row.id,
+                        ExternalMetadata.source == 'lastfm',
+                        ExternalMetadata.metadata_type == 'bio',
+                    ).first()
+                    status['needs_artist_info'] = artist_meta is None
                 status['artist_id'] = artist_row.id
                 status['artist_name'] = artist_row.name
             else:
                 status['needs_artist_info'] = False
 
-            # Check if album has info
-            from models import AlbumInfo
+            # Check if album has info OR a recorded attempt
             album_info = db.query(AlbumInfo).filter(
                 AlbumInfo.album_id == track.album_id,
                 AlbumInfo.source == 'lastfm'
             ).first()
-            status['needs_album_info'] = album_info is None
+            if album_info:
+                status['needs_album_info'] = False
+            else:
+                album_meta = db.query(ExternalMetadata).filter(
+                    ExternalMetadata.entity_type == 'album',
+                    ExternalMetadata.entity_id == track.album_id,
+                    ExternalMetadata.source == 'lastfm',
+                    ExternalMetadata.metadata_type == 'info',
+                ).first()
+                status['needs_album_info'] = album_meta is None
 
-            # Check if track has stats
-            from models import TrackStats
+            # Check if track has stats OR a recorded attempt
             track_stats = db.query(TrackStats).filter(
                 TrackStats.track_id == track.id,
                 TrackStats.source == 'lastfm'
             ).first()
-            status['needs_track_stats'] = track_stats is None
+            if track_stats:
+                status['needs_track_stats'] = False
+            else:
+                track_meta = db.query(ExternalMetadata).filter(
+                    ExternalMetadata.entity_type == 'track',
+                    ExternalMetadata.entity_id == track.id,
+                    ExternalMetadata.source == 'lastfm',
+                    ExternalMetadata.metadata_type == 'stats',
+                ).first()
+                status['needs_track_stats'] = track_meta is None
         else:
             status['needs_artist_info'] = False
             status['needs_album_info'] = False
@@ -362,40 +386,80 @@ class TrackEnrichmentPipeline:
                     )
                 )
 
-        # Last.fm artist: primary artist has no ArtistBio with source='lastfm'
+        # Last.fm enrichment: check both normalized tables AND ExternalMetadata
+        # (ExternalMetadata records "not_found"/"error" attempts so they're not retried)
         if not self.skip_lastfm:
+            # Artist: needs enrichment if no ArtistBio AND no ExternalMetadata record
             conditions.append(
-                ~exists(
-                    select(ArtistBio.id).where(
-                        and_(
-                            ArtistBio.artist_id == TrackArtist.artist_id,
-                            ArtistBio.source == 'lastfm',
-                            TrackArtist.track_id == Track.id,
-                            TrackArtist.role == 'primary',
+                and_(
+                    ~exists(
+                        select(ArtistBio.id).where(
+                            and_(
+                                ArtistBio.artist_id == TrackArtist.artist_id,
+                                ArtistBio.source == 'lastfm',
+                                TrackArtist.track_id == Track.id,
+                                TrackArtist.role == 'primary',
+                            )
                         )
-                    )
+                    ),
+                    ~exists(
+                        select(ExternalMetadata.id).where(
+                            and_(
+                                ExternalMetadata.entity_type == 'artist',
+                                ExternalMetadata.entity_id == TrackArtist.artist_id,
+                                ExternalMetadata.source == 'lastfm',
+                                ExternalMetadata.metadata_type == 'bio',
+                                TrackArtist.track_id == Track.id,
+                                TrackArtist.role == 'primary',
+                            )
+                        )
+                    ),
                 )
             )
-            # Last.fm album: no AlbumInfo for album
+            # Album: needs enrichment if no AlbumInfo AND no ExternalMetadata record
             conditions.append(
-                ~exists(
-                    select(AlbumInfo.id).where(
-                        and_(
-                            AlbumInfo.album_id == Track.album_id,
-                            AlbumInfo.source == 'lastfm',
+                and_(
+                    ~exists(
+                        select(AlbumInfo.id).where(
+                            and_(
+                                AlbumInfo.album_id == Track.album_id,
+                                AlbumInfo.source == 'lastfm',
+                            )
                         )
-                    )
+                    ),
+                    ~exists(
+                        select(ExternalMetadata.id).where(
+                            and_(
+                                ExternalMetadata.entity_type == 'album',
+                                ExternalMetadata.entity_id == Track.album_id,
+                                ExternalMetadata.source == 'lastfm',
+                                ExternalMetadata.metadata_type == 'info',
+                            )
+                        )
+                    ),
                 )
             )
-            # Last.fm track stats: no TrackStats for track
+            # Track stats: needs enrichment if no TrackStats AND no ExternalMetadata record
             conditions.append(
-                ~exists(
-                    select(TrackStats.id).where(
-                        and_(
-                            TrackStats.track_id == Track.id,
-                            TrackStats.source == 'lastfm',
+                and_(
+                    ~exists(
+                        select(TrackStats.id).where(
+                            and_(
+                                TrackStats.track_id == Track.id,
+                                TrackStats.source == 'lastfm',
+                            )
                         )
-                    )
+                    ),
+                    ~exists(
+                        select(ExternalMetadata.id).where(
+                            and_(
+                                ExternalMetadata.entity_type == 'track',
+                                ExternalMetadata.entity_id == Track.id,
+                                ExternalMetadata.source == 'lastfm',
+                                ExternalMetadata.metadata_type == 'stats',
+                            )
+                        )
+                    ),
                 )
             )
 

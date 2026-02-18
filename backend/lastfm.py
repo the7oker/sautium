@@ -171,6 +171,17 @@ class LastFmService:
 
             stored["bio"] = True
         else:
+            # Artist found but no bio — record in external_metadata to avoid re-processing
+            self._upsert_metadata(
+                db,
+                entity_type="artist",
+                entity_id=artist_id,
+                source="lastfm",
+                metadata_type="bio",
+                data={"found": True, "no_bio": True},
+                fetch_status="success",
+            )
+            logger.debug(f"Artist {artist_id} ({artist_name}) found on Last.fm but has no bio")
             stored["bio"] = False
 
         # Store tags in normalized tables
@@ -432,19 +443,23 @@ class LastFmService:
 
         except Exception as e:
             logger.error(f"Failed to enrich artist {artist_name}: {e}")
+            db.rollback()
 
-            # Store error
-            self._upsert_metadata(
-                db,
-                entity_type="artist",
-                entity_id=artist_id,
-                source="lastfm",
-                metadata_type="bio",
-                data={},
-                fetch_status="error",
-                error_message=str(e),
-            )
-            db.commit()
+            # Store error in external_metadata to avoid re-processing
+            try:
+                self._upsert_metadata(
+                    db,
+                    entity_type="artist",
+                    entity_id=artist_id,
+                    source="lastfm",
+                    metadata_type="bio",
+                    data={},
+                    fetch_status="error",
+                    error_message=str(e)[:500],
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
 
             return {
                 "status": "error",
@@ -822,8 +837,19 @@ class LastFmService:
             data = self.get_album_info(artist_name, album_title)
 
             if data is None:
-                # Album not found
+                # Album not found — record in external_metadata to avoid re-processing
                 logger.warning(f"Album not found on Last.fm: {artist_name} - {album_title}")
+                self._upsert_metadata(
+                    db,
+                    entity_type="album",
+                    entity_id=album_id,
+                    source="lastfm",
+                    metadata_type="info",
+                    data={},
+                    fetch_status="not_found",
+                    error_message=f"Album not found on Last.fm: {artist_name} - {album_title}",
+                )
+                db.commit()
                 return {
                     "status": "not_found",
                     "album_id": album_id,
@@ -841,6 +867,17 @@ class LastFmService:
             # Store album info (wiki + stats)
             if data.get("wiki") or data.get("stats"):
                 self._store_album_info(db, album_id, artist_name, album_title, data)
+            else:
+                # Album found but no wiki/stats — record in external_metadata to avoid re-processing
+                self._upsert_metadata(
+                    db,
+                    entity_type="album",
+                    entity_id=album_id,
+                    source="lastfm",
+                    metadata_type="info",
+                    data={"found": True, "no_wiki": True, "no_stats": True},
+                    fetch_status="success",
+                )
 
             # Store album tags
             tags_count = 0
@@ -864,6 +901,22 @@ class LastFmService:
         except Exception as e:
             logger.error(f"Failed to enrich album {artist_name} - {album_title}: {e}")
             db.rollback()
+
+            # Record error in external_metadata to avoid re-processing
+            try:
+                self._upsert_metadata(
+                    db,
+                    entity_type="album",
+                    entity_id=album_id,
+                    source="lastfm",
+                    metadata_type="info",
+                    data={},
+                    fetch_status="error",
+                    error_message=str(e),
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
 
             return {
                 "status": "error",
@@ -1046,8 +1099,19 @@ class LastFmService:
             stats = self.get_track_stats(artist_name, track_title)
 
             if stats is None:
-                # Track not found or no stats
+                # Track not found or no stats — record in external_metadata to avoid re-processing
                 logger.warning(f"No stats found for track: {artist_name} - {track_title}")
+                self._upsert_metadata(
+                    db,
+                    entity_type="track",
+                    entity_id=track_id,
+                    source="lastfm",
+                    metadata_type="stats",
+                    data={},
+                    fetch_status="not_found",
+                    error_message=f"No stats found: {artist_name} - {track_title}",
+                )
+                db.commit()
                 return {
                     "status": "not_found",
                     "track_id": track_id,
@@ -1072,6 +1136,22 @@ class LastFmService:
         except Exception as e:
             logger.error(f"Failed to enrich track {artist_name} - {track_title}: {e}")
             db.rollback()
+
+            # Record error in external_metadata to avoid re-processing
+            try:
+                self._upsert_metadata(
+                    db,
+                    entity_type="track",
+                    entity_id=track_id,
+                    source="lastfm",
+                    metadata_type="stats",
+                    data={},
+                    fetch_status="error",
+                    error_message=str(e),
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
 
             return {
                 "status": "error",
