@@ -206,7 +206,7 @@ class PlaybackTracker:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """
-                    SELECT t.title, t.duration, al.title as album,
+                    SELECT t.title, t.duration_seconds as duration, al.title as album,
                            a.name as artist
                     FROM tracks t
                     JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
