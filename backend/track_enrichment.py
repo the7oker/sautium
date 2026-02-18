@@ -17,10 +17,11 @@ import time
 from typing import Dict, List, Optional
 
 from sqlalchemy.orm import Session
+from sqlalchemy import or_, and_, exists, select
 from tqdm import tqdm
 
 from database import get_db_context
-from models import Track, Album, Artist, TrackArtist, AudioFeature, SimilarArtist, ArtistBio
+from models import Track, Album, Artist, TrackArtist, AudioFeature, SimilarArtist, ArtistBio, AlbumInfo, TrackStats
 from embeddings import AudioEmbeddingGenerator
 from audio_analysis import AudioAnalyzer
 
@@ -330,6 +331,76 @@ class TrackEnrichmentPipeline:
 
         return results
 
+    def _build_needs_enrichment_filter(self):
+        """
+        Build SQLAlchemy filter conditions to select only tracks
+        that need at least one enrichment step.
+
+        Returns a list of OR conditions. If empty, no filtering needed
+        (shouldn't happen — means all steps are skipped).
+        """
+        conditions = []
+
+        # Audio embedding: track.embedding_id IS NULL
+        if not self.skip_embeddings:
+            if self.force_embeddings:
+                # Force mode — process all tracks
+                conditions.append(True)  # will be simplified to no filter
+            else:
+                conditions.append(Track.embedding_id.is_(None))
+
+        # Audio features: no AudioFeature row for this track
+        if not self.skip_audio_analysis:
+            if self.force_audio_analysis:
+                conditions.append(True)
+            else:
+                conditions.append(
+                    ~exists(
+                        select(AudioFeature.id).where(
+                            AudioFeature.track_id == Track.id
+                        )
+                    )
+                )
+
+        # Last.fm artist: primary artist has no ArtistBio with source='lastfm'
+        if not self.skip_lastfm:
+            conditions.append(
+                ~exists(
+                    select(ArtistBio.id).where(
+                        and_(
+                            ArtistBio.artist_id == TrackArtist.artist_id,
+                            ArtistBio.source == 'lastfm',
+                            TrackArtist.track_id == Track.id,
+                            TrackArtist.role == 'primary',
+                        )
+                    )
+                )
+            )
+            # Last.fm album: no AlbumInfo for album
+            conditions.append(
+                ~exists(
+                    select(AlbumInfo.id).where(
+                        and_(
+                            AlbumInfo.album_id == Track.album_id,
+                            AlbumInfo.source == 'lastfm',
+                        )
+                    )
+                )
+            )
+            # Last.fm track stats: no TrackStats for track
+            conditions.append(
+                ~exists(
+                    select(TrackStats.id).where(
+                        and_(
+                            TrackStats.track_id == Track.id,
+                            TrackStats.source == 'lastfm',
+                        )
+                    )
+                )
+            )
+
+        return conditions
+
     def enrich_tracks(
         self,
         limit: Optional[int] = None,
@@ -368,11 +439,30 @@ class TrackEnrichmentPipeline:
 
         try:
             with get_db_context() as db:
-                # Build query
+                # Build query — only select tracks that need enrichment
                 query = db.query(Track)
 
                 if track_ids is not None:
                     query = query.filter(Track.id.in_(track_ids))
+
+                # Worker filtering at SQL level (more efficient than post-filtering)
+                if worker_count is not None:
+                    query = query.filter(Track.id % worker_count == worker_id)
+                    logger.info(f"Worker {worker_id}/{worker_count}: filtering tracks where id % {worker_count} == {worker_id}")
+
+                # Pre-filter: only tracks that need at least one enrichment step
+                needs_conditions = self._build_needs_enrichment_filter()
+                # Remove literal True values (from force flags)
+                real_conditions = [c for c in needs_conditions if c is not True]
+                has_force = len(real_conditions) < len(needs_conditions)
+
+                if not has_force and real_conditions:
+                    # Only fetch tracks where at least one condition is true
+                    query = query.filter(or_(*real_conditions))
+                    logger.info("Pre-filtering: only tracks needing enrichment")
+                elif not real_conditions and not has_force:
+                    logger.info("All enrichment steps are skipped — nothing to do")
+                    return stats
 
                 if order_by_date:
                     query = query.order_by(Track.file_modified_at.desc().nulls_last())
@@ -381,12 +471,6 @@ class TrackEnrichmentPipeline:
                     query = query.limit(limit)
 
                 tracks = query.all()
-                total_before_worker_filter = len(tracks)
-
-                # Worker filtering: assign tracks to workers based on track.id modulo
-                if worker_count is not None:
-                    tracks = [t for t in tracks if t.id % worker_count == worker_id]
-                    logger.info(f"Worker {worker_id}/{worker_count}: filtered to {len(tracks)} tracks (from {total_before_worker_filter} total)")
 
                 total = len(tracks)
 
