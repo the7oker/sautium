@@ -49,12 +49,16 @@ logger = logging.getLogger("playback-tracker")
 class PlaybackSession:
     """Tracks a single listening session for a track"""
 
+    # Last.fm scrobble rule: >50% OR >4 minutes (240 seconds), whichever comes first
+    SCROBBLE_MIN_SECONDS = 240
+
     def __init__(self, track_id: int, started_at: datetime, track_length: float):
         self.track_id = track_id
         self.started_at = started_at
         self.track_length = track_length
         self.last_position = 0.0
         self.max_position = 0.0  # highest position reached
+        self.scrobbled = False  # whether scrobble was already sent for this session
 
     @property
     def duration_listened(self) -> float:
@@ -69,19 +73,26 @@ class PlaybackSession:
         return 0.0
 
     @property
-    def completed(self) -> bool:
-        """Track counts as 'played' if >50% listened or reached end"""
-        # Require minimum 30 seconds listened to count as completed
-        if self.max_position < 30 and self.track_length > 60:
+    def scrobble_ready(self) -> bool:
+        """Last.fm rule: scrobble after >50% OR >4 minutes listened (min 30s)"""
+        if self.max_position < 30:
             return False
-        return self.percent_listened >= 50 or (
+        return (
+            self.percent_listened >= 50
+            or self.max_position >= self.SCROBBLE_MIN_SECONDS
+        )
+
+    @property
+    def completed(self) -> bool:
+        """Track counts as 'played' if scrobble-ready or reached end"""
+        return self.scrobble_ready or (
             self.track_length > 0 and self.max_position >= self.track_length - 5
         )
 
     @property
     def skipped(self) -> bool:
-        """Track was skipped if <50% listened"""
-        return self.percent_listened < 50
+        """Track was skipped if not scrobble-ready"""
+        return not self.scrobble_ready
 
     def update_position(self, position: float):
         """Update playback position"""
@@ -263,8 +274,8 @@ class PlaybackTracker:
                         f"({session.percent_listened:.1f}% listened) — play_count++"
                     )
 
-                    # Scrobble to Last.fm
-                    if self.scrobbler:
+                    # Scrobble to Last.fm (if not already scrobbled in real-time)
+                    if self.scrobbler and not session.scrobbled:
                         meta = self._get_track_metadata(session.track_id)
                         if meta:
                             timestamp = int(session.started_at.timestamp())
@@ -276,6 +287,7 @@ class PlaybackTracker:
                                 album=meta.get("album"),
                                 duration=duration,
                             )
+                            session.scrobbled = True
                             self.scrobbles_sent += 1
                 else:
                     logger.info(
@@ -364,9 +376,29 @@ class PlaybackTracker:
                         f"▶️  Started tracking track_id={track_id} (index={track_index})"
                     )
 
-            # Update position
+            # Update position and check for real-time scrobble
             if self.current_session:
                 self.current_session.update_position(position)
+
+                # Scrobble as soon as threshold is reached (don't wait for track end)
+                if (
+                    self.scrobbler
+                    and not self.current_session.scrobbled
+                    and self.current_session.scrobble_ready
+                ):
+                    meta = self._get_track_metadata(self.current_session.track_id)
+                    if meta:
+                        timestamp = int(self.current_session.started_at.timestamp())
+                        duration = int(meta["duration"]) if meta.get("duration") else None
+                        self.scrobbler.scrobble(
+                            artist=meta["artist"],
+                            title=meta["title"],
+                            timestamp=timestamp,
+                            album=meta.get("album"),
+                            duration=duration,
+                        )
+                        self.current_session.scrobbled = True
+                        self.scrobbles_sent += 1
 
         except Exception as e:
             logger.error(f"Error handling event: {e}")
