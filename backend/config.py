@@ -53,6 +53,9 @@ class Settings(BaseSettings):
 
     # External APIs (Phase 2)
     lastfm_api_key: Optional[str] = None
+    lastfm_api_secret: Optional[str] = None
+    lastfm_username: Optional[str] = None
+    lastfm_session_key: Optional[str] = None
 
     # HQPlayer Integration (Phase 3.2)
     hqplayer_host: str = "localhost"

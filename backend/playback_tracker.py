@@ -21,6 +21,7 @@ Usage:
 import argparse
 import asyncio
 import logging
+import os
 import sys
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -29,6 +30,7 @@ from contextlib import asynccontextmanager
 
 import psycopg2
 import psycopg2.extras
+import pylast
 from aiohttp import web
 
 # Add backend to path for imports
@@ -87,6 +89,49 @@ class PlaybackSession:
         self.max_position = max(self.max_position, position)
 
 
+class LastFmScrobbler:
+    """Last.fm scrobbling client — sends 'now playing' and scrobble events"""
+
+    def __init__(self, api_key: str, api_secret: str, session_key: str, username: str):
+        self.network = pylast.LastFMNetwork(
+            api_key=api_key,
+            api_secret=api_secret,
+            session_key=session_key,
+            username=username,
+        )
+        self.enabled = True
+        logger.info(f"Last.fm scrobbler initialized for user '{username}'")
+
+    def update_now_playing(self, artist: str, title: str, album: Optional[str] = None,
+                           duration: Optional[int] = None):
+        """Send 'now playing' notification to Last.fm"""
+        try:
+            self.network.update_now_playing(
+                artist=artist,
+                title=title,
+                album=album,
+                duration=duration,
+            )
+            logger.info(f"🎵 Last.fm now playing: {artist} - {title}")
+        except Exception as e:
+            logger.error(f"Last.fm now playing failed: {e}")
+
+    def scrobble(self, artist: str, title: str, timestamp: int,
+                 album: Optional[str] = None, duration: Optional[int] = None):
+        """Scrobble a track to Last.fm"""
+        try:
+            self.network.scrobble(
+                artist=artist,
+                title=title,
+                timestamp=timestamp,
+                album=album,
+                duration=duration,
+            )
+            logger.info(f"📡 Last.fm scrobbled: {artist} - {title}")
+        except Exception as e:
+            logger.error(f"Last.fm scrobble failed: {e}")
+
+
 class PlaybackTracker:
     """Main daemon that tracks HQPlayer playback and records to database"""
 
@@ -100,6 +145,10 @@ class PlaybackTracker:
         db_password: str,
         db_name: str,
         http_port: int = 8765,
+        lastfm_api_key: Optional[str] = None,
+        lastfm_api_secret: Optional[str] = None,
+        lastfm_session_key: Optional[str] = None,
+        lastfm_username: Optional[str] = None,
     ):
         self.hqplayer_host = hqplayer_host
         self.hqplayer_port = hqplayer_port
@@ -122,9 +171,25 @@ class PlaybackTracker:
         self.current_session: Optional[PlaybackSession] = None
         self.current_track_index: Optional[int] = None
 
+        # Last.fm scrobbler
+        self.scrobbler: Optional[LastFmScrobbler] = None
+        if lastfm_api_key and lastfm_api_secret and lastfm_session_key:
+            try:
+                self.scrobbler = LastFmScrobbler(
+                    api_key=lastfm_api_key,
+                    api_secret=lastfm_api_secret,
+                    session_key=lastfm_session_key,
+                    username=lastfm_username or "",
+                )
+            except Exception as e:
+                logger.error(f"Failed to initialize Last.fm scrobbler: {e}")
+        else:
+            logger.info("Last.fm scrobbling disabled (missing credentials)")
+
         # Stats
         self.sessions_recorded = 0
         self.plays_counted = 0
+        self.scrobbles_sent = 0
 
     def _get_db(self) -> psycopg2.extensions.connection:
         """Get or create database connection"""
@@ -134,8 +199,30 @@ class PlaybackTracker:
             logger.info("Connected to PostgreSQL")
         return self.db_conn
 
+    def _get_track_metadata(self, track_id: int) -> Optional[dict]:
+        """Get track artist, title, album, duration from DB for scrobbling"""
+        conn = self._get_db()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT t.title, t.duration, al.title as album,
+                           a.name as artist
+                    FROM tracks t
+                    JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+                    JOIN artists a ON ta.artist_id = a.id
+                    LEFT JOIN albums al ON t.album_id = al.id
+                    WHERE t.id = %s
+                    """,
+                    (track_id,),
+                )
+                return cur.fetchone()
+        except Exception as e:
+            logger.error(f"Failed to get track metadata: {e}")
+            return None
+
     def _save_session(self, session: PlaybackSession):
-        """Save listening session to database"""
+        """Save listening session to database and scrobble to Last.fm"""
         conn = self._get_db()
 
         try:
@@ -175,6 +262,21 @@ class PlaybackTracker:
                         f"✅ Track {session.track_id} completed "
                         f"({session.percent_listened:.1f}% listened) — play_count++"
                     )
+
+                    # Scrobble to Last.fm
+                    if self.scrobbler:
+                        meta = self._get_track_metadata(session.track_id)
+                        if meta:
+                            timestamp = int(session.started_at.timestamp())
+                            duration = int(meta["duration"]) if meta.get("duration") else None
+                            self.scrobbler.scrobble(
+                                artist=meta["artist"],
+                                title=meta["title"],
+                                timestamp=timestamp,
+                                album=meta.get("album"),
+                                duration=duration,
+                            )
+                            self.scrobbles_sent += 1
                 else:
                     logger.info(
                         f"⏭️  Track {session.track_id} skipped "
@@ -241,29 +343,26 @@ class PlaybackTracker:
                 )
                 self.current_track_index = track_index
 
-                # Get track name from DB for logging
-                conn = self._get_db()
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    cur.execute(
-                        """
-                        SELECT t.title, a.name as artist
-                        FROM tracks t
-                        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-                        JOIN artists a ON ta.artist_id = a.id
-                        WHERE t.id = %s
-                        """,
-                        (track_id,),
+                # Get track metadata for logging and Last.fm "now playing"
+                meta = self._get_track_metadata(track_id)
+                if meta:
+                    logger.info(
+                        f"▶️  Started tracking: {meta['artist']} - {meta['title']} "
+                        f"(track_id={track_id}, index={track_index})"
                     )
-                    row = cur.fetchone()
-                    if row:
-                        logger.info(
-                            f"▶️  Started tracking: {row['artist']} - {row['title']} "
-                            f"(track_id={track_id}, index={track_index})"
+                    # Send "now playing" to Last.fm
+                    if self.scrobbler:
+                        duration = int(meta["duration"]) if meta.get("duration") else None
+                        self.scrobbler.update_now_playing(
+                            artist=meta["artist"],
+                            title=meta["title"],
+                            album=meta.get("album"),
+                            duration=duration,
                         )
-                    else:
-                        logger.info(
-                            f"▶️  Started tracking track_id={track_id} (index={track_index})"
-                        )
+                else:
+                    logger.info(
+                        f"▶️  Started tracking track_id={track_id} (index={track_index})"
+                    )
 
             # Update position
             if self.current_session:
@@ -334,6 +433,8 @@ class PlaybackTracker:
                 "playlist_tracks": len(self.playlist),
                 "sessions_recorded": self.sessions_recorded,
                 "plays_counted": self.plays_counted,
+                "scrobbles_sent": self.scrobbles_sent,
+                "lastfm_enabled": self.scrobbler is not None,
                 "current_session": {
                     "track_id": self.current_session.track_id if self.current_session else None,
                     "track_index": self.current_track_index,
@@ -402,6 +503,10 @@ async def main():
         db_password=args.db_password,
         db_name=args.db_name,
         http_port=args.http_port,
+        lastfm_api_key=os.environ.get("LASTFM_API_KEY"),
+        lastfm_api_secret=os.environ.get("LASTFM_API_SECRET"),
+        lastfm_session_key=os.environ.get("LASTFM_SESSION_KEY"),
+        lastfm_username=os.environ.get("LASTFM_USERNAME"),
     )
 
     logger.info("🎵 HQPlayer Playback Tracker starting...")

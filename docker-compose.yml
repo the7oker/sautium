@@ -102,6 +102,12 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-music_ai}
       POSTGRES_USER: ${POSTGRES_USER:-musicai}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+
+      # Last.fm Scrobbling
+      LASTFM_API_KEY: ${LASTFM_API_KEY}
+      LASTFM_API_SECRET: ${LASTFM_API_SECRET}
+      LASTFM_USERNAME: ${LASTFM_USERNAME}
+      LASTFM_SESSION_KEY: ${LASTFM_SESSION_KEY}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
