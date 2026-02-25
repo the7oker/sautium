@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#0f0f23">
   <title>Music AI DJ</title>
-  <link rel="stylesheet" href="/static/style.css?v=5">
+  <link rel="stylesheet" href="/static/style.css?v=6">
 </head>
 <body>
   <div class="container">
@@ -69,9 +69,8 @@
         <div class="empty-state">Ask the AI DJ for recommendations</div>
       </div>
       <div class="chat-bottom">
-        <div class="model-selector">
-          <button class="model-btn active" data-model="sonnet" onclick="selectModel('sonnet')">Sonnet</button>
-          <button class="model-btn" data-model="haiku" onclick="selectModel('haiku')">Haiku</button>
+        <div class="provider-selector" id="providerSelector">
+          <!-- Populated dynamically by loadProviders() -->
         </div>
         <form class="chat-form" onsubmit="sendChat(event)">
           <input type="text" class="search-input" id="chatInput" placeholder="What should I play?" autocomplete="off">
@@ -89,6 +88,6 @@
 
   </div>
 
-  <script src="/static/app.js?v=7"></script>
+  <script src="/static/app.js?v=8"></script>
 </body>
 </html>

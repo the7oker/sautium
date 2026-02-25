@@ -71,6 +71,15 @@ class Settings(BaseSettings):
     # Claude Code integration (agent-based AI DJ)
     claude_code_enabled: bool = False
 
+    # Multi-provider LLM support
+    openai_api_key: Optional[str] = None
+    groq_api_key: Optional[str] = None
+    openai_compat_base_url: Optional[str] = None
+    openai_compat_api_key: Optional[str] = None
+    openai_compat_model: Optional[str] = None
+    openai_compat_name: Optional[str] = None
+    default_provider: str = "claude_code"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

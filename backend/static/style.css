@@ -592,7 +592,7 @@ header h1 {
   margin-top: 4px;
 }
 
-/* Model selector */
+/* Provider & model selector */
 .chat-bottom {
   position: sticky;
   bottom: 0;
@@ -600,19 +600,60 @@ header h1 {
   padding: 4px 0 8px;
 }
 
-.model-selector {
-  display: flex;
-  gap: 4px;
+.provider-selector {
   margin-bottom: 6px;
 }
 
-.model-btn {
+.provider-empty {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  padding: 4px 0;
+}
+
+.provider-row {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.provider-btn {
   padding: 4px 12px;
   border: 1px solid var(--border);
   border-radius: 14px;
   background: none;
   color: var(--text-dim);
   font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.provider-btn:hover {
+  border-color: var(--accent-dim);
+  color: var(--text);
+}
+
+.provider-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(0, 212, 170, 0.12);
+}
+
+.model-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.model-btn {
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 0.68rem;
   font-weight: 500;
   cursor: pointer;
   transition: border-color 0.15s, color 0.15s, background 0.15s;
@@ -627,7 +668,7 @@ header h1 {
 .model-btn.active {
   border-color: var(--accent);
   color: var(--accent);
-  background: rgba(0, 212, 170, 0.1);
+  background: rgba(0, 212, 170, 0.08);
 }
 
 .chat-form {

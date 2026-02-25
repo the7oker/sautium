@@ -7,7 +7,9 @@ let currentSessionId = null;
 let sessions = [];
 let sessionsLoaded = false;
 let currentPlaylist = [];
-let selectedModel = localStorage.getItem("djModel") || "sonnet";
+let providersData = [];  // [{id, name, models}, ...]
+let selectedProvider = localStorage.getItem("djProvider") || "";
+let selectedModel = localStorage.getItem("djModel") || "";
 
 // -- DOM refs ----------------------------------------------------------------
 
@@ -462,6 +464,105 @@ async function submitFeedback(messageId, comment, form, btn) {
   }
 }
 
+// -- Provider selector -------------------------------------------------------
+
+async function loadProviders() {
+  try {
+    const resp = await fetch("/api/chat/providers");
+    providersData = await resp.json();
+    renderProviderSelector();
+  } catch (e) {
+    console.error("Failed to load providers:", e);
+    // Fallback: show nothing
+    providersData = [];
+    renderProviderSelector();
+  }
+}
+
+function renderProviderSelector() {
+  const container = document.getElementById("providerSelector");
+  if (!container) return;
+
+  if (providersData.length === 0) {
+    container.innerHTML = '<div class="provider-empty">No AI providers configured</div>';
+    return;
+  }
+
+  // Auto-select provider if current selection is invalid
+  const validIds = providersData.map(p => p.id);
+  if (!selectedProvider || !validIds.includes(selectedProvider)) {
+    selectedProvider = validIds[0];
+    localStorage.setItem("djProvider", selectedProvider);
+  }
+
+  // Auto-select model if current selection is invalid for this provider
+  const currentProviderData = providersData.find(p => p.id === selectedProvider);
+  if (currentProviderData && (!selectedModel || !currentProviderData.models.includes(selectedModel))) {
+    selectedModel = currentProviderData.models[0] || "";
+    localStorage.setItem("djModel", selectedModel);
+  }
+
+  let html = '<div class="provider-row">';
+  for (const p of providersData) {
+    const isActive = p.id === selectedProvider;
+    html += '<button class="provider-btn' + (isActive ? " active" : "") +
+      '" data-provider="' + p.id + '" onclick="selectProvider(\'' + p.id + '\')">' +
+      esc(p.name) + '</button>';
+  }
+  html += '</div>';
+
+  // Model buttons for selected provider
+  if (currentProviderData && currentProviderData.models.length > 0) {
+    html += '<div class="model-row">';
+    for (const m of currentProviderData.models) {
+      const isActive = m === selectedModel;
+      // Show short model name
+      const shortName = formatModelName(m);
+      html += '<button class="model-btn' + (isActive ? " active" : "") +
+        '" data-model="' + m + '" onclick="selectModelBtn(\'' + esc(m) + '\')">' +
+        esc(shortName) + '</button>';
+    }
+    html += '</div>';
+  }
+
+  container.innerHTML = html;
+}
+
+function formatModelName(model) {
+  // Shorten common model names for UI display
+  const shorts = {
+    "claude-sonnet-4-20250514": "Sonnet 4",
+    "claude-haiku-4-5-20251001": "Haiku 4.5",
+    "gpt-4o": "GPT-4o",
+    "gpt-4o-mini": "GPT-4o mini",
+    "llama-3.3-70b-versatile": "Llama 70B",
+    "llama-3.1-8b-instant": "Llama 8B",
+    "sonnet": "Sonnet",
+    "haiku": "Haiku",
+  };
+  return shorts[model] || model;
+}
+
+function selectProvider(id) {
+  selectedProvider = id;
+  localStorage.setItem("djProvider", id);
+
+  // Auto-select first model of this provider
+  const prov = providersData.find(p => p.id === id);
+  if (prov && prov.models.length > 0) {
+    selectedModel = prov.models[0];
+    localStorage.setItem("djModel", selectedModel);
+  }
+
+  renderProviderSelector();
+}
+
+function selectModelBtn(model) {
+  selectedModel = model;
+  localStorage.setItem("djModel", model);
+  renderProviderSelector();
+}
+
 // -- Chat --------------------------------------------------------------------
 
 async function sendChat(e) {
@@ -505,10 +606,14 @@ async function sendChat(e) {
   chatMessages.scrollTop = chatMessages.scrollHeight;
 
   try {
+    const body = { message: msg };
+    if (selectedProvider) body.provider = selectedProvider;
+    if (selectedModel) body.model = selectedModel;
+
     const resp = await fetch("/api/chat/sessions/" + currentSessionId + "/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: msg, model: selectedModel }),
+      body: JSON.stringify(body),
     });
     const data = await resp.json();
 
@@ -520,12 +625,13 @@ async function sendChat(e) {
       appendChatBubble("assistant", "Error: " + data.detail);
     } else {
       const assistantId = data.assistant_msg ? data.assistant_msg.id : null;
+      const providerLabel = data.provider ? (data.provider + ":" + (data.model || "")) : data.model;
       appendChatBubble(
         "assistant",
         data.assistant_msg ? data.assistant_msg.content : "",
         data.tracks,
         data.retrieval_log,
-        data.model,
+        providerLabel,
         data.tracks_retrieved,
         assistantId
       );
@@ -559,7 +665,7 @@ function appendChatBubble(role, text, tracks, retrievalLog, model, tracksRetriev
   if (retrievalLog && retrievalLog.length > 0) {
     const logDiv = document.createElement("details");
     logDiv.className = "retrieval-log";
-    let logHtml = "<summary>Retrieval pipeline (" + (tracksRetrieved || 0) + " tracks, " + esc(model || "?") + ")</summary>";
+    let logHtml = "<summary>Pipeline (" + (tracksRetrieved || 0) + " tracks, " + esc(model || "?") + ")</summary>";
     logHtml += '<div class="retrieval-steps">';
     for (const step of retrievalLog) {
       logHtml += '<div class="retrieval-step">'
@@ -663,24 +769,10 @@ function esc(str) {
   return el.innerHTML;
 }
 
-// -- Model selector ----------------------------------------------------------
-
-function selectModel(model) {
-  selectedModel = model;
-  localStorage.setItem("djModel", model);
-  document.querySelectorAll(".model-btn").forEach(btn => {
-    btn.classList.toggle("active", btn.dataset.model === model);
-  });
-}
-
-// Restore saved model selection on load
-(function initModelSelector() {
-  document.querySelectorAll(".model-btn").forEach(btn => {
-    btn.classList.toggle("active", btn.dataset.model === selectedModel);
-  });
-})();
-
 // -- Init --------------------------------------------------------------------
+
+// Load providers on startup
+loadProviders();
 
 // Fetch playlist from HQPlayer on load
 fetchPlaylist();

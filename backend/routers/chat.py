@@ -2,7 +2,7 @@
 AI DJ chat with persistent history and feedback.
 
 Sessions, messages stored in PostgreSQL. Feedback endpoint for debugging
-recommendation quality.
+recommendation quality. Supports multiple LLM providers.
 """
 
 import json
@@ -140,13 +140,10 @@ def _save_claude_session_id(session_id: int, claude_sid: str):
 def _call_claude_code_dj(session_id: int, message: str, player_context: Optional[str], model: Optional[str] = None) -> dict:
     """Call Claude Code as AI DJ backend."""
     from claude_code_runner import call_claude_code
-    from claude_dj_prompt import CLAUDE_DJ_SYSTEM_PROMPT
+    from claude_dj_prompt import get_system_prompt
 
     claude_sid = _get_claude_session_id(session_id)
-
-    # Format system prompt with player context
-    pc_block = f"\n\nCurrently playing:\n{player_context}" if player_context else ""
-    prompt = CLAUDE_DJ_SYSTEM_PROMPT.format(player_context=pc_block)
+    prompt = get_system_prompt("claude_code", player_context)
 
     result = call_claude_code(
         message=message,
@@ -164,10 +161,112 @@ def _call_claude_code_dj(session_id: int, message: str, player_context: Optional
         "answer": result.get("answer", ""),
         "tracks": result.get("tracks", []),
         "model": result.get("model", "claude-code"),
+        "provider": "claude_code",
         "filters_detected": {},
         "retrieval_log": [],
         "tracks_retrieved": len(result.get("tracks", [])),
     }
+
+
+# ---------------------------------------------------------------------------
+# API provider DJ integration
+# ---------------------------------------------------------------------------
+
+def _call_api_provider_dj(
+    provider_name: str,
+    session_id: int,
+    message: str,
+    player_context: Optional[str],
+    model: Optional[str] = None,
+    history: Optional[list[dict]] = None,
+) -> dict:
+    """Call an API-based LLM provider as AI DJ backend."""
+    from providers import get_provider
+    from providers.base import ProviderMessage
+    from claude_dj_prompt import get_system_prompt
+
+    provider = get_provider(provider_name)
+    if provider is None:
+        raise ValueError(f"Provider '{provider_name}' is not available")
+
+    prompt = get_system_prompt(provider_name, player_context)
+
+    # Convert history dicts to ProviderMessage objects
+    pm_history = None
+    if history:
+        pm_history = [ProviderMessage(role=h["role"], content=h["content"]) for h in history]
+
+    result = provider.chat(
+        message=message,
+        history=pm_history,
+        system_prompt=prompt,
+        player_context=player_context,
+        model=model,
+    )
+
+    return {
+        "answer": result.answer,
+        "tracks": result.tracks,
+        "model": result.model,
+        "provider": result.provider,
+        "filters_detected": {},
+        "retrieval_log": [{"source": "tools", "description": f"{result.tool_calls_count} tool calls"}] if result.tool_calls_count else [],
+        "tracks_retrieved": len(result.tracks),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Track ID post-validation
+# ---------------------------------------------------------------------------
+
+def _validate_tracks(tracks: list[dict]) -> list[dict]:
+    """Validate track IDs against the database.
+
+    LLMs (especially smaller ones like Llama) may hallucinate track IDs.
+    This function checks each ID exists and replaces title/artist/album
+    with real data from the DB. Invalid IDs are removed.
+    """
+    if not tracks:
+        return tracks
+
+    ids = [t.get("id") for t in tracks if t.get("id") is not None]
+    if not ids:
+        return tracks
+
+    try:
+        rows = _db_query("""
+            SELECT t.id, t.title, ar.name as artist, al.title as album
+            FROM tracks t
+            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+            JOIN artists ar ON ta.artist_id = ar.id
+            JOIN albums al ON t.album_id = al.id
+            WHERE t.id = ANY(%(ids)s)
+        """, {"ids": ids})
+
+        db_map = {r["id"]: r for r in rows}
+
+        validated = []
+        for t in tracks:
+            tid = t.get("id")
+            if tid in db_map:
+                real = db_map[tid]
+                validated.append({
+                    "id": tid,
+                    "title": real["title"],
+                    "artist": real["artist"],
+                    "album": real["album"],
+                    "similarity": t.get("similarity"),
+                })
+            else:
+                logger.warning(f"Track ID {tid} not found in DB — removed from results")
+
+        if len(validated) < len(tracks):
+            logger.info(f"Track validation: {len(tracks)} → {len(validated)} (removed {len(tracks) - len(validated)} invalid)")
+
+        return validated
+    except Exception as e:
+        logger.error(f"Track validation failed: {e}")
+        return tracks  # return original on error
 
 
 # ---------------------------------------------------------------------------
@@ -181,11 +280,23 @@ class CreateSessionRequest(BaseModel):
 class ChatMessageRequest(BaseModel):
     message: str
     model: Optional[str] = None
+    provider: Optional[str] = None
 
 
 class FeedbackRequest(BaseModel):
     is_not_relevant: bool = True
     comment: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Providers endpoint
+# ---------------------------------------------------------------------------
+
+@router.get("/providers")
+async def list_providers():
+    """List available LLM providers and their models."""
+    from providers import available_providers
+    return available_providers()
 
 
 # ---------------------------------------------------------------------------
@@ -259,12 +370,36 @@ async def send_message(session_id: int, req: ChatMessageRequest):
 
     1. Save user message
     2. Load last 10 messages as history
-    3. Call ask_assistant()
+    3. Dispatch to provider (Claude Code or API provider)
     4. Save assistant response (content, tracks_data, model, filters, retrieval_log)
     5. Return both messages with DB IDs
     """
-    if not settings.claude_code_enabled and not settings.anthropic_api_key:
-        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY is not configured")
+    # Check that at least one provider is available
+    from providers import available_providers
+    providers = available_providers()
+    if not providers:
+        raise HTTPException(
+            status_code=503,
+            detail="No LLM providers configured. Set CLAUDE_CODE_ENABLED, ANTHROPIC_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY.",
+        )
+
+    # Determine which provider to use
+    provider_name = req.provider or settings.default_provider
+
+    # Validate provider exists
+    from providers import get_provider
+    if provider_name != "claude_code" and get_provider(provider_name) is None:
+        # Fallback to first available provider
+        provider_name = providers[0]["id"]
+
+    # For claude_code, verify it's enabled
+    if provider_name == "claude_code" and not settings.claude_code_enabled:
+        # Fallback to first non-claude_code provider
+        non_cc = [p for p in providers if p["id"] != "claude_code"]
+        if non_cc:
+            provider_name = non_cc[0]["id"]
+        else:
+            raise HTTPException(status_code=503, detail="Claude Code is not enabled and no other providers available.")
 
     # Verify session exists
     session = _db_query_one(
@@ -307,19 +442,23 @@ async def send_message(session_id: int, req: ChatMessageRequest):
     # 3. Gather player context (non-blocking, best-effort)
     player_context = _get_player_context()
 
-    # 4. Call Claude Code DJ backend
-    if not settings.claude_code_enabled:
-        raise HTTPException(status_code=503, detail="Claude Code is not enabled")
-
+    # 4. Dispatch to provider
     try:
-        result = _call_claude_code_dj(session_id, req.message, player_context, model=req.model)
+        if provider_name == "claude_code":
+            result = _call_claude_code_dj(session_id, req.message, player_context, model=req.model)
+        else:
+            result = _call_api_provider_dj(
+                provider_name, session_id, req.message,
+                player_context, model=req.model, history=history,
+            )
     except Exception as e:
-        logger.error(f"Claude Code DJ failed: {e}")
+        logger.error(f"Provider '{provider_name}' failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
     answer = result.get("answer", "")
-    tracks = result.get("tracks", [])
+    tracks = _validate_tracks(result.get("tracks", []))
     model = result.get("model", "")
+    provider_used = result.get("provider", provider_name)
     filters_detected = result.get("filters_detected", {})
     retrieval_log = result.get("retrieval_log", [])
     tracks_retrieved = result.get("tracks_retrieved", 0)
@@ -349,7 +488,7 @@ async def send_message(session_id: int, req: ChatMessageRequest):
         "sid": session_id,
         "content": answer,
         "tracks_data": json.dumps(tracks_data) if tracks_data else None,
-        "model": model,
+        "model": f"{provider_used}:{model}" if provider_used else model,
         "filters": json.dumps(filters_detected) if filters_detected else None,
         "rlog": json.dumps(retrieval_log) if retrieval_log else None,
         "tr": tracks_retrieved,
@@ -363,6 +502,7 @@ async def send_message(session_id: int, req: ChatMessageRequest):
         "filters_detected": filters_detected,
         "retrieval_log": retrieval_log,
         "model": model,
+        "provider": provider_used,
         "tracks_retrieved": tracks_retrieved,
     }
 
@@ -449,10 +589,9 @@ async def legacy_chat(req: LegacyChatRequest):
 
     try:
         from claude_code_runner import call_claude_code
-        from claude_dj_prompt import CLAUDE_DJ_SYSTEM_PROMPT
+        from claude_dj_prompt import get_system_prompt
 
-        pc_block = f"\n\nCurrently playing:\n{player_context}" if player_context else ""
-        prompt = CLAUDE_DJ_SYSTEM_PROMPT.format(player_context=pc_block)
+        prompt = get_system_prompt("claude_code", player_context)
 
         result = call_claude_code(
             message=req.message,

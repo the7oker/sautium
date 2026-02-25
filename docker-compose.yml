@@ -57,6 +57,15 @@ services:
 
       # Claude Code integration
       CLAUDE_CODE_ENABLED: ${CLAUDE_CODE_ENABLED:-true}
+
+      # Multi-provider LLM support
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OPENAI_COMPAT_BASE_URL: ${OPENAI_COMPAT_BASE_URL:-}
+      OPENAI_COMPAT_API_KEY: ${OPENAI_COMPAT_API_KEY:-}
+      OPENAI_COMPAT_MODEL: ${OPENAI_COMPAT_MODEL:-}
+      OPENAI_COMPAT_NAME: ${OPENAI_COMPAT_NAME:-}
+      DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-claude_code}
     extra_hosts:
       # Allow container to access Windows host services (like HQPlayer)
       - "host.docker.internal:host-gateway"
