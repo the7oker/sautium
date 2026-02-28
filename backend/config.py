@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     debug: bool = False
 
     # Database Configuration
-    postgres_host: str = "postgres"
+    postgres_host: str = "localhost"
     postgres_port: int = 5432
     postgres_db: str = "music_ai"
     postgres_user: str = "musicai"
@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     hqplayer_music_path: str = "E:/Music"
 
     # Playback tracker daemon URL
-    tracker_url: str = "http://playback-tracker:8765"
+    tracker_url: str = "http://localhost:8765"
 
     # Claude Code integration (agent-based AI DJ)
     claude_code_enabled: bool = False
@@ -107,8 +107,15 @@ class Settings(BaseSettings):
         """
         missing = []
 
-        if not self.anthropic_api_key:
-            missing.append("ANTHROPIC_API_KEY")
+        # Check that at least one AI provider is configured
+        has_provider = any([
+            self.anthropic_api_key,
+            self.openai_api_key,
+            self.claude_code_enabled,
+            self.openai_compat_base_url and self.openai_compat_model,
+        ])
+        if not has_provider:
+            missing.append("AI provider (set ANTHROPIC_API_KEY, OPENAI_API_KEY, or CLAUDE_CODE_ENABLED)")
 
         if not self.music_library_exists:
             missing.append(f"MUSIC_LIBRARY_PATH (current: {self.music_library_path})")

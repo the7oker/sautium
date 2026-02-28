@@ -9,7 +9,10 @@ from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional
 
 import psycopg2
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -35,12 +38,14 @@ async def lifespan(app: FastAPI):
         )
 
     # Check GPU availability
-    if torch.cuda.is_available():
+    if torch and torch.cuda.is_available():
         gpu_name = torch.cuda.get_device_name(0)
         gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
         logger.info(f"GPU available: {gpu_name} ({gpu_memory:.1f} GB)")
-    else:
+    elif torch:
         logger.warning("No GPU detected. Audio embedding will be slow.")
+    else:
+        logger.warning("PyTorch not installed. Audio embedding features unavailable.")
 
     # Test database connection
     try:
@@ -99,7 +104,7 @@ async def health_check() -> Dict[str, Any]:
         health_status["status"] = "degraded"
 
     # GPU check
-    if torch.cuda.is_available():
+    if torch and torch.cuda.is_available():
         health_status["checks"]["gpu"] = {
             "available": True,
             "name": torch.cuda.get_device_name(0),
@@ -109,7 +114,8 @@ async def health_check() -> Dict[str, Any]:
         }
     else:
         health_status["checks"]["gpu"] = {
-            "available": False
+            "available": False,
+            "torch_installed": torch is not None,
         }
 
     # Music library check
@@ -373,7 +379,7 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",
+        host="127.0.0.1",
         port=8000,
         reload=True,
         log_config=LOGGING_CONFIG

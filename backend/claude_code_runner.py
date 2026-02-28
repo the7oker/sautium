@@ -8,14 +8,22 @@ Parses JSON output, extracts track recommendations from [DJ_TRACKS] marker.
 import json
 import logging
 import os
-import pwd
 import re
 import subprocess
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+if sys.platform != "win32":
+    import pwd
 
 logger = logging.getLogger(__name__)
 
-MCP_CONFIG_PATH = "/app/mcp-docker.json"
+if sys.platform == "win32":
+    # Windows desktop mode: mcp-windows.json next to this module
+    MCP_CONFIG_PATH = str(Path(__file__).parent / "mcp-windows.json")
+else:
+    MCP_CONFIG_PATH = "/app/mcp-docker.json"
 DEFAULT_MODEL = "sonnet"
 ALLOWED_MODELS = {"sonnet", "haiku"}
 TIMEOUT_SECONDS = 120
@@ -60,24 +68,29 @@ def call_claude_code(
     logger.info(f"Claude Code call: message={message[:80]!r}, resume={resume}, session={session_id}")
 
     try:
-        # Run as non-root user (Claude Code blocks --dangerously-skip-permissions as root)
-        pw = pwd.getpwnam(CLAUDE_USER)
-
-        def demote():
-            os.setgid(pw.pw_gid)
-            os.setuid(pw.pw_uid)
-
         env = os.environ.copy()
-        env["HOME"] = pw.pw_dir
+        kwargs = {
+            "capture_output": True,
+            "text": True,
+            "timeout": TIMEOUT_SECONDS,
+            "env": env,
+        }
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT_SECONDS,
-            preexec_fn=demote,
-            env=env,
-        )
+        if sys.platform == "win32":
+            # Windows: no user switching needed, add CREATE_NO_WINDOW
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        else:
+            # Linux/Docker: run as non-root user
+            pw = pwd.getpwnam(CLAUDE_USER)
+
+            def demote():
+                os.setgid(pw.pw_gid)
+                os.setuid(pw.pw_uid)
+
+            kwargs["preexec_fn"] = demote
+            env["HOME"] = pw.pw_dir
+
+        result = subprocess.run(cmd, **kwargs)
 
         if result.returncode != 0:
             stderr = result.stderr.strip()

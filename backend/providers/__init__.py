@@ -40,14 +40,6 @@ def _init_providers():
         from providers.openai_provider import OpenAIProvider
         _providers["openai"] = OpenAIProvider(api_key=openai_key)
 
-    # Groq — disabled: Llama 3.3 70B doesn't follow tool-use instructions
-    # reliably enough (hallucinates track IDs, ignores tool results).
-    # Keeping code for future re-evaluation with better models.
-    # groq_key = getattr(settings, "groq_api_key", None)
-    # if groq_key:
-    #     from providers.groq_provider import GroqProvider
-    #     _providers["groq"] = GroqProvider(api_key=groq_key)
-
     # OpenAI-compatible custom endpoint
     compat_url = getattr(settings, "openai_compat_base_url", None)
     compat_key = getattr(settings, "openai_compat_api_key", None)

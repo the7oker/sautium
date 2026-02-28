@@ -510,7 +510,7 @@ class PlaybackTracker:
 async def main():
     parser = argparse.ArgumentParser(description="HQPlayer playback tracker daemon")
     parser.add_argument(
-        "--hqplayer-host", default="172.26.80.1", help="HQPlayer host (default: 172.26.80.1)"
+        "--hqplayer-host", default="localhost", help="HQPlayer host (default: localhost)"
     )
     parser.add_argument(
         "--hqplayer-port", type=int, default=4321, help="HQPlayer port (default: 4321)"

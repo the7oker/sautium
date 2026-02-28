@@ -1,0 +1,16 @@
+# CPU-only torch requirements
+# Install with: pip install -r requirements-torch-cpu.txt
+torch==2.1.2+cpu
+torchvision==0.16.2+cpu
+torchaudio==2.1.2+cpu
+
+# ML models
+transformers==4.37.2
+sentence-transformers==2.3.1
+
+# Audio processing
+librosa==0.10.1
+soundfile==0.12.1
+audioread==3.0.1
+scipy>=1.2.0,<1.12.0
+pandas==2.2.0
