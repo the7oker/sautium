@@ -64,3 +64,4 @@ htmlcov/
 /prompt.txt
 /backend/.cache
 /tmp/
+/pgsql/
