@@ -38,9 +38,9 @@ DEFAULT_CONFIG = {
         "port": 4321,
     },
     "ports": {
-        "postgres": 5432,
-        "web": 8000,
-        "tracker": 8765,
+        "postgres": 15432,
+        "web": 18000,
+        "tracker": 18765,
     },
     "install_mode": "full_gpu",
     "claude_code_available": False,

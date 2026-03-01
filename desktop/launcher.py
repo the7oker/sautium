@@ -154,7 +154,14 @@ class LauncherApp(ctk.CTk):
             def progress(msg):
                 self.after(0, lambda: self._progress_text.configure(text=msg))
 
-            success = self.service_manager.start_all(progress_cb=progress)
+            try:
+                success = self.service_manager.start_all(progress_cb=progress)
+            except Exception as e:
+                logger.error(f"Startup failed: {e}", exc_info=True)
+                err_msg = str(e)[:200]
+                self.after(0, lambda: self._set_status("error", "Startup failed"))
+                self.after(0, lambda: self._progress_text.configure(text=err_msg))
+                return
 
             if success:
                 self.after(0, self._on_services_ready)

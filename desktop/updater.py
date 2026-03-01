@@ -17,12 +17,13 @@ logger = logging.getLogger(__name__)
 
 def _git_cmd(args: list, cwd: Optional[str] = None, timeout: int = 30) -> subprocess.CompletedProcess:
     """Run a git command."""
+    from desktop.utils import get_project_root
     cmd = ["git"] + args
     kwargs = {
         "capture_output": True,
         "text": True,
         "timeout": timeout,
-        "cwd": cwd or str(Path(__file__).parent.parent),
+        "cwd": cwd or str(get_project_root()),
     }
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -31,7 +32,8 @@ def _git_cmd(args: list, cwd: Optional[str] = None, timeout: int = 30) -> subpro
 
 def get_project_root() -> Path:
     """Get the project root directory (git repo root)."""
-    return Path(__file__).parent.parent
+    from desktop.utils import get_project_root as _get_root
+    return _get_root()
 
 
 def is_git_repo() -> bool:

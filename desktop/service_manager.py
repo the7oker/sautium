@@ -28,7 +28,8 @@ class ServiceManager:
         self.config = config
         self.backend_proc: Optional[subprocess.Popen] = None
         self.tracker_proc: Optional[subprocess.Popen] = None
-        self._project_root = Path(__file__).parent.parent
+        from desktop.utils import get_project_root
+        self._project_root = get_project_root()
         self._backend_dir = self._project_root / "backend"
 
     @property
@@ -41,10 +42,28 @@ class ServiceManager:
 
     def start_postgres(self, progress_cb: Optional[Callable] = None) -> bool:
         """Start PostgreSQL and run migrations."""
-        from desktop.db_init import start_postgres, is_postgres_running, run_migrations
+        from desktop.db_init import (
+            start_postgres, is_postgres_running, run_migrations,
+            get_pg_bin_dir, download_portable_postgres, initialize_cluster,
+            create_database,
+        )
 
         port = self.ports.get("postgres", 5432)
         password = self.config.get("postgres_password", "changeme")
+
+        # Auto-download PostgreSQL if not found
+        try:
+            get_pg_bin_dir()
+        except FileNotFoundError:
+            if sys.platform == "win32":
+                if not download_portable_postgres(progress_cb):
+                    return False
+            else:
+                logger.error("PostgreSQL not found")
+                return False
+
+        # Initialize cluster if needed
+        initialize_cluster(password, progress_cb=progress_cb)
 
         if is_postgres_running():
             logger.info("PostgreSQL already running")
@@ -53,6 +72,14 @@ class ServiceManager:
                 progress_cb("Starting PostgreSQL...")
             if not start_postgres(port=port):
                 return False
+
+        # Create database/role if needed (first run)
+        if progress_cb:
+            progress_cb("Checking database...")
+        try:
+            create_database(password, port=port, progress_cb=progress_cb)
+        except Exception as e:
+            logger.warning(f"create_database: {e}")
 
         # Wait for connection
         if progress_cb:
@@ -100,11 +127,63 @@ class ServiceManager:
     # Backend (FastAPI / uvicorn)
     # ================================================================
 
+    def _ensure_backend_deps(self, progress_cb: Optional[Callable] = None) -> bool:
+        """Install backend dependencies if missing."""
+        try:
+            import uvicorn  # noqa: F401
+            return True
+        except ImportError:
+            pass
+
+        req_file = self._backend_dir / "requirements.txt"
+        if not req_file.exists():
+            logger.error(f"requirements.txt not found: {req_file}")
+            return False
+
+        if progress_cb:
+            progress_cb("Installing backend dependencies (first run)...")
+
+        logger.info("Installing backend dependencies...")
+        cmd = [
+            sys.executable, "-m", "pip", "install",
+            "-r", str(req_file),
+            "--only-binary=:all:",
+            "--quiet",
+        ]
+
+        # Add pgsql/bin to PATH so pg_config is found for psycopg2
+        # Force English locale to avoid encoding issues with pg_config
+        env = os.environ.copy()
+        pg_bin = self._project_root / "pgsql" / "bin"
+        if pg_bin.exists():
+            env["PATH"] = f"{pg_bin};{env.get('PATH', '')}"
+        env["LANG"] = "C"
+        env["LC_ALL"] = "C"
+        env["PGCLIENTENCODING"] = "UTF8"
+
+        kwargs = {"capture_output": True, "text": True, "timeout": 600, "env": env}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        result = subprocess.run(cmd, **kwargs)
+        if result.returncode != 0:
+            logger.error(f"pip install failed: {result.stderr}")
+            if progress_cb:
+                progress_cb(f"Failed to install dependencies: {result.stderr[:200]}")
+            return False
+
+        logger.info("Backend dependencies installed")
+        return True
+
     def start_backend(self, progress_cb: Optional[Callable] = None) -> bool:
         """Start the FastAPI backend."""
         if self.backend_proc and self.backend_proc.poll() is None:
             logger.info("Backend already running")
             return True
+
+        # Auto-install dependencies if missing
+        if not self._ensure_backend_deps(progress_cb):
+            return False
 
         if progress_cb:
             progress_cb("Starting backend server...")
@@ -130,11 +209,18 @@ class ServiceManager:
             "--port", str(port),
         ]
 
+        # Log backend output to file instead of PIPE (PIPE can block on Windows)
+        from desktop.config_manager import get_data_dir
+        log_dir = get_data_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        backend_log = log_dir / "backend.log"
+        self._backend_log_file = open(backend_log, "w", encoding="utf-8")
+
         kwargs = {
             "cwd": str(self._backend_dir),
             "env": env,
-            "stdout": subprocess.PIPE,
-            "stderr": subprocess.PIPE,
+            "stdout": self._backend_log_file,
+            "stderr": self._backend_log_file,
         }
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -142,8 +228,10 @@ class ServiceManager:
         try:
             self.backend_proc = subprocess.Popen(cmd, **kwargs)
             logger.info(f"Backend started (PID {self.backend_proc.pid}) on port {port}")
+            logger.info(f"Backend log: {backend_log}")
         except Exception as e:
             logger.error(f"Failed to start backend: {e}")
+            self._backend_log_file.close()
             return False
 
         # Wait for /health endpoint
@@ -156,28 +244,43 @@ class ServiceManager:
         self._stop_process(self.backend_proc, "Backend")
         self.backend_proc = None
 
-    def _wait_for_backend(self, port: int, timeout: int = 30) -> bool:
+    def _wait_for_backend(self, port: int, timeout: int = 120) -> bool:
         """Wait for the backend /health endpoint to respond."""
         import urllib.request
         import urllib.error
 
         url = f"http://127.0.0.1:{port}/health"
-        for _ in range(timeout):
+        for i in range(timeout):
             # Check if process died
             if self.backend_proc and self.backend_proc.poll() is not None:
-                stderr = self.backend_proc.stderr.read().decode() if self.backend_proc.stderr else ""
-                logger.error(f"Backend exited early: {stderr[:500]}")
+                err_msg = self._read_backend_log_tail()
+                logger.error(f"Backend exited early: {err_msg}")
                 return False
             try:
-                req = urllib.request.urlopen(url, timeout=2)
+                req = urllib.request.urlopen(url, timeout=5)
                 if req.status == 200:
                     logger.info("Backend is ready")
                     return True
-            except (urllib.error.URLError, ConnectionError, OSError):
+            except Exception as e:
+                if i % 10 == 0:
+                    logger.debug(f"Health check attempt {i}: {type(e).__name__}: {e}")
                 time.sleep(1)
 
-        logger.error("Backend did not become ready")
+        err_msg = self._read_backend_log_tail()
+        logger.error(f"Backend did not become ready within {timeout}s. Log: {err_msg}")
         return False
+
+    def _read_backend_log_tail(self) -> str:
+        """Read last lines from backend log file."""
+        try:
+            from desktop.config_manager import get_data_dir
+            log_file = get_data_dir() / "backend.log"
+            if log_file.exists():
+                lines = log_file.read_text(encoding="utf-8", errors="replace").strip().split("\n")
+                return "\n".join(lines[-20:])
+        except Exception:
+            pass
+        return "(no log available)"
 
     # ================================================================
     # Playback Tracker

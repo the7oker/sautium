@@ -7,14 +7,41 @@ import shutil
 import socket
 import subprocess
 import sys
+from pathlib import Path
 from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
+def get_project_root() -> Path:
+    """Get project root directory, works in both dev and PyInstaller mode."""
+    if getattr(sys, "frozen", False):
+        # PyInstaller exe — project root is where the exe lives
+        return Path(sys.executable).parent
+    else:
+        # Dev mode — desktop/ is one level below project root
+        return Path(__file__).parent.parent
+
+
 def detect_claude_cli() -> bool:
-    """Check if Claude Code CLI is available in PATH."""
-    return shutil.which("claude") is not None
+    """Check if Claude Code CLI is available in PATH or via WSL."""
+    if shutil.which("claude") is not None:
+        return True
+
+    # On Windows, check if claude is available inside WSL
+    if sys.platform == "win32":
+        try:
+            result = subprocess.run(
+                ["wsl", "claude", "--version"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if result.returncode == 0 and "claude" in result.stdout.lower():
+                return True
+        except Exception:
+            pass
+
+    return False
 
 
 def detect_git() -> bool:
