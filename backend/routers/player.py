@@ -178,59 +178,63 @@ async def search_tracks(q: str = "", limit: int = 20):
         key = f"w{i}"
         params[key] = f"%{word}%"
         word_conditions.append(
-            f"(a2.name ILIKE %({key})s OR al.title ILIKE %({key})s OR t.title ILIKE %({key})s)"
+            f"(a.name ILIKE %({key})s OR al.title ILIKE %({key})s OR t.title ILIKE %({key})s)"
         )
     where_exact = " AND ".join(word_conditions)
 
     rows = _db_query(f"""
-        SELECT t.id, t.title, t.track_number, t.disc_number, t.duration_seconds,
-               a2.name as artist, al.id as album_id, al.title as album,
-               g.name as genre, al.quality_source
-        FROM tracks t
+        SELECT mf.id, t.title, mf.track_number, mf.disc_number, mf.duration_seconds,
+               a.name as artist, al.id as album_id, al.title as album,
+               g.name as genre, mf.is_lossless
+        FROM media_files mf
+        JOIN tracks t ON mf.track_id = t.id
         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-        JOIN artists a2 ON ta.artist_id = a2.id
-        JOIN albums al ON t.album_id = al.id
+        JOIN artists a ON ta.artist_id = a.id
+        JOIN album_variants av ON mf.album_variant_id = av.id
+        JOIN albums al ON av.album_id = al.id
         LEFT JOIN track_genres tg ON t.id = tg.track_id
         LEFT JOIN genres g ON tg.genre_id = g.id
         WHERE {where_exact}
-        ORDER BY a2.name, al.title, t.disc_number, t.track_number
+        ORDER BY a.name, al.title, mf.disc_number, mf.track_number
     """, params)
 
     if not rows:
         # Stage 2: Fuzzy trigram fallback
         params = {"query": q, "query_like": f"%{q}%", "limit": limit * 10}
         rows = _db_query("""
-            SELECT t.id, t.title, t.track_number, t.disc_number, t.duration_seconds,
-                   a2.name as artist, al.id as album_id, al.title as album,
-                   g.name as genre, al.quality_source,
+            SELECT mf.id, t.title, mf.track_number, mf.disc_number, mf.duration_seconds,
+                   a.name as artist, al.id as album_id, al.title as album,
+                   g.name as genre, mf.is_lossless,
                    GREATEST(
-                       similarity(a2.name, %(query)s),
+                       similarity(a.name, %(query)s),
                        similarity(al.title, %(query)s),
                        similarity(t.title, %(query)s)
                    ) as _score
-            FROM tracks t
+            FROM media_files mf
+            JOIN tracks t ON mf.track_id = t.id
             JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a2 ON ta.artist_id = a2.id
-            JOIN albums al ON t.album_id = al.id
+            JOIN artists a ON ta.artist_id = a.id
+            JOIN album_variants av ON mf.album_variant_id = av.id
+            JOIN albums al ON av.album_id = al.id
             LEFT JOIN track_genres tg ON t.id = tg.track_id
             LEFT JOIN genres g ON tg.genre_id = g.id
-            WHERE similarity(a2.name, %(query)s) > 0.25
+            WHERE similarity(a.name, %(query)s) > 0.25
                OR similarity(al.title, %(query)s) > 0.25
                OR similarity(t.title, %(query)s) > 0.25
-            ORDER BY _score DESC, a2.name, al.title, t.disc_number, t.track_number
+            ORDER BY _score DESC, a.name, al.title, mf.disc_number, mf.track_number
         """, params)
 
-    # Group by album (merge multi-disc albums, but keep CD/Vinyl/Hi-Res separate)
+    # Group by album (merge multi-disc albums, but keep lossless/lossy separate)
     albums_dict = {}
     for row in rows:
-        key = (row["artist"], row["album"], row["quality_source"])
+        key = (row["artist"], row["album"], row["is_lossless"])
         if key not in albums_dict:
             albums_dict[key] = {
                 "artist": row["artist"],
                 "album": row["album"],
                 "album_id": row["album_id"],
                 "genre": row["genre"],
-                "quality_source": row["quality_source"],
+                "is_lossless": row["is_lossless"],
                 "tracks": [],
             }
         albums_dict[key]["tracks"].append({
@@ -289,11 +293,12 @@ def get_playlist():
 
             # Query DB for track info
             row = _db_query_one("""
-                SELECT t.id, t.title, t.track_number, a2.name as artist
-                FROM tracks t
+                SELECT mf.id, t.title, mf.track_number, a.name as artist
+                FROM media_files mf
+                JOIN tracks t ON mf.track_id = t.id
                 JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-                JOIN artists a2 ON ta.artist_id = a2.id
-                WHERE t.file_path = %(path)s
+                JOIN artists a ON ta.artist_id = a.id
+                WHERE mf.file_path = %(path)s
             """, {"path": db_path})
 
             logger.debug(f"  DB lookup: {'found' if row else 'not found'}")
@@ -430,12 +435,14 @@ def set_volume(req: VolumeRequest):
 def play_track(req: PlayTrackRequest):
     """Clear playlist, add single track, play, register with tracker."""
     row = _db_query_one("""
-        SELECT t.file_path, t.title, a2.name as artist, al.title as album
-        FROM tracks t
+        SELECT mf.file_path, t.title, a.name as artist, al.title as album
+        FROM media_files mf
+        JOIN tracks t ON mf.track_id = t.id
         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-        JOIN artists a2 ON ta.artist_id = a2.id
-        JOIN albums al ON t.album_id = al.id
-        WHERE t.id = %(track_id)s
+        JOIN artists a ON ta.artist_id = a.id
+        JOIN album_variants av ON mf.album_variant_id = av.id
+        JOIN albums al ON av.album_id = al.id
+        WHERE mf.id = %(track_id)s
     """, {"track_id": req.track_id})
 
     if not row:
@@ -471,23 +478,25 @@ def play_album(req: PlayAlbumRequest):
 
     if req.artist_name:
         match_conditions.append(
-            "(similarity(a2.name, %(artist)s) > 0.15 OR a2.name ILIKE %(artist_like)s)"
+            "(similarity(a.name, %(artist)s) > 0.15 OR a.name ILIKE %(artist_like)s)"
         )
         match_params["artist"] = req.artist_name
         match_params["artist_like"] = f"%{req.artist_name}%"
-        order_parts.append("similarity(a2.name, %(artist)s)")
+        order_parts.append("similarity(a.name, %(artist)s)")
 
     match_where = " AND ".join(match_conditions)
     order_expr = " + ".join(order_parts)
 
     best_album = _db_query_one(f"""
-        SELECT al.id, al.title as album, a2.name as artist, {order_expr} as _score
+        SELECT al.id, al.title as album, a.name as artist, {order_expr} as _score
         FROM albums al
-        JOIN tracks t ON t.album_id = al.id
+        JOIN album_variants av ON av.album_id = al.id
+        JOIN media_files mf ON mf.album_variant_id = av.id
+        JOIN tracks t ON mf.track_id = t.id
         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-        JOIN artists a2 ON ta.artist_id = a2.id
+        JOIN artists a ON ta.artist_id = a.id
         WHERE {match_where}
-        GROUP BY al.id, al.title, a2.name
+        GROUP BY al.id, al.title, a.name
         ORDER BY _score DESC
         LIMIT 1
     """, match_params)
@@ -496,14 +505,16 @@ def play_album(req: PlayAlbumRequest):
         raise HTTPException(status_code=404, detail=f"Album '{req.album_name}' not found")
 
     rows = _db_query("""
-        SELECT t.id, t.file_path, t.title, t.track_number,
-               a2.name as artist, al.title as album
-        FROM tracks t
+        SELECT mf.id, mf.file_path, t.title, mf.track_number,
+               a.name as artist, al.title as album
+        FROM media_files mf
+        JOIN tracks t ON mf.track_id = t.id
         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-        JOIN artists a2 ON ta.artist_id = a2.id
-        JOIN albums al ON t.album_id = al.id
+        JOIN artists a ON ta.artist_id = a.id
+        JOIN album_variants av ON mf.album_variant_id = av.id
+        JOIN albums al ON av.album_id = al.id
         WHERE al.id = %(album_id)s
-        ORDER BY t.disc_number, t.track_number
+        ORDER BY mf.disc_number, mf.track_number
     """, {"album_id": best_album["id"]})
 
     if not rows:
@@ -538,24 +549,45 @@ def play_album(req: PlayAlbumRequest):
 @router.post("/play-similar")
 def play_similar(req: PlaySimilarRequest):
     """Find similar tracks via pgvector cosine search, queue and play."""
+    # Get track_id from the media_file
+    source = _db_query_one("""
+        SELECT mf.id, t.id as db_track_id
+        FROM media_files mf
+        JOIN tracks t ON mf.track_id = t.id
+        WHERE mf.id = %(track_id)s
+    """, {"track_id": req.track_id})
+
+    if not source:
+        raise HTTPException(status_code=404, detail="Track not found")
+
     rows = _db_query("""
         WITH target AS (
             SELECT e.vector
-            FROM tracks t
-            JOIN embeddings e ON t.embedding_id = e.id
-            WHERE t.id = %(track_id)s
+            FROM embeddings e
+            WHERE e.track_id = %(db_track_id)s
         )
-        SELECT t.id, t.file_path, t.title, a2.name as artist, al.title as album,
+        SELECT mf_rep.id, mf_rep.file_path, t.title, a.name as artist,
+               mf_rep.album_title as album,
                1 - (e.vector <=> (SELECT vector FROM target)) as similarity
         FROM tracks t
-        JOIN embeddings e ON t.embedding_id = e.id
+        JOIN embeddings e ON e.track_id = t.id
         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-        JOIN artists a2 ON ta.artist_id = a2.id
-        JOIN albums al ON t.album_id = al.id
-        WHERE t.id != %(track_id)s
+        JOIN artists a ON ta.artist_id = a.id
+        JOIN LATERAL (
+            SELECT mf.id, mf.file_path, mf.duration_seconds, mf.track_number,
+                   mf.sample_rate, mf.bit_depth, mf.is_lossless,
+                   al.title as album_title
+            FROM media_files mf
+            JOIN album_variants av ON mf.album_variant_id = av.id
+            JOIN albums al ON av.album_id = al.id
+            WHERE mf.track_id = t.id
+            ORDER BY mf.is_analysis_source DESC, mf.id
+            LIMIT 1
+        ) mf_rep ON true
+        WHERE t.id != %(db_track_id)s
         ORDER BY e.vector <=> (SELECT vector FROM target)
         LIMIT %(limit)s
-    """, {"track_id": req.track_id, "limit": req.limit})
+    """, {"db_track_id": source["db_track_id"], "limit": req.limit})
 
     if not rows:
         raise HTTPException(status_code=404, detail="No similar tracks found")
@@ -598,13 +630,15 @@ def play_tracks(req: PlayTracksRequest):
 
     placeholders = ", ".join(str(int(tid)) for tid in req.track_ids)
     rows = _db_query(f"""
-        SELECT t.id, t.file_path, t.title, a2.name as artist, al.title as album
-        FROM tracks t
+        SELECT mf.id, mf.file_path, t.title, a.name as artist, al.title as album
+        FROM media_files mf
+        JOIN tracks t ON mf.track_id = t.id
         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-        JOIN artists a2 ON ta.artist_id = a2.id
-        JOIN albums al ON t.album_id = al.id
-        WHERE t.id IN ({placeholders})
-        ORDER BY array_position(ARRAY[{placeholders}]::int[], t.id)
+        JOIN artists a ON ta.artist_id = a.id
+        JOIN album_variants av ON mf.album_variant_id = av.id
+        JOIN albums al ON av.album_id = al.id
+        WHERE mf.id IN ({placeholders})
+        ORDER BY array_position(ARRAY[{placeholders}]::int[], mf.id)
     """)
 
     if not rows:

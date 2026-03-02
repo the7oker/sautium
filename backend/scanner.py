@@ -1,5 +1,8 @@
 """
-Music library scanner for extracting metadata from FLAC files.
+Music library scanner for extracting metadata from audio files.
+
+Creates canonical entities (Artist, Track, Album) with deterministic UUIDs
+and physical entities (AlbumVariant, MediaFile) per file on disk.
 """
 
 import logging
@@ -15,14 +18,21 @@ from sqlalchemy.orm import Session
 from tqdm import tqdm
 
 from config import settings
-from models import Artist, Album, Track, TrackArtist, TrackGenre, Genre, QualitySource
+from models import (
+    Artist, Album, Track, TrackArtist, TrackGenre, AlbumArtist,
+    AlbumVariant, MediaFile, Genre,
+)
 from database import get_db_context
+from uuid_utils import artist_uuid, track_uuid, album_uuid, is_lossless as check_lossless
 
 logger = logging.getLogger(__name__)
 
+# Supported audio extensions
+AUDIO_EXTENSIONS = {'.flac', '.ape', '.wav', '.aiff', '.wv', '.tta', '.dsf', '.dff', '.mp3', '.ogg', '.m4a'}
+
 
 class LibraryScanner:
-    """Scanner for music library FLAC files."""
+    """Scanner for music library audio files."""
 
     def __init__(self, library_path: Optional[str] = None):
         """Initialize scanner with library path."""
@@ -34,31 +44,9 @@ class LibraryScanner:
         logger.info(f"Initialized scanner for: {self.library_path}")
 
     @staticmethod
-    def detect_quality_source(file_path: Path) -> QualitySource:
-        """
-        Detect quality source from folder structure.
-
-        Rules:
-        - [Vinyl] folder → Vinyl
-        - [TR24] folder → Hi-Res
-        - [MP3] folder → MP3
-        - Otherwise → CD
-        """
-        path_str = str(file_path)
-
-        if "[Vinyl]" in path_str:
-            return QualitySource.VINYL
-        elif "[TR24]" in path_str:
-            return QualitySource.HI_RES
-        elif "[MP3]" in path_str:
-            return QualitySource.MP3
-        else:
-            return QualitySource.CD
-
-    @staticmethod
     def extract_metadata(file_path: Path) -> Optional[Dict[str, Any]]:
         """
-        Extract metadata from FLAC file.
+        Extract metadata from audio file.
 
         Returns:
             Dictionary with extracted metadata or None if failed.
@@ -68,12 +56,15 @@ class LibraryScanner:
 
             # Extract basic tags
             file_stat = file_path.stat()
+            file_format = file_path.suffix.lstrip('.').upper()
+
             metadata = {
                 # File information
                 "file_path": str(file_path.absolute()),
                 "file_size_bytes": file_stat.st_size,
-                "file_format": "FLAC",
+                "file_format": file_format,
                 "file_modified_at": datetime.fromtimestamp(file_stat.st_mtime),
+                "is_lossless": check_lossless(file_format),
 
                 # Audio properties
                 "duration_seconds": round(audio.info.length, 2) if audio.info else None,
@@ -94,9 +85,6 @@ class LibraryScanner:
                 "label": audio.get("label", [None])[0] or audio.get("publisher", [None])[0],
                 "catalog_number": audio.get("catalognumber", [None])[0],
                 "isrc": audio.get("isrc", [None])[0],
-
-                # Quality detection
-                "quality_source": LibraryScanner.detect_quality_source(file_path),
             }
 
             # Parse track number (handle "1/12" format)
@@ -140,7 +128,7 @@ class LibraryScanner:
 
         Args:
             limit: Maximum number of files to return (for testing).
-            subpath: Optional subdirectory within library to scan (e.g., "Electronic/Berlin School/Klaus Schulze").
+            subpath: Optional subdirectory within library to scan.
 
         Returns:
             List of Path objects for FLAC files.
@@ -180,45 +168,82 @@ class LibraryScanner:
 
     @staticmethod
     def get_or_create_artist(db: Session, artist_name: str) -> Artist:
-        """Get existing artist or create new one."""
-        artist = db.query(Artist).filter(Artist.name == artist_name).first()
+        """Get existing artist or create new one. Uses deterministic UUID."""
+        uid = artist_uuid(artist_name)
+        artist = db.query(Artist).filter(Artist.id == uid).first()
 
         if not artist:
-            artist = Artist(name=artist_name)
+            artist = Artist(id=uid, name=artist_name)
             db.add(artist)
             db.flush()
-            logger.debug(f"Created artist: {artist_name}")
+            logger.debug(f"Created artist: {artist_name} ({uid})")
 
         return artist
+
+    @staticmethod
+    def get_or_create_track(db: Session, title: str, artist_name: str) -> Track:
+        """Get existing track or create new one. Uses deterministic UUID."""
+        uid = track_uuid(title, artist_name)
+        track = db.query(Track).filter(Track.id == uid).first()
+
+        if not track:
+            track = Track(id=uid, title=title)
+            db.add(track)
+            db.flush()
+            logger.debug(f"Created track: {title} ({uid})")
+
+        return track
 
     @staticmethod
     def get_or_create_album(
         db: Session,
         album_title: str,
-        directory_path: str,
-        metadata: Dict[str, Any]
+        artist_name: str,
+        metadata: Dict[str, Any],
     ) -> Album:
-        """Get existing album or create new one (identified by directory_path)."""
-        album = db.query(Album).filter(
-            Album.directory_path == directory_path
-        ).first()
+        """Get existing album or create new one. Uses deterministic UUID."""
+        uid = album_uuid(album_title, artist_name)
+        album = db.query(Album).filter(Album.id == uid).first()
 
         if not album:
             album = Album(
+                id=uid,
                 title=album_title,
-                directory_path=directory_path,
                 release_year=metadata.get("release_year"),
                 label=metadata.get("label"),
                 catalog_number=metadata.get("catalog_number"),
-                quality_source=metadata.get("quality_source", QualitySource.CD),
-                sample_rate=metadata.get("sample_rate"),
-                bit_depth=metadata.get("bit_depth"),
             )
             db.add(album)
             db.flush()
-            logger.debug(f"Created album: {album_title}")
+            logger.debug(f"Created album: {album_title} ({uid})")
 
         return album
+
+    @staticmethod
+    def get_or_create_album_variant(
+        db: Session,
+        album: Album,
+        directory_path: str,
+        metadata: Dict[str, Any],
+    ) -> AlbumVariant:
+        """Get existing album variant or create new one (identified by directory_path)."""
+        variant = db.query(AlbumVariant).filter(
+            AlbumVariant.directory_path == directory_path
+        ).first()
+
+        if not variant:
+            variant = AlbumVariant(
+                album_id=album.id,
+                directory_path=directory_path,
+                sample_rate=metadata.get("sample_rate"),
+                bit_depth=metadata.get("bit_depth"),
+                is_lossless=metadata.get("is_lossless", True),
+            )
+            db.add(variant)
+            db.flush()
+            logger.debug(f"Created album variant: {directory_path}")
+
+        return variant
 
     def scan_and_import(self, limit: Optional[int] = None, skip_existing: bool = True, subpath: Optional[str] = None) -> Dict[str, int]:
         """
@@ -250,9 +275,9 @@ class LibraryScanner:
             # Get existing file paths for skip check
             if skip_existing:
                 existing_paths = set(
-                    path[0] for path in db.query(Track.file_path).all()
+                    path[0] for path in db.query(MediaFile.file_path).all()
                 )
-                logger.info(f"Found {len(existing_paths)} existing tracks in database")
+                logger.info(f"Found {len(existing_paths)} existing media files in database")
             else:
                 existing_paths = set()
 
@@ -291,61 +316,83 @@ class LibraryScanner:
                         album_title = metadata["title"]
                         logger.info(f"No album tag, using title as album: {album_title}")
 
-                    # Get or create artist
+                    # Get or create canonical entities
                     artist = self.get_or_create_artist(db, artist_name)
+                    track = self.get_or_create_track(db, metadata["title"], artist_name)
+                    album = self.get_or_create_album(db, album_title, artist_name, metadata)
 
-                    # Get or create album
-                    album = self.get_or_create_album(
-                        db,
-                        album_title,
-                        directory_path=str(file_path.parent),
-                        metadata=metadata
+                    # Get or create album variant (physical edition)
+                    variant = self.get_or_create_album_variant(
+                        db, album, str(file_path.parent), metadata
                     )
 
-                    # Create track
-                    track = Track(
-                        title=metadata["title"],
-                        album_id=album.id,
-                        track_number=metadata.get("track_number"),
-                        disc_number=metadata.get("disc_number", 1),
-                        duration_seconds=metadata.get("duration_seconds"),
-                        sample_rate=metadata.get("sample_rate"),
-                        bit_depth=metadata.get("bit_depth"),
-                        bitrate=metadata.get("bitrate"),
-                        channels=metadata.get("channels"),
-                        file_path=metadata["file_path"],
-                        file_size_bytes=metadata.get("file_size_bytes"),
-                        file_format=metadata.get("file_format", "FLAC"),
-                        file_modified_at=metadata.get("file_modified_at"),
-                        isrc=metadata.get("isrc"),
-                    )
-                    db.add(track)
-                    db.flush()
+                    # Create track-artist association (if not exists)
+                    existing_ta = db.query(TrackArtist).filter(
+                        TrackArtist.track_id == track.id,
+                        TrackArtist.artist_id == artist.id,
+                        TrackArtist.role == "primary",
+                    ).first()
+                    if not existing_ta:
+                        db.add(TrackArtist(
+                            track_id=track.id,
+                            artist_id=artist.id,
+                            role="primary",
+                        ))
 
-                    # Create track-artist association
-                    track_artist = TrackArtist(
-                        track_id=track.id,
-                        artist_id=artist.id,
-                        role="primary"
-                    )
-                    db.add(track_artist)
+                    # Create album-artist association (if not exists)
+                    existing_aa = db.query(AlbumArtist).filter(
+                        AlbumArtist.album_id == album.id,
+                        AlbumArtist.artist_id == artist.id,
+                        AlbumArtist.role == "primary",
+                    ).first()
+                    if not existing_aa:
+                        db.add(AlbumArtist(
+                            album_id=album.id,
+                            artist_id=artist.id,
+                            role="primary",
+                        ))
 
                     # Create track-genre association
                     genre_name = metadata.get("genre")
                     if genre_name and genre_name.strip():
                         genre = self.get_or_create_genre(db, genre_name)
-                        track_genre = TrackGenre(
-                            track_id=track.id,
-                            genre_id=genre.id
-                        )
-                        db.add(track_genre)
+                        existing_tg = db.query(TrackGenre).filter(
+                            TrackGenre.track_id == track.id,
+                            TrackGenre.genre_id == genre.id,
+                        ).first()
+                        if not existing_tg:
+                            db.add(TrackGenre(
+                                track_id=track.id,
+                                genre_id=genre.id,
+                            ))
+
+                    # Create media file (physical file on disk)
+                    media_file = MediaFile(
+                        track_id=track.id,
+                        album_variant_id=variant.id,
+                        file_path=metadata["file_path"],
+                        file_format=metadata.get("file_format", "FLAC"),
+                        is_lossless=metadata.get("is_lossless", True),
+                        file_size_bytes=metadata.get("file_size_bytes"),
+                        file_modified_at=metadata.get("file_modified_at"),
+                        sample_rate=metadata.get("sample_rate"),
+                        bit_depth=metadata.get("bit_depth"),
+                        bitrate=metadata.get("bitrate"),
+                        channels=metadata.get("channels"),
+                        duration_seconds=metadata.get("duration_seconds"),
+                        track_number=metadata.get("track_number"),
+                        disc_number=metadata.get("disc_number", 1),
+                        isrc=metadata.get("isrc"),
+                    )
+                    db.add(media_file)
+                    db.flush()
 
                     stats["added"] += 1
 
-                    # Commit every 100 tracks to avoid huge transactions
+                    # Commit every 100 files to avoid huge transactions
                     if stats["added"] % 100 == 0:
                         db.commit()
-                        logger.info(f"Progress: {stats['added']} tracks added")
+                        logger.info(f"Progress: {stats['added']} files added")
 
                 except Exception as e:
                     logger.error(f"Error processing {file_path}: {e}")

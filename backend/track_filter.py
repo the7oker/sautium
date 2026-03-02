@@ -5,6 +5,9 @@ Provides:
 - get_filtered_track_ids(): SQL-based filtering returning matching track IDs
 - track_filter_options: Click decorator adding filter options to commands
 - describe_filters(): Human-readable description of active filters
+
+Uses the canonical schema: tracks → media_files → album_variants → albums.
+Returns track IDs (UUIDs) since batch operations (embeddings, analysis) work on tracks.
 """
 
 import functools
@@ -24,15 +27,15 @@ def get_filtered_track_ids(
     path: Optional[str] = None,
     tag: Optional[str] = None,
     track_number: Optional[int] = None,
-    quality: Optional[str] = None,
+    lossless: Optional[bool] = None,
     year_from: Optional[int] = None,
     year_to: Optional[int] = None,
-) -> Optional[List[int]]:
+) -> Optional[List]:
     """
     Return track IDs matching the given filters.
 
     Returns None if no filters are active (meaning "all tracks").
-    Returns List[int] (possibly empty) if any filter is active.
+    Returns List (possibly empty) if any filter is active.
 
     All string filters use ILIKE for case-insensitive partial matching.
     JOINs are added only when needed by the active filters.
@@ -40,7 +43,7 @@ def get_filtered_track_ids(
     # Check if any filter is active
     has_filter = any([
         artist, album, genre, path, tag,
-        track_number is not None, quality,
+        track_number is not None, lossless is not None,
         year_from is not None, year_to is not None,
     ])
 
@@ -58,18 +61,24 @@ def get_filtered_track_ids(
         where_clauses.append("a.name ILIKE :artist")
         params["artist"] = f"%{artist}%"
 
-    # Album filter: JOIN albums
-    need_album_join = any([album, quality, year_from is not None, year_to is not None])
+    # Album/year/lossless filters: need media_files + album_variants + albums
+    need_album_join = any([album, year_from is not None, year_to is not None])
+    need_mf_join = any([path, track_number is not None, lossless is not None]) or need_album_join
+
+    if need_mf_join:
+        joins.append("JOIN media_files mf ON mf.track_id = t.id")
+
     if need_album_join:
-        joins.append("JOIN albums al ON t.album_id = al.id")
+        joins.append("JOIN album_variants av ON mf.album_variant_id = av.id")
+        joins.append("JOIN albums al ON av.album_id = al.id")
 
     if album:
         where_clauses.append("al.title ILIKE :album")
         params["album"] = f"%{album}%"
 
-    if quality:
-        where_clauses.append("al.quality_source = :quality")
-        params["quality"] = quality
+    if lossless is not None:
+        where_clauses.append("mf.is_lossless = :lossless")
+        params["lossless"] = lossless
 
     if year_from is not None:
         where_clauses.append("al.release_year >= :year_from")
@@ -86,16 +95,22 @@ def get_filtered_track_ids(
         where_clauses.append("g.name ILIKE :genre")
         params["genre"] = f"%{genre}%"
 
-    # Path filter: direct on tracks.file_path
+    # Path filter: on media_files.file_path
     if path:
-        where_clauses.append("t.file_path ILIKE :path")
+        where_clauses.append("mf.file_path ILIKE :path")
         params["path"] = f"%{path}%"
 
     # Tag filter: search artist_tags and album_tags via tags table
     if tag:
         # Need album join for album_tags if not already joined
-        if not need_album_join:
-            joins.append("JOIN albums al ON t.album_id = al.id")
+        if not need_album_join and not need_mf_join:
+            joins.append("JOIN media_files mf ON mf.track_id = t.id")
+            joins.append("JOIN album_variants av ON mf.album_variant_id = av.id")
+            joins.append("JOIN albums al ON av.album_id = al.id")
+        elif not need_album_join:
+            joins.append("JOIN album_variants av ON mf.album_variant_id = av.id")
+            joins.append("JOIN albums al ON av.album_id = al.id")
+
         # Need artist join for artist_tags if not already joined
         if not artist:
             joins.append("JOIN track_artists ta ON t.id = ta.track_id")
@@ -116,7 +131,7 @@ def get_filtered_track_ids(
 
     # Track number filter
     if track_number is not None:
-        where_clauses.append("t.track_number = :track_number")
+        where_clauses.append("mf.track_number = :track_number")
         params["track_number"] = track_number
 
     joins_sql = "\n".join(joins)
@@ -153,8 +168,8 @@ def describe_filters(**kwargs) -> str:
         parts.append(f"tag~'{kwargs['tag']}'")
     if kwargs.get("track_number") is not None:
         parts.append(f"track#{kwargs['track_number']}")
-    if kwargs.get("quality"):
-        parts.append(f"quality={kwargs['quality']}")
+    if kwargs.get("lossless") is not None:
+        parts.append(f"lossless={kwargs['lossless']}")
     if kwargs.get("year_from") is not None:
         parts.append(f"year>={kwargs['year_from']}")
     if kwargs.get("year_to") is not None:
@@ -177,8 +192,8 @@ def track_filter_options(func):
                   help="Filter by Last.fm tag (e.g. 'idm', 'psychill')")
     @click.option("--track-number", "-n", "filter_track_number", type=int, default=None,
                   help="Filter by track number (e.g. 1 for first tracks)")
-    @click.option("--quality", "filter_quality", type=str, default=None,
-                  help="Filter by quality source (CD, Vinyl, Hi-Res, MP3)")
+    @click.option("--lossless/--lossy", "filter_lossless", default=None,
+                  help="Filter by lossless/lossy format")
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         return func(*args, **kwargs)

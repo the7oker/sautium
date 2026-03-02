@@ -235,12 +235,14 @@ def _validate_tracks(tracks: list[dict]) -> list[dict]:
 
     try:
         rows = _db_query("""
-            SELECT t.id, t.title, ar.name as artist, al.title as album
-            FROM tracks t
+            SELECT mf.id, t.title, a.name as artist, al.title as album
+            FROM media_files mf
+            JOIN tracks t ON mf.track_id = t.id
             JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists ar ON ta.artist_id = ar.id
-            JOIN albums al ON t.album_id = al.id
-            WHERE t.id = ANY(%(ids)s)
+            JOIN artists a ON ta.artist_id = a.id
+            JOIN album_variants av ON mf.album_variant_id = av.id
+            JOIN albums al ON av.album_id = al.id
+            WHERE mf.id = ANY(%(ids)s)
         """, {"ids": ids})
 
         db_map = {r["id"]: r for r in rows}

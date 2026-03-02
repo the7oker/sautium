@@ -1086,9 +1086,14 @@ class LastFmService:
             logger.error(f"Error fetching Last.fm data for {artist_name} - {track_title}: {e}")
             raise
 
-    def enrich_track(self, db: Session, track_id: int, artist_name: str, track_title: str) -> Dict[str, Any]:
+    def enrich_track(self, db: Session, track_id, artist_name: str, track_title: str) -> Dict[str, Any]:
         """
         Fetch Last.fm statistics for a track and store in database.
+
+        Args:
+            track_id: UUID of the track.
+            artist_name: Primary artist name.
+            track_title: Track title.
 
         Returns summary dict with status.
         """
@@ -1104,7 +1109,7 @@ class LastFmService:
                 self._upsert_metadata(
                     db,
                     entity_type="track",
-                    entity_id=track_id,
+                    entity_id=str(track_id),
                     source="lastfm",
                     metadata_type="stats",
                     data={},
@@ -1142,7 +1147,7 @@ class LastFmService:
                 self._upsert_metadata(
                     db,
                     entity_type="track",
-                    entity_id=track_id,
+                    entity_id=str(track_id),
                     source="lastfm",
                     metadata_type="stats",
                     data={},
@@ -1161,7 +1166,7 @@ class LastFmService:
                 "error": str(e),
             }
 
-    def _store_track_stats(self, db: Session, track_id: int, stats: Dict[str, Any]):
+    def _store_track_stats(self, db: Session, track_id, stats: Dict[str, Any]):
         """Store track statistics in track_stats table."""
         from models import TrackStats
 

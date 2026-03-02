@@ -159,16 +159,18 @@ async def get_stats() -> Dict[str, Any]:
                     "total_artists": result[0],
                     "total_albums": result[1],
                     "total_tracks": result[2],
-                    "tracks_with_embeddings": result[3],
-                    "total_duration_seconds": float(result[4]) if result[4] else 0,
-                    "total_file_size_bytes": result[5] or 0,
-                    "unique_genres": result[6],
+                    "total_media_files": result[3],
+                    "tracks_with_embeddings": result[4],
+                    "total_duration_seconds": float(result[5]) if result[5] else 0,
+                    "total_file_size_bytes": result[6] or 0,
+                    "unique_genres": result[7],
                 }
             else:
                 return {
                     "total_artists": 0,
                     "total_albums": 0,
                     "total_tracks": 0,
+                    "total_media_files": 0,
                     "tracks_with_embeddings": 0,
                     "total_duration_seconds": 0,
                     "total_file_size_bytes": 0,
@@ -248,7 +250,7 @@ async def search_similar(
     min_similarity: Optional[float] = None,
     artist: Optional[str] = None,
     genre: Optional[str] = None,
-    quality_source: Optional[str] = None,
+    is_lossless: Optional[bool] = None,
     year_from: Optional[int] = None,
     year_to: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -261,8 +263,8 @@ async def search_similar(
         filters["artist"] = artist
     if genre:
         filters["genre"] = genre
-    if quality_source:
-        filters["quality_source"] = quality_source
+    if is_lossless is not None:
+        filters["is_lossless"] = is_lossless
     if year_from:
         filters["year_from"] = year_from
     if year_to:
@@ -290,7 +292,7 @@ async def search_text(
     min_similarity: Optional[float] = None,
     artist: Optional[str] = None,
     genre: Optional[str] = None,
-    quality_source: Optional[str] = None,
+    is_lossless: Optional[bool] = None,
     year_from: Optional[int] = None,
     year_to: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -303,8 +305,8 @@ async def search_text(
         filters["artist"] = artist
     if genre:
         filters["genre"] = genre
-    if quality_source:
-        filters["quality_source"] = quality_source
+    if is_lossless is not None:
+        filters["is_lossless"] = is_lossless
     if year_from:
         filters["year_from"] = year_from
     if year_to:
@@ -325,7 +327,7 @@ async def search_metadata(
     artist: Optional[str] = None,
     album: Optional[str] = None,
     genre: Optional[str] = None,
-    quality_source: Optional[str] = None,
+    is_lossless: Optional[bool] = None,
     year_from: Optional[int] = None,
     year_to: Optional[int] = None,
     limit: Optional[int] = None,
@@ -342,8 +344,8 @@ async def search_metadata(
         filters["album"] = album
     if genre:
         filters["genre"] = genre
-    if quality_source:
-        filters["quality_source"] = quality_source
+    if is_lossless is not None:
+        filters["is_lossless"] = is_lossless
     if year_from:
         filters["year_from"] = year_from
     if year_to:

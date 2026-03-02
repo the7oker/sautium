@@ -226,7 +226,7 @@ function groupTracksByAlbum(tracks) {
         album: t.album,
         album_id: `chat-${Math.random().toString(36).substr(2, 9)}`,
         genre: t.genre,
-        quality_source: t.quality_source,
+        is_lossless: t.is_lossless,
         tracks: [],
       });
     }
@@ -254,7 +254,8 @@ function renderAlbumList(container, albums) {
 
   for (const album of albums) {
     const duration = album.total_duration ? formatTime(album.total_duration) : "";
-    const meta = [album.genre, album.quality_source, album.track_count + " tracks", duration]
+    const qualityLabel = album.is_lossless === true ? "Lossless" : album.is_lossless === false ? "Lossy" : "";
+    const meta = [album.genre, qualityLabel, album.track_count + " tracks", duration]
       .filter(Boolean).join(" \u00B7 ");
 
     const albumId = album.album_id;

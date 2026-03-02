@@ -1,6 +1,9 @@
 """
 Audio embedding generation using CLAP model.
 Generates 512-dimensional audio embeddings for tracks using laion/clap-htsat-unfused.
+
+Uses the analysis source media file (is_analysis_source=TRUE) for each track.
+One embedding per track, not per file.
 """
 
 import logging
@@ -9,13 +12,14 @@ from typing import Dict, List, Optional
 import librosa
 import numpy as np
 import torch
+from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 from tqdm import tqdm
 from transformers import ClapModel, ClapProcessor
 
 from config import settings
 from database import get_db_context
-from models import Embedding, EmbeddingModel, Track
+from models import Embedding, EmbeddingModel, Track, MediaFile
 
 logger = logging.getLogger(__name__)
 
@@ -183,27 +187,34 @@ class AudioEmbeddingGenerator:
         return em
 
     def _save_embedding(
-        self, db: Session, track: Track, vector: np.ndarray, model: EmbeddingModel
+        self, db: Session, track_id, vector: np.ndarray, model: EmbeddingModel,
+        source_bit_depth: Optional[int] = None,
+        source_sample_rate: Optional[int] = None,
+        source_is_lossless: Optional[bool] = None,
     ):
-        """Create Embedding record and link to track."""
+        """Create Embedding record linked to track."""
         embedding = Embedding(
             vector=vector.tolist(),
             model_id=model.id,
-            track_id=track.id,
+            track_id=track_id,
+            source_bit_depth=source_bit_depth,
+            source_sample_rate=source_sample_rate,
+            source_is_lossless=source_is_lossless,
         )
         db.add(embedding)
         db.flush()
 
-        track.embedding_id = embedding.id
-
-    def generate_embeddings(self, limit: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[List[int]] = None, worker_id: Optional[int] = None, worker_count: Optional[int] = None) -> Dict[str, int]:
+    def generate_embeddings(self, limit: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[list] = None, worker_id: Optional[int] = None, worker_count: Optional[int] = None) -> Dict[str, int]:
         """
         Generate embeddings for tracks that don't have them yet.
 
+        Queries tracks without embeddings, picks the analysis source media file
+        (is_analysis_source=TRUE) for audio loading.
+
         Args:
             limit: Maximum number of tracks to process.
-            order_by_date: If True, process newest tracks first (by file_modified_at).
-            max_duration_seconds: Maximum duration in seconds. Process will stop gracefully after this time.
+            order_by_date: If True, process newest tracks first.
+            max_duration_seconds: Maximum duration in seconds.
             track_ids: If provided, only process these track IDs.
             worker_id: Worker index (0-based) for parallel processing.
             worker_count: Total number of workers for parallel processing.
@@ -222,24 +233,32 @@ class AudioEmbeddingGenerator:
             with get_db_context() as db:
                 embedding_model = self._get_or_create_embedding_model(db)
 
-                # Query tracks without embeddings
-                query = db.query(Track).filter(Track.embedding_id.is_(None))
+                # Query tracks without embeddings, joining to analysis source media file
+                query_sql = """
+                    SELECT t.id as track_id, mf.file_path, mf.bit_depth,
+                           mf.sample_rate, mf.is_lossless
+                    FROM tracks t
+                    LEFT JOIN embeddings e ON e.track_id = t.id
+                    JOIN media_files mf ON mf.track_id = t.id
+                        AND mf.is_analysis_source = true
+                    WHERE e.id IS NULL
+                """
+                params = {}
 
                 if track_ids is not None:
-                    query = query.filter(Track.id.in_(track_ids))
+                    query_sql += " AND t.id = ANY(:track_ids)"
+                    params["track_ids"] = track_ids
 
-                if worker_count is not None and worker_id is not None:
-                    query = query.filter(Track.id % worker_count == worker_id)
-
-                # Sort by file modification date (newest first) if requested
                 if order_by_date:
-                    query = query.order_by(Track.file_modified_at.desc().nulls_last())
+                    query_sql += " ORDER BY mf.file_modified_at DESC NULLS LAST"
+                else:
+                    query_sql += " ORDER BY t.id"
 
                 if limit:
-                    query = query.limit(limit)
+                    query_sql += f" LIMIT {limit}"
 
-                tracks = query.all()
-                total = len(tracks)
+                rows = db.execute(sa_text(query_sql), params).fetchall()
+                total = len(rows)
 
                 if total == 0:
                     logger.info("No tracks pending embedding generation")
@@ -263,23 +282,22 @@ class AudioEmbeddingGenerator:
                         if elapsed >= max_duration_seconds:
                             logger.info(f"Time limit reached ({elapsed:.1f}s), stopping gracefully")
                             break
-                    batch_tracks = tracks[
-                        batch_start : batch_start + self.batch_size
-                    ]
+
+                    batch_rows = rows[batch_start : batch_start + self.batch_size]
                     audio_arrays = []
-                    valid_tracks = []
+                    valid_rows = []
 
                     # Load audio for batch
-                    for track in batch_tracks:
+                    for row in batch_rows:
                         stats["processed"] += 1
-                        audio = self._load_audio(track.file_path)
+                        audio = self._load_audio(row.file_path)
                         if audio is not None:
                             audio_arrays.append(audio)
-                            valid_tracks.append(track)
+                            valid_rows.append(row)
                         else:
                             stats["failed"] += 1
                             logger.warning(
-                                f"Skipping track {track.id}: audio load failed"
+                                f"Skipping track {row.track_id}: audio load failed"
                             )
 
                     if not audio_arrays:
@@ -293,24 +311,30 @@ class AudioEmbeddingGenerator:
                         logger.warning(
                             "Batch failed, falling back to single processing"
                         )
-                        for i, (audio, track) in enumerate(
-                            zip(audio_arrays, valid_tracks)
+                        for i, (audio, row) in enumerate(
+                            zip(audio_arrays, valid_rows)
                         ):
                             single = self._generate_batch_embeddings([audio])
                             if single is not None:
                                 self._save_embedding(
-                                    db, track, single[0], embedding_model
+                                    db, row.track_id, single[0], embedding_model,
+                                    source_bit_depth=row.bit_depth,
+                                    source_sample_rate=row.sample_rate,
+                                    source_is_lossless=row.is_lossless,
                                 )
                                 stats["success"] += 1
                             else:
                                 stats["failed"] += 1
                                 logger.error(
-                                    f"Failed single embedding for track {track.id}"
+                                    f"Failed single embedding for track {row.track_id}"
                                 )
                     else:
-                        for track, vector in zip(valid_tracks, embeddings):
+                        for row, vector in zip(valid_rows, embeddings):
                             self._save_embedding(
-                                db, track, vector, embedding_model
+                                db, row.track_id, vector, embedding_model,
+                                source_bit_depth=row.bit_depth,
+                                source_sample_rate=row.sample_rate,
+                                source_is_lossless=row.is_lossless,
                             )
                             stats["success"] += 1
 
@@ -329,7 +353,7 @@ class AudioEmbeddingGenerator:
 
 
 def generate_embeddings(
-    limit: Optional[int] = None, batch_size: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[List[int]] = None,
+    limit: Optional[int] = None, batch_size: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[list] = None,
     worker_id: Optional[int] = None, worker_count: Optional[int] = None,
 ) -> Dict[str, int]:
     """
@@ -338,7 +362,7 @@ def generate_embeddings(
     Args:
         limit: Maximum number of tracks to process.
         batch_size: Override default batch size.
-        order_by_date: If True, process newest tracks first (by file_modified_at).
+        order_by_date: If True, process newest tracks first.
         max_duration_seconds: Maximum duration in seconds.
         track_ids: If provided, only process these track IDs.
         worker_id: Worker index (0-based) for parallel processing.

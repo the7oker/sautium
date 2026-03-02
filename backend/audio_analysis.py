@@ -4,6 +4,8 @@ Audio feature extraction using librosa (DSP) and CLAP zero-shot classification.
 Extracts:
 - librosa: BPM, key/mode, energy, brightness, dynamic range, ZCR
 - CLAP zero-shot: instruments, moods, vocal/instrumental, danceability
+
+Operates on tracks (one analysis per track), using the analysis source media file.
 """
 
 import logging
@@ -13,13 +15,14 @@ import librosa
 import numpy as np
 import torch
 from scipy.stats import pearsonr
+from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 from tqdm import tqdm
 from transformers import ClapModel, ClapProcessor
 
 from config import settings
 from database import get_db_context
-from models import AudioFeature, Track
+from models import AudioFeature, Track, MediaFile
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +63,7 @@ _KEY_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 
 class AudioAnalyzer:
-    """Extract audio features from FLAC files using librosa and CLAP zero-shot."""
+    """Extract audio features from audio files using librosa and CLAP zero-shot."""
 
     def __init__(
         self,
@@ -304,7 +307,7 @@ class AudioAnalyzer:
 
     def analyze_track(self, file_path: str) -> Optional[Dict[str, Any]]:
         """
-        Full analysis pipeline for a single track.
+        Full analysis pipeline for a single audio file.
         Phase 1: librosa DSP at 22kHz (CPU)
         Phase 2: CLAP zero-shot at 48kHz (GPU)
         """
@@ -337,19 +340,21 @@ class AudioAnalyzer:
         order_by_date: bool = False,
         librosa_only: bool = False,
         max_duration_seconds: Optional[int] = None,
-        track_ids: Optional[List[int]] = None,
+        track_ids: Optional[list] = None,
         worker_id: Optional[int] = None,
         worker_count: Optional[int] = None,
     ) -> Dict[str, int]:
         """
         Batch analyze tracks and store results in audio_features table.
 
+        Uses the analysis source media file (is_analysis_source=TRUE) for each track.
+
         Args:
             limit: Max tracks to process.
             force: Re-analyze even if features exist.
             order_by_date: Process newest tracks first.
             librosa_only: Skip CLAP classification (faster, DSP only).
-            max_duration_seconds: Maximum duration in seconds. Process will stop gracefully after this time.
+            max_duration_seconds: Maximum duration in seconds.
             track_ids: If provided, only process these track IDs.
             worker_id: Worker index (0-based) for parallel processing.
             worker_count: Total number of workers for parallel processing.
@@ -367,30 +372,42 @@ class AudioAnalyzer:
 
         try:
             with get_db_context() as db:
-                # Query tracks to analyze
+                # Query tracks to analyze, joining to analysis source media file
                 if force:
-                    query = db.query(Track)
+                    query_sql = """
+                        SELECT t.id as track_id, mf.file_path, mf.bit_depth,
+                               mf.sample_rate as mf_sample_rate, mf.is_lossless
+                        FROM tracks t
+                        JOIN media_files mf ON mf.track_id = t.id
+                            AND mf.is_analysis_source = true
+                    """
                 else:
-                    query = db.query(Track).filter(
-                        ~Track.id.in_(
-                            db.query(AudioFeature.track_id)
-                        )
-                    )
+                    query_sql = """
+                        SELECT t.id as track_id, mf.file_path, mf.bit_depth,
+                               mf.sample_rate as mf_sample_rate, mf.is_lossless
+                        FROM tracks t
+                        LEFT JOIN audio_features af ON af.track_id = t.id
+                        JOIN media_files mf ON mf.track_id = t.id
+                            AND mf.is_analysis_source = true
+                        WHERE af.id IS NULL
+                    """
+
+                params = {}
 
                 if track_ids is not None:
-                    query = query.filter(Track.id.in_(track_ids))
-
-                if worker_count is not None and worker_id is not None:
-                    query = query.filter(Track.id % worker_count == worker_id)
+                    query_sql += " AND t.id = ANY(:track_ids)"
+                    params["track_ids"] = track_ids
 
                 if order_by_date:
-                    query = query.order_by(Track.file_modified_at.desc().nulls_last())
+                    query_sql += " ORDER BY mf.file_modified_at DESC NULLS LAST"
+                else:
+                    query_sql += " ORDER BY t.id"
 
                 if limit:
-                    query = query.limit(limit)
+                    query_sql += f" LIMIT {limit}"
 
-                tracks = query.all()
-                total = len(tracks)
+                rows = db.execute(sa_text(query_sql), params).fetchall()
+                total = len(rows)
 
                 if total == 0:
                     logger.info("No tracks pending audio analysis")
@@ -400,7 +417,7 @@ class AudioAnalyzer:
                 if max_duration_seconds:
                     logger.info(f"Time limit: {max_duration_seconds} seconds ({max_duration_seconds/60:.1f} minutes)")
 
-                for track in tqdm(tracks, desc="Analyzing audio", unit="track"):
+                for row in tqdm(rows, desc="Analyzing audio", unit="track"):
                     # Check time limit before starting new track
                     if max_duration_seconds:
                         elapsed = time.time() - start_time
@@ -411,7 +428,7 @@ class AudioAnalyzer:
                     stats["processed"] += 1
 
                     try:
-                        features = self.analyze_track(track.file_path)
+                        features = self.analyze_track(row.file_path)
                         if features is None:
                             stats["failed"] += 1
                             continue
@@ -419,20 +436,20 @@ class AudioAnalyzer:
                         # Upsert into audio_features
                         if force:
                             existing = db.query(AudioFeature).filter(
-                                AudioFeature.track_id == track.id
+                                AudioFeature.track_id == row.track_id
                             ).first()
                             if existing:
                                 for k, v in features.items():
-                                    if k == "instruments" or k == "moods":
-                                        setattr(existing, k, v)
-                                    else:
-                                        setattr(existing, k, v)
+                                    setattr(existing, k, v)
+                                existing.source_bit_depth = row.bit_depth
+                                existing.source_sample_rate = row.mf_sample_rate
+                                existing.source_is_lossless = row.is_lossless
                                 db.commit()
                                 stats["success"] += 1
                                 continue
 
                         af = AudioFeature(
-                            track_id=track.id,
+                            track_id=row.track_id,
                             bpm=features.get("bpm"),
                             key=features.get("key"),
                             mode=features.get("mode"),
@@ -447,6 +464,9 @@ class AudioAnalyzer:
                             vocal_instrumental=features.get("vocal_instrumental"),
                             vocal_score=features.get("vocal_score"),
                             danceability=features.get("danceability"),
+                            source_bit_depth=row.bit_depth,
+                            source_sample_rate=row.mf_sample_rate,
+                            source_is_lossless=row.is_lossless,
                         )
                         db.add(af)
                         db.commit()
@@ -455,7 +475,7 @@ class AudioAnalyzer:
                     except Exception as e:
                         db.rollback()
                         stats["failed"] += 1
-                        logger.error(f"Failed to analyze track {track.id} ({track.title}): {e}")
+                        logger.error(f"Failed to analyze track {row.track_id}: {e}")
 
                 logger.info(
                     f"Audio analysis complete: {stats['success']} success, {stats['failed']} failed"

@@ -177,7 +177,7 @@ def normalize_genres(db: Session, dry_run: bool = False) -> dict:
                 ).first()
 
                 if not existing:
-                    new_tg = TrackGenre(track_id=track_id, genre_id=individual_genre.id)
+                    new_tg = TrackGenre(track_id=tg.track_id, genre_id=individual_genre.id)
                     db.add(new_tg)
                     stats['track_relationships_updated'] += 1
 

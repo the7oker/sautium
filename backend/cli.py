@@ -27,7 +27,7 @@ def cli():
 
 
 def _resolve_filters(filter_artist, filter_album, filter_genre, filter_path,
-                     filter_tag, filter_track_number, filter_quality):
+                     filter_tag, filter_track_number, filter_lossless):
     """
     Resolve track filter options into a list of track IDs.
 
@@ -37,7 +37,7 @@ def _resolve_filters(filter_artist, filter_album, filter_genre, filter_path,
     filter_kwargs = dict(
         artist=filter_artist, album=filter_album, genre=filter_genre,
         path=filter_path, tag=filter_tag, track_number=filter_track_number,
-        quality=filter_quality,
+        lossless=filter_lossless,
     )
     filter_desc = describe_filters(**filter_kwargs)
     if not filter_desc:
@@ -103,7 +103,7 @@ def scan(limit, no_skip, path):
 def generate_embeddings(limit, batch_size, newest_first, max_duration,
                         worker_id, worker_count,
                         filter_artist, filter_album, filter_genre, filter_path,
-                        filter_tag, filter_track_number, filter_quality):
+                        filter_tag, filter_track_number, filter_lossless):
     """Generate audio embeddings for tracks using CLAP model."""
     from embeddings import generate_embeddings as do_generate
 
@@ -136,7 +136,7 @@ def generate_embeddings(limit, batch_size, newest_first, max_duration,
     # Resolve track filters
     track_ids = _resolve_filters(
         filter_artist, filter_album, filter_genre, filter_path,
-        filter_tag, filter_track_number, filter_quality,
+        filter_tag, filter_track_number, filter_lossless,
     )
     if track_ids is not None and len(track_ids) == 0:
         return
@@ -197,25 +197,26 @@ def stats():
 def list_tracks(limit):
     """List recently added tracks."""
     try:
-        from models import Track, Album, TrackArtist, Artist
+        from models import Track, MediaFile, AlbumVariant, Album, TrackArtist, Artist
 
         with get_db_context() as db:
-            tracks = (
-                db.query(Track, Album)
-                .join(Album, Track.album_id == Album.id)
+            rows = (
+                db.query(Track, MediaFile, Album)
+                .join(MediaFile, MediaFile.track_id == Track.id)
+                .join(AlbumVariant, MediaFile.album_variant_id == AlbumVariant.id)
+                .join(Album, AlbumVariant.album_id == Album.id)
                 .order_by(Track.created_at.desc())
                 .limit(limit)
                 .all()
             )
 
-            if not tracks:
+            if not rows:
                 click.echo("No tracks in database yet. Run 'scan' first.")
                 return
 
-            click.echo(f"\n🎵 Recently added tracks (showing {len(tracks)}):\n")
+            click.echo(f"\n🎵 Recently added tracks (showing {len(rows)}):\n")
 
-            for track, album in tracks:
-                # Get primary artist via track_artists
+            for track, mf, album in rows:
                 artist_row = (
                     db.query(Artist.name)
                     .join(TrackArtist, TrackArtist.artist_id == Artist.id)
@@ -223,8 +224,8 @@ def list_tracks(limit):
                     .first()
                 )
                 artist_name = artist_row[0] if artist_row else "Unknown"
-                duration = f"{int(track.duration_seconds // 60)}:{int(track.duration_seconds % 60):02d}" if track.duration_seconds else "?"
-                quality = f"{track.sample_rate//1000}kHz/{track.bit_depth}bit" if track.sample_rate and track.bit_depth else "?"
+                duration = f"{int(mf.duration_seconds // 60)}:{int(mf.duration_seconds % 60):02d}" if mf.duration_seconds else "?"
+                quality = f"{mf.sample_rate//1000}kHz/{mf.bit_depth}bit" if mf.sample_rate and mf.bit_depth else "?"
 
                 click.echo(f"   • {artist_name} - {track.title}")
                 click.echo(f"     Album: {album.title} | {duration} | {quality}")
@@ -323,7 +324,7 @@ def test_file(path):
     click.echo(f"   Bitrate: {metadata.get('bitrate')} kbps")
 
     click.echo(f"\n💿 Quality:")
-    click.echo(f"   Source: {metadata.get('quality_source')}")
+    click.echo(f"   Format: {metadata.get('file_format', '?')}")
     click.echo(f"   File Size: {metadata.get('file_size_bytes') / (1024*1024):.2f} MB")
 
 
@@ -333,8 +334,8 @@ def test_file(path):
 @click.option("--min-similarity", type=float, default=None, help="Minimum similarity (0-1)")
 @click.option("--artist", type=str, default=None, help="Filter by artist name (partial match)")
 @click.option("--genre", type=str, default=None, help="Filter by genre (partial match)")
-@click.option("--quality", type=str, default=None, help="Filter by quality source (CD, Vinyl, Hi-Res, MP3)")
-def search_similar(track_id, limit, min_similarity, artist, genre, quality):
+@click.option("--lossless/--lossy", default=None, help="Filter by lossless/lossy format")
+def search_similar(track_id, limit, min_similarity, artist, genre, lossless):
     """Find tracks similar to a given track by audio similarity."""
     from search import search_similar_tracks
 
@@ -343,8 +344,8 @@ def search_similar(track_id, limit, min_similarity, artist, genre, quality):
         filters["artist"] = artist
     if genre:
         filters["genre"] = genre
-    if quality:
-        filters["quality_source"] = quality
+    if lossless is not None:
+        filters["is_lossless"] = lossless
 
     try:
         with get_db_context() as db:
@@ -359,16 +360,16 @@ def search_similar(track_id, limit, min_similarity, artist, genre, quality):
         qt = result["query_track"]
         click.echo(f"\n🎵 Tracks similar to: {qt['artist']} - {qt['title']}")
         click.echo(f"   Album: {qt['album']} | Genre: {qt.get('genre', 'N/A')}")
-        click.echo(f"\n{'#':<4} {'Sim':>5}  {'Artist':<25} {'Title':<35} {'Album':<30} {'Quality':<7}")
-        click.echo("-" * 110)
+        click.echo(f"\n{'#':<4} {'Sim':>5}  {'Artist':<25} {'Title':<35} {'Album':<30} {'Format':<10}")
+        click.echo("-" * 113)
 
         for i, track in enumerate(result["results"], 1):
             sim = f"{track['similarity']:.2f}" if track["similarity"] else "N/A"
             artist_name = (track["artist"] or "Unknown")[:24]
             title = (track["title"] or "?")[:34]
             album_name = (track["album"] or "?")[:29]
-            qs = track.get("quality_source") or "?"
-            click.echo(f"{i:<4} {sim:>5}  {artist_name:<25} {title:<35} {album_name:<30} {qs:<7}")
+            fmt = "Lossless" if track.get("is_lossless") else "Lossy" if track.get("is_lossless") is False else "?"
+            click.echo(f"{i:<4} {sim:>5}  {artist_name:<25} {title:<35} {album_name:<30} {fmt:<10}")
 
         click.echo(f"\n📊 Found {result['count']} similar tracks")
 
@@ -384,8 +385,8 @@ def search_similar(track_id, limit, min_similarity, artist, genre, quality):
 @click.option("--min-similarity", type=float, default=None, help="Minimum similarity (0-1)")
 @click.option("--artist", type=str, default=None, help="Filter by artist name (partial match)")
 @click.option("--genre", type=str, default=None, help="Filter by genre (partial match)")
-@click.option("--quality", type=str, default=None, help="Filter by quality source (CD, Vinyl, Hi-Res, MP3)")
-def search_text(query, limit, min_similarity, artist, genre, quality):
+@click.option("--lossless/--lossy", default=None, help="Filter by lossless/lossy format")
+def search_text(query, limit, min_similarity, artist, genre, lossless):
     """Search tracks by text description using CLAP text-to-audio similarity."""
     from search import search_by_text
 
@@ -397,8 +398,8 @@ def search_text(query, limit, min_similarity, artist, genre, quality):
         filters["artist"] = artist
     if genre:
         filters["genre"] = genre
-    if quality:
-        filters["quality_source"] = quality
+    if lossless is not None:
+        filters["is_lossless"] = lossless
 
     try:
         with get_db_context() as db:
@@ -406,16 +407,16 @@ def search_text(query, limit, min_similarity, artist, genre, quality):
                 db, query, limit=limit, min_similarity=min_similarity, filters=filters
             )
 
-        click.echo(f"\n{'#':<4} {'Sim':>5}  {'Artist':<25} {'Title':<35} {'Album':<30} {'Quality':<7}")
-        click.echo("-" * 110)
+        click.echo(f"\n{'#':<4} {'Sim':>5}  {'Artist':<25} {'Title':<35} {'Album':<30} {'Format':<10}")
+        click.echo("-" * 113)
 
         for i, track in enumerate(result["results"], 1):
             sim = f"{track['similarity']:.2f}" if track["similarity"] else "N/A"
             artist_name = (track["artist"] or "Unknown")[:24]
             title = (track["title"] or "?")[:34]
             album_name = (track["album"] or "?")[:29]
-            qs = track.get("quality_source") or "?"
-            click.echo(f"{i:<4} {sim:>5}  {artist_name:<25} {title:<35} {album_name:<30} {qs:<7}")
+            fmt = "Lossless" if track.get("is_lossless") else "Lossy" if track.get("is_lossless") is False else "?"
+            click.echo(f"{i:<4} {sim:>5}  {artist_name:<25} {title:<35} {album_name:<30} {fmt:<10}")
 
         click.echo(f"\n📊 Found {result['count']} matching tracks")
 
@@ -637,15 +638,14 @@ def enrich_albums(limit, album, no_skip, delay):
                 result = db.execute(
                     text("""
                         SELECT DISTINCT
-                            a.id,
-                            a.title,
-                            STRING_AGG(DISTINCT ar.name, ', ') as artist_names
-                        FROM albums a
-                        JOIN tracks t ON a.id = t.album_id
-                        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-                        JOIN artists ar ON ta.artist_id = ar.id
-                        WHERE a.title ILIKE :title
-                        GROUP BY a.id, a.title
+                            al.id,
+                            al.title,
+                            STRING_AGG(DISTINCT a.name, ', ') as artist_names
+                        FROM albums al
+                        JOIN album_artists aa ON al.id = aa.album_id AND aa.role = 'primary'
+                        JOIN artists a ON aa.artist_id = a.id
+                        WHERE al.title ILIKE :title
+                        GROUP BY al.id, al.title
                         LIMIT 1
                     """),
                     {"title": f"%{album}%"}
@@ -693,32 +693,30 @@ def enrich_albums(limit, album, no_skip, delay):
                 if skip_existing:
                     query = text("""
                         SELECT DISTINCT
-                            a.id,
-                            a.title,
-                            STRING_AGG(DISTINCT ar.name, ', ') as artist_names
-                        FROM albums a
-                        JOIN tracks t ON a.id = t.album_id
-                        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-                        JOIN artists ar ON ta.artist_id = ar.id
+                            al.id,
+                            al.title,
+                            STRING_AGG(DISTINCT a.name, ', ') as artist_names
+                        FROM albums al
+                        JOIN album_artists aa ON al.id = aa.album_id AND aa.role = 'primary'
+                        JOIN artists a ON aa.artist_id = a.id
                         WHERE NOT EXISTS (
                             SELECT 1 FROM album_info ai
-                            WHERE ai.album_id = a.id AND ai.source = 'lastfm'
+                            WHERE ai.album_id = al.id AND ai.source = 'lastfm'
                         )
-                        GROUP BY a.id, a.title
-                        ORDER BY a.title
+                        GROUP BY al.id, al.title
+                        ORDER BY al.title
                     """)
                 else:
                     query = text("""
                         SELECT DISTINCT
-                            a.id,
-                            a.title,
-                            STRING_AGG(DISTINCT ar.name, ', ') as artist_names
-                        FROM albums a
-                        JOIN tracks t ON a.id = t.album_id
-                        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-                        JOIN artists ar ON ta.artist_id = ar.id
-                        GROUP BY a.id, a.title
-                        ORDER BY a.title
+                            al.id,
+                            al.title,
+                            STRING_AGG(DISTINCT a.name, ', ') as artist_names
+                        FROM albums al
+                        JOIN album_artists aa ON al.id = aa.album_id AND aa.role = 'primary'
+                        JOIN artists a ON aa.artist_id = a.id
+                        GROUP BY al.id, al.title
+                        ORDER BY al.title
                     """)
 
                 if limit:
@@ -779,7 +777,7 @@ def enrich_albums(limit, album, no_skip, delay):
 def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_duration,
                   worker_id, worker_count,
                   filter_artist, filter_album, filter_genre, filter_path,
-                  filter_tag, filter_track_number, filter_quality):
+                  filter_tag, filter_track_number, filter_lossless):
     """Extract audio features (BPM, key, instruments, mood, etc.) from tracks."""
     from audio_analysis import AudioAnalyzer
 
@@ -813,7 +811,7 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
     # Resolve track filters
     track_ids = _resolve_filters(
         filter_artist, filter_album, filter_genre, filter_path,
-        filter_tag, filter_track_number, filter_quality,
+        filter_tag, filter_track_number, filter_lossless,
     )
     if track_ids is not None and len(track_ids) == 0:
         return
@@ -890,7 +888,7 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
                   force_audio_analysis, lastfm_delay,
                   worker_id, worker_count,
                   filter_artist, filter_album, filter_genre, filter_path,
-                  filter_tag, filter_track_number, filter_quality):
+                  filter_tag, filter_track_number, filter_lossless):
     """
     Comprehensive track enrichment pipeline.
 
@@ -962,7 +960,7 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
     # Resolve track filters
     track_ids = _resolve_filters(
         filter_artist, filter_album, filter_genre, filter_path,
-        filter_tag, filter_track_number, filter_quality,
+        filter_tag, filter_track_number, filter_lossless,
     )
     if track_ids is not None and len(track_ids) == 0:
         return
@@ -1102,52 +1100,50 @@ def search_features(bpm_min, bpm_max, key, instrument, vocal, instrumental, danc
 @cli.command()
 @click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to update")
 def update_file_dates(limit):
-    """Update file_modified_at for existing tracks from filesystem."""
+    """Update file_modified_at for existing media files from filesystem."""
     from pathlib import Path
     from datetime import datetime
-    from models import Track
+    from models import MediaFile
 
     click.echo("🔄 Updating file modification dates from filesystem...")
 
     try:
         with get_db_context() as db:
-            # Query tracks without file_modified_at
-            query = db.query(Track).filter(Track.file_modified_at.is_(None))
+            query = db.query(MediaFile).filter(MediaFile.file_modified_at.is_(None))
 
             if limit:
                 query = query.limit(limit)
 
-            tracks = query.all()
-            total = len(tracks)
+            files = query.all()
+            total = len(files)
 
             if total == 0:
-                click.echo("✅ All tracks already have file modification dates!")
+                click.echo("✅ All files already have file modification dates!")
                 return
 
-            click.echo(f"📊 Found {total} tracks to update")
+            click.echo(f"📊 Found {total} files to update")
 
             updated = 0
             errors = 0
 
-            for track in tracks:
+            for mf in files:
                 try:
-                    file_path = Path(track.file_path)
+                    file_path = Path(mf.file_path)
 
                     if file_path.exists():
-                        # Get file modification time
                         mtime = file_path.stat().st_mtime
-                        track.file_modified_at = datetime.fromtimestamp(mtime)
+                        mf.file_modified_at = datetime.fromtimestamp(mtime)
                         updated += 1
 
                         if updated % 100 == 0:
                             click.echo(f"   • Updated {updated}/{total} tracks...")
                             db.commit()
                     else:
-                        logger.warning(f"File not found: {track.file_path}")
+                        logger.warning(f"File not found: {mf.file_path}")
                         errors += 1
 
                 except Exception as e:
-                    logger.error(f"Failed to update track {track.id}: {e}")
+                    logger.error(f"Failed to update media file {mf.id}: {e}")
                     errors += 1
 
             # Final commit
@@ -1155,7 +1151,7 @@ def update_file_dates(limit):
 
             click.echo("\n✅ File dates update complete!")
             click.echo(f"📊 Statistics:")
-            click.echo(f"   • Updated: {updated} tracks")
+            click.echo(f"   • Updated: {updated} files")
             click.echo(f"   • Errors: {errors}")
 
     except Exception as e:

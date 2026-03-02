@@ -363,17 +363,16 @@ def show_artist_statistics(db: Session):
         SELECT
             a.id,
             a.name,
-            COUNT(DISTINCT ta.track_id) as track_count,
-            CASE WHEN a.lastfm_id IS NOT NULL THEN 'Yes' ELSE 'No' END as has_mbid
+            COUNT(DISTINCT ta.track_id) as track_count
         FROM artists a
         LEFT JOIN track_artists ta ON a.id = ta.artist_id
-        GROUP BY a.id, a.name, a.lastfm_id
+        GROUP BY a.id, a.name
         ORDER BY track_count DESC, a.name
     """)).fetchall()
 
     logger.info("\n📊 Artist Statistics:")
-    logger.info(f"{'ID':<5} {'Artist':<45} {'Tracks':<8} {'MBID':<6}")
-    logger.info("-" * 70)
+    logger.info(f"{'ID':<40} {'Artist':<45} {'Songs':<8}")
+    logger.info("-" * 95)
 
     compound_count = 0
     total_tracks = 0
@@ -381,10 +380,10 @@ def show_artist_statistics(db: Session):
         is_compound = '🔗' if is_compound_artist(row.name) else '  '
         if is_compound_artist(row.name):
             compound_count += 1
-        logger.info(f"{row.id:<5} {is_compound} {row.name:<43} {row.track_count:<8} {row.has_mbid:<6}")
+        logger.info(f"{str(row.id):<40} {is_compound} {row.name:<43} {row.track_count:<8}")
         total_tracks += row.track_count
 
-    logger.info("-" * 70)
+    logger.info("-" * 95)
     logger.info(f"Total: {len(result)} artists, {compound_count} compound, {total_tracks} track relationships")
 
 

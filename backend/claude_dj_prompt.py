@@ -15,77 +15,102 @@ _RULES_COMMON = """\
 If they write in Ukrainian, respond in Ukrainian. If in English, respond in English.
 - Only recommend tracks that actually exist in the database. NEVER invent tracks.
 - Format track references as: "Title" by Artist (Album).
-- You can comment on audio quality (CD, Vinyl, Hi-Res) when relevant."""
+- You can comment on audio quality (lossless, bit depth, sample rate) when relevant."""
 
 _DB_SCHEMA = """\
 # Database Schema (PostgreSQL)
 
-## Core tables
+## Canonical entities (UUID primary keys)
 
-**artists** (id, name) - unique artist names
-**albums** (id, title, release_year, quality_source [CD/Vinyl/Hi-Res/MP3], directory_path, sample_rate, bit_depth)
-**tracks** (id, title, album_id, track_number, disc_number, duration_seconds, sample_rate, bit_depth, file_path, embedding_id, play_count)
-**genres** (id, name) - e.g. Rock, Jazz, Electronic
-**track_artists** (track_id, artist_id, role [primary/featured]) - many-to-many
-**track_genres** (track_id, genre_id) - many-to-many
+**artists** (id UUID, name) - unique artist names
+**albums** (id UUID, title, release_year, label, catalog_number) - canonical albums (no physical info)
+**tracks** (id UUID, title) - unique tracks (one per title+primary_artist)
+**genres** (id SERIAL, name) - e.g. Rock, Jazz, Electronic
 
-## Audio analysis
+## Associations
 
-**audio_features** (track_id, bpm, key, mode, energy, energy_db, brightness, danceability, vocal_instrumental, vocal_score, instruments[jsonb], moods[jsonb])
+**track_artists** (track_id UUID, artist_id UUID, role [primary/featured]) - many-to-many
+**track_genres** (track_id UUID, genre_id INT) - many-to-many
+**album_artists** (album_id UUID, artist_id UUID, role) - many-to-many
+
+## Physical entities (SERIAL primary keys)
+
+**album_variants** (id SERIAL, album_id UUID, directory_path, sample_rate, bit_depth, is_lossless BOOLEAN)
+  - A physical edition of an album (CD, Vinyl, Hi-Res, etc.)
+
+**media_files** (id SERIAL, track_id UUID, album_variant_id INT, file_path, file_format, \
+is_lossless BOOLEAN, sample_rate, bit_depth, bitrate, channels, duration_seconds, \
+track_number, disc_number, is_analysis_source BOOLEAN, play_count)
+  - A physical audio file on disk. `id` is the track ID used for playback.
+
+## Audio analysis (linked to tracks, not files)
+
+**audio_features** (track_id UUID, bpm, key, mode, energy, energy_db, brightness, danceability, \
+vocal_instrumental, vocal_score, instruments[jsonb], moods[jsonb])
+
+## Embeddings (CLAP audio, linked to tracks)
+
+**embeddings** (id, track_id UUID, vector[512]) - one audio embedding per track
+**text_embeddings** (id, track_id UUID, vector[384]) - one text embedding per track
 
 ## External metadata (Last.fm)
 
-**artist_bios** (artist_id, bio, summary) - artist biographies
-**artist_tags** (artist_id, tag_id, weight, source) - artist tags/genres from Last.fm
-**similar_artists** (artist_id, similar_artist_id, match_score, source) - similar artists (both IDs reference artists table)
-**album_info** (album_id, summary, listeners, playcount) - album popularity
-**album_tags** (album_id, tag_id, weight, source)
+**artist_bios** (artist_id UUID, bio, summary) - artist biographies
+**artist_tags** (artist_id UUID, tag_id, weight, source) - artist tags/genres from Last.fm
+**similar_artists** (artist_id UUID, similar_artist_id UUID, match_score, source)
+**album_info** (album_id UUID, summary, listeners, playcount) - album popularity
+**album_tags** (album_id UUID, tag_id, weight, source)
 **tags** (id, name) - shared tag names for artist_tags and album_tags
 
 ## Listening history
 
-**listening_history** (track_id, started_at, ended_at, duration_listened, percent_listened, completed, skipped)
-**track_stats** (track_id, play_count, skip_count, total_listen_time, avg_percent_listened, last_played_at)
+**listening_history** (media_file_id INT, track_id UUID, started_at, ended_at, duration_listened, \
+percent_listened, completed, skipped)
+**track_stats** (track_id UUID, play_count, skip_count, total_listen_time, avg_percent_listened, last_played_at)
 
-## Embeddings (CLAP audio)
-
-**embeddings** (id, vector[512]) - audio embeddings
-tracks.embedding_id -> embeddings.id (for similarity search)"""
+## IMPORTANT: Playback uses media_file.id (integer), not track.id (UUID)
+When recommending tracks for playback, always return media_files.id."""
 
 _SQL_PATTERNS = """\
 # Common SQL patterns
 
 Find tracks by artist:
 ```sql
-SELECT t.id, t.title, ar.name as artist, al.title as album
-FROM tracks t
+SELECT mf.id, t.title, a.name as artist, al.title as album
+FROM media_files mf
+JOIN tracks t ON mf.track_id = t.id
 JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-JOIN artists ar ON ta.artist_id = ar.id
-JOIN albums al ON t.album_id = al.id
-WHERE ar.name ILIKE '%search%'
-ORDER BY al.release_year, t.disc_number, t.track_number
+JOIN artists a ON ta.artist_id = a.id
+JOIN album_variants av ON mf.album_variant_id = av.id
+JOIN albums al ON av.album_id = al.id
+WHERE a.name ILIKE '%search%'
+ORDER BY al.release_year, mf.disc_number, mf.track_number
 ```
 
 Find albums by artist:
 ```sql
-SELECT DISTINCT al.id, al.title, al.release_year, al.quality_source, ar.name as artist,
-       COUNT(t.id) as track_count
+SELECT DISTINCT al.id, al.title, al.release_year, a.name as artist,
+       COUNT(mf.id) as track_count,
+       BOOL_OR(av.is_lossless) as has_lossless
 FROM albums al
-JOIN tracks t ON t.album_id = al.id
+JOIN album_variants av ON av.album_id = al.id
+JOIN media_files mf ON mf.album_variant_id = av.id
+JOIN tracks t ON mf.track_id = t.id
 JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-JOIN artists ar ON ta.artist_id = ar.id
-WHERE ar.name ILIKE '%search%'
-GROUP BY al.id, al.title, al.release_year, al.quality_source, ar.name
+JOIN artists a ON ta.artist_id = a.id
+WHERE a.name ILIKE '%search%'
+GROUP BY al.id, al.title, al.release_year, a.name
 ORDER BY al.release_year
 ```
 
 Tracks with audio features:
 ```sql
-SELECT t.id, t.title, ar.name as artist, af.bpm, af.key, af.mode,
+SELECT mf.id, t.title, a.name as artist, af.bpm, af.key, af.mode,
        af.energy, af.danceability, af.vocal_instrumental
-FROM tracks t
+FROM media_files mf
+JOIN tracks t ON mf.track_id = t.id
 JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-JOIN artists ar ON ta.artist_id = ar.id
+JOIN artists a ON ta.artist_id = a.id
 JOIN audio_features af ON af.track_id = t.id
 WHERE af.bpm BETWEEN 120 AND 140
 ORDER BY af.energy DESC
@@ -97,7 +122,9 @@ SELECT al.title as album, AVG(af.energy) as avg_energy, AVG(af.brightness) as av
        AVG(af.danceability) as avg_danceability, AVG(af.bpm) as avg_bpm
 FROM audio_features af
 JOIN tracks t ON af.track_id = t.id
-JOIN albums al ON t.album_id = al.id
+JOIN media_files mf ON mf.track_id = t.id
+JOIN album_variants av ON mf.album_variant_id = av.id
+JOIN albums al ON av.album_id = al.id
 WHERE al.title ILIKE '%album_name%'
 GROUP BY al.title
 ```
@@ -134,11 +161,11 @@ ORDER BY at2.weight DESC
 
 Listening stats:
 ```sql
-SELECT t.title, ar.name as artist, ts.play_count, ts.last_played_at
+SELECT t.title, a.name as artist, ts.play_count, ts.last_played_at
 FROM track_stats ts
 JOIN tracks t ON ts.track_id = t.id
 JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-JOIN artists ar ON ta.artist_id = ar.id
+JOIN artists a ON ta.artist_id = a.id
 ORDER BY ts.play_count DESC
 LIMIT 20
 ```"""
@@ -157,7 +184,8 @@ Include ALL tracks you mention or recommend in this block.
 If you played an album, include all tracks from that album.
 If no tracks are relevant to your response, omit this block entirely.
 
-The JSON must be valid. Use double quotes for strings. Escape special characters."""
+The JSON must be valid. Use double quotes for strings. Escape special characters.
+The `id` field is media_files.id (integer) — this is what playback tools use."""
 
 # ---------------------------------------------------------------------------
 # Claude Code prompt (MCP-based)
@@ -227,13 +255,14 @@ curated Last.fm data that respects genre boundaries.
 - **execute_query(sql)**: Run any read-only SELECT query. Best for comparing audio features, \
 finding albums by criteria, checking listening history, getting artist bios.
 - **search_tracks(query, artist, album, genre, limit)**: Fuzzy search by metadata.
-- **search_similar(track_id, limit)**: Find sonically similar tracks (CLAP audio embeddings).
+- **search_similar(track_id, limit)**: Find sonically similar tracks (CLAP audio embeddings). \
+track_id is media_files.id (integer).
 - **search_semantic(query, limit)**: Natural language audio search ("energetic rock", "calm piano").
-- **get_track_info(track_id)**: Get full track details + audio features.
-- **play_track(track_id)**: Play a single track.
+- **get_track_info(track_id)**: Get full track details + audio features. track_id is media_files.id.
+- **play_track(track_id)**: Play a single track. track_id is media_files.id.
 - **play_album(album_name, artist_name)**: Play an album (fuzzy match).
 - **play_similar(track_id, limit)**: Play tracks similar to a given track.
-- **add_to_queue(track_ids)**: Add tracks to the current queue.
+- **add_to_queue(track_ids)**: Add tracks to the current queue. track_ids are media_files.id values.
 - **hqplayer_play/pause/stop/next/previous**: Playback controls.
 - **hqplayer_get_status**: Get current playback state.
 - **hqplayer_volume_up/down, hqplayer_set_volume(level)**: Volume controls.

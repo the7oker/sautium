@@ -17,11 +17,15 @@ import time
 from typing import Dict, List, Optional
 
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, and_, exists, select
+from sqlalchemy import or_, and_, exists, select, func, cast, String
 from tqdm import tqdm
 
 from database import get_db_context
-from models import Track, Album, Artist, TrackArtist, AudioFeature, SimilarArtist, ArtistBio, AlbumInfo, TrackStats, ExternalMetadata
+from models import (
+    Track, MediaFile, Album, AlbumVariant, Artist, TrackArtist,
+    AudioFeature, Embedding, SimilarArtist, ArtistBio, AlbumInfo,
+    TrackStats, ExternalMetadata,
+)
 from embeddings import AudioEmbeddingGenerator
 from audio_analysis import AudioAnalyzer
 
@@ -45,17 +49,6 @@ class TrackEnrichmentPipeline:
         force_audio_analysis: bool = False,
         lastfm_delay: float = 0.2,
     ):
-        """
-        Initialize enrichment pipeline.
-
-        Args:
-            skip_embeddings: Skip audio embedding generation
-            skip_lastfm: Skip Last.fm enrichment
-            skip_audio_analysis: Skip audio feature extraction
-            force_embeddings: Regenerate audio embeddings even if exist
-            force_audio_analysis: Re-analyze audio even if features exist
-            lastfm_delay: Delay between Last.fm requests (seconds)
-        """
         self.skip_embeddings = skip_embeddings
         self.skip_lastfm = skip_lastfm
         self.skip_audio_analysis = skip_audio_analysis
@@ -90,7 +83,24 @@ class TrackEnrichmentPipeline:
             self._lastfm_service = LastFmService()
         return self._lastfm_service
 
-    def _enrich_new_similar_artists(self, db: Session, artist_id: int, lastfm) -> int:
+    def _get_analysis_file(self, db: Session, track: Track) -> Optional[MediaFile]:
+        """Get the preferred media file for audio analysis (is_analysis_source=True)."""
+        mf = db.query(MediaFile).filter(
+            MediaFile.track_id == track.id,
+            MediaFile.is_analysis_source == True,
+        ).first()
+        if not mf:
+            mf = db.query(MediaFile).filter(MediaFile.track_id == track.id).first()
+        return mf
+
+    def _get_album_id(self, db: Session, track: Track):
+        """Get album UUID for a track via its representative media_file → album_variant."""
+        row = db.query(AlbumVariant.album_id).join(
+            MediaFile, MediaFile.album_variant_id == AlbumVariant.id
+        ).filter(MediaFile.track_id == track.id).first()
+        return row[0] if row else None
+
+    def _enrich_new_similar_artists(self, db: Session, artist_id, lastfm) -> int:
         """Enrich similar artists that don't have bios yet (bio+tags only, no recursion)."""
         similar_ids = db.query(SimilarArtist.similar_artist_id).filter(
             SimilarArtist.artist_id == artist_id,
@@ -99,7 +109,6 @@ class TrackEnrichmentPipeline:
 
         enriched = 0
         for (sim_id,) in similar_ids:
-            # Skip if already has bio
             has_bio = db.query(ArtistBio).filter(
                 ArtistBio.artist_id == sim_id,
                 ArtistBio.source == "lastfm",
@@ -132,19 +141,16 @@ class TrackEnrichmentPipeline:
         """
         status = {}
 
-        # Audio embedding
+        # Audio embedding: check via relationship
         status['needs_audio_embedding'] = (
             not self.skip_embeddings and
-            (self.force_embeddings or track.embedding_id is None)
+            (self.force_embeddings or track.embedding is None)
         )
 
-        # Audio features
-        audio_feature = db.query(AudioFeature).filter(
-            AudioFeature.track_id == track.id
-        ).first()
+        # Audio features: check via relationship
         status['needs_audio_features'] = (
             not self.skip_audio_analysis and
-            (self.force_audio_analysis or audio_feature is None)
+            (self.force_audio_analysis or track.audio_feature is None)
         )
 
         # Last.fm data (only check if not skipping)
@@ -156,7 +162,6 @@ class TrackEnrichmentPipeline:
             ).first()
 
             if artist_row:
-                # Check if artist has bio OR a recorded attempt in external_metadata
                 artist_bio = db.query(ArtistBio).filter(
                     ArtistBio.artist_id == artist_row.id,
                     ArtistBio.source == 'lastfm'
@@ -166,7 +171,7 @@ class TrackEnrichmentPipeline:
                 else:
                     artist_meta = db.query(ExternalMetadata).filter(
                         ExternalMetadata.entity_type == 'artist',
-                        ExternalMetadata.entity_id == artist_row.id,
+                        ExternalMetadata.entity_id == str(artist_row.id),
                         ExternalMetadata.source == 'lastfm',
                         ExternalMetadata.metadata_type == 'bio',
                     ).first()
@@ -176,23 +181,29 @@ class TrackEnrichmentPipeline:
             else:
                 status['needs_artist_info'] = False
 
-            # Check if album has info OR a recorded attempt
-            album_info = db.query(AlbumInfo).filter(
-                AlbumInfo.album_id == track.album_id,
-                AlbumInfo.source == 'lastfm'
-            ).first()
-            if album_info:
-                status['needs_album_info'] = False
-            else:
-                album_meta = db.query(ExternalMetadata).filter(
-                    ExternalMetadata.entity_type == 'album',
-                    ExternalMetadata.entity_id == track.album_id,
-                    ExternalMetadata.source == 'lastfm',
-                    ExternalMetadata.metadata_type == 'info',
-                ).first()
-                status['needs_album_info'] = album_meta is None
+            # Album info — get album_id through media_file → album_variant
+            album_id = self._get_album_id(db, track)
+            status['album_id'] = album_id
 
-            # Check if track has stats OR a recorded attempt
+            if album_id:
+                album_info = db.query(AlbumInfo).filter(
+                    AlbumInfo.album_id == album_id,
+                    AlbumInfo.source == 'lastfm'
+                ).first()
+                if album_info:
+                    status['needs_album_info'] = False
+                else:
+                    album_meta = db.query(ExternalMetadata).filter(
+                        ExternalMetadata.entity_type == 'album',
+                        ExternalMetadata.entity_id == str(album_id),
+                        ExternalMetadata.source == 'lastfm',
+                        ExternalMetadata.metadata_type == 'info',
+                    ).first()
+                    status['needs_album_info'] = album_meta is None
+            else:
+                status['needs_album_info'] = False
+
+            # Track stats
             track_stats = db.query(TrackStats).filter(
                 TrackStats.track_id == track.id,
                 TrackStats.source == 'lastfm'
@@ -202,7 +213,7 @@ class TrackEnrichmentPipeline:
             else:
                 track_meta = db.query(ExternalMetadata).filter(
                     ExternalMetadata.entity_type == 'track',
-                    ExternalMetadata.entity_id == track.id,
+                    ExternalMetadata.entity_id == str(track.id),
                     ExternalMetadata.source == 'lastfm',
                     ExternalMetadata.metadata_type == 'stats',
                 ).first()
@@ -226,10 +237,21 @@ class TrackEnrichmentPipeline:
 
         Returns dict with step results (success/failed/skipped).
         """
-        # Save track ID early for safe logging after potential rollback
         track_id = track.id
-
         results = {}
+
+        # Get analysis source file (needed for embedding and audio analysis)
+        analysis_file = None
+        if status['needs_audio_embedding'] or status['needs_audio_features']:
+            analysis_file = self._get_analysis_file(db, track)
+            if not analysis_file:
+                logger.warning(f"No media file found for track {track_id}")
+                if status['needs_audio_embedding']:
+                    results['audio_embedding'] = 'failed'
+                if status['needs_audio_features']:
+                    results['audio_features'] = 'failed'
+                status['needs_audio_embedding'] = False
+                status['needs_audio_features'] = False
 
         # Step 1: Audio Embedding
         if status['needs_audio_embedding']:
@@ -237,7 +259,7 @@ class TrackEnrichmentPipeline:
                 progress_callback("Audio embedding")
             try:
                 generator = self._get_audio_embedding_generator()
-                audio = generator._load_audio(track.file_path)
+                audio = generator._load_audio(analysis_file.file_path)
                 if audio is not None:
                     embeddings = generator._generate_batch_embeddings([audio])
                     if embeddings is not None:
@@ -254,7 +276,7 @@ class TrackEnrichmentPipeline:
                 results['audio_embedding'] = 'failed'
                 db.rollback()
         else:
-            results['audio_embedding'] = 'skipped'
+            results.setdefault('audio_embedding', 'skipped')
 
         # Step 2-4: Last.fm enrichment (if not skipping)
         if not self.skip_lastfm:
@@ -271,13 +293,12 @@ class TrackEnrichmentPipeline:
                     results['lastfm_artist'] = result['status']
                     time.sleep(self.lastfm_delay)
 
-                    # Enrich newly created similar artists (bio only, no recursion)
                     self._enrich_new_similar_artists(db, status['artist_id'], lastfm)
 
                 except Exception as e:
                     logger.error(f"Last.fm artist enrichment failed: {e}")
                     results['lastfm_artist'] = 'error'
-                    db.rollback()  # Rollback failed transaction
+                    db.rollback()
             else:
                 results['lastfm_artist'] = 'skipped'
 
@@ -286,16 +307,17 @@ class TrackEnrichmentPipeline:
                 if progress_callback:
                     progress_callback("Last.fm album")
                 try:
-                    album = db.query(Album).get(track.album_id)
+                    album_id = status.get('album_id')
+                    album = db.query(Album).get(album_id)
                     result = lastfm.enrich_album(
-                        db, track.album_id, status.get('artist_name', ''), album.title
+                        db, album_id, status.get('artist_name', ''), album.title
                     )
                     results['lastfm_album'] = result['status']
                     time.sleep(self.lastfm_delay)
                 except Exception as e:
                     logger.error(f"Last.fm album enrichment failed: {e}")
                     results['lastfm_album'] = 'error'
-                    db.rollback()  # Rollback failed transaction
+                    db.rollback()
             else:
                 results['lastfm_album'] = 'skipped'
 
@@ -312,7 +334,7 @@ class TrackEnrichmentPipeline:
                 except Exception as e:
                     logger.error(f"Last.fm track enrichment failed: {e}")
                     results['lastfm_track'] = 'error'
-                    db.rollback()  # Rollback failed transaction
+                    db.rollback()
             else:
                 results['lastfm_track'] = 'skipped'
 
@@ -322,7 +344,7 @@ class TrackEnrichmentPipeline:
                 progress_callback("Audio analysis")
             try:
                 analyzer = self._get_audio_analyzer()
-                features = analyzer.analyze_track(track.file_path)
+                features = analyzer.analyze_track(analysis_file.file_path)
                 if features is not None:
                     af = AudioFeature(
                         track_id=track.id,
@@ -351,7 +373,7 @@ class TrackEnrichmentPipeline:
                 results['audio_features'] = 'failed'
                 db.rollback()
         else:
-            results['audio_features'] = 'skipped'
+            results.setdefault('audio_features', 'skipped')
 
         return results
 
@@ -365,13 +387,18 @@ class TrackEnrichmentPipeline:
         """
         conditions = []
 
-        # Audio embedding: track.embedding_id IS NULL
+        # Audio embedding: no Embedding row for this track
         if not self.skip_embeddings:
             if self.force_embeddings:
-                # Force mode — process all tracks
-                conditions.append(True)  # will be simplified to no filter
+                conditions.append(True)
             else:
-                conditions.append(Track.embedding_id.is_(None))
+                conditions.append(
+                    ~exists(
+                        select(Embedding.id).where(
+                            Embedding.track_id == Track.id
+                        )
+                    )
+                )
 
         # Audio features: no AudioFeature row for this track
         if not self.skip_audio_analysis:
@@ -387,7 +414,6 @@ class TrackEnrichmentPipeline:
                 )
 
         # Last.fm enrichment: check both normalized tables AND ExternalMetadata
-        # (ExternalMetadata records "not_found"/"error" attempts so they're not retried)
         if not self.skip_lastfm:
             # Artist: needs enrichment if no ArtistBio AND no ExternalMetadata record
             conditions.append(
@@ -406,7 +432,7 @@ class TrackEnrichmentPipeline:
                         select(ExternalMetadata.id).where(
                             and_(
                                 ExternalMetadata.entity_type == 'artist',
-                                ExternalMetadata.entity_id == TrackArtist.artist_id,
+                                ExternalMetadata.entity_id == cast(TrackArtist.artist_id, String),
                                 ExternalMetadata.source == 'lastfm',
                                 ExternalMetadata.metadata_type == 'bio',
                                 TrackArtist.track_id == Track.id,
@@ -416,13 +442,19 @@ class TrackEnrichmentPipeline:
                     ),
                 )
             )
+
             # Album: needs enrichment if no AlbumInfo AND no ExternalMetadata record
+            # Get album_id via media_files → album_variants
+            album_id_subq = select(AlbumVariant.album_id).join(
+                MediaFile, MediaFile.album_variant_id == AlbumVariant.id
+            ).where(MediaFile.track_id == Track.id).correlate(Track).limit(1).scalar_subquery()
+
             conditions.append(
                 and_(
                     ~exists(
                         select(AlbumInfo.id).where(
                             and_(
-                                AlbumInfo.album_id == Track.album_id,
+                                AlbumInfo.album_id == album_id_subq,
                                 AlbumInfo.source == 'lastfm',
                             )
                         )
@@ -431,7 +463,7 @@ class TrackEnrichmentPipeline:
                         select(ExternalMetadata.id).where(
                             and_(
                                 ExternalMetadata.entity_type == 'album',
-                                ExternalMetadata.entity_id == Track.album_id,
+                                ExternalMetadata.entity_id == cast(album_id_subq, String),
                                 ExternalMetadata.source == 'lastfm',
                                 ExternalMetadata.metadata_type == 'info',
                             )
@@ -439,6 +471,7 @@ class TrackEnrichmentPipeline:
                     ),
                 )
             )
+
             # Track stats: needs enrichment if no TrackStats AND no ExternalMetadata record
             conditions.append(
                 and_(
@@ -454,7 +487,7 @@ class TrackEnrichmentPipeline:
                         select(ExternalMetadata.id).where(
                             and_(
                                 ExternalMetadata.entity_type == 'track',
-                                ExternalMetadata.entity_id == Track.id,
+                                ExternalMetadata.entity_id == cast(Track.id, String),
                                 ExternalMetadata.source == 'lastfm',
                                 ExternalMetadata.metadata_type == 'stats',
                             )
@@ -470,7 +503,7 @@ class TrackEnrichmentPipeline:
         limit: Optional[int] = None,
         order_by_date: bool = False,
         max_duration_seconds: Optional[int] = None,
-        track_ids: Optional[List[int]] = None,
+        track_ids: Optional[List] = None,
         worker_id: Optional[int] = None,
         worker_count: Optional[int] = None,
     ) -> Dict[str, int]:
@@ -479,9 +512,9 @@ class TrackEnrichmentPipeline:
 
         Args:
             limit: Maximum number of tracks to process
-            order_by_date: Process newest tracks first
+            order_by_date: Process newest tracks first (by media file modification date)
             max_duration_seconds: Maximum duration in seconds
-            track_ids: Specific track IDs to process (from filters)
+            track_ids: Specific track IDs (UUIDs) to process (from filters)
             worker_id: Worker ID for parallel processing (0-indexed)
             worker_count: Total number of workers for parallel processing
 
@@ -503,25 +536,24 @@ class TrackEnrichmentPipeline:
 
         try:
             with get_db_context() as db:
-                # Build query — only select tracks that need enrichment
                 query = db.query(Track)
 
                 if track_ids is not None:
                     query = query.filter(Track.id.in_(track_ids))
 
-                # Worker filtering at SQL level (more efficient than post-filtering)
+                # Worker filtering: use hash-based partitioning for UUID PKs
                 if worker_count is not None:
-                    query = query.filter(Track.id % worker_count == worker_id)
-                    logger.info(f"Worker {worker_id}/{worker_count}: filtering tracks where id % {worker_count} == {worker_id}")
+                    query = query.filter(
+                        func.abs(func.hashtext(cast(Track.id, String))) % worker_count == worker_id
+                    )
+                    logger.info(f"Worker {worker_id}/{worker_count}: hash-partitioned tracks")
 
                 # Pre-filter: only tracks that need at least one enrichment step
                 needs_conditions = self._build_needs_enrichment_filter()
-                # Remove literal True values (from force flags)
                 real_conditions = [c for c in needs_conditions if c is not True]
                 has_force = len(real_conditions) < len(needs_conditions)
 
                 if not has_force and real_conditions:
-                    # Only fetch tracks where at least one condition is true
                     query = query.filter(or_(*real_conditions))
                     logger.info("Pre-filtering: only tracks needing enrichment")
                 elif not real_conditions and not has_force:
@@ -529,13 +561,18 @@ class TrackEnrichmentPipeline:
                     return stats
 
                 if order_by_date:
-                    query = query.order_by(Track.file_modified_at.desc().nulls_last())
+                    # Order by newest media file modification date
+                    newest_file_date = select(
+                        func.max(MediaFile.file_modified_at)
+                    ).where(
+                        MediaFile.track_id == Track.id
+                    ).correlate(Track).scalar_subquery()
+                    query = query.order_by(newest_file_date.desc().nulls_last())
 
                 if limit:
                     query = query.limit(limit)
 
                 tracks = query.all()
-
                 total = len(tracks)
 
                 if total == 0:
@@ -546,9 +583,7 @@ class TrackEnrichmentPipeline:
                 if max_duration_seconds:
                     logger.info(f"Time limit: {max_duration_seconds}s")
 
-                # Process each track
                 for track in tqdm(tracks, desc="Enriching tracks", unit="track"):
-                    # Check time limit
                     if max_duration_seconds:
                         elapsed = time.time() - start_time
                         if elapsed >= max_duration_seconds:
@@ -557,13 +592,9 @@ class TrackEnrichmentPipeline:
 
                     stats['processed'] += 1
 
-                    # Check what's needed
                     status = self._check_track_status(db, track)
-
-                    # Enrich track
                     results = self._enrich_track(db, track, status)
 
-                    # Update stats
                     if results.get('audio_embedding') == 'success':
                         stats['audio_embedding_success'] += 1
                     elif results.get('audio_embedding') == 'failed':
@@ -584,7 +615,6 @@ class TrackEnrichmentPipeline:
                 logger.info(f"Enrichment complete: {stats['processed']} tracks processed")
 
         finally:
-            # Cleanup
             if self._audio_embedding_generator:
                 self._audio_embedding_generator.unload_model()
             if self._audio_analyzer:

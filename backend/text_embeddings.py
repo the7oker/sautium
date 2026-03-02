@@ -1,6 +1,9 @@
 """
 Text embedding generation using sentence-transformers.
 Generates 384-dimensional text embeddings from track metadata for semantic search.
+
+Operates on tracks (one embedding per track). Uses track_artists, track_genres,
+and enrichment data (artist_bios, album_info, tags) to compose descriptive text.
 """
 
 import logging
@@ -95,8 +98,8 @@ class TextEmbeddingGenerator:
         )
 
     def compose_tracks_text_batch(
-        self, db: Session, track_ids: List[int]
-    ) -> Dict[int, str]:
+        self, db: Session, track_ids: list
+    ) -> Dict:
         """
         Build descriptive text for multiple tracks in a single efficient query.
 
@@ -109,10 +112,10 @@ class TextEmbeddingGenerator:
             SELECT
                 t.id as track_id,
                 t.title as track_title,
-                ar.name as artist_name,
-                al.title as album_title,
-                al.release_year,
-                al.quality_source,
+                a.name as artist_name,
+                mf_rep.album_title,
+                mf_rep.release_year,
+                mf_rep.is_lossless,
                 g_agg.genres,
                 at_agg.artist_tags,
                 alt_agg.album_tags,
@@ -121,8 +124,18 @@ class TextEmbeddingGenerator:
                 gd_agg.genre_descs
             FROM tracks t
             JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists ar ON ta.artist_id = ar.id
-            JOIN albums al ON t.album_id = al.id
+            JOIN artists a ON ta.artist_id = a.id
+            -- Representative media file for album info
+            JOIN LATERAL (
+                SELECT al.title as album_title, al.release_year, al.id as album_id,
+                       mf.is_lossless
+                FROM media_files mf
+                JOIN album_variants av ON mf.album_variant_id = av.id
+                JOIN albums al ON av.album_id = al.id
+                WHERE mf.track_id = t.id
+                ORDER BY mf.is_analysis_source DESC, mf.id
+                LIMIT 1
+            ) mf_rep ON true
             -- Aggregated genres
             LEFT JOIN LATERAL (
                 SELECT STRING_AGG(g.name, ', ' ORDER BY g.name) as genres
@@ -135,7 +148,7 @@ class TextEmbeddingGenerator:
                 SELECT STRING_AGG(tg.name, ', ' ORDER BY at2.weight DESC) as artist_tags
                 FROM (
                     SELECT tag_id, weight FROM artist_tags
-                    WHERE artist_id = ar.id
+                    WHERE artist_id = a.id
                     ORDER BY weight DESC LIMIT 10
                 ) at2
                 JOIN tags tg ON at2.tag_id = tg.id
@@ -145,7 +158,7 @@ class TextEmbeddingGenerator:
                 SELECT STRING_AGG(tg.name, ', ' ORDER BY alt2.weight DESC) as album_tags
                 FROM (
                     SELECT tag_id, weight FROM album_tags
-                    WHERE album_id = al.id
+                    WHERE album_id = mf_rep.album_id
                     ORDER BY weight DESC LIMIT 10
                 ) alt2
                 JOIN tags tg ON alt2.tag_id = tg.id
@@ -153,13 +166,13 @@ class TextEmbeddingGenerator:
             -- Artist bio (Last.fm, first match)
             LEFT JOIN LATERAL (
                 SELECT summary FROM artist_bios
-                WHERE artist_id = ar.id AND source = 'lastfm'
+                WHERE artist_id = a.id AND source = 'lastfm'
                 LIMIT 1
             ) ab ON true
             -- Album info (Last.fm, first match)
             LEFT JOIN LATERAL (
                 SELECT summary FROM album_info
-                WHERE album_id = al.id AND source = 'lastfm'
+                WHERE album_id = mf_rep.album_id AND source = 'lastfm'
                 LIMIT 1
             ) ai ON true
             -- Genre descriptions aggregated
@@ -193,8 +206,8 @@ class TextEmbeddingGenerator:
             if row.genres:
                 parts.append(f"Genre: {row.genres}")
 
-            if row.quality_source:
-                parts.append(f"Quality: {row.quality_source}")
+            if row.is_lossless is not None:
+                parts.append(f"Quality: {'Lossless' if row.is_lossless else 'Lossy'}")
 
             # Tags
             if row.artist_tags:
@@ -248,7 +261,7 @@ class TextEmbeddingGenerator:
         force: bool = False,
         order_by_date: bool = False,
         max_duration_seconds: Optional[int] = None,
-        track_ids: Optional[List[int]] = None,
+        track_ids: Optional[list] = None,
     ) -> Dict[str, int]:
         """
         Generate text embeddings for all tracks (or those missing them).
@@ -257,8 +270,8 @@ class TextEmbeddingGenerator:
             db: Database session.
             limit: Max tracks to process.
             force: If True, regenerate even if embedding exists.
-            order_by_date: If True, process newest tracks first (by file_modified_at).
-            max_duration_seconds: Maximum duration in seconds. Process will stop gracefully after this time.
+            order_by_date: If True, process newest tracks first.
+            max_duration_seconds: Maximum duration in seconds.
             track_ids: If provided, only process these track IDs.
 
         Returns:
@@ -269,33 +282,43 @@ class TextEmbeddingGenerator:
         stats = {"processed": 0, "success": 0, "failed": 0}
         start_time = time.time()
 
-        # Get tracks to process
-        order_clause = "ORDER BY file_modified_at DESC NULLS LAST" if order_by_date else "ORDER BY id"
-
+        # Query tracks to process
         where_parts = []
         params: Dict[str, Any] = {}
 
         if not force:
-            where_parts.append("text_embedding_id IS NULL")
+            where_parts.append("""
+                t.id NOT IN (SELECT te.track_id FROM text_embeddings te)
+            """)
 
         if track_ids is not None:
-            where_parts.append("id = ANY(:filter_track_ids)")
+            where_parts.append("t.id = ANY(:filter_track_ids)")
             params["filter_track_ids"] = track_ids
 
         where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
-        query = sa_text(f"SELECT id FROM tracks {where_clause} {order_clause}")
 
+        if order_by_date:
+            order_clause = """
+                ORDER BY (
+                    SELECT MAX(mf.file_modified_at)
+                    FROM media_files mf WHERE mf.track_id = t.id
+                ) DESC NULLS LAST
+            """
+        else:
+            order_clause = "ORDER BY t.id"
+
+        query_sql = f"SELECT t.id FROM tracks t {where_clause} {order_clause}"
         if limit:
-            query = sa_text(str(query) + f" LIMIT {limit}")
+            query_sql += f" LIMIT {limit}"
 
-        rows = db.execute(query, params).fetchall()
-        track_ids = [r[0] for r in rows]
+        rows = db.execute(sa_text(query_sql), params).fetchall()
+        pending_track_ids = [r[0] for r in rows]
 
-        if not track_ids:
+        if not pending_track_ids:
             logger.info("No tracks pending text embedding generation")
             return stats
 
-        logger.info(f"Processing {len(track_ids)} tracks for text embeddings")
+        logger.info(f"Processing {len(pending_track_ids)} tracks for text embeddings")
         if max_duration_seconds:
             logger.info(f"Time limit: {max_duration_seconds} seconds ({max_duration_seconds/60:.1f} minutes)")
 
@@ -305,7 +328,7 @@ class TextEmbeddingGenerator:
         # Process in batches
         batch_size = self.batch_size
         for batch_start in tqdm(
-            range(0, len(track_ids), batch_size),
+            range(0, len(pending_track_ids), batch_size),
             desc="Generating text embeddings",
             unit="batch",
         ):
@@ -316,7 +339,7 @@ class TextEmbeddingGenerator:
                     logger.info(f"Time limit reached ({elapsed:.1f}s), stopping gracefully")
                     break
 
-            batch_ids = track_ids[batch_start:batch_start + batch_size]
+            batch_ids = pending_track_ids[batch_start:batch_start + batch_size]
 
             # Compose text for batch
             texts_map = self.compose_tracks_text_batch(db, batch_ids)
@@ -328,10 +351,10 @@ class TextEmbeddingGenerator:
             # Prepare ordered lists
             ordered_ids = []
             ordered_texts = []
-            for tid in batch_ids:
-                if tid in texts_map:
-                    ordered_ids.append(tid)
-                    ordered_texts.append(texts_map[tid])
+            for sid in batch_ids:
+                if sid in texts_map:
+                    ordered_ids.append(sid)
+                    ordered_texts.append(texts_map[sid])
                 else:
                     stats["failed"] += 1
 
@@ -346,28 +369,19 @@ class TextEmbeddingGenerator:
                 stats["failed"] += len(ordered_ids)
                 continue
 
-            # Create text embeddings and link to tracks
-            for tid, vector in zip(ordered_ids, embeddings):
+            # Create text embeddings linked to tracks
+            for sid, vector in zip(ordered_ids, embeddings):
                 try:
                     text_embedding = TextEmbedding(
                         vector=vector.tolist(),
                         model_id=model_record.id,
-                        track_id=tid,
+                        track_id=sid,
                     )
                     db.add(text_embedding)
                     db.flush()
-
-                    track = db.query(Track).filter_by(id=tid).first()
-                    if track:
-                        track.text_embedding_id = text_embedding.id
-                        db.add(track)
-                        db.flush()
-                        stats["success"] += 1
-                    else:
-                        logger.error(f"Track {tid} not found")
-                        stats["failed"] += 1
+                    stats["success"] += 1
                 except Exception as e:
-                    logger.error(f"Failed to save embedding for track {tid}: {e}")
+                    logger.error(f"Failed to save embedding for track {sid}: {e}")
                     stats["failed"] += 1
 
             stats["processed"] += len(batch_ids)
@@ -389,7 +403,7 @@ def generate_text_embeddings(
     force: bool = False,
     order_by_date: bool = False,
     max_duration_seconds: Optional[int] = None,
-    track_ids: Optional[List[int]] = None,
+    track_ids: Optional[list] = None,
 ) -> Dict[str, int]:
     """
     Convenience function to generate text embeddings.
@@ -398,7 +412,7 @@ def generate_text_embeddings(
         limit: Max tracks to process.
         batch_size: Override default batch size.
         force: Regenerate even if already exists.
-        order_by_date: If True, process newest tracks first (by file_modified_at).
+        order_by_date: If True, process newest tracks first.
         max_duration_seconds: Maximum duration in seconds.
         track_ids: If provided, only process these track IDs.
 

@@ -211,19 +211,24 @@ class PlaybackTracker:
         return self.db_conn
 
     def _get_track_metadata(self, track_id: int) -> Optional[dict]:
-        """Get track artist, title, album, duration from DB for scrobbling"""
+        """Get track artist, title, album, duration from DB for scrobbling.
+
+        track_id is media_files.id (integer).
+        """
         conn = self._get_db()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """
-                    SELECT t.title, t.duration_seconds as duration, al.title as album,
-                           a.name as artist
-                    FROM tracks t
+                    SELECT t.title, mf.duration_seconds as duration, al.title as album,
+                           a.name as artist, mf.track_id
+                    FROM media_files mf
+                    JOIN tracks t ON mf.track_id = t.id
                     JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
                     JOIN artists a ON ta.artist_id = a.id
-                    LEFT JOIN albums al ON t.album_id = al.id
-                    WHERE t.id = %s
+                    JOIN album_variants av ON mf.album_variant_id = av.id
+                    LEFT JOIN albums al ON av.album_id = al.id
+                    WHERE mf.id = %s
                     """,
                     (track_id,),
                 )
@@ -237,17 +242,22 @@ class PlaybackTracker:
         conn = self._get_db()
 
         try:
+            # Get track_id for the media_file
+            meta = self._get_track_metadata(session.track_id)
+            track_id = meta["track_id"] if meta else None
+
             with conn.cursor() as cur:
                 # Insert listening history
                 cur.execute(
                     """
                     INSERT INTO listening_history
-                        (track_id, started_at, ended_at, duration_listened,
-                         percent_listened, completed, skipped)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        (media_file_id, track_id, started_at, ended_at,
+                         duration_listened, percent_listened, completed, skipped)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         session.track_id,
+                        track_id,
                         session.started_at,
                         datetime.now(),
                         session.duration_listened,
@@ -261,13 +271,30 @@ class PlaybackTracker:
                 if session.completed:
                     cur.execute(
                         """
-                        UPDATE tracks
+                        UPDATE media_files
                         SET play_count = COALESCE(play_count, 0) + 1,
                             last_played_at = %s
                         WHERE id = %s
                         """,
                         (datetime.now(), session.track_id),
                     )
+                    # Also update track_stats
+                    if track_id:
+                        cur.execute(
+                            """
+                            INSERT INTO track_stats (track_id, play_count, total_listen_time,
+                                                    avg_percent_listened, last_played_at)
+                            VALUES (%s, 1, %s, %s, %s)
+                            ON CONFLICT (track_id) DO UPDATE SET
+                                play_count = track_stats.play_count + 1,
+                                total_listen_time = track_stats.total_listen_time + EXCLUDED.total_listen_time,
+                                avg_percent_listened = (track_stats.avg_percent_listened * track_stats.play_count
+                                    + EXCLUDED.avg_percent_listened) / (track_stats.play_count + 1),
+                                last_played_at = EXCLUDED.last_played_at
+                            """,
+                            (track_id, session.duration_listened,
+                             session.percent_listened, datetime.now()),
+                        )
                     self.plays_counted += 1
                     logger.info(
                         f"✅ Track {session.track_id} completed "
