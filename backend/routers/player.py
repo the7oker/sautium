@@ -184,7 +184,7 @@ async def search_tracks(q: str = "", limit: int = 20):
 
     rows = _db_query(f"""
         SELECT mf.id, t.title, mf.track_number, mf.disc_number, mf.duration_seconds,
-               a.name as artist, al.id as album_id, al.title as album,
+               a.name as artist, av.id as album_id, al.title as album,
                g.name as genre, mf.is_lossless
         FROM media_files mf
         JOIN tracks t ON mf.track_id = t.id
@@ -203,7 +203,7 @@ async def search_tracks(q: str = "", limit: int = 20):
         params = {"query": q, "query_like": f"%{q}%", "limit": limit * 10}
         rows = _db_query("""
             SELECT mf.id, t.title, mf.track_number, mf.disc_number, mf.duration_seconds,
-                   a.name as artist, al.id as album_id, al.title as album,
+                   a.name as artist, av.id as album_id, al.title as album,
                    g.name as genre, mf.is_lossless,
                    GREATEST(
                        similarity(a.name, %(query)s),
@@ -247,7 +247,8 @@ async def search_tracks(q: str = "", limit: int = 20):
 
     # Calculate totals and limit to requested album count
     albums = []
-    for album_data in list(albums_dict.values())[:limit]:
+    for i, album_data in enumerate(list(albums_dict.values())[:limit]):
+        album_data["album_id"] = i  # Unique index per group for DOM IDs (DB album_id may collide)
         album_data["track_count"] = len(album_data["tracks"])
         album_data["total_duration"] = sum(t["duration_seconds"] or 0 for t in album_data["tracks"])
         albums.append(album_data)
