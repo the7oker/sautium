@@ -1966,37 +1966,232 @@ Claude Haiku understands proper names and grammatical cases, producing correct E
 
 ---
 
+## Playback Tracker Daemon - DONE
+
+### What was done
+Standalone daemon для відстеження прослуховування та Last.fm scrobbling.
+
+**Новий файл:** `backend/playback_tracker.py` (581 рядків)
+
+**Архітектура:**
+- Окремий daemon (запускається як Docker service або standalone)
+- Підписується на HQPlayer events через XML API (TCP subscribe mode)
+- Записує listening sessions в реальному часі
+- Оновлює play counts, listening history, track stats
+
+**Ключові функції:**
+- Event-driven: отримує HQPlayer status updates ~1/сек
+- Playlist mapping: `track_index → media_file_id` (реєструється через HTTP API)
+- Session tracking: моніторить прогрес треку (position, percent_listened)
+- Scrobble logic: Last.fm правила (>50% OR >240 секунд)
+- HTTP API:
+  - `POST /playlist` — реєстрація playlist mapping від MCP/CLI
+  - `GET /stats` — статистика daemon
+  - `POST /clear` — очистка поточного playlist
+
+**БД оновлення:**
+- `listening_history` — повна історія прослуховувань
+- `media_files.play_count` та `last_played_at` — оновлення лічильників
+- `track_stats` — агрегована статистика по треках
+
+**Last.fm Scrobbling:**
+- Потребує: `LASTFM_API_KEY`, `LASTFM_API_SECRET`, `LASTFM_SESSION_KEY`, `LASTFM_USERNAME`
+- Два типи: real-time (при досягненні порогу) та end-of-session (при переключенні)
+- Використовує бібліотеку `pylast`
+
+---
+
+## Multi-Provider LLM Support - DONE
+
+### What was done
+Підтримка кількох LLM провайдерів для AI DJ.
+
+**Новий модуль:** `backend/providers/` (6 файлів, ~500 рядків)
+- `base.py` — `BaseProvider` абстрактний клас
+- `__init__.py` — реєстр провайдерів та ініціалізація
+- `claude_code.py` — Claude Code subprocess provider (основний)
+- `anthropic_provider.py` — Anthropic API (claude-opus, claude-sonnet)
+- `openai_provider.py` — OpenAI API (GPT-4, etc.)
+- `openai_compat.py` — OpenAI-compatible endpoints (Groq, custom APIs)
+
+**Config:** `default_provider`, `openai_api_key`, `groq_api_key`, `openai_compat_*`
+
+**Router:** `backend/routers/chat.py` — вибір провайдера per request, tool calling для всіх
+
+---
+
+## Tool-Based AI DJ Architecture - DONE
+
+### What was done
+Єдина система інструментів для всіх LLM провайдерів.
+
+**Новий модуль:** `backend/tools/` (6 файлів, ~900 рядків)
+- `registry.py` — ToolDef / ToolParam / REGISTRY
+- `definitions.py` — 21 tool handler + реєстрація
+- `executor.py` — диспетчер виконання tool calls
+- `execute_query.py` — SQL execution з обмеженням рядків
+- `converters.py` — type conversions
+- `track_parser.py` — парсинг track IDs з відповіді
+
+**21 інструмент:**
+- **Search (5):** execute_query, search_tracks (fuzzy), search_similar (CLAP), search_semantic (CLAP text-to-audio), search_lyrics (lyrics embeddings)
+- **Track (2):** get_track_info, play_track
+- **Playlist (3):** play_album, play_similar, add_to_queue
+- **HQPlayer (11):** play/pause/stop/next/previous, get_status, volume_up/down/set_volume, get_settings, set_filter
+
+---
+
+## Canonical Tracks (UUID) Refactoring - DONE
+
+### What was done
+Масштабне переробленняschema — розділення канонічних сутностей (UUID PK) та фізичних файлів (SERIAL PK).
+
+**Нова архітектура:**
+- **Canonical (UUID PK):** `tracks`, `artists`, `albums` — один запис на унікальну сутність
+- **Physical (SERIAL PK):** `media_files` (один рядок на файл), `album_variants` (фізична директорія)
+- UUID генерується детерміновано через uuid5 (namespace)
+
+**Переваги:**
+- Дедуплікація між CD/Vinyl/Hi-Res виданнями (одна пісня = один UUID)
+- Один embedding на трек (не на файл)
+- Окремі embeddings/analysis таблиці пов'язані з `tracks.id` (UUID)
+- `media_files.id` (SERIAL) використовується для playback
+
+**Нові файли:**
+- `backend/uuid_utils.py` — генерація UUID v5
+- `backend/sql_queries.py` — shared SQL building blocks (185 рядків)
+- `backend/migrate_to_uuid.py` — 4-фазний міграційний скрипт (1532 рядки)
+
+**Статистика після міграції:** 30,944 tracks (UUID) ← 34,262 media_files (деякі пісні мали кілька файлів)
+
+### Testing status - VERIFIED ✅
+- 25 backend файлів оновлені з новими JOIN patterns
+- Всі пошуки, enrichment, embeddings працюють з UUID схемою
+- Backup перед міграцією: `backup_pre_uuid_20260302_214736.sql` (407 MB)
+
+---
+
+## LRCLIB Lyrics Integration - DONE
+
+### What was done
+Отримання текстів пісень з lrclib.net.
+
+**Новий файл:** `backend/lrclib.py` (234 рядки)
+
+**Функціонал:**
+- Два методи пошуку: exact match (`/api/get`) → fallback search (`/api/search`)
+- Plain text lyrics + synced LRC lyrics (з timestamps)
+- Детекція інструментальних треків
+- Збереження в `track_lyrics` таблиці
+- Відстеження `not_found` в `external_metadata` (уникнення повторних запитів)
+- CLI: `python cli.py fetch-lyrics [--limit N] [--no-skip] [--delay 0.1]`
+
+**Утиліта:** `parse_lrc()` — конвертація LRC формату в `{time_ms, text}` список
+
+---
+
+## Windows Desktop Launcher - DONE
+
+### What was done
+Standalone desktop додаток для Windows з GUI.
+
+**Новий модуль:** `desktop/` (11 файлів, 4301 рядок)
+- `launcher.py` — CustomTkinter GUI додаток
+  - Моніторинг статусу сервісів
+  - QR code для мобільного доступу
+  - System tray мінімізація
+  - Settings dialog
+- `wizard.py` — інтерактивний setup wizard першого запуску (612 рядків)
+- `service_manager.py` — управління subprocess (PostgreSQL, FastAPI, playback_tracker)
+- `config_manager.py` — персистентна конфігурація
+- `db_init.py` — ініціалізація БД з SQL міграцій
+- `settings.py` — Settings UI
+- `updater.py` — Git-based auto-updates
+- `build.py` — PyInstaller build → `dist/MusicAIDJ.exe`
+- `migrations/001_initial.sql` — standalone database schema
+- `installer/musicaidj.iss` — Inno Setup installer
+
+**Ключові особливості:**
+- Manages PostgreSQL, FastAPI, playback tracker як subprocess
+- Windows-compatible Claude Code runner
+- Розділені requirements: `requirements-base.txt`, `requirements-torch-gpu.txt`, `requirements-torch-cpu.txt`
+- Builds single-file `.exe` через PyInstaller
+- Git-based auto-updates
+- AGPL-3.0 ліцензія
+
+---
+
+## Album Search Fix - DONE
+
+### What was done
+Виправлено баг: клік на альбом відкривав неправильний альбом коли різні артисти.
+
+**Проблема:** Один album.id міг мати треки з різними primary artists → DOM ID collision
+
+**Рішення:** Змінено групування з `albums.id` на `album_variants.id` з sequential index у `backend/routers/player.py`
+
+---
+
+## Lyrics Embeddings: Semantic Search by Lyrics - DONE
+
+### What was done
+Embeddings з тексту пісень для семантичного пошуку за змістом ("songs about rain", "love songs").
+
+**Архітектура:**
+- Окрема таблиця `lyrics_embeddings` (не `text_embeddings` — різна семантика, можливі кілька чанків на трек)
+- Model: all-MiniLM-L6-v2 (384d), та ж модель що і text_embeddings
+- Обробка тексту: дедуплікація рядків → видалення stop words → chunking (якщо > 200 tokens)
+
+**Нові/змінені файли:**
+- `backend/lyrics_embeddings.py` — **новий**: `LyricsEmbeddingGenerator`, `prepare_lyrics_text`, `split_into_balanced_chunks`
+- `backend/models.py` — додано `LyricsEmbedding` клас + relationship в `Track`
+- `backend/search.py` — додано `search_by_lyrics()` (GROUP BY track_id, MAX similarity across chunks)
+- `backend/main.py` — endpoint `GET /search/lyrics`
+- `backend/tools/definitions.py` — tool `search_lyrics` (21-й інструмент)
+- `backend/cli.py` — команда `generate-lyrics-embeddings`
+- `backend/claude_dj_prompt.py` — оновлено schema + tools list
+- `backend/config.py` — додано `text_embedding_model/dimension/batch_size` settings
+- `scripts/init_db.sql` — таблиця `lyrics_embeddings` з HNSW index
+
+**Тестування:**
+- 16 треків → 17 embeddings (один трек з довгим текстом розбито на 2 чанки)
+- Пошук `"feeling numb and disconnected"` → Pink Floyd - Comfortably Numb (similarity 0.41)
+
+---
+
 ## Next Steps
 
 ### Phase 2: External Data & Text Embeddings - COMPLETE ✅
 
-### Phase 3: Audio Analysis & Playback - IN PROGRESS
+### Phase 3: Audio Analysis & Playback - COMPLETE ✅
 - [x] **Step 3.1: Audio Feature Extraction (librosa + CLAP zero-shot)** ✅
-  - librosa DSP: BPM, key, energy, brightness, dynamic range
-  - CLAP zero-shot: instruments, moods, vocal detection, danceability
-  - Feature-based search and filtering
-  - Integration with RAG assistant
 - [x] **Step 3.2: HQPlayer Control** ✅
-  - Implemented HQPlayer Desktop 5 API client
-  - Full playback controls (play, pause, stop, queue management)
-  - Semantic search integration for intelligent playlist generation
-  - Audio similarity-based album selection
-- [x] **Step 3.3: MCP Server for HQPlayer** ✅
-  - 19 MCP tools for Claude Code/Desktop integration
-  - Natural language playback commands
-  - Fuzzy search with pg_trgm (typo-tolerant)
-  - Direct HQPlayer control, library search, smart play
-- [ ] **Step 3.4: Web UI** — IN PROGRESS
+- [x] **Step 3.3: MCP Server for HQPlayer** ✅ (21 tool)
+- [x] **Step 3.4: Web UI** ✅
   - FastAPI static files + vanilla JS frontend
   - Player controls (play/pause/stop/next/prev, volume, progress, playlist)
-  - AI chat with Claude (RAG recommendations)
+  - AI chat with multi-provider LLM support
   - Track search with album grouping
-  - Chat history persistence (sessions, messages in PostgreSQL)
-  - Feedback system ("not relevant" button for debugging RAG quality)
-  - TODO: frontend integration with new session-based chat API
+  - Chat history persistence (sessions, messages)
+  - Feedback system ("not relevant" button)
+
+### Additional completed work (beyond original phases)
+- [x] **Canonical UUID schema refactoring** ✅
+- [x] **Playback tracker + Last.fm scrobbling** ✅
+- [x] **LRCLIB lyrics integration** ✅
+- [x] **Lyrics semantic search (embeddings)** ✅
+- [x] **Windows desktop launcher** ✅
+- [x] **Multi-provider LLM (Anthropic, OpenAI, Groq)** ✅
+- [x] **Tool-based AI DJ (21 tools)** ✅
 
 ### Phase 4: Voice Interface & Advanced Features
 - Whisper for voice input (Ukrainian/English)
 - TTS for voice output
 - Complete voice conversation loop
 - Listening statistics and user preferences
+
+### Upcoming
+- Fetch more lyrics (extend library coverage)
+- Multiple lyrics sources (Genius, Musixmatch) with cascade fallback
+- Text embeddings regeneration for updated metadata
+- Audio analysis for remaining tracks

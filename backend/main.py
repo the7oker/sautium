@@ -54,9 +54,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Database connection failed: {e}")
 
+    # Start SSE status poller
+    from routers.player import start_status_poller, stop_status_poller
+    start_status_poller()
+
     yield
 
     # Shutdown
+    stop_status_poller()
     logger.info("Shutting down application")
 
 
@@ -319,6 +324,26 @@ async def search_text(
             )
     except Exception as e:
         logger.error(f"Text search failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/search/lyrics")
+async def search_lyrics(
+    query: str,
+    limit: Optional[int] = None,
+    min_similarity: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Search tracks by lyrics content similarity."""
+    from database import get_db_context
+    from search import search_by_lyrics
+
+    try:
+        with get_db_context() as db:
+            return search_by_lyrics(
+                db, query, limit=limit, min_similarity=min_similarity
+            )
+    except Exception as e:
+        logger.error(f"Lyrics search failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

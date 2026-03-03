@@ -284,6 +284,22 @@ def _h_search_semantic(query: str, limit: int = 15) -> str:
         return f"Error in semantic search: {e}"
 
 
+def _h_search_lyrics(query: str, limit: int = 15) -> str:
+    try:
+        import os
+        backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
+        with httpx.Client(base_url=backend_url, timeout=30.0) as client:
+            resp = client.get("/search/lyrics", params={"query": query, "limit": limit})
+            resp.raise_for_status()
+            data = resp.json()
+        rows = data.get("results", [])
+        return _format_track_list(rows, f"Lyrics search for '{query}' ({len(rows)} results):")
+    except httpx.ConnectError:
+        return "Error: Cannot connect to backend for lyrics search."
+    except Exception as e:
+        return f"Error in lyrics search: {e}"
+
+
 def _h_get_track_info(track_id: int) -> str:
     try:
         from hqplayer_client import format_time
@@ -710,7 +726,7 @@ def _h_hqplayer_set_filter(filter_name: str) -> str:
 # ===========================================================================
 
 def register_all():
-    """Register all 19 tools in the global REGISTRY."""
+    """Register all 20 tools in the global REGISTRY."""
 
     REGISTRY.register(ToolDef(
         name="execute_query",
@@ -756,6 +772,18 @@ def register_all():
             ToolParam("limit", "integer", "Maximum number of results (default 15)", required=False, default=15),
         ],
         handler=_h_search_semantic,
+    ))
+
+    REGISTRY.register(ToolDef(
+        name="search_lyrics",
+        description="Search tracks by lyrics content using AI semantic understanding. "
+                    "Finds songs whose lyrics match a description. "
+                    "E.g. 'songs about love', 'rain and sadness', 'protest and freedom', 'dancing in the moonlight'.",
+        parameters=[
+            ToolParam("query", "string", "Description of lyrical content to search for", required=True),
+            ToolParam("limit", "integer", "Maximum number of results (default 15)", required=False, default=15),
+        ],
+        handler=_h_search_lyrics,
     ))
 
     REGISTRY.register(ToolDef(

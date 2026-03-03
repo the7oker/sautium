@@ -404,3 +404,96 @@ def search_by_features(
     results = [_build_feature_result(row) for row in rows]
 
     return {"results": results, "count": len(results)}
+
+
+def search_by_lyrics(
+    db: Session,
+    query_text: str,
+    limit: int = None,
+    min_similarity: float = None,
+) -> Dict[str, Any]:
+    """
+    Search tracks by lyrics content similarity.
+
+    Uses sentence-transformer embeddings of lyrics text.
+    For tracks with multiple chunks, takes the MAX similarity across chunks.
+
+    Args:
+        db: Database session.
+        query_text: Natural language description of lyrical content.
+        limit: Max results to return.
+        min_similarity: Minimum similarity score (0-1).
+
+    Returns:
+        Dict with results list, count, and query_text.
+    """
+    from lyrics_embeddings import LyricsEmbeddingGenerator
+
+    limit = limit or settings.default_search_limit
+    min_similarity = min_similarity if min_similarity is not None else 0.3
+
+    # Get the model_id for the text embedding model
+    model_row = db.execute(
+        text("SELECT id FROM embedding_models WHERE name = :name"),
+        {"name": settings.text_embedding_model},
+    ).fetchone()
+
+    if not model_row:
+        return {"error": "Text embedding model not found in DB", "results": [], "count": 0}
+
+    model_id = model_row.id
+
+    # Generate query embedding
+    generator = LyricsEmbeddingGenerator()
+    query_vector = generator.query_to_embedding(query_text)
+    generator.unload_model()
+
+    # Format vector as pgvector literal
+    vector_str = "'" + "[" + ",".join(str(float(x)) for x in query_vector) + "]" + "'::vector"
+
+    # Search: GROUP BY track_id, take MAX similarity across chunks
+    # Use subquery with DISTINCT ON to avoid duplicates from genre joins
+    similarity_sql = text(f"""
+        SELECT * FROM (
+            SELECT DISTINCT ON (matches.track_id)
+                   mf_rep.id, t.title, a.name as artist,
+                   mf_rep.album_title as album, g.name as genre,
+                   mf_rep.duration_seconds,
+                   mf_rep.sample_rate, mf_rep.bit_depth, mf_rep.is_lossless,
+                   matches.similarity
+            FROM (
+                SELECT le.track_id,
+                       MAX(1 - (le.vector <=> {vector_str})) as similarity
+                FROM lyrics_embeddings le
+                WHERE le.model_id = :model_id
+                GROUP BY le.track_id
+                HAVING MAX(1 - (le.vector <=> {vector_str})) >= :min_similarity
+            ) matches
+            JOIN tracks t ON matches.track_id = t.id
+            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+            JOIN artists a ON ta.artist_id = a.id
+            LEFT JOIN track_genres tg ON t.id = tg.track_id
+            LEFT JOIN genres g ON tg.genre_id = g.id
+            JOIN LATERAL (
+                SELECT mf.id, mf.duration_seconds,
+                       mf.sample_rate, mf.bit_depth, mf.is_lossless,
+                       al.title as album_title
+                FROM media_files mf
+                JOIN album_variants av ON mf.album_variant_id = av.id
+                JOIN albums al ON av.album_id = al.id
+                WHERE mf.track_id = t.id
+                ORDER BY mf.is_analysis_source DESC, mf.id
+                LIMIT 1
+            ) mf_rep ON true
+            ORDER BY matches.track_id
+        ) deduped
+        ORDER BY deduped.similarity DESC
+        LIMIT :limit
+    """)
+
+    params = {"model_id": model_id, "min_similarity": min_similarity, "limit": limit}
+    rows = db.execute(similarity_sql, params).fetchall()
+
+    results = [_build_track_result(row) for row in rows]
+
+    return {"results": results, "count": len(results), "query_text": query_text}

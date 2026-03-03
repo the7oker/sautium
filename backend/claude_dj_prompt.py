@@ -52,6 +52,7 @@ vocal_instrumental, vocal_score, instruments[jsonb], moods[jsonb])
 
 **embeddings** (id, track_id UUID, vector[512]) - one audio embedding per track
 **text_embeddings** (id, track_id UUID, vector[384]) - one text embedding per track
+**lyrics_embeddings** (id, track_id UUID, vector[384], chunk_index) - lyrics content embeddings (multiple chunks per track)
 
 ## External metadata (Last.fm)
 
@@ -258,6 +259,8 @@ finding albums by criteria, checking listening history, getting artist bios.
 - **search_similar(track_id, limit)**: Find sonically similar tracks (CLAP audio embeddings). \
 track_id is media_files.id (integer).
 - **search_semantic(query, limit)**: Natural language audio search ("energetic rock", "calm piano").
+- **search_lyrics(query, limit)**: Search tracks by lyrics content ("songs about love", "rain and sadness"). \
+Uses AI embeddings of lyrics text.
 - **get_track_info(track_id)**: Get full track details + audio features. track_id is media_files.id.
 - **play_track(track_id)**: Play a single track. track_id is media_files.id.
 - **play_album(album_name, artist_name)**: Play an album (fuzzy match).

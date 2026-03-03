@@ -5,6 +5,8 @@ Mirrors MCP server patterns (lazy singleton, path conversion, tracker registrati
 but exposed as HTTP endpoints for the Web UI.
 """
 
+import asyncio
+import json
 import logging
 import threading
 import time
@@ -14,14 +16,109 @@ import httpx
 import psycopg2
 import psycopg2.extras
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from config import settings
 from hqplayer_client import HQPlayerClient, PlaybackState, format_time, file_path_to_uri
+from lrclib import LrclibService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/player", tags=["player"])
+
+# -- SSE infrastructure -------------------------------------------------------
+
+_latest_status: dict = {"state": "disconnected"}
+_status_version: int = 0
+_status_changed = threading.Event()
+_sse_clients: list = []           # list of (asyncio.Event, asyncio.AbstractEventLoop)
+_sse_clients_lock = threading.Lock()
+_poller_thread: Optional[threading.Thread] = None
+_poller_running = False
+
+
+def _wake_sse_clients():
+    """Thread-safe: signal all SSE async generators to send new data."""
+    with _sse_clients_lock:
+        for evt, loop in _sse_clients:
+            loop.call_soon_threadsafe(evt.set)
+
+
+def _status_poller():
+    """Background thread: poll HQPlayer every ~1s, update cache, wake SSE clients."""
+    global _latest_status, _status_version
+    while _poller_running:
+        try:
+            with _hqp_lock:
+                hqp = _get_hqp()
+                status = hqp.get_status()
+
+            if status is None:
+                new_data = {"state": "unknown"}
+            else:
+                state_names = {
+                    PlaybackState.STOPPED: "stopped",
+                    PlaybackState.PAUSED: "paused",
+                    PlaybackState.PLAYING: "playing",
+                    PlaybackState.STOPREQ: "stopping",
+                }
+                new_data = {
+                    "state": state_names.get(status.state, "unknown"),
+                    "artist": status.artist,
+                    "album": status.album,
+                    "song": status.song,
+                    "genre": status.genre,
+                    "position": status.position,
+                    "length": status.length,
+                    "volume": status.volume,
+                    "track_index": status.track_index,
+                    "progress_percent": round(status.progress_percent, 1),
+                    "position_formatted": format_time(status.position),
+                    "length_formatted": format_time(status.length),
+                }
+
+            if new_data != _latest_status:
+                _latest_status = new_data
+                _status_version += 1
+                _wake_sse_clients()
+
+        except Exception:
+            if _latest_status.get("state") != "disconnected":
+                _latest_status = {"state": "disconnected"}
+                _status_version += 1
+                _wake_sse_clients()
+
+        # Wait up to 1s, but wake early if _notify_update() signals
+        _status_changed.wait(timeout=1.0)
+        _status_changed.clear()
+
+
+def _notify_update():
+    """Wake poller for an immediate re-poll after a command."""
+    _status_changed.set()
+
+
+def start_status_poller():
+    """Start the background status polling thread."""
+    global _poller_thread, _poller_running
+    if _poller_thread and _poller_thread.is_alive():
+        return
+    _poller_running = True
+    _poller_thread = threading.Thread(target=_status_poller, daemon=True, name="sse-poller")
+    _poller_thread.start()
+    logger.info("SSE status poller started")
+
+
+def stop_status_poller():
+    """Stop the background status polling thread."""
+    global _poller_running
+    _poller_running = False
+    _status_changed.set()  # unblock wait
+    if _poller_thread:
+        _poller_thread.join(timeout=3)
+    logger.info("SSE status poller stopped")
+
 
 # -- Lazy singletons ----------------------------------------------------------
 
@@ -331,6 +428,51 @@ def get_playlist():
         return {"tracks": [], "count": 0}
 
 
+@router.get("/status/stream")
+async def status_stream():
+    """SSE endpoint: pushes status updates in real-time."""
+    loop = asyncio.get_event_loop()
+    evt = asyncio.Event()
+
+    async def event_generator():
+        last_version = -1
+        try:
+            with _sse_clients_lock:
+                _sse_clients.append((evt, loop))
+
+            # Send current status immediately
+            yield f"data: {json.dumps(_latest_status)}\n\n"
+            last_version = _status_version
+
+            while True:
+                try:
+                    await asyncio.wait_for(evt.wait(), timeout=15.0)
+                    evt.clear()
+                except asyncio.TimeoutError:
+                    # Keepalive
+                    yield ": keepalive\n\n"
+                    continue
+
+                if _status_version != last_version:
+                    last_version = _status_version
+                    yield f"data: {json.dumps(_latest_status)}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            with _sse_clients_lock:
+                _sse_clients[:] = [(e, l) for e, l in _sse_clients if e is not evt]
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/status")
 def get_status():
     """Get current HQPlayer status. Returns {state: 'disconnected'} on connection failure."""
@@ -369,7 +511,9 @@ def get_status():
 @router.post("/play")
 def play():
     try:
-        return {"ok": _hqp_cmd(lambda h: h.play())}
+        result = {"ok": _hqp_cmd(lambda h: h.play())}
+        _notify_update()
+        return result
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -377,7 +521,9 @@ def play():
 @router.post("/pause")
 def pause():
     try:
-        return {"ok": _hqp_cmd(lambda h: h.pause())}
+        result = {"ok": _hqp_cmd(lambda h: h.pause())}
+        _notify_update()
+        return result
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -385,7 +531,9 @@ def pause():
 @router.post("/stop")
 def stop():
     try:
-        return {"ok": _hqp_cmd(lambda h: h.stop())}
+        result = {"ok": _hqp_cmd(lambda h: h.stop())}
+        _notify_update()
+        return result
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -393,7 +541,9 @@ def stop():
 @router.post("/next")
 def next_track():
     try:
-        return {"ok": _hqp_cmd(lambda h: h.next())}
+        result = {"ok": _hqp_cmd(lambda h: h.next())}
+        _notify_update()
+        return result
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -401,7 +551,9 @@ def next_track():
 @router.post("/previous")
 def previous_track():
     try:
-        return {"ok": _hqp_cmd(lambda h: h.previous())}
+        result = {"ok": _hqp_cmd(lambda h: h.previous())}
+        _notify_update()
+        return result
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -409,7 +561,9 @@ def previous_track():
 @router.post("/volume/up")
 def volume_up():
     try:
-        return {"ok": _hqp_cmd(lambda h: h.volume_up())}
+        result = {"ok": _hqp_cmd(lambda h: h.volume_up())}
+        _notify_update()
+        return result
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -417,7 +571,9 @@ def volume_up():
 @router.post("/volume/down")
 def volume_down():
     try:
-        return {"ok": _hqp_cmd(lambda h: h.volume_down())}
+        result = {"ok": _hqp_cmd(lambda h: h.volume_down())}
+        _notify_update()
+        return result
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -425,7 +581,9 @@ def volume_down():
 @router.post("/volume")
 def set_volume(req: VolumeRequest):
     try:
-        return {"ok": _hqp_cmd(lambda h: h.set_volume(req.level))}
+        result = {"ok": _hqp_cmd(lambda h: h.set_volume(req.level))}
+        _notify_update()
+        return result
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -457,6 +615,7 @@ def play_track(req: PlayTrackRequest):
             hqp.playlist_add(uri, clear=True)
             hqp.play()
         _register_playlist([req.track_id])
+        _notify_update()
 
         return {
             "ok": True,
@@ -532,6 +691,7 @@ def play_album(req: PlayAlbumRequest):
 
         track_ids = [r["id"] for r in rows]
         _register_playlist(track_ids)
+        _notify_update()
 
         return {
             "ok": True,
@@ -604,6 +764,7 @@ def play_similar(req: PlaySimilarRequest):
 
         track_ids = [r["id"] for r in rows]
         _register_playlist(track_ids)
+        _notify_update()
 
         return {
             "ok": True,
@@ -677,6 +838,7 @@ def play_tracks(req: PlayTracksRequest):
 
         track_ids = [r["id"] for r in rows]
         _register_playlist(track_ids)
+        _notify_update()
 
         return {
             "ok": True,
@@ -689,3 +851,127 @@ def play_tracks(req: PlayTracksRequest):
     except Exception as e:
         logger.error(f"play-tracks failed: {e}")
         raise HTTPException(status_code=503, detail=str(e))
+
+
+# -- Lyrics -------------------------------------------------------------------
+
+@router.get("/lyrics/{media_file_id}")
+def get_lyrics(media_file_id: int):
+    """
+    Get lyrics for a track by media_file_id. Lazy-fetch from LRCLIB if not cached.
+
+    Returns parsed synced_lyrics (list of {time_ms, text}) or null.
+    Never returns an error — gracefully returns null fields.
+    """
+    # Get track info from DB
+    row = _db_query_one("""
+        SELECT mf.id, t.id as track_id, t.title, a.name as artist,
+               al.title as album, mf.duration_seconds
+        FROM media_files mf
+        JOIN tracks t ON mf.track_id = t.id
+        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+        JOIN artists a ON ta.artist_id = a.id
+        JOIN album_variants av ON mf.album_variant_id = av.id
+        JOIN albums al ON av.album_id = al.id
+        WHERE mf.id = %(media_file_id)s
+    """, {"media_file_id": media_file_id})
+
+    if not row:
+        return {
+            "track_id": None, "artist": None, "title": None,
+            "source": None, "instrumental": False,
+            "plain_lyrics": None, "synced_lyrics": None,
+        }
+
+    track_id = str(row["track_id"])
+
+    # Check track_lyrics table (fast path)
+    lyrics_row = _db_query_one("""
+        SELECT source, plain_lyrics, synced_lyrics, instrumental
+        FROM track_lyrics
+        WHERE track_id = %(track_id)s
+        ORDER BY
+            CASE WHEN synced_lyrics IS NOT NULL THEN 0 ELSE 1 END,
+            created_at DESC
+        LIMIT 1
+    """, {"track_id": track_id})
+
+    if lyrics_row:
+        synced = None
+        if lyrics_row["synced_lyrics"]:
+            synced = LrclibService.parse_lrc(lyrics_row["synced_lyrics"])
+        return {
+            "track_id": track_id,
+            "artist": row["artist"],
+            "title": row["title"],
+            "source": lyrics_row["source"],
+            "instrumental": lyrics_row["instrumental"],
+            "plain_lyrics": lyrics_row["plain_lyrics"],
+            "synced_lyrics": synced,
+        }
+
+    # Check external_metadata for previous failed fetch
+    meta_row = _db_query_one("""
+        SELECT fetch_status FROM external_metadata
+        WHERE entity_type = 'track' AND entity_id = %(track_id)s
+          AND source = 'lrclib' AND metadata_type = 'lyrics'
+    """, {"track_id": track_id})
+
+    if meta_row and meta_row["fetch_status"] == "not_found":
+        return {
+            "track_id": track_id,
+            "artist": row["artist"],
+            "title": row["title"],
+            "source": None, "instrumental": False,
+            "plain_lyrics": None, "synced_lyrics": None,
+        }
+
+    # On-demand fetch from LRCLIB
+    try:
+        from database import get_db_context
+
+        duration = int(row["duration_seconds"]) if row["duration_seconds"] else None
+
+        with LrclibService() as service, get_db_context() as db:
+            result = service.fetch_and_store(
+                db,
+                track_id=row["track_id"],
+                track_name=row["title"],
+                artist_name=row["artist"],
+                album_name=row["album"],
+                duration=duration,
+            )
+
+        if result["status"] == "not_found":
+            return {
+                "track_id": track_id,
+                "artist": row["artist"],
+                "title": row["title"],
+                "source": None, "instrumental": False,
+                "plain_lyrics": None, "synced_lyrics": None,
+            }
+
+        data = result.get("data", {})
+        synced = None
+        if data.get("syncedLyrics"):
+            synced = LrclibService.parse_lrc(data["syncedLyrics"])
+
+        return {
+            "track_id": track_id,
+            "artist": row["artist"],
+            "title": row["title"],
+            "source": "lrclib",
+            "instrumental": data.get("instrumental", False),
+            "plain_lyrics": data.get("plainLyrics"),
+            "synced_lyrics": synced,
+        }
+
+    except Exception as e:
+        logger.error(f"Lyrics fetch failed for media_file {media_file_id}: {e}")
+        return {
+            "track_id": track_id,
+            "artist": row["artist"],
+            "title": row["title"],
+            "source": None, "instrumental": False,
+            "plain_lyrics": None, "synced_lyrics": None,
+        }

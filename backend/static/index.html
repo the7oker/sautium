@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#0f0f23">
   <title>Music AI DJ</title>
-  <link rel="stylesheet" href="/static/style.css?v=6">
+  <link rel="stylesheet" href="/static/style.css?v=7">
 </head>
 <body>
   <div class="container">
@@ -38,6 +38,14 @@
         <button class="vol-btn" onclick="playerCmd('volume/down')">&#128265;</button>
         <span class="vol-label" id="volLabel">-- dB</span>
         <button class="vol-btn" onclick="playerCmd('volume/up')">&#128266;</button>
+      </div>
+      <div class="lyrics-toggle-row">
+        <button class="lyrics-toggle-btn" id="lyricsToggleBtn" onclick="toggleLyrics()">Lyrics</button>
+      </div>
+      <div class="lyrics-panel" id="lyricsPanel" style="display:none">
+        <div class="lyrics-content" id="lyricsContent">
+          <div class="lyrics-placeholder">Click "Lyrics" to load</div>
+        </div>
       </div>
     </section>
 
@@ -88,6 +96,6 @@
 
   </div>
 
-  <script src="/static/app.js?v=8"></script>
+  <script src="/static/app.js?v=9"></script>
 </body>
 </html>

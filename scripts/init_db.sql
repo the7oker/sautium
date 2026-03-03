@@ -418,6 +418,48 @@ CREATE INDEX IF NOT EXISTS idx_external_metadata_status ON external_metadata(fet
 CREATE INDEX IF NOT EXISTS idx_external_metadata_data ON external_metadata USING gin (data);
 
 -- ─────────────────────────────────────────────────────────────────────────
+-- Lyrics
+-- ─────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS track_lyrics (
+    id SERIAL PRIMARY KEY,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    source VARCHAR(50) NOT NULL,        -- 'lrclib', 'genius', etc.
+    plain_lyrics TEXT,                   -- Lyrics text without timestamps
+    synced_lyrics TEXT,                  -- LRC format with timestamps (NULL if source doesn't support)
+    instrumental BOOLEAN DEFAULT FALSE,  -- Instrumental track flag
+    external_id INTEGER,                 -- ID in external service
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (track_id, source)
+);
+
+CREATE INDEX IF NOT EXISTS idx_track_lyrics_track_id ON track_lyrics(track_id);
+CREATE INDEX IF NOT EXISTS idx_track_lyrics_source ON track_lyrics(source);
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- Lyrics embeddings (384-dimensional, multiple chunks per track)
+-- ─────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS lyrics_embeddings (
+    id SERIAL PRIMARY KEY,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    model_id INTEGER NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    vector vector(384) NOT NULL,
+    chunk_index INTEGER NOT NULL DEFAULT 0,
+    chunk_text TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (track_id, model_id, chunk_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lyrics_embeddings_vector ON lyrics_embeddings
+    USING hnsw (vector vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+CREATE INDEX IF NOT EXISTS idx_lyrics_embeddings_track_id ON lyrics_embeddings(track_id);
+CREATE INDEX IF NOT EXISTS idx_lyrics_embeddings_model_id ON lyrics_embeddings(model_id);
+
+-- ─────────────────────────────────────────────────────────────────────────
 -- Listening history
 -- ─────────────────────────────────────────────────────────────────────────
 
@@ -478,6 +520,7 @@ SELECT
     (SELECT COUNT(*) FROM tracks) as total_tracks,
     (SELECT COUNT(*) FROM media_files) as total_media_files,
     (SELECT COUNT(*) FROM embeddings) as tracks_with_embeddings,
+    (SELECT COUNT(*) FROM track_lyrics) as tracks_with_lyrics,
     (SELECT SUM(duration_seconds) FROM media_files) as total_duration_seconds,
     (SELECT SUM(file_size_bytes) FROM media_files) as total_file_size_bytes,
     (SELECT COUNT(*) FROM genres) as unique_genres;

@@ -1160,5 +1160,191 @@ def update_file_dates(limit):
         sys.exit(1)
 
 
+@cli.command("fetch-lyrics")
+@click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process")
+@click.option("--no-skip", is_flag=True, help="Re-fetch lyrics even if already attempted")
+@click.option("--delay", type=float, default=0.1, help="Delay between requests (seconds)")
+def fetch_lyrics(limit, no_skip, delay):
+    """Fetch lyrics from LRCLIB for tracks that don't have them yet."""
+    from lrclib import LrclibService
+
+    click.echo("🎤 Fetching lyrics from LRCLIB...")
+    skip_existing = not no_skip
+    click.echo(f"{'⚠️  Re-fetching all tracks' if no_skip else '✓ Skipping tracks already fetched'}")
+    if limit:
+        click.echo(f"⚠️  Limited to {limit} tracks")
+    click.echo(f"⏱️  Rate limit: {delay}s between requests")
+    click.echo()
+
+    try:
+        with get_db_context() as db:
+            # Get tracks to process
+            if skip_existing:
+                # Skip tracks that already have lyrics or a previous fetch attempt
+                query = text("""
+                    SELECT t.id as track_id, t.title,
+                           a.name as artist,
+                           al.title as album,
+                           mf.duration_seconds
+                    FROM tracks t
+                    JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+                    JOIN artists a ON ta.artist_id = a.id
+                    JOIN media_files mf ON mf.track_id = t.id
+                    JOIN album_variants av ON mf.album_variant_id = av.id
+                    JOIN albums al ON av.album_id = al.id
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM track_lyrics tl
+                        WHERE tl.track_id = t.id AND tl.source = 'lrclib'
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM external_metadata em
+                        WHERE em.entity_type = 'track'
+                          AND em.entity_id = t.id::text
+                          AND em.source = 'lrclib'
+                          AND em.metadata_type = 'lyrics'
+                    )
+                    GROUP BY t.id, t.title, a.name, al.title, mf.duration_seconds
+                    ORDER BY a.name, al.title, t.title
+                """)
+            else:
+                query = text("""
+                    SELECT t.id as track_id, t.title,
+                           a.name as artist,
+                           al.title as album,
+                           mf.duration_seconds
+                    FROM tracks t
+                    JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+                    JOIN artists a ON ta.artist_id = a.id
+                    JOIN media_files mf ON mf.track_id = t.id
+                    JOIN album_variants av ON mf.album_variant_id = av.id
+                    JOIN albums al ON av.album_id = al.id
+                    GROUP BY t.id, t.title, a.name, al.title, mf.duration_seconds
+                    ORDER BY a.name, al.title, t.title
+                """)
+
+            if limit:
+                query = text(str(query) + f" LIMIT {limit}")
+
+            tracks = db.execute(query).fetchall()
+
+            if not tracks:
+                click.echo("✓ No tracks to process")
+                return
+
+            total = len(tracks)
+            click.echo(f"Found {total} tracks to process\n")
+
+            stats = {
+                "processed": 0,
+                "synced": 0,
+                "plain_only": 0,
+                "instrumental": 0,
+                "not_found": 0,
+                "errors": 0,
+            }
+
+            with LrclibService() as service:
+                for i, row in enumerate(tracks, 1):
+                    track_id = row.track_id
+                    artist = row.artist
+                    title = row.title
+                    album = row.album
+                    duration = int(row.duration_seconds) if row.duration_seconds else None
+
+                    try:
+                        result = service.fetch_and_store(
+                            db,
+                            track_id=track_id,
+                            track_name=title,
+                            artist_name=artist,
+                            album_name=album,
+                            duration=duration,
+                        )
+
+                        status = result["status"]
+                        stats["processed"] += 1
+
+                        if status == "synced":
+                            stats["synced"] += 1
+                            icon = "🎵"
+                        elif status == "plain":
+                            stats["plain_only"] += 1
+                            icon = "📝"
+                        elif status == "instrumental":
+                            stats["instrumental"] += 1
+                            icon = "🎹"
+                        elif status == "not_found":
+                            stats["not_found"] += 1
+                            icon = "❌"
+                        else:
+                            stats["errors"] += 1
+                            icon = "⚠️"
+
+                        if i % 50 == 0 or i == total:
+                            click.echo(
+                                f"  [{i}/{total}] {icon} {artist} - {title} → {status}"
+                            )
+
+                    except Exception as e:
+                        stats["errors"] += 1
+                        stats["processed"] += 1
+                        logger.error(f"Error processing {artist} - {title}: {e}")
+                        if i % 50 == 0:
+                            click.echo(f"  [{i}/{total}] ⚠️ {artist} - {title} → error")
+
+                    # Rate limiting
+                    if delay > 0:
+                        time.sleep(delay)
+
+            click.echo(f"\n✅ LRCLIB lyrics fetch complete!")
+            click.echo(f"📊 Statistics:")
+            click.echo(f"   • Processed: {stats['processed']} tracks")
+            click.echo(f"   • Synced lyrics: {stats['synced']}")
+            click.echo(f"   • Plain only: {stats['plain_only']}")
+            click.echo(f"   • Instrumental: {stats['instrumental']}")
+            click.echo(f"   • Not found: {stats['not_found']}")
+            click.echo(f"   • Errors: {stats['errors']}")
+
+    except Exception as e:
+        click.echo(f"\n❌ Error: {e}", err=True)
+        logger.exception("Lyrics fetch failed")
+        sys.exit(1)
+
+
+@cli.command("generate-lyrics-embeddings")
+@click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process")
+@click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default from config)")
+@click.option("--force", is_flag=True, help="Regenerate embeddings even if they already exist")
+def generate_lyrics_embeddings_cmd(limit, batch_size, force):
+    """Generate embeddings from track lyrics for semantic lyrics search."""
+    from lyrics_embeddings import generate_lyrics_embeddings
+
+    click.echo("🎤 Generating lyrics embeddings...")
+    if limit:
+        click.echo(f"⚠️  Limited to {limit} tracks")
+    if force:
+        click.echo(f"🔄 Force regenerating existing embeddings")
+
+    try:
+        stats = generate_lyrics_embeddings(
+            limit=limit,
+            batch_size=batch_size,
+            force=force,
+        )
+
+        click.echo(f"\n✅ Lyrics embedding generation complete!")
+        click.echo(f"📊 Statistics:")
+        click.echo(f"   • Processed: {stats['processed']} tracks")
+        click.echo(f"   • Success: {stats['success']} tracks")
+        click.echo(f"   • Chunks: {stats['chunks']} embeddings")
+        click.echo(f"   • Skipped: {stats['skipped']} (empty after processing)")
+        click.echo(f"   • Failed: {stats['failed']} tracks")
+
+    except Exception as e:
+        click.echo(f"\n❌ Error: {e}", err=True)
+        logger.exception("Lyrics embedding generation failed")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     cli()

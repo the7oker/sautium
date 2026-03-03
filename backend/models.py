@@ -148,6 +148,8 @@ class Track(Base):
     text_embedding = relationship("TextEmbedding", back_populates="track", uselist=False, cascade="all, delete-orphan")
     audio_feature = relationship("AudioFeature", back_populates="track", uselist=False, cascade="all, delete-orphan")
     stats = relationship("TrackStats", back_populates="track", cascade="all, delete-orphan")
+    lyrics = relationship("TrackLyrics", back_populates="track", cascade="all, delete-orphan")
+    lyrics_embeddings = relationship("LyricsEmbedding", back_populates="track", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("idx_tracks_title", "title"),
@@ -368,6 +370,37 @@ class TextEmbedding(Base):
 
     def __repr__(self):
         return f"<TextEmbedding(id={self.id}, track_id={self.track_id})>"
+
+
+class LyricsEmbedding(Base):
+    """Lyrics embeddings (384-dimensional, multiple chunks per track for long lyrics)."""
+    __tablename__ = "lyrics_embeddings"
+
+    id = Column(Integer, primary_key=True)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False)
+    model_id = Column(Integer, ForeignKey("embedding_models.id", ondelete="CASCADE"), nullable=False)
+    vector = Column(Vector(384), nullable=False)
+    chunk_index = Column(Integer, nullable=False, default=0)
+    chunk_text = Column(Text)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    model = relationship("EmbeddingModel", backref="lyrics_embeddings")
+    track = relationship("Track", back_populates="lyrics_embeddings")
+
+    __table_args__ = (
+        UniqueConstraint("track_id", "model_id", "chunk_index", name="uq_lyrics_embeddings_track_model_chunk"),
+        Index("idx_lyrics_embeddings_vector", "vector",
+              postgresql_using="hnsw",
+              postgresql_with={"m": 16, "ef_construction": 64},
+              postgresql_ops={"vector": "vector_cosine_ops"}),
+        Index("idx_lyrics_embeddings_track_id", "track_id"),
+        Index("idx_lyrics_embeddings_model_id", "model_id"),
+    )
+
+    def __repr__(self):
+        return f"<LyricsEmbedding(id={self.id}, track_id={self.track_id}, chunk={self.chunk_index})>"
 
 
 class AudioFeature(Base):
@@ -690,6 +723,34 @@ class TrackStats(Base):
 
     def __repr__(self):
         return f"<TrackStats(track_id={self.track_id}, source='{self.source}')>"
+
+
+class TrackLyrics(Base):
+    """Track lyrics from external sources (LRCLIB, Genius, etc.)."""
+    __tablename__ = "track_lyrics"
+
+    id = Column(Integer, primary_key=True)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False)
+    source = Column(String(50), nullable=False)
+
+    plain_lyrics = Column(Text)
+    synced_lyrics = Column(Text)
+    instrumental = Column(Boolean, default=False)
+    external_id = Column(Integer)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    track = relationship("Track", back_populates="lyrics")
+
+    __table_args__ = (
+        UniqueConstraint("track_id", "source", name="uq_track_lyrics"),
+        Index("idx_track_lyrics_track", "track_id"),
+        Index("idx_track_lyrics_source", "source"),
+    )
+
+    def __repr__(self):
+        return f"<TrackLyrics(track_id={self.track_id}, source='{self.source}')>"
 
 
 class ExternalMetadata(Base):

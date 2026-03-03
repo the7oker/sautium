@@ -11,6 +11,12 @@ let providersData = [];  // [{id, name, models}, ...]
 let selectedProvider = localStorage.getItem("djProvider") || "";
 let selectedModel = localStorage.getItem("djModel") || "";
 
+// Lyrics state
+let lyricsVisible = false;
+let lyricsData = null;         // {synced_lyrics, plain_lyrics, instrumental, ...}
+let lyricsTrackKey = null;     // "artist|song" to detect track changes
+let lyricsMediaFileId = null;  // media_file_id used for fetching
+
 // -- DOM refs ----------------------------------------------------------------
 
 const connDot = document.getElementById("connDot");
@@ -26,7 +32,39 @@ const chatMessages = document.getElementById("chatMessages");
 const chatInput = document.getElementById("chatInput");
 const chatSendBtn = document.getElementById("chatSendBtn");
 
-// -- Status polling ----------------------------------------------------------
+// -- SSE status stream -------------------------------------------------------
+
+let _sseSource = null;
+let _sseRetryDelay = 1000;
+
+function connectStatusSSE() {
+  if (_sseSource) {
+    _sseSource.close();
+  }
+
+  _sseSource = new EventSource("/api/player/status/stream");
+
+  _sseSource.onmessage = (event) => {
+    _sseRetryDelay = 1000; // reset backoff on success
+    try {
+      const data = JSON.parse(event.data);
+      currentState = data.state;
+      updateNowPlaying(data);
+    } catch (e) {
+      console.error("SSE parse error:", e);
+    }
+  };
+
+  _sseSource.onerror = () => {
+    _sseSource.close();
+    _sseSource = null;
+    currentState = "disconnected";
+    updateNowPlaying({ state: "disconnected" });
+    // Reconnect with exponential backoff (max 10s)
+    setTimeout(connectStatusSSE, _sseRetryDelay);
+    _sseRetryDelay = Math.min(_sseRetryDelay * 1.5, 10000);
+  };
+}
 
 async function pollStatus() {
   try {
@@ -80,6 +118,21 @@ function updateNowPlaying(data) {
     volLabel.textContent = Math.round(data.volume) + " dB";
   }
 
+  // Lyrics: detect track change and update highlight
+  _latest_status_cache = data;
+  const newTrackKey = (data.artist || "") + "|" + (data.song || "");
+  if (newTrackKey !== lyricsTrackKey && data.song) {
+    lyricsTrackKey = newTrackKey;
+    lyricsData = null;
+    lyricsMediaFileId = null;
+    if (lyricsVisible) {
+      fetchLyricsForCurrentTrack();
+    }
+  }
+  if (data.position !== undefined) {
+    updateLyricsHighlight(data.position);
+  }
+
   // Update queue highlighting
   if (currentPlaylist.length > 0 && data.track_index !== undefined) {
     const queueItems = document.querySelectorAll(".queue-item");
@@ -95,8 +148,6 @@ function updateNowPlaying(data) {
 async function playerCmd(cmd) {
   try {
     await fetch("/api/player/" + cmd, { method: "POST" });
-    // Poll immediately after command
-    setTimeout(pollStatus, 300);
   } catch (e) {
     console.error("Player command failed:", e);
   }
@@ -123,7 +174,6 @@ async function playTrack(trackId) {
     if (data.ok) {
       setTimeout(fetchPlaylist, 500);
     }
-    setTimeout(pollStatus, 500);
   } catch (e) {
     console.error("Play track failed:", e);
   }
@@ -144,7 +194,6 @@ async function playAlbum(albumName, artistName) {
     } else if (result.ok) {
       setTimeout(fetchPlaylist, 500);
     }
-    setTimeout(pollStatus, 500);
   } catch (e) {
     console.error("Play album failed:", e);
   }
@@ -169,7 +218,6 @@ async function playRecommendations(tracks) {
     if (data.ok) {
       setTimeout(fetchPlaylist, 500);
     }
-    setTimeout(pollStatus, 500);
   } catch (e) {
     console.error("Play recommendations failed:", e);
   }
@@ -770,6 +818,122 @@ function esc(str) {
   return el.innerHTML;
 }
 
+// -- Lyrics ------------------------------------------------------------------
+
+function toggleLyrics() {
+  const panel = document.getElementById("lyricsPanel");
+  const btn = document.getElementById("lyricsToggleBtn");
+  lyricsVisible = !lyricsVisible;
+  panel.style.display = lyricsVisible ? "block" : "none";
+  btn.classList.toggle("active", lyricsVisible);
+
+  if (lyricsVisible && !lyricsData) {
+    fetchLyricsForCurrentTrack();
+  }
+}
+
+function fetchLyricsForCurrentTrack() {
+  // Find media_file_id from current playlist + track_index
+  const status = _latest_status_cache;
+  if (!status || !status.song) return;
+
+  // Use playlist to find media_file_id
+  const trackIndex = status.track_index;
+  if (currentPlaylist.length > 0 && trackIndex !== undefined && trackIndex >= 1) {
+    const playlistTrack = currentPlaylist[trackIndex - 1];
+    if (playlistTrack && playlistTrack.id) {
+      fetchLyrics(playlistTrack.id);
+      return;
+    }
+  }
+
+  // Fallback: no playlist info, show message
+  const content = document.getElementById("lyricsContent");
+  content.innerHTML = '<div class="lyrics-placeholder">Play a track to see lyrics</div>';
+}
+
+async function fetchLyrics(mediaFileId) {
+  if (lyricsMediaFileId === mediaFileId && lyricsData) return;
+  lyricsMediaFileId = mediaFileId;
+
+  const content = document.getElementById("lyricsContent");
+  content.innerHTML = '<div class="lyrics-placeholder">Loading lyrics...</div>';
+
+  try {
+    const resp = await fetch("/api/player/lyrics/" + mediaFileId);
+    const data = await resp.json();
+    lyricsData = data;
+    renderLyrics(data);
+  } catch (e) {
+    console.error("Lyrics fetch failed:", e);
+    content.innerHTML = '<div class="lyrics-placeholder">Failed to load lyrics</div>';
+  }
+}
+
+function renderLyrics(data) {
+  const content = document.getElementById("lyricsContent");
+
+  if (data.instrumental) {
+    content.innerHTML = '<div class="lyrics-instrumental">Instrumental</div>';
+    return;
+  }
+
+  if (data.synced_lyrics && data.synced_lyrics.length > 0) {
+    let html = "";
+    for (let i = 0; i < data.synced_lyrics.length; i++) {
+      const line = data.synced_lyrics[i];
+      html += '<div class="lyrics-line" data-time="' + line.time_ms + '" data-idx="' + i + '">' +
+        esc(line.text || "") + '</div>';
+    }
+    content.innerHTML = html;
+    return;
+  }
+
+  if (data.plain_lyrics) {
+    content.innerHTML = '<div class="lyrics-plain">' + esc(data.plain_lyrics) + '</div>';
+    return;
+  }
+
+  content.innerHTML = '<div class="lyrics-placeholder">No lyrics available</div>';
+}
+
+function updateLyricsHighlight(positionSeconds) {
+  if (!lyricsVisible || !lyricsData || !lyricsData.synced_lyrics) return;
+
+  const positionMs = positionSeconds * 1000;
+  const lines = document.querySelectorAll(".lyrics-line");
+  if (lines.length === 0) return;
+
+  let activeIdx = -1;
+  for (let i = lyricsData.synced_lyrics.length - 1; i >= 0; i--) {
+    if (positionMs >= lyricsData.synced_lyrics[i].time_ms) {
+      activeIdx = i;
+      break;
+    }
+  }
+
+  lines.forEach((line, idx) => {
+    line.classList.toggle("active", idx === activeIdx);
+    line.classList.toggle("past", idx < activeIdx);
+  });
+
+  // Auto-scroll to active line
+  if (activeIdx >= 0 && lines[activeIdx]) {
+    const panel = document.getElementById("lyricsPanel");
+    const activeLine = lines[activeIdx];
+    const panelRect = panel.getBoundingClientRect();
+    const lineRect = activeLine.getBoundingClientRect();
+
+    // Scroll if active line is outside visible area
+    if (lineRect.top < panelRect.top || lineRect.bottom > panelRect.bottom) {
+      activeLine.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }
+}
+
+// Cache for track change detection
+let _latest_status_cache = {};
+
 // -- Init --------------------------------------------------------------------
 
 // Load providers on startup
@@ -778,5 +942,4 @@ loadProviders();
 // Fetch playlist from HQPlayer on load
 fetchPlaylist();
 
-pollStatus();
-setInterval(pollStatus, 3000);
+connectStatusSSE();
