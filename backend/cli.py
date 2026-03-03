@@ -1163,24 +1163,96 @@ def update_file_dates(limit):
 @cli.command("fetch-lyrics")
 @click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process")
 @click.option("--no-skip", is_flag=True, help="Re-fetch lyrics even if already attempted")
-@click.option("--delay", type=float, default=0.1, help="Delay between requests (seconds)")
-def fetch_lyrics(limit, no_skip, delay):
-    """Fetch lyrics from LRCLIB for tracks that don't have them yet."""
-    from lrclib import LrclibService
+@click.option("--delay", type=float, default=None,
+              help="Delay between requests (seconds). Default: 0.1 for lrclib, 1.0 for genius")
+@click.option("--source", type=click.Choice(["lrclib", "genius", "all"]),
+              default="all", help="Source: lrclib, genius, or all (per-track cascade)")
+def fetch_lyrics(limit, no_skip, delay, source):
+    """Fetch lyrics from LRCLIB and/or Genius.
 
-    click.echo("🎤 Fetching lyrics from LRCLIB...")
+    --source all: per-track cascade (LRCLIB first, Genius fallback if not found).
+    --source genius: tries Genius for tracks where LRCLIB already failed first,
+                     then tracks never attempted by any source.
+    --source lrclib: LRCLIB only.
+    """
+    from config import settings
+
+    use_genius = source in ("genius", "all")
+    use_lrclib = source in ("lrclib", "all")
+
+    # Validate Genius token
+    if use_genius and not settings.genius_access_token:
+        if source == "genius":
+            click.echo("❌ GENIUS_ACCESS_TOKEN not set in .env", err=True)
+            sys.exit(1)
+        else:
+            click.echo("⚠️  GENIUS_ACCESS_TOKEN not set — Genius fallback disabled")
+            use_genius = False
+
     skip_existing = not no_skip
-    click.echo(f"{'⚠️  Re-fetching all tracks' if no_skip else '✓ Skipping tracks already fetched'}")
+    lrclib_delay = delay if delay is not None else 0.1
+    genius_delay = delay if delay is not None else 1.0
+
+    mode_desc = {
+        "all": "per-track cascade (LRCLIB → Genius)",
+        "lrclib": "LRCLIB only",
+        "genius": "Genius only (LRCLIB failures first)",
+    }
+    click.echo(f"🎤 Fetching lyrics — {mode_desc[source]}")
+    click.echo(f"{'⚠️  Re-fetching all tracks' if no_skip else '✓ Skipping already attempted'}")
     if limit:
         click.echo(f"⚠️  Limited to {limit} tracks")
-    click.echo(f"⏱️  Rate limit: {delay}s between requests")
     click.echo()
 
     try:
+        # Initialize services
+        lrclib_service = None
+        genius_service = None
+
+        if use_lrclib:
+            from lrclib import LrclibService
+            lrclib_service = LrclibService()
+        if use_genius:
+            from genius import GeniusService
+            genius_service = GeniusService(settings.genius_access_token)
+
         with get_db_context() as db:
-            # Get tracks to process
-            if skip_existing:
-                # Skip tracks that already have lyrics or a previous fetch attempt
+            # Build track list depending on mode
+            if source == "genius":
+                # Genius-only: prioritize tracks where LRCLIB already failed
+                query = text("""
+                    SELECT t.id as track_id, t.title,
+                           a.name as artist,
+                           al.title as album,
+                           mf.duration_seconds,
+                           CASE WHEN em_lrclib.fetch_status = 'not_found' THEN 0 ELSE 1 END as priority
+                    FROM tracks t
+                    JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+                    JOIN artists a ON ta.artist_id = a.id
+                    JOIN media_files mf ON mf.track_id = t.id
+                    JOIN album_variants av ON mf.album_variant_id = av.id
+                    JOIN albums al ON av.album_id = al.id
+                    LEFT JOIN external_metadata em_lrclib
+                        ON em_lrclib.entity_type = 'track'
+                        AND em_lrclib.entity_id = t.id::text
+                        AND em_lrclib.source = 'lrclib'
+                        AND em_lrclib.metadata_type = 'lyrics'
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM track_lyrics tl WHERE tl.track_id = t.id
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM external_metadata em
+                        WHERE em.entity_type = 'track'
+                          AND em.entity_id = t.id::text
+                          AND em.source = 'genius'
+                          AND em.metadata_type = 'lyrics'
+                    )
+                    GROUP BY t.id, t.title, a.name, al.title, mf.duration_seconds, em_lrclib.fetch_status
+                    ORDER BY priority, a.name, al.title, t.title
+                """)
+            elif skip_existing:
+                # lrclib or all: tracks without lyrics and not yet attempted by first source
+                first_source = "lrclib" if use_lrclib else "genius"
                 query = text("""
                     SELECT t.id as track_id, t.title,
                            a.name as artist,
@@ -1193,19 +1265,18 @@ def fetch_lyrics(limit, no_skip, delay):
                     JOIN album_variants av ON mf.album_variant_id = av.id
                     JOIN albums al ON av.album_id = al.id
                     WHERE NOT EXISTS (
-                        SELECT 1 FROM track_lyrics tl
-                        WHERE tl.track_id = t.id AND tl.source = 'lrclib'
+                        SELECT 1 FROM track_lyrics tl WHERE tl.track_id = t.id
                     )
                     AND NOT EXISTS (
                         SELECT 1 FROM external_metadata em
                         WHERE em.entity_type = 'track'
                           AND em.entity_id = t.id::text
-                          AND em.source = 'lrclib'
+                          AND em.source = :source
                           AND em.metadata_type = 'lyrics'
                     )
                     GROUP BY t.id, t.title, a.name, al.title, mf.duration_seconds
                     ORDER BY a.name, al.title, t.title
-                """)
+                """).bindparams(source=first_source)
             else:
                 query = text("""
                     SELECT t.id as track_id, t.title,
@@ -1223,7 +1294,13 @@ def fetch_lyrics(limit, no_skip, delay):
                 """)
 
             if limit:
-                query = text(str(query) + f" LIMIT {limit}")
+                raw_sql = str(query.text) if hasattr(query, 'text') else str(query)
+                if skip_existing and source != "genius":
+                    query = text(raw_sql + f" LIMIT {limit}").bindparams(source="lrclib" if use_lrclib else "genius")
+                elif source == "genius":
+                    query = text(raw_sql + f" LIMIT {limit}")
+                else:
+                    query = text(raw_sql + f" LIMIT {limit}")
 
             tracks = db.execute(query).fetchall()
 
@@ -1236,74 +1313,105 @@ def fetch_lyrics(limit, no_skip, delay):
 
             stats = {
                 "processed": 0,
-                "synced": 0,
-                "plain_only": 0,
-                "instrumental": 0,
-                "not_found": 0,
-                "errors": 0,
+                "synced": 0, "plain_only": 0, "instrumental": 0,
+                "not_found": 0, "errors": 0,
+                "lrclib_found": 0, "genius_found": 0,
             }
 
-            with LrclibService() as service:
-                for i, row in enumerate(tracks, 1):
-                    track_id = row.track_id
-                    artist = row.artist
-                    title = row.title
-                    album = row.album
-                    duration = int(row.duration_seconds) if row.duration_seconds else None
+            for i, row in enumerate(tracks, 1):
+                track_id = row.track_id
+                artist = row.artist
+                title = row.title
+                album = row.album
+                duration = int(row.duration_seconds) if row.duration_seconds else None
 
-                    try:
-                        result = service.fetch_and_store(
-                            db,
-                            track_id=track_id,
-                            track_name=title,
-                            artist_name=artist,
-                            album_name=album,
-                            duration=duration,
+                found_by = None
+                status = None
+
+                try:
+                    # Try LRCLIB first (if enabled)
+                    if lrclib_service:
+                        result = lrclib_service.fetch_and_store(
+                            db, track_id=track_id, track_name=title,
+                            artist_name=artist, album_name=album, duration=duration,
+                        )
+                        status = result["status"]
+                        if status not in ("not_found", "error"):
+                            found_by = "lrclib"
+
+                        if lrclib_delay > 0:
+                            time.sleep(lrclib_delay)
+
+                    # Try Genius fallback (if enabled and not found yet)
+                    if genius_service and found_by is None:
+                        result = genius_service.fetch_and_store(
+                            db, track_id=track_id, track_name=title,
+                            artist_name=artist, album_name=album, duration=duration,
+                        )
+                        status = result["status"]
+                        if status not in ("not_found", "error"):
+                            found_by = "genius"
+
+                        if genius_delay > 0:
+                            time.sleep(genius_delay)
+
+                    stats["processed"] += 1
+
+                    if status == "synced":
+                        stats["synced"] += 1
+                        icon = "🎵"
+                    elif status == "plain":
+                        stats["plain_only"] += 1
+                        icon = "📝"
+                    elif status == "instrumental":
+                        stats["instrumental"] += 1
+                        icon = "🎹"
+                    elif status == "not_found":
+                        stats["not_found"] += 1
+                        icon = "❌"
+                    else:
+                        stats["errors"] += 1
+                        icon = "⚠️"
+
+                    if found_by:
+                        stats[f"{found_by}_found"] += 1
+
+                    source_tag = f" [{found_by}]" if found_by else ""
+                    if i % 50 == 0 or i == total:
+                        click.echo(
+                            f"  [{i}/{total}] {icon} {artist} - {title} → {status}{source_tag}"
                         )
 
-                        status = result["status"]
-                        stats["processed"] += 1
+                except Exception as e:
+                    db.rollback()
+                    stats["errors"] += 1
+                    stats["processed"] += 1
+                    logger.error(f"Error processing {artist} - {title}: {e}")
+                    if i % 50 == 0:
+                        click.echo(f"  [{i}/{total}] ⚠️ {artist} - {title} → error")
 
-                        if status == "synced":
-                            stats["synced"] += 1
-                            icon = "🎵"
-                        elif status == "plain":
-                            stats["plain_only"] += 1
-                            icon = "📝"
-                        elif status == "instrumental":
-                            stats["instrumental"] += 1
-                            icon = "🎹"
-                        elif status == "not_found":
-                            stats["not_found"] += 1
-                            icon = "❌"
-                        else:
-                            stats["errors"] += 1
-                            icon = "⚠️"
-
-                        if i % 50 == 0 or i == total:
-                            click.echo(
-                                f"  [{i}/{total}] {icon} {artist} - {title} → {status}"
-                            )
-
-                    except Exception as e:
-                        stats["errors"] += 1
-                        stats["processed"] += 1
-                        logger.error(f"Error processing {artist} - {title}: {e}")
-                        if i % 50 == 0:
-                            click.echo(f"  [{i}/{total}] ⚠️ {artist} - {title} → error")
-
-                    # Rate limiting
-                    if delay > 0:
-                        time.sleep(delay)
-
-            click.echo(f"\n✅ LRCLIB lyrics fetch complete!")
+            click.echo(f"\n✅ Lyrics fetch complete!")
             click.echo(f"📊 Statistics:")
             click.echo(f"   • Processed: {stats['processed']} tracks")
-            click.echo(f"   • Synced lyrics: {stats['synced']}")
-            click.echo(f"   • Plain only: {stats['plain_only']}")
-            click.echo(f"   • Instrumental: {stats['instrumental']}")
+            if stats['synced']:
+                click.echo(f"   • Synced lyrics: {stats['synced']}")
+            if stats['plain_only']:
+                click.echo(f"   • Plain lyrics: {stats['plain_only']}")
+            if stats['instrumental']:
+                click.echo(f"   • Instrumental: {stats['instrumental']}")
             click.echo(f"   • Not found: {stats['not_found']}")
-            click.echo(f"   • Errors: {stats['errors']}")
+            if stats['errors']:
+                click.echo(f"   • Errors: {stats['errors']}")
+            if use_lrclib and stats['lrclib_found']:
+                click.echo(f"   • Found by LRCLIB: {stats['lrclib_found']}")
+            if use_genius and stats['genius_found']:
+                click.echo(f"   • Found by Genius: {stats['genius_found']}")
+
+        # Close services
+        if lrclib_service:
+            lrclib_service.close()
+        if genius_service:
+            genius_service.close()
 
     except Exception as e:
         click.echo(f"\n❌ Error: {e}", err=True)

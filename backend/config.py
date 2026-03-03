@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     lastfm_username: Optional[str] = None
     lastfm_session_key: Optional[str] = None
 
+    # Genius API (lyrics source)
+    genius_access_token: Optional[str] = None
+
     # HQPlayer Integration (Phase 3.2)
     hqplayer_host: str = "localhost"
     hqplayer_port: int = 4321
