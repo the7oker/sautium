@@ -2166,23 +2166,41 @@ Embeddings з тексту пісень для семантичного пошу
 
 **Архітектура:**
 - Окрема таблиця `lyrics_embeddings` (не `text_embeddings` — різна семантика, можливі кілька чанків на трек)
-- Model: all-MiniLM-L6-v2 (384d), та ж модель що і text_embeddings
+- Model: `paraphrase-multilingual-MiniLM-L12-v2` (384d, 50+ мов — Japanese, Chinese, Ukrainian, etc.)
 - Обробка тексту: дедуплікація рядків → видалення stop words → chunking (якщо > 200 tokens)
+- `--worker-id/--worker-count/--max-duration` підтримка для паралельної генерації
 
 **Нові/змінені файли:**
 - `backend/lyrics_embeddings.py` — **новий**: `LyricsEmbeddingGenerator`, `prepare_lyrics_text`, `split_into_balanced_chunks`
 - `backend/models.py` — додано `LyricsEmbedding` клас + relationship в `Track`
 - `backend/search.py` — додано `search_by_lyrics()` (GROUP BY track_id, MAX similarity across chunks)
 - `backend/main.py` — endpoint `GET /search/lyrics`
-- `backend/tools/definitions.py` — tool `search_lyrics` (21-й інструмент)
-- `backend/cli.py` — команда `generate-lyrics-embeddings`
+- `backend/tools/definitions.py` — tool `search_lyrics` (21-й інструмент) + `get_lyrics` (22-й)
+- `backend/cli.py` — команди `generate-lyrics-embeddings`, `generate-text-embeddings`
 - `backend/claude_dj_prompt.py` — оновлено schema + tools list
-- `backend/config.py` — додано `text_embedding_model/dimension/batch_size` settings
+- `backend/config.py` — модель змінена на multilingual
 - `scripts/init_db.sql` — таблиця `lyrics_embeddings` з HNSW index
 
 **Тестування:**
-- 16 треків → 17 embeddings (один трек з довгим текстом розбито на 2 чанки)
-- Пошук `"feeling numb and disconnected"` → Pink Floyd - Comfortably Numb (similarity 0.41)
+- ~57,000 chunks згенеровано для ~7,600 треків
+- Пошук `"feeling numb and disconnected"` → Pink Floyd - Comfortably Numb
+- Мультилінгвальний пошук: `"море хвилі"` → Скрябін (similarity 0.73)
+
+## get_lyrics Tool for AI DJ - DONE
+
+### What was done
+AI DJ тепер може відповідати на питання "про що ця пісня?"
+
+**Новий tool:** `get_lyrics(track_id)` — 22-й інструмент AI DJ
+- Повертає повний текст пісні з `track_lyrics` таблиці
+- Обирає кращий источник (lrclib > genius)
+- Коректно обробляє інструментальні треки та треки без lyrics
+
+**Сценарій використання:**
+1. Користувач: "про що ця пісня?"
+2. AI DJ: `hqplayer_get_status` → дізнається track_id
+3. AI DJ: `get_lyrics(track_id)` → дістає текст
+4. Claude аналізує і пояснює зміст
 
 ---
 
@@ -2193,7 +2211,7 @@ Embeddings з тексту пісень для семантичного пошу
 ### Phase 3: Audio Analysis & Playback - COMPLETE ✅
 - [x] **Step 3.1: Audio Feature Extraction (librosa + CLAP zero-shot)** ✅
 - [x] **Step 3.2: HQPlayer Control** ✅
-- [x] **Step 3.3: MCP Server for HQPlayer** ✅ (21 tool)
+- [x] **Step 3.3: MCP Server for HQPlayer** ✅ (22 tools)
 - [x] **Step 3.4: Web UI** ✅
   - FastAPI static files + vanilla JS frontend
   - Player controls (play/pause/stop/next/prev, volume, progress, playlist)
@@ -2209,7 +2227,8 @@ Embeddings з тексту пісень для семантичного пошу
 - [x] **Lyrics semantic search (embeddings)** ✅
 - [x] **Windows desktop launcher** ✅
 - [x] **Multi-provider LLM (Anthropic, OpenAI, Groq)** ✅
-- [x] **Tool-based AI DJ (21 tools)** ✅
+- [x] **Tool-based AI DJ (22 tools)** ✅ — додано `get_lyrics`
+- [x] **Multilingual text embeddings** ✅ — `paraphrase-multilingual-MiniLM-L12-v2` (50+ мов)
 
 ### Phase 4: Voice Interface & Advanced Features
 - Whisper for voice input (Ukrainian/English)
@@ -2218,7 +2237,7 @@ Embeddings з тексту пісень для семантичного пошу
 - Listening statistics and user preferences
 
 ### Upcoming
-- Fetch more lyrics (extend library coverage — full scan running)
+- Regenerate text + lyrics embeddings with multilingual model (paraphrase-multilingual-MiniLM-L12-v2)
+- Fetch more lyrics (extend library coverage)
 - Musixmatch as third lyrics source (if needed after Genius coverage analysis)
-- Text embeddings regeneration for updated metadata
 - Audio analysis for remaining tracks
