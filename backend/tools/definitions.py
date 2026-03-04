@@ -300,6 +300,31 @@ def _h_search_lyrics(query: str, limit: int = 15) -> str:
         return f"Error in lyrics search: {e}"
 
 
+def _h_get_lyrics(track_id: int) -> str:
+    row = _db_query_one("""
+        SELECT t.title, a.name as artist, tl.source, tl.plain_lyrics, tl.instrumental
+        FROM tracks t
+        JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+        JOIN artists a ON a.id = ta.artist_id
+        LEFT JOIN track_lyrics tl ON tl.track_id = t.id
+        WHERE t.id = %(track_id)s
+        ORDER BY CASE tl.source WHEN 'lrclib' THEN 1 WHEN 'genius' THEN 2 ELSE 3 END
+        LIMIT 1
+    """, {"track_id": str(track_id)})
+
+    if not row:
+        return f"Track {track_id} not found."
+    if row.get("instrumental"):
+        return f"{row['artist']} - {row['title']}: instrumental track (no lyrics)."
+    if not row.get("plain_lyrics"):
+        return f"{row['artist']} - {row['title']}: lyrics not available."
+
+    return (
+        f"{row['artist']} - {row['title']} [source: {row['source']}]\n\n"
+        f"{row['plain_lyrics']}"
+    )
+
+
 def _h_get_track_info(track_id: int) -> str:
     try:
         from hqplayer_client import format_time
@@ -784,6 +809,17 @@ def register_all():
             ToolParam("limit", "integer", "Maximum number of results (default 15)", required=False, default=15),
         ],
         handler=_h_search_lyrics,
+    ))
+
+    REGISTRY.register(ToolDef(
+        name="get_lyrics",
+        description="Get the full lyrics text for a specific track. "
+                    "Use this when the user asks what a song is about, to quote lyrics, "
+                    "or to analyze lyrical content of a specific track.",
+        parameters=[
+            ToolParam("track_id", "integer", "The track ID from the database", required=True),
+        ],
+        handler=_h_get_lyrics,
     ))
 
     REGISTRY.register(ToolDef(
