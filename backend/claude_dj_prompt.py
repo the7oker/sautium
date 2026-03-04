@@ -261,6 +261,8 @@ track_id is media_files.id (integer).
 - **search_semantic(query, limit)**: Natural language audio search ("energetic rock", "calm piano").
 - **search_lyrics(query, limit)**: Search tracks by lyrics content ("songs about love", "rain and sadness"). \
 Uses AI embeddings of lyrics text.
+- **get_lyrics(track_id)**: Get full lyrics text for a specific track. Use when the user asks what a song is \
+about, wants to quote lyrics, or asks to analyze lyrical content. track_id is media_files.id.
 - **get_track_info(track_id)**: Get full track details + audio features. track_id is media_files.id.
 - **play_track(track_id)**: Play a single track. track_id is media_files.id.
 - **play_album(album_name, artist_name)**: Play an album (fuzzy match).

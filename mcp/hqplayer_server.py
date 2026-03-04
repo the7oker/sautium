@@ -505,6 +505,72 @@ def search_semantic(query: str, limit: int = 15) -> str:
 
 
 @mcp.tool()
+def search_lyrics(query: str, limit: int = 15) -> str:
+    """Search tracks by lyrics content using AI semantic understanding.
+
+    Finds songs whose lyrics match a description.
+    E.g. 'songs about love', 'rain and sadness', 'protest and freedom', 'dancing in the moonlight'.
+
+    Args:
+        query: Description of lyrical content to search for
+        limit: Maximum number of results (default 15)
+    """
+    try:
+        with httpx.Client(base_url=BACKEND_URL, timeout=30.0) as client:
+            resp = client.post(
+                "/search/lyrics",
+                params={"query": query, "limit": limit},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        rows = data.get("results", [])
+        return _format_track_list(rows, f"Lyrics search for '{query}' ({len(rows)} results):")
+    except httpx.ConnectError:
+        return "Error: Cannot connect to backend for lyrics search."
+    except Exception as e:
+        return f"Error in lyrics search: {e}"
+
+
+@mcp.tool()
+def get_lyrics(track_id: int) -> str:
+    """Get the full lyrics text for a specific track.
+
+    Use this when the user asks what a song is about, to quote lyrics,
+    or to analyze lyrical content of a specific track.
+
+    Args:
+        track_id: The track ID from the database
+    """
+    try:
+        row = _db_query_one("""
+            SELECT t.title, a.name as artist, tl.source, tl.plain_lyrics, tl.instrumental
+            FROM media_files mf
+            JOIN tracks t ON mf.track_id = t.id
+            JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+            JOIN artists a ON a.id = ta.artist_id
+            LEFT JOIN track_lyrics tl ON tl.track_id = t.id
+            WHERE mf.id = %(track_id)s
+            ORDER BY CASE tl.source WHEN 'lrclib' THEN 1 WHEN 'genius' THEN 2 ELSE 3 END
+            LIMIT 1
+        """, {"track_id": track_id})
+
+        if not row:
+            return f"Track {track_id} not found."
+        if row.get("instrumental"):
+            return f"{row['artist']} - {row['title']}: instrumental track (no lyrics)."
+        if not row.get("plain_lyrics"):
+            return f"{row['artist']} - {row['title']}: lyrics not available."
+
+        return (
+            f"{row['artist']} - {row['title']} [source: {row['source']}]\n\n"
+            f"{row['plain_lyrics']}"
+        )
+    except Exception as e:
+        return f"Error getting lyrics: {e}"
+
+
+@mcp.tool()
 def get_track_info(track_id: int) -> str:
     """Get full details about a specific track including audio features.
 

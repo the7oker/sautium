@@ -104,7 +104,8 @@ def _get_player_context() -> Optional[str]:
                 playlist_lines = [f"Playlist ({len(pl_tracks)} tracks):"]
                 for t in pl_tracks:
                     marker = " >>> " if t.get("index") == (current_idx - 1 if current_idx else -1) else "     "
-                    playlist_lines.append(f"{marker}{t.get('artist', '?')} - {t.get('title', '?')}")
+                    tid = f" [ID:{t['id']}]" if t.get("id") else ""
+                    playlist_lines.append(f"{marker}{t.get('artist', '?')} - {t.get('title', '?')}{tid}")
                 parts.append("\n".join(playlist_lines))
         except Exception:
             pass

@@ -303,11 +303,12 @@ def _h_search_lyrics(query: str, limit: int = 15) -> str:
 def _h_get_lyrics(track_id: int) -> str:
     row = _db_query_one("""
         SELECT t.title, a.name as artist, tl.source, tl.plain_lyrics, tl.instrumental
-        FROM tracks t
+        FROM media_files mf
+        JOIN tracks t ON mf.track_id = t.id
         JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
         JOIN artists a ON a.id = ta.artist_id
         LEFT JOIN track_lyrics tl ON tl.track_id = t.id
-        WHERE t.id = %(track_id)s
+        WHERE mf.id = %(track_id)s
         ORDER BY CASE tl.source WHEN 'lrclib' THEN 1 WHEN 'genius' THEN 2 ELSE 3 END
         LIMIT 1
     """, {"track_id": str(track_id)})
