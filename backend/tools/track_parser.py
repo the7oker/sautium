@@ -13,8 +13,10 @@ logger = logging.getLogger(__name__)
 
 
 def extract_tracks(text: str) -> list[dict[str, Any]]:
-    """Extract track list from [DJ_TRACKS][...][/DJ_TRACKS] marker."""
-    match = re.search(r'\[DJ_TRACKS\]\s*(\[.*?\])\s*\[/DJ_TRACKS\]', text, re.DOTALL)
+    """Extract track list from [DJ_TRACKS][...][/DJ_TRACKS] marker.
+    Closing tag [/DJ_TRACKS] is optional for robustness.
+    """
+    match = re.search(r'\[DJ_TRACKS\]\s*(\[.*?\])\s*(?:\[/DJ_TRACKS\])?', text, re.DOTALL)
     if not match:
         return []
 
@@ -38,6 +40,8 @@ def extract_tracks(text: str) -> list[dict[str, Any]]:
 
 
 def strip_tracks_marker(text: str) -> str:
-    """Remove [DJ_TRACKS]...[/DJ_TRACKS] block from answer text."""
-    cleaned = re.sub(r'\s*\[DJ_TRACKS\].*?\[/DJ_TRACKS\]\s*', '', text, flags=re.DOTALL)
+    """Remove [DJ_TRACKS]...[/DJ_TRACKS] block from answer text.
+    Closing tag [/DJ_TRACKS] is optional for robustness.
+    """
+    cleaned = re.sub(r'\s*\[DJ_TRACKS\]\s*\[.*?\]\s*(?:\[/DJ_TRACKS\])?\s*', '', text, flags=re.DOTALL)
     return cleaned.strip()
