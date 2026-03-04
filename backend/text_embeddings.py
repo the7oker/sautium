@@ -262,6 +262,8 @@ class TextEmbeddingGenerator:
         order_by_date: bool = False,
         max_duration_seconds: Optional[int] = None,
         track_ids: Optional[list] = None,
+        worker_id: Optional[int] = None,
+        worker_count: Optional[int] = None,
     ) -> Dict[str, int]:
         """
         Generate text embeddings for all tracks (or those missing them).
@@ -313,6 +315,10 @@ class TextEmbeddingGenerator:
 
         rows = db.execute(sa_text(query_sql), params).fetchall()
         pending_track_ids = [r[0] for r in rows]
+
+        # Worker partitioning: each worker takes every Nth item
+        if worker_id is not None and worker_count is not None:
+            pending_track_ids = pending_track_ids[worker_id::worker_count]
 
         if not pending_track_ids:
             logger.info("No tracks pending text embedding generation")
@@ -404,6 +410,8 @@ def generate_text_embeddings(
     order_by_date: bool = False,
     max_duration_seconds: Optional[int] = None,
     track_ids: Optional[list] = None,
+    worker_id: Optional[int] = None,
+    worker_count: Optional[int] = None,
 ) -> Dict[str, int]:
     """
     Convenience function to generate text embeddings.
@@ -422,6 +430,10 @@ def generate_text_embeddings(
     generator = TextEmbeddingGenerator(batch_size=batch_size)
     try:
         with get_db_context() as db:
-            return generator.generate_all(db, limit=limit, force=force, order_by_date=order_by_date, max_duration_seconds=max_duration_seconds, track_ids=track_ids)
+            return generator.generate_all(
+                db, limit=limit, force=force, order_by_date=order_by_date,
+                max_duration_seconds=max_duration_seconds, track_ids=track_ids,
+                worker_id=worker_id, worker_count=worker_count,
+            )
     finally:
         generator.unload_model()

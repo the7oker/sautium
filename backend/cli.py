@@ -1475,5 +1475,59 @@ def generate_lyrics_embeddings_cmd(limit, batch_size, force, max_duration, worke
         sys.exit(1)
 
 
+@cli.command("generate-text-embeddings")
+@click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process")
+@click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default from config)")
+@click.option("--force", is_flag=True, help="Regenerate embeddings even if they already exist")
+@click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 3600 for 1 hour)")
+@click.option("--worker-id", type=int, default=None, help="Worker index (0-based) for parallel processing")
+@click.option("--worker-count", type=int, default=None, help="Total number of workers for parallel processing")
+def generate_text_embeddings_cmd(limit, batch_size, force, max_duration, worker_id, worker_count):
+    """Generate text embeddings from track metadata for semantic search."""
+    from text_embeddings import generate_text_embeddings
+
+    click.echo("📝 Generating text embeddings...")
+    click.echo(f"🤖 Model: {settings.text_embedding_model}")
+    if limit:
+        click.echo(f"⚠️  Limited to {limit} tracks")
+    if force:
+        click.echo(f"🔄 Force regenerating existing embeddings")
+    if max_duration:
+        click.echo(f"⏱️  Time limit: {max_duration}s ({max_duration/60:.1f} min)")
+
+    if (worker_id is not None) != (worker_count is not None):
+        click.echo("❌ Both --worker-id and --worker-count must be specified together", err=True)
+        sys.exit(1)
+    if worker_count is not None:
+        if worker_count < 1:
+            click.echo("❌ --worker-count must be >= 1", err=True)
+            sys.exit(1)
+        if worker_id < 0 or worker_id >= worker_count:
+            click.echo(f"❌ --worker-id must be in range [0, {worker_count - 1}]", err=True)
+            sys.exit(1)
+        click.echo(f"👷 Worker {worker_id + 1}/{worker_count}")
+
+    try:
+        stats = generate_text_embeddings(
+            limit=limit,
+            batch_size=batch_size,
+            force=force,
+            max_duration_seconds=max_duration,
+            worker_id=worker_id,
+            worker_count=worker_count,
+        )
+
+        click.echo(f"\n✅ Text embedding generation complete!")
+        click.echo(f"📊 Statistics:")
+        click.echo(f"   • Processed: {stats['processed']} tracks")
+        click.echo(f"   • Success: {stats['success']} tracks")
+        click.echo(f"   • Failed: {stats['failed']} tracks")
+
+    except Exception as e:
+        click.echo(f"\n❌ Error: {e}", err=True)
+        logger.exception("Text embedding generation failed")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     cli()

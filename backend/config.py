@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     embedding_batch_size: int = 16
 
     # Text Embedding Configuration (sentence-transformers)
-    text_embedding_model: str = "all-MiniLM-L6-v2"
+    text_embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
     text_embedding_dimension: int = 384
     text_embedding_batch_size: int = 64
 
