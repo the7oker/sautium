@@ -1423,7 +1423,10 @@ def fetch_lyrics(limit, no_skip, delay, source):
 @click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process")
 @click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default from config)")
 @click.option("--force", is_flag=True, help="Regenerate embeddings even if they already exist")
-def generate_lyrics_embeddings_cmd(limit, batch_size, force):
+@click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 3600 for 1 hour)")
+@click.option("--worker-id", type=int, default=None, help="Worker index (0-based) for parallel processing")
+@click.option("--worker-count", type=int, default=None, help="Total number of workers for parallel processing")
+def generate_lyrics_embeddings_cmd(limit, batch_size, force, max_duration, worker_id, worker_count):
     """Generate embeddings from track lyrics for semantic lyrics search."""
     from lyrics_embeddings import generate_lyrics_embeddings
 
@@ -1432,12 +1435,30 @@ def generate_lyrics_embeddings_cmd(limit, batch_size, force):
         click.echo(f"⚠️  Limited to {limit} tracks")
     if force:
         click.echo(f"🔄 Force regenerating existing embeddings")
+    if max_duration:
+        click.echo(f"⏱️  Time limit: {max_duration}s ({max_duration/60:.1f} min)")
+
+    # Validate worker options
+    if (worker_id is not None) != (worker_count is not None):
+        click.echo("❌ Both --worker-id and --worker-count must be specified together", err=True)
+        sys.exit(1)
+    if worker_count is not None:
+        if worker_count < 1:
+            click.echo("❌ --worker-count must be >= 1", err=True)
+            sys.exit(1)
+        if worker_id < 0 or worker_id >= worker_count:
+            click.echo(f"❌ --worker-id must be in range [0, {worker_count - 1}]", err=True)
+            sys.exit(1)
+        click.echo(f"👷 Worker {worker_id + 1}/{worker_count}")
 
     try:
         stats = generate_lyrics_embeddings(
             limit=limit,
             batch_size=batch_size,
             force=force,
+            max_duration_seconds=max_duration,
+            worker_id=worker_id,
+            worker_count=worker_count,
         )
 
         click.echo(f"\n✅ Lyrics embedding generation complete!")

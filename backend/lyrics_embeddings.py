@@ -204,6 +204,9 @@ class LyricsEmbeddingGenerator:
         limit: Optional[int] = None,
         force: bool = False,
         track_ids: Optional[list] = None,
+        max_duration_seconds: Optional[int] = None,
+        worker_id: Optional[int] = None,
+        worker_count: Optional[int] = None,
     ) -> Dict[str, int]:
         """
         Generate lyrics embeddings for tracks with lyrics.
@@ -213,6 +216,9 @@ class LyricsEmbeddingGenerator:
             limit: Max tracks to process.
             force: If True, delete existing and regenerate.
             track_ids: If provided, only process these track IDs.
+            max_duration_seconds: Stop after this many seconds.
+            worker_id: Worker index (0-based) for parallel processing.
+            worker_count: Total number of workers.
 
         Returns:
             Stats dict with processed, success, skipped, failed, chunks counts.
@@ -252,11 +258,17 @@ class LyricsEmbeddingGenerator:
 
         rows = db.execute(sa_text(query_sql), params).fetchall()
 
+        # Worker partitioning: each worker takes every Nth row
+        if worker_id is not None and worker_count is not None:
+            rows = rows[worker_id::worker_count]
+
         if not rows:
             logger.info("No tracks pending lyrics embedding generation")
             return stats
 
         logger.info(f"Processing {len(rows)} tracks for lyrics embeddings")
+        if max_duration_seconds:
+            logger.info(f"Time limit: {max_duration_seconds}s ({max_duration_seconds/60:.1f} min)")
 
         self.load_model()
         model_record = self._get_or_create_model_record(db)
@@ -278,6 +290,13 @@ class LyricsEmbeddingGenerator:
             desc="Generating lyrics embeddings",
             unit="batch",
         ):
+            # Check time limit before starting new batch
+            if max_duration_seconds:
+                elapsed = time.time() - start_time
+                if elapsed >= max_duration_seconds:
+                    logger.info(f"Time limit reached ({elapsed:.1f}s), stopping gracefully")
+                    break
+
             batch_rows = rows[batch_start : batch_start + batch_size]
 
             # Prepare all chunks for this batch
@@ -360,6 +379,9 @@ def generate_lyrics_embeddings(
     batch_size: Optional[int] = None,
     force: bool = False,
     track_ids: Optional[list] = None,
+    max_duration_seconds: Optional[int] = None,
+    worker_id: Optional[int] = None,
+    worker_count: Optional[int] = None,
 ) -> Dict[str, int]:
     """
     Convenience function to generate lyrics embeddings.
@@ -369,6 +391,9 @@ def generate_lyrics_embeddings(
         batch_size: Override default batch size.
         force: Regenerate even if already exists.
         track_ids: If provided, only process these track IDs.
+        max_duration_seconds: Stop after this many seconds.
+        worker_id: Worker index (0-based) for parallel processing.
+        worker_count: Total number of workers.
 
     Returns:
         Statistics dictionary.
@@ -376,6 +401,10 @@ def generate_lyrics_embeddings(
     generator = LyricsEmbeddingGenerator(batch_size=batch_size)
     try:
         with get_db_context() as db:
-            return generator.generate_all(db, limit=limit, force=force, track_ids=track_ids)
+            return generator.generate_all(
+                db, limit=limit, force=force, track_ids=track_ids,
+                max_duration_seconds=max_duration_seconds,
+                worker_id=worker_id, worker_count=worker_count,
+            )
     finally:
         generator.unload_model()
