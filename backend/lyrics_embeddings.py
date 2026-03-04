@@ -327,6 +327,7 @@ class LyricsEmbeddingGenerator:
             # Save embeddings
             current_track = None
             track_ok = True
+            batch_failed_tracks = set()
             for (track_id, chunk_index, chunk_text), vector in zip(all_chunks, embeddings):
                 if track_id != current_track:
                     current_track = track_id
@@ -350,14 +351,12 @@ class LyricsEmbeddingGenerator:
                     logger.error(f"Failed to save lyrics embedding for track {track_id} chunk {chunk_index}: {e}")
                     db.rollback()
                     track_ok = False
-                    stats["failed"] += 1
+                    batch_failed_tracks.add(track_id)
 
-            # Count successful tracks in this batch
-            successful_tracks = set()
-            for track_id, _, _ in all_chunks:
-                successful_tracks.add(track_id)
-            stats["success"] += len(successful_tracks) - stats["failed"]
-
+            # Count per-batch stats
+            batch_all_tracks = {tid for tid, _, _ in all_chunks}
+            stats["failed"] += len(batch_failed_tracks)
+            stats["success"] += len(batch_all_tracks) - len(batch_failed_tracks)
             stats["processed"] += len(batch_rows)
 
             # Commit after each batch
