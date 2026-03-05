@@ -155,34 +155,23 @@ async def get_stats() -> Dict[str, Any]:
     from sqlalchemy import text
     from database import get_db_context
 
+    defaults = {
+        "total_artists": 0, "total_albums": 0, "total_tracks": 0,
+        "total_media_files": 0, "tracks_with_embeddings": 0,
+        "tracks_with_lyrics": 0, "total_duration_seconds": 0,
+        "total_file_size_bytes": 0, "unique_genres": 0,
+    }
     try:
         with get_db_context() as db:
             result = db.execute(text("SELECT * FROM library_stats")).fetchone()
 
             if result:
-                return {
-                    "total_artists": result[0],
-                    "total_albums": result[1],
-                    "total_tracks": result[2],
-                    "total_media_files": result[3],
-                    "tracks_with_embeddings": result[4],
-                    "tracks_with_lyrics": result[5],
-                    "total_duration_seconds": float(result[6]) if result[6] else 0,
-                    "total_file_size_bytes": result[7] or 0,
-                    "unique_genres": result[8],
-                }
+                row = dict(result._mapping)
+                dur = row.get("total_duration_seconds")
+                row["total_duration_seconds"] = float(dur) if dur else 0
+                return {**defaults, **row}
             else:
-                return {
-                    "total_artists": 0,
-                    "total_albums": 0,
-                    "total_tracks": 0,
-                    "total_media_files": 0,
-                    "tracks_with_embeddings": 0,
-                    "tracks_with_lyrics": 0,
-                    "total_duration_seconds": 0,
-                    "total_file_size_bytes": 0,
-                    "unique_genres": 0,
-                }
+                return defaults
     except Exception as e:
         logger.error(f"Failed to get stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
