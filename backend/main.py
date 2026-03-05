@@ -166,9 +166,10 @@ async def get_stats() -> Dict[str, Any]:
                     "total_tracks": result[2],
                     "total_media_files": result[3],
                     "tracks_with_embeddings": result[4],
-                    "total_duration_seconds": float(result[5]) if result[5] else 0,
-                    "total_file_size_bytes": result[6] or 0,
-                    "unique_genres": result[7],
+                    "tracks_with_lyrics": result[5],
+                    "total_duration_seconds": float(result[6]) if result[6] else 0,
+                    "total_file_size_bytes": result[7] or 0,
+                    "unique_genres": result[8],
                 }
             else:
                 return {
@@ -177,6 +178,7 @@ async def get_stats() -> Dict[str, Any]:
                     "total_tracks": 0,
                     "total_media_files": 0,
                     "tracks_with_embeddings": 0,
+                    "tracks_with_lyrics": 0,
                     "total_duration_seconds": 0,
                     "total_file_size_bytes": 0,
                     "unique_genres": 0,
