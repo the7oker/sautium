@@ -6,6 +6,9 @@
 -- Project namespace UUID (must match backend/uuid_utils.py NAMESPACE exactly)
 -- Used as literal below since set_config is transaction-scoped.
 
+-- Ensure uuid-ossp extension is available (needed for uuid_generate_v5)
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
 -- Normalization helper: lower + trim + collapse whitespace (matches Python normalize())
 CREATE OR REPLACE FUNCTION _djai_normalize(t text) RETURNS text AS $$
 BEGIN
