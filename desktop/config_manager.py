@@ -52,6 +52,11 @@ DEFAULT_CONFIG = {
         "username": None,
         "session_key": None,
     },
+    "p2p": {
+        "enabled": False,
+        "node_name": None,
+        "listen_port": 19000,
+    },
 }
 
 

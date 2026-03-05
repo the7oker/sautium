@@ -14,6 +14,7 @@ from typing import Optional
 
 import customtkinter as ctk
 
+from desktop.api_client import BackendAPIClient
 from desktop.config_manager import load_config, save_config, update_config
 from desktop.service_manager import ServiceManager
 from desktop.utils import get_local_ip, generate_qr_ctk
@@ -32,13 +33,15 @@ class LauncherApp(ctk.CTk):
         super().__init__()
 
         self.title("Music AI DJ")
-        self.geometry("480x580")
+        self.geometry("480x640")
         self.resizable(False, False)
 
         self.config = load_config()
         self.service_manager = ServiceManager(self.config)
+        self.api_client = BackendAPIClient()
         self.tray = None
         self._update_thread = None
+        self._stats_timer = None
 
         # Check first run
         if not self.config.get("first_run_complete"):
@@ -100,6 +103,31 @@ class LauncherApp(ctk.CTk):
             font=ctk.CTkFont(size=12),
         )
         self._url_label.pack(pady=(0, 5))
+
+        # Library stats section
+        stats_outer = ctk.CTkFrame(self)
+        stats_outer.pack(fill="x", padx=20, pady=5)
+
+        ctk.CTkLabel(
+            stats_outer, text="Library",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).pack(anchor="w", padx=10, pady=(5, 2))
+
+        stats_grid = ctk.CTkFrame(stats_outer, fg_color="transparent")
+        stats_grid.pack(fill="x", padx=10, pady=(0, 5))
+        stats_grid.columnconfigure((0, 1), weight=1)
+
+        self._stat_labels = {}
+        for i, (key, label) in enumerate([
+            ("tracks", "Tracks"), ("artists", "Artists"),
+            ("albums", "Albums"), ("embeddings", "Embeddings"),
+        ]):
+            lbl = ctk.CTkLabel(
+                stats_grid, text=f"{label}: —",
+                font=ctk.CTkFont(size=12), text_color="gray",
+            )
+            lbl.grid(row=i // 2, column=i % 2, sticky="w", padx=5, pady=1)
+            self._stat_labels[key] = lbl
 
         # Buttons
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -185,12 +213,65 @@ class LauncherApp(ctk.CTk):
         self._btn_open.configure(state="normal")
         self._progress_text.configure(text="")
 
+        # Connect API client to the right port
+        self.api_client.set_port(port)
+
+        # Fetch and display library stats
+        self._fetch_and_display_stats()
+
         # Generate QR code for LAN access
         qr_img = generate_qr_ctk(lan_url, size=180)
         if qr_img:
             self._qr_label.configure(image=qr_img, text="")
         else:
             self._qr_label.configure(text=f"Scan: {lan_url}")
+
+        # Silently generate node identity if not present
+        self._ensure_node_identity()
+
+    def _ensure_node_identity(self):
+        """Generate node identity on first run (non-blocking)."""
+        def _gen():
+            try:
+                from desktop.node_identity import has_identity, generate_identity
+                if not has_identity():
+                    generate_identity()
+                    logger.info("Node identity generated")
+            except Exception as e:
+                logger.debug(f"Node identity generation skipped: {e}")
+
+        threading.Thread(target=_gen, daemon=True).start()
+
+    def _fetch_and_display_stats(self):
+        """Fetch library stats from backend and update UI labels."""
+        def _fetch():
+            data = self.api_client.get_stats()
+            if data:
+                self.after(0, lambda: self._update_stats_labels(data))
+            # Schedule next refresh in 60 seconds
+            self._stats_timer = self.after(60_000, self._fetch_and_display_stats)
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _update_stats_labels(self, data: dict):
+        """Update stats labels from API response."""
+        mapping = {
+            "tracks": "total_tracks",
+            "artists": "total_artists",
+            "albums": "total_albums",
+            "embeddings": "tracks_with_embeddings",
+        }
+        display = {
+            "tracks": "Tracks",
+            "artists": "Artists",
+            "albums": "Albums",
+            "embeddings": "Embeddings",
+        }
+        for key, api_key in mapping.items():
+            value = data.get(api_key, "—")
+            if isinstance(value, (int, float)):
+                value = f"{int(value):,}"
+            self._stat_labels[key].configure(text=f"{display[key]}: {value}")
 
     def _set_status(self, state: str, text: str):
         """Update status indicator."""
@@ -233,6 +314,8 @@ class LauncherApp(ctk.CTk):
     def _on_settings_saved(self, new_config):
         self.config = new_config
         self.service_manager.config = new_config
+        port = new_config.get("ports", {}).get("web", 8000)
+        self.api_client.set_port(port)
         self._set_status("starting", "Applying settings...")
 
         def _restart():

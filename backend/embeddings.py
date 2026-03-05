@@ -20,6 +20,7 @@ from transformers import ClapModel, ClapProcessor
 from config import settings
 from database import get_db_context
 from models import Embedding, EmbeddingModel, Track, MediaFile
+from uuid_utils import embedding_model_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -169,14 +170,12 @@ class AudioEmbeddingGenerator:
             return None
 
     def _get_or_create_embedding_model(self, db: Session) -> EmbeddingModel:
-        """Get existing embedding model record or create one."""
-        em = (
-            db.query(EmbeddingModel)
-            .filter(EmbeddingModel.name == self.model_name)
-            .first()
-        )
+        """Get existing embedding model record or create one (deterministic UUID PK)."""
+        mid = embedding_model_uuid(self.model_name)
+        em = db.query(EmbeddingModel).filter(EmbeddingModel.id == mid).first()
         if not em:
             em = EmbeddingModel(
+                id=mid,
                 name=self.model_name,
                 description=f"CLAP audio embedding model ({settings.embedding_dimension}d)",
                 dimension=settings.embedding_dimension,

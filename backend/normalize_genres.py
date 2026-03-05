@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db_context
 from models import Genre, TrackGenre
+from uuid_utils import genre_uuid
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -71,21 +72,22 @@ def normalize_genre_name(genre: str) -> str:
 
 
 def get_or_create_genre(db: Session, genre_name: str) -> Genre:
-    """Get existing genre or create new one."""
+    """Get existing genre or create new one (deterministic UUID PK)."""
     # Normalize name
     normalized_name = normalize_genre_name(genre_name)
 
-    # Check if exists
-    genre = db.query(Genre).filter(Genre.name == normalized_name).first()
+    # Deterministic UUID lookup
+    gid = genre_uuid(normalized_name)
+    genre = db.query(Genre).filter(Genre.id == gid).first()
 
     if genre:
         logger.debug(f"Found existing genre: {normalized_name}")
         return genre
 
     # Create new
-    genre = Genre(name=normalized_name)
+    genre = Genre(id=gid, name=normalized_name)
     db.add(genre)
-    db.flush()  # Get ID without committing
+    db.flush()
     logger.info(f"Created new genre: {normalized_name} (ID: {genre.id})")
 
     return genre

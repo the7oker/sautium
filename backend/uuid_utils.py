@@ -43,6 +43,21 @@ def album_uuid(title: str, artist_name: str) -> uuid.UUID:
     return uuid.uuid5(NAMESPACE, f"album:{normalize(artist_name)}:{normalize(title)}")
 
 
+def genre_uuid(name: str) -> uuid.UUID:
+    """Generate deterministic UUID for a genre."""
+    return uuid.uuid5(NAMESPACE, f"genre:{normalize(name)}")
+
+
+def tag_uuid(name: str) -> uuid.UUID:
+    """Generate deterministic UUID for a tag."""
+    return uuid.uuid5(NAMESPACE, f"tag:{normalize(name)}")
+
+
+def embedding_model_uuid(name: str) -> uuid.UUID:
+    """Generate deterministic UUID for an embedding model."""
+    return uuid.uuid5(NAMESPACE, f"embedding_model:{normalize(name)}")
+
+
 # Lossless audio formats
 LOSSLESS_FORMATS = {'flac', 'ape', 'alac', 'wav', 'aiff', 'wv', 'tta', 'dsf', 'dff'}
 

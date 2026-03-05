@@ -18,6 +18,7 @@ from tqdm import tqdm
 from config import settings
 from database import get_db_context
 from models import EmbeddingModel, TextEmbedding, Track
+from uuid_utils import embedding_model_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -237,14 +238,12 @@ class TextEmbeddingGenerator:
         return result
 
     def _get_or_create_model_record(self, db: Session) -> EmbeddingModel:
-        """Get or create the embedding model record in DB."""
-        em = (
-            db.query(EmbeddingModel)
-            .filter(EmbeddingModel.name == self.model_name)
-            .first()
-        )
+        """Get or create the embedding model record in DB (deterministic UUID PK)."""
+        mid = embedding_model_uuid(self.model_name)
+        em = db.query(EmbeddingModel).filter(EmbeddingModel.id == mid).first()
         if not em:
             em = EmbeddingModel(
+                id=mid,
                 name=self.model_name,
                 description=f"Sentence-transformers text embedding model ({self.dimension}d)",
                 dimension=self.dimension,

@@ -11,7 +11,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS embedding_models (
-    id SERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY,
     name VARCHAR(100) NOT NULL UNIQUE,
     description TEXT,
     dimension INTEGER NOT NULL,
@@ -55,14 +55,14 @@ CREATE TABLE IF NOT EXISTS tracks (
 );
 
 CREATE TABLE IF NOT EXISTS genres (
-    id SERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY,
     name VARCHAR(100) NOT NULL UNIQUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS tags (
-    id SERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY,
     name VARCHAR(100) NOT NULL UNIQUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS album_artists (
 
 CREATE TABLE IF NOT EXISTS track_genres (
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
-    genre_id INTEGER NOT NULL REFERENCES genres(id) ON DELETE CASCADE,
+    genre_id UUID NOT NULL REFERENCES genres(id) ON DELETE CASCADE,
     PRIMARY KEY (track_id, genre_id)
 );
 
@@ -139,7 +139,7 @@ CREATE TABLE IF NOT EXISTS media_files (
 CREATE TABLE IF NOT EXISTS embeddings (
     id SERIAL PRIMARY KEY,
     vector vector(512) NOT NULL,
-    model_id INTEGER NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
     source_bit_depth INTEGER,
     source_sample_rate INTEGER,
@@ -152,7 +152,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
 CREATE TABLE IF NOT EXISTS text_embeddings (
     id SERIAL PRIMARY KEY,
     vector vector(384) NOT NULL,
-    model_id INTEGER NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -205,7 +205,7 @@ CREATE TABLE IF NOT EXISTS artist_bios (
 CREATE TABLE IF NOT EXISTS artist_tags (
     id SERIAL PRIMARY KEY,
     artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
-    tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    tag_id UUID NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
     weight INTEGER NOT NULL CHECK (weight >= 0 AND weight <= 100),
     source VARCHAR(50) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -243,7 +243,7 @@ CREATE TABLE IF NOT EXISTS album_info (
 CREATE TABLE IF NOT EXISTS album_tags (
     id SERIAL PRIMARY KEY,
     album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
-    tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    tag_id UUID NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
     weight INTEGER NOT NULL CHECK (weight >= 0 AND weight <= 100),
     source VARCHAR(50) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -253,7 +253,7 @@ CREATE TABLE IF NOT EXISTS album_tags (
 
 CREATE TABLE IF NOT EXISTS genre_descriptions (
     id SERIAL PRIMARY KEY,
-    genre_id INTEGER NOT NULL REFERENCES genres(id) ON DELETE CASCADE,
+    genre_id UUID NOT NULL REFERENCES genres(id) ON DELETE CASCADE,
     source VARCHAR(50) NOT NULL,
     summary TEXT,
     content TEXT,

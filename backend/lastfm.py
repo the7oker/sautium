@@ -17,6 +17,7 @@ from models import (
     ExternalMetadata, Artist, SimilarArtist, Genre, GenreDescription,
     ArtistBio, Tag, ArtistTag, Album, AlbumInfo, AlbumTag, TrackArtist
 )
+from uuid_utils import tag_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -301,16 +302,15 @@ class LastFmService:
             # Normalize tag name
             tag_name = tag_name.strip()
 
-            # Get or create tag
-            tag = db.query(Tag).filter(
-                Tag.name.ilike(tag_name)
-            ).first()
+            # Get or create tag (deterministic UUID PK)
+            tid = tag_uuid(tag_name)
+
+            tag = db.query(Tag).filter(Tag.id == tid).first()
 
             if not tag:
-                # Create new tag
-                tag = Tag(name=tag_name)
+                tag = Tag(id=tid, name=tag_name)
                 db.add(tag)
-                db.flush()  # Get ID without committing
+                db.flush()
                 logger.debug(f"Created new tag: {tag_name} (ID: {tag.id})")
 
             # Check if we already processed this tag in current batch
@@ -983,13 +983,13 @@ class LastFmService:
 
             tag_name = tag_name.strip()
 
-            # Get or create tag
-            tag = db.query(Tag).filter(
-                Tag.name.ilike(tag_name)
-            ).first()
+            # Get or create tag (deterministic UUID PK)
+            tid = tag_uuid(tag_name)
+
+            tag = db.query(Tag).filter(Tag.id == tid).first()
 
             if not tag:
-                tag = Tag(name=tag_name)
+                tag = Tag(id=tid, name=tag_name)
                 db.add(tag)
                 db.flush()
                 logger.debug(f"Created new tag: {tag_name} (ID: {tag.id})")

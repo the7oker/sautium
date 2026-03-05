@@ -23,7 +23,7 @@ from models import (
     AlbumVariant, MediaFile, Genre,
 )
 from database import get_db_context
-from uuid_utils import artist_uuid, track_uuid, album_uuid, is_lossless as check_lossless
+from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, is_lossless as check_lossless
 
 logger = logging.getLogger(__name__)
 
@@ -154,12 +154,13 @@ class LibraryScanner:
 
     @staticmethod
     def get_or_create_genre(db: Session, genre_name: str) -> Genre:
-        """Get existing genre or create new one."""
+        """Get existing genre or create new one (deterministic UUID PK)."""
         name = genre_name.strip()
-        genre = db.query(Genre).filter(Genre.name == name).first()
+        gid = genre_uuid(name)
+        genre = db.query(Genre).filter(Genre.id == gid).first()
 
         if not genre:
-            genre = Genre(name=name)
+            genre = Genre(id=gid, name=name)
             db.add(genre)
             db.flush()
             logger.debug(f"Created genre: {name}")
