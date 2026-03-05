@@ -151,6 +151,7 @@ ALTER TABLE track_genres DROP CONSTRAINT track_genres_pkey;
 ALTER TABLE track_genres DROP CONSTRAINT IF EXISTS track_genres_genre_id_fkey;
 ALTER TABLE track_genres DROP CONSTRAINT IF EXISTS song_genres_genre_id_fkey;
 ALTER TABLE track_genres DROP CONSTRAINT IF EXISTS song_genres_song_id_fkey;
+ALTER TABLE track_genres DROP CONSTRAINT IF EXISTS track_genres_track_id_fkey;
 DROP INDEX IF EXISTS idx_track_genres_genre_id;
 
 ALTER TABLE genre_descriptions DROP CONSTRAINT IF EXISTS genre_descriptions_genre_id_fkey;
