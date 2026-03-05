@@ -18,6 +18,11 @@ $$ LANGUAGE plpgsql IMMUTABLE;
 
 
 -- ============================================================================
+-- Pre-step: Ensure external_metadata.entity_id is text (may be integer in old schema)
+-- ============================================================================
+ALTER TABLE external_metadata ALTER COLUMN entity_id TYPE text USING entity_id::text;
+
+-- ============================================================================
 -- 0. DEDUPLICATE: merge case-variant genres/tags before UUID conversion
 -- ============================================================================
 
@@ -138,7 +143,7 @@ UPDATE external_metadata em
 SET entity_id = gm.new_id::text
 FROM _genre_map gm
 WHERE em.entity_type = 'genre'
-  AND em.entity_id::text = gm.old_id::text;
+  AND em.entity_id = gm.old_id::text;
 
 -- 1g. Drop old constraints and columns, swap in new ones
 -- Note: constraint names may differ from table names (e.g. song_genres_* from historical rename)
