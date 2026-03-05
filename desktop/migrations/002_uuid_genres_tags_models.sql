@@ -53,14 +53,14 @@ BEGIN
         WHERE genre_id = ANY(r.all_ids) AND genre_id != r.keep_id;
         -- Remap external_metadata
         UPDATE external_metadata SET entity_id = r.keep_id::text
-        WHERE entity_type = 'genre' AND entity_id::int = ANY(r.all_ids) AND entity_id::int != r.keep_id
+        WHERE entity_type = 'genre' AND entity_id::text = ANY(SELECT unnest(r.all_ids)::text) AND entity_id::text != r.keep_id::text
           AND NOT EXISTS (
             SELECT 1 FROM external_metadata em2
             WHERE em2.entity_type = 'genre' AND em2.entity_id = r.keep_id::text
               AND em2.source = external_metadata.source AND em2.metadata_type = external_metadata.metadata_type
           );
         DELETE FROM external_metadata
-        WHERE entity_type = 'genre' AND entity_id::int = ANY(r.all_ids) AND entity_id::int != r.keep_id;
+        WHERE entity_type = 'genre' AND entity_id::text = ANY(SELECT unnest(r.all_ids)::text) AND entity_id::text != r.keep_id::text;
         -- Delete duplicate genres
         DELETE FROM genres WHERE id = ANY(r.all_ids) AND id != r.keep_id;
     END LOOP;
@@ -138,7 +138,7 @@ UPDATE external_metadata em
 SET entity_id = gm.new_id::text
 FROM _genre_map gm
 WHERE em.entity_type = 'genre'
-  AND em.entity_id = gm.old_id::text;
+  AND em.entity_id::text = gm.old_id::text;
 
 -- 1g. Drop old constraints and columns, swap in new ones
 -- Note: constraint names may differ from table names (e.g. song_genres_* from historical rename)
