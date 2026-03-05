@@ -336,6 +336,28 @@ CREATE TABLE IF NOT EXISTS listening_history (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS track_lyrics (
+    id SERIAL PRIMARY KEY,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    source VARCHAR(50) NOT NULL,
+    plain_lyrics TEXT,
+    synced_lyrics TEXT,
+    instrumental BOOLEAN DEFAULT FALSE,
+    language VARCHAR(10),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(track_id, source)
+);
+
+CREATE TABLE IF NOT EXISTS lyrics_embeddings (
+    id SERIAL PRIMARY KEY,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    vector vector(384) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(track_id, model_id)
+);
+
 -- ============================================================
 -- Indexes
 -- ============================================================

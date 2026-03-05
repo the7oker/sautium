@@ -33,7 +33,7 @@ class LauncherApp(ctk.CTk):
         super().__init__()
 
         self.title("Music AI DJ")
-        self.geometry("480x640")
+        self.geometry("480x700")
         self.resizable(False, False)
 
         self.config = load_config()
@@ -139,6 +139,13 @@ class LauncherApp(ctk.CTk):
         )
         self._btn_open.pack(pady=3)
 
+        self._btn_scan = ctk.CTkButton(
+            btn_frame, text="Scan Library", width=200,
+            command=self._scan_library, state="disabled",
+            fg_color="transparent", border_width=1,
+        )
+        self._btn_scan.pack(pady=3)
+
         self._btn_music = ctk.CTkButton(
             btn_frame, text="Change Music Folder", width=200,
             command=self._change_music_folder,
@@ -211,6 +218,7 @@ class LauncherApp(ctk.CTk):
         self._set_status("running", "All services running")
         self._url_label.configure(text=f"Local: {local_url}  |  LAN: {lan_url}")
         self._btn_open.configure(state="normal")
+        self._btn_scan.configure(state="normal")
         self._progress_text.configure(text="")
 
         # Connect API client to the right port
@@ -287,6 +295,91 @@ class LauncherApp(ctk.CTk):
     def _open_web_ui(self):
         port = self.config.get("ports", {}).get("web", 8000)
         webbrowser.open(f"http://localhost:{port}")
+
+    def _scan_library(self):
+        """Open folder picker and scan selected folder."""
+        music_path = self.config.get("music_path", "")
+        selected = filedialog.askdirectory(
+            title="Select Folder to Scan",
+            initialdir=music_path,
+        )
+        if not selected:
+            return
+
+        # Normalize paths for comparison
+        selected_p = Path(selected).resolve()
+        music_p = Path(music_path).resolve() if music_path else None
+
+        subpath = None
+        need_restart = False
+
+        if music_p and selected_p == music_p:
+            # Scan entire library
+            subpath = None
+        elif music_p and self._is_subpath(selected_p, music_p):
+            # Scan subfolder
+            subpath = str(selected_p.relative_to(music_p))
+        else:
+            # Selected folder is outside music_path — update config and restart
+            self.config = update_config({"music_path": str(selected_p)})
+            self.service_manager.config = self.config
+            need_restart = True
+
+        self._btn_scan.configure(state="disabled", text="Scanning...")
+        self._progress_text.configure(text="Starting scan...")
+
+        def _do_scan():
+            if need_restart:
+                def progress(msg):
+                    self.after(0, lambda: self._progress_text.configure(text=msg))
+
+                self._set_status_safe("starting", "Restarting with new music path...")
+                ok = self.service_manager.restart_backend_and_tracker(progress_cb=progress)
+                if not ok:
+                    self.after(0, lambda: self._progress_text.configure(
+                        text="Failed to restart backend"))
+                    self.after(0, lambda: self._btn_scan.configure(
+                        state="normal", text="Scan Library"))
+                    return
+                # Update API client port after restart
+                port = self.config.get("ports", {}).get("web", 8000)
+                self.api_client.set_port(port)
+                self.after(0, lambda: self._on_services_ready())
+
+            self.after(0, lambda: self._progress_text.configure(text="Scanning..."))
+            result = self.api_client.start_scan(subpath)
+
+            if result and result.get("success"):
+                stats = result.get("statistics", {})
+                added = stats.get("added", 0)
+                skipped = stats.get("skipped", 0)
+                errors = stats.get("errors", 0)
+                msg = f"Scan complete — Added: {added}, Skipped: {skipped}"
+                if errors:
+                    msg += f", Errors: {errors}"
+            elif result:
+                msg = f"Scan failed — {result}"
+            else:
+                msg = "Scan failed — no response from backend"
+
+            self.after(0, lambda: self._progress_text.configure(text=msg))
+            self.after(0, lambda: self._btn_scan.configure(state="normal", text="Scan Library"))
+            self.after(0, self._fetch_and_display_stats)
+
+        threading.Thread(target=_do_scan, daemon=True).start()
+
+    @staticmethod
+    def _is_subpath(child: Path, parent: Path) -> bool:
+        """Check if child is inside parent directory."""
+        try:
+            child.relative_to(parent)
+            return True
+        except ValueError:
+            return False
+
+    def _set_status_safe(self, state: str, text: str):
+        """Thread-safe version of _set_status."""
+        self.after(0, lambda: self._set_status(state, text))
 
     def _change_music_folder(self):
         path = filedialog.askdirectory(

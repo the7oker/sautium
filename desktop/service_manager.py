@@ -189,6 +189,10 @@ class ServiceManager:
             progress_cb("Starting backend server...")
 
         port = self.ports.get("web", 8000)
+
+        # Kill orphan backend from a previous launcher session
+        self._kill_orphan_on_port(port)
+
         env_path = self._backend_dir / ".env"
 
         # Generate .env
@@ -205,9 +209,12 @@ class ServiceManager:
         cmd = [
             python, "-m", "uvicorn",
             "main:app",
-            "--host", "127.0.0.1",
+            "--host", "0.0.0.0",
             "--port", str(port),
         ]
+
+        # Ensure Windows Firewall allows LAN access
+        self._ensure_firewall_rule(port)
 
         # Log backend output to file instead of PIPE (PIPE can block on Windows)
         from desktop.config_manager import get_data_dir
@@ -299,6 +306,10 @@ class ServiceManager:
 
         if progress_cb:
             progress_cb("Starting playback tracker...")
+
+        # Kill orphan tracker from a previous launcher session
+        tracker_port = self.ports.get("tracker", 8765)
+        self._kill_orphan_on_port(tracker_port)
 
         ports = self.ports
         password = self.config.get("postgres_password", "changeme")
@@ -425,6 +436,61 @@ class ServiceManager:
             logger.error(f"Error stopping {name}: {e}")
 
         logger.info(f"{name} stopped")
+
+    @staticmethod
+    def _ensure_firewall_rule(port: int) -> None:
+        """Add Windows Firewall rule to allow LAN access on the given port."""
+        if sys.platform != "win32":
+            return
+
+        rule_name = f"Music AI DJ (port {port})"
+        try:
+            # Check if rule already exists
+            check = subprocess.run(
+                ["netsh", "advfirewall", "firewall", "show", "rule",
+                 f"name={rule_name}"],
+                capture_output=True, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if check.returncode == 0 and rule_name in check.stdout:
+                return  # Rule already exists
+
+            # Create inbound rule
+            subprocess.run(
+                ["netsh", "advfirewall", "firewall", "add", "rule",
+                 f"name={rule_name}",
+                 "dir=in", "action=allow", "protocol=TCP",
+                 f"localport={port}", "profile=private"],
+                capture_output=True, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            logger.info(f"Firewall rule created: {rule_name}")
+        except Exception as e:
+            logger.debug(f"Could not create firewall rule: {e}")
+
+    @staticmethod
+    def _kill_orphan_on_port(port: int) -> None:
+        """Kill any process listening on the given port (orphan from previous session)."""
+        try:
+            for conn in psutil.net_connections(kind="tcp"):
+                if conn.laddr.port == port and conn.status == "LISTEN":
+                    try:
+                        proc = psutil.Process(conn.pid)
+                        logger.warning(
+                            f"Killing orphan process on port {port}: "
+                            f"PID {conn.pid} ({proc.name()})"
+                        )
+                        proc.terminate()
+                        proc.wait(timeout=5)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                    except psutil.TimeoutExpired:
+                        try:
+                            psutil.Process(conn.pid).kill()
+                        except psutil.NoSuchProcess:
+                            pass
+        except (psutil.AccessDenied, OSError) as e:
+            logger.debug(f"Could not check for orphan processes: {e}")
 
     @staticmethod
     def _load_env_file(env_path: Path, env: dict) -> None:
