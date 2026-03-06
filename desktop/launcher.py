@@ -146,13 +146,6 @@ class LauncherApp(ctk.CTk):
         )
         self._btn_scan.pack(pady=3)
 
-        self._btn_music = ctk.CTkButton(
-            btn_frame, text="Change Music Folder", width=200,
-            command=self._change_music_folder,
-            fg_color="transparent", border_width=1,
-        )
-        self._btn_music.pack(pady=3)
-
         self._btn_settings = ctk.CTkButton(
             btn_frame, text="Settings", width=200,
             command=self._open_settings,
@@ -380,25 +373,6 @@ class LauncherApp(ctk.CTk):
     def _set_status_safe(self, state: str, text: str):
         """Thread-safe version of _set_status."""
         self.after(0, lambda: self._set_status(state, text))
-
-    def _change_music_folder(self):
-        path = filedialog.askdirectory(
-            title="Select Music Library Folder",
-            initialdir=self.config.get("music_path", ""),
-        )
-        if path:
-            self.config = update_config({"music_path": path})
-            self.service_manager.config = self.config
-            self._set_status("starting", "Restarting with new music path...")
-
-            def _restart():
-                def progress(msg):
-                    self.after(0, lambda: self._progress_text.configure(text=msg))
-
-                self.service_manager.restart_backend_and_tracker(progress_cb=progress)
-                self.after(0, self._on_services_ready)
-
-            threading.Thread(target=_restart, daemon=True).start()
 
     def _open_settings(self):
         from desktop.settings import SettingsDialog
