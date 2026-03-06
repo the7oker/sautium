@@ -351,7 +351,8 @@ class LauncherApp(ctk.CTk):
                 def progress(msg):
                     self.after(0, lambda: self._progress_text.configure(text=msg))
 
-                self._set_status_safe("starting", "Restarting with new music path...")
+                msg = "Setting up music library..." if not music_p else "Restarting with new music path..."
+                self._set_status_safe("starting", msg)
                 ok = self.service_manager.restart_backend_and_tracker(progress_cb=progress)
                 if not ok:
                     self.after(0, lambda: self._progress_text.configure(
@@ -370,9 +371,10 @@ class LauncherApp(ctk.CTk):
             if result and result.get("success"):
                 stats = result.get("statistics", {})
                 added = stats.get("added", 0)
+                unique = stats.get("unique_tracks", 0)
                 skipped = stats.get("skipped", 0)
                 errors = stats.get("errors", 0)
-                msg = f"Scan complete — Added: {added}, Skipped: {skipped}"
+                msg = f"Scan complete — Added: {added} files ({unique} unique tracks), Skipped: {skipped}"
                 if errors:
                     msg += f", Errors: {errors}"
             elif result:

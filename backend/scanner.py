@@ -263,7 +263,9 @@ class LibraryScanner:
             "added": 0,
             "skipped": 0,
             "errors": 0,
+            "unique_tracks": 0,
         }
+        seen_track_ids = set()
 
         # Find FLAC files
         flac_files = self.find_flac_files(limit=limit, subpath=subpath)
@@ -389,6 +391,9 @@ class LibraryScanner:
                     db.flush()
 
                     stats["added"] += 1
+                    if track.id not in seen_track_ids:
+                        seen_track_ids.add(track.id)
+                        stats["unique_tracks"] += 1
 
                     # Commit every 100 files to avoid huge transactions
                     if stats["added"] % 100 == 0:
