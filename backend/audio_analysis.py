@@ -428,7 +428,9 @@ class AudioAnalyzer:
                     stats["processed"] += 1
 
                     try:
-                        features = self.analyze_track(row.file_path)
+                        # DB stores native OS paths; translate back to local for file access in Docker
+                        local_path = settings.translate_to_local_path(row.file_path)
+                        features = self.analyze_track(local_path)
                         if features is None:
                             stats["failed"] += 1
                             continue

@@ -211,12 +211,6 @@ def _db_query_one(sql: str, params=None) -> Optional[dict]:
     return rows[0] if rows else None
 
 
-def _convert_path(db_path: str) -> str:
-    """Convert DB path (/music/...) to HQPlayer file URI."""
-    win_path = db_path.replace("/music/", settings.hqplayer_music_path + "/", 1)
-    return file_path_to_uri(win_path)
-
-
 def _register_playlist(track_ids: list[int]) -> bool:
     """Register playlist mapping with playback tracker daemon."""
     try:
@@ -374,19 +368,18 @@ def get_playlist():
             uri = hqp_track["uri"]
             logger.debug(f"Processing track {idx}: URI={uri}")
 
-            # Convert file://E:/Music/... or file:///E:/Music/... back to /music/...
+            # Strip file:// prefix to get the DB path (DB now stores native OS paths)
             if uri.startswith("file:///"):
-                win_path = uri[8:]  # Remove file:///
+                db_path = uri[8:]  # Remove file:///
             elif uri.startswith("file://"):
-                win_path = uri[7:]  # Remove file://
+                db_path = uri[7:]  # Remove file://
             else:
                 logger.warning(f"Unsupported URI format: {uri}")
                 continue
 
-            # Replace backslashes with forward slashes and decode percent-encoded brackets
-            win_path = win_path.replace("\\", "/")
-            win_path = win_path.replace("%5B", "[").replace("%5D", "]")
-            db_path = win_path.replace(settings.hqplayer_music_path + "/", "/music/", 1)
+            # Normalize: backslashes → forward slashes, decode percent-encoded brackets
+            db_path = db_path.replace("\\", "/")
+            db_path = db_path.replace("%5B", "[").replace("%5D", "]")
             logger.debug(f"  Converted: {uri} -> {db_path}")
 
             # Query DB for track info
@@ -608,7 +601,7 @@ def play_track(req: PlayTrackRequest):
         raise HTTPException(status_code=404, detail="Track not found")
 
     try:
-        uri = _convert_path(row["file_path"])
+        uri = file_path_to_uri(row["file_path"])
         with _hqp_lock:
             hqp = _get_hqp()
             hqp.stop()
@@ -684,9 +677,9 @@ def play_album(req: PlayAlbumRequest):
         with _hqp_lock:
             hqp = _get_hqp()
             hqp.stop()
-            hqp.playlist_add(_convert_path(rows[0]["file_path"]), clear=True)
+            hqp.playlist_add(file_path_to_uri(rows[0]["file_path"]), clear=True)
             for row in rows[1:]:
-                hqp.playlist_add(_convert_path(row["file_path"]))
+                hqp.playlist_add(file_path_to_uri(row["file_path"]))
             hqp.play()
 
         track_ids = [r["id"] for r in rows]
@@ -757,9 +750,9 @@ def play_similar(req: PlaySimilarRequest):
         with _hqp_lock:
             hqp = _get_hqp()
             hqp.stop()
-            hqp.playlist_add(_convert_path(rows[0]["file_path"]), clear=True)
+            hqp.playlist_add(file_path_to_uri(rows[0]["file_path"]), clear=True)
             for row in rows[1:]:
-                hqp.playlist_add(_convert_path(row["file_path"]))
+                hqp.playlist_add(file_path_to_uri(row["file_path"]))
             hqp.play()
 
         track_ids = [r["id"] for r in rows]
@@ -811,12 +804,12 @@ def play_tracks(req: PlayTracksRequest):
             hqp = _get_hqp()
             logger.info(f"play-tracks: stopping playback")
             hqp.stop()
-            first_path = _convert_path(rows[0]["file_path"])
+            first_path = file_path_to_uri(rows[0]["file_path"])
             logger.info(f"play-tracks: adding first track (clear=True): {first_path}")
             result = hqp.playlist_add(first_path, clear=True)
             logger.info(f"play-tracks: playlist_add result: {result}")
             for i, row in enumerate(rows[1:], 2):
-                path = _convert_path(row["file_path"])
+                path = file_path_to_uri(row["file_path"])
                 hqp.playlist_add(path)
             logger.info(f"play-tracks: added {len(rows)} tracks total")
             hqp.play()

@@ -13,6 +13,7 @@ import psycopg2
 import psycopg2.extras
 
 from config import settings
+from hqplayer_client import file_path_to_uri
 from tools.registry import REGISTRY, ToolDef, ToolParam
 
 logger = logging.getLogger(__name__)
@@ -61,12 +62,6 @@ def _get_hqp():
                 "Make sure HQPlayer Desktop is running."
             )
     return _hqp_client
-
-
-def _convert_path(db_path: str) -> str:
-    from hqplayer_client import file_path_to_uri
-    win_path = db_path.replace("/music/", settings.hqplayer_music_path + "/", 1)
-    return file_path_to_uri(win_path)
 
 
 def _register_playlist(track_ids: list[int]) -> bool:
@@ -414,7 +409,7 @@ def _h_play_track(track_id: int) -> str:
         if not row:
             return f"Track with ID {track_id} not found."
 
-        uri = _convert_path(row["file_path"])
+        uri = file_path_to_uri(row["file_path"])
         hqp = _get_hqp()
         hqp.stop()
         hqp.playlist_add(uri, clear=True)
@@ -479,10 +474,10 @@ def _h_play_album(album_name: str, artist_name: str = "") -> str:
 
         hqp = _get_hqp()
         hqp.stop()
-        first_uri = _convert_path(rows[0]["file_path"])
+        first_uri = file_path_to_uri(rows[0]["file_path"])
         hqp.playlist_add(first_uri, clear=True)
         for row in rows[1:]:
-            uri = _convert_path(row["file_path"])
+            uri = file_path_to_uri(row["file_path"])
             hqp.playlist_add(uri)
         hqp.select_track(0)
         hqp.play()
@@ -548,10 +543,10 @@ def _h_play_similar(track_id: int, limit: int = 10) -> str:
 
         hqp = _get_hqp()
         hqp.stop()
-        first_uri = _convert_path(rows[0]["file_path"])
+        first_uri = file_path_to_uri(rows[0]["file_path"])
         hqp.playlist_add(first_uri, clear=True)
         for row in rows[1:]:
-            uri = _convert_path(row["file_path"])
+            uri = file_path_to_uri(row["file_path"])
             hqp.playlist_add(uri)
         hqp.select_track(0)
         hqp.play()
@@ -597,7 +592,7 @@ def _h_add_to_queue(track_ids: list[int]) -> str:
         hqp = _get_hqp()
         added = []
         for row in rows:
-            uri = _convert_path(row["file_path"])
+            uri = file_path_to_uri(row["file_path"])
             hqp.playlist_add(uri)
             added.append(f"{row['artist']} - {row['title']}")
         return f"Added {len(added)} tracks to queue:\n" + "\n".join(f"  {i+1}. {t}" for i, t in enumerate(added))

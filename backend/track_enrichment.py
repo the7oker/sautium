@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_, exists, select, func, cast, String
 from tqdm import tqdm
 
+from config import settings
 from database import get_db_context
 from models import (
     Track, MediaFile, Album, AlbumVariant, Artist, TrackArtist,
@@ -259,7 +260,9 @@ class TrackEnrichmentPipeline:
                 progress_callback("Audio embedding")
             try:
                 generator = self._get_audio_embedding_generator()
-                audio = generator._load_audio(analysis_file.file_path)
+                # DB stores native OS paths; translate back to local for file access
+                local_path = settings.translate_to_local_path(analysis_file.file_path)
+                audio = generator._load_audio(local_path)
                 if audio is not None:
                     embeddings = generator._generate_batch_embeddings([audio])
                     if embeddings is not None:
@@ -344,7 +347,8 @@ class TrackEnrichmentPipeline:
                 progress_callback("Audio analysis")
             try:
                 analyzer = self._get_audio_analyzer()
-                features = analyzer.analyze_track(analysis_file.file_path)
+                local_path = settings.translate_to_local_path(analysis_file.file_path)
+                features = analyzer.analyze_track(local_path)
                 if features is not None:
                     af = AudioFeature(
                         track_id=track.id,

@@ -59,8 +59,8 @@ class LibraryScanner:
             file_format = file_path.suffix.lstrip('.').upper()
 
             metadata = {
-                # File information
-                "file_path": str(file_path.absolute()),
+                # File information — translate to native OS path for DB storage
+                "file_path": settings.translate_to_host_path(str(file_path.absolute())),
                 "file_size_bytes": file_stat.st_size,
                 "file_format": file_format,
                 "file_modified_at": datetime.fromtimestamp(file_stat.st_mtime),
@@ -286,8 +286,8 @@ class LibraryScanner:
             for file_path in tqdm(flac_files, desc="Scanning files", unit="file"):
                 stats["processed"] += 1
 
-                # Skip if already in database
-                if skip_existing and str(file_path.absolute()) in existing_paths:
+                # Skip if already in database (compare translated path)
+                if skip_existing and settings.translate_to_host_path(str(file_path.absolute())) in existing_paths:
                     stats["skipped"] += 1
                     continue
 
@@ -324,7 +324,7 @@ class LibraryScanner:
 
                     # Get or create album variant (physical edition)
                     variant = self.get_or_create_album_variant(
-                        db, album, str(file_path.parent), metadata
+                        db, album, settings.translate_to_host_path(str(file_path.parent)), metadata
                     )
 
                     # Create track-artist association (if not exists)

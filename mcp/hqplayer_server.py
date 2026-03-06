@@ -43,7 +43,6 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "supervisor")
 DB_NAME = os.getenv("DB_NAME", "music_ai")
 HQPLAYER_HOST = os.getenv("HQPLAYER_HOST", "172.26.80.1")
 HQPLAYER_PORT = int(os.getenv("HQPLAYER_PORT", "4321"))
-MUSIC_WINDOWS_PATH = os.getenv("MUSIC_WINDOWS_PATH", "E:/Music")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 TRACKER_URL = os.getenv("TRACKER_URL", "http://localhost:8765")  # playback tracker daemon
 
@@ -99,12 +98,6 @@ def _db_query_one(sql: str, params: dict | None = None) -> dict | None:
     """Execute SQL query and return single dict or None."""
     rows = _db_query(sql, params)
     return rows[0] if rows else None
-
-
-def _convert_path(db_path: str) -> str:
-    """Convert DB path (/music/...) to HQPlayer file URI (file:///E:/Music/...)."""
-    win_path = db_path.replace("/music/", MUSIC_WINDOWS_PATH + "/", 1)
-    return file_path_to_uri(win_path)
 
 
 def _register_playlist(track_ids: list[int]) -> bool:
@@ -672,7 +665,7 @@ def play_track(track_id: int) -> str:
         if not row:
             return f"Track with ID {track_id} not found."
 
-        uri = _convert_path(row["file_path"])
+        uri = file_path_to_uri(row["file_path"])
         hqp = _get_hqp()
 
         # Stop, clear playlist, add track, select first, play
@@ -755,11 +748,11 @@ def play_album(album_name: str, artist_name: str = "") -> str:
 
         # Stop, clear playlist, add all tracks, select first, play
         hqp.stop()
-        first_uri = _convert_path(rows[0]["file_path"])
+        first_uri = file_path_to_uri(rows[0]["file_path"])
         hqp.playlist_add(first_uri, clear=True)
 
         for row in rows[1:]:
-            uri = _convert_path(row["file_path"])
+            uri = file_path_to_uri(row["file_path"])
             hqp.playlist_add(uri)
 
         hqp.select_track(0)
@@ -841,11 +834,11 @@ def play_similar(track_id: int, limit: int = 10) -> str:
 
         # Stop, clear playlist, add all tracks, select first, play
         hqp.stop()
-        first_uri = _convert_path(rows[0]["file_path"])
+        first_uri = file_path_to_uri(rows[0]["file_path"])
         hqp.playlist_add(first_uri, clear=True)
 
         for row in rows[1:]:
-            uri = _convert_path(row["file_path"])
+            uri = file_path_to_uri(row["file_path"])
             hqp.playlist_add(uri)
 
         hqp.select_track(0)
@@ -906,7 +899,7 @@ def add_to_queue(track_ids: list[int]) -> str:
 
         added = []
         for row in rows:
-            uri = _convert_path(row["file_path"])
+            uri = file_path_to_uri(row["file_path"])
             hqp.playlist_add(uri)
             added.append(f"{row['artist']} - {row['title']}")
 

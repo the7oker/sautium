@@ -70,8 +70,10 @@ class Settings(BaseSettings):
     hqplayer_port: int = 4321
     hqplayer_enabled: bool = False
 
-    # Web UI: path prefix for HQPlayer file URIs
-    hqplayer_music_path: str = "E:/Music"
+    # Native OS path prefix for stored DB paths (used when scanner runs inside Docker)
+    # Docker: scanner sees /music/... → DB stores E:/Music/...
+    # Launcher: not set or same as MUSIC_LIBRARY_PATH → DB stores native path as-is
+    music_host_path: Optional[str] = None
 
     # Playback tracker daemon URL
     tracker_url: str = "http://localhost:8765"
@@ -107,6 +109,37 @@ class Settings(BaseSettings):
     def music_library_exists(self) -> bool:
         """Check if music library path exists."""
         return Path(self.music_library_path).exists()
+
+    def translate_to_host_path(self, scanner_path: str) -> str:
+        """Translate a scanner-visible path to a native OS path for DB storage.
+
+        Docker: /music/Blues/track.flac → E:/Music/Blues/track.flac
+        Launcher: E:/Music/Blues/track.flac → E:/Music/Blues/track.flac (no-op)
+        """
+        host = self.music_host_path
+        if not host or host == self.music_library_path:
+            return scanner_path
+        # Replace the scanner prefix with the host prefix
+        lib = self.music_library_path.rstrip("/\\")
+        host = host.rstrip("/\\")
+        if scanner_path.startswith(lib):
+            return host + scanner_path[len(lib):]
+        return scanner_path
+
+    def translate_to_local_path(self, db_path: str) -> str:
+        """Translate a DB-stored native path back to a local path for file access.
+
+        Docker: E:/Music/Blues/track.flac → /music/Blues/track.flac
+        Launcher: E:/Music/Blues/track.flac → E:/Music/Blues/track.flac (no-op)
+        """
+        host = self.music_host_path
+        if not host or host == self.music_library_path:
+            return db_path
+        host = host.rstrip("/\\")
+        lib = self.music_library_path.rstrip("/\\")
+        if db_path.startswith(host):
+            return lib + db_path[len(host):]
+        return db_path
 
     def validate_required_settings(self) -> list[str]:
         """

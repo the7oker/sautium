@@ -289,7 +289,9 @@ class AudioEmbeddingGenerator:
                     # Load audio for batch
                     for row in batch_rows:
                         stats["processed"] += 1
-                        audio = self._load_audio(row.file_path)
+                        # DB stores native OS paths; translate back to local for file access in Docker
+                        local_path = settings.translate_to_local_path(row.file_path)
+                        audio = self._load_audio(local_path)
                         if audio is not None:
                             audio_arrays.append(audio)
                             valid_rows.append(row)
