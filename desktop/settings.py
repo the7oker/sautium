@@ -5,10 +5,13 @@ A tabbed CTkToplevel dialog for modifying application settings.
 """
 
 import logging
+import threading
+import webbrowser
 from typing import Callable, Optional
 
 import customtkinter as ctk
 
+from desktop.api_client import BackendAPIClient
 from desktop.config_manager import load_config, save_config
 from desktop.utils import detect_claude_cli
 
@@ -18,7 +21,8 @@ logger = logging.getLogger(__name__)
 class SettingsDialog(ctk.CTkToplevel):
     """Settings dialog with tabs: General, AI Provider, HQPlayer, Last.fm."""
 
-    def __init__(self, parent, config: dict, on_save: Optional[Callable] = None):
+    def __init__(self, parent, config: dict, on_save: Optional[Callable] = None,
+                 api_client: Optional[BackendAPIClient] = None):
         super().__init__(parent)
 
         self.title("Settings")
@@ -29,6 +33,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         self.config = config.copy()
         self.on_save = on_save
+        self.api_client = api_client
 
         # Tabview
         self.tabview = ctk.CTkTabview(self, width=510, height=400)
@@ -198,27 +203,125 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkLabel(tab, text="Last.fm Scrobbling",
                       font=ctk.CTkFont(weight="bold")).pack(anchor="w", pady=(5, 3))
 
-        self._lastfm_key_var = ctk.StringVar(value=lastfm.get("api_key") or "")
-        self._lastfm_secret_var = ctk.StringVar(value=lastfm.get("api_secret") or "")
+        ctk.CTkLabel(
+            tab, text="Track your listening history on Last.fm.\nAPI keys are built into the app.",
+            text_color="gray", font=ctk.CTkFont(size=11),
+        ).pack(anchor="w", padx=10, pady=(0, 8))
+
+        # Username
         self._lastfm_user_var = ctk.StringVar(value=lastfm.get("username") or "")
+        user_row = ctk.CTkFrame(tab, fg_color="transparent")
+        user_row.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(user_row, text="Username:", width=100, anchor="w").pack(side="left")
+        ctk.CTkEntry(user_row, textvariable=self._lastfm_user_var, width=350).pack(side="left")
+
+        # Session key (hidden, managed by auth flow)
         self._lastfm_session_var = ctk.StringVar(value=lastfm.get("session_key") or "")
 
-        fields_frame = ctk.CTkFrame(tab, fg_color="transparent")
-        fields_frame.pack(fill="x", padx=10)
+        # Auth status
+        has_session = bool(lastfm.get("session_key"))
+        status_text = "Authorized" if has_session else "Not authorized"
+        status_color = "#22c55e" if has_session else "gray"
 
-        for label, var, show in [
-            ("API Key:", self._lastfm_key_var, "*"),
-            ("API Secret:", self._lastfm_secret_var, "*"),
-            ("Username:", self._lastfm_user_var, ""),
-            ("Session Key:", self._lastfm_session_var, "*"),
-        ]:
-            row = ctk.CTkFrame(fields_frame, fg_color="transparent")
-            row.pack(fill="x", pady=2)
-            ctk.CTkLabel(row, text=label, width=100, anchor="w").pack(side="left")
-            entry = ctk.CTkEntry(row, textvariable=var, width=350)
-            if show:
-                entry.configure(show=show)
-            entry.pack(side="left")
+        auth_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        auth_frame.pack(fill="x", padx=10, pady=(10, 2))
+
+        ctk.CTkLabel(auth_frame, text="Scrobbling:", width=100, anchor="w").pack(side="left")
+        self._lastfm_status = ctk.CTkLabel(
+            auth_frame, text=status_text, text_color=status_color,
+            font=ctk.CTkFont(size=12),
+        )
+        self._lastfm_status.pack(side="left", padx=(0, 10))
+
+        self._lastfm_auth_btn = ctk.CTkButton(
+            auth_frame, text="Authorize Scrobbling", width=160,
+            command=self._lastfm_authorize,
+        )
+        self._lastfm_auth_btn.pack(side="left")
+
+        if has_session:
+            self._lastfm_disconnect_btn = ctk.CTkButton(
+                auth_frame, text="Disconnect", width=90,
+                command=self._lastfm_disconnect,
+                fg_color="transparent", border_width=1,
+                text_color="#ef4444", border_color="#ef4444",
+            )
+            self._lastfm_disconnect_btn.pack(side="left", padx=(5, 0))
+
+        # Auth message area
+        self._lastfm_msg = ctk.CTkLabel(
+            tab, text="", text_color="gray", font=ctk.CTkFont(size=11),
+            wraplength=450,
+        )
+        self._lastfm_msg.pack(anchor="w", padx=10, pady=(5, 0))
+
+    def _lastfm_authorize(self):
+        """Start Last.fm authorization flow."""
+        if not self.api_client:
+            self._lastfm_msg.configure(text="Backend not available", text_color="#ef4444")
+            return
+
+        self._lastfm_auth_btn.configure(state="disabled", text="Opening browser...")
+        self._lastfm_msg.configure(text="", text_color="gray")
+
+        def _auth():
+            # Step 1: Get auth URL
+            result = self.api_client.lastfm_auth_start()
+            if not result or not result.get("auth_url"):
+                self.after(0, lambda: self._lastfm_msg.configure(
+                    text="Failed to start authorization", text_color="#ef4444"))
+                self.after(0, lambda: self._lastfm_auth_btn.configure(
+                    state="normal", text="Authorize Scrobbling"))
+                return
+
+            auth_url = result["auth_url"]
+            webbrowser.open(auth_url)
+
+            self.after(0, lambda: self._lastfm_auth_btn.configure(
+                text="Complete Authorization", state="normal",
+                command=self._lastfm_complete_auth))
+            self.after(0, lambda: self._lastfm_msg.configure(
+                text="A browser window has opened. Authorize the app, then click 'Complete Authorization'.",
+                text_color="#f59e0b"))
+
+        threading.Thread(target=_auth, daemon=True).start()
+
+    def _lastfm_complete_auth(self):
+        """Complete the Last.fm authorization after user allowed in browser."""
+        if not self.api_client:
+            return
+
+        self._lastfm_auth_btn.configure(state="disabled", text="Checking...")
+
+        def _complete():
+            result = self.api_client.lastfm_auth_complete()
+            if result and result.get("success"):
+                session_key = result["session_key"]
+                self._lastfm_session_var.set(session_key)
+                self.after(0, lambda: self._lastfm_status.configure(
+                    text="Authorized", text_color="#22c55e"))
+                self.after(0, lambda: self._lastfm_msg.configure(
+                    text="Authorization successful! Click Save to apply.",
+                    text_color="#22c55e"))
+                self.after(0, lambda: self._lastfm_auth_btn.configure(
+                    state="normal", text="Authorize Scrobbling"))
+            else:
+                detail = ""
+                if result and result.get("detail"):
+                    detail = f" — {result['detail']}"
+                self.after(0, lambda: self._lastfm_msg.configure(
+                    text=f"Authorization failed{detail}", text_color="#ef4444"))
+                self.after(0, lambda: self._lastfm_auth_btn.configure(
+                    state="normal", text="Authorize Scrobbling"))
+
+        threading.Thread(target=_complete, daemon=True).start()
+
+    def _lastfm_disconnect(self):
+        """Remove Last.fm session key."""
+        self._lastfm_session_var.set("")
+        self._lastfm_status.configure(text="Not authorized", text_color="gray")
+        self._lastfm_msg.configure(
+            text="Disconnected. Click Save to apply.", text_color="#f59e0b")
 
     # ================================================================
     # Save
@@ -253,10 +356,8 @@ class SettingsDialog(ctk.CTkToplevel):
             "port": int(self._hqp_port_var.get()) if self._hqp_port_var.get().isdigit() else 4321,
         }
 
-        # Last.fm
+        # Last.fm (API key/secret are built into the app)
         self.config["lastfm"] = {
-            "api_key": self._lastfm_key_var.get().strip() or None,
-            "api_secret": self._lastfm_secret_var.get().strip() or None,
             "username": self._lastfm_user_var.get().strip() or None,
             "session_key": self._lastfm_session_var.get().strip() or None,
         }

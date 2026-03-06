@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     min_similarity_threshold: float = 0.5
 
     # External APIs (Phase 2)
+    # Last.fm keys default to built-in app keys (semi-public, standard for desktop apps)
     lastfm_api_key: Optional[str] = None
     lastfm_api_secret: Optional[str] = None
     lastfm_username: Optional[str] = None
@@ -96,6 +97,16 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore"
     )
+
+    def model_post_init(self, __context) -> None:
+        """Fill in built-in app keys when not provided via env."""
+        from app_keys import LASTFM_API_KEY, LASTFM_API_SECRET, GENIUS_ACCESS_TOKEN
+        if not self.lastfm_api_key:
+            self.lastfm_api_key = LASTFM_API_KEY
+        if not self.lastfm_api_secret:
+            self.lastfm_api_secret = LASTFM_API_SECRET
+        if not self.genius_access_token:
+            self.genius_access_token = GENIUS_ACCESS_TOKEN
 
     @property
     def database_url(self) -> str:

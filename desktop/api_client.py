@@ -41,6 +41,14 @@ class BackendAPIClient:
             req = urllib.request.Request(url, method="POST", data=b"")
             resp = urllib.request.urlopen(req, timeout=timeout)
             return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            try:
+                body = json.loads(e.read().decode("utf-8"))
+                logger.warning(f"API POST {url} returned {e.code}: {body}")
+                return body
+            except Exception:
+                logger.warning(f"API POST {url} returned {e.code}")
+                return {"detail": f"HTTP {e.code}"}
         except Exception as e:
             logger.debug(f"API POST failed: {url} — {e}")
             return None
@@ -59,3 +67,23 @@ class BackendAPIClient:
         if subpath:
             params += f"&subpath={urllib.parse.quote(subpath)}"
         return self._post_json(f"/scan?{params}")
+
+    def enrich_start(self) -> Optional[dict]:
+        """Start background enrichment (all steps)."""
+        return self._post_json("/enrich/start", timeout=10)
+
+    def enrich_status(self) -> Optional[dict]:
+        """Poll enrichment progress."""
+        return self._get_json("/enrich/status", timeout=5)
+
+    def enrich_cancel(self) -> Optional[dict]:
+        """Cancel running enrichment."""
+        return self._post_json("/enrich/cancel", timeout=5)
+
+    def lastfm_auth_start(self) -> Optional[dict]:
+        """Start Last.fm OAuth flow. Returns {"auth_url": "..."}."""
+        return self._post_json("/lastfm/auth/start", timeout=10)
+
+    def lastfm_auth_complete(self) -> Optional[dict]:
+        """Complete Last.fm OAuth flow. Returns {"session_key": "..."}."""
+        return self._post_json("/lastfm/auth/complete", timeout=10)

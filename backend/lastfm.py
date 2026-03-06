@@ -36,7 +36,7 @@ class LastFmService:
         )
         logger.info("Last.fm service initialized")
 
-    def get_artist_info(self, artist_name: str) -> Optional[Dict[str, Any]]:
+    def get_artist_info(self, artist_name: str, fetch_similar: bool = True) -> Optional[Dict[str, Any]]:
         """
         Fetch artist info from Last.fm.
 
@@ -44,7 +44,7 @@ class LastFmService:
         - bio: {summary, content, published, url}
         - tags: [{name, count}, ...]
         - stats: {listeners, playcount}
-        - similar: [{name, match, mbid}, ...]
+        - similar: [{name, match, mbid}, ...] (only if fetch_similar=True)
         """
         try:
             artist = self.network.get_artist(artist_name)
@@ -90,20 +90,21 @@ class LastFmService:
             except Exception as e:
                 logger.debug(f"No stats for {artist_name}: {e}")
 
-            # Get similar artists
+            # Get similar artists (skip for non-library artists to save API calls)
             similar_data = []
-            try:
-                similar = artist.get_similar(limit=20)
-                similar_data = [
-                    {
-                        "name": similar_artist.item.get_name(),
-                        "match": float(similar_artist.match),
-                        "mbid": similar_artist.item.get_mbid() or None,
-                    }
-                    for similar_artist in similar
-                ]
-            except Exception as e:
-                logger.debug(f"No similar artists for {artist_name}: {e}")
+            if fetch_similar:
+                try:
+                    similar = artist.get_similar(limit=20)
+                    similar_data = [
+                        {
+                            "name": similar_artist.item.get_name(),
+                            "match": float(similar_artist.match),
+                            "mbid": similar_artist.item.get_mbid() or None,
+                        }
+                        for similar_artist in similar
+                    ]
+                except Exception as e:
+                    logger.debug(f"No similar artists for {artist_name}: {e}")
 
             return {
                 "mbid": mbid,
@@ -246,8 +247,12 @@ class LastFmService:
             ).first()
 
             if not similar_artist:
-                # Create new artist (useful for recommendations)
-                similar_artist = Artist(name=normalized_name)
+                # Create new artist with deterministic UUID
+                from uuid_utils import artist_uuid
+                similar_artist = Artist(
+                    id=artist_uuid(normalized_name),
+                    name=normalized_name,
+                )
                 db.add(similar_artist)
                 db.flush()
                 logger.info(f"Created new artist from similar: {normalized_name} (ID: {similar_artist.id})")
@@ -403,8 +408,8 @@ class LastFmService:
         logger.info(f"Enriching artist: {artist_name} (ID: {artist_id})")
 
         try:
-            # Fetch from Last.fm
-            data = self.get_artist_info(artist_name)
+            # Fetch from Last.fm (skip similar artists API call when not needed)
+            data = self.get_artist_info(artist_name, fetch_similar=not skip_similar)
 
             if data is None:
                 # Artist not found

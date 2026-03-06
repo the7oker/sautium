@@ -6,6 +6,8 @@ Minimizes to system tray on close.
 """
 
 import logging
+import subprocess
+import sys
 import threading
 import webbrowser
 from pathlib import Path
@@ -33,7 +35,7 @@ class LauncherApp(ctk.CTk):
         super().__init__()
 
         self.title("Music AI DJ")
-        self.geometry("480x700")
+        self.geometry("480x750")
         self.resizable(False, False)
 
         self.config = load_config()
@@ -146,6 +148,13 @@ class LauncherApp(ctk.CTk):
         )
         self._btn_scan.pack(pady=3)
 
+        self._btn_enrich = ctk.CTkButton(
+            btn_frame, text="Enrich Library", width=200,
+            command=self._enrich_library, state="disabled",
+            fg_color="transparent", border_width=1,
+        )
+        self._btn_enrich.pack(pady=3)
+
         self._btn_settings = ctk.CTkButton(
             btn_frame, text="Settings", width=200,
             command=self._open_settings,
@@ -208,11 +217,27 @@ class LauncherApp(ctk.CTk):
         local_url = f"http://localhost:{port}"
         lan_url = f"http://{local_ip}:{port}"
 
+        # Check GPU status via backend Python (torch is in python312, not launcher)
+        gpu_text = ""
+        try:
+            backend_python = self.service_manager._get_backend_python()
+            gpu_check = subprocess.run(
+                [backend_python, "-c",
+                 "import torch; print(f'GPU: {torch.cuda.get_device_name(0)}') "
+                 "if torch.cuda.is_available() else print('GPU: not available (CPU mode)')"],
+                capture_output=True, text=True, timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+            gpu_text = gpu_check.stdout.strip() if gpu_check.returncode == 0 else "GPU: torch not available"
+        except Exception:
+            gpu_text = "GPU: check failed"
+
         self._set_status("running", "All services running")
         self._url_label.configure(text=f"Local: {local_url}  |  LAN: {lan_url}")
         self._btn_open.configure(state="normal")
         self._btn_scan.configure(state="normal")
-        self._progress_text.configure(text="")
+        self._btn_enrich.configure(state="normal")
+        self._progress_text.configure(text=gpu_text)
 
         # Connect API client to the right port
         self.api_client.set_port(port)
@@ -361,6 +386,58 @@ class LauncherApp(ctk.CTk):
 
         threading.Thread(target=_do_scan, daemon=True).start()
 
+    def _enrich_library(self):
+        """Start background enrichment and poll for progress."""
+        result = self.api_client.enrich_start()
+        if not result or not result.get("success"):
+            detail = result.get("detail", "no response") if result else "no response"
+            self._progress_text.configure(text=f"Enrich failed: {detail[:80]}")
+            return
+
+        self._btn_enrich.configure(text="Cancel Enrichment",
+                                   command=self._cancel_enrich,
+                                   fg_color="#8B0000", hover_color="#A52A2A")
+        self._btn_scan.configure(state="disabled")
+        self._progress_text.configure(text="Starting enrichment...")
+        self._poll_enrich()
+
+    def _poll_enrich(self):
+        """Poll enrichment status every 2 seconds."""
+        def _check():
+            status = self.api_client.enrich_status()
+            if not status:
+                self.after(0, self._enrich_done)
+                return
+
+            progress = status.get("progress", "")
+            running = status.get("running", False)
+
+            self.after(0, lambda: self._progress_text.configure(text=progress))
+            self.after(0, self._fetch_and_display_stats)
+
+            if running:
+                self.after(1000, self._poll_enrich)
+            else:
+                self.after(0, self._enrich_done)
+
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _cancel_enrich(self):
+        """Request cancellation of running enrichment."""
+        self.api_client.enrich_cancel()
+        self._progress_text.configure(text="Cancelling...")
+        self._btn_enrich.configure(state="disabled")
+
+    def _enrich_done(self):
+        """Restore UI after enrichment completes."""
+        self._btn_enrich.configure(
+            text="Enrich Library", command=self._enrich_library,
+            state="normal", fg_color="transparent",
+            hover_color=("gray75", "gray25"),
+        )
+        self._btn_scan.configure(state="normal")
+        self._fetch_and_display_stats()
+
     @staticmethod
     def _is_subpath(child: Path, parent: Path) -> bool:
         """Check if child is inside parent directory."""
@@ -376,7 +453,8 @@ class LauncherApp(ctk.CTk):
 
     def _open_settings(self):
         from desktop.settings import SettingsDialog
-        SettingsDialog(self, self.config, on_save=self._on_settings_saved)
+        SettingsDialog(self, self.config, on_save=self._on_settings_saved,
+                       api_client=self.api_client)
 
     def _on_settings_saved(self, new_config):
         self.config = new_config

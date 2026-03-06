@@ -127,13 +127,40 @@ class ServiceManager:
     # Backend (FastAPI / uvicorn)
     # ================================================================
 
+    def _get_backend_python(self) -> str:
+        """Return path to Python for the backend (embedded 3.12 on Windows)."""
+        from desktop.python_env import get_backend_python
+        return get_backend_python()
+
+    def _ensure_backend_python(self, progress_cb: Optional[Callable] = None) -> bool:
+        """Ensure embedded Python 3.12 is available (Windows only)."""
+        if sys.platform != "win32":
+            return True
+
+        from desktop.python_env import is_python_ready, download_embedded_python
+        if is_python_ready():
+            return True
+
+        return download_embedded_python(progress_cb)
+
     def _ensure_backend_deps(self, progress_cb: Optional[Callable] = None) -> bool:
         """Install backend dependencies if missing."""
-        try:
-            import uvicorn  # noqa: F401
+        # Ensure embedded Python 3.12 is available
+        if not self._ensure_backend_python(progress_cb):
+            return False
+
+        python = self._get_backend_python()
+        logger.info(f"Backend Python for deps: {python}")
+
+        # Check if uvicorn already installed in backend Python
+        check = subprocess.run(
+            [python, "-c", "import uvicorn"],
+            capture_output=True, text=True, timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+        if check.returncode == 0:
+            logger.info("Backend dependencies already installed")
             return True
-        except ImportError:
-            pass
 
         req_file = self._backend_dir / "requirements.txt"
         if not req_file.exists():
@@ -144,8 +171,44 @@ class ServiceManager:
             progress_cb("Installing backend dependencies (first run)...")
 
         logger.info("Installing backend dependencies...")
+
+        # Install torch with CUDA first (PyPI torch is CPU-only on Windows)
+        if progress_cb:
+            progress_cb("Installing PyTorch with CUDA (may take a few minutes)...")
+        torch_cmd = [
+            python, "-m", "pip", "install",
+            "torch", "torchvision", "torchaudio",
+            "--index-url", "https://download.pytorch.org/whl/cu124",
+            "--quiet",
+        ]
+        torch_env = os.environ.copy()
+        torch_kwargs = {"capture_output": True, "text": True, "timeout": 600, "env": torch_env}
+        if sys.platform == "win32":
+            torch_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        torch_result = subprocess.run(torch_cmd, **torch_kwargs)
+        if torch_result.returncode != 0:
+            logger.warning(f"CUDA torch install failed, falling back to default: {torch_result.stderr[:200]}")
+            if progress_cb:
+                progress_cb("CUDA torch failed, using CPU fallback...")
+
+        # Verify torch + CUDA
+        verify_cmd = [python, "-c",
+                      "import torch; print(f'torch {torch.__version__}, CUDA: {torch.cuda.is_available()}',"
+                      "f'GPU: {torch.cuda.get_device_name(0)}' if torch.cuda.is_available() else '')"]
+        verify_kwargs = {"capture_output": True, "text": True, "timeout": 30}
+        if sys.platform == "win32":
+            verify_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        verify = subprocess.run(verify_cmd, **verify_kwargs)
+        torch_info = verify.stdout.strip() if verify.returncode == 0 else "torch not available"
+        logger.info(f"PyTorch status: {torch_info}")
+        if progress_cb:
+            progress_cb(f"PyTorch: {torch_info}")
+
+        if progress_cb:
+            progress_cb("Installing backend dependencies...")
+
         cmd = [
-            sys.executable, "-m", "pip", "install",
+            python, "-m", "pip", "install",
             "-r", str(req_file),
             "--only-binary=:all:",
             "--quiet",
@@ -205,9 +268,10 @@ class ServiceManager:
         # Load .env vars into environment
         self._load_env_file(env_path, env)
 
-        python = sys.executable
+        backend_python = self._get_backend_python()
+        logger.info(f"Backend Python: {backend_python}")
         cmd = [
-            python, "-m", "uvicorn",
+            backend_python, "-m", "uvicorn",
             "main:app",
             "--host", "0.0.0.0",
             "--port", str(port),
@@ -315,9 +379,9 @@ class ServiceManager:
         password = self.config.get("postgres_password", "changeme")
         lastfm = self.config.get("lastfm", {})
 
-        python = sys.executable
+        backend_python = self._get_backend_python()
         cmd = [
-            python, str(self._backend_dir / "playback_tracker.py"),
+            backend_python, str(self._backend_dir / "playback_tracker.py"),
             "--hqplayer-host", hqp.get("host", "localhost"),
             "--hqplayer-port", str(hqp.get("port", 4321)),
             "--db-host", "localhost",

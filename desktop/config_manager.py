@@ -47,8 +47,6 @@ DEFAULT_CONFIG = {
     "first_run_complete": False,
     "postgres_password": None,  # auto-generated on first run
     "lastfm": {
-        "api_key": None,
-        "api_secret": None,
         "username": None,
         "session_key": None,
     },
@@ -180,9 +178,7 @@ def generate_env_file(config: dict, env_path: Path) -> None:
         "# Claude Code",
         f"CLAUDE_CODE_ENABLED={'true' if config.get('claude_code_available') and config.get('provider') == 'claude_code' else 'false'}",
         "",
-        "# Last.fm",
-        f"LASTFM_API_KEY={lastfm.get('api_key') or ''}",
-        f"LASTFM_API_SECRET={lastfm.get('api_secret') or ''}",
+        "# Last.fm (API key/secret are built into the app)",
         f"LASTFM_USERNAME={lastfm.get('username') or ''}",
         f"LASTFM_SESSION_KEY={lastfm.get('session_key') or ''}",
         "",

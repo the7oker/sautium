@@ -41,7 +41,6 @@ class SetupWizard(ctk.CTkToplevel):
         self.current_step = 0
         self.steps = [
             self._step_welcome,
-            self._step_music_path,
             self._step_provider,
             self._step_hqplayer,
             self._step_summary,
@@ -122,17 +121,7 @@ class SetupWizard(ctk.CTkToplevel):
             self._finish()
 
     def _validate_step(self) -> bool:
-        if self.current_step == 1:  # Music path
-            path = self._music_path_var.get()
-            if not path or not Path(path).exists():
-                self._music_path_error.configure(
-                    text="Please select a valid directory"
-                )
-                return False
-            self.config["music_path"] = path
-            return True
-
-        if self.current_step == 2:  # Provider
+        if self.current_step == 1:  # Provider
             provider = self._provider_var.get()
             self.config["provider"] = provider
 
@@ -167,7 +156,7 @@ class SetupWizard(ctk.CTkToplevel):
 
             return True
 
-        if self.current_step == 3:  # HQPlayer
+        if self.current_step == 2:  # HQPlayer
             self.config["hqplayer"]["enabled"] = self._hqp_enabled_var.get()
             if self._hqp_enabled_var.get():
                 self.config["hqplayer"]["host"] = self._hqp_host_var.get().strip() or "localhost"
@@ -519,7 +508,6 @@ class SetupWizard(ctk.CTkToplevel):
         summary_frame.pack(fill="x", padx=20, pady=10)
 
         items = [
-            ("Music Library", self.config.get("music_path", "Not set")),
             ("AI Provider", self.config.get("provider", "anthropic")),
             (
                 "HQPlayer",
@@ -606,7 +594,10 @@ class SetupWizard(ctk.CTkToplevel):
         self.destroy()
 
     def _on_close(self):
-        """Handle window close — ask for confirmation."""
+        """Handle window close — quit the whole app if wizard not completed."""
         if self.current_step == len(self.steps) - 1:
             return  # Don't close during init
         self.destroy()
+        # Quit the parent app since setup was not completed
+        if self.master:
+            self.master.destroy()

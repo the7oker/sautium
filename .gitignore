@@ -65,6 +65,7 @@ htmlcov/
 /backend/.cache
 /tmp/
 /pgsql/
+/python312/
 
 # MCP configs (contain passwords and API keys)
 .mcp.json

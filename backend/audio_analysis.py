@@ -189,7 +189,7 @@ class AudioAnalyzer:
         return {
             "key": _KEY_NAMES[best_key],
             "mode": best_mode,
-            "key_confidence": round(confidence, 3),
+            "key_confidence": round(float(confidence), 3),
         }
 
     def _extract_librosa_features(self, y: np.ndarray, sr: int) -> Dict[str, Any]:
@@ -259,7 +259,7 @@ class AudioAnalyzer:
         """Run CLAP zero-shot classification for instruments, moods, vocal, dance."""
         # Encode audio
         inputs = self.processor(
-            audios=[audio_48k],
+            audio=[audio_48k],
             sampling_rate=self.clap_sr,
             return_tensors="pt",
             padding=True,

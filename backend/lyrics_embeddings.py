@@ -206,6 +206,7 @@ class LyricsEmbeddingGenerator:
         max_duration_seconds: Optional[int] = None,
         worker_id: Optional[int] = None,
         worker_count: Optional[int] = None,
+        progress_cb=None,
     ) -> Dict[str, int]:
         """
         Generate lyrics embeddings for tracks with lyrics.
@@ -284,17 +285,30 @@ class LyricsEmbeddingGenerator:
         # Process in batches
         batch_size = self.batch_size
 
-        for batch_start in tqdm(
-            range(0, len(rows), batch_size),
+        total_rows = len(rows)
+        total_batches = (total_rows + batch_size - 1) // batch_size
+
+        for batch_idx, batch_start in enumerate(tqdm(
+            range(0, total_rows, batch_size),
             desc="Generating lyrics embeddings",
             unit="batch",
-        ):
+        )):
             # Check time limit before starting new batch
             if max_duration_seconds:
                 elapsed = time.time() - start_time
                 if elapsed >= max_duration_seconds:
                     logger.info(f"Time limit reached ({elapsed:.1f}s), stopping gracefully")
                     break
+
+            if progress_cb:
+                done = min(batch_start + batch_size, total_rows)
+                elapsed = time.time() - start_time
+                if batch_idx > 0:
+                    eta = elapsed / batch_idx * (total_batches - batch_idx)
+                    eta_str = f", ETA {int(eta)}s"
+                else:
+                    eta_str = ""
+                progress_cb(f"Lyrics emb {done}/{total_rows}{eta_str}")
 
             batch_rows = rows[batch_start : batch_start + batch_size]
 
@@ -380,6 +394,7 @@ def generate_lyrics_embeddings(
     max_duration_seconds: Optional[int] = None,
     worker_id: Optional[int] = None,
     worker_count: Optional[int] = None,
+    progress_cb=None,
 ) -> Dict[str, int]:
     """
     Convenience function to generate lyrics embeddings.
@@ -392,6 +407,7 @@ def generate_lyrics_embeddings(
         max_duration_seconds: Stop after this many seconds.
         worker_id: Worker index (0-based) for parallel processing.
         worker_count: Total number of workers.
+        progress_cb: Callback for progress updates.
 
     Returns:
         Statistics dictionary.
@@ -403,6 +419,7 @@ def generate_lyrics_embeddings(
                 db, limit=limit, force=force, track_ids=track_ids,
                 max_duration_seconds=max_duration_seconds,
                 worker_id=worker_id, worker_count=worker_count,
+                progress_cb=progress_cb,
             )
     finally:
         generator.unload_model()

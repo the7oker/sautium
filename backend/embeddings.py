@@ -139,7 +139,7 @@ class AudioEmbeddingGenerator:
         """
         try:
             inputs = self.processor(
-                audios=audio_arrays,
+                audio=audio_arrays,
                 sampling_rate=self.sample_rate,
                 return_tensors="pt",
                 padding=True,

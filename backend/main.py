@@ -239,6 +239,322 @@ async def generate_embeddings_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# -- Enrichment background task -----------------------------------------------
+
+import threading
+
+_enrich_state: Dict[str, Any] = {
+    "running": False,
+    "cancel_requested": False,
+    "step": "",           # current step name
+    "progress": "",       # human-readable progress
+    "result": None,       # final result when done
+}
+_enrich_lock = threading.Lock()
+
+
+def _enrich_worker(limit: Optional[int], skip_embeddings: bool,
+                   skip_lastfm: bool, skip_audio_analysis: bool):
+    """Background worker that runs all enrichment steps sequentially."""
+    import time as _time
+
+    state = _enrich_state
+    result_parts = {}
+
+    try:
+        # --- Step 1: Track enrichment (embeddings, Last.fm, audio analysis) ---
+        state["step"] = "enrich"
+        state["progress"] = "Enriching tracks..."
+
+        # Auto-skip Last.fm if API key not configured
+        _skip_lastfm = skip_lastfm or not settings.lastfm_api_key
+
+        # Log GPU status
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_name = torch.cuda.get_device_name(0)
+                logger.info(f"GPU available: {gpu_name}")
+                state["progress"] = f"GPU: {gpu_name}"
+            else:
+                logger.warning("CUDA not available — embeddings will be slow on CPU")
+                state["progress"] = "Warning: no CUDA GPU, embeddings will be slow"
+        except ImportError:
+            logger.warning("torch not installed — audio embeddings will fail")
+
+        if state["cancel_requested"]:
+            return
+
+        from track_enrichment import TrackEnrichmentPipeline
+        pipeline = TrackEnrichmentPipeline(
+            skip_embeddings=skip_embeddings,
+            skip_lastfm=_skip_lastfm,
+            skip_audio_analysis=skip_audio_analysis,
+        )
+        enrich_stats = pipeline.enrich_tracks(
+            limit=limit,
+            cancel_flag=lambda: state["cancel_requested"],
+            progress_cb=lambda msg: state.update(progress=msg),
+        )
+        result_parts["enrich"] = enrich_stats
+        state["progress"] = f"Enriched {enrich_stats.get('processed', 0)} tracks"
+
+        if state["cancel_requested"]:
+            return
+
+        # --- Step 2: Fetch lyrics ---
+        state["step"] = "lyrics"
+        state["progress"] = "Fetching lyrics..."
+
+        lyrics_stats = _fetch_lyrics_sync(
+            limit=None,
+            cancel_flag=lambda: state["cancel_requested"],
+            progress_cb=lambda msg: state.update(progress=msg),
+        )
+        result_parts["lyrics"] = lyrics_stats
+        state["progress"] = f"Lyrics: {lyrics_stats.get('found', 0)} found"
+
+        if state["cancel_requested"]:
+            return
+
+        # --- Step 3: Lyrics embeddings ---
+        state["step"] = "lyrics_embeddings"
+        state["progress"] = "Generating lyrics embeddings..."
+
+        from lyrics_embeddings import generate_lyrics_embeddings
+        lyrics_emb_stats = generate_lyrics_embeddings(
+            limit=None,
+            progress_cb=lambda msg: state.update(progress=msg),
+        )
+        result_parts["lyrics_embeddings"] = lyrics_emb_stats
+
+        # Build summary
+        parts = []
+        enrich_s = result_parts.get("enrich", {})
+        parts.append(f"Enriched: {enrich_s.get('processed', 0)}")
+        lyrics_s = result_parts.get("lyrics", {})
+        parts.append(f"Lyrics: {lyrics_s.get('found', 0)} found")
+        lem_s = result_parts.get("lyrics_embeddings", {})
+        parts.append(f"Lyrics emb: {lem_s.get('success', 0)}")
+        state["progress"] = " | ".join(parts)
+
+        state["result"] = {"success": True, "statistics": result_parts}
+
+    except Exception as e:
+        logger.error(f"Enrichment failed: {e}", exc_info=True)
+        state["result"] = {"success": False, "detail": str(e)}
+        state["progress"] = f"Error: {str(e)[:100]}"
+    finally:
+        state["running"] = False
+        state["step"] = "done"
+
+
+def _fetch_lyrics_sync(limit=None, cancel_flag=None, progress_cb=None):
+    """Fetch lyrics synchronously. Used by enrichment worker."""
+    import time as _time
+    from database import get_db_context
+    from sqlalchemy import text
+
+    use_lrclib = True
+    use_genius = bool(settings.genius_access_token)
+
+    lrclib_service = None
+    genius_service = None
+
+    if use_lrclib:
+        from lrclib import LrclibService
+        lrclib_service = LrclibService()
+    if use_genius:
+        from genius import GeniusService
+        genius_service = GeniusService(settings.genius_access_token)
+
+    stats = {"processed": 0, "found": 0, "not_found": 0, "errors": 0}
+
+    with get_db_context() as db:
+        query_sql = """
+            SELECT t.id as track_id, t.title,
+                   a.name as artist,
+                   al.title as album,
+                   mf.duration_seconds
+            FROM tracks t
+            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+            JOIN artists a ON ta.artist_id = a.id
+            JOIN media_files mf ON mf.track_id = t.id AND mf.is_analysis_source = true
+            JOIN album_variants av ON mf.album_variant_id = av.id
+            JOIN albums al ON av.album_id = al.id
+            LEFT JOIN external_metadata em
+                ON em.entity_type = 'track'
+                AND em.entity_id = t.id::text
+                AND em.source = 'lrclib'
+                AND em.metadata_type = 'lyrics'
+            WHERE em.id IS NULL
+            ORDER BY t.title
+        """
+        if limit:
+            query_sql += f" LIMIT {limit}"
+
+        rows = db.execute(text(query_sql)).fetchall()
+        total_lyrics = len(rows)
+        logger.info(f"Lyrics: {total_lyrics} tracks to process")
+        lyrics_start = _time.time()
+
+        for i, row in enumerate(rows):
+            if cancel_flag and cancel_flag():
+                break
+
+            stats["processed"] += 1
+
+            if progress_cb and i % 5 == 0:
+                elapsed = _time.time() - lyrics_start
+                if i > 0:
+                    eta = elapsed / i * (total_lyrics - i)
+                    eta_str = f", ETA {int(eta)}s"
+                else:
+                    eta_str = ""
+                progress_cb(f"Lyrics {i+1}/{total_lyrics}{eta_str}")
+            found = False
+
+            if use_lrclib and lrclib_service:
+                try:
+                    result = lrclib_service.fetch_and_store(
+                        db, row.track_id, row.title, row.artist,
+                        album_name=row.album,
+                        duration=int(row.duration_seconds) if row.duration_seconds else None,
+                    )
+                    if result and result.get("status") not in ("not_found", "error"):
+                        found = True
+                    _time.sleep(0.1)
+                except Exception as e:
+                    logger.debug(f"LRCLIB failed for {row.artist} - {row.title}: {e}")
+
+            if not found and use_genius and genius_service:
+                try:
+                    result = genius_service.fetch_and_store(
+                        db, row.track_id, row.title, row.artist,
+                    )
+                    if result and result.get("status") not in ("not_found", "error"):
+                        found = True
+                    _time.sleep(1.0)
+                except Exception as e:
+                    logger.debug(f"Genius failed for {row.artist} - {row.title}: {e}")
+
+            if found:
+                stats["found"] += 1
+            else:
+                stats["not_found"] += 1
+
+            db.commit()
+
+    return stats
+
+
+@app.post("/enrich/start")
+async def enrich_start(
+    limit: Optional[int] = None,
+    skip_embeddings: bool = False,
+    skip_lastfm: bool = False,
+    skip_audio_analysis: bool = False,
+) -> Dict[str, Any]:
+    """Start enrichment as a background task. Poll /enrich/status for progress."""
+    with _enrich_lock:
+        if _enrich_state["running"]:
+            raise HTTPException(status_code=409, detail="Enrichment already running")
+        _enrich_state.update(
+            running=True, cancel_requested=False,
+            step="starting", progress="Starting...", result=None,
+        )
+
+    t = threading.Thread(
+        target=_enrich_worker,
+        args=(limit, skip_embeddings, skip_lastfm, skip_audio_analysis),
+        daemon=True,
+    )
+    t.start()
+    return {"success": True, "message": "Enrichment started"}
+
+
+@app.post("/enrich/cancel")
+async def enrich_cancel() -> Dict[str, Any]:
+    """Request cancellation of a running enrichment task."""
+    if not _enrich_state["running"]:
+        return {"success": False, "message": "No enrichment running"}
+    _enrich_state["cancel_requested"] = True
+    return {"success": True, "message": "Cancellation requested"}
+
+
+@app.get("/enrich/status")
+async def enrich_status() -> Dict[str, Any]:
+    """Get current enrichment progress."""
+    return {
+        "running": _enrich_state["running"],
+        "step": _enrich_state["step"],
+        "progress": _enrich_state["progress"],
+        "result": _enrich_state["result"],
+    }
+
+
+# Keep simple sync endpoints for backward compat / direct calls
+@app.post("/enrich")
+async def enrich_tracks_endpoint(
+    limit: Optional[int] = None,
+    skip_embeddings: bool = False,
+    skip_lastfm: bool = False,
+    skip_audio_analysis: bool = False,
+) -> Dict[str, Any]:
+    """Run enrichment synchronously (for CLI/Docker use). Prefer /enrich/start for UI."""
+    import asyncio
+    from track_enrichment import TrackEnrichmentPipeline
+
+    def _run():
+        _skip_lastfm = skip_lastfm or not settings.lastfm_api_key
+        pipeline = TrackEnrichmentPipeline(
+            skip_embeddings=skip_embeddings,
+            skip_lastfm=_skip_lastfm,
+            skip_audio_analysis=skip_audio_analysis,
+        )
+        return pipeline.enrich_tracks(limit=limit)
+
+    try:
+        stats = await asyncio.to_thread(_run)
+        return {"success": True, "statistics": stats}
+    except Exception as e:
+        logger.error(f"Enrichment failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/fetch-lyrics")
+async def fetch_lyrics_endpoint(
+    limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Fetch lyrics synchronously."""
+    import asyncio
+    try:
+        stats = await asyncio.to_thread(_fetch_lyrics_sync, limit)
+        return {"success": True, "statistics": stats}
+    except Exception as e:
+        logger.error(f"Lyrics fetch failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/lyrics/embeddings/generate")
+async def generate_lyrics_embeddings_endpoint(
+    limit: Optional[int] = None,
+    batch_size: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Generate embeddings from track lyrics for semantic lyrics search."""
+    import asyncio
+    from lyrics_embeddings import generate_lyrics_embeddings
+
+    try:
+        stats = await asyncio.to_thread(
+            generate_lyrics_embeddings, limit=limit, batch_size=batch_size
+        )
+        return {"success": True, "statistics": stats}
+    except Exception as e:
+        logger.error(f"Lyrics embedding generation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/search/similar")
 async def search_similar(
     track_id: int,
@@ -373,6 +689,46 @@ async def search_metadata(
     except Exception as e:
         logger.error(f"Metadata search failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# -- Last.fm Auth -------------------------------------------------------------
+
+# Temporary storage for auth URL (one per server instance)
+_lastfm_auth_state: Dict[str, Any] = {}
+
+
+@app.post("/lastfm/auth/start")
+async def lastfm_auth_start() -> Dict[str, str]:
+    """Start Last.fm OAuth flow. Returns auth URL to open in browser."""
+    import pylast
+
+    network = pylast.LastFMNetwork(
+        api_key=settings.lastfm_api_key,
+        api_secret=settings.lastfm_api_secret,
+    )
+    skg = pylast.SessionKeyGenerator(network)
+    url = skg.get_web_auth_url()
+    _lastfm_auth_state["skg"] = skg
+    _lastfm_auth_state["url"] = url
+    return {"auth_url": url}
+
+
+@app.post("/lastfm/auth/complete")
+async def lastfm_auth_complete() -> Dict[str, Any]:
+    """Complete Last.fm OAuth flow. Call after user authorized in browser."""
+    skg = _lastfm_auth_state.get("skg")
+    url = _lastfm_auth_state.get("url")
+    if not skg or not url:
+        raise HTTPException(status_code=400, detail="Auth flow not started. Call /lastfm/auth/start first.")
+    try:
+        session_key = skg.get_web_auth_session_key(url)
+        _lastfm_auth_state.clear()
+        return {"success": True, "session_key": session_key}
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Authorization failed. Make sure you allowed access in the browser. ({e})",
+        )
 
 
 # -- Routers & Static Files ---------------------------------------------------

@@ -267,7 +267,7 @@ class TrackEnrichmentPipeline:
                     embeddings = generator._generate_batch_embeddings([audio])
                     if embeddings is not None:
                         embedding_model = generator._get_or_create_embedding_model(db)
-                        generator._save_embedding(db, track, embeddings[0], embedding_model)
+                        generator._save_embedding(db, track.id, embeddings[0], embedding_model)
                         db.commit()
                         results['audio_embedding'] = 'success'
                     else:
@@ -510,6 +510,8 @@ class TrackEnrichmentPipeline:
         track_ids: Optional[List] = None,
         worker_id: Optional[int] = None,
         worker_count: Optional[int] = None,
+        cancel_flag=None,
+        progress_cb=None,
     ) -> Dict[str, int]:
         """
         Run comprehensive enrichment pipeline on tracks.
@@ -587,7 +589,11 @@ class TrackEnrichmentPipeline:
                 if max_duration_seconds:
                     logger.info(f"Time limit: {max_duration_seconds}s")
 
-                for track in tqdm(tracks, desc="Enriching tracks", unit="track"):
+                for i, track in enumerate(tqdm(tracks, desc="Enriching tracks", unit="track")):
+                    if cancel_flag and cancel_flag():
+                        logger.info("Enrichment cancelled by user")
+                        break
+
                     if max_duration_seconds:
                         elapsed = time.time() - start_time
                         if elapsed >= max_duration_seconds:
@@ -595,6 +601,15 @@ class TrackEnrichmentPipeline:
                             break
 
                     stats['processed'] += 1
+
+                    if progress_cb:
+                        elapsed = time.time() - start_time
+                        if i > 0:
+                            eta = elapsed / i * (total - i)
+                            eta_str = f", ETA {int(eta)}s" if eta < 3600 else f", ETA {eta/3600:.1f}h"
+                        else:
+                            eta_str = ""
+                        progress_cb(f"Enriching {i+1}/{total}{eta_str}")
 
                     status = self._check_track_status(db, track)
                     results = self._enrich_track(db, track, status)
