@@ -59,7 +59,7 @@ def _apply_filters(filters: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
         params["f_album"] = f"%{filters['album']}%"
 
     if filters.get("genre"):
-        clauses.append("g.name ILIKE :f_genre")
+        clauses.append("EXISTS (SELECT 1 FROM track_genres tg JOIN genres g ON tg.genre_id = g.id WHERE tg.track_id = t.id AND g.name ILIKE :f_genre)")
         params["f_genre"] = f"%{filters['genre']}%"
 
     if filters.get("is_lossless") is not None:
@@ -151,7 +151,9 @@ def search_similar_tracks(
     # Get the source track info
     source_sql = text("""
         SELECT mf.id, t.title, a.name as artist, al.title as album,
-               g.name as genre, mf.duration_seconds, mf.sample_rate,
+               (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
+                WHERE tg.track_id = t.id LIMIT 1) as genre,
+               mf.duration_seconds, mf.sample_rate,
                mf.bit_depth, mf.is_lossless, t.id as track_id
         FROM media_files mf
         JOIN tracks t ON mf.track_id = t.id
@@ -159,8 +161,6 @@ def search_similar_tracks(
         JOIN artists a ON ta.artist_id = a.id
         JOIN album_variants av ON mf.album_variant_id = av.id
         JOIN albums al ON av.album_id = al.id
-        LEFT JOIN track_genres tg ON t.id = tg.track_id
-        LEFT JOIN genres g ON tg.genre_id = g.id
         WHERE mf.id = :track_id
     """)
     source_row = db.execute(source_sql, {"track_id": track_id}).fetchone()
@@ -379,7 +379,9 @@ def search_by_features(
 
     query_sql = text(f"""
         SELECT DISTINCT mf.id, t.title, a.name as artist, al.title as album,
-               g.name as genre, mf.is_lossless,
+               (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
+                WHERE tg.track_id = t.id LIMIT 1) as genre,
+               mf.is_lossless,
                mf.duration_seconds,
                af.bpm, af.key, af.mode, af.vocal_instrumental,
                af.danceability, af.instruments
@@ -390,8 +392,6 @@ def search_by_features(
         JOIN artists a ON ta.artist_id = a.id
         JOIN album_variants av ON mf.album_variant_id = av.id
         JOIN albums al ON av.album_id = al.id
-        LEFT JOIN track_genres tg ON t.id = tg.track_id
-        LEFT JOIN genres g ON tg.genre_id = g.id
         {where_clause}
         ORDER BY af.bpm, a.name, t.title
         LIMIT :limit
@@ -457,7 +457,9 @@ def search_by_lyrics(
         SELECT * FROM (
             SELECT DISTINCT ON (matches.track_id)
                    mf_rep.id, t.title, a.name as artist,
-                   mf_rep.album_title as album, g.name as genre,
+                   mf_rep.album_title as album,
+                   (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
+                    WHERE tg.track_id = t.id LIMIT 1) as genre,
                    mf_rep.duration_seconds,
                    mf_rep.sample_rate, mf_rep.bit_depth, mf_rep.is_lossless,
                    matches.similarity
@@ -472,8 +474,6 @@ def search_by_lyrics(
             JOIN tracks t ON matches.track_id = t.id
             JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
             JOIN artists a ON ta.artist_id = a.id
-            LEFT JOIN track_genres tg ON t.id = tg.track_id
-            LEFT JOIN genres g ON tg.genre_id = g.id
             JOIN LATERAL (
                 SELECT mf.id, mf.duration_seconds,
                        mf.sample_rate, mf.bit_depth, mf.is_lossless,

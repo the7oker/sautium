@@ -276,15 +276,15 @@ async def search_tracks(q: str = "", limit: int = 20):
     rows = _db_query(f"""
         SELECT mf.id, t.title, mf.track_number, mf.disc_number, mf.duration_seconds,
                a.name as artist, av.id as album_id, al.title as album,
-               g.name as genre, mf.is_lossless
+               (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
+                WHERE tg.track_id = t.id LIMIT 1) as genre,
+               mf.is_lossless, t.id as track_id
         FROM media_files mf
         JOIN tracks t ON mf.track_id = t.id
         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
         JOIN artists a ON ta.artist_id = a.id
         JOIN album_variants av ON mf.album_variant_id = av.id
         JOIN albums al ON av.album_id = al.id
-        LEFT JOIN track_genres tg ON t.id = tg.track_id
-        LEFT JOIN genres g ON tg.genre_id = g.id
         WHERE {where_exact}
         ORDER BY a.name, al.title, mf.disc_number, mf.track_number
     """, params)
@@ -295,7 +295,9 @@ async def search_tracks(q: str = "", limit: int = 20):
         rows = _db_query("""
             SELECT mf.id, t.title, mf.track_number, mf.disc_number, mf.duration_seconds,
                    a.name as artist, av.id as album_id, al.title as album,
-                   g.name as genre, mf.is_lossless,
+                   (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
+                    WHERE tg.track_id = t.id LIMIT 1) as genre,
+                   mf.is_lossless, t.id as track_id,
                    GREATEST(
                        similarity(a.name, %(query)s),
                        similarity(al.title, %(query)s),
@@ -307,8 +309,6 @@ async def search_tracks(q: str = "", limit: int = 20):
             JOIN artists a ON ta.artist_id = a.id
             JOIN album_variants av ON mf.album_variant_id = av.id
             JOIN albums al ON av.album_id = al.id
-            LEFT JOIN track_genres tg ON t.id = tg.track_id
-            LEFT JOIN genres g ON tg.genre_id = g.id
             WHERE similarity(a.name, %(query)s) > 0.25
                OR similarity(al.title, %(query)s) > 0.25
                OR similarity(t.title, %(query)s) > 0.25
@@ -316,7 +316,9 @@ async def search_tracks(q: str = "", limit: int = 20):
         """, params)
 
     # Group by album (merge multi-disc albums, but keep lossless/lossy separate)
+    # Deduplicate tracks that appear in multiple album_variants of the same album
     albums_dict = {}
+    seen_tracks = {}  # key -> set of track_ids already added
     for row in rows:
         key = (row["artist"], row["album"], row["is_lossless"])
         if key not in albums_dict:
@@ -328,6 +330,12 @@ async def search_tracks(q: str = "", limit: int = 20):
                 "is_lossless": row["is_lossless"],
                 "tracks": [],
             }
+            seen_tracks[key] = set()
+        track_id = row.get("track_id")
+        if track_id and track_id in seen_tracks[key]:
+            continue
+        if track_id:
+            seen_tracks[key].add(track_id)
         albums_dict[key]["tracks"].append({
             "id": row["id"],
             "title": row["title"],

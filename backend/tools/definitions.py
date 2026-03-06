@@ -179,7 +179,8 @@ def _h_search_tracks(
             SELECT * FROM (
                 SELECT DISTINCT ON (mf.id)
                        mf.id, t.title, a.name as artist, al.title as album,
-                       g.name as genre,
+                       (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
+                        WHERE tg.track_id = t.id LIMIT 1) as genre,
                        mf.duration_seconds, mf.track_number,
                        {score_expr} as _score
                 FROM media_files mf
@@ -188,8 +189,6 @@ def _h_search_tracks(
                 JOIN artists a ON ta.artist_id = a.id
                 JOIN album_variants av ON mf.album_variant_id = av.id
                 JOIN albums al ON av.album_id = al.id
-                LEFT JOIN track_genres tg ON t.id = tg.track_id
-                LEFT JOIN genres g ON tg.genre_id = g.id
                 WHERE {where}
                 ORDER BY mf.id, _score DESC
             ) sub
@@ -232,14 +231,14 @@ def _h_search_similar(track_id: int, limit: int = 15) -> str:
             ) track_matches
             JOIN LATERAL (
                 SELECT mf.id, mf.duration_seconds,
-                       a.name as artist, al.title as album, g.name as genre
+                       a.name as artist, al.title as album,
+                       (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
+                        WHERE tg.track_id = track_matches.track_id LIMIT 1) as genre
                 FROM media_files mf
                 JOIN track_artists ta ON track_matches.track_id = ta.track_id AND ta.role = 'primary'
                 JOIN artists a ON ta.artist_id = a.id
                 JOIN album_variants av ON mf.album_variant_id = av.id
                 JOIN albums al ON av.album_id = al.id
-                LEFT JOIN track_genres tg ON track_matches.track_id = tg.track_id
-                LEFT JOIN genres g ON tg.genre_id = g.id
                 WHERE mf.track_id = track_matches.track_id
                 ORDER BY mf.id
                 LIMIT 1
@@ -330,15 +329,14 @@ def _h_get_track_info(track_id: int) -> str:
                    mf.file_path, mf.is_lossless,
                    a.name as artist, al.title as album,
                    al.release_year,
-                   g.name as genre
+                   (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
+                    WHERE tg.track_id = t.id LIMIT 1) as genre
             FROM media_files mf
             JOIN tracks t ON mf.track_id = t.id
             JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
             JOIN artists a ON ta.artist_id = a.id
             JOIN album_variants av ON mf.album_variant_id = av.id
             JOIN albums al ON av.album_id = al.id
-            LEFT JOIN track_genres tg ON t.id = tg.track_id
-            LEFT JOIN genres g ON tg.genre_id = g.id
             WHERE mf.id = %(track_id)s
         """, {"track_id": track_id})
 

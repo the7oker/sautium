@@ -19,7 +19,8 @@ All queries use the schema:
 
 MEDIA_FILE_SELECT = """\
     SELECT mf.id, t.title, a.name as artist, al.title as album,
-           g.name as genre,
+           (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
+            WHERE tg.track_id = t.id LIMIT 1) as genre,
            mf.duration_seconds, mf.track_number, mf.disc_number,
            mf.sample_rate, mf.bit_depth, mf.is_lossless,
            mf.file_path"""
@@ -30,9 +31,7 @@ MEDIA_FILE_FROM = """\
     JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
     JOIN artists a ON ta.artist_id = a.id
     JOIN album_variants av ON mf.album_variant_id = av.id
-    JOIN albums al ON av.album_id = al.id
-    LEFT JOIN track_genres tg ON t.id = tg.track_id
-    LEFT JOIN genres g ON tg.genre_id = g.id"""
+    JOIN albums al ON av.album_id = al.id"""
 
 # ---------------------------------------------------------------------------
 # Embedding similarity queries (track-centric, picks representative media_file)
@@ -40,7 +39,9 @@ MEDIA_FILE_FROM = """\
 
 EMBEDDING_SIMILARITY_SELECT = """\
     SELECT mf_rep.id, t.title, a.name as artist,
-           mf_rep.album_title as album, g.name as genre,
+           mf_rep.album_title as album,
+           (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
+            WHERE tg.track_id = t.id LIMIT 1) as genre,
            mf_rep.duration_seconds, mf_rep.track_number,
            mf_rep.sample_rate, mf_rep.bit_depth, mf_rep.is_lossless"""
 
@@ -49,8 +50,6 @@ EMBEDDING_SIMILARITY_FROM = """\
     JOIN embeddings e ON e.track_id = t.id
     JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
     JOIN artists a ON ta.artist_id = a.id
-    LEFT JOIN track_genres tg ON t.id = tg.track_id
-    LEFT JOIN genres g ON tg.genre_id = g.id
     JOIN LATERAL (
         SELECT mf.id, mf.duration_seconds, mf.track_number,
                mf.sample_rate, mf.bit_depth, mf.is_lossless,
@@ -86,9 +85,7 @@ SEARCH_TRACKS_FROM = """\
     JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
     JOIN artists a ON ta.artist_id = a.id
     JOIN album_variants av ON mf.album_variant_id = av.id
-    JOIN albums al ON av.album_id = al.id
-    LEFT JOIN track_genres tg ON t.id = tg.track_id
-    LEFT JOIN genres g ON tg.genre_id = g.id"""
+    JOIN albums al ON av.album_id = al.id"""
 
 # ---------------------------------------------------------------------------
 # Play track: get file_path from media_file
