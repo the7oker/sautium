@@ -45,6 +45,8 @@ class TrackStatus:
     album: str = ""
     song: str = ""
     genre: str = ""
+    convolution: bool = False
+    matrix_profile: str = ""
 
     @property
     def is_playing(self) -> bool:
@@ -389,6 +391,36 @@ class HQPlayerClient:
             logger.error(f"Failed to parse status: {e}")
             return None
 
+    def get_state(self) -> Optional[Dict[str, Any]]:
+        """
+        Get current HQPlayer DSP state (filter, shaper, mode, convolution, matrix profile).
+
+        Returns:
+            Dict with: mode, filter, shaper, rate, convolution, matrix_profile, etc.
+        """
+        response = self._execute_command("State")
+
+        if response is None or response.tag != "State":
+            return None
+
+        try:
+            return {
+                "mode": int(response.get("mode", 0)),
+                "filter": int(response.get("filter", 0)),
+                "filter1x": int(response.get("filter1x", -1)),
+                "shaper": int(response.get("shaper", 0)),
+                "rate": int(response.get("rate", 0)),
+                "active_mode": int(response.get("active_mode", 0)),
+                "active_rate": int(response.get("active_rate", 0)),
+                "convolution": bool(int(response.get("convolution", 0))),
+                "matrix_profile": response.get("matrix_profile", ""),
+                "invert": bool(int(response.get("invert", 0))),
+                "volume": float(response.get("volume", 0.0)),
+            }
+        except Exception as e:
+            logger.error(f"Failed to parse state: {e}")
+            return None
+
     def get_info(self) -> Optional[Dict[str, str]]:
         """
         Get HQPlayer info
@@ -574,6 +606,58 @@ class HQPlayerClient:
             inputs.append(item.get("name", ""))
 
         return inputs
+
+    # ========== Convolution & Matrix ==========
+
+    def set_convolution(self, enabled: bool) -> bool:
+        """
+        Enable or disable convolution engine.
+
+        Args:
+            enabled: True to enable, False to disable
+        """
+        response = self._execute_command("SetConvolution", {"value": "1" if enabled else "0"})
+        return response is not None
+
+    def matrix_list_profiles(self) -> List[str]:
+        """
+        Get list of saved matrix profiles.
+
+        Returns:
+            List of profile names
+        """
+        response = self._execute_command("MatrixListProfiles")
+        if response is None or response.tag != "MatrixListProfiles":
+            return []
+
+        profiles = []
+        for item in response.findall("MatrixProfile"):
+            name = item.get("name", "")
+            if name:
+                profiles.append(name)
+        return profiles
+
+    def matrix_get_profile(self) -> Optional[str]:
+        """
+        Get currently active matrix profile name.
+
+        Returns:
+            Profile name or None
+        """
+        response = self._execute_command("MatrixGetProfile")
+        if response is None or response.tag != "MatrixGetProfile":
+            return None
+        return response.get("value", "")
+
+    def matrix_set_profile(self, profile: str) -> bool:
+        """
+        Set active matrix profile by name.
+
+        Args:
+            profile: Profile name (must exist in HQPlayer)
+        """
+        response = self._execute_command("MatrixSetProfile", {"value": profile})
+        return response is not None
 
 
 # ========== Context Manager Support ==========

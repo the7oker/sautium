@@ -914,7 +914,7 @@ def add_to_queue(track_ids: list[int]) -> str:
 
 @mcp.tool()
 def hqplayer_get_settings() -> str:
-    """Get current HQPlayer DSP settings: filters, output mode, sample rate."""
+    """Get current HQPlayer DSP settings: filters, dither/shapers, output mode, sample rate."""
     try:
         hqp = _get_hqp()
 
@@ -933,6 +933,13 @@ def hqplayer_get_settings() -> str:
             lines.append(f"Available filters ({len(filters)}):")
             for f in filters:
                 lines.append(f"  [{f['index']}] {f['name']}")
+
+        # Shapers / Dithers
+        shapers = hqp.get_shapers()
+        if shapers:
+            lines.append(f"\nAvailable dither/shapers ({len(shapers)}):")
+            for s in shapers:
+                lines.append(f"  [{s['index']}] {s['name']}")
 
         # Modes
         modes = hqp.get_modes()
@@ -992,6 +999,212 @@ def hqplayer_set_filter(filter_name: str) -> str:
         return f"Filter set to: {match['name']}" if ok else f"Failed to set filter to {match['name']}."
     except Exception as e:
         return f"Error setting filter: {e}"
+
+
+@mcp.tool()
+def hqplayer_set_shaper(shaper_name: str) -> str:
+    """Set HQPlayer dither/noise shaper by name.
+
+    Use hqplayer_get_settings first to see available shaper names.
+
+    Args:
+        shaper_name: Name of the dither/shaper to set (e.g. 'NS9')
+    """
+    try:
+        hqp = _get_hqp()
+        shapers = hqp.get_shapers()
+
+        if not shapers:
+            return "Could not retrieve shaper list from HQPlayer."
+
+        # Find shaper by name (case-insensitive, exact match first)
+        match = None
+        for s in shapers:
+            if s["name"].lower() == shaper_name.lower():
+                match = s
+                break
+
+        if match is None:
+            # Try partial match
+            for s in shapers:
+                if shaper_name.lower() in s["name"].lower():
+                    match = s
+                    break
+
+        if match is None:
+            available = ", ".join(s["name"] for s in shapers)
+            return f"Shaper '{shaper_name}' not found. Available shapers: {available}"
+
+        ok = hqp.set_shaping(match["index"])
+        return f"Dither/shaper set to: {match['name']}" if ok else f"Failed to set shaper to {match['name']}."
+    except Exception as e:
+        return f"Error setting shaper: {e}"
+
+
+# =============================================================================
+# CONVOLUTION & MATRIX PROFILE TOOLS
+# =============================================================================
+
+@mcp.tool()
+def hqplayer_set_convolution(enabled: bool) -> str:
+    """Enable or disable HQPlayer convolution engine.
+
+    Convolution must be pre-configured in HQPlayer GUI with impulse response files.
+    This tool only toggles convolution on/off during playback.
+
+    Args:
+        enabled: True to enable convolution, False to disable
+    """
+    try:
+        hqp = _get_hqp()
+        ok = hqp.set_convolution(enabled)
+        state = "enabled" if enabled else "disabled"
+        return f"Convolution {state}." if ok else f"Failed to {state} convolution."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def hqplayer_list_matrix_profiles() -> str:
+    """List all saved HQPlayer Matrix Processor profiles.
+
+    Matrix profiles contain EQ, convolution, and channel routing settings.
+    """
+    try:
+        hqp = _get_hqp()
+        profiles = hqp.matrix_list_profiles()
+        if not profiles:
+            return "No matrix profiles found. Create profiles in HQPlayer GUI (Settings → Matrix → save profile name)."
+        lines = [f"Available matrix profiles ({len(profiles)}):"]
+        for p in profiles:
+            lines.append(f"  - {p}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def hqplayer_get_matrix_profile() -> str:
+    """Get the currently active HQPlayer Matrix Processor profile name."""
+    try:
+        hqp = _get_hqp()
+        profile = hqp.matrix_get_profile()
+        if profile is None:
+            return "Could not get current matrix profile."
+        return f"Current matrix profile: '{profile}'" if profile else "No matrix profile active (using default)."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def hqplayer_set_matrix_profile(profile_name: str) -> str:
+    """Set HQPlayer Matrix Processor profile by name.
+
+    Use hqplayer_list_matrix_profiles first to see available profiles.
+    Matrix profiles contain EQ settings, convolution filters, and channel routing.
+
+    Args:
+        profile_name: Name of the matrix profile to activate
+    """
+    try:
+        hqp = _get_hqp()
+
+        # Verify profile exists
+        profiles = hqp.matrix_list_profiles()
+        if profiles and profile_name not in profiles:
+            # Try case-insensitive match
+            match = None
+            for p in profiles:
+                if p.lower() == profile_name.lower():
+                    match = p
+                    break
+            if match is None:
+                for p in profiles:
+                    if profile_name.lower() in p.lower():
+                        match = p
+                        break
+            if match is None:
+                available = ", ".join(profiles)
+                return f"Profile '{profile_name}' not found. Available: {available}"
+            profile_name = match
+
+        ok = hqp.matrix_set_profile(profile_name)
+        return f"Matrix profile set to: '{profile_name}'" if ok else f"Failed to set matrix profile to '{profile_name}'."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def hqplayer_get_dsp_state() -> str:
+    """Get current HQPlayer DSP processing state.
+
+    Returns active filter index, shaper index, mode, convolution on/off,
+    and current matrix profile. Complements hqplayer_get_settings which lists
+    available options.
+    """
+    try:
+        hqp = _get_hqp()
+        state = hqp.get_state()
+        if not state:
+            return "Could not get DSP state from HQPlayer."
+
+        lines = ["Current DSP state:"]
+        lines.append(f"  Convolution: {'ON' if state['convolution'] else 'OFF'}")
+        lines.append(f"  Matrix profile: '{state['matrix_profile']}'" if state['matrix_profile'] else "  Matrix profile: (none)")
+        lines.append(f"  Active filter index: {state['filter']}")
+        lines.append(f"  Active shaper index: {state['shaper']}")
+        lines.append(f"  Active mode index: {state['mode']}")
+        lines.append(f"  Active rate index: {state['rate']}")
+        lines.append(f"  Phase invert: {'ON' if state['invert'] else 'OFF'}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def generate_eq_preset(name: str, filters_json: str, description: str = "") -> str:
+    """Generate a parametric EQ preset file for HQPlayer Matrix Processor.
+
+    Creates a Room EQ Wizard (REW) format .txt file that can be loaded into
+    HQPlayer's Matrix Processor via the Browse button. Also provides inline
+    HQPlayer pipeline syntax.
+
+    Use this when the user asks for EQ adjustments (de-essing, warmth, bass boost, etc.)
+    that HQPlayer cannot do natively through its filter/shaper settings.
+
+    Args:
+        name: Preset name (e.g. "de-ess", "warm-vocal", "bass-boost")
+        filters_json: JSON array of filter objects. Each filter has:
+            - type: "peak", "lowshelf"/"lshelf", "highshelf"/"hshelf", "highpass"/"hp", "lowpass"/"lp", "notch"
+            - freq: Frequency in Hz
+            - gain: Gain in dB (for peak and shelf types)
+            - q: Q factor (higher = narrower band). Default 0.707
+            Example: [{"type":"peak","freq":6500,"gain":-3,"q":4},{"type":"hshelf","freq":9000,"gain":-2,"q":0.7}]
+        description: Human-readable description of what this EQ does
+    """
+    try:
+        import json as _json
+        filters = _json.loads(filters_json)
+        if not isinstance(filters, list) or not filters:
+            return "Error: filters_json must be a non-empty JSON array of filter objects."
+
+        # Validate filters
+        for i, f in enumerate(filters):
+            if "type" not in f or "freq" not in f:
+                return f"Error: filter {i+1} must have 'type' and 'freq' fields."
+
+        # Import generator (backend path already in sys.path)
+        from eq_generator import save_eq_preset
+        result = save_eq_preset(
+            filters=filters,
+            name=name,
+            description=description,
+        )
+        return result["instructions"]
+    except _json.JSONDecodeError as e:
+        return f"Error parsing filters_json: {e}"
+    except Exception as e:
+        return f"Error generating EQ preset: {e}"
 
 
 # =============================================================================

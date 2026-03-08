@@ -701,11 +701,12 @@ function appendChatBubble(role, text, tracks, retrievalLog, model, tracksRetriev
   const div = document.createElement("div");
   div.className = "chat-msg " + role;
 
-  // Simple markdown-like formatting: bold, newlines
+  // Simple markdown-like formatting: bold, italic, links, newlines
   let html = esc(text)
     .replace(/\n/g, "<br>")
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*(.+?)\*/g, "<em>$1</em>");
+    .replace(/\*(.+?)\*/g, "<em>$1</em>")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
   div.innerHTML = html;
 
   chatMessages.appendChild(div);

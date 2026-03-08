@@ -74,6 +74,7 @@ services:
       - ./backend:/app
       - ./mcp:/app/mcp
       - ./data/cache:/root/.cache
+      - ./data/generated_eq:/app/generated_eq
       # Mount music library as read-only
       # Windows path: E:\Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro

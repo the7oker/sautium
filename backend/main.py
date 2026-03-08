@@ -738,6 +738,10 @@ from routers.chat import router as chat_router
 
 app.include_router(player_router)
 app.include_router(chat_router)
+
+from routers.eq import router as eq_router
+app.include_router(eq_router)
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 

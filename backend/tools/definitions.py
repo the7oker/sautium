@@ -699,6 +699,11 @@ def _h_hqplayer_get_settings() -> str:
             lines.append(f"Available filters ({len(filters)}):")
             for f in filters:
                 lines.append(f"  [{f['index']}] {f['name']}")
+        shapers = hqp.get_shapers()
+        if shapers:
+            lines.append(f"\nAvailable dither/shapers ({len(shapers)}):")
+            for s in shapers:
+                lines.append(f"  [{s['index']}] {s['name']}")
         modes = hqp.get_modes()
         if modes:
             lines.append(f"\nOutput modes ({len(modes)}):")
@@ -740,12 +745,127 @@ def _h_hqplayer_set_filter(filter_name: str) -> str:
         return f"Error setting filter: {e}"
 
 
+def _h_hqplayer_set_shaper(shaper_name: str) -> str:
+    try:
+        hqp = _get_hqp()
+        shapers = hqp.get_shapers()
+        if not shapers:
+            return "Could not retrieve shaper list from HQPlayer."
+        match = None
+        for s in shapers:
+            if s["name"].lower() == shaper_name.lower():
+                match = s
+                break
+        if match is None:
+            for s in shapers:
+                if shaper_name.lower() in s["name"].lower():
+                    match = s
+                    break
+        if match is None:
+            available = ", ".join(s["name"] for s in shapers)
+            return f"Shaper '{shaper_name}' not found. Available shapers: {available}"
+        ok = hqp.set_shaping(match["index"])
+        return f"Dither/shaper set to: {match['name']}" if ok else f"Failed to set shaper to {match['name']}."
+    except Exception as e:
+        return f"Error setting shaper: {e}"
+
+
+def _h_hqplayer_set_convolution(enabled: bool) -> str:
+    try:
+        ok = _get_hqp().set_convolution(enabled)
+        state = "enabled" if enabled else "disabled"
+        return f"Convolution {state}." if ok else f"Failed to {state} convolution."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _h_hqplayer_list_matrix_profiles() -> str:
+    try:
+        profiles = _get_hqp().matrix_list_profiles()
+        if not profiles:
+            return "No matrix profiles found."
+        lines = [f"Available matrix profiles ({len(profiles)}):"]
+        for p in profiles:
+            lines.append(f"  - {p}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _h_hqplayer_get_matrix_profile() -> str:
+    try:
+        profile = _get_hqp().matrix_get_profile()
+        if profile is None:
+            return "Could not get current matrix profile."
+        return f"Current matrix profile: '{profile}'" if profile else "No matrix profile active."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _h_hqplayer_set_matrix_profile(profile_name: str) -> str:
+    try:
+        hqp = _get_hqp()
+        profiles = hqp.matrix_list_profiles()
+        if profiles and profile_name not in profiles:
+            match = None
+            for p in profiles:
+                if p.lower() == profile_name.lower():
+                    match = p
+                    break
+            if match is None:
+                for p in profiles:
+                    if profile_name.lower() in p.lower():
+                        match = p
+                        break
+            if match is None:
+                available = ", ".join(profiles)
+                return f"Profile '{profile_name}' not found. Available: {available}"
+            profile_name = match
+        ok = hqp.matrix_set_profile(profile_name)
+        return f"Matrix profile set to: '{profile_name}'" if ok else f"Failed to set profile."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _h_hqplayer_get_dsp_state() -> str:
+    try:
+        state = _get_hqp().get_state()
+        if not state:
+            return "Could not get DSP state."
+        lines = ["Current DSP state:"]
+        lines.append(f"  Convolution: {'ON' if state['convolution'] else 'OFF'}")
+        lines.append(f"  Matrix profile: '{state['matrix_profile']}'" if state['matrix_profile'] else "  Matrix profile: (none)")
+        lines.append(f"  Active filter index: {state['filter']}")
+        lines.append(f"  Active shaper index: {state['shaper']}")
+        lines.append(f"  Active mode index: {state['mode']}")
+        lines.append(f"  Phase invert: {'ON' if state['invert'] else 'OFF'}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _h_generate_eq_preset(name: str, filters_json: str, description: str = "") -> str:
+    try:
+        import json as _json
+        filters = _json.loads(filters_json)
+        if not isinstance(filters, list) or not filters:
+            return "Error: filters_json must be a non-empty JSON array."
+        for i, f in enumerate(filters):
+            if "type" not in f or "freq" not in f:
+                return f"Error: filter {i+1} must have 'type' and 'freq'."
+        from eq_generator import save_eq_preset
+        result = save_eq_preset(filters=filters, name=name, description=description)
+        return result["instructions"]
+    except Exception as e:
+        return f"Error: {e}"
+
+
 # ===========================================================================
 # Register all tools
 # ===========================================================================
 
 def register_all():
-    """Register all 20 tools in the global REGISTRY."""
+    """Register all tools in the global REGISTRY."""
 
     REGISTRY.register(ToolDef(
         name="execute_query",
@@ -942,6 +1062,70 @@ def register_all():
             ToolParam("filter_name", "string", "Name of the filter to set (e.g. 'poly-sinc-gauss-xla')", required=True),
         ],
         handler=_h_hqplayer_set_filter,
+    ))
+
+    REGISTRY.register(ToolDef(
+        name="hqplayer_set_shaper",
+        description="Set HQPlayer dither/noise shaper by name. Use hqplayer_get_settings first to see available shaper names.",
+        parameters=[
+            ToolParam("shaper_name", "string", "Name of the dither/shaper to set (e.g. 'NS9')", required=True),
+        ],
+        handler=_h_hqplayer_set_shaper,
+    ))
+
+    REGISTRY.register(ToolDef(
+        name="hqplayer_set_convolution",
+        description="Enable or disable HQPlayer convolution engine on the fly.",
+        parameters=[
+            ToolParam("enabled", "boolean", "True to enable, False to disable", required=True),
+        ],
+        handler=_h_hqplayer_set_convolution,
+    ))
+
+    REGISTRY.register(ToolDef(
+        name="hqplayer_list_matrix_profiles",
+        description="List all saved HQPlayer Matrix Processor profiles (EQ/convolution presets).",
+        parameters=[],
+        handler=_h_hqplayer_list_matrix_profiles,
+    ))
+
+    REGISTRY.register(ToolDef(
+        name="hqplayer_get_matrix_profile",
+        description="Get the currently active HQPlayer Matrix Processor profile name.",
+        parameters=[],
+        handler=_h_hqplayer_get_matrix_profile,
+    ))
+
+    REGISTRY.register(ToolDef(
+        name="hqplayer_set_matrix_profile",
+        description="Set HQPlayer Matrix Processor profile by name. Use hqplayer_list_matrix_profiles to see available profiles.",
+        parameters=[
+            ToolParam("profile_name", "string", "Name of the matrix profile to activate", required=True),
+        ],
+        handler=_h_hqplayer_set_matrix_profile,
+    ))
+
+    REGISTRY.register(ToolDef(
+        name="hqplayer_get_dsp_state",
+        description="Get current HQPlayer DSP processing state: active filter, shaper, convolution on/off, matrix profile.",
+        parameters=[],
+        handler=_h_hqplayer_get_dsp_state,
+    ))
+
+    REGISTRY.register(ToolDef(
+        name="generate_eq_preset",
+        description="Generate a parametric EQ preset file (REW format) for HQPlayer Matrix Processor. "
+                    "Use when user asks for EQ adjustments (de-essing, warmth, bass boost, etc.). "
+                    "Returns download link and instructions for loading into HQPlayer.",
+        parameters=[
+            ToolParam("name", "string", "Preset name (e.g. 'de-ess', 'warm-vocal')", required=True),
+            ToolParam("filters_json", "string",
+                      'JSON array of filters. Each: {"type":"peak|lshelf|hshelf|hp|lp|notch","freq":Hz,"gain":dB,"q":Q}. '
+                      'Example: [{"type":"peak","freq":6500,"gain":-3,"q":4}]',
+                      required=True),
+            ToolParam("description", "string", "Human-readable description", required=False, default=""),
+        ],
+        handler=_h_generate_eq_preset,
     ))
 
 
