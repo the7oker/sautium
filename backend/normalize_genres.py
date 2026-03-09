@@ -17,55 +17,139 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+
+# Genre names that contain delimiter characters but should NOT be split
+PROTECTED_GENRES = {
+    'r&b': 'R&B',
+    'rock & roll': 'Rock & Roll',
+    'drum & bass': 'Drum & Bass',
+    'rhythm & blues': 'Rhythm & Blues',
+    'hip-hop': 'Hip-Hop',
+    'trip-hop': 'Trip-Hop',
+    'synth-pop': 'Synth-Pop',
+    'post-punk': 'Post-Punk',
+    'post-rock': 'Post-Rock',
+    'neo-classical': 'Neo-Classical',
+    'singer-songwriter': 'Singer-Songwriter',
+    'hi nrg': 'Hi NRG',
+}
+
+
 def parse_genre_string(genre_name: str) -> List[str]:
     """
     Parse a compound genre string into individual genre names.
 
-    Handles delimiters: '/', ',', '&', '+', and variations with spaces
+    Handles delimiters: '/', ',', ';', '|', '&', '+', '. ' (dot+space)
 
     Examples:
         "Progressive Electronic/Berlin School" -> ["Progressive Electronic", "Berlin School"]
         "Electronic, Ambient" -> ["Electronic", "Ambient"]
-        "Krautrock/Electro/Experimental/Ambient" -> ["Krautrock", "Electro", "Experimental", "Ambient"]
+        "ambient; electronic; experimental" -> ["Ambient", "Electronic", "Experimental"]
+        "Ambient | Chillout | Downtempo" -> ["Ambient", "Chillout", "Downtempo"]
+        "Psychill. Downtempo. Psybient" -> ["Psychill", "Downtempo", "Psybient"]
+        "Soul / Funk / R&B" -> ["Soul", "Funk", "R&B"]
     """
-    # Replace common delimiters with a standard one
     normalized = genre_name
 
-    # Replace '/', ' & ', ' + ' with comma
-    normalized = re.sub(r'\s*/\s*', ', ', normalized)
-    normalized = re.sub(r'\s*&\s*', ', ', normalized)
-    normalized = re.sub(r'\s*\+\s*', ', ', normalized)
+    # Protect known compound genre names from splitting
+    placeholders = {}
+    for key, value in PROTECTED_GENRES.items():
+        pattern = re.compile(re.escape(key), re.IGNORECASE)
+        if pattern.search(normalized):
+            placeholder = f'\x00PROT{len(placeholders)}\x00'
+            normalized = pattern.sub(placeholder, normalized)
+            placeholders[placeholder] = value
+
+    # Replace delimiters with comma
+    normalized = re.sub(r'\s*/\s*', ', ', normalized)      # /
+    normalized = re.sub(r'\s*\|\s*', ', ', normalized)     # |
+    normalized = re.sub(r'\s*;\s*', ', ', normalized)      # ;
+    normalized = re.sub(r'\s*&\s*', ', ', normalized)      # & (protected ones already replaced)
+    normalized = re.sub(r'\s*\+\s*', ', ', normalized)     # +
+    normalized = re.sub(r'\.\s+', ', ', normalized)        # . followed by space(s)
+    normalized = re.sub(r'\s{2,}', ', ', normalized)       # double+ spaces as delimiter
 
     # Split by comma
     parts = [part.strip() for part in normalized.split(',')]
 
-    # Remove empty strings and deduplicate while preserving order
+    # Restore protected names and deduplicate
     seen = set()
     result = []
     for part in parts:
-        if part and part not in seen:
-            seen.add(part)
+        for placeholder, value in placeholders.items():
+            part = part.replace(placeholder, value)
+        part = part.strip()
+        if part and part.lower() not in seen:
+            seen.add(part.lower())
             result.append(part)
 
     return result
+
+
+
+# CamelCase genre names to split into proper words
+CAMELCASE_GENRES = {
+    'popmusic': 'Pop Music',
+    'newwave': 'New Wave',
+    'progressivetrance': 'Progressive Trance',
+    'electropop': 'Electropop',
+    'ethnochaos': 'EthnoChaos',
+    'darkpop': 'Darkpop',
+    'electro house': 'Electro House',
+}
 
 
 def normalize_genre_name(genre: str) -> str:
     """
     Normalize genre name for consistency.
 
+    - Exact match for known names (preserves casing like IDM, R&B)
     - Titlecase for standard genres
-    - Special handling for abbreviations (IDM, etc.)
     - Remove extra whitespace
     """
-    genre = genre.strip()
-
-    # Special cases
-    abbreviations = {'idm': 'IDM', 'edm': 'EDM', 'rnb': 'R&B', 'hiphop': 'Hip-Hop'}
+    genre = re.sub(r'\s+', ' ', genre.strip())
+    if not genre:
+        return genre
 
     lower = genre.lower()
-    if lower in abbreviations:
-        return abbreviations[lower]
+
+    # Exact replacements for known names
+    known_names = {
+        'idm': 'IDM',
+        'edm': 'EDM',
+        'rnb': 'R&B',
+        'r&b': 'R&B',
+        'r and b': 'R&B',
+        'hiphop': 'Hip-Hop',
+        'hip.hop': 'Hip-Hop',
+        'hip hop': 'Hip-Hop',
+        'hip-hop': 'Hip-Hop',
+        'trip-hop': 'Trip-Hop',
+        'trip hop': 'Trip-Hop',
+        'synth-pop': 'Synth-Pop',
+        'synthpop': 'Synthpop',
+        'hi nrg': 'Hi NRG',
+        'hi-nrg': 'Hi-NRG',
+        'dj': 'DJ',
+        'uk': 'UK',
+        'ussr': 'USSR',
+        'ussr post': 'USSR Post',
+        'ussr retro': 'USSR Retro',
+        'ost': 'OST',
+        'dub': 'Dub',
+        'psytrance': 'Psytrance',
+    }
+
+    if lower in known_names:
+        return known_names[lower]
+
+    # CamelCase mappings
+    if lower in CAMELCASE_GENRES:
+        return CAMELCASE_GENRES[lower]
+
+    # Check if it's already a protected genre name
+    if lower in PROTECTED_GENRES:
+        return PROTECTED_GENRES[lower]
 
     # Titlecase for most genres
     return genre.title()
@@ -186,12 +270,56 @@ def normalize_genres(db: Session, dry_run: bool = False) -> dict:
             # Delete old compound relationship
             db.delete(tg)
 
+        # Flush to make new track_genres visible to subsequent queries
+        db.flush()
+
         # Delete compound genre
         db.delete(compound_genre)
+        db.flush()
         stats['compound_genres_deleted'] += 1
         stats['compound_genres_processed'] += 1
 
         logger.info(f"  ✓ Normalized '{compound_genre.name}' into {len(individual_genres)} genres")
+
+    # Second pass: normalize names of remaining genres (casing, typos)
+    all_genres_after = db.query(Genre).all()
+    for genre in all_genres_after:
+        normalized_name = normalize_genre_name(genre.name)
+        if normalized_name == genre.name:
+            continue
+
+        logger.info(f"Renaming: '{genre.name}' -> '{normalized_name}'")
+        stats.setdefault('genres_renamed', 0)
+
+        if dry_run:
+            stats['genres_renamed'] += 1
+            continue
+
+        # Check if target genre already exists
+        target_id = genre_uuid(normalized_name)
+        existing = db.query(Genre).filter(Genre.id == target_id).first()
+
+        if existing and existing.id != genre.id:
+            # Merge: move all track associations to existing genre
+            track_genres = db.query(TrackGenre).filter(
+                TrackGenre.genre_id == genre.id
+            ).all()
+            for tg in track_genres:
+                dup = db.query(TrackGenre).filter(
+                    TrackGenre.track_id == tg.track_id,
+                    TrackGenre.genre_id == existing.id,
+                ).first()
+                if not dup:
+                    db.add(TrackGenre(track_id=tg.track_id, genre_id=existing.id))
+                db.delete(tg)
+            db.delete(genre)
+            logger.info(f"  Merged into existing genre '{existing.name}'")
+        else:
+            # Just rename
+            genre.id = target_id
+            genre.name = normalized_name
+
+        stats['genres_renamed'] += 1
 
     if not dry_run:
         db.commit()
@@ -216,12 +344,12 @@ def show_genre_statistics(db: Session):
     """)).fetchall()
 
     logger.info("\n📊 Genre Statistics:")
-    logger.info(f"{'ID':<5} {'Genre':<40} {'Tracks':<10}")
+    logger.info(f"{'Genre':<50} {'Tracks':<10}")
     logger.info("-" * 60)
 
     total_tracks = 0
     for row in result:
-        logger.info(f"{row.id:<5} {row.name:<40} {row.track_count:<10}")
+        logger.info(f"{row.name:<50} {row.track_count:<10}")
         total_tracks += row.track_count
 
     logger.info("-" * 60)

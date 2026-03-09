@@ -355,19 +355,23 @@ class LibraryScanner:
                             role="primary",
                         ))
 
-                    # Create track-genre association
+                    # Create track-genre associations (split composite genres)
                     genre_name = metadata.get("genre")
                     if genre_name and genre_name.strip():
-                        genre = self.get_or_create_genre(db, genre_name)
-                        existing_tg = db.query(TrackGenre).filter(
-                            TrackGenre.track_id == track.id,
-                            TrackGenre.genre_id == genre.id,
-                        ).first()
-                        if not existing_tg:
-                            db.add(TrackGenre(
-                                track_id=track.id,
-                                genre_id=genre.id,
-                            ))
+                        from normalize_genres import parse_genre_string, normalize_genre_name
+                        genre_names = parse_genre_string(genre_name)
+                        for gn in genre_names:
+                            gn = normalize_genre_name(gn)
+                            genre = self.get_or_create_genre(db, gn)
+                            existing_tg = db.query(TrackGenre).filter(
+                                TrackGenre.track_id == track.id,
+                                TrackGenre.genre_id == genre.id,
+                            ).first()
+                            if not existing_tg:
+                                db.add(TrackGenre(
+                                    track_id=track.id,
+                                    genre_id=genre.id,
+                                ))
 
                     # Create media file (physical file on disk)
                     media_file = MediaFile(
