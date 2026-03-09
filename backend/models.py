@@ -487,7 +487,6 @@ class GenreDescription(Base):
     summary = Column(Text)
     content = Column(Text)
     url = Column(String(500))
-    reach = Column(Integer)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

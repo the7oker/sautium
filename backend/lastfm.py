@@ -480,7 +480,6 @@ class LastFmService:
         Returns dict with:
         - summary: Short description
         - content: Full wiki text
-        - reach: How many items have this tag
         - url: Last.fm tag page URL
         """
         try:
@@ -495,20 +494,12 @@ class LastFmService:
             except Exception as e:
                 logger.debug(f"No wiki for tag {tag_name}: {e}")
 
-            # Get reach (popularity)
-            reach = None
-            try:
-                reach = int(tag.get_reach())
-            except Exception as e:
-                logger.debug(f"No reach for tag {tag_name}: {e}")
-
             if not summary and not content:
                 return None
 
             return {
                 "summary": summary,
                 "content": content,
-                "reach": reach,
                 "url": tag.get_url(),
             }
 
@@ -555,7 +546,6 @@ class LastFmService:
                 existing.summary = data.get("summary")
                 existing.content = data.get("content")
                 existing.url = data.get("url")
-                existing.reach = data.get("reach")
                 logger.debug(f"Updated description for genre {genre_id} ({genre_name})")
             else:
                 # Create new
@@ -565,7 +555,6 @@ class LastFmService:
                     summary=data.get("summary"),
                     content=data.get("content"),
                     url=data.get("url"),
-                    reach=data.get("reach")
                 )
                 db.add(description)
                 logger.debug(f"Created description for genre {genre_id} ({genre_name})")
@@ -577,7 +566,6 @@ class LastFmService:
                 "genre_id": genre_id,
                 "genre_name": genre_name,
                 "has_description": bool(data.get("summary") or data.get("content")),
-                "reach": data.get("reach"),
                 "summary_length": len(data.get("summary") or ""),
                 "content_length": len(data.get("content") or ""),
             }
@@ -618,12 +606,9 @@ class LastFmService:
                 SELECT DISTINCT g.id, g.name
                 FROM genres g
                 WHERE NOT EXISTS (
-                    SELECT 1 FROM external_metadata em
-                    WHERE em.entity_type = 'genre'
-                      AND em.entity_id = g.id
-                      AND em.source = 'lastfm'
-                      AND em.metadata_type = 'description'
-                      AND em.fetch_status = 'success'
+                    SELECT 1 FROM genre_descriptions gd
+                    WHERE gd.genre_id = g.id
+                      AND gd.source = 'lastfm'
                 )
                 ORDER BY g.name
             """)

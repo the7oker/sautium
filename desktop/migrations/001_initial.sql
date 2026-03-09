@@ -258,7 +258,6 @@ CREATE TABLE IF NOT EXISTS genre_descriptions (
     summary TEXT,
     content TEXT,
     url VARCHAR(500),
-    reach INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_genre_descriptions UNIQUE (genre_id, source),
