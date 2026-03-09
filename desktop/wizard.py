@@ -43,6 +43,7 @@ class SetupWizard(ctk.CTkToplevel):
             self._step_welcome,
             self._step_provider,
             self._step_hqplayer,
+            self._step_lastfm,
             self._step_summary,
         ]
 
@@ -164,6 +165,18 @@ class SetupWizard(ctk.CTkToplevel):
                     self.config["hqplayer"]["port"] = int(self._hqp_port_var.get())
                 except ValueError:
                     self.config["hqplayer"]["port"] = 4321
+            return True
+
+        if self.current_step == 3:  # Last.fm
+            if self._lastfm_enabled_var.get():
+                username = self._lastfm_user_var.get().strip()
+                if not username:
+                    return True  # Allow empty — will skip auth
+                self.config.setdefault("lastfm", {})["username"] = username
+                self.config["lastfm"]["pending_auth"] = True
+            else:
+                self.config.setdefault("lastfm", {})["username"] = None
+                self.config.setdefault("lastfm", {})["pending_auth"] = False
             return True
 
         return True
@@ -497,6 +510,69 @@ class SetupWizard(ctk.CTkToplevel):
                 text=f"Connection failed: {e}", text_color="red"
             )
 
+    def _step_lastfm(self):
+        ctk.CTkLabel(
+            self.content_frame,
+            text="Last.fm Scrobbling",
+            font=ctk.CTkFont(size=22, weight="bold"),
+        ).pack(pady=(20, 5))
+
+        ctk.CTkLabel(
+            self.content_frame,
+            text="Track your listening history on Last.fm.\nScrobbling works automatically with HQPlayer playback.",
+        ).pack(pady=5)
+
+        lastfm = self.config.get("lastfm", {})
+        self._lastfm_enabled_var = ctk.BooleanVar(
+            value=bool(lastfm.get("username"))
+        )
+
+        ctk.CTkCheckBox(
+            self.content_frame,
+            text="Enable Last.fm scrobbling",
+            variable=self._lastfm_enabled_var,
+            command=self._toggle_lastfm_fields,
+        ).pack(pady=10)
+
+        self._lastfm_fields_frame = ctk.CTkFrame(
+            self.content_frame, fg_color="transparent"
+        )
+        self._lastfm_fields_frame.pack(fill="x", padx=30, pady=5)
+
+        self._lastfm_user_var = ctk.StringVar(
+            value=lastfm.get("username") or ""
+        )
+
+        self._toggle_lastfm_fields()
+
+    def _toggle_lastfm_fields(self):
+        for widget in self._lastfm_fields_frame.winfo_children():
+            widget.destroy()
+
+        if not self._lastfm_enabled_var.get():
+            return
+
+        ctk.CTkLabel(
+            self._lastfm_fields_frame, text="Last.fm Username:"
+        ).pack(anchor="w")
+        ctk.CTkEntry(
+            self._lastfm_fields_frame,
+            textvariable=self._lastfm_user_var,
+            width=300,
+            placeholder_text="your Last.fm username",
+        ).pack(anchor="w", pady=(0, 10))
+
+        ctk.CTkLabel(
+            self._lastfm_fields_frame,
+            text=(
+                "After setup, the app will open Last.fm in your browser\n"
+                "to authorize scrobbling. You can also do this later in Settings."
+            ),
+            text_color="gray",
+            font=ctk.CTkFont(size=12),
+            justify="left",
+        ).pack(anchor="w", pady=5)
+
     def _step_summary(self):
         ctk.CTkLabel(
             self.content_frame,
@@ -507,12 +583,19 @@ class SetupWizard(ctk.CTkToplevel):
         summary_frame = ctk.CTkFrame(self.content_frame)
         summary_frame.pack(fill="x", padx=20, pady=10)
 
+        lastfm_user = self.config.get("lastfm", {}).get("username")
         items = [
             ("AI Provider", self.config.get("provider", "anthropic")),
             (
                 "HQPlayer",
                 f"{self.config['hqplayer']['host']}:{self.config['hqplayer']['port']}"
                 if self.config.get("hqplayer", {}).get("enabled")
+                else "Disabled",
+            ),
+            (
+                "Last.fm",
+                f"{lastfm_user} (will authorize after start)"
+                if lastfm_user
                 else "Disabled",
             ),
             ("GPU", f"{self._gpu_name}" if self._cuda_available else "CPU mode"),

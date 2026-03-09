@@ -255,6 +255,9 @@ class LauncherApp(ctk.CTk):
         # Silently generate node identity if not present
         self._ensure_node_identity()
 
+        # Auto-trigger Last.fm auth if pending from wizard
+        self._check_lastfm_pending_auth()
+
     def _ensure_node_identity(self):
         """Generate node identity on first run (non-blocking)."""
         def _gen():
@@ -267,6 +270,96 @@ class LauncherApp(ctk.CTk):
                 logger.debug(f"Node identity generation skipped: {e}")
 
         threading.Thread(target=_gen, daemon=True).start()
+
+    def _check_lastfm_pending_auth(self):
+        """If user enabled Last.fm in wizard, trigger authorization."""
+        lastfm = self.config.get("lastfm", {})
+        if not lastfm.get("pending_auth") or not lastfm.get("username"):
+            return
+        if lastfm.get("session_key"):
+            return  # Already authorized
+
+        # Clear pending flag
+        self.config["lastfm"]["pending_auth"] = False
+        save_config(self.config)
+
+        def _auth():
+            try:
+                result = self.api_client.lastfm_auth_start()
+                if not result or not result.get("auth_url"):
+                    logger.warning("Last.fm auth start failed")
+                    return
+
+                webbrowser.open(result["auth_url"])
+
+                # Show dialog asking user to complete auth
+                self.after(0, lambda: self._show_lastfm_auth_dialog())
+            except Exception as e:
+                logger.warning(f"Last.fm auth failed: {e}")
+
+        threading.Thread(target=_auth, daemon=True).start()
+
+    def _show_lastfm_auth_dialog(self):
+        """Show dialog to complete Last.fm authorization after browser step."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Last.fm Authorization")
+        dialog.geometry("420x200")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ctk.CTkLabel(
+            dialog, text="Last.fm Authorization",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        ).pack(pady=(20, 10))
+
+        ctk.CTkLabel(
+            dialog,
+            text="A browser window has opened.\nAllow access on Last.fm, then click 'Complete'.",
+            justify="center",
+        ).pack(pady=5)
+
+        self._lastfm_dialog_msg = ctk.CTkLabel(
+            dialog, text="", text_color="gray",
+        )
+        self._lastfm_dialog_msg.pack(pady=5)
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(pady=10)
+
+        ctk.CTkButton(
+            btn_frame, text="Complete", width=120,
+            command=lambda: self._complete_lastfm_auth(dialog),
+        ).pack(side="left", padx=5)
+
+        ctk.CTkButton(
+            btn_frame, text="Skip", width=100,
+            fg_color="transparent", border_width=1,
+            command=dialog.destroy,
+        ).pack(side="left", padx=5)
+
+    def _complete_lastfm_auth(self, dialog):
+        """Complete Last.fm auth after user allowed in browser."""
+        self._lastfm_dialog_msg.configure(text="Checking...", text_color="gray")
+
+        def _complete():
+            result = self.api_client.lastfm_auth_complete()
+            if result and result.get("success"):
+                session_key = result["session_key"]
+                self.config.setdefault("lastfm", {})["session_key"] = session_key
+                save_config(self.config)
+                self.after(0, lambda: self._lastfm_dialog_msg.configure(
+                    text="Authorized successfully!", text_color="#22c55e"))
+                self.after(1500, dialog.destroy)
+            else:
+                detail = ""
+                if result and result.get("detail"):
+                    detail = f"\n{result['detail']}"
+                self.after(0, lambda: self._lastfm_dialog_msg.configure(
+                    text=f"Authorization failed.{detail}\nYou can try again in Settings.",
+                    text_color="#ef4444"))
+
+        threading.Thread(target=_complete, daemon=True).start()
 
     def _fetch_and_display_stats(self):
         """Fetch library stats from backend and update UI labels."""
