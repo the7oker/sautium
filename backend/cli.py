@@ -1529,5 +1529,51 @@ def generate_text_embeddings_cmd(limit, batch_size, force, max_duration, worker_
         sys.exit(1)
 
 
+@cli.command("generate-enrichment-embeddings")
+@click.option("--limit", "-l", type=int, default=None, help="Limit number of entities per type")
+@click.option("--batch-size", "-b", type=int, default=None, help="Override batch size")
+@click.option("--force", is_flag=True, help="Regenerate even if already exists")
+@click.option("--type", "-t", "emb_type", type=click.Choice(["all", "artist-bios", "album-info", "genre-descs"]),
+              default="all", help="Which enrichment type to generate")
+def generate_enrichment_embeddings_cmd(limit, batch_size, force, emb_type):
+    """Generate embeddings for artist bios, album info, genre descriptions."""
+    from enrichment_embeddings import (
+        generate_all_enrichment_embeddings,
+        generate_album_info_embeddings,
+        generate_artist_bio_embeddings,
+        generate_genre_desc_embeddings,
+    )
+
+    click.echo(f"📝 Generating enrichment embeddings ({emb_type})...")
+    click.echo(f"🤖 Model: {settings.text_embedding_model}")
+    if limit:
+        click.echo(f"⚠️  Limited to {limit} entities per type")
+    if force:
+        click.echo(f"🔄 Force regenerating existing embeddings")
+
+    try:
+        if emb_type == "all":
+            results = generate_all_enrichment_embeddings(limit=limit, batch_size=batch_size, force=force)
+            for name, stats in results.items():
+                click.echo(f"\n📊 {name}: {stats['success']} ok, {stats['chunks']} chunks, "
+                           f"{stats['failed']} failed, {stats['skipped']} skipped")
+        elif emb_type == "artist-bios":
+            stats = generate_artist_bio_embeddings(limit=limit, batch_size=batch_size, force=force)
+            click.echo(f"\n📊 Artist bios: {stats['success']} ok, {stats['chunks']} chunks")
+        elif emb_type == "album-info":
+            stats = generate_album_info_embeddings(limit=limit, batch_size=batch_size, force=force)
+            click.echo(f"\n📊 Album info: {stats['success']} ok, {stats['chunks']} chunks")
+        elif emb_type == "genre-descs":
+            stats = generate_genre_desc_embeddings(limit=limit, batch_size=batch_size, force=force)
+            click.echo(f"\n📊 Genre descs: {stats['success']} ok, {stats['chunks']} chunks")
+
+        click.echo("\n✅ Enrichment embedding generation complete!")
+
+    except Exception as e:
+        click.echo(f"\n❌ Error: {e}", err=True)
+        logger.exception("Enrichment embedding generation failed")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     cli()
