@@ -2256,6 +2256,68 @@ AI DJ тепер може відповідати на питання "про щ�
 
 ---
 
+## BGE-M3 Embedding Model Migration - DONE
+
+**Date:** 2026-03-09
+
+Switched all text/lyrics/enrichment embeddings from `paraphrase-multilingual-MiniLM-L12-v2` (384d, 128 tokens) to `BAAI/bge-m3` (1024d, 8192 tokens).
+
+**Problem:** Old model silently truncated text at 128 tokens (~100 words). Artist bios, album descriptions, and long lyrics were losing most of their semantic content.
+
+**Changes:**
+- All vector columns: 384d → 1024d (text_embeddings, lyrics_embeddings, artist_bio_embeddings, album_info_embeddings, genre_desc_embeddings)
+- HNSW indexes rebuilt for new dimensions
+- Enrichment chunk counts dropped dramatically (ABBA bio: 194 → 10 chunks, avg: 6.6 → 1.1)
+- Config: `text_embedding_model = "BAAI/bge-m3"`, `text_embedding_dimension = 1024`
+
+**Regenerated:** All embeddings (31K text, 21K lyrics, 3.3K artist bios, 702 albums, 237 genres)
+
+**Files:** `backend/config.py`, `backend/models.py`, `backend/text_embeddings.py`, `backend/lyrics_embeddings.py`, `backend/enrichment_embeddings.py`, `desktop/migrations/001_initial.sql`
+
+---
+
+## Genius Lyrics Validation - DONE
+
+**Date:** 2026-03-09
+
+**Problem:** 69% of Genius lyrics (1,735/2,511) were junk — novels (Marcel Proust 825KB), legislation (US Healthcare Act 2.5MB), release calendars, essays. Genius.com hosts non-lyrics content in the same format as lyrics pages. Their search API returns these for instrumental/electronic tracks.
+
+**Root cause:** Genius expanded beyond lyrics to become a general annotation platform. Fuzzy search returns "best match" across ALL content including literature, legal documents, etc.
+
+**Solution:** Added `validate_lyrics()` to `backend/genius.py` with 3 heuristics:
+- `MAX_LYRICS_CHARS = 5000` — rejects texts > 5K (novels, legislation)
+- `_fuzzy_match()` — title/artist verification (min 50% match)
+- `MAX_AVG_WORDS_PER_LINE = 16` — detects prose structure (lyrics: 3-12 wpl, prose: 20-37 wpl)
+
+Also added safety limits to `backend/lyrics_embeddings.py`: `MAX_LYRICS_CHARS = 5000`, `MAX_CHUNKS_PER_TRACK = 3`, SQL-level LENGTH filter.
+
+**Cleanup:** 1,735 junk records marked as instrumental (plain_lyrics = NULL)
+
+---
+
+## Enrichment Search Split (Artists/Albums/Genres) - DONE
+
+**Date:** 2026-03-10
+
+**Problem:** `search_by_enrichment` searched all 3 enrichment tables at once and returned tracks. All tracks from one artist had identical similarity scores, flooding results with 10 tracks from the same artist.
+
+**Solution:** Split into 3 entity-level search functions:
+- `search_artists_by_bio(query)` → returns **artists** with track_count, sample_tracks
+- `search_albums_by_info(query)` → returns **albums** with artist, year, track_count
+- `search_genres_by_description(query)` → returns **genres** with track_count, sample_artists
+
+**API endpoints:** `/search/artists`, `/search/albums`, `/search/genres`
+**Tools:** `search_artists`, `search_albums`, `search_genres` (replaced single `search_enrichment`)
+
+**Quality test results:**
+- "British progressive rock from 70s" → Deep Purple, Led Zeppelin, Procol Harum, Queen, King Crimson
+- "concept album about space" → Vangelis "Cosmos", Hans Zimmer "Interstellar", Vangelis "Albedo 0.39"
+- "slow romantic piano" → Piano, Classique, Solo Piano, Modern Classical
+
+**Files:** `backend/search.py`, `backend/main.py`, `backend/tools/definitions.py`, `mcp/hqplayer_server.py`, `backend/claude_dj_prompt.py`
+
+---
+
 ## Next Steps
 
 ### Phase 2: External Data & Text Embeddings - COMPLETE ✅
@@ -2280,7 +2342,9 @@ AI DJ тепер може відповідати на питання "про щ�
 - [x] **Windows desktop launcher** ✅
 - [x] **Multi-provider LLM (Anthropic, OpenAI, Groq)** ✅
 - [x] **Tool-based AI DJ (22 tools)** ✅ — додано `get_lyrics`
-- [x] **Multilingual text embeddings** ✅ — `paraphrase-multilingual-MiniLM-L12-v2` (50+ мов)
+- [x] **BGE-M3 embedding model** ✅ — 1024d, 8192 tokens (replaced paraphrase-multilingual-MiniLM-L12-v2)
+- [x] **Genius lyrics validation** ✅ — fuzzy match + length + prose detection, cleaned 1,735 junk records
+- [x] **Entity-level enrichment search** ✅ — separate artist/album/genre search (replaced monolithic search_enrichment)
 - [x] **P2P preparation (P0+P1)** ✅ — launcher↔backend bridge, UUID v5 для Genre/Tag/EmbeddingModel, Ed25519 node identity
 
 ### Phase 4: Voice Interface & Advanced Features
@@ -2290,7 +2354,6 @@ AI DJ тепер може відповідати на питання "про щ�
 - Listening statistics and user preferences
 
 ### Upcoming
-- Regenerate text + lyrics embeddings with multilingual model (paraphrase-multilingual-MiniLM-L12-v2)
 - Fetch more lyrics (extend library coverage)
 - Musixmatch as third lyrics source (if needed after Genius coverage analysis)
 - Audio analysis for remaining tracks

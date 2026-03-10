@@ -1,6 +1,6 @@
 """
 Lyrics embedding generation using sentence-transformers.
-Generates 384-dimensional embeddings from track lyrics for semantic search
+Generates 1024-dimensional embeddings from track lyrics for semantic search
 by lyrical content ("songs about rain", "love songs", "protest songs").
 
 Pipeline:
@@ -26,6 +26,15 @@ from models import EmbeddingModel, LyricsEmbedding
 from uuid_utils import embedding_model_uuid
 
 logger = logging.getLogger(__name__)
+
+# Max plain_lyrics length to consider valid. Longer texts are almost certainly
+# junk from Genius (novels, legislation, release lists). Typical song lyrics
+# are 500-3000 chars; the longest legitimate lyrics rarely exceed 5000.
+MAX_LYRICS_CHARS = 5000
+
+# Max chunks per track. Even if text is at the limit, cap embedding chunks
+# to keep GPU memory bounded and avoid runaway processing.
+MAX_CHUNKS_PER_TRACK = 3
 
 # Standard English stop words (~170 words).
 # These carry no semantic meaning for lyrics content search.
@@ -84,7 +93,7 @@ def prepare_lyrics_text(plain_lyrics: str) -> str:
     return " ".join(words)
 
 
-def split_into_balanced_chunks(text: str, max_tokens: int = 200) -> List[str]:
+def split_into_balanced_chunks(text: str, max_tokens: int = 2000) -> List[str]:
     """
     Split text into approximately equal chunks that fit within max_tokens.
 
@@ -92,7 +101,7 @@ def split_into_balanced_chunks(text: str, max_tokens: int = 200) -> List[str]:
 
     Args:
         text: Input text.
-        max_tokens: Max tokens per chunk (model limit is 256, use 200 for safety).
+        max_tokens: Max tokens per chunk (BGE-M3 limit is 8192, use 2000 for retrieval granularity).
 
     Returns:
         List of text chunks (1 element if fits in single chunk).
@@ -174,7 +183,7 @@ class LyricsEmbeddingGenerator:
         )
 
     def query_to_embedding(self, query: str) -> np.ndarray:
-        """Encode a search query into a 384d embedding vector."""
+        """Encode a search query into a 1024d embedding vector."""
         self.load_model()
         return self.model.encode(
             query,
@@ -229,9 +238,12 @@ class LyricsEmbeddingGenerator:
         start_time = time.time()
 
         # Find tracks with lyrics that need embedding
+        # Filter out junk lyrics (> MAX_LYRICS_CHARS) at DB level to avoid
+        # transferring megabytes of novels/legislation from Genius API
         where_parts = [
             "tl.plain_lyrics IS NOT NULL",
             "tl.instrumental = FALSE",
+            f"LENGTH(tl.plain_lyrics) <= {MAX_LYRICS_CHARS}",
         ]
         params: Dict[str, Any] = {}
 
@@ -315,12 +327,17 @@ class LyricsEmbeddingGenerator:
             # Prepare all chunks for this batch
             all_chunks = []  # list of (track_id, chunk_index, chunk_text)
             for row in batch_rows:
+                # Skip junk lyrics (novels, legislation, etc. from Genius API)
+                if len(row.plain_lyrics) > MAX_LYRICS_CHARS:
+                    stats["skipped"] += 1
+                    continue
+
                 prepared = prepare_lyrics_text(row.plain_lyrics)
                 if not prepared.strip():
                     stats["skipped"] += 1
                     continue
 
-                chunks = split_into_balanced_chunks(prepared)
+                chunks = split_into_balanced_chunks(prepared)[:MAX_CHUNKS_PER_TRACK]
                 for ci, chunk in enumerate(chunks):
                     all_chunks.append((row.track_id, ci, chunk))
 

@@ -1,6 +1,11 @@
 """
 Genius API integration for Music AI DJ.
 Fetches plain lyrics from Genius via the lyricsgenius library.
+
+Known issue: Genius.com hosts non-lyrics content (novels, legislation,
+release calendars, essays) using the same page format as lyrics.
+Their search API can return these pages for instrumental/electronic tracks.
+We validate results with fuzzy title matching and structural heuristics.
 """
 
 import logging
@@ -13,6 +18,21 @@ from sqlalchemy.orm import Session
 from models import TrackLyrics, ExternalMetadata
 
 logger = logging.getLogger(__name__)
+
+# --- Lyrics validation constants ---
+# Max characters for valid lyrics. Longest legitimate songs rarely exceed 5000 chars.
+# Genius junk can be 100K-2.5M (novels, legislation, release calendars).
+MAX_LYRICS_CHARS = 5000
+
+# Minimum fuzzy match score (0-100) between requested and returned title/artist.
+MIN_FUZZY_MATCH_SCORE = 50
+
+# Average words-per-line threshold. Real lyrics: 3-12 words/line.
+# Prose (novels, essays): 15-30+ words/line.
+MAX_AVG_WORDS_PER_LINE = 16
+
+# Minimum number of lines to apply structural checks (very short lyrics skip these).
+MIN_LINES_FOR_STRUCTURE_CHECK = 5
 
 
 def clean_genius_lyrics(raw_lyrics: str) -> Optional[str]:
@@ -49,6 +69,66 @@ def clean_genius_lyrics(raw_lyrics: str) -> Optional[str]:
     return text.strip() or None
 
 
+def _fuzzy_match(a: str, b: str) -> int:
+    """Simple fuzzy match score (0-100) without external dependencies."""
+    a = re.sub(r"[^\w\s]", "", a.lower()).strip()
+    b = re.sub(r"[^\w\s]", "", b.lower()).strip()
+    if not a or not b:
+        return 0
+    if a == b:
+        return 100
+    # Check if one contains the other
+    if a in b or b in a:
+        return 80
+    # Token overlap ratio
+    tokens_a = set(a.split())
+    tokens_b = set(b.split())
+    if not tokens_a or not tokens_b:
+        return 0
+    overlap = len(tokens_a & tokens_b)
+    total = max(len(tokens_a), len(tokens_b))
+    return int(overlap / total * 100)
+
+
+def validate_lyrics(
+    lyrics: str,
+    requested_title: str,
+    requested_artist: str,
+    returned_title: Optional[str] = None,
+    returned_artist: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Validate that scraped text is actually song lyrics, not junk.
+
+    Returns None if valid, or a rejection reason string if invalid.
+    """
+    if not lyrics or not lyrics.strip():
+        return "empty"
+
+    # 1. Length check — novels/legislation are 100K-2.5M chars
+    if len(lyrics) > MAX_LYRICS_CHARS:
+        return f"too_long ({len(lyrics)} chars)"
+
+    # 2. Fuzzy title match — catch completely wrong pages
+    if returned_title:
+        title_score = _fuzzy_match(requested_title, returned_title)
+        if title_score < MIN_FUZZY_MATCH_SCORE:
+            # Also check artist to be lenient (compilation pages etc.)
+            artist_score = _fuzzy_match(requested_artist, returned_artist or "")
+            if artist_score < MIN_FUZZY_MATCH_SCORE:
+                return f"title_mismatch (req='{requested_title}' got='{returned_title}' score={title_score})"
+
+    # 3. Structural analysis — lyrics have short lines, prose has long paragraphs
+    lines = [line for line in lyrics.split("\n") if line.strip()]
+    if len(lines) >= MIN_LINES_FOR_STRUCTURE_CHECK:
+        words_per_line = [len(line.split()) for line in lines]
+        avg_wpl = sum(words_per_line) / len(words_per_line)
+        if avg_wpl > MAX_AVG_WORDS_PER_LINE:
+            return f"prose_structure (avg {avg_wpl:.1f} words/line)"
+
+    return None
+
+
 class GeniusService:
     """Service for fetching and storing lyrics from Genius."""
 
@@ -78,7 +158,7 @@ class GeniusService:
     ) -> Optional[Dict[str, Any]]:
         """
         Search Genius for a song and return cleaned lyrics + metadata.
-        Returns None if not found.
+        Returns None if not found or if validation fails (junk content).
         """
         try:
             song = self.genius.search_song(
@@ -89,6 +169,20 @@ class GeniusService:
 
             cleaned = clean_genius_lyrics(song.lyrics)
             if not cleaned:
+                return None
+
+            # Validate lyrics aren't junk (novels, legislation, etc.)
+            rejection = validate_lyrics(
+                cleaned,
+                requested_title=title,
+                requested_artist=artist,
+                returned_title=song.title,
+                returned_artist=song.artist,
+            )
+            if rejection:
+                logger.warning(
+                    f"Genius lyrics rejected for {artist} - {title}: {rejection}"
+                )
                 return None
 
             # lyricsgenius 3.x stores attributes in _body dict

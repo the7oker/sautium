@@ -526,6 +526,98 @@ def search_lyrics(query: str, limit: int = 15) -> str:
 
 
 @mcp.tool()
+def search_artists(query: str, limit: int = 10) -> str:
+    """Search artists by biography/background. Returns artists, not tracks.
+
+    Use for queries about artist origin, style, era, or background.
+    E.g. 'British rock band from the 70s', 'female jazz vocalist', 'German electronic producer'.
+
+    Args:
+        query: Description to search for in artist biographies
+        limit: Maximum number of artists (default 10)
+    """
+    try:
+        with httpx.Client(base_url=BACKEND_URL, timeout=30.0) as client:
+            resp = client.get("/search/artists", params={"query": query, "limit": limit})
+            resp.raise_for_status()
+            data = resp.json()
+
+        rows = data.get("results", [])
+        lines = [f"Artist search for '{query}' ({len(rows)} results):"]
+        for r in rows:
+            line = f"  {r['similarity']:.4f} | {r['artist']} ({r['track_count']} tracks)"
+            if r.get("sample_tracks"):
+                line += f" — {r['sample_tracks']}"
+            lines.append(line)
+        return "\n".join(lines) if rows else f"No artists found for '{query}'"
+    except httpx.ConnectError:
+        return "Error: Cannot connect to backend."
+    except Exception as e:
+        return f"Error in artist search: {e}"
+
+
+@mcp.tool()
+def search_albums(query: str, limit: int = 10) -> str:
+    """Search albums by description. Returns albums, not tracks.
+
+    Use for queries about album concept, style, or context.
+    E.g. 'concept album about war', 'live recording', 'debut album with orchestral arrangements'.
+
+    Args:
+        query: Description to search for in album descriptions
+        limit: Maximum number of albums (default 10)
+    """
+    try:
+        with httpx.Client(base_url=BACKEND_URL, timeout=30.0) as client:
+            resp = client.get("/search/albums", params={"query": query, "limit": limit})
+            resp.raise_for_status()
+            data = resp.json()
+
+        rows = data.get("results", [])
+        lines = [f"Album search for '{query}' ({len(rows)} results):"]
+        for r in rows:
+            year_str = f" ({r['year']})" if r.get("year") else ""
+            line = f"  {r['similarity']:.4f} | {r['artist']} — {r['album']}{year_str} ({r['track_count']} tracks)"
+            lines.append(line)
+        return "\n".join(lines) if rows else f"No albums found for '{query}'"
+    except httpx.ConnectError:
+        return "Error: Cannot connect to backend."
+    except Exception as e:
+        return f"Error in album search: {e}"
+
+
+@mcp.tool()
+def search_genres(query: str, limit: int = 10) -> str:
+    """Search genres by description. Returns genres, not tracks.
+
+    Use for queries about music characteristics or style.
+    E.g. 'heavy distorted guitars', 'African rhythms', 'minimalist repetitive compositions'.
+
+    Args:
+        query: Description to search for in genre descriptions
+        limit: Maximum number of genres (default 10)
+    """
+    try:
+        with httpx.Client(base_url=BACKEND_URL, timeout=30.0) as client:
+            resp = client.get("/search/genres", params={"query": query, "limit": limit})
+            resp.raise_for_status()
+            data = resp.json()
+
+        rows = data.get("results", [])
+        lines = [f"Genre search for '{query}' ({len(rows)} results):"]
+        for r in rows:
+            line = f"  {r['similarity']:.4f} | {r['genre']} ({r['track_count']} tracks)"
+            if r.get("sample_artists"):
+                line += f" — {r['sample_artists']}"
+            lines.append(line)
+        return "\n".join(lines) if rows else f"No genres found for '{query}'"
+    except httpx.ConnectError:
+        return "Error: Cannot connect to backend."
+    except Exception as e:
+        return f"Error in genre search: {e}"
+
+
+@mcp.tool()
 def get_lyrics(track_id: int) -> str:
     """Get the full lyrics text for a specific track.
 

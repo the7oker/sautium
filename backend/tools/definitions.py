@@ -294,6 +294,68 @@ def _h_search_lyrics(query: str, limit: int = 15) -> str:
         return f"Error in lyrics search: {e}"
 
 
+def _h_search_artists(query: str, limit: int = 10) -> str:
+    try:
+        backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
+        with httpx.Client(base_url=backend_url, timeout=30.0) as client:
+            resp = client.get("/search/artists", params={"query": query, "limit": limit})
+            resp.raise_for_status()
+            data = resp.json()
+        rows = data.get("results", [])
+        lines = [f"Artist search for '{query}' ({len(rows)} results):"]
+        for r in rows:
+            line = f"  {r['similarity']:.4f} | {r['artist']} ({r['track_count']} tracks)"
+            if r.get("sample_tracks"):
+                line += f" — {r['sample_tracks']}"
+            lines.append(line)
+        return "\n".join(lines) if rows else f"No artists found for '{query}'"
+    except httpx.ConnectError:
+        return "Error: Cannot connect to backend."
+    except Exception as e:
+        return f"Error in artist search: {e}"
+
+
+def _h_search_albums(query: str, limit: int = 10) -> str:
+    try:
+        backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
+        with httpx.Client(base_url=backend_url, timeout=30.0) as client:
+            resp = client.get("/search/albums", params={"query": query, "limit": limit})
+            resp.raise_for_status()
+            data = resp.json()
+        rows = data.get("results", [])
+        lines = [f"Album search for '{query}' ({len(rows)} results):"]
+        for r in rows:
+            year_str = f" ({r['year']})" if r.get("year") else ""
+            line = f"  {r['similarity']:.4f} | {r['artist']} — {r['album']}{year_str} ({r['track_count']} tracks)"
+            lines.append(line)
+        return "\n".join(lines) if rows else f"No albums found for '{query}'"
+    except httpx.ConnectError:
+        return "Error: Cannot connect to backend."
+    except Exception as e:
+        return f"Error in album search: {e}"
+
+
+def _h_search_genres(query: str, limit: int = 10) -> str:
+    try:
+        backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
+        with httpx.Client(base_url=backend_url, timeout=30.0) as client:
+            resp = client.get("/search/genres", params={"query": query, "limit": limit})
+            resp.raise_for_status()
+            data = resp.json()
+        rows = data.get("results", [])
+        lines = [f"Genre search for '{query}' ({len(rows)} results):"]
+        for r in rows:
+            line = f"  {r['similarity']:.4f} | {r['genre']} ({r['track_count']} tracks)"
+            if r.get("sample_artists"):
+                line += f" — {r['sample_artists']}"
+            lines.append(line)
+        return "\n".join(lines) if rows else f"No genres found for '{query}'"
+    except httpx.ConnectError:
+        return "Error: Cannot connect to backend."
+    except Exception as e:
+        return f"Error in genre search: {e}"
+
+
 def _h_get_lyrics(track_id: int) -> str:
     row = _db_query_one("""
         SELECT t.title, a.name as artist, tl.source, tl.plain_lyrics, tl.instrumental
@@ -923,6 +985,42 @@ def register_all():
             ToolParam("limit", "integer", "Maximum number of results (default 15)", required=False, default=15),
         ],
         handler=_h_search_lyrics,
+    ))
+
+    REGISTRY.register(ToolDef(
+        name="search_artists",
+        description="Search artists by biography/background. Returns artists (not tracks). "
+                    "Use for queries about artist origin, style, era, or background. "
+                    "E.g. 'British rock band from the 70s', 'female jazz vocalist', 'German electronic producer'.",
+        parameters=[
+            ToolParam("query", "string", "Description to search for in artist biographies", required=True),
+            ToolParam("limit", "integer", "Maximum number of artists (default 10)", required=False, default=10),
+        ],
+        handler=_h_search_artists,
+    ))
+
+    REGISTRY.register(ToolDef(
+        name="search_albums",
+        description="Search albums by description. Returns albums (not tracks). "
+                    "Use for queries about album concept, style, or context. "
+                    "E.g. 'concept album about war', 'live recording', 'debut album with orchestral arrangements'.",
+        parameters=[
+            ToolParam("query", "string", "Description to search for in album descriptions", required=True),
+            ToolParam("limit", "integer", "Maximum number of albums (default 10)", required=False, default=10),
+        ],
+        handler=_h_search_albums,
+    ))
+
+    REGISTRY.register(ToolDef(
+        name="search_genres",
+        description="Search genres by description. Returns genres (not tracks). "
+                    "Use for queries about music characteristics or style. "
+                    "E.g. 'heavy distorted guitars', 'African rhythms', 'minimalist repetitive compositions'.",
+        parameters=[
+            ToolParam("query", "string", "Description to search for in genre descriptions", required=True),
+            ToolParam("limit", "integer", "Maximum number of genres (default 10)", required=False, default=10),
+        ],
+        handler=_h_search_genres,
     ))
 
     REGISTRY.register(ToolDef(

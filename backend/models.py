@@ -11,6 +11,9 @@ Schema overview:
     embeddings ──→ track_id
     audio_features ──→ track_id
     text_embeddings ──→ track_id
+    artist_bio_embeddings ──→ artist_id
+    album_info_embeddings ──→ album_id
+    genre_desc_embeddings ──→ genre_id
 """
 
 import uuid as _uuid
@@ -348,7 +351,7 @@ class TextEmbedding(Base):
     __tablename__ = "text_embeddings"
 
     id = Column(Integer, primary_key=True)
-    vector = Column(Vector(384), nullable=False)
+    vector = Column(Vector(1024), nullable=False)
     model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id"), nullable=False)
     track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False)
 
@@ -379,7 +382,7 @@ class LyricsEmbedding(Base):
     id = Column(Integer, primary_key=True)
     track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False)
     model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE"), nullable=False)
-    vector = Column(Vector(384), nullable=False)
+    vector = Column(Vector(1024), nullable=False)
     chunk_index = Column(Integer, nullable=False, default=0)
     chunk_text = Column(Text)
 
@@ -401,6 +404,90 @@ class LyricsEmbedding(Base):
 
     def __repr__(self):
         return f"<LyricsEmbedding(id={self.id}, track_id={self.track_id}, chunk={self.chunk_index})>"
+
+
+class ArtistBioEmbedding(Base):
+    """Artist bio embeddings (384-dimensional, chunked). One or more per artist."""
+    __tablename__ = "artist_bio_embeddings"
+
+    id = Column(Integer, primary_key=True)
+    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE"), nullable=False)
+    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE"), nullable=False)
+    vector = Column(Vector(1024), nullable=False)
+    chunk_index = Column(Integer, nullable=False, default=0)
+    chunk_text = Column(Text)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    model = relationship("EmbeddingModel")
+    artist = relationship("Artist")
+
+    __table_args__ = (
+        UniqueConstraint("artist_id", "model_id", "chunk_index", name="uq_artist_bio_emb_artist_model_chunk"),
+        Index("idx_artist_bio_emb_vector", "vector",
+              postgresql_using="hnsw",
+              postgresql_with={"m": 16, "ef_construction": 64},
+              postgresql_ops={"vector": "vector_cosine_ops"}),
+        Index("idx_artist_bio_emb_artist", "artist_id"),
+        Index("idx_artist_bio_emb_model", "model_id"),
+    )
+
+
+class AlbumInfoEmbedding(Base):
+    """Album info embeddings (384-dimensional, chunked). One or more per album."""
+    __tablename__ = "album_info_embeddings"
+
+    id = Column(Integer, primary_key=True)
+    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE"), nullable=False)
+    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE"), nullable=False)
+    vector = Column(Vector(1024), nullable=False)
+    chunk_index = Column(Integer, nullable=False, default=0)
+    chunk_text = Column(Text)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    model = relationship("EmbeddingModel")
+    album = relationship("Album")
+
+    __table_args__ = (
+        UniqueConstraint("album_id", "model_id", "chunk_index", name="uq_album_info_emb_album_model_chunk"),
+        Index("idx_album_info_emb_vector", "vector",
+              postgresql_using="hnsw",
+              postgresql_with={"m": 16, "ef_construction": 64},
+              postgresql_ops={"vector": "vector_cosine_ops"}),
+        Index("idx_album_info_emb_album", "album_id"),
+        Index("idx_album_info_emb_model", "model_id"),
+    )
+
+
+class GenreDescEmbedding(Base):
+    """Genre description embeddings (384-dimensional, chunked). One or more per genre."""
+    __tablename__ = "genre_desc_embeddings"
+
+    id = Column(Integer, primary_key=True)
+    genre_id = Column(UUID(as_uuid=True), ForeignKey("genres.id", ondelete="CASCADE"), nullable=False)
+    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE"), nullable=False)
+    vector = Column(Vector(1024), nullable=False)
+    chunk_index = Column(Integer, nullable=False, default=0)
+    chunk_text = Column(Text)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    model = relationship("EmbeddingModel")
+    genre = relationship("Genre")
+
+    __table_args__ = (
+        UniqueConstraint("genre_id", "model_id", "chunk_index", name="uq_genre_desc_emb_genre_model_chunk"),
+        Index("idx_genre_desc_emb_vector", "vector",
+              postgresql_using="hnsw",
+              postgresql_with={"m": 16, "ef_construction": 64},
+              postgresql_ops={"vector": "vector_cosine_ops"}),
+        Index("idx_genre_desc_emb_genre", "genre_id"),
+        Index("idx_genre_desc_emb_model", "model_id"),
+    )
 
 
 class AudioFeature(Base):

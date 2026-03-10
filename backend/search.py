@@ -497,3 +497,243 @@ def search_by_lyrics(
     results = [_build_track_result(row) for row in rows]
 
     return {"results": results, "count": len(results), "query_text": query_text}
+
+
+def _encode_enrichment_query(query_text: str) -> "np.ndarray":
+    """Encode a text query using the enrichment embedding model (BGE-M3)."""
+    from enrichment_embeddings import _BaseEnrichmentGenerator
+    gen = _BaseEnrichmentGenerator()
+    gen.load_model()
+    vector = gen.model.encode(query_text, normalize_embeddings=True)
+    gen.unload_model()
+    return vector
+
+
+def _vector_literal(vector) -> str:
+    """Format a numpy vector as a pgvector SQL literal."""
+    return "'" + "[" + ",".join(str(float(x)) for x in vector) + "]" + "'::vector"
+
+
+def _get_text_model_id(db: Session):
+    """Get embedding model ID from DB. Returns None if not found."""
+    row = db.execute(
+        text("SELECT id FROM embedding_models WHERE name = :name"),
+        {"name": settings.text_embedding_model},
+    ).fetchone()
+    return row.id if row else None
+
+
+def search_artists_by_bio(
+    db: Session,
+    query_text: str,
+    limit: int = 10,
+    min_similarity: float = 0.3,
+) -> Dict[str, Any]:
+    """
+    Search artists by biography similarity.
+
+    Returns artists ranked by how well their Last.fm bio matches the query.
+    Each artist includes track_count and sample tracks for context.
+
+    Use for: "British rock band from the 70s", "female jazz vocalist",
+    "German electronic music producer", "blind blues musician".
+    """
+    model_id = _get_text_model_id(db)
+    if not model_id:
+        return {"error": "Text embedding model not found", "results": [], "count": 0}
+
+    query_vector = _encode_enrichment_query(query_text)
+    vector_str = _vector_literal(query_vector)
+
+    sql = text(f"""
+        SELECT
+            a.id as artist_id,
+            a.name as artist_name,
+            matches.similarity,
+            (SELECT COUNT(*) FROM track_artists ta2
+             WHERE ta2.artist_id = a.id AND ta2.role = 'primary') as track_count,
+            (SELECT STRING_AGG(sub.info, ' | ' ORDER BY sub.info)
+             FROM (
+                SELECT t.title || ' (' || al.title || ')' as info
+                FROM track_artists ta3
+                JOIN tracks t ON ta3.track_id = t.id
+                JOIN media_files mf ON mf.track_id = t.id AND mf.is_analysis_source = TRUE
+                JOIN album_variants av ON mf.album_variant_id = av.id
+                JOIN albums al ON av.album_id = al.id
+                WHERE ta3.artist_id = a.id AND ta3.role = 'primary'
+                LIMIT 3
+             ) sub
+            ) as sample_tracks
+        FROM (
+            SELECT abe.artist_id,
+                   MAX(1 - (abe.vector <=> {vector_str})) as similarity
+            FROM artist_bio_embeddings abe
+            WHERE abe.model_id = :model_id
+            GROUP BY abe.artist_id
+            HAVING MAX(1 - (abe.vector <=> {vector_str})) >= :min_similarity
+        ) matches
+        JOIN artists a ON matches.artist_id = a.id
+        ORDER BY matches.similarity DESC
+        LIMIT :limit
+    """)
+
+    rows = db.execute(sql, {
+        "model_id": model_id, "min_similarity": min_similarity, "limit": limit,
+    }).fetchall()
+
+    results = [
+        {
+            "artist_id": str(r.artist_id),
+            "artist": r.artist_name,
+            "similarity": round(float(r.similarity), 4),
+            "track_count": r.track_count,
+            "sample_tracks": r.sample_tracks,
+        }
+        for r in rows
+    ]
+
+    return {"results": results, "count": len(results), "query_text": query_text}
+
+
+def search_albums_by_info(
+    db: Session,
+    query_text: str,
+    limit: int = 10,
+    min_similarity: float = 0.3,
+) -> Dict[str, Any]:
+    """
+    Search albums by description similarity.
+
+    Returns albums ranked by how well their Last.fm description matches the query.
+    Each album includes artist name, year, and track count.
+
+    Use for: "concept album about war", "live recording from the 80s",
+    "debut album", "double album with orchestral arrangements".
+    """
+    model_id = _get_text_model_id(db)
+    if not model_id:
+        return {"error": "Text embedding model not found", "results": [], "count": 0}
+
+    query_vector = _encode_enrichment_query(query_text)
+    vector_str = _vector_literal(query_vector)
+
+    sql = text(f"""
+        SELECT
+            al.id as album_id,
+            al.title as album_title,
+            a.name as artist_name,
+            al.release_year,
+            matches.similarity,
+            (SELECT COUNT(DISTINCT mf2.track_id)
+             FROM album_variants av2
+             JOIN media_files mf2 ON mf2.album_variant_id = av2.id
+             WHERE av2.album_id = al.id) as track_count
+        FROM (
+            SELECT aie.album_id,
+                   MAX(1 - (aie.vector <=> {vector_str})) as similarity
+            FROM album_info_embeddings aie
+            WHERE aie.model_id = :model_id
+            GROUP BY aie.album_id
+            HAVING MAX(1 - (aie.vector <=> {vector_str})) >= :min_similarity
+        ) matches
+        JOIN albums al ON matches.album_id = al.id
+        -- Get primary artist via first track on this album
+        JOIN LATERAL (
+            SELECT a2.name, a2.id
+            FROM album_variants av3
+            JOIN media_files mf3 ON mf3.album_variant_id = av3.id
+            JOIN track_artists ta ON mf3.track_id = ta.track_id AND ta.role = 'primary'
+            JOIN artists a2 ON ta.artist_id = a2.id
+            WHERE av3.album_id = al.id
+            LIMIT 1
+        ) a ON true
+        ORDER BY matches.similarity DESC
+        LIMIT :limit
+    """)
+
+    rows = db.execute(sql, {
+        "model_id": model_id, "min_similarity": min_similarity, "limit": limit,
+    }).fetchall()
+
+    results = [
+        {
+            "album_id": str(r.album_id),
+            "album": r.album_title,
+            "artist": r.artist_name,
+            "year": r.release_year,
+            "similarity": round(float(r.similarity), 4),
+            "track_count": r.track_count,
+        }
+        for r in rows
+    ]
+
+    return {"results": results, "count": len(results), "query_text": query_text}
+
+
+def search_genres_by_description(
+    db: Session,
+    query_text: str,
+    limit: int = 10,
+    min_similarity: float = 0.3,
+) -> Dict[str, Any]:
+    """
+    Search genres by description similarity.
+
+    Returns genres ranked by how well their description matches the query.
+    Each genre includes track count and sample artists.
+
+    Use for: "music with heavy distorted guitars", "slow romantic music",
+    "African rhythms", "repetitive minimalist compositions".
+    """
+    model_id = _get_text_model_id(db)
+    if not model_id:
+        return {"error": "Text embedding model not found", "results": [], "count": 0}
+
+    query_vector = _encode_enrichment_query(query_text)
+    vector_str = _vector_literal(query_vector)
+
+    sql = text(f"""
+        SELECT
+            g.id as genre_id,
+            g.name as genre_name,
+            matches.similarity,
+            (SELECT COUNT(*) FROM track_genres tg2 WHERE tg2.genre_id = g.id) as track_count,
+            (SELECT STRING_AGG(DISTINCT sub.name, ', ' ORDER BY sub.name)
+             FROM (
+                SELECT a.name
+                FROM track_genres tg3
+                JOIN track_artists ta ON tg3.track_id = ta.track_id AND ta.role = 'primary'
+                JOIN artists a ON ta.artist_id = a.id
+                WHERE tg3.genre_id = g.id
+                LIMIT 5
+             ) sub
+            ) as sample_artists
+        FROM (
+            SELECT gde.genre_id,
+                   MAX(1 - (gde.vector <=> {vector_str})) as similarity
+            FROM genre_desc_embeddings gde
+            WHERE gde.model_id = :model_id
+            GROUP BY gde.genre_id
+            HAVING MAX(1 - (gde.vector <=> {vector_str})) >= :min_similarity
+        ) matches
+        JOIN genres g ON matches.genre_id = g.id
+        ORDER BY matches.similarity DESC
+        LIMIT :limit
+    """)
+
+    rows = db.execute(sql, {
+        "model_id": model_id, "min_similarity": min_similarity, "limit": limit,
+    }).fetchall()
+
+    results = [
+        {
+            "genre_id": str(r.genre_id),
+            "genre": r.genre_name,
+            "similarity": round(float(r.similarity), 4),
+            "track_count": r.track_count,
+            "sample_artists": r.sample_artists,
+        }
+        for r in rows
+    ]
+
+    return {"results": results, "count": len(results), "query_text": query_text}

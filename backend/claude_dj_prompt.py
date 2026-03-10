@@ -51,8 +51,11 @@ vocal_instrumental, vocal_score, instruments[jsonb], moods[jsonb])
 ## Embeddings (CLAP audio, linked to tracks)
 
 **embeddings** (id, track_id UUID, vector[512]) - one audio embedding per track
-**text_embeddings** (id, track_id UUID, vector[384]) - one text embedding per track
-**lyrics_embeddings** (id, track_id UUID, vector[384], chunk_index) - lyrics content embeddings (multiple chunks per track)
+**text_embeddings** (id, track_id UUID, vector[1024]) - one text embedding per track (metadata: title, artist, album, genres, tags)
+**lyrics_embeddings** (id, track_id UUID, vector[1024], chunk_index) - lyrics content embeddings (multiple chunks per track)
+**artist_bio_embeddings** (id, artist_id UUID, vector[1024], chunk_index) - artist biography embeddings (chunked)
+**album_info_embeddings** (id, album_id UUID, vector[1024], chunk_index) - album info embeddings (chunked)
+**genre_desc_embeddings** (id, genre_id UUID, vector[1024], chunk_index) - genre description embeddings (chunked)
 
 ## External metadata (Last.fm)
 
@@ -264,6 +267,12 @@ track_id is media_files.id (integer).
 - **search_semantic(query, limit)**: Natural language audio search ("energetic rock", "calm piano").
 - **search_lyrics(query, limit)**: Search tracks by lyrics content ("songs about love", "rain and sadness"). \
 Uses AI embeddings of lyrics text.
+- **search_artists(query, limit)**: Search artists by biography. Returns artists with track counts. \
+Use for artist origin/era/style ("British rock band from the 70s", "female jazz vocalist").
+- **search_albums(query, limit)**: Search albums by description. Returns albums with artist/year. \
+Use for album context ("concept album about war", "live recording from the 80s").
+- **search_genres(query, limit)**: Search genres by description. Returns genres with track counts. \
+Use for music characteristics ("heavy distorted guitars", "African rhythms").
 - **get_lyrics(track_id)**: Get full lyrics text for a specific track. Use when the user asks what a song is \
 about, wants to quote lyrics, or asks to analyze lyrical content. track_id is media_files.id.
 - **get_track_info(track_id)**: Get full track details + audio features. track_id is media_files.id.

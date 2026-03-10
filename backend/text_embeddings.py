@@ -1,13 +1,12 @@
 """
 Text embedding generation using sentence-transformers.
-Generates 384-dimensional text embeddings from track metadata for semantic search.
+Generates 1024-dimensional text embeddings from track metadata for semantic search.
 
 Operates on tracks (one embedding per track). Uses track_artists, track_genres,
 and enrichment data (artist_bios, album_info, tags) to compose descriptive text.
 """
 
 import logging
-import re
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -21,13 +20,6 @@ from models import EmbeddingModel, TextEmbedding, Track
 from uuid_utils import embedding_model_uuid
 
 logger = logging.getLogger(__name__)
-
-
-def _strip_html(s: str) -> str:
-    """Strip HTML tags (especially Last.fm <a href> links) from text."""
-    if not s:
-        return ""
-    return re.sub(r'<[^>]+>', '', s).strip()
 
 
 class TextEmbeddingGenerator:
@@ -80,7 +72,7 @@ class TextEmbeddingGenerator:
             texts: List of text strings.
 
         Returns:
-            numpy array of shape (len(texts), 384).
+            numpy array of shape (len(texts), 1024).
         """
         self.load_model()
         return self.model.encode(
@@ -91,7 +83,7 @@ class TextEmbeddingGenerator:
         )
 
     def query_to_embedding(self, query: str) -> np.ndarray:
-        """Encode a search query into a 384d embedding vector."""
+        """Encode a search query into a 1024d embedding vector."""
         self.load_model()
         return self.model.encode(
             query,
@@ -109,6 +101,9 @@ class TextEmbeddingGenerator:
         if not track_ids:
             return {}
 
+        # NOTE: artist bios, album info, and genre descriptions are now in separate
+        # embedding tables (artist_bio_embeddings, album_info_embeddings,
+        # genre_desc_embeddings) to avoid exceeding the 128-token model limit.
         query = sa_text("""
             SELECT
                 t.id as track_id,
@@ -119,10 +114,7 @@ class TextEmbeddingGenerator:
                 mf_rep.is_lossless,
                 g_agg.genres,
                 at_agg.artist_tags,
-                alt_agg.album_tags,
-                ab.summary as artist_bio,
-                ai.summary as album_info,
-                gd_agg.genre_descs
+                alt_agg.album_tags
             FROM tracks t
             JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
             JOIN artists a ON ta.artist_id = a.id
@@ -164,29 +156,6 @@ class TextEmbeddingGenerator:
                 ) alt2
                 JOIN tags tg ON alt2.tag_id = tg.id
             ) alt_agg ON true
-            -- Artist bio (Last.fm, first match)
-            LEFT JOIN LATERAL (
-                SELECT summary FROM artist_bios
-                WHERE artist_id = a.id AND source = 'lastfm'
-                LIMIT 1
-            ) ab ON true
-            -- Album info (Last.fm, first match)
-            LEFT JOIN LATERAL (
-                SELECT summary FROM album_info
-                WHERE album_id = mf_rep.album_id AND source = 'lastfm'
-                LIMIT 1
-            ) ai ON true
-            -- Genre descriptions aggregated
-            LEFT JOIN LATERAL (
-                SELECT STRING_AGG(
-                    g.name || ': ' || LEFT(gd.summary, 200),
-                    '; '
-                ) as genre_descs
-                FROM track_genres tg
-                JOIN genres g ON tg.genre_id = g.id
-                LEFT JOIN genre_descriptions gd ON g.id = gd.genre_id AND gd.source = 'lastfm'
-                WHERE tg.track_id = t.id AND gd.summary IS NOT NULL
-            ) gd_agg ON true
             WHERE t.id = ANY(:track_ids)
         """)
 
@@ -216,22 +185,6 @@ class TextEmbeddingGenerator:
 
             if row.album_tags:
                 parts.append(f"Album style: {row.album_tags}")
-
-            # Enriched data (strip HTML from Last.fm)
-            if row.artist_bio:
-                bio = _strip_html(row.artist_bio)[:300]
-                if bio:
-                    parts.append(f"About artist: {bio}")
-
-            if row.album_info:
-                info = _strip_html(row.album_info)[:300]
-                if info:
-                    parts.append(f"About album: {info}")
-
-            if row.genre_descs:
-                descs = _strip_html(row.genre_descs)[:400]
-                if descs:
-                    parts.append(f"Genre description: {descs}")
 
             result[row.track_id] = "\n".join(parts)
 
@@ -329,6 +282,13 @@ class TextEmbeddingGenerator:
 
         self.load_model()
         model_record = self._get_or_create_model_record(db)
+
+        if force:
+            db.execute(
+                sa_text("DELETE FROM text_embeddings WHERE track_id = ANY(:ids)"),
+                {"ids": pending_track_ids},
+            )
+            db.flush()
 
         # Process in batches
         batch_size = self.batch_size

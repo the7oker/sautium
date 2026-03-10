@@ -654,6 +654,69 @@ async def search_lyrics(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/search/artists")
+async def api_search_artists(
+    query: str,
+    limit: int = 10,
+    min_similarity: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Search artists by biography similarity."""
+    from database import get_db_context
+    from search import search_artists_by_bio
+
+    try:
+        with get_db_context() as db:
+            return search_artists_by_bio(
+                db, query, limit=limit,
+                min_similarity=min_similarity or 0.3,
+            )
+    except Exception as e:
+        logger.error(f"Artist search failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/search/albums")
+async def api_search_albums(
+    query: str,
+    limit: int = 10,
+    min_similarity: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Search albums by description similarity."""
+    from database import get_db_context
+    from search import search_albums_by_info
+
+    try:
+        with get_db_context() as db:
+            return search_albums_by_info(
+                db, query, limit=limit,
+                min_similarity=min_similarity or 0.3,
+            )
+    except Exception as e:
+        logger.error(f"Album search failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/search/genres")
+async def api_search_genres(
+    query: str,
+    limit: int = 10,
+    min_similarity: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Search genres by description similarity."""
+    from database import get_db_context
+    from search import search_genres_by_description
+
+    try:
+        with get_db_context() as db:
+            return search_genres_by_description(
+                db, query, limit=limit,
+                min_similarity=min_similarity or 0.3,
+            )
+    except Exception as e:
+        logger.error(f"Genre search failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/search/metadata")
 async def search_metadata(
     artist: Optional[str] = None,

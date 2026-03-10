@@ -151,7 +151,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
 CREATE TABLE IF NOT EXISTS text_embeddings (
     id SERIAL PRIMARY KEY,
-    vector vector(384) NOT NULL,
+    vector vector(1024) NOT NULL,
     model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -352,9 +352,48 @@ CREATE TABLE IF NOT EXISTS lyrics_embeddings (
     id SERIAL PRIMARY KEY,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
     model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
-    vector vector(384) NOT NULL,
+    vector vector(1024) NOT NULL,
+    chunk_index INTEGER NOT NULL DEFAULT 0,
+    chunk_text TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(track_id, model_id)
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(track_id, model_id, chunk_index)
+);
+
+CREATE TABLE IF NOT EXISTS artist_bio_embeddings (
+    id SERIAL PRIMARY KEY,
+    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    vector vector(1024) NOT NULL,
+    chunk_index INTEGER NOT NULL DEFAULT 0,
+    chunk_text TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (artist_id, model_id, chunk_index)
+);
+
+CREATE TABLE IF NOT EXISTS album_info_embeddings (
+    id SERIAL PRIMARY KEY,
+    album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    vector vector(1024) NOT NULL,
+    chunk_index INTEGER NOT NULL DEFAULT 0,
+    chunk_text TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (album_id, model_id, chunk_index)
+);
+
+CREATE TABLE IF NOT EXISTS genre_desc_embeddings (
+    id SERIAL PRIMARY KEY,
+    genre_id UUID NOT NULL REFERENCES genres(id) ON DELETE CASCADE,
+    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    vector vector(1024) NOT NULL,
+    chunk_index INTEGER NOT NULL DEFAULT 0,
+    chunk_text TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (genre_id, model_id, chunk_index)
 );
 
 -- ============================================================
@@ -373,6 +412,34 @@ CREATE INDEX IF NOT EXISTS idx_embeddings_vector ON embeddings
 CREATE INDEX IF NOT EXISTS idx_text_embeddings_model_id ON text_embeddings(model_id);
 CREATE INDEX IF NOT EXISTS idx_text_embeddings_track_id ON text_embeddings(track_id);
 CREATE INDEX IF NOT EXISTS idx_text_embeddings_vector ON text_embeddings
+    USING hnsw (vector vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+-- Lyrics embedding indexes
+CREATE INDEX IF NOT EXISTS idx_lyrics_embeddings_track_id ON lyrics_embeddings(track_id);
+CREATE INDEX IF NOT EXISTS idx_lyrics_embeddings_model_id ON lyrics_embeddings(model_id);
+CREATE INDEX IF NOT EXISTS idx_lyrics_embeddings_vector ON lyrics_embeddings
+    USING hnsw (vector vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+-- Artist bio embedding indexes
+CREATE INDEX IF NOT EXISTS idx_artist_bio_emb_artist ON artist_bio_embeddings(artist_id);
+CREATE INDEX IF NOT EXISTS idx_artist_bio_emb_model ON artist_bio_embeddings(model_id);
+CREATE INDEX IF NOT EXISTS idx_artist_bio_emb_vector ON artist_bio_embeddings
+    USING hnsw (vector vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+-- Album info embedding indexes
+CREATE INDEX IF NOT EXISTS idx_album_info_emb_album ON album_info_embeddings(album_id);
+CREATE INDEX IF NOT EXISTS idx_album_info_emb_model ON album_info_embeddings(model_id);
+CREATE INDEX IF NOT EXISTS idx_album_info_emb_vector ON album_info_embeddings
+    USING hnsw (vector vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+-- Genre description embedding indexes
+CREATE INDEX IF NOT EXISTS idx_genre_desc_emb_genre ON genre_desc_embeddings(genre_id);
+CREATE INDEX IF NOT EXISTS idx_genre_desc_emb_model ON genre_desc_embeddings(model_id);
+CREATE INDEX IF NOT EXISTS idx_genre_desc_emb_vector ON genre_desc_embeddings
     USING hnsw (vector vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
@@ -534,6 +601,22 @@ DO $$ BEGIN CREATE TRIGGER trg_tags_updated_at BEFORE UPDATE ON tags
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN CREATE TRIGGER trigger_audio_features_updated_at BEFORE UPDATE ON audio_features
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN CREATE TRIGGER trg_lyrics_embeddings_updated_at BEFORE UPDATE ON lyrics_embeddings
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN CREATE TRIGGER trg_artist_bio_emb_updated_at BEFORE UPDATE ON artist_bio_embeddings
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN CREATE TRIGGER trg_album_info_emb_updated_at BEFORE UPDATE ON album_info_embeddings
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN CREATE TRIGGER trg_genre_desc_emb_updated_at BEFORE UPDATE ON genre_desc_embeddings
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
