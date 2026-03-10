@@ -2318,6 +2318,59 @@ Also added safety limits to `backend/lyrics_embeddings.py`: `MAX_LYRICS_CHARS = 
 
 ---
 
+## P2P Sync — S1: HTTP Sync Protocol
+
+**Date:** 2026-03-10
+
+### What was done
+
+Implemented the first stage of P2P data synchronization (S1) using HTTP between Docker backend and Windows launcher.
+
+**Backend (source side):**
+- `backend/routers/sync.py` — sync API router with 12 endpoints:
+  - `POST /api/sync/inventory` — accepts track UUIDs, returns categorized UUID lists across 14 enrichment categories
+  - 11 pull endpoints: `/pull/tracks`, `/pull/lyrics`, `/pull/embeddings`, `/pull/audio-features`, `/pull/track-stats`, `/pull/artist-bios`, `/pull/artist-tags`, `/pull/similar-artists`, `/pull/album-info`, `/pull/album-tags`, `/pull/genre-descriptions`
+- GZip middleware added to `backend/main.py` for HTTP-level compression
+
+**Launcher (client side):**
+- `desktop/sync_client.py` — sync orchestrator:
+  - Single DB connection reuse (was creating ~20+ connections)
+  - `execute_values` batch INSERT for all categories (was row-by-row)
+  - Batch size 500 (was 50)
+  - Parent entity filtering (albums must exist locally)
+  - Idempotent imports (ON CONFLICT DO UPDATE/DO NOTHING)
+  - Dependent entity upserts (tags, artists, embedding_models created on import)
+- `desktop/api_client.py` — added `sync_inventory()` and `sync_pull()` methods
+- `desktop/config_manager.py` — added `sync.source_url` config field
+- `desktop/launcher.py` — "Sync Library" button with progress display
+
+**Bug fix — compound artist UUID mismatch:**
+- Scanner generated track UUID with full compound name ("Beth Hart & Joe Bonamassa")
+- Docker DB had UUID from normalized primary artist ("Beth Hart") after `normalize_artists.py` + `migrate_to_uuid.py`
+- Fix: integrated `parse_compound_artist()` into `scanner.py` — now splits compound artists at scan time
+- First artist = primary (used for UUID), rest = featured
+
+### Performance
+- Before optimization: ~120 seconds for 424 tracks (3.5 tracks/sec)
+- After optimization: ~3.4 seconds for 424 tracks (~125 tracks/sec) — **35x speedup**
+- Bottlenecks fixed: connection reuse, batch INSERT, larger batch size
+
+### Testing
+- 424 Blues tracks synced successfully (all 10 enrichment categories)
+- Idempotent: second sync imports 0 items
+- 10 Beth Hart & Joe Bonamassa tracks initially failed due to UUID mismatch — fixed
+
+### Files
+- `backend/routers/sync.py` (new)
+- `backend/main.py` (modified — GZip middleware, sync router)
+- `backend/scanner.py` (modified — compound artist splitting)
+- `desktop/sync_client.py` (new)
+- `desktop/api_client.py` (modified — sync methods)
+- `desktop/config_manager.py` (modified — sync config)
+- `desktop/launcher.py` (modified — sync UI)
+
+---
+
 ## Next Steps
 
 ### Phase 2: External Data & Text Embeddings - COMPLETE ✅
@@ -2346,6 +2399,8 @@ Also added safety limits to `backend/lyrics_embeddings.py`: `MAX_LYRICS_CHARS = 
 - [x] **Genius lyrics validation** ✅ — fuzzy match + length + prose detection, cleaned 1,735 junk records
 - [x] **Entity-level enrichment search** ✅ — separate artist/album/genre search (replaced monolithic search_enrichment)
 - [x] **P2P preparation (P0+P1)** ✅ — launcher↔backend bridge, UUID v5 для Genre/Tag/EmbeddingModel, Ed25519 node identity
+
+- [x] **P2P Sync (S1)** ✅ — HTTP sync protocol: inventory → batch pull → import (10 enrichment categories)
 
 ### Phase 4: Voice Interface & Advanced Features
 - Whisper for voice input (Ukrainian/English)

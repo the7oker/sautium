@@ -35,7 +35,7 @@ class LauncherApp(ctk.CTk):
         super().__init__()
 
         self.title("Music AI DJ")
-        self.geometry("480x750")
+        self.geometry("480x790")
         self.resizable(False, False)
 
         self.config = load_config()
@@ -155,6 +155,13 @@ class LauncherApp(ctk.CTk):
         )
         self._btn_enrich.pack(pady=3)
 
+        self._btn_sync = ctk.CTkButton(
+            btn_frame, text="Sync Library", width=200,
+            command=self._sync_library, state="disabled",
+            fg_color="transparent", border_width=1,
+        )
+        self._btn_sync.pack(pady=3)
+
         self._btn_settings = ctk.CTkButton(
             btn_frame, text="Settings", width=200,
             command=self._open_settings,
@@ -237,6 +244,7 @@ class LauncherApp(ctk.CTk):
         self._btn_open.configure(state="normal")
         self._btn_scan.configure(state="normal")
         self._btn_enrich.configure(state="normal")
+        self._btn_sync.configure(state="normal")
         self._progress_text.configure(text=gpu_text)
 
         # Connect API client to the right port
@@ -531,6 +539,77 @@ class LauncherApp(ctk.CTk):
             hover_color=("gray75", "gray25"),
         )
         self._btn_scan.configure(state="normal")
+        self._fetch_and_display_stats()
+
+    def _get_local_db_dsn(self) -> str:
+        """Build DSN for the launcher's local PostgreSQL."""
+        ports = self.config.get("ports", {})
+        pw = self.config.get("postgres_password", "changeme")
+        port = ports.get("postgres", 15432)
+        return f"postgresql://musicai:{pw}@localhost:{port}/music_ai"
+
+    def _sync_library(self):
+        """Sync enrichment data from a remote source into local database."""
+        source_url = self.config.get("sync", {}).get(
+            "source_url", "http://localhost:8800"
+        )
+
+        self._btn_sync.configure(state="disabled", text="Syncing...")
+        self._btn_scan.configure(state="disabled")
+        self._btn_enrich.configure(state="disabled")
+        self._progress_text.configure(text=f"Connecting to {source_url}...")
+
+        def _do_sync():
+            from desktop.sync_client import SyncClient
+
+            source_api = BackendAPIClient(source_url)
+
+            # Verify source is reachable
+            health = source_api.get_health()
+            if not health:
+                self.after(0, lambda: self._progress_text.configure(
+                    text=f"Sync source not reachable: {source_url}"))
+                self.after(0, self._sync_done)
+                return
+
+            db_dsn = self._get_local_db_dsn()
+
+            def progress(msg):
+                self.after(0, lambda: self._progress_text.configure(text=msg))
+
+            sync = SyncClient(
+                source_api, db_dsn,
+                batch_size=50, progress_cb=progress,
+            )
+
+            try:
+                stats = sync.run_sync()
+            except Exception as e:
+                logger.error(f"Sync failed: {e}", exc_info=True)
+                self.after(0, lambda: self._progress_text.configure(
+                    text=f"Sync failed: {str(e)[:100]}"))
+                self.after(0, self._sync_done)
+                return
+
+            total = sum(v for v in stats.values() if isinstance(v, int))
+            msg = f"Sync complete — {total} items imported"
+            if total > 0:
+                details = ", ".join(
+                    f"{k}: {v}" for k, v in stats.items()
+                    if isinstance(v, int) and v > 0
+                )
+                msg += f" ({details})"
+
+            self.after(0, lambda: self._progress_text.configure(text=msg))
+            self.after(0, self._sync_done)
+
+        threading.Thread(target=_do_sync, daemon=True).start()
+
+    def _sync_done(self):
+        """Restore UI after sync completes."""
+        self._btn_sync.configure(state="normal", text="Sync Library")
+        self._btn_scan.configure(state="normal")
+        self._btn_enrich.configure(state="normal")
         self._fetch_and_display_stats()
 
     @staticmethod

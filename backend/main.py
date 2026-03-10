@@ -14,6 +14,7 @@ try:
 except ImportError:
     torch = None
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -72,6 +73,9 @@ app = FastAPI(
     description="AI-powered music library management and recommendation system",
     lifespan=lifespan,
 )
+
+# Enable gzip compression for sync API responses
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 def test_db_connection() -> bool:
@@ -804,6 +808,9 @@ app.include_router(chat_router)
 
 from routers.eq import router as eq_router
 app.include_router(eq_router)
+
+from routers.sync import router as sync_router
+app.include_router(sync_router)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

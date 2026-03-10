@@ -55,6 +55,9 @@ DEFAULT_CONFIG = {
         "node_name": None,
         "listen_port": 19000,
     },
+    "sync": {
+        "source_url": "http://localhost:8800",
+    },
 }
 
 

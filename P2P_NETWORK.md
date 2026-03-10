@@ -570,8 +570,14 @@ services:
 3. ~~**[Phase P0]** Показати library stats в launcher UI~~ ✅ (stats section в launcher)
 4. ~~**[Phase P1]** DB refactoring: Genre, Tag, EmbeddingModel → UUID v5~~ ✅ (міграція 002)
 5. ~~**[Phase P1]** Реалізувати node identity (Ed25519 keypair)~~ ✅ (`desktop/node_identity.py`)
-6. **[Phase P2]** Базовий P2P service з handshake (TCP + msgpack)
-7. **[Phase P2]** Тест: 2 ноди на localhost обмінюються hello + catalog
+6. ~~**[Phase S1]** HTTP sync: inventory → batch pull → import~~ ✅ (`backend/routers/sync.py`, `desktop/sync_client.py`)
+   - 12 API endpoints (1 inventory + 11 pull categories)
+   - Batch INSERT via `execute_values`, 500/batch, single DB connection
+   - Compound artist UUID fix in scanner
+   - Performance: ~125 tracks/sec (424 tracks in 3.4 sec)
+7. **[Phase S2]** TCP + msgpack sync protocol (direct peer connections)
+8. **[Phase P2]** Базовий P2P service з handshake
+9. **[Phase P2]** Тест: 2 ноди на localhost обмінюються hello + catalog
 
 ---
 
