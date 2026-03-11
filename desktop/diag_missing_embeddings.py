@@ -1,6 +1,6 @@
 """
-Diagnostic: find local tracks without embeddings and check if their UUIDs
-exist in the Docker database.
+Diagnostic: find local tracks without embeddings and compare UUIDs
+between launcher and Docker databases.
 
 Run from Windows:
     python -m desktop.diag_missing_embeddings
@@ -8,12 +8,10 @@ Run from Windows:
 
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import psycopg2
-
-# Launcher DB (local)
-LAUNCHER_DSN = None  # Will be loaded from config
 
 # Docker DB (source) — port 5432, password from .env
 DOCKER_DSN = "postgresql://musicai:supervisor@localhost:5432/music_ai"
@@ -36,75 +34,105 @@ def main():
     launcher_dsn = get_launcher_dsn()
     print(f"Launcher DB: {launcher_dsn.split('@')[1]}")
 
-    # Connect to launcher
+    # Connect to both DBs
     lconn = psycopg2.connect(launcher_dsn)
     lcur = lconn.cursor()
-
-    # Get all launcher track UUIDs
-    lcur.execute("SELECT id::text, title FROM tracks")
-    launcher_tracks = {row[0]: row[1] for row in lcur.fetchall()}
-    print(f"\nLauncher total tracks: {len(launcher_tracks)}")
-
-    # Get tracks with embeddings
-    lcur.execute("SELECT DISTINCT track_id::text FROM embeddings")
-    launcher_embedded = {row[0] for row in lcur.fetchall()}
-    print(f"Launcher tracks with embeddings: {len(launcher_embedded)}")
-
-    # Tracks without embeddings
-    missing = set(launcher_tracks.keys()) - launcher_embedded
-    print(f"Launcher tracks WITHOUT embeddings: {len(missing)}")
-
-    if missing:
-        # Get artist info for missing tracks
-        lcur.execute("""
-            SELECT t.id::text, t.title, a.name
-            FROM tracks t
-            LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
-            LEFT JOIN artists a ON a.id = ta.artist_id
-            WHERE t.id = ANY(%s::uuid[])
-            ORDER BY a.name, t.title
-        """, [list(missing)])
-
-        print("\n--- Missing embedding tracks ---")
-        for row in lcur.fetchall():
-            artist = row[2] or "Unknown"
-            print(f"  {artist} - {row[1]}  (UUID: {row[0]})")
-
-    # Also find tracks that exist in launcher but not in Docker
-    # (this explains sync mismatches)
-    lcur.execute("SELECT id::text FROM tracks")
-    launcher_uuids = {row[0] for row in lcur.fetchall()}
 
     try:
         dconn = psycopg2.connect(DOCKER_DSN)
         dcur = dconn.cursor()
-
-        dcur.execute("SELECT id::text FROM tracks")
-        docker_uuids = {row[0] for row in dcur.fetchall()}
-
-        only_launcher = launcher_uuids - docker_uuids
-        only_docker_blues = set()
-
-        if only_launcher:
-            print(f"\n--- Tracks in launcher but NOT in Docker: {len(only_launcher)} ---")
-            lcur.execute("""
-                SELECT t.id::text, t.title, a.name
-                FROM tracks t
-                LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
-                LEFT JOIN artists a ON a.id = ta.artist_id
-                WHERE t.id = ANY(%s::uuid[])
-                ORDER BY a.name, t.title
-            """, [list(only_launcher)])
-            for row in lcur.fetchall():
-                artist = row[2] or "Unknown"
-                print(f"  {artist} - {row[1]}  (UUID: {row[0]})")
-
-        dconn.close()
     except Exception as e:
-        print(f"\nCould not connect to Docker DB: {e}")
-        print("(This is OK if Docker is not running or uses different credentials)")
+        print(f"Could not connect to Docker DB: {e}")
+        lconn.close()
+        return
+
+    # Basic counts
+    lcur.execute("SELECT COUNT(*) FROM tracks")
+    l_tracks = lcur.fetchone()[0]
+    lcur.execute("SELECT COUNT(*) FROM embeddings")
+    l_embeds = lcur.fetchone()[0]
+    dcur.execute("SELECT COUNT(*) FROM tracks")
+    d_tracks = dcur.fetchone()[0]
+    dcur.execute("SELECT COUNT(*) FROM embeddings")
+    d_embeds = dcur.fetchone()[0]
+
+    print(f"\n{'':>20} {'Launcher':>10} {'Docker':>10}")
+    print(f"{'Tracks':>20} {l_tracks:>10} {d_tracks:>10}")
+    print(f"{'Embeddings':>20} {l_embeds:>10} {d_embeds:>10}")
+
+    # UUID comparison
+    lcur.execute("SELECT id::text FROM tracks")
+    launcher_uuids = {row[0] for row in lcur.fetchall()}
+    dcur.execute("SELECT id::text FROM tracks")
+    docker_uuids = {row[0] for row in dcur.fetchall()}
+
+    only_launcher = launcher_uuids - docker_uuids
+    only_docker = docker_uuids - launcher_uuids
+    common = launcher_uuids & docker_uuids
+
+    print(f"\n{'Common UUIDs':>20} {len(common):>10}")
+    print(f"{'Only in launcher':>20} {len(only_launcher):>10}")
+    print(f"{'Only in Docker':>20} {len(only_docker):>10}")
+
+    if not only_launcher:
+        print("\nAll launcher UUIDs found in Docker — no mismatches!")
+        lconn.close()
+        dconn.close()
+        return
+
+    # Get artists for mismatched launcher tracks — summary by artist
+    lcur.execute("""
+        SELECT a.name, COUNT(*) as cnt
+        FROM tracks t
+        LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+        LEFT JOIN artists a ON a.id = ta.artist_id
+        WHERE t.id = ANY(%s::uuid[])
+        GROUP BY a.name
+        ORDER BY cnt DESC
+    """, [list(only_launcher)])
+
+    rows = lcur.fetchall()
+    print(f"\n--- Mismatched tracks by artist (top 30) ---")
+    for artist, cnt in rows[:30]:
+        print(f"  {cnt:>4}  {artist or 'Unknown'}")
+    if len(rows) > 30:
+        print(f"  ... and {len(rows) - 30} more artists")
+
+    # Sample: show first 5 mismatched tracks with Docker comparison
+    print(f"\n--- Sample mismatches (first 10) ---")
+    lcur.execute("""
+        SELECT t.id::text, t.title, a.name
+        FROM tracks t
+        LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+        LEFT JOIN artists a ON a.id = ta.artist_id
+        WHERE t.id = ANY(%s::uuid[])
+        ORDER BY a.name, t.title
+        LIMIT 10
+    """, [list(only_launcher)])
+
+    for uuid, title, artist in lcur.fetchall():
+        print(f"\n  Launcher: {artist} - {title}")
+        print(f"    UUID: {uuid}")
+
+        # Find same title in Docker
+        dcur.execute("""
+            SELECT t.id::text, a.name
+            FROM tracks t
+            LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+            LEFT JOIN artists a ON a.id = ta.artist_id
+            WHERE t.title = %s
+            ORDER BY a.name
+        """, [title])
+        docker_matches = dcur.fetchall()
+        if docker_matches:
+            for d_uuid, d_artist in docker_matches:
+                match = " <-- MATCH" if d_artist == artist else ""
+                print(f"    Docker: {d_artist} - {title} UUID: {d_uuid}{match}")
+        else:
+            print(f"    Docker: title not found!")
 
     lconn.close()
+    dconn.close()
 
 
 if __name__ == "__main__":

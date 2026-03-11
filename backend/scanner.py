@@ -24,7 +24,6 @@ from models import (
 )
 from database import get_db_context
 from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, is_lossless as check_lossless
-from normalize_artists import is_compound_artist, parse_compound_artist
 
 logger = logging.getLogger(__name__)
 
@@ -335,21 +334,11 @@ class LibraryScanner:
                         continue
 
                     # Get artist name (prefer album artist, fallback to artist)
-                    raw_artist_name = metadata.get("album_artist") or metadata.get("artist")
-                    if not raw_artist_name:
+                    artist_name = metadata.get("album_artist") or metadata.get("artist")
+                    if not artist_name:
                         logger.warning(f"Missing artist for {file_path}, skipping")
                         stats["errors"] += 1
                         continue
-
-                    # Split compound artist names (e.g. "Beth Hart & Joe Bonamassa")
-                    # First artist becomes primary, rest become featured
-                    if is_compound_artist(raw_artist_name):
-                        artist_parts = parse_compound_artist(raw_artist_name)
-                    else:
-                        artist_parts = [raw_artist_name]
-
-                    primary_artist_name = artist_parts[0]
-                    featured_artist_names = artist_parts[1:]
 
                     album_title = metadata.get("album")
                     if not album_title:
@@ -357,53 +346,43 @@ class LibraryScanner:
                         album_title = metadata["title"]
                         logger.info(f"No album tag, using title as album: {album_title}")
 
-                    # Get or create canonical entities (use primary artist for UUID)
-                    primary_artist = self.get_or_create_artist(db, primary_artist_name)
-                    track = self.get_or_create_track(db, metadata["title"], primary_artist_name)
-                    album = self.get_or_create_album(db, album_title, primary_artist_name, metadata)
+                    # Get or create canonical entities
+                    # Note: compound artist names (e.g. "Beth Hart & Joe Bonamassa")
+                    # are stored as-is. Splitting into individual artists is done
+                    # separately by normalize_artists.py (with Last.fm verification)
+                    # to avoid incorrectly splitting band names like "Simon & Garfunkel".
+                    artist = self.get_or_create_artist(db, artist_name)
+                    track = self.get_or_create_track(db, metadata["title"], artist_name)
+                    album = self.get_or_create_album(db, album_title, artist_name, metadata)
 
                     # Get or create album variant (physical edition)
                     variant = self.get_or_create_album_variant(
                         db, album, settings.translate_to_host_path(str(file_path.parent)), metadata
                     )
 
-                    # Create primary track-artist association
+                    # Create track-artist association (if not exists)
                     existing_ta = db.query(TrackArtist).filter(
                         TrackArtist.track_id == track.id,
-                        TrackArtist.artist_id == primary_artist.id,
+                        TrackArtist.artist_id == artist.id,
                         TrackArtist.role == "primary",
                     ).first()
                     if not existing_ta:
                         db.add(TrackArtist(
                             track_id=track.id,
-                            artist_id=primary_artist.id,
+                            artist_id=artist.id,
                             role="primary",
                         ))
-
-                    # Create featured artist associations
-                    for feat_name in featured_artist_names:
-                        feat_artist = self.get_or_create_artist(db, feat_name)
-                        existing_feat = db.query(TrackArtist).filter(
-                            TrackArtist.track_id == track.id,
-                            TrackArtist.artist_id == feat_artist.id,
-                        ).first()
-                        if not existing_feat:
-                            db.add(TrackArtist(
-                                track_id=track.id,
-                                artist_id=feat_artist.id,
-                                role="featured",
-                            ))
 
                     # Create album-artist association (if not exists)
                     existing_aa = db.query(AlbumArtist).filter(
                         AlbumArtist.album_id == album.id,
-                        AlbumArtist.artist_id == primary_artist.id,
+                        AlbumArtist.artist_id == artist.id,
                         AlbumArtist.role == "primary",
                     ).first()
                     if not existing_aa:
                         db.add(AlbumArtist(
                             album_id=album.id,
-                            artist_id=primary_artist.id,
+                            artist_id=artist.id,
                             role="primary",
                         ))
 
