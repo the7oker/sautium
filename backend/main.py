@@ -181,25 +181,104 @@ async def get_stats() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Scanning endpoints
+# -- Scan background task -------------------------------------------------------
+import threading
 
+_scan_state: Dict[str, Any] = {
+    "running": False,
+    "cancel_requested": False,
+    "progress": "",
+    "stats": None,        # live stats dict (processed/added/skipped/errors)
+    "result": None,       # final result when done
+}
+_scan_lock = threading.Lock()
+
+
+def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[str]):
+    """Background worker for library scanning."""
+    state = _scan_state
+    try:
+        from scanner import LibraryScanner
+
+        def progress_cb(msg: str, stats: dict):
+            state["progress"] = msg
+            state["stats"] = dict(stats)
+
+        def cancel_check() -> bool:
+            return state["cancel_requested"]
+
+        scanner = LibraryScanner()
+        result = scanner.scan_and_import(
+            limit=limit, skip_existing=skip_existing, subpath=subpath,
+            progress_cb=progress_cb, cancel_check=cancel_check,
+        )
+
+        if state["cancel_requested"]:
+            state["progress"] = "Scan cancelled"
+        else:
+            state["progress"] = "Scan complete"
+        state["result"] = result
+
+    except Exception as e:
+        logger.error(f"Scan worker failed: {e}", exc_info=True)
+        state["progress"] = f"Scan failed: {str(e)[:200]}"
+        state["result"] = {"error": str(e)}
+    finally:
+        state["running"] = False
+
+
+@app.post("/scan/start")
+async def scan_start(
+    limit: Optional[int] = None,
+    skip_existing: bool = True,
+    subpath: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Start library scan as a background task. Poll /scan/status for progress."""
+    with _scan_lock:
+        if _scan_state["running"]:
+            raise HTTPException(status_code=409, detail="Scan already running")
+        _scan_state.update(
+            running=True, cancel_requested=False,
+            progress="Starting scan...", stats=None, result=None,
+        )
+
+    t = threading.Thread(
+        target=_scan_worker,
+        args=(limit, skip_existing, subpath),
+        daemon=True,
+    )
+    t.start()
+    return {"success": True, "message": "Scan started"}
+
+
+@app.post("/scan/cancel")
+async def scan_cancel() -> Dict[str, Any]:
+    """Request cancellation of a running scan."""
+    if not _scan_state["running"]:
+        return {"success": False, "message": "No scan running"}
+    _scan_state["cancel_requested"] = True
+    return {"success": True, "message": "Cancellation requested"}
+
+
+@app.get("/scan/status")
+async def scan_status() -> Dict[str, Any]:
+    """Get current scan progress."""
+    return {
+        "running": _scan_state["running"],
+        "progress": _scan_state["progress"],
+        "stats": _scan_state["stats"],
+        "result": _scan_state["result"],
+    }
+
+
+# Legacy sync scan endpoint (for CLI / backward compat)
 @app.post("/scan")
 async def scan_library_endpoint(
     limit: Optional[int] = None,
     skip_existing: bool = True,
     subpath: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Scan music library and import metadata to database.
-
-    Args:
-        limit: Maximum number of files to scan (for testing).
-        skip_existing: Skip files already in database.
-        subpath: Optional subdirectory within library to scan.
-
-    Returns:
-        Statistics about the scan.
-    """
+    """Synchronous scan (for CLI/scripts). Use /scan/start for UI."""
     from scanner import scan_library as do_scan
 
     try:
@@ -244,8 +323,6 @@ async def generate_embeddings_endpoint(
 
 
 # -- Enrichment background task -----------------------------------------------
-
-import threading
 
 _enrich_state: Dict[str, Any] = {
     "running": False,

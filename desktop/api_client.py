@@ -69,11 +69,19 @@ class BackendAPIClient:
         return self._get_json("/health")
 
     def start_scan(self, subpath: str = None) -> Optional[dict]:
-        """Start library scan. Returns scan results dict or None."""
+        """Start library scan as background task."""
         params = "skip_existing=true"
         if subpath:
             params += f"&subpath={urllib.parse.quote(subpath)}"
-        return self._post_json(f"/scan?{params}")
+        return self._post_json(f"/scan/start?{params}", timeout=10)
+
+    def scan_status(self) -> Optional[dict]:
+        """Poll scan progress."""
+        return self._get_json("/scan/status", timeout=5)
+
+    def scan_cancel(self) -> Optional[dict]:
+        """Cancel running scan."""
+        return self._post_json("/scan/cancel", timeout=5)
 
     def enrich_start(self) -> Optional[dict]:
         """Start background enrichment (all steps)."""

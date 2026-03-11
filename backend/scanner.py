@@ -247,7 +247,14 @@ class LibraryScanner:
 
         return variant
 
-    def scan_and_import(self, limit: Optional[int] = None, skip_existing: bool = True, subpath: Optional[str] = None) -> Dict[str, int]:
+    def scan_and_import(
+        self,
+        limit: Optional[int] = None,
+        skip_existing: bool = True,
+        subpath: Optional[str] = None,
+        progress_cb: Optional[callable] = None,
+        cancel_check: Optional[callable] = None,
+    ) -> Dict[str, int]:
         """
         Scan library and import metadata to database.
 
@@ -255,6 +262,8 @@ class LibraryScanner:
             limit: Maximum number of files to scan (for testing).
             skip_existing: Skip files already in database.
             subpath: Optional subdirectory within library to scan.
+            progress_cb: Callback(msg, stats) for progress reporting.
+            cancel_check: Callback() -> bool, returns True if cancel requested.
 
         Returns:
             Dictionary with statistics (processed, added, skipped, errors).
@@ -268,12 +277,21 @@ class LibraryScanner:
         }
         seen_track_ids = set()
 
+        def _report(msg: str = None):
+            if progress_cb:
+                progress_cb(msg or f"Scanned {stats['processed']}/{total_files}", stats)
+
         # Find FLAC files
+        if progress_cb:
+            progress_cb("Discovering files...", stats)
         flac_files = self.find_flac_files(limit=limit, subpath=subpath)
 
         if not flac_files:
             logger.warning("No FLAC files found")
             return stats
+
+        total_files = len(flac_files)
+        _report(f"Found {total_files} files, starting scan...")
 
         with get_db_context() as db:
             # Get existing file paths for skip check
@@ -287,7 +305,16 @@ class LibraryScanner:
 
             # Process files with progress bar
             for file_path in tqdm(flac_files, desc="Scanning files", unit="file"):
+                # Check for cancellation
+                if cancel_check and cancel_check():
+                    logger.info("Scan cancelled by user")
+                    db.commit()
+                    break
                 stats["processed"] += 1
+
+                # Report progress every 50 files
+                if stats["processed"] % 50 == 0:
+                    _report()
 
                 # Skip if already in database (compare translated path)
                 if skip_existing and settings.translate_to_host_path(str(file_path.absolute())) in existing_paths:
@@ -427,6 +454,7 @@ class LibraryScanner:
                     # Commit every 100 files to avoid huge transactions
                     if stats["added"] % 100 == 0:
                         db.commit()
+                        _report()
                         logger.info(f"Progress: {stats['added']} files added")
 
                 except Exception as e:
@@ -437,6 +465,7 @@ class LibraryScanner:
             # Final commit
             db.commit()
 
+        _report(f"Done: {stats['added']} added, {stats['skipped']} skipped, {stats['errors']} errors")
         logger.info(
             f"Scan complete: {stats['processed']} processed, "
             f"{stats['added']} added, {stats['skipped']} skipped, "

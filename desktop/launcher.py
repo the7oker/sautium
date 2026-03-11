@@ -369,14 +369,20 @@ class LauncherApp(ctk.CTk):
 
         threading.Thread(target=_complete, daemon=True).start()
 
-    def _fetch_and_display_stats(self):
+    def _fetch_and_display_stats(self, schedule_next: bool = True):
         """Fetch library stats from backend and update UI labels."""
+        # Cancel any pending refresh to avoid stacking timers
+        if self._stats_timer is not None:
+            self.after_cancel(self._stats_timer)
+            self._stats_timer = None
+
         def _fetch():
             data = self.api_client.get_stats()
             if data:
                 self.after(0, lambda: self._update_stats_labels(data))
-            # Schedule next refresh in 60 seconds
-            self._stats_timer = self.after(60_000, self._fetch_and_display_stats)
+            # Schedule next refresh in 60 seconds (only if not called from polling)
+            if schedule_next:
+                self._stats_timer = self.after(60_000, self._fetch_and_display_stats)
 
         threading.Thread(target=_fetch, daemon=True).start()
 
@@ -433,21 +439,22 @@ class LauncherApp(ctk.CTk):
         need_restart = False
 
         if music_p and selected_p == music_p:
-            # Scan entire library
             subpath = None
         elif music_p and self._is_subpath(selected_p, music_p):
-            # Scan subfolder
             subpath = str(selected_p.relative_to(music_p))
         else:
-            # Selected folder is outside music_path — update config and restart
             self.config = update_config({"music_path": str(selected_p)})
             self.service_manager.config = self.config
             need_restart = True
 
-        self._btn_scan.configure(state="disabled", text="Scanning...")
+        self._btn_scan.configure(text="Cancel Scan",
+                                 command=self._cancel_scan,
+                                 fg_color="#8B0000", hover_color="#A52A2A")
+        self._btn_enrich.configure(state="disabled")
+        self._btn_sync.configure(state="disabled")
         self._progress_text.configure(text="Starting scan...")
 
-        def _do_scan():
+        def _do_start():
             if need_restart:
                 def progress(msg):
                     self.after(0, lambda: self._progress_text.configure(text=msg))
@@ -458,36 +465,68 @@ class LauncherApp(ctk.CTk):
                 if not ok:
                     self.after(0, lambda: self._progress_text.configure(
                         text="Failed to restart backend"))
-                    self.after(0, lambda: self._btn_scan.configure(
-                        state="normal", text="Scan Library"))
+                    self.after(0, self._scan_done)
                     return
-                # Update API client port after restart
                 port = self.config.get("ports", {}).get("web", 8000)
                 self.api_client.set_port(port)
                 self.after(0, lambda: self._on_services_ready())
 
-            self.after(0, lambda: self._progress_text.configure(text="Scanning..."))
             result = self.api_client.start_scan(subpath)
-
             if result and result.get("success"):
-                stats = result.get("statistics", {})
-                added = stats.get("added", 0)
-                unique = stats.get("unique_tracks", 0)
-                skipped = stats.get("skipped", 0)
-                errors = stats.get("errors", 0)
-                msg = f"Scan complete — Added: {added} files ({unique} unique tracks), Skipped: {skipped}"
-                if errors:
-                    msg += f", Errors: {errors}"
-            elif result:
-                msg = f"Scan failed — {result}"
+                self.after(500, self._poll_scan)
             else:
-                msg = "Scan failed — no response from backend"
+                self.after(0, lambda: self._progress_text.configure(
+                    text="Failed to start scan"))
+                self.after(0, self._scan_done)
 
-            self.after(0, lambda: self._progress_text.configure(text=msg))
-            self.after(0, lambda: self._btn_scan.configure(state="normal", text="Scan Library"))
-            self.after(0, self._fetch_and_display_stats)
+        threading.Thread(target=_do_start, daemon=True).start()
 
-        threading.Thread(target=_do_scan, daemon=True).start()
+    def _poll_scan(self):
+        """Poll scan status every 1 second."""
+        def _check():
+            status = self.api_client.scan_status()
+            if not status:
+                self.after(0, self._scan_done)
+                return
+
+            progress = status.get("progress", "")
+            running = status.get("running", False)
+
+            self.after(0, lambda: self._progress_text.configure(text=progress))
+
+            # Update live stats from scan progress
+            scan_stats = status.get("stats")
+            if scan_stats:
+                self.after(0, lambda: self._update_scan_live_stats(scan_stats))
+
+            if running:
+                self.after(1000, self._poll_scan)
+            else:
+                self.after(0, self._scan_done)
+
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _update_scan_live_stats(self, scan_stats: dict):
+        """Update Library stats labels with live scan data during scanning."""
+        # Refresh full stats from backend (without scheduling next timer)
+        self._fetch_and_display_stats(schedule_next=False)
+
+    def _cancel_scan(self):
+        """Request cancellation of running scan."""
+        self.api_client.scan_cancel()
+        self._progress_text.configure(text="Cancelling...")
+        self._btn_scan.configure(state="disabled")
+
+    def _scan_done(self):
+        """Restore UI after scan completes."""
+        self._btn_scan.configure(
+            text="Scan Library", command=self._scan_library,
+            state="normal", fg_color="transparent",
+            hover_color=("gray75", "gray25"),
+        )
+        self._btn_enrich.configure(state="normal")
+        self._btn_sync.configure(state="normal")
+        self._fetch_and_display_stats()
 
     def _enrich_library(self):
         """Start background enrichment and poll for progress."""
