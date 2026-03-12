@@ -31,6 +31,7 @@ CATEGORIES = [
     ("artist_bios", "artist-bios", "artist"),
     ("artist_tags", "artist-tags", "artist"),
     ("similar_artists", "similar-artists", "artist"),
+    ("artist_members", "artist-members", "artist"),
     ("album_info", "album-info", "album"),
     ("album_tags", "album-tags", "album"),
     ("genre_descriptions", "genre-descriptions", "genre"),
@@ -182,6 +183,7 @@ class SyncClient:
             "artist_bios": ("artist_bios", "artist_id"),
             "artist_tags": ("artist_tags", "artist_id"),
             "similar_artists": ("similar_artists", "artist_id"),
+            "artist_members": ("artist_members", "compound_artist_id"),
             "album_info": ("album_info", "album_id"),
             "album_tags": ("album_tags", "album_id"),
             "genre_descriptions": ("genre_descriptions", "genre_id"),
@@ -533,6 +535,67 @@ class SyncClient:
                        updated_at = CURRENT_TIMESTAMP""",
                 values,
                 template="(%s, %s, %s, %s)",
+                page_size=500,
+            )
+        return len(items)
+
+    def _import_artist_members(self, conn, items: list[dict]) -> int:
+        with conn.cursor() as cur:
+            # Ensure member artists exist
+            member_values = list({
+                item["member_artist_uuid"]: (
+                    item["member_artist_uuid"], item["member_artist_name"]
+                )
+                for item in items if item.get("member_artist_name")
+            }.values())
+            if member_values:
+                psycopg2.extras.execute_values(
+                    cur,
+                    """INSERT INTO artists (id, name)
+                       VALUES %s ON CONFLICT (id) DO NOTHING""",
+                    member_values,
+                    template="(%s, %s)",
+                )
+
+            # Update compound artist metadata
+            compound_updates = list({
+                item["compound_artist_uuid"]: (
+                    item["compound_artist_uuid"],
+                    item.get("artist_type", "collaboration"),
+                    item.get("verification_status", "verified_split"),
+                )
+                for item in items
+            }.values())
+            if compound_updates:
+                psycopg2.extras.execute_values(
+                    cur,
+                    """UPDATE artists SET
+                           artist_type = data.artist_type,
+                           verification_status = data.verification_status
+                       FROM (VALUES %s) AS data(id, artist_type, verification_status)
+                       WHERE artists.id = data.id::uuid""",
+                    compound_updates,
+                    template="(%s, %s, %s)",
+                )
+
+            # Upsert artist_members
+            values = [
+                (
+                    item["compound_artist_uuid"],
+                    item["member_artist_uuid"],
+                    item.get("role", "member"),
+                )
+                for item in items
+            ]
+            psycopg2.extras.execute_values(
+                cur,
+                """INSERT INTO artist_members
+                   (compound_artist_id, member_artist_id, role)
+                   VALUES %s
+                   ON CONFLICT (compound_artist_id, member_artist_id) DO UPDATE SET
+                       role = EXCLUDED.role""",
+                values,
+                template="(%s, %s, %s)",
                 page_size=500,
             )
         return len(items)

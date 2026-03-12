@@ -73,6 +73,7 @@ _EMPTY_INVENTORY = {
     "audio_features": [], "track_stats": [],
     "artists": [], "artist_bios": [],
     "artist_tags": [], "similar_artists": [],
+    "artist_members": [],
     "albums": [], "album_info": [], "album_tags": [],
     "genres": [], "genre_descriptions": [],
 }
@@ -163,6 +164,18 @@ async def get_inventory(req: InventoryRequest) -> dict:
             "artist_id",
         )
 
+        # -- Artist members (compound → member) --
+        artist_members = _uuid_list(
+            _db_query(
+                """SELECT DISTINCT am.compound_artist_id AS artist_id
+                   FROM artist_members am
+                   INNER JOIN track_artists ta ON ta.artist_id = am.compound_artist_id
+                   WHERE ta.track_id = ANY(%s::uuid[])""",
+                [uuids],
+            ),
+            "artist_id",
+        )
+
         # -- Related albums (track → media_files → album_variants → album) --
         albums = _uuid_list(
             _db_query(
@@ -222,6 +235,7 @@ async def get_inventory(req: InventoryRequest) -> dict:
             "artist_bios": artist_bios,
             "artist_tags": artist_tags,
             "similar_artists": similar_artists,
+            "artist_members": artist_members,
             "albums": albums,
             "album_info": album_info,
             "album_tags": album_tags,
@@ -464,6 +478,25 @@ async def pull_similar_artists(req: PullRequest) -> dict:
            FROM similar_artists sa
            INNER JOIN artists a ON a.id = sa.similar_artist_id
            WHERE sa.artist_id = ANY(%s::uuid[])""",
+        req.uuids,
+    )
+
+
+@router.post("/pull/artist-members")
+async def pull_artist_members(req: PullRequest) -> dict:
+    """Pull artist member relationships (compound → individual artists)."""
+    return _pull_handler(
+        "artist_members",
+        """SELECT am.compound_artist_id::text AS compound_artist_uuid,
+                  c.name AS compound_artist_name,
+                  c.artist_type, c.verification_status,
+                  am.member_artist_id::text AS member_artist_uuid,
+                  m.name AS member_artist_name,
+                  am.role
+           FROM artist_members am
+           INNER JOIN artists c ON c.id = am.compound_artist_id
+           INNER JOIN artists m ON m.id = am.member_artist_id
+           WHERE am.compound_artist_id = ANY(%s::uuid[])""",
         req.uuids,
     )
 

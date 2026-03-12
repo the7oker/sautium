@@ -29,15 +29,21 @@ CREATE INDEX IF NOT EXISTS idx_embedding_models_name ON embedding_models(name);
 CREATE TABLE IF NOT EXISTS artists (
     id UUID PRIMARY KEY,
     name VARCHAR(500) NOT NULL UNIQUE,
+    artist_type VARCHAR(20) DEFAULT 'unknown',
+    verification_status VARCHAR(20) DEFAULT 'unverified',
+    raw_name VARCHAR(500),
     lastfm_id VARCHAR(100),
     musicbrainz_id VARCHAR(100),
-    country VARCHAR(100),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_artist_type CHECK (artist_type IN ('unknown', 'solo', 'band', 'collaboration', 'orchestra', 'other')),
+    CONSTRAINT chk_verification_status CHECK (verification_status IN ('unverified', 'suspicious', 'verified_band', 'verified_split', 'verified_collab'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_artists_name ON artists(name);
 CREATE INDEX IF NOT EXISTS idx_artists_name_trgm ON artists USING gin (name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_artists_verification_status ON artists(verification_status);
+CREATE INDEX IF NOT EXISTS idx_artists_artist_type ON artists(artist_type);
 
 -- Albums (canonical — no physical file info)
 CREATE TABLE IF NOT EXISTS albums (
@@ -76,8 +82,8 @@ CREATE INDEX IF NOT EXISTS idx_tracks_title_trgm ON tracks USING gin (title gin_
 
 -- Track-Artist (many-to-many with role)
 CREATE TABLE IF NOT EXISTS track_artists (
-    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
-    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     role VARCHAR(50) DEFAULT 'primary',
     PRIMARY KEY (track_id, artist_id, role)
 );
@@ -87,14 +93,25 @@ CREATE INDEX IF NOT EXISTS idx_track_artists_artist_id ON track_artists(artist_i
 
 -- Album-Artist (many-to-many with role)
 CREATE TABLE IF NOT EXISTS album_artists (
-    album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
-    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+    album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     role VARCHAR(50) DEFAULT 'primary',
     PRIMARY KEY (album_id, artist_id, role)
 );
 
 CREATE INDEX IF NOT EXISTS idx_album_artists_album_id ON album_artists(album_id);
 CREATE INDEX IF NOT EXISTS idx_album_artists_artist_id ON album_artists(artist_id);
+
+-- Artist-Member (compound artist → individual members)
+CREATE TABLE IF NOT EXISTS artist_members (
+    compound_artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    member_artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    role VARCHAR(50) NOT NULL DEFAULT 'member',
+    PRIMARY KEY (compound_artist_id, member_artist_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_artist_members_compound ON artist_members(compound_artist_id);
+CREATE INDEX IF NOT EXISTS idx_artist_members_member ON artist_members(member_artist_id);
 
 -- Genres
 CREATE TABLE IF NOT EXISTS genres (
@@ -108,7 +125,7 @@ CREATE INDEX IF NOT EXISTS idx_genres_name ON genres(name);
 
 -- Track-Genre (many-to-many)
 CREATE TABLE IF NOT EXISTS track_genres (
-    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     genre_id INTEGER NOT NULL REFERENCES genres(id) ON DELETE CASCADE,
     PRIMARY KEY (track_id, genre_id)
 );
@@ -123,7 +140,7 @@ CREATE INDEX IF NOT EXISTS idx_track_genres_genre_id ON track_genres(genre_id);
 -- Album variants (CD, Vinyl, Hi-Res editions)
 CREATE TABLE IF NOT EXISTS album_variants (
     id SERIAL PRIMARY KEY,
-    album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+    album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
     directory_path TEXT NOT NULL UNIQUE,
     sample_rate INTEGER,
     bit_depth INTEGER,
@@ -138,7 +155,7 @@ CREATE INDEX IF NOT EXISTS idx_album_variants_directory ON album_variants(direct
 -- Media files (physical audio files on disk)
 CREATE TABLE IF NOT EXISTS media_files (
     id SERIAL PRIMARY KEY,
-    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     album_variant_id INTEGER NOT NULL REFERENCES album_variants(id) ON DELETE CASCADE,
     file_path TEXT NOT NULL UNIQUE,
     file_format VARCHAR(10) DEFAULT 'FLAC',
@@ -176,7 +193,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
     id SERIAL PRIMARY KEY,
     vector vector(512) NOT NULL,
     model_id INTEGER NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
-    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     source_bit_depth INTEGER,
     source_sample_rate INTEGER,
     source_is_lossless BOOLEAN,
@@ -196,7 +213,7 @@ CREATE TABLE IF NOT EXISTS text_embeddings (
     id SERIAL PRIMARY KEY,
     vector vector(384) NOT NULL,
     model_id INTEGER NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
-    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (track_id, model_id)
@@ -211,7 +228,7 @@ CREATE INDEX IF NOT EXISTS idx_text_embeddings_track_id ON text_embeddings(track
 -- Audio features (librosa DSP + CLAP zero-shot classification)
 CREATE TABLE IF NOT EXISTS audio_features (
     id SERIAL PRIMARY KEY,
-    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE UNIQUE,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE UNIQUE,
     bpm DOUBLE PRECISION,
     key VARCHAR(3),
     mode VARCHAR(5),
@@ -340,7 +357,7 @@ CREATE INDEX IF NOT EXISTS idx_similar_artists_match ON similar_artists(match_sc
 
 CREATE TABLE IF NOT EXISTS album_info (
     id SERIAL PRIMARY KEY,
-    album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+    album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
     source VARCHAR(50) NOT NULL,
     summary TEXT,
     content TEXT,
@@ -360,7 +377,7 @@ CREATE INDEX IF NOT EXISTS idx_album_info_playcount ON album_info(playcount) WHE
 
 CREATE TABLE IF NOT EXISTS album_tags (
     id SERIAL PRIMARY KEY,
-    album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+    album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
     tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
     weight INTEGER NOT NULL,
     source VARCHAR(50) NOT NULL,
@@ -381,7 +398,7 @@ CREATE INDEX IF NOT EXISTS idx_album_tags_weight ON album_tags(weight);
 
 CREATE TABLE IF NOT EXISTS track_stats (
     id SERIAL PRIMARY KEY,
-    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     source VARCHAR(50) NOT NULL,
     listeners INTEGER,
     playcount BIGINT,
@@ -422,7 +439,7 @@ CREATE INDEX IF NOT EXISTS idx_external_metadata_data ON external_metadata USING
 
 CREATE TABLE IF NOT EXISTS track_lyrics (
     id SERIAL PRIMARY KEY,
-    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     source VARCHAR(50) NOT NULL,        -- 'lrclib', 'genius', etc.
     plain_lyrics TEXT,                   -- Lyrics text without timestamps
     synced_lyrics TEXT,                  -- LRC format with timestamps (NULL if source doesn't support)
@@ -442,7 +459,7 @@ CREATE INDEX IF NOT EXISTS idx_track_lyrics_source ON track_lyrics(source);
 
 CREATE TABLE IF NOT EXISTS lyrics_embeddings (
     id SERIAL PRIMARY KEY,
-    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     model_id INTEGER NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
     vector vector(384) NOT NULL,
     chunk_index INTEGER NOT NULL DEFAULT 0,
@@ -465,7 +482,7 @@ CREATE INDEX IF NOT EXISTS idx_lyrics_embeddings_model_id ON lyrics_embeddings(m
 CREATE TABLE IF NOT EXISTS listening_history (
     id SERIAL PRIMARY KEY,
     media_file_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
-    track_id UUID REFERENCES tracks(id) ON DELETE SET NULL,
+    track_id UUID REFERENCES tracks(id) ON DELETE SET NULL ON UPDATE CASCADE,
     started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     duration_listened NUMERIC(10, 2),
     percent_listened NUMERIC(5, 2),

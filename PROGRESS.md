@@ -2401,6 +2401,13 @@ Implemented the first stage of P2P data synchronization (S1) using HTTP between 
 - [x] **P2P preparation (P0+P1)** ✅ — launcher↔backend bridge, UUID v5 для Genre/Tag/EmbeddingModel, Ed25519 node identity
 
 - [x] **P2P Sync (S1)** ✅ — HTTP sync protocol: inventory → batch pull → import (10 enrichment categories)
+- [x] **Artist Normalization** ✅ — two-pass algorithm with cascading UUID updates:
+  - Pass 1 (offline, safe): splits feat./ft./featuring/vs. — 27 artists split, 112 tracks updated, 9 merged
+  - Pass 2 (Last.fm): verifies &/,/and/with// patterns — 129 verified as bands, 0 splits
+  - ON UPDATE CASCADE on all UUID FK constraints for track/album UUID propagation
+  - `artist_members` junction table, `artist_type`, `verification_status` columns
+  - Auto-runs Pass 1 after scan; POST `/normalize-artists?pass2=true` for Last.fm verification
+  - Sync protocol updated with `artist_members` category (11 categories total)
 
 ### Phase 4: Voice Interface & Advanced Features
 - Whisper for voice input (Ukrainian/English)

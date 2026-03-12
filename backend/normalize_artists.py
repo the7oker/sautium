@@ -1,415 +1,547 @@
 """
-Artist normalization script.
-Splits compound artist names into individual artists and creates proper many-to-many relationships.
+Artist normalization with two-pass algorithm and cascading UUID updates.
+
+Pass 1 (offline, safe): Split on feat./ft./featuring/vs. patterns — never band names.
+Pass 2 (Last.fm):       Verify suspicious patterns (&, comma, and, with, /)
+                         by checking if compound name exists on Last.fm.
+
+After splitting, track and album UUIDs are recalculated based on the
+normalized primary artist name, and cascaded to all FK references via
+ON UPDATE CASCADE constraints.
+
+Usage:
+    # Inside Docker container:
+    python normalize_artists.py                  # Pass 1 only (safe)
+    python normalize_artists.py --pass2          # Pass 1 + Last.fm verification
+    python normalize_artists.py --dry-run        # Preview only
+    python normalize_artists.py --pass2 --dry-run
 """
 
 import logging
 import re
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
+
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from database import get_db_context
-from models import Artist, TrackArtist
+from uuid_utils import artist_uuid, track_uuid, album_uuid
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ─── Pattern definitions ──────────────────────────────────────────────────
 
-def is_compound_artist(artist_name: str) -> bool:
+# Patterns that are ALWAYS collaborations — nobody names a band "X feat. Y"
+SAFE_SEPARATORS = [
+    (r'\s+featuring\s+', 'featuring'),
+    (r'\s+feat\.?\s+',   'feat.'),
+    (r'\s+ft\.?\s+',     'ft.'),
+    (r'\s+vs\.?\s+',     'vs.'),
+]
+
+# Patterns that MIGHT be band names — need Last.fm verification
+SUSPICIOUS_SEPARATORS = [
+    (r'\s+&\s+',   '&'),
+    (r',\s+',      ','),
+    (r'\s+and\s+', 'and'),
+    (r'\s+with\s+','with'),
+    (r'\s+/\s+',   '/'),
+]
+
+
+def detect_compound_type(name: str) -> Optional[Tuple[str, str, List[str]]]:
     """
-    Check if an artist name is potentially a compound/collaboration.
+    Detect if artist name is compound and classify separator type.
 
-    Patterns:
-    - "Artist A & Artist B"
-    - "Artist A feat. Artist B"
-    - "Artist A featuring Artist B"
-    - "Artist A, Artist B"
-    - "Artist A and Artist B"
-    - "Artist A with Artist B"
-    - "Artist A vs Artist B"
-    - "Artist A / Artist B"
+    Returns:
+        ('safe', separator_label, [parts]) — guaranteed collaboration
+        ('suspicious', separator_label, [parts]) — needs verification
+        None — not compound
     """
-    if not artist_name:
-        return False
+    # Check safe patterns first (higher priority)
+    for pattern, label in SAFE_SEPARATORS:
+        if re.search(pattern, name, re.IGNORECASE):
+            parts = re.split(pattern, name, flags=re.IGNORECASE)
+            parts = [p.strip() for p in parts if p.strip()]
+            if len(parts) > 1:
+                return ('safe', label, parts)
 
-    # Patterns that indicate compound artists
-    patterns = [
-        r'\s+&\s+',           # " & "
-        r'\s+feat\.?\s+',     # " feat. " or " feat "
-        r'\s+featuring\s+',   # " featuring "
-        r'\s+ft\.?\s+',       # " ft. " or " ft "
-        r'\s+and\s+',         # " and " (but not at start/end)
-        r'\s+with\s+',        # " with "
-        r'\s+vs\.?\s+',       # " vs. " or " vs "
-        r'\s+/\s+',           # " / "
-        r',\s+',              # ", "
-    ]
+    # Check suspicious patterns
+    for pattern, label in SUSPICIOUS_SEPARATORS:
+        if re.search(pattern, name, re.IGNORECASE):
+            parts = re.split(pattern, name, flags=re.IGNORECASE)
+            parts = [p.strip() for p in parts if p.strip()]
+            if len(parts) > 1:
+                return ('suspicious', label, parts)
 
-    for pattern in patterns:
-        if re.search(pattern, artist_name, re.IGNORECASE):
-            return True
-
-    return False
+    return None
 
 
-def parse_compound_artist(artist_name: str) -> List[str]:
+# ─── Low-level DB helpers ─────────────────────────────────────────────────
+
+def _ensure_artist(db: Session, name: str):
+    """Get or create artist with deterministic UUID. Returns UUID."""
+    uid = artist_uuid(name)
+    exists = db.execute(
+        text("SELECT 1 FROM artists WHERE id = :id"), {"id": str(uid)}
+    ).fetchone()
+    if not exists:
+        db.execute(text("""
+            INSERT INTO artists (id, name)
+            VALUES (:id, :name)
+            ON CONFLICT (id) DO NOTHING
+        """), {"id": str(uid), "name": name})
+        logger.info(f"  Created artist: {name} ({uid})")
+    return uid
+
+
+def _update_track_uuid(db: Session, old_id, new_id) -> str:
     """
-    Parse a compound artist name into individual artist names.
-
-    Examples:
-        "Beth Hart & Joe Bonamassa" -> ["Beth Hart", "Joe Bonamassa"]
-        "Klaus Schulze feat. Lisa Gerrard" -> ["Klaus Schulze", "Lisa Gerrard"]
-        "Artist A, Artist B and Artist C" -> ["Artist A", "Artist B", "Artist C"]
+    Update track UUID via ON UPDATE CASCADE, or merge if target exists.
+    Returns the final track UUID.
     """
-    # Replace all separator patterns with a standard delimiter
-    normalized = artist_name
+    old_str = str(old_id)
+    new_str = str(new_id)
 
-    # Replace patterns with ||
-    separators = [
-        (r'\s+&\s+', '||'),
-        (r'\s+feat\.?\s+', '||'),
-        (r'\s+featuring\s+', '||'),
-        (r'\s+ft\.?\s+', '||'),
-        (r'\s+and\s+', '||'),
-        (r'\s+with\s+', '||'),
-        (r'\s+vs\.?\s+', '||'),
-        (r'\s+/\s+', '||'),
-        (r',\s+', '||'),
-    ]
+    if old_str == new_str:
+        return new_str
 
-    for pattern, replacement in separators:
-        normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+    exists = db.execute(
+        text("SELECT 1 FROM tracks WHERE id = :id"), {"id": new_str}
+    ).fetchone()
 
-    # Split by delimiter
-    parts = [part.strip() for part in normalized.split('||')]
+    if not exists:
+        # ON UPDATE CASCADE propagates to all child tables
+        db.execute(
+            text("UPDATE tracks SET id = :new_id WHERE id = :old_id"),
+            {"new_id": new_str, "old_id": old_str},
+        )
+    else:
+        # Merge: move per-user data to target track, delete old
+        db.execute(
+            text("UPDATE media_files SET track_id = :new WHERE track_id = :old"),
+            {"new": new_str, "old": old_str},
+        )
+        db.execute(
+            text("UPDATE listening_history SET track_id = :new WHERE track_id = :old"),
+            {"new": new_str, "old": old_str},
+        )
+        # CASCADE deletes old associations, embeddings, features, stats, lyrics
+        db.execute(text("DELETE FROM tracks WHERE id = :old"), {"old": old_str})
 
-    # Remove empty strings and deduplicate while preserving order
-    seen = set()
-    result = []
-    for part in parts:
-        if part and part not in seen:
-            seen.add(part)
-            result.append(part)
-
-    return result
+    return new_str
 
 
-def normalize_artist_name(name: str) -> str:
+def _update_album_uuid(db: Session, old_id, new_id) -> str:
     """
-    Normalize artist name for consistency.
-
-    - Remove extra whitespace
-    - Strip leading/trailing spaces
-    - Handle special characters
+    Update album UUID via ON UPDATE CASCADE, or merge if target exists.
+    Returns the final album UUID.
     """
-    # Remove trailing spaces after punctuation that might be artifacts
-    name = re.sub(r'\s+', ' ', name)  # Multiple spaces -> single space
-    name = name.strip()
+    old_str = str(old_id)
+    new_str = str(new_id)
 
-    return name
+    if old_str == new_str:
+        return new_str
 
+    exists = db.execute(
+        text("SELECT 1 FROM albums WHERE id = :id"), {"id": new_str}
+    ).fetchone()
 
-def get_or_create_artist(db: Session, artist_name: str) -> Artist:
-    """Get existing artist or create new one."""
-    normalized_name = normalize_artist_name(artist_name)
+    if not exists:
+        db.execute(
+            text("UPDATE albums SET id = :new_id WHERE id = :old_id"),
+            {"new_id": new_str, "old_id": old_str},
+        )
+    else:
+        # Merge: move album variants to target, delete old
+        db.execute(
+            text("UPDATE album_variants SET album_id = :new WHERE album_id = :old"),
+            {"new": new_str, "old": old_str},
+        )
+        db.execute(text("DELETE FROM albums WHERE id = :old"), {"old": old_str})
 
-    # Check if exists (case-insensitive)
-    artist = db.query(Artist).filter(
-        Artist.name.ilike(normalized_name)
-    ).first()
-
-    if artist:
-        logger.debug(f"Found existing artist: {normalized_name}")
-        return artist
-
-    # Create new
-    artist = Artist(name=normalized_name)
-    db.add(artist)
-    db.flush()  # Get ID without committing
-    logger.info(f"Created new artist: {normalized_name} (ID: {artist.id})")
-
-    return artist
+    return new_str
 
 
-def normalize_artists(
+# ─── Core normalization logic ─────────────────────────────────────────────
+
+def normalize_compound_artist(
     db: Session,
-    dry_run: bool = False,
-    verify_on_lastfm: bool = False
-) -> dict:
+    compound_id,
+    compound_name: str,
+    parts: List[str],
+    status: str = 'verified_split',
+) -> Dict:
     """
-    Normalize compound artist names.
-
-    Process:
-    1. Find all compound artist names
-    2. Split them into individual artists
-    3. Create individual artists if they don't exist
-    4. Update track_artists relationships (change primary -> featured)
-    5. Optionally: verify individual artists exist on Last.fm
-    6. Delete or mark compound artists
+    Split compound artist into primary + featured artists.
+    Recalculates track/album UUIDs and cascades all FK references.
 
     Args:
         db: Database session
-        dry_run: If True, only show what would be done
-        verify_on_lastfm: If True, verify individual artists on Last.fm (slow)
+        compound_id: UUID of the compound artist
+        compound_name: Full compound name (e.g. "Beth Hart & Joe Bonamassa")
+        parts: Individual names (e.g. ["Beth Hart", "Joe Bonamassa"])
+        status: verification_status to set on compound artist
 
     Returns:
-        Statistics dict
+        Stats dict with counts of updated/merged tracks and albums.
     """
     stats = {
-        'compound_artists_found': 0,
-        'compound_artists_processed': 0,
-        'new_artists_created': 0,
-        'track_relationships_updated': 0,
-        'compound_artists_deleted': 0,
-        'lastfm_verified': 0,
-        'lastfm_not_found': 0,
+        'tracks_updated': 0,
+        'albums_updated': 0,
+        'tracks_merged': 0,
+        'albums_merged': 0,
     }
 
-    # Find all artists
-    all_artists = db.query(Artist).all()
+    compound_str = str(compound_id)
+    primary_name = parts[0]
+    featured_names = parts[1:]
 
-    # Identify compound artists
-    compound_artists = []
-    for artist in all_artists:
-        if is_compound_artist(artist.name):
-            individual_names = parse_compound_artist(artist.name)
-            if len(individual_names) > 1:
-                compound_artists.append((artist, individual_names))
+    # Create individual artists
+    primary_id = str(_ensure_artist(db, primary_name))
+    featured_ids = [str(_ensure_artist(db, name)) for name in featured_names]
 
-    stats['compound_artists_found'] = len(compound_artists)
+    # Create artist_members entries
+    db.execute(text("""
+        INSERT INTO artist_members (compound_artist_id, member_artist_id, role)
+        VALUES (:cid, :mid, 'primary')
+        ON CONFLICT DO NOTHING
+    """), {"cid": compound_str, "mid": primary_id})
 
-    if not compound_artists:
-        logger.info("No compound artists found. Database is already normalized.")
-        return stats
+    for fid, fname in zip(featured_ids, featured_names):
+        db.execute(text("""
+            INSERT INTO artist_members (compound_artist_id, member_artist_id, role)
+            VALUES (:cid, :mid, 'featured')
+            ON CONFLICT DO NOTHING
+        """), {"cid": compound_str, "mid": fid})
 
-    logger.info(f"Found {len(compound_artists)} compound artists to normalize")
+    # ── Process tracks ────────────────────────────────────────────────────
+    tracks = db.execute(text("""
+        SELECT t.id::text, t.title
+        FROM tracks t
+        JOIN track_artists ta ON ta.track_id = t.id
+        WHERE ta.artist_id = :aid AND ta.role = 'primary'
+    """), {"aid": compound_str}).fetchall()
 
-    # Collect unique individual artist names
-    unique_names = set()
-    for _, individual_names in compound_artists:
-        unique_names.update(individual_names)
+    for old_track_str, title in tracks:
+        new_track_id = track_uuid(title, primary_name)
+        new_track_str = str(new_track_id)
 
-    # Step 1: Check if artists already exist in local database
-    # verified_artists[name] = ('in_db', artist_id) | ('lastfm', True/False) | ('unknown', None)
-    verified_artists = {}
-    logger.info(f"Checking {len(unique_names)} unique artist names...")
+        will_merge = (
+            old_track_str != new_track_str
+            and db.execute(
+                text("SELECT 1 FROM tracks WHERE id = :id"), {"id": new_track_str}
+            ).fetchone() is not None
+        )
 
-    for name in unique_names:
-        # Check if artist exists in database (case-insensitive)
-        existing = db.query(Artist).filter(
-            Artist.name.ilike(normalize_artist_name(name))
-        ).first()
+        final_id = _update_track_uuid(db, old_track_str, new_track_str)
 
-        if existing:
-            verified_artists[name] = ('in_db', existing.id)
-            logger.info(f"✓ Found in local DB: {name} (ID: {existing.id})")
-        else:
-            # Not in local DB, will need verification
-            verified_artists[name] = ('unknown', None)
-            logger.debug(f"? Not in local DB: {name}")
+        if will_merge:
+            stats['tracks_merged'] += 1
+            logger.debug(f"    Merged track: {title} ({old_track_str} -> {final_id})")
+        elif old_track_str != new_track_str:
+            stats['tracks_updated'] += 1
+            logger.debug(f"    Updated track UUID: {title} ({old_track_str} -> {final_id})")
 
-    # Step 2: Verify unknown artists on Last.fm (only if requested and not dry-run)
-    if verify_on_lastfm and not dry_run:
-        unknown_artists = [name for name, (source, _) in verified_artists.items() if source == 'unknown']
+        # Update artist associations on the final track
+        db.execute(text("""
+            DELETE FROM track_artists
+            WHERE track_id = :tid AND artist_id = :aid
+        """), {"tid": final_id, "aid": compound_str})
 
-        if unknown_artists:
-            logger.info(f"\nVerifying {len(unknown_artists)} unknown artists on Last.fm...")
-            from lastfm import LastFmService
-            import time
+        db.execute(text("""
+            INSERT INTO track_artists (track_id, artist_id, role)
+            VALUES (:tid, :aid, 'primary')
+            ON CONFLICT DO NOTHING
+        """), {"tid": final_id, "aid": primary_id})
 
-            service = LastFmService()
+        for fid in featured_ids:
+            db.execute(text("""
+                INSERT INTO track_artists (track_id, artist_id, role)
+                VALUES (:tid, :aid, 'featured')
+                ON CONFLICT DO NOTHING
+            """), {"tid": final_id, "aid": fid})
 
-            for name in unknown_artists:
-                try:
-                    data = service.get_artist_info(name)
-                    if data:
-                        verified_artists[name] = ('lastfm', True)
-                        stats['lastfm_verified'] += 1
-                        logger.info(f"✓ Found on Last.fm: {name}")
-                    else:
-                        verified_artists[name] = ('lastfm', False)
-                        stats['lastfm_not_found'] += 1
-                        logger.warning(f"✗ Not found on Last.fm: {name}")
+    # ── Process albums ────────────────────────────────────────────────────
+    albums = db.execute(text("""
+        SELECT a.id::text, a.title
+        FROM albums a
+        JOIN album_artists aa ON aa.album_id = a.id
+        WHERE aa.artist_id = :aid AND aa.role = 'primary'
+    """), {"aid": compound_str}).fetchall()
 
-                    time.sleep(0.25)  # Rate limiting
-                except Exception as e:
-                    logger.error(f"Error verifying {name}: {e}")
-                    verified_artists[name] = ('lastfm', False)
-        else:
-            logger.info("All artists already exist in database, no Last.fm verification needed")
+    for old_album_str, title in albums:
+        new_album_id = album_uuid(title, primary_name)
+        new_album_str = str(new_album_id)
 
-    # Process compound artists
-    for compound_artist, individual_names in compound_artists:
-        logger.info(f"\nProcessing: '{compound_artist.name}' -> {individual_names}")
+        will_merge = (
+            old_album_str != new_album_str
+            and db.execute(
+                text("SELECT 1 FROM albums WHERE id = :id"), {"id": new_album_str}
+            ).fetchone() is not None
+        )
 
-        if dry_run:
-            logger.info(f"  [DRY RUN] Would split into:")
-            for name in individual_names:
-                source, value = verified_artists.get(name, ('unknown', None))
-                if source == 'in_db':
-                    logger.info(f"    ✓ {name} (already in DB, ID: {value})")
-                elif source == 'lastfm':
-                    if value:
-                        logger.info(f"    ✓ {name} (verified on Last.fm)")
-                    else:
-                        logger.info(f"    ✗ {name} (not found on Last.fm)")
-                else:  # unknown
-                    logger.info(f"    ? {name} (would create without verification)")
-            stats['compound_artists_processed'] += 1
-            continue
+        final_id = _update_album_uuid(db, old_album_str, new_album_str)
 
-        # Filter out artists that failed Last.fm verification
-        valid_names = []
-        for name in individual_names:
-            source, value = verified_artists.get(name, ('unknown', None))
+        if will_merge:
+            stats['albums_merged'] += 1
+            logger.debug(f"    Merged album: {title} ({old_album_str} -> {final_id})")
+        elif old_album_str != new_album_str:
+            stats['albums_updated'] += 1
+            logger.debug(f"    Updated album UUID: {title} ({old_album_str} -> {final_id})")
 
-            if source == 'in_db':
-                # Already exists in DB - always valid
-                valid_names.append(name)
-            elif source == 'lastfm':
-                if value:
-                    # Verified on Last.fm - valid
-                    valid_names.append(name)
-                else:
-                    # Not found on Last.fm - skip
-                    logger.warning(f"  ✗ Skipping '{name}' (not found on Last.fm)")
-            else:  # unknown
-                # Not verified, but accept if --verify-lastfm not used
-                valid_names.append(name)
+        # Update artist associations on the final album
+        db.execute(text("""
+            DELETE FROM album_artists
+            WHERE album_id = :aid AND artist_id = :cid
+        """), {"aid": final_id, "cid": compound_str})
 
-        individual_names = valid_names
+        db.execute(text("""
+            INSERT INTO album_artists (album_id, artist_id, role)
+            VALUES (:aid, :pid, 'primary')
+            ON CONFLICT DO NOTHING
+        """), {"aid": final_id, "pid": primary_id})
 
-        if not individual_names:
-            logger.warning(f"  No valid artists found for '{compound_artist.name}', skipping")
-            continue
+        for fid in featured_ids:
+            db.execute(text("""
+                INSERT INTO album_artists (album_id, artist_id, role)
+                VALUES (:aid, :fid, 'featured')
+                ON CONFLICT DO NOTHING
+            """), {"aid": final_id, "fid": fid})
 
-        # Get or create individual artists
-        individual_artists = []
-        for name in individual_names:
-            try:
-                artist = get_or_create_artist(db, name)
-                individual_artists.append(artist)
-            except Exception as e:
-                logger.error(f"Error creating artist '{name}': {e}")
-                continue
+    # ── Update compound artist metadata ───────────────────────────────────
+    db.execute(text("""
+        UPDATE artists SET
+            verification_status = :status,
+            artist_type = 'collaboration',
+            raw_name = COALESCE(raw_name, name)
+        WHERE id = :id
+    """), {"status": status, "id": compound_str})
 
-        if not individual_artists:
-            logger.warning(f"No individual artists created for '{compound_artist.name}'")
-            continue
-
-        # Find all tracks with this compound artist
-        track_artists = db.query(TrackArtist).filter(
-            TrackArtist.artist_id == compound_artist.id
-        ).all()
-
-        logger.info(f"  Found {len(track_artists)} tracks with artist '{compound_artist.name}'")
-
-        # Update relationships
-        for ta in track_artists:
-            track_id = ta.track_id
-
-            # First artist is primary, rest are featured
-            for i, individual_artist in enumerate(individual_artists):
-                role = 'primary' if i == 0 else 'featured'
-
-                # Check if relationship already exists
-                existing = db.query(TrackArtist).filter(
-                    TrackArtist.track_id == track_id,
-                    TrackArtist.artist_id == individual_artist.id,
-                    TrackArtist.role == role
-                ).first()
-
-                if not existing:
-                    new_ta = TrackArtist(
-                        track_id=track_id,
-                        artist_id=individual_artist.id,
-                        role=role
-                    )
-                    db.add(new_ta)
-                    stats['track_relationships_updated'] += 1
-
-            # Delete old compound relationship
-            db.delete(ta)
-
-        # Delete compound artist (if no other relationships exist)
-        # Check if artist is used elsewhere (e.g., in albums)
-        remaining_tracks = db.query(TrackArtist).filter(
-            TrackArtist.artist_id == compound_artist.id
-        ).count()
-
-        if remaining_tracks == 0:
-            db.delete(compound_artist)
-            stats['compound_artists_deleted'] += 1
-            logger.info(f"  ✓ Deleted compound artist '{compound_artist.name}'")
-        else:
-            logger.warning(f"  ⚠ Compound artist '{compound_artist.name}' still has {remaining_tracks} relationships")
-
-        stats['compound_artists_processed'] += 1
-        logger.info(f"  ✓ Normalized '{compound_artist.name}' into {len(individual_artists)} artists")
-
-    if not dry_run:
-        db.commit()
-        logger.info("\n✅ Artist normalization complete!")
-    else:
-        logger.info("\n[DRY RUN] No changes made to database")
+    logger.info(
+        f"  Split '{compound_name}' -> {parts}: "
+        f"{stats['tracks_updated']} tracks updated, {stats['tracks_merged']} merged, "
+        f"{stats['albums_updated']} albums updated, {stats['albums_merged']} merged"
+    )
 
     return stats
 
 
-def show_artist_statistics(db: Session):
-    """Show statistics about artists."""
-    result = db.execute(text("""
-        SELECT
-            a.id,
-            a.name,
-            COUNT(DISTINCT ta.track_id) as track_count
-        FROM artists a
-        LEFT JOIN track_artists ta ON a.id = ta.artist_id
-        GROUP BY a.id, a.name
-        ORDER BY track_count DESC, a.name
+# ─── Two-pass normalization ───────────────────────────────────────────────
+
+def normalize_pass1(db: Session, dry_run: bool = False) -> Dict:
+    """
+    Pass 1: Split safe patterns (feat./ft./featuring/vs.) without external lookups.
+    These separators are NEVER used in band names.
+    """
+    logger.info("=== Pass 1: Safe pattern splitting ===")
+
+    all_artists = db.execute(text("""
+        SELECT id::text, name FROM artists
+        WHERE verification_status = 'unverified'
+        ORDER BY name
     """)).fetchall()
 
-    logger.info("\n📊 Artist Statistics:")
-    logger.info(f"{'ID':<40} {'Artist':<45} {'Songs':<8}")
-    logger.info("-" * 95)
+    total = {
+        'artists_scanned': len(all_artists),
+        'safe_found': 0,
+        'suspicious_marked': 0,
+        'split': 0,
+        'tracks_updated': 0,
+        'albums_updated': 0,
+        'tracks_merged': 0,
+        'albums_merged': 0,
+    }
 
-    compound_count = 0
-    total_tracks = 0
-    for row in result:
-        is_compound = '🔗' if is_compound_artist(row.name) else '  '
-        if is_compound_artist(row.name):
-            compound_count += 1
-        logger.info(f"{str(row.id):<40} {is_compound} {row.name:<43} {row.track_count:<8}")
-        total_tracks += row.track_count
+    for artist_id, name in all_artists:
+        result = detect_compound_type(name)
+        if not result:
+            continue
 
-    logger.info("-" * 95)
-    logger.info(f"Total: {len(result)} artists, {compound_count} compound, {total_tracks} track relationships")
+        compound_type, separator, parts = result
+
+        if compound_type == 'safe':
+            total['safe_found'] += 1
+            logger.info(f"Safe split: '{name}' -> {parts} (separator: {separator})")
+
+            if dry_run:
+                continue
+
+            stats = normalize_compound_artist(db, artist_id, name, parts, 'verified_split')
+            total['split'] += 1
+            total['tracks_updated'] += stats['tracks_updated']
+            total['albums_updated'] += stats['albums_updated']
+            total['tracks_merged'] += stats['tracks_merged']
+            total['albums_merged'] += stats['albums_merged']
+
+        elif compound_type == 'suspicious':
+            total['suspicious_marked'] += 1
+            if not dry_run:
+                db.execute(text("""
+                    UPDATE artists SET verification_status = 'suspicious'
+                    WHERE id = :id AND verification_status = 'unverified'
+                """), {"id": artist_id})
+            logger.debug(f"Marked suspicious: '{name}' (separator: {separator})")
+
+    if not dry_run:
+        db.commit()
+
+    logger.info(
+        f"Pass 1 done: scanned {total['artists_scanned']}, "
+        f"safe splits {total['split']}, suspicious marked {total['suspicious_marked']}"
+    )
+    return total
+
+
+def normalize_pass2(db: Session, dry_run: bool = False) -> Dict:
+    """
+    Pass 2: Verify suspicious artists via Last.fm.
+
+    If compound name is found on Last.fm -> it's a band, keep as-is.
+    If not found -> split into individual artists.
+    """
+    import time
+    logger.info("=== Pass 2: Last.fm verification ===")
+
+    suspicious = db.execute(text("""
+        SELECT id::text, name FROM artists
+        WHERE verification_status = 'suspicious'
+        ORDER BY name
+    """)).fetchall()
+
+    total = {
+        'suspicious_count': len(suspicious),
+        'verified_band': 0,
+        'verified_split': 0,
+        'errors': 0,
+        'tracks_updated': 0,
+        'albums_updated': 0,
+        'tracks_merged': 0,
+        'albums_merged': 0,
+    }
+
+    if not suspicious:
+        logger.info("No suspicious artists to verify")
+        return total
+
+    from lastfm import LastFmService
+    try:
+        lastfm = LastFmService()
+    except Exception as e:
+        logger.error(f"Cannot initialize Last.fm service: {e}")
+        return total
+
+    for artist_id, name in suspicious:
+        result = detect_compound_type(name)
+        if not result:
+            continue
+
+        _, separator, parts = result
+        logger.info(f"Verifying: '{name}' ...")
+
+        try:
+            compound_info = lastfm.get_artist_info(name, fetch_similar=False)
+            time.sleep(0.25)
+        except Exception as e:
+            logger.error(f"  Last.fm error for '{name}': {e}")
+            total['errors'] += 1
+            continue
+
+        if compound_info:
+            # Found on Last.fm — treat as a recognized entity (band/project)
+            listeners = compound_info.get('stats', {}).get('listeners', 0)
+            if isinstance(listeners, str):
+                listeners = int(listeners) if listeners.isdigit() else 0
+
+            logger.info(f"  Found on Last.fm: '{name}' ({listeners} listeners) -> verified_band")
+
+            if not dry_run:
+                db.execute(text("""
+                    UPDATE artists SET
+                        verification_status = 'verified_band',
+                        artist_type = 'band',
+                        raw_name = COALESCE(raw_name, name)
+                    WHERE id = :id
+                """), {"id": artist_id})
+
+            total['verified_band'] += 1
+        else:
+            # Not found on Last.fm — split into individual artists
+            logger.info(f"  Not on Last.fm: '{name}' -> splitting into {parts}")
+
+            if not dry_run:
+                stats = normalize_compound_artist(
+                    db, artist_id, name, parts, 'verified_split'
+                )
+                total['tracks_updated'] += stats['tracks_updated']
+                total['albums_updated'] += stats['albums_updated']
+                total['tracks_merged'] += stats['tracks_merged']
+                total['albums_merged'] += stats['albums_merged']
+
+            total['verified_split'] += 1
+
+    if not dry_run:
+        db.commit()
+
+    logger.info(
+        f"Pass 2 done: {total['verified_band']} bands, "
+        f"{total['verified_split']} splits, {total['errors']} errors"
+    )
+    return total
+
+
+# ─── Main entry point ─────────────────────────────────────────────────────
+
+def normalize_artists(
+    db: Session,
+    pass1: bool = True,
+    pass2: bool = False,
+    dry_run: bool = False,
+) -> Dict:
+    """
+    Run artist normalization.
+
+    Args:
+        db: Database session
+        pass1: Run offline safe splitting (feat./ft./featuring/vs.)
+        pass2: Run Last.fm verification for suspicious patterns (&, comma, and, with, /)
+        dry_run: Only show what would be done, no DB changes
+
+    Returns:
+        Dict with pass1/pass2 stats
+    """
+    stats = {}
+
+    if pass1:
+        stats['pass1'] = normalize_pass1(db, dry_run=dry_run)
+
+    if pass2:
+        stats['pass2'] = normalize_pass2(db, dry_run=dry_run)
+
+    return stats
 
 
 if __name__ == "__main__":
     import sys
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s: %(message)s',
+    )
+
     dry_run = '--dry-run' in sys.argv
-    verify = '--verify-lastfm' in sys.argv
+    run_pass2 = '--pass2' in sys.argv or '--lastfm' in sys.argv
+
+    from database import get_db_context
 
     with get_db_context() as db:
-        logger.info("=== Artist Normalization Script ===\n")
+        logger.info("=== Artist Normalization ===")
+        if dry_run:
+            logger.info("[DRY RUN MODE]")
 
-        # Show current state
-        logger.info("Current state:")
-        show_artist_statistics(db)
+        stats = normalize_artists(db, pass1=True, pass2=run_pass2, dry_run=dry_run)
 
-        # Normalize
-        logger.info("\n" + "="*60)
-        stats = normalize_artists(db, dry_run=dry_run, verify_on_lastfm=verify)
-
-        # Show results
-        logger.info("\n" + "="*60)
-        logger.info("Statistics:")
-        for key, value in stats.items():
-            logger.info(f"  {key}: {value}")
-
-        if not dry_run and stats['compound_artists_processed'] > 0:
-            logger.info("\nAfter normalization:")
-            show_artist_statistics(db)
+        print("\n=== Results ===")
+        for pass_name, pass_stats in stats.items():
+            print(f"\n{pass_name}:")
+            for key, value in pass_stats.items():
+                print(f"  {key}: {value}")

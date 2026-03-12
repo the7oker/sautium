@@ -70,11 +70,14 @@ class Artist(Base):
     id = Column(UUID(as_uuid=True), primary_key=True)
     name = Column(String(500), nullable=False, unique=True)
 
+    # Normalization metadata
+    artist_type = Column(String(20), default="unknown")       # unknown/solo/band/collaboration/orchestra/other
+    verification_status = Column(String(20), default="unverified")  # unverified/suspicious/verified_band/verified_split/verified_collab
+    raw_name = Column(String(500))                             # original tag value before normalization
+
     # External service IDs
     lastfm_id = Column(String(100))
     musicbrainz_id = Column(String(100))
-
-    country = Column(String(100))
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -86,9 +89,21 @@ class Artist(Base):
     similar_from = relationship("SimilarArtist", foreign_keys="SimilarArtist.similar_artist_id", back_populates="similar_artist", cascade="all, delete-orphan")
     bios = relationship("ArtistBio", back_populates="artist", cascade="all, delete-orphan")
     tag_associations = relationship("ArtistTag", back_populates="artist", cascade="all, delete-orphan")
+    members_as_compound = relationship("ArtistMember", foreign_keys="ArtistMember.compound_artist_id", back_populates="compound_artist", cascade="all, delete-orphan")
+    member_of = relationship("ArtistMember", foreign_keys="ArtistMember.member_artist_id", back_populates="member_artist", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("idx_artists_name", "name"),
+        Index("idx_artists_verification_status", "verification_status"),
+        Index("idx_artists_artist_type", "artist_type"),
+        CheckConstraint(
+            "artist_type IN ('unknown', 'solo', 'band', 'collaboration', 'orchestra', 'other')",
+            name="chk_artist_type",
+        ),
+        CheckConstraint(
+            "verification_status IN ('unverified', 'suspicious', 'verified_band', 'verified_split', 'verified_collab')",
+            name="chk_verification_status",
+        ),
     )
 
     def __repr__(self):
@@ -219,6 +234,30 @@ class AlbumArtist(Base):
 
     def __repr__(self):
         return f"<AlbumArtist(album_id={self.album_id}, artist_id={self.artist_id}, role='{self.role}')>"
+
+
+class ArtistMember(Base):
+    """Compound artist → member artist junction table.
+
+    Records which individual artists make up a compound/collaboration artist.
+    E.g. "Beth Hart & Joe Bonamassa" → [Beth Hart (primary), Joe Bonamassa (featured)]
+    """
+    __tablename__ = "artist_members"
+
+    compound_artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
+    member_artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
+    role = Column(String(50), nullable=False, default="member")  # primary, featured, member
+
+    compound_artist = relationship("Artist", foreign_keys=[compound_artist_id], back_populates="members_as_compound")
+    member_artist = relationship("Artist", foreign_keys=[member_artist_id], back_populates="member_of")
+
+    __table_args__ = (
+        Index("idx_artist_members_compound", "compound_artist_id"),
+        Index("idx_artist_members_member", "member_artist_id"),
+    )
+
+    def __repr__(self):
+        return f"<ArtistMember(compound={self.compound_artist_id}, member={self.member_artist_id}, role='{self.role}')>"
 
 
 # ───────────────────────────────────────────────────────────────────────────

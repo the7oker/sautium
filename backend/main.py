@@ -216,6 +216,17 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
         if state["cancel_requested"]:
             state["progress"] = "Scan cancelled"
         else:
+            # Run artist normalization Pass 1 (safe patterns only)
+            state["progress"] = "Normalizing artists..."
+            try:
+                from normalize_artists import normalize_artists as do_normalize
+                from database import get_db_context
+                with get_db_context() as db:
+                    norm_stats = do_normalize(db, pass1=True, pass2=False)
+                    if norm_stats.get('pass1', {}).get('split', 0) > 0:
+                        logger.info(f"Post-scan normalization: {norm_stats}")
+            except Exception as e:
+                logger.error(f"Post-scan normalization failed: {e}")
             state["progress"] = "Scan complete"
         state["result"] = result
 
@@ -290,6 +301,29 @@ async def scan_library_endpoint(
         }
     except Exception as e:
         logger.error(f"Scan failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/normalize-artists")
+async def normalize_artists_endpoint(
+    pass2: bool = False,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """
+    Run artist normalization.
+
+    Pass 1 (always): Split safe patterns (feat./vs.) — no external API.
+    Pass 2 (optional): Verify suspicious patterns (&, comma) via Last.fm.
+    """
+    from normalize_artists import normalize_artists as do_normalize
+    from database import get_db_context
+
+    try:
+        with get_db_context() as db:
+            stats = do_normalize(db, pass1=True, pass2=pass2, dry_run=dry_run)
+        return {"success": True, "statistics": stats}
+    except Exception as e:
+        logger.error(f"Normalization failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
