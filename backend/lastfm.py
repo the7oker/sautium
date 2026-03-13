@@ -679,24 +679,29 @@ class LastFmService:
         Returns:
             Statistics dict
         """
-        # Get artists to enrich
+        # Get artists to enrich (only those with tracks in library)
         if skip_existing:
-            # Find artists without Last.fm bio
+            # Find library artists without Last.fm bio
             query = text("""
                 SELECT DISTINCT a.id, a.name
                 FROM artists a
+                JOIN track_artists ta ON ta.artist_id = a.id
                 WHERE NOT EXISTS (
                     SELECT 1 FROM external_metadata em
                     WHERE em.entity_type = 'artist'
-                      AND em.entity_id = a.id
+                      AND em.entity_id = a.id::text
                       AND em.source = 'lastfm'
                       AND em.metadata_type = 'bio'
-                      AND em.fetch_status = 'success'
                 )
                 ORDER BY a.name
             """)
         else:
-            query = text("SELECT id, name FROM artists ORDER BY name")
+            query = text("""
+                SELECT DISTINCT a.id, a.name
+                FROM artists a
+                JOIN track_artists ta ON ta.artist_id = a.id
+                ORDER BY a.name
+            """)
 
         if limit:
             query = text(str(query) + f" LIMIT {limit}")

@@ -142,33 +142,106 @@ def run_parallel_enrichment(
         _update_progress()
         return combined
 
-    # --- Pipeline B: Last.fm enrichment ---
+    # --- Pipeline B: Last.fm enrichment (by artist + album, not per-track) ---
     def _run_lastfm_pipeline():
         if _skip_lastfm:
             return {}
         logger.info("Pipeline B (Network): starting Last.fm enrichment")
-        pipeline = TrackEnrichmentPipeline(
-            skip_embeddings=True,
-            skip_lastfm=False,
-            skip_audio_analysis=True,
-            lastfm_delay=lastfm_delay,
-        )
 
-        def lastfm_progress(msg):
-            pipeline_progress["lastfm"] = f"Last.fm: {msg}"
-            _update_progress()
+        from lastfm import LastFmService
+        lastfm = LastFmService()
+        stats = {"artists_processed": 0, "artists_success": 0, "albums_processed": 0, "albums_success": 0, "errors": 0}
+        start_time = time.time()
 
-        stats = pipeline.enrich_tracks(
-            limit=limit,
-            cancel_flag=cancel_flag,
-            progress_cb=lastfm_progress,
-            track_ids=track_ids,
-            order_by_date=order_by_date,
-            max_duration_seconds=max_duration_seconds,
-            worker_id=worker_id,
-            worker_count=worker_count,
-        )
-        pipeline_progress["lastfm"] = f"Last.fm: done ({stats.get('processed', 0)})"
+        with get_db_context() as db:
+            # --- Enrich artists (only library artists with tracks) ---
+            artist_sql = """
+                SELECT DISTINCT a.id, a.name
+                FROM artists a
+                JOIN track_artists ta ON ta.artist_id = a.id
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM artist_bios ab
+                    WHERE ab.artist_id = a.id AND ab.source = 'lastfm'
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM external_metadata em
+                    WHERE em.entity_type = 'artist' AND em.entity_id = a.id::text
+                      AND em.source = 'lastfm' AND em.metadata_type = 'bio'
+                )
+                ORDER BY a.name
+            """
+            artists = db.execute(text(artist_sql)).fetchall()
+            total_artists = len(artists)
+            logger.info(f"Last.fm: {total_artists} artists to enrich")
+
+            for i, (artist_id, artist_name) in enumerate(artists):
+                if cancel_flag and cancel_flag():
+                    break
+                if max_duration_seconds:
+                    if time.time() - start_time >= max_duration_seconds:
+                        logger.info("Last.fm: time limit reached")
+                        break
+
+                pipeline_progress["lastfm"] = f"artist {i+1}/{total_artists}: {artist_name}"
+                _update_progress()
+
+                try:
+                    result = lastfm.enrich_artist(db, artist_id, artist_name)
+                    stats["artists_processed"] += 1
+                    if result.get("status") == "success":
+                        stats["artists_success"] += 1
+                    time.sleep(lastfm_delay)
+                except Exception as e:
+                    logger.error(f"Last.fm artist failed {artist_name}: {e}")
+                    stats["errors"] += 1
+                    db.rollback()
+
+            # --- Enrich albums (only library albums with tracks) ---
+            album_sql = """
+                SELECT DISTINCT al.id, al.title, a.name as artist_name
+                FROM albums al
+                JOIN album_variants av ON av.album_id = al.id
+                JOIN media_files mf ON mf.album_variant_id = av.id
+                JOIN track_artists ta ON ta.track_id = mf.track_id AND ta.role = 'primary'
+                JOIN artists a ON a.id = ta.artist_id
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM album_info ai
+                    WHERE ai.album_id = al.id AND ai.source = 'lastfm'
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM external_metadata em
+                    WHERE em.entity_type = 'album' AND em.entity_id = al.id::text
+                      AND em.source = 'lastfm' AND em.metadata_type = 'info'
+                )
+                ORDER BY a.name, al.title
+            """
+            albums = db.execute(text(album_sql)).fetchall()
+            total_albums = len(albums)
+            logger.info(f"Last.fm: {total_albums} albums to enrich")
+
+            for i, (album_id, album_title, artist_name) in enumerate(albums):
+                if cancel_flag and cancel_flag():
+                    break
+                if max_duration_seconds:
+                    if time.time() - start_time >= max_duration_seconds:
+                        logger.info("Last.fm: time limit reached")
+                        break
+
+                pipeline_progress["lastfm"] = f"album {i+1}/{total_albums}: {artist_name} - {album_title}"
+                _update_progress()
+
+                try:
+                    result = lastfm.enrich_album(db, album_id, artist_name, album_title)
+                    stats["albums_processed"] += 1
+                    if result.get("status") == "success":
+                        stats["albums_success"] += 1
+                    time.sleep(lastfm_delay)
+                except Exception as e:
+                    logger.error(f"Last.fm album failed {artist_name} - {album_title}: {e}")
+                    stats["errors"] += 1
+                    db.rollback()
+
+        pipeline_progress["lastfm"] = f"Last.fm: done ({stats['artists_success']} artists, {stats['albums_success']} albums)"
         _update_progress()
         return stats
 
