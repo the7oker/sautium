@@ -49,13 +49,6 @@ class LastFmService:
         try:
             artist = self.network.get_artist(artist_name)
 
-            # Get MBID (MusicBrainz ID)
-            mbid = None
-            try:
-                mbid = artist.get_mbid()
-            except Exception as e:
-                logger.debug(f"No MBID for {artist_name}: {e}")
-
             # Get bio
             bio_data = None
             try:
@@ -99,7 +92,6 @@ class LastFmService:
                         {
                             "name": similar_artist.item.get_name(),
                             "match": float(similar_artist.match),
-                            "mbid": similar_artist.item.get_mbid() or None,
                         }
                         for similar_artist in similar
                     ]
@@ -107,7 +99,6 @@ class LastFmService:
                     logger.debug(f"No similar artists for {artist_name}: {e}")
 
             return {
-                "mbid": mbid,
                 "bio": bio_data,
                 "tags": tags_data,
                 "stats": stats_data,
@@ -203,13 +194,6 @@ class LastFmService:
             )
         else:
             stored["similar_artists"] = False
-
-        # Update artist.lastfm_id with MBID if available
-        if data.get("mbid"):
-            artist_record = db.query(Artist).filter(Artist.id == artist_id).first()
-            if artist_record:
-                artist_record.lastfm_id = data["mbid"]
-                logger.debug(f"Updated lastfm_id for artist {artist_id}: {data['mbid']}")
 
         db.commit()
         return stored
@@ -450,7 +434,6 @@ class LastFmService:
                 "artist_id": artist_id,
                 "artist_name": artist_name,
                 "stored": stored,
-                "mbid": data.get("mbid"),
                 "tags_count": len(data.get("tags", [])),
                 "similar_count": len(data.get("similar", [])),
             }
@@ -753,13 +736,6 @@ class LastFmService:
         try:
             album = self.network.get_album(artist_name, album_title)
 
-            # Get MBID
-            mbid = None
-            try:
-                mbid = album.get_mbid()
-            except Exception as e:
-                logger.debug(f"No MBID for {artist_name} - {album_title}: {e}")
-
             # Get wiki
             wiki_data = None
             try:
@@ -810,7 +786,6 @@ class LastFmService:
                 logger.debug(f"No tracks for {artist_name} - {album_title}: {e}")
 
             return {
-                "mbid": mbid,
                 "wiki": wiki_data,
                 "tags": tags_data,
                 "stats": stats_data,
@@ -861,13 +836,6 @@ class LastFmService:
                     "album_title": album_title,
                 }
 
-            # Update album.lastfm_id with MBID
-            if data.get("mbid"):
-                album_record = db.query(Album).filter(Album.id == album_id).first()
-                if album_record:
-                    album_record.lastfm_id = data["mbid"]
-                    logger.debug(f"Updated lastfm_id for album {album_id}: {data['mbid']}")
-
             # Store album info (wiki + stats)
             if data.get("wiki") or data.get("stats"):
                 self._store_album_info(db, album_id, artist_name, album_title, data)
@@ -895,7 +863,6 @@ class LastFmService:
                 "album_id": album_id,
                 "artist_name": artist_name,
                 "album_title": album_title,
-                "mbid": data.get("mbid"),
                 "has_wiki": bool(data.get("wiki")),
                 "tags_count": tags_count,
                 "listeners": data.get("stats", {}).get("listeners"),
