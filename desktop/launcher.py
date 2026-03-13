@@ -611,6 +611,15 @@ class LauncherApp(ctk.CTk):
                 self.after(0, self._sync_done)
                 return
 
+            # Normalize local artists before sync to ensure UUID consistency
+            self.after(0, lambda: self._progress_text.configure(
+                text="Normalizing artists..."))
+            norm_result = self.api_client.normalize_artists()
+            if norm_result:
+                p1 = norm_result.get("statistics", {}).get("pass1", {})
+                if p1.get("split", 0) > 0:
+                    logger.info(f"Pre-sync normalization: {p1}")
+
             db_dsn = self._get_local_db_dsn()
 
             def progress(msg):

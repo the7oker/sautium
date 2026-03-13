@@ -185,22 +185,46 @@ class AudioEmbeddingGenerator:
             logger.info(f"Created embedding model record: {self.model_name}")
         return em
 
+    @staticmethod
+    def _quality_score(bit_depth, is_lossless) -> int:
+        """Quality priority: CD (16bit lossless) = 100 > other lossless = 50 > lossy = 10."""
+        if is_lossless and bit_depth == 16:
+            return 100  # CD — ideal for analysis
+        if is_lossless:
+            return 50   # Hi-Res / DSD / Vinyl
+        return 10       # MP3, OGG, M4A
+
     def _save_embedding(
         self, db: Session, track_id, vector: np.ndarray, model: EmbeddingModel,
         source_bit_depth: Optional[int] = None,
         source_sample_rate: Optional[int] = None,
         source_is_lossless: Optional[bool] = None,
     ):
-        """Create Embedding record linked to track."""
-        embedding = Embedding(
-            vector=vector.tolist(),
-            model_id=model.id,
-            track_id=track_id,
-            source_bit_depth=source_bit_depth,
-            source_sample_rate=source_sample_rate,
-            source_is_lossless=source_is_lossless,
-        )
-        db.add(embedding)
+        """Create or update Embedding record. Won't overwrite higher quality source."""
+        existing = db.query(Embedding).filter(
+            Embedding.track_id == track_id,
+            Embedding.model_id == model.id,
+        ).first()
+
+        if existing:
+            old_score = self._quality_score(existing.source_bit_depth, existing.source_is_lossless)
+            new_score = self._quality_score(source_bit_depth, source_is_lossless)
+            if new_score < old_score:
+                return  # Don't overwrite better quality embedding
+            existing.vector = vector.tolist()
+            existing.source_bit_depth = source_bit_depth
+            existing.source_sample_rate = source_sample_rate
+            existing.source_is_lossless = source_is_lossless
+        else:
+            embedding = Embedding(
+                vector=vector.tolist(),
+                model_id=model.id,
+                track_id=track_id,
+                source_bit_depth=source_bit_depth,
+                source_sample_rate=source_sample_rate,
+                source_is_lossless=source_is_lossless,
+            )
+            db.add(embedding)
         db.flush()
 
     def generate_embeddings(self, limit: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[list] = None, worker_id: Optional[int] = None, worker_count: Optional[int] = None) -> Dict[str, int]:

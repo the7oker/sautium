@@ -350,24 +350,32 @@ class TrackEnrichmentPipeline:
                 local_path = settings.translate_to_local_path(analysis_file.file_path)
                 features = analyzer.analyze_track(local_path)
                 if features is not None:
-                    af = AudioFeature(
-                        track_id=track.id,
-                        bpm=features.get("bpm"),
-                        key=features.get("key"),
-                        mode=features.get("mode"),
-                        key_confidence=features.get("key_confidence"),
-                        energy=features.get("energy"),
-                        energy_db=features.get("energy_db"),
-                        brightness=features.get("brightness"),
-                        dynamic_range_db=features.get("dynamic_range_db"),
-                        zero_crossing_rate=features.get("zero_crossing_rate"),
-                        instruments=features.get("instruments"),
-                        moods=features.get("moods"),
-                        vocal_instrumental=features.get("vocal_instrumental"),
-                        vocal_score=features.get("vocal_score"),
-                        danceability=features.get("danceability"),
-                    )
-                    db.add(af)
+                    existing_af = db.query(AudioFeature).filter(
+                        AudioFeature.track_id == track.id
+                    ).first()
+                    if existing_af:
+                        for k, v in features.items():
+                            if hasattr(existing_af, k):
+                                setattr(existing_af, k, v)
+                    else:
+                        af = AudioFeature(
+                            track_id=track.id,
+                            bpm=features.get("bpm"),
+                            key=features.get("key"),
+                            mode=features.get("mode"),
+                            key_confidence=features.get("key_confidence"),
+                            energy=features.get("energy"),
+                            energy_db=features.get("energy_db"),
+                            brightness=features.get("brightness"),
+                            dynamic_range_db=features.get("dynamic_range_db"),
+                            zero_crossing_rate=features.get("zero_crossing_rate"),
+                            instruments=features.get("instruments"),
+                            moods=features.get("moods"),
+                            vocal_instrumental=features.get("vocal_instrumental"),
+                            vocal_score=features.get("vocal_score"),
+                            danceability=features.get("danceability"),
+                        )
+                        db.add(af)
                     db.commit()
                     results['audio_features'] = 'success'
                 else:

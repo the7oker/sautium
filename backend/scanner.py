@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
+import mutagen
 from mutagen.flac import FLAC
 from mutagen import MutagenError
 from sqlalchemy.orm import Session
@@ -52,11 +53,50 @@ class LibraryScanner:
             Dictionary with extracted metadata or None if failed.
         """
         try:
-            audio = FLAC(file_path)
+            audio = mutagen.File(file_path)
+            if audio is None:
+                logger.warning(f"Unsupported format: {file_path}")
+                return None
 
             # Extract basic tags
             file_stat = file_path.stat()
             file_format = file_path.suffix.lstrip('.').upper()
+
+            # Audio properties — not all formats expose all fields
+            info = audio.info if hasattr(audio, 'info') and audio.info else None
+            bit_depth = None
+            if info and hasattr(info, 'bits_per_sample'):
+                bit_depth = info.bits_per_sample
+
+            # Universal tag getter: handles Vorbis (FLAC/OGG), ID3 (MP3/DSF),
+            # MP4 (M4A/AAC), and APE (WavPack/Musepack) tag formats
+            def get_tag(vorbis_key: str, id3_key: str = None,
+                        mp4_key: str = None, default=None):
+                """Get tag value from any supported format."""
+                # Try Vorbis-style key first (works for FLAC, OGG, easy=True)
+                val = audio.get(vorbis_key)
+                if val:
+                    return str(val[0]) if isinstance(val, list) else str(val)
+                # Try ID3 frame (MP3, DSF, AIFF)
+                if id3_key and audio.tags:
+                    frame = audio.tags.get(id3_key)
+                    if frame:
+                        return str(frame)
+                # Try MP4 atom (M4A, AAC, ALAC)
+                if mp4_key and audio.tags:
+                    val = audio.tags.get(mp4_key)
+                    if val:
+                        item = val[0] if isinstance(val, list) else val
+                        # MP4 trkn/disk are tuples like (track_num, total)
+                        if isinstance(item, tuple):
+                            return str(item[0])
+                        return str(item)
+                return default
+
+            def get_tag_int(vorbis_key: str, id3_key: str = None,
+                           mp4_key: str = None) -> Optional[str]:
+                """Get tag that should be parsed as int (track/disc number)."""
+                return get_tag(vorbis_key, id3_key, mp4_key)
 
             metadata = {
                 # File information — translate to native OS path for DB storage
@@ -67,24 +107,26 @@ class LibraryScanner:
                 "is_lossless": check_lossless(file_format),
 
                 # Audio properties
-                "duration_seconds": round(audio.info.length, 2) if audio.info else None,
-                "sample_rate": audio.info.sample_rate if audio.info else None,
-                "bit_depth": audio.info.bits_per_sample if audio.info else None,
-                "channels": audio.info.channels if audio.info else None,
-                "bitrate": int(audio.info.bitrate / 1000) if audio.info and audio.info.bitrate else None,
+                "duration_seconds": round(info.length, 2) if info else None,
+                "sample_rate": info.sample_rate if info and hasattr(info, 'sample_rate') else None,
+                "bit_depth": bit_depth,
+                "channels": info.channels if info and hasattr(info, 'channels') else None,
+                "bitrate": int(info.bitrate / 1000) if info and hasattr(info, 'bitrate') and info.bitrate else None,
 
-                # Metadata tags (with fallbacks)
-                "title": audio.get("title", [None])[0],
-                "artist": audio.get("artist", [None])[0],
-                "album": audio.get("album", [None])[0],
-                "album_artist": audio.get("albumartist", [None])[0] or audio.get("album artist", [None])[0],
-                "genre": audio.get("genre", [None])[0],
-                "date": audio.get("date", [None])[0],
-                "track_number": audio.get("tracknumber", [None])[0],
-                "disc_number": audio.get("discnumber", [None])[0] or "1",
-                "label": audio.get("label", [None])[0] or audio.get("publisher", [None])[0],
-                "catalog_number": audio.get("catalognumber", [None])[0],
-                "isrc": audio.get("isrc", [None])[0],
+                # Metadata tags — universal across formats
+                "title": get_tag("title", "TIT2", "\xa9nam"),
+                "artist": get_tag("artist", "TPE1", "\xa9ART"),
+                "album": get_tag("album", "TALB", "\xa9alb"),
+                "album_artist": (get_tag("albumartist", "TPE2", "aART")
+                                 or get_tag("album artist")),
+                "genre": get_tag("genre", "TCON", "\xa9gen"),
+                "date": get_tag("date", "TDRC", "\xa9day"),
+                "track_number": get_tag("tracknumber", "TRCK", "trkn"),
+                "disc_number": get_tag("discnumber", "TPOS", "disk") or "1",
+                "label": (get_tag("label", "TPUB")
+                          or get_tag("publisher", "TPUB")),
+                "catalog_number": get_tag("catalognumber"),
+                "isrc": get_tag("isrc", "TSRC"),
             }
 
             # Parse track number (handle "1/12" format)
@@ -143,13 +185,13 @@ class LibraryScanner:
             logger.info(f"Searching for FLAC files in {scan_path}")
 
         flac_files = []
-        for file_path in scan_path.rglob("*.flac"):
-            if file_path.is_file():
+        for file_path in scan_path.rglob("*"):
+            if file_path.is_file() and file_path.suffix.lower() in AUDIO_EXTENSIONS:
                 flac_files.append(file_path)
                 if limit and len(flac_files) >= limit:
                     break
 
-        logger.info(f"Found {len(flac_files)} FLAC files")
+        logger.info(f"Found {len(flac_files)} audio files")
         return flac_files
 
     @staticmethod
@@ -245,6 +287,30 @@ class LibraryScanner:
             logger.debug(f"Created album variant: {directory_path}")
 
         return variant
+
+    @staticmethod
+    def _update_analysis_source(db: Session, track_id):
+        """Set is_analysis_source for the best quality file per track.
+
+        Priority: CD (16bit lossless) > other lossless > lossy.
+        """
+        from sqlalchemy import text
+        db.execute(text("""
+            WITH ranked AS (
+                SELECT id,
+                       ROW_NUMBER() OVER (
+                           ORDER BY
+                               (bit_depth = 16 AND is_lossless) DESC,
+                               is_lossless DESC,
+                               id
+                       ) as rn
+                FROM media_files
+                WHERE track_id = :tid
+            )
+            UPDATE media_files
+            SET is_analysis_source = (id = (SELECT id FROM ranked WHERE rn = 1))
+            WHERE track_id = :tid
+        """), {"tid": track_id})
 
     def scan_and_import(
         self,
@@ -424,6 +490,9 @@ class LibraryScanner:
                     )
                     db.add(media_file)
                     db.flush()
+
+                    # Update is_analysis_source: CD quality (16bit lossless) > lossless > lossy
+                    self._update_analysis_source(db, track.id)
 
                     stats["added"] += 1
                     if track.id not in seen_track_ids:

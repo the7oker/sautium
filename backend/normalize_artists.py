@@ -338,6 +338,10 @@ def normalize_pass1(db: Session, dry_run: bool = False) -> Dict:
     all_artists = db.execute(text("""
         SELECT id::text, name FROM artists
         WHERE verification_status = 'unverified'
+           OR (verification_status = 'verified_split'
+               AND NOT EXISTS (
+                   SELECT 1 FROM artist_members am
+                   WHERE am.compound_artist_id = artists.id))
         ORDER BY name
     """)).fetchall()
 
@@ -512,7 +516,22 @@ def normalize_artists(
     stats = {}
 
     if pass1:
-        stats['pass1'] = normalize_pass1(db, dry_run=dry_run)
+        # Run Pass 1 iteratively — splitting "A vs. B feat. C" first produces
+        # "A vs. B" as a new artist, which needs another pass to split on "vs."
+        iteration = 0
+        while True:
+            iteration += 1
+            pass1_stats = normalize_pass1(db, dry_run=dry_run)
+            if iteration == 1:
+                stats['pass1'] = pass1_stats
+            else:
+                # Merge stats from subsequent iterations
+                for key in pass1_stats:
+                    if isinstance(pass1_stats[key], int):
+                        stats['pass1'][key] = stats['pass1'].get(key, 0) + pass1_stats[key]
+                logger.info(f"Pass 1 iteration {iteration}: {pass1_stats['split']} more splits")
+            if pass1_stats['split'] == 0 or dry_run:
+                break
 
     if pass2:
         stats['pass2'] = normalize_pass2(db, dry_run=dry_run)

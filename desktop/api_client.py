@@ -103,6 +103,11 @@ class BackendAPIClient:
         """Complete Last.fm OAuth flow. Returns {"session_key": "..."}."""
         return self._post_json("/lastfm/auth/complete", timeout=10)
 
+    def normalize_artists(self, pass2: bool = False) -> Optional[dict]:
+        """Run artist normalization (Pass 1 by default, Pass 2 if pass2=True)."""
+        params = f"pass2={str(pass2).lower()}"
+        return self._post_json(f"/normalize-artists?{params}", timeout=120)
+
     # -- Sync API ----------------------------------------------------------
 
     def sync_inventory(self, track_uuids: list[str]) -> Optional[dict]:

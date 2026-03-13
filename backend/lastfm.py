@@ -224,7 +224,7 @@ class LastFmService:
         Returns number of similar artists stored.
         """
         # Import here to avoid circular dependency
-        from normalize_artists import is_compound_artist, normalize_artist_name
+        from normalize_artists import detect_compound_type
 
         stored_count = 0
 
@@ -236,12 +236,12 @@ class LastFmService:
                 continue
 
             # Skip compound artists (e.g., "Pete Namlook & Klaus Schulze")
-            if is_compound_artist(similar_name):
+            if detect_compound_type(similar_name):
                 logger.debug(f"Skipping compound similar artist: {similar_name}")
                 continue
 
             # Get or create similar artist
-            normalized_name = normalize_artist_name(similar_name)
+            normalized_name = similar_name.strip()
             similar_artist = db.query(Artist).filter(
                 Artist.name.ilike(normalized_name)
             ).first()
@@ -298,55 +298,61 @@ class LastFmService:
         processed_tag_ids = set()
 
         for tag_item in tags_data:
-            tag_name = tag_item.get("name")
+            raw_tag_name = tag_item.get("name")
             tag_weight = tag_item.get("count", 50)  # Default weight if missing
 
-            if not tag_name or not tag_name.strip():
+            if not raw_tag_name or not raw_tag_name.strip():
                 continue
 
-            # Normalize tag name
-            tag_name = tag_name.strip()
-
-            # Get or create tag (deterministic UUID PK)
-            tid = tag_uuid(tag_name)
-
-            tag = db.query(Tag).filter(Tag.id == tid).first()
-
-            if not tag:
-                tag = Tag(id=tid, name=tag_name)
-                db.add(tag)
-                db.flush()
-                logger.debug(f"Created new tag: {tag_name} (ID: {tag.id})")
-
-            # Check if we already processed this tag in current batch
-            if tag.id in processed_tag_ids:
-                logger.debug(f"Skipping duplicate tag in batch: {artist_name} - {tag_name}")
+            # Split compound tags like "Rock/Pop/Indie" into separate tags
+            sub_tags = [t.strip() for t in raw_tag_name.split("/") if t.strip()]
+            if not sub_tags:
                 continue
 
-            # Check if artist_tag relationship already exists in database
-            existing = db.query(ArtistTag).filter(
-                ArtistTag.artist_id == artist_id,
-                ArtistTag.tag_id == tag.id,
-                ArtistTag.source == "lastfm"
-            ).first()
+            for tag_name in sub_tags:
+                # Truncate to 100 chars max
+                tag_name = tag_name[:100]
 
-            if existing:
-                # Update weight if changed
-                if existing.weight != tag_weight:
-                    existing.weight = tag_weight
-                    logger.debug(f"Updated tag weight for {artist_name} - {tag_name}: {tag_weight}")
-            else:
-                # Create new relationship
-                artist_tag = ArtistTag(
-                    artist_id=artist_id,
-                    tag_id=tag.id,
-                    weight=tag_weight,
-                    source="lastfm"
-                )
-                db.add(artist_tag)
-                processed_tag_ids.add(tag.id)  # Mark as processed
-                stored_count += 1
-                logger.debug(f"Added tag: {artist_name} - {tag_name} (weight: {tag_weight})")
+                # Get or create tag (deterministic UUID PK)
+                tid = tag_uuid(tag_name)
+
+                tag = db.query(Tag).filter(Tag.id == tid).first()
+
+                if not tag:
+                    tag = Tag(id=tid, name=tag_name)
+                    db.add(tag)
+                    db.flush()
+                    logger.debug(f"Created new tag: {tag_name} (ID: {tag.id})")
+
+                # Check if we already processed this tag in current batch
+                if tag.id in processed_tag_ids:
+                    logger.debug(f"Skipping duplicate tag in batch: {artist_name} - {tag_name}")
+                    continue
+
+                # Check if artist_tag relationship already exists in database
+                existing = db.query(ArtistTag).filter(
+                    ArtistTag.artist_id == artist_id,
+                    ArtistTag.tag_id == tag.id,
+                    ArtistTag.source == "lastfm"
+                ).first()
+
+                if existing:
+                    # Update weight if changed
+                    if existing.weight != tag_weight:
+                        existing.weight = tag_weight
+                        logger.debug(f"Updated tag weight for {artist_name} - {tag_name}: {tag_weight}")
+                else:
+                    # Create new relationship
+                    artist_tag = ArtistTag(
+                        artist_id=artist_id,
+                        tag_id=tag.id,
+                        weight=tag_weight,
+                        source="lastfm"
+                    )
+                    db.add(artist_tag)
+                    processed_tag_ids.add(tag.id)  # Mark as processed
+                    stored_count += 1
+                    logger.debug(f"Added tag: {artist_name} - {tag_name} (weight: {tag_weight})")
 
         return stored_count
 
@@ -354,7 +360,7 @@ class LastFmService:
         self,
         db: Session,
         entity_type: str,
-        entity_id: int,
+        entity_id,
         source: str,
         metadata_type: str,
         data: Dict[str, Any],
@@ -362,6 +368,9 @@ class LastFmService:
         error_message: Optional[str] = None,
     ):
         """Insert or update metadata record."""
+        # entity_id column is Text — ensure we pass a string, not UUID object
+        entity_id = str(entity_id)
+
         # Check if record exists
         existing = (
             db.query(ExternalMetadata)
@@ -965,54 +974,60 @@ class LastFmService:
         processed_tag_ids = set()
 
         for tag_item in tags_data:
-            tag_name = tag_item.get("name")
+            raw_tag_name = tag_item.get("name")
             tag_weight = tag_item.get("count", 50)
 
-            if not tag_name or not tag_name.strip():
+            if not raw_tag_name or not raw_tag_name.strip():
                 continue
 
-            tag_name = tag_name.strip()
-
-            # Get or create tag (deterministic UUID PK)
-            tid = tag_uuid(tag_name)
-
-            tag = db.query(Tag).filter(Tag.id == tid).first()
-
-            if not tag:
-                tag = Tag(id=tid, name=tag_name)
-                db.add(tag)
-                db.flush()
-                logger.debug(f"Created new tag: {tag_name} (ID: {tag.id})")
-
-            # Check if we already processed this tag in current batch
-            if tag.id in processed_tag_ids:
-                logger.debug(f"Skipping duplicate tag in batch: album {album_id} - {tag_name}")
+            # Split compound tags like "Rock/Pop/Indie" into separate tags
+            sub_tags = [t.strip() for t in raw_tag_name.split("/") if t.strip()]
+            if not sub_tags:
                 continue
 
-            # Check if album_tag relationship already exists in database
-            existing = db.query(AlbumTag).filter(
-                AlbumTag.album_id == album_id,
-                AlbumTag.tag_id == tag.id,
-                AlbumTag.source == "lastfm"
-            ).first()
+            for tag_name in sub_tags:
+                tag_name = tag_name[:100]
 
-            if existing:
-                # Update weight if changed
-                if existing.weight != tag_weight:
-                    existing.weight = tag_weight
-                    logger.debug(f"Updated tag weight for album {album_id} - {tag_name}: {tag_weight}")
-            else:
-                # Create new relationship
-                album_tag = AlbumTag(
-                    album_id=album_id,
-                    tag_id=tag.id,
-                    weight=tag_weight,
-                    source="lastfm"
-                )
-                db.add(album_tag)
-                processed_tag_ids.add(tag.id)  # Mark as processed
-                stored_count += 1
-                logger.debug(f"Added tag: album {album_id} - {tag_name} (weight: {tag_weight})")
+                # Get or create tag (deterministic UUID PK)
+                tid = tag_uuid(tag_name)
+
+                tag = db.query(Tag).filter(Tag.id == tid).first()
+
+                if not tag:
+                    tag = Tag(id=tid, name=tag_name)
+                    db.add(tag)
+                    db.flush()
+                    logger.debug(f"Created new tag: {tag_name} (ID: {tag.id})")
+
+                # Check if we already processed this tag in current batch
+                if tag.id in processed_tag_ids:
+                    logger.debug(f"Skipping duplicate tag in batch: album {album_id} - {tag_name}")
+                    continue
+
+                # Check if album_tag relationship already exists in database
+                existing = db.query(AlbumTag).filter(
+                    AlbumTag.album_id == album_id,
+                    AlbumTag.tag_id == tag.id,
+                    AlbumTag.source == "lastfm"
+                ).first()
+
+                if existing:
+                    # Update weight if changed
+                    if existing.weight != tag_weight:
+                        existing.weight = tag_weight
+                        logger.debug(f"Updated tag weight for album {album_id} - {tag_name}: {tag_weight}")
+                else:
+                    # Create new relationship
+                    album_tag = AlbumTag(
+                        album_id=album_id,
+                        tag_id=tag.id,
+                        weight=tag_weight,
+                        source="lastfm"
+                    )
+                    db.add(album_tag)
+                    processed_tag_ids.add(tag.id)  # Mark as processed
+                    stored_count += 1
+                    logger.debug(f"Added tag: album {album_id} - {tag_name} (weight: {tag_weight})")
 
         return stored_count
 
