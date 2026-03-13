@@ -890,21 +890,19 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
                   filter_artist, filter_album, filter_genre, filter_path,
                   filter_tag, filter_track_number, filter_lossless):
     """
-    Comprehensive track enrichment pipeline.
+    Comprehensive track enrichment with parallel pipelines.
 
-    Runs all data aggregation steps in correct order for each track:
-    1. Audio Embedding (CLAP) - if missing
-    2. Last.fm Artist Info - if missing
-    3. Last.fm Album Info - if missing
-    4. Last.fm Track Stats - if missing
-    5. Audio Analysis - if missing
+    Phase 1 (parallel):
+      A) GPU: audio embeddings + audio features (batched)
+      B) Network: Last.fm artist/album/track enrichment
+      C) Network: Lyrics fetching (lrclib/genius)
+    Phase 2 (sequential):
+      D) Text embeddings, lyrics embeddings, enrichment embeddings
 
     Only processes missing data unless --force flags are used.
     Supports all filter options for targeted processing.
-
-    Parallel processing: Use --worker-id and --worker-count to split work across multiple processes.
     """
-    from track_enrichment import TrackEnrichmentPipeline
+    from track_enrichment import run_parallel_enrichment
 
     # Validate worker parameters
     if (worker_id is not None) != (worker_count is not None):
@@ -919,10 +917,10 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
             click.echo(f"❌ Error: --worker-id must be between 0 and {worker_count - 1}", err=True)
             sys.exit(1)
 
-    click.echo("🎵 Starting comprehensive track enrichment...")
+    click.echo("🎵 Starting parallel track enrichment...")
 
     if worker_count is not None:
-        click.echo(f"👷 Worker mode: {worker_id + 1}/{worker_count} (processing tracks where id % {worker_count} == {worker_id})")
+        click.echo(f"👷 Worker mode: {worker_id + 1}/{worker_count}")
 
     # Show configuration
     skip_steps = []
@@ -965,39 +963,54 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
     if track_ids is not None and len(track_ids) == 0:
         return
 
+    def _print_progress(msg):
+        click.echo(f"\r⏳ {msg}", nl=False)
+
     try:
-        pipeline = TrackEnrichmentPipeline(
+        result = run_parallel_enrichment(
+            limit=limit,
             skip_embeddings=skip_embeddings,
             skip_lastfm=skip_lastfm,
             skip_audio_analysis=skip_audio_analysis,
             force_embeddings=force_embeddings,
             force_audio_analysis=force_audio_analysis,
             lastfm_delay=lastfm_delay,
-        )
-
-        stats = pipeline.enrich_tracks(
-            limit=limit,
+            progress_cb=_print_progress,
+            track_ids=track_ids,
             order_by_date=newest_first,
             max_duration_seconds=max_duration,
-            track_ids=track_ids,
             worker_id=worker_id,
             worker_count=worker_count,
         )
 
-        click.echo("\n✅ Track enrichment complete!")
+        click.echo("\n\n✅ Track enrichment complete!")
         click.echo(f"📊 Statistics:")
-        click.echo(f"   • Tracks processed: {stats['processed']}")
 
+        # GPU stats
+        gpu = result.get("gpu", {})
+        emb = gpu.get("embeddings", {})
+        af = gpu.get("audio_features", {})
         if not skip_embeddings:
-            click.echo(f"   • Audio embeddings: {stats['audio_embedding_success']} success, {stats['audio_embedding_failed']} failed")
-
-        if not skip_lastfm:
-            click.echo(f"   • Last.fm artists: {stats['lastfm_artist_success']} enriched")
-            click.echo(f"   • Last.fm albums: {stats['lastfm_album_success']} enriched")
-            click.echo(f"   • Last.fm tracks: {stats['lastfm_track_success']} enriched")
-
+            click.echo(f"   • Audio embeddings: {emb.get('success', 0)} success, {emb.get('failed', 0)} failed")
         if not skip_audio_analysis:
-            click.echo(f"   • Audio features: {stats['audio_features_success']} success, {stats['audio_features_failed']} failed")
+            click.echo(f"   • Audio features: {af.get('success', 0)} success, {af.get('failed', 0)} failed")
+
+        # Last.fm stats
+        lastfm = result.get("lastfm", {})
+        if not skip_lastfm:
+            click.echo(f"   • Last.fm: {lastfm.get('processed', 0)} tracks processed")
+
+        # Lyrics stats
+        lyrics = result.get("lyrics", {})
+        click.echo(f"   • Lyrics: {lyrics.get('found', 0)} found, {lyrics.get('not_found', 0)} not found")
+
+        # Phase 2 stats
+        text_emb = result.get("text_embeddings", {})
+        if isinstance(text_emb, dict) and "error" not in text_emb:
+            click.echo(f"   • Text embeddings: {text_emb.get('generated', text_emb.get('success', 0))}")
+        lyrics_emb = result.get("lyrics_embeddings", {})
+        if isinstance(lyrics_emb, dict) and "error" not in lyrics_emb:
+            click.echo(f"   • Lyrics embeddings: {lyrics_emb.get('generated', lyrics_emb.get('success', 0))}")
 
     except Exception as e:
         click.echo(f"\n❌ Error: {e}", err=True)

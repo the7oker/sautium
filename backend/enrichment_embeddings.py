@@ -161,12 +161,12 @@ class ArtistBioEmbeddingGenerator(_BaseEnrichmentGenerator):
         where_clause = "WHERE " + " AND ".join(where_parts)
 
         query_sql = f"""
-            SELECT a.id as artist_id, a.name,
+            SELECT DISTINCT ON (a.id) a.id as artist_id, a.name,
                    ab.content, ab.summary
             FROM artists a
             JOIN artist_bios ab ON ab.artist_id = a.id AND ab.source = 'lastfm'
             {where_clause}
-            ORDER BY a.id
+            ORDER BY a.id, ab.content IS NOT NULL DESC
         """
         if limit:
             query_sql += f" LIMIT {limit}"
@@ -275,7 +275,7 @@ class AlbumInfoEmbeddingGenerator(_BaseEnrichmentGenerator):
         where_clause = "WHERE " + " AND ".join(where_parts)
 
         query_sql = f"""
-            SELECT al.id as album_id, al.title, al.release_year,
+            SELECT DISTINCT ON (al.id) al.id as album_id, al.title, al.release_year,
                    (SELECT a.name FROM album_artists aa
                     JOIN artists a ON aa.artist_id = a.id
                     WHERE aa.album_id = al.id AND aa.role = 'primary'
@@ -284,7 +284,7 @@ class AlbumInfoEmbeddingGenerator(_BaseEnrichmentGenerator):
             FROM albums al
             JOIN album_info ai ON ai.album_id = al.id AND ai.source = 'lastfm'
             {where_clause}
-            ORDER BY al.id
+            ORDER BY al.id, ai.content IS NOT NULL DESC
         """
         if limit:
             query_sql += f" LIMIT {limit}"
@@ -397,12 +397,12 @@ class GenreDescEmbeddingGenerator(_BaseEnrichmentGenerator):
         where_clause = "WHERE " + " AND ".join(where_parts)
 
         query_sql = f"""
-            SELECT g.id as genre_id, g.name,
+            SELECT DISTINCT ON (g.id) g.id as genre_id, g.name,
                    gd.content, gd.summary
             FROM genres g
             JOIN genre_descriptions gd ON gd.genre_id = g.id AND gd.source = 'lastfm'
             {where_clause}
-            ORDER BY g.id
+            ORDER BY g.id, gd.content IS NOT NULL DESC
         """
         if limit:
             query_sql += f" LIMIT {limit}"

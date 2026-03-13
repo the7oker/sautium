@@ -10,14 +10,19 @@ Orchestrates all data aggregation steps in the correct order:
 
 Each step is conditional - only runs if data is missing.
 Supports filters, limits, time constraints, and graceful error handling.
+
+Two modes:
+- TrackEnrichmentPipeline: per-track sequential processing (legacy)
+- run_parallel_enrichment(): parallel pipelines (recommended)
 """
 
 import logging
 import time
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, and_, exists, select, func, cast, String
+from sqlalchemy import or_, and_, exists, select, func, cast, String, text
 from tqdm import tqdm
 
 from config import settings
@@ -31,6 +36,328 @@ from embeddings import AudioEmbeddingGenerator
 from audio_analysis import AudioAnalyzer
 
 logger = logging.getLogger(__name__)
+
+
+def run_parallel_enrichment(
+    limit: Optional[int] = None,
+    skip_embeddings: bool = False,
+    skip_lastfm: bool = False,
+    skip_audio_analysis: bool = False,
+    force_embeddings: bool = False,
+    force_audio_analysis: bool = False,
+    lastfm_delay: float = 0.2,
+    cancel_flag: Optional[Callable] = None,
+    progress_cb: Optional[Callable] = None,
+    track_ids: Optional[List] = None,
+    order_by_date: bool = False,
+    max_duration_seconds: Optional[int] = None,
+    worker_id: Optional[int] = None,
+    worker_count: Optional[int] = None,
+) -> Dict:
+    """Run enrichment with parallel pipelines.
+
+    Phase 1 (parallel via ThreadPoolExecutor):
+      A) GPU: audio embeddings (batched) → audio features (CLAP classify)
+      B) Network: Last.fm artist/album/track enrichment
+      C) Network: Lyrics fetching (lrclib/genius)
+    Phase 2 (sequential, GPU):
+      D) Text embeddings (sentence-transformers)
+      E) Lyrics embeddings
+      F) Enrichment embeddings (artist bios, album info, genre desc)
+
+    Returns dict with stats from all pipelines.
+    """
+    if cancel_flag is None:
+        cancel_flag = lambda: False
+
+    _skip_lastfm = skip_lastfm or not settings.lastfm_api_key
+
+    result_parts = {}
+    pipeline_progress = {"gpu": "", "lastfm": "", "lyrics": ""}
+
+    def _update_progress():
+        parts = [v for v in pipeline_progress.values() if v]
+        msg = " | ".join(parts) if parts else "Working..."
+        if progress_cb:
+            progress_cb(msg)
+
+    # Common kwargs for bulk GPU functions
+    gpu_kwargs = dict(
+        limit=limit, track_ids=track_ids, order_by_date=order_by_date,
+        max_duration_seconds=max_duration_seconds,
+        worker_id=worker_id, worker_count=worker_count,
+    )
+
+    # --- Step 0: Normalize artists ---
+    if progress_cb:
+        progress_cb("Normalizing artists...")
+    try:
+        from normalize_artists import normalize_artists as do_normalize
+        with get_db_context() as db:
+            norm_stats = do_normalize(db, pass1=True, pass2=False)
+            splits = norm_stats.get('pass1', {}).get('split', 0)
+            if splits > 0:
+                logger.info(f"Pre-enrich normalization: {splits} artists split")
+    except Exception as e:
+        logger.error(f"Pre-enrich normalization failed: {e}")
+
+    if cancel_flag():
+        return result_parts
+
+    # --- Pipeline A: GPU (audio embeddings + audio features) ---
+    def _run_gpu_pipeline():
+        logger.info("Pipeline A (GPU): starting audio embeddings + features")
+        combined = {}
+
+        if not skip_embeddings:
+            pipeline_progress["gpu"] = "GPU: embeddings..."
+            _update_progress()
+            gen = AudioEmbeddingGenerator()
+            try:
+                emb_stats = gen.generate_embeddings(**gpu_kwargs)
+                combined["embeddings"] = emb_stats
+                pipeline_progress["gpu"] = f"GPU: {emb_stats.get('success', 0)} embeddings"
+                _update_progress()
+            finally:
+                gen.unload_model()
+
+        if cancel_flag():
+            return combined
+
+        if not skip_audio_analysis:
+            pipeline_progress["gpu"] = "GPU: audio analysis..."
+            _update_progress()
+            analyzer = AudioAnalyzer()
+            try:
+                af_stats = analyzer.analyze_all(
+                    force=force_audio_analysis, **gpu_kwargs
+                )
+                combined["audio_features"] = af_stats
+                pipeline_progress["gpu"] = f"GPU: {af_stats.get('success', 0)} features"
+                _update_progress()
+            finally:
+                analyzer.unload_model()
+
+        pipeline_progress["gpu"] = "GPU: done"
+        _update_progress()
+        return combined
+
+    # --- Pipeline B: Last.fm enrichment ---
+    def _run_lastfm_pipeline():
+        if _skip_lastfm:
+            return {}
+        logger.info("Pipeline B (Network): starting Last.fm enrichment")
+        pipeline = TrackEnrichmentPipeline(
+            skip_embeddings=True,
+            skip_lastfm=False,
+            skip_audio_analysis=True,
+            lastfm_delay=lastfm_delay,
+        )
+
+        def lastfm_progress(msg):
+            pipeline_progress["lastfm"] = f"Last.fm: {msg}"
+            _update_progress()
+
+        stats = pipeline.enrich_tracks(
+            limit=limit,
+            cancel_flag=cancel_flag,
+            progress_cb=lastfm_progress,
+            track_ids=track_ids,
+            order_by_date=order_by_date,
+            max_duration_seconds=max_duration_seconds,
+            worker_id=worker_id,
+            worker_count=worker_count,
+        )
+        pipeline_progress["lastfm"] = f"Last.fm: done ({stats.get('processed', 0)})"
+        _update_progress()
+        return stats
+
+    # --- Pipeline C: Lyrics fetching ---
+    def _run_lyrics_pipeline():
+        logger.info("Pipeline C (Network): starting lyrics fetch")
+
+        def lyrics_progress(msg):
+            pipeline_progress["lyrics"] = f"Lyrics: {msg}"
+            _update_progress()
+
+        stats = _fetch_lyrics_batch(
+            limit=limit, cancel_flag=cancel_flag, progress_cb=lyrics_progress,
+        )
+        pipeline_progress["lyrics"] = f"Lyrics: {stats.get('found', 0)} found"
+        _update_progress()
+        return stats
+
+    # === Phase 1: Run A, B, C in parallel ===
+    if progress_cb:
+        progress_cb("Phase 1: GPU + Last.fm + Lyrics (parallel)...")
+    logger.info("=== Phase 1: parallel pipelines ===")
+
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="enrich") as pool:
+        futures = {
+            pool.submit(_run_gpu_pipeline): "gpu",
+            pool.submit(_run_lastfm_pipeline): "lastfm",
+            pool.submit(_run_lyrics_pipeline): "lyrics",
+        }
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                stats = future.result()
+                result_parts[name] = stats
+                logger.info(f"Pipeline {name} complete: {stats}")
+            except Exception as e:
+                logger.error(f"Pipeline {name} failed: {e}", exc_info=True)
+                result_parts[name] = {"error": str(e)}
+
+    if cancel_flag():
+        result_parts["note"] = "cancelled during phase 1"
+        return result_parts
+
+    # === Phase 2: Text embeddings (sentence-transformers, needs GPU) ===
+    logger.info("=== Phase 2: text embeddings ===")
+
+    # Text embeddings
+    try:
+        from text_embeddings import generate_text_embeddings
+        if progress_cb:
+            progress_cb("Phase 2: text embeddings...")
+        text_stats = generate_text_embeddings(limit=None)
+        result_parts["text_embeddings"] = text_stats
+        logger.info(f"Text embeddings: {text_stats}")
+    except Exception as e:
+        logger.error(f"Text embeddings failed: {e}", exc_info=True)
+        result_parts["text_embeddings"] = {"error": str(e)}
+
+    if cancel_flag():
+        result_parts["note"] = "cancelled during phase 2"
+        return result_parts
+
+    # Lyrics embeddings
+    try:
+        from lyrics_embeddings import generate_lyrics_embeddings
+        if progress_cb:
+            progress_cb("Phase 2: lyrics embeddings...")
+        lyrics_emb_stats = generate_lyrics_embeddings(limit=None)
+        result_parts["lyrics_embeddings"] = lyrics_emb_stats
+        logger.info(f"Lyrics embeddings: {lyrics_emb_stats}")
+    except Exception as e:
+        logger.error(f"Lyrics embeddings failed: {e}", exc_info=True)
+        result_parts["lyrics_embeddings"] = {"error": str(e)}
+
+    if cancel_flag():
+        result_parts["note"] = "cancelled during phase 2"
+        return result_parts
+
+    # Enrichment embeddings (artist bios, album info, genre descriptions)
+    try:
+        from enrichment_embeddings import generate_all_enrichment_embeddings
+        if progress_cb:
+            progress_cb("Phase 2: enrichment embeddings...")
+        enrich_emb_stats = generate_all_enrichment_embeddings(limit=None)
+        result_parts["enrichment_embeddings"] = enrich_emb_stats
+        logger.info(f"Enrichment embeddings: {enrich_emb_stats}")
+    except Exception as e:
+        logger.error(f"Enrichment embeddings failed: {e}", exc_info=True)
+        result_parts["enrichment_embeddings"] = {"error": str(e)}
+
+    return result_parts
+
+
+def _fetch_lyrics_batch(
+    limit: Optional[int] = None,
+    cancel_flag: Optional[Callable] = None,
+    progress_cb: Optional[Callable] = None,
+) -> Dict:
+    """Fetch lyrics for all tracks missing them (lrclib + genius fallback)."""
+    use_lrclib = True
+    use_genius = bool(settings.genius_access_token)
+
+    lrclib_service = None
+    genius_service = None
+
+    if use_lrclib:
+        from lrclib import LrclibService
+        lrclib_service = LrclibService()
+    if use_genius:
+        from genius import GeniusService
+        genius_service = GeniusService(settings.genius_access_token)
+
+    stats = {"processed": 0, "found": 0, "not_found": 0, "errors": 0}
+
+    with get_db_context() as db:
+        query_sql = """
+            SELECT t.id as track_id, t.title,
+                   a.name as artist,
+                   al.title as album,
+                   mf.duration_seconds
+            FROM tracks t
+            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+            JOIN artists a ON ta.artist_id = a.id
+            JOIN media_files mf ON mf.track_id = t.id AND mf.is_analysis_source = true
+            JOIN album_variants av ON mf.album_variant_id = av.id
+            JOIN albums al ON av.album_id = al.id
+            LEFT JOIN external_metadata em
+                ON em.entity_type = 'track'
+                AND em.entity_id = t.id::text
+                AND em.source = 'lrclib'
+                AND em.metadata_type = 'lyrics'
+            WHERE em.id IS NULL
+            ORDER BY t.title
+        """
+        if limit:
+            query_sql += f" LIMIT {int(limit)}"
+
+        rows = db.execute(text(query_sql)).fetchall()
+        total = len(rows)
+        logger.info(f"Lyrics: {total} tracks to process")
+        start = time.time()
+
+        for i, row in enumerate(rows):
+            if cancel_flag and cancel_flag():
+                break
+
+            stats["processed"] += 1
+
+            if progress_cb and i % 5 == 0:
+                elapsed = time.time() - start
+                eta_str = ""
+                if i > 0:
+                    eta = elapsed / i * (total - i)
+                    eta_str = f", ETA {int(eta)}s"
+                progress_cb(f"{i+1}/{total}{eta_str}")
+
+            found = False
+            if use_lrclib and lrclib_service:
+                try:
+                    result = lrclib_service.fetch_and_store(
+                        db, row.track_id, row.title, row.artist,
+                        album_name=row.album,
+                        duration=int(row.duration_seconds) if row.duration_seconds else None,
+                    )
+                    if result and result.get("status") not in ("not_found", "error"):
+                        found = True
+                    time.sleep(0.1)
+                except Exception as e:
+                    logger.debug(f"LRCLIB failed for {row.artist} - {row.title}: {e}")
+
+            if not found and use_genius and genius_service:
+                try:
+                    result = genius_service.fetch_and_store(
+                        db, row.track_id, row.title, row.artist,
+                    )
+                    if result and result.get("status") not in ("not_found", "error"):
+                        found = True
+                    time.sleep(1.0)
+                except Exception as e:
+                    logger.debug(f"Genius failed for {row.artist} - {row.title}: {e}")
+
+            if found:
+                stats["found"] += 1
+            else:
+                stats["not_found"] += 1
+
+            db.commit()
+
+    return stats
 
 
 class TrackEnrichmentPipeline:
@@ -101,44 +428,12 @@ class TrackEnrichmentPipeline:
         ).filter(MediaFile.track_id == track.id).first()
         return row[0] if row else None
 
-    def _enrich_new_similar_artists(self, db: Session, artist_id, lastfm) -> int:
-        """Enrich similar artists that don't have bios yet (bio+tags only, no recursion)."""
-        similar_ids = db.query(SimilarArtist.similar_artist_id).filter(
-            SimilarArtist.artist_id == artist_id,
-            SimilarArtist.source == "lastfm",
-        ).all()
-
-        enriched = 0
-        for (sim_id,) in similar_ids:
-            has_bio = db.query(ArtistBio).filter(
-                ArtistBio.artist_id == sim_id,
-                ArtistBio.source == "lastfm",
-            ).first()
-            if has_bio:
-                continue
-
-            sim_artist = db.query(Artist).get(sim_id)
-            if not sim_artist:
-                continue
-
-            try:
-                lastfm.enrich_artist(db, sim_id, sim_artist.name, skip_similar=True)
-                enriched += 1
-                time.sleep(self.lastfm_delay)
-            except Exception as e:
-                logger.debug(f"Failed to enrich similar artist {sim_artist.name}: {e}")
-                db.rollback()
-
-        if enriched:
-            logger.info(f"Enriched {enriched} similar artists for artist_id={artist_id}")
-        return enriched
-
     def _check_track_status(self, db: Session, track: Track) -> Dict[str, bool]:
         """
         Check what data is missing for a track.
 
         Returns dict with keys: needs_audio_embedding, needs_artist_info,
-        needs_album_info, needs_track_stats, needs_audio_features
+        needs_album_info, needs_audio_features
         """
         status = {}
 
@@ -204,25 +499,9 @@ class TrackEnrichmentPipeline:
             else:
                 status['needs_album_info'] = False
 
-            # Track stats
-            track_stats = db.query(TrackStats).filter(
-                TrackStats.track_id == track.id,
-                TrackStats.source == 'lastfm'
-            ).first()
-            if track_stats:
-                status['needs_track_stats'] = False
-            else:
-                track_meta = db.query(ExternalMetadata).filter(
-                    ExternalMetadata.entity_type == 'track',
-                    ExternalMetadata.entity_id == str(track.id),
-                    ExternalMetadata.source == 'lastfm',
-                    ExternalMetadata.metadata_type == 'stats',
-                ).first()
-                status['needs_track_stats'] = track_meta is None
         else:
             status['needs_artist_info'] = False
             status['needs_album_info'] = False
-            status['needs_track_stats'] = False
 
         return status
 
@@ -242,8 +521,11 @@ class TrackEnrichmentPipeline:
         results = {}
 
         # Get analysis source file (needed for embedding and audio analysis)
+        needs_audio = status['needs_audio_embedding'] or status['needs_audio_features']
         analysis_file = None
-        if status['needs_audio_embedding'] or status['needs_audio_features']:
+        audio_48k = None
+
+        if needs_audio:
             analysis_file = self._get_analysis_file(db, track)
             if not analysis_file:
                 logger.warning(f"No media file found for track {track_id}")
@@ -253,21 +535,37 @@ class TrackEnrichmentPipeline:
                     results['audio_features'] = 'failed'
                 status['needs_audio_embedding'] = False
                 status['needs_audio_features'] = False
+            else:
+                # Load audio ONCE at 48kHz — reuse for embedding + CLAP classify
+                import librosa
+                local_path = settings.translate_to_local_path(analysis_file.file_path)
+                try:
+                    audio_48k, _ = librosa.load(local_path, sr=48000, mono=True)
+                    # Extract middle 30s segment
+                    target_samples = 30 * 48000
+                    if len(audio_48k) > target_samples:
+                        start = (len(audio_48k) - target_samples) // 2
+                        audio_48k = audio_48k[start:start + target_samples]
+                except Exception as e:
+                    logger.error(f"Failed to load audio {local_path}: {e}")
+                    audio_48k = None
 
-        # Step 1: Audio Embedding
+        # Step 1: Audio Embedding (reuse loaded audio)
         if status['needs_audio_embedding']:
             if progress_callback:
                 progress_callback("Audio embedding")
             try:
-                generator = self._get_audio_embedding_generator()
-                # DB stores native OS paths; translate back to local for file access
-                local_path = settings.translate_to_local_path(analysis_file.file_path)
-                audio = generator._load_audio(local_path)
-                if audio is not None:
-                    embeddings = generator._generate_batch_embeddings([audio])
+                if audio_48k is not None:
+                    generator = self._get_audio_embedding_generator()
+                    embeddings = generator._generate_batch_embeddings([audio_48k])
                     if embeddings is not None:
                         embedding_model = generator._get_or_create_embedding_model(db)
-                        generator._save_embedding(db, track.id, embeddings[0], embedding_model)
+                        generator._save_embedding(
+                            db, track.id, embeddings[0], embedding_model,
+                            source_bit_depth=analysis_file.bit_depth,
+                            source_sample_rate=analysis_file.sample_rate,
+                            source_is_lossless=analysis_file.is_lossless,
+                        )
                         db.commit()
                         results['audio_embedding'] = 'success'
                     else:
@@ -296,8 +594,6 @@ class TrackEnrichmentPipeline:
                     results['lastfm_artist'] = result['status']
                     time.sleep(self.lastfm_delay)
 
-                    self._enrich_new_similar_artists(db, status['artist_id'], lastfm)
-
                 except Exception as e:
                     logger.error(f"Last.fm artist enrichment failed: {e}")
                     results['lastfm_artist'] = 'error'
@@ -324,31 +620,18 @@ class TrackEnrichmentPipeline:
             else:
                 results['lastfm_album'] = 'skipped'
 
-            # Track stats
-            if status.get('needs_track_stats'):
-                if progress_callback:
-                    progress_callback("Last.fm track")
-                try:
-                    result = lastfm.enrich_track(
-                        db, track.id, status.get('artist_name', ''), track.title
-                    )
-                    results['lastfm_track'] = result['status']
-                    time.sleep(self.lastfm_delay)
-                except Exception as e:
-                    logger.error(f"Last.fm track enrichment failed: {e}")
-                    results['lastfm_track'] = 'error'
-                    db.rollback()
-            else:
-                results['lastfm_track'] = 'skipped'
+            results['lastfm_track'] = 'skipped'
 
-        # Step 5: Audio Analysis
+        # Step 5: Audio Analysis (reuse loaded audio — no second file read)
         if status['needs_audio_features']:
             if progress_callback:
                 progress_callback("Audio analysis")
             try:
                 analyzer = self._get_audio_analyzer()
-                local_path = settings.translate_to_local_path(analysis_file.file_path)
-                features = analyzer.analyze_track(local_path)
+                if audio_48k is not None:
+                    features = analyzer.analyze_from_array(audio_48k, sr=48000)
+                else:
+                    features = None
                 if features is not None:
                     existing_af = db.query(AudioFeature).filter(
                         AudioFeature.track_id == track.id
@@ -478,30 +761,6 @@ class TrackEnrichmentPipeline:
                                 ExternalMetadata.entity_id == cast(album_id_subq, String),
                                 ExternalMetadata.source == 'lastfm',
                                 ExternalMetadata.metadata_type == 'info',
-                            )
-                        )
-                    ),
-                )
-            )
-
-            # Track stats: needs enrichment if no TrackStats AND no ExternalMetadata record
-            conditions.append(
-                and_(
-                    ~exists(
-                        select(TrackStats.id).where(
-                            and_(
-                                TrackStats.track_id == Track.id,
-                                TrackStats.source == 'lastfm',
-                            )
-                        )
-                    ),
-                    ~exists(
-                        select(ExternalMetadata.id).where(
-                            and_(
-                                ExternalMetadata.entity_type == 'track',
-                                ExternalMetadata.entity_id == cast(Track.id, String),
-                                ExternalMetadata.source == 'lastfm',
-                                ExternalMetadata.metadata_type == 'stats',
                             )
                         )
                     ),

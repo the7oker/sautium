@@ -370,90 +370,42 @@ _enrich_lock = threading.Lock()
 
 def _enrich_worker(limit: Optional[int], skip_embeddings: bool,
                    skip_lastfm: bool, skip_audio_analysis: bool):
-    """Background worker that runs all enrichment steps sequentially."""
-    import time as _time
+    """Background worker that delegates to run_parallel_enrichment."""
+    from track_enrichment import run_parallel_enrichment
 
     state = _enrich_state
-    result_parts = {}
+
+    def _progress_cb(msg):
+        state["progress"] = msg
+
+    def _cancel_flag():
+        return state["cancel_requested"]
 
     try:
-        # --- Step 1: Track enrichment (embeddings, Last.fm, audio analysis) ---
-        state["step"] = "enrich"
-        state["progress"] = "Enriching tracks..."
-
-        # Auto-skip Last.fm if API key not configured
-        _skip_lastfm = skip_lastfm or not settings.lastfm_api_key
-
-        # Log GPU status
-        try:
-            import torch
-            if torch.cuda.is_available():
-                gpu_name = torch.cuda.get_device_name(0)
-                logger.info(f"GPU available: {gpu_name}")
-                state["progress"] = f"GPU: {gpu_name}"
-            else:
-                logger.warning("CUDA not available — embeddings will be slow on CPU")
-                state["progress"] = "Warning: no CUDA GPU, embeddings will be slow"
-        except ImportError:
-            logger.warning("torch not installed — audio embeddings will fail")
-
-        if state["cancel_requested"]:
-            return
-
-        from track_enrichment import TrackEnrichmentPipeline
-        pipeline = TrackEnrichmentPipeline(
-            skip_embeddings=skip_embeddings,
-            skip_lastfm=_skip_lastfm,
-            skip_audio_analysis=skip_audio_analysis,
-        )
-        enrich_stats = pipeline.enrich_tracks(
+        state["step"] = "running"
+        result = run_parallel_enrichment(
             limit=limit,
-            cancel_flag=lambda: state["cancel_requested"],
-            progress_cb=lambda msg: state.update(progress=msg),
+            skip_embeddings=skip_embeddings,
+            skip_lastfm=skip_lastfm,
+            skip_audio_analysis=skip_audio_analysis,
+            cancel_flag=_cancel_flag,
+            progress_cb=_progress_cb,
         )
-        result_parts["enrich"] = enrich_stats
-        state["progress"] = f"Enriched {enrich_stats.get('processed', 0)} tracks"
 
-        if state["cancel_requested"]:
-            return
-
-        # --- Step 2: Fetch lyrics ---
-        state["step"] = "lyrics"
-        state["progress"] = "Fetching lyrics..."
-
-        lyrics_stats = _fetch_lyrics_sync(
-            limit=None,
-            cancel_flag=lambda: state["cancel_requested"],
-            progress_cb=lambda msg: state.update(progress=msg),
-        )
-        result_parts["lyrics"] = lyrics_stats
-        state["progress"] = f"Lyrics: {lyrics_stats.get('found', 0)} found"
-
-        if state["cancel_requested"]:
-            return
-
-        # --- Step 3: Lyrics embeddings ---
-        state["step"] = "lyrics_embeddings"
-        state["progress"] = "Generating lyrics embeddings..."
-
-        from lyrics_embeddings import generate_lyrics_embeddings
-        lyrics_emb_stats = generate_lyrics_embeddings(
-            limit=None,
-            progress_cb=lambda msg: state.update(progress=msg),
-        )
-        result_parts["lyrics_embeddings"] = lyrics_emb_stats
-
-        # Build summary
-        parts = []
-        enrich_s = result_parts.get("enrich", {})
-        parts.append(f"Enriched: {enrich_s.get('processed', 0)}")
-        lyrics_s = result_parts.get("lyrics", {})
-        parts.append(f"Lyrics: {lyrics_s.get('found', 0)} found")
-        lem_s = result_parts.get("lyrics_embeddings", {})
-        parts.append(f"Lyrics emb: {lem_s.get('success', 0)}")
+        # Build summary for status endpoint
+        gpu_s = result.get("gpu", {})
+        emb_s = gpu_s.get("embeddings", {})
+        af_s = gpu_s.get("audio_features", {})
+        lastfm_s = result.get("lastfm", {})
+        lyrics_s = result.get("lyrics", {})
+        parts = [
+            f"Emb: {emb_s.get('success', 0)}",
+            f"Features: {af_s.get('success', 0)}",
+            f"Last.fm: {lastfm_s.get('processed', 0)}",
+            f"Lyrics: {lyrics_s.get('found', 0)}",
+        ]
         state["progress"] = " | ".join(parts)
-
-        state["result"] = {"success": True, "statistics": result_parts}
+        state["result"] = {"success": True, "statistics": result}
 
     except Exception as e:
         logger.error(f"Enrichment failed: {e}", exc_info=True)
@@ -465,102 +417,9 @@ def _enrich_worker(limit: Optional[int], skip_embeddings: bool,
 
 
 def _fetch_lyrics_sync(limit=None, cancel_flag=None, progress_cb=None):
-    """Fetch lyrics synchronously. Used by enrichment worker."""
-    import time as _time
-    from database import get_db_context
-    from sqlalchemy import text
-
-    use_lrclib = True
-    use_genius = bool(settings.genius_access_token)
-
-    lrclib_service = None
-    genius_service = None
-
-    if use_lrclib:
-        from lrclib import LrclibService
-        lrclib_service = LrclibService()
-    if use_genius:
-        from genius import GeniusService
-        genius_service = GeniusService(settings.genius_access_token)
-
-    stats = {"processed": 0, "found": 0, "not_found": 0, "errors": 0}
-
-    with get_db_context() as db:
-        query_sql = """
-            SELECT t.id as track_id, t.title,
-                   a.name as artist,
-                   al.title as album,
-                   mf.duration_seconds
-            FROM tracks t
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            JOIN media_files mf ON mf.track_id = t.id AND mf.is_analysis_source = true
-            JOIN album_variants av ON mf.album_variant_id = av.id
-            JOIN albums al ON av.album_id = al.id
-            LEFT JOIN external_metadata em
-                ON em.entity_type = 'track'
-                AND em.entity_id = t.id::text
-                AND em.source = 'lrclib'
-                AND em.metadata_type = 'lyrics'
-            WHERE em.id IS NULL
-            ORDER BY t.title
-        """
-        if limit:
-            query_sql += f" LIMIT {limit}"
-
-        rows = db.execute(text(query_sql)).fetchall()
-        total_lyrics = len(rows)
-        logger.info(f"Lyrics: {total_lyrics} tracks to process")
-        lyrics_start = _time.time()
-
-        for i, row in enumerate(rows):
-            if cancel_flag and cancel_flag():
-                break
-
-            stats["processed"] += 1
-
-            if progress_cb and i % 5 == 0:
-                elapsed = _time.time() - lyrics_start
-                if i > 0:
-                    eta = elapsed / i * (total_lyrics - i)
-                    eta_str = f", ETA {int(eta)}s"
-                else:
-                    eta_str = ""
-                progress_cb(f"Lyrics {i+1}/{total_lyrics}{eta_str}")
-            found = False
-
-            if use_lrclib and lrclib_service:
-                try:
-                    result = lrclib_service.fetch_and_store(
-                        db, row.track_id, row.title, row.artist,
-                        album_name=row.album,
-                        duration=int(row.duration_seconds) if row.duration_seconds else None,
-                    )
-                    if result and result.get("status") not in ("not_found", "error"):
-                        found = True
-                    _time.sleep(0.1)
-                except Exception as e:
-                    logger.debug(f"LRCLIB failed for {row.artist} - {row.title}: {e}")
-
-            if not found and use_genius and genius_service:
-                try:
-                    result = genius_service.fetch_and_store(
-                        db, row.track_id, row.title, row.artist,
-                    )
-                    if result and result.get("status") not in ("not_found", "error"):
-                        found = True
-                    _time.sleep(1.0)
-                except Exception as e:
-                    logger.debug(f"Genius failed for {row.artist} - {row.title}: {e}")
-
-            if found:
-                stats["found"] += 1
-            else:
-                stats["not_found"] += 1
-
-            db.commit()
-
-    return stats
+    """Fetch lyrics synchronously. Delegates to track_enrichment._fetch_lyrics_batch."""
+    from track_enrichment import _fetch_lyrics_batch
+    return _fetch_lyrics_batch(limit=limit, cancel_flag=cancel_flag, progress_cb=progress_cb)
 
 
 @app.post("/enrich/start")

@@ -310,20 +310,25 @@ class AudioEmbeddingGenerator:
                     audio_arrays = []
                     valid_rows = []
 
-                    # Load audio for batch
-                    for row in batch_rows:
-                        stats["processed"] += 1
-                        # DB stores native OS paths; translate back to local for file access in Docker
+                    # Load audio for batch in parallel (I/O bound)
+                    from concurrent.futures import ThreadPoolExecutor, as_completed
+                    def _load_one(row):
                         local_path = settings.translate_to_local_path(row.file_path)
-                        audio = self._load_audio(local_path)
-                        if audio is not None:
-                            audio_arrays.append(audio)
-                            valid_rows.append(row)
-                        else:
-                            stats["failed"] += 1
-                            logger.warning(
-                                f"Skipping track {row.track_id}: audio load failed"
-                            )
+                        return row, self._load_audio(local_path)
+
+                    with ThreadPoolExecutor(max_workers=4) as pool:
+                        futures = [pool.submit(_load_one, row) for row in batch_rows]
+                        for future in as_completed(futures):
+                            stats["processed"] += 1
+                            row, audio = future.result()
+                            if audio is not None:
+                                audio_arrays.append(audio)
+                                valid_rows.append(row)
+                            else:
+                                stats["failed"] += 1
+                                logger.warning(
+                                    f"Skipping track {row.track_id}: audio load failed"
+                                )
 
                     if not audio_arrays:
                         continue

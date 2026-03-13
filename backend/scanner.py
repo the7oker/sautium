@@ -164,35 +164,35 @@ class LibraryScanner:
             logger.error(f"Unexpected error reading {file_path}: {e}")
             return None
 
-    def find_flac_files(self, limit: Optional[int] = None, subpath: Optional[str] = None) -> List[Path]:
+    def find_audio_files(self, limit: Optional[int] = None, subpath: Optional[str] = None) -> List[Path]:
         """
-        Recursively find all FLAC files in library.
+        Recursively find all audio files in library.
 
         Args:
             limit: Maximum number of files to return (for testing).
             subpath: Optional subdirectory within library to scan.
 
         Returns:
-            List of Path objects for FLAC files.
+            List of Path objects for audio files.
         """
         if subpath:
             scan_path = self.library_path / subpath
             if not scan_path.exists():
                 raise ValueError(f"Subpath does not exist: {scan_path}")
-            logger.info(f"Searching for FLAC files in {scan_path} (subpath: {subpath})")
+            logger.info(f"Searching for audio files in {scan_path} (subpath: {subpath})")
         else:
             scan_path = self.library_path
-            logger.info(f"Searching for FLAC files in {scan_path}")
+            logger.info(f"Searching for audio files in {scan_path}")
 
-        flac_files = []
+        audio_files = []
         for file_path in scan_path.rglob("*"):
             if file_path.is_file() and file_path.suffix.lower() in AUDIO_EXTENSIONS:
-                flac_files.append(file_path)
-                if limit and len(flac_files) >= limit:
+                audio_files.append(file_path)
+                if limit and len(audio_files) >= limit:
                     break
 
-        logger.info(f"Found {len(flac_files)} audio files")
-        return flac_files
+        logger.info(f"Found {len(audio_files)} audio files")
+        return audio_files
 
     @staticmethod
     def get_or_create_genre(db: Session, genre_name: str) -> Genre:
@@ -346,16 +346,16 @@ class LibraryScanner:
             if progress_cb:
                 progress_cb(msg or f"Scanned {stats['processed']}/{total_files}", stats)
 
-        # Find FLAC files
+        # Find audio files
         if progress_cb:
             progress_cb("Discovering files...", stats)
-        flac_files = self.find_flac_files(limit=limit, subpath=subpath)
+        audio_files = self.find_audio_files(limit=limit, subpath=subpath)
 
-        if not flac_files:
-            logger.warning("No FLAC files found")
+        if not audio_files:
+            logger.warning("No audio files found")
             return stats
 
-        total_files = len(flac_files)
+        total_files = len(audio_files)
         _report(f"Found {total_files} files, starting scan...")
 
         with get_db_context() as db:
@@ -369,7 +369,7 @@ class LibraryScanner:
                 existing_paths = set()
 
             # Process files with progress bar
-            for file_path in tqdm(flac_files, desc="Scanning files", unit="file"):
+            for file_path in tqdm(audio_files, desc="Scanning files", unit="file"):
                 # Check for cancellation
                 if cancel_check and cancel_check():
                     logger.info("Scan cancelled by user")
