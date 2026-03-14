@@ -68,9 +68,11 @@ vocal_instrumental, vocal_score, instruments[jsonb], moods[jsonb])
 
 ## Listening history
 
-**listening_history** (media_file_id INT, track_id UUID, started_at, ended_at, duration_listened, \
-percent_listened, completed, skipped)
-**track_stats** (track_id UUID, play_count, skip_count, total_listen_time, avg_percent_listened, last_played_at)
+**listening_history** (media_file_id INT, track_id UUID NOT NULL, started_at, ended_at, duration_listened, \
+percent_listened, completed BOOLEAN, skipped BOOLEAN)
+**local_play_stats** (track_id UUID PRIMARY KEY, play_count, skip_count, total_listen_time, \
+avg_percent_listened, last_played_at) - aggregated local listening stats per track
+**track_stats** (track_id UUID, source VARCHAR, listeners INT, playcount BIGINT) - external popularity (Last.fm)
 
 ## IMPORTANT: Playback uses media_file.id (integer), not track.id (UUID)
 When recommending tracks for playback, always return media_files.id."""
@@ -163,14 +165,26 @@ WHERE t.name ILIKE '%tag_name%'
 ORDER BY at2.weight DESC
 ```
 
-Listening stats:
+Local listening stats (user's own plays):
 ```sql
-SELECT t.title, a.name as artist, ts.play_count, ts.last_played_at
+SELECT t.title, a.name as artist, lps.play_count, lps.skip_count, lps.last_played_at
+FROM local_play_stats lps
+JOIN tracks t ON lps.track_id = t.id
+JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+JOIN artists a ON ta.artist_id = a.id
+ORDER BY lps.play_count DESC
+LIMIT 20
+```
+
+Last.fm popularity stats:
+```sql
+SELECT t.title, a.name as artist, ts.listeners, ts.playcount
 FROM track_stats ts
 JOIN tracks t ON ts.track_id = t.id
 JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
 JOIN artists a ON ta.artist_id = a.id
-ORDER BY ts.play_count DESC
+WHERE ts.source = 'lastfm'
+ORDER BY ts.playcount DESC
 LIMIT 20
 ```"""
 

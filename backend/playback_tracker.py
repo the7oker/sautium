@@ -267,30 +267,24 @@ class PlaybackTracker:
                     ),
                 )
 
-                # Update play count if completed
+                # Update local_play_stats
                 if session.completed:
-                    cur.execute(
-                        """
-                        UPDATE media_files
-                        SET play_count = COALESCE(play_count, 0) + 1,
-                            last_played_at = %s
-                        WHERE id = %s
-                        """,
-                        (datetime.now(), session.track_id),
-                    )
-                    # Also update track_stats
                     if track_id:
                         cur.execute(
                             """
-                            INSERT INTO track_stats (track_id, play_count, total_listen_time,
-                                                    avg_percent_listened, last_played_at)
-                            VALUES (%s, 1, %s, %s, %s)
+                            INSERT INTO local_play_stats
+                                (track_id, play_count, skip_count,
+                                 total_listen_time, avg_percent_listened, last_played_at)
+                            VALUES (%s, 1, 0, %s, %s, %s)
                             ON CONFLICT (track_id) DO UPDATE SET
-                                play_count = track_stats.play_count + 1,
-                                total_listen_time = track_stats.total_listen_time + EXCLUDED.total_listen_time,
-                                avg_percent_listened = (track_stats.avg_percent_listened * track_stats.play_count
-                                    + EXCLUDED.avg_percent_listened) / (track_stats.play_count + 1),
-                                last_played_at = EXCLUDED.last_played_at
+                                play_count = local_play_stats.play_count + 1,
+                                total_listen_time = local_play_stats.total_listen_time + EXCLUDED.total_listen_time,
+                                avg_percent_listened = (
+                                    local_play_stats.avg_percent_listened * local_play_stats.play_count
+                                    + EXCLUDED.avg_percent_listened
+                                ) / (local_play_stats.play_count + 1),
+                                last_played_at = EXCLUDED.last_played_at,
+                                updated_at = CURRENT_TIMESTAMP
                             """,
                             (track_id, session.duration_listened,
                              session.percent_listened, datetime.now()),
@@ -317,6 +311,21 @@ class PlaybackTracker:
                             session.scrobbled = True
                             self.scrobbles_sent += 1
                 else:
+                    # Track was skipped — update skip_count
+                    if track_id:
+                        cur.execute(
+                            """
+                            INSERT INTO local_play_stats
+                                (track_id, play_count, skip_count,
+                                 total_listen_time, avg_percent_listened, last_played_at)
+                            VALUES (%s, 0, 1, %s, %s, %s)
+                            ON CONFLICT (track_id) DO UPDATE SET
+                                skip_count = local_play_stats.skip_count + 1,
+                                updated_at = CURRENT_TIMESTAMP
+                            """,
+                            (track_id, session.duration_listened,
+                             session.percent_listened, datetime.now()),
+                        )
                     logger.info(
                         f"⏭️  Track {session.track_id} skipped "
                         f"({session.percent_listened:.1f}% listened)"

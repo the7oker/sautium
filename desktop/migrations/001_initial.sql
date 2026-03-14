@@ -200,7 +200,7 @@ CREATE TABLE IF NOT EXISTS audio_features (
 
 CREATE TABLE IF NOT EXISTS artist_bios (
     id SERIAL PRIMARY KEY,
-    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     source VARCHAR(50) NOT NULL,
     summary TEXT,
     content TEXT,
@@ -215,7 +215,7 @@ CREATE TABLE IF NOT EXISTS artist_bios (
 
 CREATE TABLE IF NOT EXISTS artist_tags (
     id SERIAL PRIMARY KEY,
-    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     tag_id UUID NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
     weight INTEGER NOT NULL CHECK (weight >= 0 AND weight <= 100),
     source VARCHAR(50) NOT NULL,
@@ -226,8 +226,8 @@ CREATE TABLE IF NOT EXISTS artist_tags (
 
 CREATE TABLE IF NOT EXISTS similar_artists (
     id SERIAL PRIMARY KEY,
-    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
-    similar_artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    similar_artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     match_score NUMERIC(5, 4) NOT NULL CHECK (match_score >= 0 AND match_score <= 1),
     source VARCHAR(50) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -336,14 +336,25 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 CREATE TABLE IF NOT EXISTS listening_history (
     id SERIAL PRIMARY KEY,
     media_file_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
-    track_id UUID REFERENCES tracks(id) ON DELETE SET NULL ON UPDATE CASCADE,
-    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    started_at TIMESTAMP NOT NULL,
+    ended_at TIMESTAMP,
     duration_listened NUMERIC(10, 2) CHECK (duration_listened >= 0),
     percent_listened NUMERIC(5, 2) CHECK (percent_listened >= 0 AND percent_listened <= 100),
     completed BOOLEAN DEFAULT FALSE,
     skipped BOOLEAN DEFAULT FALSE,
-    source VARCHAR(50) DEFAULT 'hqplayer',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS local_play_stats (
+    track_id UUID PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    play_count INTEGER NOT NULL DEFAULT 0,
+    skip_count INTEGER NOT NULL DEFAULT 0,
+    total_listen_time NUMERIC(12, 2) NOT NULL DEFAULT 0,
+    avg_percent_listened NUMERIC(5, 2) NOT NULL DEFAULT 0,
+    last_played_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS track_lyrics (
@@ -373,7 +384,7 @@ CREATE TABLE IF NOT EXISTS lyrics_embeddings (
 
 CREATE TABLE IF NOT EXISTS artist_bio_embeddings (
     id SERIAL PRIMARY KEY,
-    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
     vector vector(1024) NOT NULL,
     chunk_index INTEGER NOT NULL DEFAULT 0,
@@ -543,6 +554,11 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id
 CREATE INDEX IF NOT EXISTS idx_listening_history_media_file ON listening_history(media_file_id);
 CREATE INDEX IF NOT EXISTS idx_listening_history_track ON listening_history(track_id);
 CREATE INDEX IF NOT EXISTS idx_listening_history_started ON listening_history(started_at);
+CREATE INDEX IF NOT EXISTS idx_listening_history_track_started ON listening_history(track_id, started_at DESC);
+
+-- Local play stats indexes
+CREATE INDEX IF NOT EXISTS idx_local_play_stats_last_played ON local_play_stats(last_played_at);
+CREATE INDEX IF NOT EXISTS idx_local_play_stats_play_count ON local_play_stats(play_count);
 
 -- ============================================================
 -- Trigger function for updated_at

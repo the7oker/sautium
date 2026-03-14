@@ -166,6 +166,7 @@ class Track(Base):
     text_embedding = relationship("TextEmbedding", back_populates="track", uselist=False, cascade="all, delete-orphan")
     audio_feature = relationship("AudioFeature", back_populates="track", uselist=False, cascade="all, delete-orphan")
     stats = relationship("TrackStats", back_populates="track", cascade="all, delete-orphan")
+    local_play_stats = relationship("LocalPlayStats", back_populates="track", uselist=False, cascade="all, delete-orphan")
     lyrics = relationship("TrackLyrics", back_populates="track", cascade="all, delete-orphan")
     lyrics_embeddings = relationship("LyricsEmbedding", back_populates="track", cascade="all, delete-orphan")
 
@@ -220,8 +221,8 @@ class AlbumArtist(Base):
     """Album-Artist association (many-to-many with role)."""
     __tablename__ = "album_artists"
 
-    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE"), primary_key=True)
-    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE"), primary_key=True)
+    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
+    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
     role = Column(String(50), primary_key=True, default="primary")
 
     album = relationship("Album", back_populates="artist_associations")
@@ -450,7 +451,7 @@ class ArtistBioEmbedding(Base):
     __tablename__ = "artist_bio_embeddings"
 
     id = Column(Integer, primary_key=True)
-    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE"), nullable=False)
+    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE"), nullable=False)
     vector = Column(Vector(1024), nullable=False)
     chunk_index = Column(Integer, nullable=False, default=0)
@@ -666,7 +667,7 @@ class ArtistTag(Base):
     __tablename__ = "artist_tags"
 
     id = Column(Integer, primary_key=True)
-    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE"), nullable=False)
+    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     tag_id = Column(UUID(as_uuid=True), ForeignKey("tags.id", ondelete="CASCADE"), nullable=False)
     weight = Column(Integer, nullable=False)
     source = Column(String(50), nullable=False)
@@ -695,7 +696,7 @@ class ArtistBio(Base):
     __tablename__ = "artist_bios"
 
     id = Column(Integer, primary_key=True)
-    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE"), nullable=False)
+    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     source = Column(String(50), nullable=False)
 
     summary = Column(Text)
@@ -727,8 +728,8 @@ class SimilarArtist(Base):
     __tablename__ = "similar_artists"
 
     id = Column(Integer, primary_key=True)
-    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE"), nullable=False)
-    similar_artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE"), nullable=False)
+    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    similar_artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     match_score = Column(Numeric(5, 4), nullable=False)
     source = Column(String(50), nullable=False)
 
@@ -820,6 +821,31 @@ class AlbumTag(Base):
 # ───────────────────────────────────────────────────────────────────────────
 # Statistics & External metadata
 # ───────────────────────────────────────────────────────────────────────────
+
+class LocalPlayStats(Base):
+    """Aggregated local listening statistics per track (from HQPlayer)."""
+    __tablename__ = "local_play_stats"
+
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
+    play_count = Column(Integer, nullable=False, default=0)
+    skip_count = Column(Integer, nullable=False, default=0)
+    total_listen_time = Column(Numeric(12, 2), nullable=False, default=0)
+    avg_percent_listened = Column(Numeric(5, 2), nullable=False, default=0)
+    last_played_at = Column(DateTime)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    track = relationship("Track", back_populates="local_play_stats")
+
+    __table_args__ = (
+        Index("idx_local_play_stats_last_played", "last_played_at"),
+        Index("idx_local_play_stats_play_count", "play_count"),
+    )
+
+    def __repr__(self):
+        return f"<LocalPlayStats(track_id={self.track_id}, play_count={self.play_count})>"
+
 
 class TrackStats(Base):
     """Track popularity statistics from external sources (Last.fm, etc)."""

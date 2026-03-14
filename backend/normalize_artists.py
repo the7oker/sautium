@@ -125,6 +125,28 @@ def _update_track_uuid(db: Session, old_id, new_id) -> str:
             text("UPDATE listening_history SET track_id = :new WHERE track_id = :old"),
             {"new": new_str, "old": old_str},
         )
+        # Merge local_play_stats: sum counts from old into new
+        db.execute(text("""
+            INSERT INTO local_play_stats (track_id, play_count, skip_count,
+                total_listen_time, avg_percent_listened, last_played_at)
+            SELECT :new, play_count, skip_count, total_listen_time,
+                   avg_percent_listened, last_played_at
+            FROM local_play_stats WHERE track_id = :old
+            ON CONFLICT (track_id) DO UPDATE SET
+                play_count = local_play_stats.play_count + EXCLUDED.play_count,
+                skip_count = local_play_stats.skip_count + EXCLUDED.skip_count,
+                total_listen_time = local_play_stats.total_listen_time + EXCLUDED.total_listen_time,
+                avg_percent_listened = CASE
+                    WHEN (local_play_stats.play_count + EXCLUDED.play_count) > 0 THEN
+                        (local_play_stats.avg_percent_listened * local_play_stats.play_count
+                         + EXCLUDED.avg_percent_listened * EXCLUDED.play_count)
+                        / (local_play_stats.play_count + EXCLUDED.play_count)
+                    ELSE 0
+                END,
+                last_played_at = GREATEST(local_play_stats.last_played_at, EXCLUDED.last_played_at),
+                updated_at = CURRENT_TIMESTAMP
+        """), {"new": new_str, "old": old_str})
+        db.execute(text("DELETE FROM local_play_stats WHERE track_id = :old"), {"old": old_str})
         # CASCADE deletes old associations, embeddings, features, stats, lyrics
         db.execute(text("DELETE FROM tracks WHERE id = :old"), {"old": old_str})
 
