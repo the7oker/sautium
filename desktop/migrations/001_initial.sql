@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS album_variants (
 CREATE TABLE IF NOT EXISTS media_files (
     id SERIAL PRIMARY KEY,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    album_variant_id INTEGER NOT NULL REFERENCES album_variants(id) ON DELETE CASCADE,
+    album_variant_id INTEGER NOT NULL REFERENCES album_variants(id) ON DELETE CASCADE ON UPDATE CASCADE,
     file_path TEXT NOT NULL UNIQUE,
     file_format VARCHAR(10) DEFAULT 'FLAC',
     is_lossless BOOLEAN DEFAULT TRUE,
@@ -150,7 +150,7 @@ CREATE TABLE IF NOT EXISTS media_files (
 CREATE TABLE IF NOT EXISTS embeddings (
     id SERIAL PRIMARY KEY,
     vector vector(512) NOT NULL,
-    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE ON UPDATE CASCADE,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     source_bit_depth INTEGER,
     source_sample_rate INTEGER,
@@ -163,7 +163,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
 CREATE TABLE IF NOT EXISTS text_embeddings (
     id SERIAL PRIMARY KEY,
     vector vector(1024) NOT NULL,
-    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE ON UPDATE CASCADE,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -216,7 +216,7 @@ CREATE TABLE IF NOT EXISTS artist_bios (
 CREATE TABLE IF NOT EXISTS artist_tags (
     id SERIAL PRIMARY KEY,
     artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    tag_id UUID NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    tag_id UUID NOT NULL REFERENCES tags(id) ON DELETE CASCADE ON UPDATE CASCADE,
     weight INTEGER NOT NULL CHECK (weight >= 0 AND weight <= 100),
     source VARCHAR(50) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -254,7 +254,7 @@ CREATE TABLE IF NOT EXISTS album_info (
 CREATE TABLE IF NOT EXISTS album_tags (
     id SERIAL PRIMARY KEY,
     album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    tag_id UUID NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    tag_id UUID NOT NULL REFERENCES tags(id) ON DELETE CASCADE ON UPDATE CASCADE,
     weight INTEGER NOT NULL CHECK (weight >= 0 AND weight <= 100),
     source VARCHAR(50) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -264,7 +264,7 @@ CREATE TABLE IF NOT EXISTS album_tags (
 
 CREATE TABLE IF NOT EXISTS genre_descriptions (
     id SERIAL PRIMARY KEY,
-    genre_id UUID NOT NULL REFERENCES genres(id) ON DELETE CASCADE,
+    genre_id UUID NOT NULL REFERENCES genres(id) ON DELETE CASCADE ON UPDATE CASCADE,
     source VARCHAR(50) NOT NULL,
     summary TEXT,
     content TEXT,
@@ -315,7 +315,7 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
 
 CREATE TABLE IF NOT EXISTS chat_messages (
     id SERIAL PRIMARY KEY,
-    session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE ON UPDATE CASCADE,
     role VARCHAR(20) NOT NULL,
     content TEXT NOT NULL,
     tracks_data JSONB,
@@ -373,7 +373,7 @@ CREATE TABLE IF NOT EXISTS track_lyrics (
 CREATE TABLE IF NOT EXISTS lyrics_embeddings (
     id SERIAL PRIMARY KEY,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE ON UPDATE CASCADE,
     vector vector(1024) NOT NULL,
     chunk_index INTEGER NOT NULL DEFAULT 0,
     chunk_text TEXT,
@@ -385,7 +385,7 @@ CREATE TABLE IF NOT EXISTS lyrics_embeddings (
 CREATE TABLE IF NOT EXISTS artist_bio_embeddings (
     id SERIAL PRIMARY KEY,
     artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE ON UPDATE CASCADE,
     vector vector(1024) NOT NULL,
     chunk_index INTEGER NOT NULL DEFAULT 0,
     chunk_text TEXT,
@@ -397,7 +397,7 @@ CREATE TABLE IF NOT EXISTS artist_bio_embeddings (
 CREATE TABLE IF NOT EXISTS album_info_embeddings (
     id SERIAL PRIMARY KEY,
     album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE ON UPDATE CASCADE,
     vector vector(1024) NOT NULL,
     chunk_index INTEGER NOT NULL DEFAULT 0,
     chunk_text TEXT,
@@ -408,8 +408,8 @@ CREATE TABLE IF NOT EXISTS album_info_embeddings (
 
 CREATE TABLE IF NOT EXISTS genre_desc_embeddings (
     id SERIAL PRIMARY KEY,
-    genre_id UUID NOT NULL REFERENCES genres(id) ON DELETE CASCADE,
-    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE,
+    genre_id UUID NOT NULL REFERENCES genres(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE ON UPDATE CASCADE,
     vector vector(1024) NOT NULL,
     chunk_index INTEGER NOT NULL DEFAULT 0,
     chunk_text TEXT,

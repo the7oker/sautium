@@ -182,7 +182,7 @@ class TrackArtist(Base):
     """Track-Artist association (many-to-many with role)."""
     __tablename__ = "track_artists"
 
-    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"), primary_key=True)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
     artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE"), primary_key=True)
     role = Column(String(50), primary_key=True, default="primary")
 
@@ -202,8 +202,8 @@ class TrackGenre(Base):
     """Track-Genre association (many-to-many)."""
     __tablename__ = "track_genres"
 
-    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"), primary_key=True)
-    genre_id = Column(UUID(as_uuid=True), ForeignKey("genres.id", ondelete="CASCADE"), primary_key=True)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
+    genre_id = Column(UUID(as_uuid=True), ForeignKey("genres.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
 
     track = relationship("Track", back_populates="genre_associations")
     genre = relationship("Genre", back_populates="track_associations")
@@ -270,7 +270,7 @@ class AlbumVariant(Base):
     __tablename__ = "album_variants"
 
     id = Column(Integer, primary_key=True)
-    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE"), nullable=False)
+    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     directory_path = Column(Text, nullable=False, unique=True)
 
     sample_rate = Column(Integer)
@@ -298,8 +298,8 @@ class MediaFile(Base):
     __tablename__ = "media_files"
 
     id = Column(Integer, primary_key=True)
-    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False)
-    album_variant_id = Column(Integer, ForeignKey("album_variants.id", ondelete="CASCADE"), nullable=False)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    album_variant_id = Column(Integer, ForeignKey("album_variants.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
 
     # File information
     file_path = Column(Text, nullable=False, unique=True)
@@ -359,8 +359,8 @@ class Embedding(Base):
 
     id = Column(Integer, primary_key=True)
     vector = Column(Vector(512), nullable=False)
-    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id"), nullable=False)
-    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False)
+    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
 
     # Source quality info (from the media_file used for analysis)
     source_bit_depth = Column(Integer)
@@ -392,8 +392,8 @@ class TextEmbedding(Base):
 
     id = Column(Integer, primary_key=True)
     vector = Column(Vector(1024), nullable=False)
-    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id"), nullable=False)
-    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False)
+    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -420,8 +420,8 @@ class LyricsEmbedding(Base):
     __tablename__ = "lyrics_embeddings"
 
     id = Column(Integer, primary_key=True)
-    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False)
-    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE"), nullable=False)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     vector = Column(Vector(1024), nullable=False)
     chunk_index = Column(Integer, nullable=False, default=0)
     chunk_text = Column(Text)
@@ -452,7 +452,7 @@ class ArtistBioEmbedding(Base):
 
     id = Column(Integer, primary_key=True)
     artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
-    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE"), nullable=False)
+    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     vector = Column(Vector(1024), nullable=False)
     chunk_index = Column(Integer, nullable=False, default=0)
     chunk_text = Column(Text)
@@ -479,8 +479,8 @@ class AlbumInfoEmbedding(Base):
     __tablename__ = "album_info_embeddings"
 
     id = Column(Integer, primary_key=True)
-    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE"), nullable=False)
-    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE"), nullable=False)
+    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     vector = Column(Vector(1024), nullable=False)
     chunk_index = Column(Integer, nullable=False, default=0)
     chunk_text = Column(Text)
@@ -507,8 +507,8 @@ class GenreDescEmbedding(Base):
     __tablename__ = "genre_desc_embeddings"
 
     id = Column(Integer, primary_key=True)
-    genre_id = Column(UUID(as_uuid=True), ForeignKey("genres.id", ondelete="CASCADE"), nullable=False)
-    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE"), nullable=False)
+    genre_id = Column(UUID(as_uuid=True), ForeignKey("genres.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     vector = Column(Vector(1024), nullable=False)
     chunk_index = Column(Integer, nullable=False, default=0)
     chunk_text = Column(Text)
@@ -535,7 +535,7 @@ class AudioFeature(Base):
     __tablename__ = "audio_features"
 
     id = Column(Integer, primary_key=True)
-    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"), unique=True, nullable=False)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), unique=True, nullable=False)
 
     # librosa DSP features
     bpm = Column(Float)
@@ -608,7 +608,7 @@ class GenreDescription(Base):
     __tablename__ = "genre_descriptions"
 
     id = Column(Integer, primary_key=True)
-    genre_id = Column(UUID(as_uuid=True), ForeignKey("genres.id", ondelete="CASCADE"), nullable=False)
+    genre_id = Column(UUID(as_uuid=True), ForeignKey("genres.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     source = Column(String(50), nullable=False)
 
     summary = Column(Text)
@@ -668,7 +668,7 @@ class ArtistTag(Base):
 
     id = Column(Integer, primary_key=True)
     artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
-    tag_id = Column(UUID(as_uuid=True), ForeignKey("tags.id", ondelete="CASCADE"), nullable=False)
+    tag_id = Column(UUID(as_uuid=True), ForeignKey("tags.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     weight = Column(Integer, nullable=False)
     source = Column(String(50), nullable=False)
 
@@ -762,7 +762,7 @@ class AlbumInfo(Base):
     __tablename__ = "album_info"
 
     id = Column(Integer, primary_key=True)
-    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE"), nullable=False)
+    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     source = Column(String(50), nullable=False)
 
     summary = Column(Text)
@@ -794,8 +794,8 @@ class AlbumTag(Base):
     __tablename__ = "album_tags"
 
     id = Column(Integer, primary_key=True)
-    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE"), nullable=False)
-    tag_id = Column(UUID(as_uuid=True), ForeignKey("tags.id", ondelete="CASCADE"), nullable=False)
+    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    tag_id = Column(UUID(as_uuid=True), ForeignKey("tags.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     weight = Column(Integer, nullable=False)
     source = Column(String(50), nullable=False)
 
@@ -852,7 +852,7 @@ class TrackStats(Base):
     __tablename__ = "track_stats"
 
     id = Column(Integer, primary_key=True)
-    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     source = Column(String(50), nullable=False)
 
     listeners = Column(Integer)
@@ -881,7 +881,7 @@ class TrackLyrics(Base):
     __tablename__ = "track_lyrics"
 
     id = Column(Integer, primary_key=True)
-    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     source = Column(String(50), nullable=False)
 
     plain_lyrics = Column(Text)
