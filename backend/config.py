@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     embedding_model: str = "laion/clap-htsat-unfused"
     embedding_dimension: int = 512
     audio_sample_duration: int = 30  # seconds
-    embedding_batch_size: int = 16
+    embedding_batch_size: int = 32
 
     # Text Embedding Configuration (sentence-transformers)
     text_embedding_model: str = "BAAI/bge-m3"

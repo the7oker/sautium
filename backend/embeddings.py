@@ -7,6 +7,7 @@ One embedding per track, not per file.
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
 import librosa
@@ -105,23 +106,32 @@ class AudioEmbeddingGenerator:
 
         return text_features[0].cpu().numpy()
 
-    def _load_audio(self, file_path: str) -> Optional[np.ndarray]:
+    def _load_audio(self, file_path: str, duration_seconds: float = None) -> Optional[np.ndarray]:
         """
         Load audio file and extract middle segment.
 
-        Loads at 48kHz mono. Extracts the middle `sample_duration` seconds.
+        Loads at 48kHz mono. Only decodes the middle `sample_duration` seconds
+        using librosa's offset/duration params to avoid reading the entire file.
         Short tracks (<sample_duration) are used as-is.
+
+        Args:
+            file_path: Path to audio file.
+            duration_seconds: Total track duration (from DB) to calculate offset
+                without reading the full file. If None, loads entire file.
         """
         try:
-            audio, sr = librosa.load(file_path, sr=self.sample_rate, mono=True)
+            offset = 0.0
+            load_duration = None
 
-            total_samples = len(audio)
-            target_samples = self.sample_duration * self.sample_rate
+            if duration_seconds and duration_seconds > self.sample_duration:
+                # Only decode the middle segment — massive I/O savings
+                offset = (duration_seconds - self.sample_duration) / 2.0
+                load_duration = float(self.sample_duration)
 
-            if total_samples > target_samples:
-                # Extract middle segment
-                start = (total_samples - target_samples) // 2
-                audio = audio[start : start + target_samples]
+            audio, sr = librosa.load(
+                file_path, sr=self.sample_rate, mono=True,
+                offset=offset, duration=load_duration,
+            )
 
             return audio
 
@@ -264,7 +274,8 @@ class AudioEmbeddingGenerator:
                 query_sql = """
                     SELECT t.id as track_id, mf.id as media_file_id,
                            mf.file_path, mf.bit_depth,
-                           mf.sample_rate, mf.is_lossless
+                           mf.sample_rate, mf.is_lossless,
+                           mf.duration_seconds
                     FROM tracks t
                     LEFT JOIN embeddings e ON e.track_id = t.id
                     JOIN media_files mf ON mf.track_id = t.id
@@ -300,85 +311,96 @@ class AudioEmbeddingGenerator:
                 if max_duration_seconds:
                     logger.info(f"Time limit: {max_duration_seconds} seconds ({max_duration_seconds/60:.1f} minutes)")
 
-                # Process in batches
-                for batch_start in tqdm(
-                    range(0, total, self.batch_size),
-                    desc="Generating embeddings",
-                    unit="batch",
-                ):
-                    # Check time limit before starting new batch
-                    if max_duration_seconds:
-                        elapsed = time.time() - start_time
-                        if elapsed >= max_duration_seconds:
-                            logger.info(f"Time limit reached ({elapsed:.1f}s), stopping gracefully")
-                            break
+                # --- Pipelined batch processing ---
+                # CPU threads decode batch N+1 while GPU processes batch N
+                def _load_one(row):
+                    local_path = settings.translate_to_local_path(row.file_path)
+                    dur = float(row.duration_seconds) if row.duration_seconds else None
+                    return row, self._load_audio(local_path, duration_seconds=dur)
 
-                    batch_rows = rows[batch_start : batch_start + self.batch_size]
+                def _load_batch(batch_rows):
+                    """Load audio for a batch using thread pool. Returns (valid_rows, audio_arrays, failed_count)."""
                     audio_arrays = []
                     valid_rows = []
+                    failed = 0
+                    futures = [io_pool.submit(_load_one, row) for row in batch_rows]
+                    for future in as_completed(futures):
+                        row, audio = future.result()
+                        if audio is not None:
+                            audio_arrays.append(audio)
+                            valid_rows.append(row)
+                        else:
+                            failed += 1
+                            logger.warning(f"Skipping track {row.track_id}: audio load failed")
+                    return valid_rows, audio_arrays, failed
 
-                    # Load audio for batch in parallel (I/O bound)
-                    from concurrent.futures import ThreadPoolExecutor, as_completed
-                    def _load_one(row):
-                        local_path = settings.translate_to_local_path(row.file_path)
-                        return row, self._load_audio(local_path)
+                # Split into batch slices
+                batch_slices = [rows[i:i + self.batch_size] for i in range(0, total, self.batch_size)]
+                num_batches = len(batch_slices)
 
-                    with ThreadPoolExecutor(max_workers=4) as pool:
-                        futures = [pool.submit(_load_one, row) for row in batch_rows]
-                        for future in as_completed(futures):
-                            stats["processed"] += 1
-                            row, audio = future.result()
-                            if audio is not None:
-                                audio_arrays.append(audio)
-                                valid_rows.append(row)
-                            else:
-                                stats["failed"] += 1
-                                logger.warning(
-                                    f"Skipping track {row.track_id}: audio load failed"
-                                )
+                # Persistent I/O thread pool (16 workers for i9-14900HX)
+                io_pool = ThreadPoolExecutor(max_workers=16)
+                # Prefetch pool runs _load_batch in background
+                prefetch_pool = ThreadPoolExecutor(max_workers=1)
 
-                    if not audio_arrays:
-                        continue
+                try:
+                    # Pre-submit first batch loading
+                    prefetch_future = prefetch_pool.submit(_load_batch, batch_slices[0])
 
-                    # Generate embeddings for batch
-                    embeddings = self._generate_batch_embeddings(audio_arrays)
+                    for batch_idx in tqdm(range(num_batches), desc="Generating embeddings", unit="batch"):
+                        # Check time limit
+                        if max_duration_seconds:
+                            elapsed = time.time() - start_time
+                            if elapsed >= max_duration_seconds:
+                                logger.info(f"Time limit reached ({elapsed:.1f}s), stopping gracefully")
+                                break
 
-                    if embeddings is None:
-                        # OOM or error - try one by one
-                        logger.warning(
-                            "Batch failed, falling back to single processing"
-                        )
-                        for i, (audio, row) in enumerate(
-                            zip(audio_arrays, valid_rows)
-                        ):
-                            single = self._generate_batch_embeddings([audio])
-                            if single is not None:
+                        # Wait for current batch audio (should already be ready or nearly ready)
+                        valid_rows, audio_arrays, batch_failed = prefetch_future.result()
+                        stats["processed"] += len(batch_slices[batch_idx])
+                        stats["failed"] += batch_failed
+
+                        # Start loading NEXT batch immediately (runs while GPU works)
+                        if batch_idx + 1 < num_batches:
+                            prefetch_future = prefetch_pool.submit(_load_batch, batch_slices[batch_idx + 1])
+
+                        if not audio_arrays:
+                            continue
+
+                        # Generate embeddings on GPU (next batch loads in parallel!)
+                        embeddings = self._generate_batch_embeddings(audio_arrays)
+
+                        if embeddings is None:
+                            logger.warning("Batch failed, falling back to single processing")
+                            for audio, row in zip(audio_arrays, valid_rows):
+                                single = self._generate_batch_embeddings([audio])
+                                if single is not None:
+                                    self._save_embedding(
+                                        db, row.track_id, single[0], embedding_model,
+                                        source_media_file_id=row.media_file_id,
+                                        source_bit_depth=row.bit_depth,
+                                        source_sample_rate=row.sample_rate,
+                                        source_is_lossless=row.is_lossless,
+                                    )
+                                    stats["success"] += 1
+                                else:
+                                    stats["failed"] += 1
+                                    logger.error(f"Failed single embedding for track {row.track_id}")
+                        else:
+                            for row, vector in zip(valid_rows, embeddings):
                                 self._save_embedding(
-                                    db, row.track_id, single[0], embedding_model,
+                                    db, row.track_id, vector, embedding_model,
                                     source_media_file_id=row.media_file_id,
                                     source_bit_depth=row.bit_depth,
                                     source_sample_rate=row.sample_rate,
                                     source_is_lossless=row.is_lossless,
                                 )
                                 stats["success"] += 1
-                            else:
-                                stats["failed"] += 1
-                                logger.error(
-                                    f"Failed single embedding for track {row.track_id}"
-                                )
-                    else:
-                        for row, vector in zip(valid_rows, embeddings):
-                            self._save_embedding(
-                                db, row.track_id, vector, embedding_model,
-                                source_media_file_id=row.media_file_id,
-                                source_bit_depth=row.bit_depth,
-                                source_sample_rate=row.sample_rate,
-                                source_is_lossless=row.is_lossless,
-                            )
-                            stats["success"] += 1
 
-                    # Commit after each batch
-                    db.commit()
+                        db.commit()
+                finally:
+                    io_pool.shutdown(wait=False)
+                    prefetch_pool.shutdown(wait=False)
 
                 logger.info(
                     f"Embedding generation complete: "
