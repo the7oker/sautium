@@ -468,7 +468,8 @@ class AudioAnalyzer:
                 # Query tracks to analyze
                 if force:
                     query_sql = """
-                        SELECT t.id as track_id, mf.file_path, mf.bit_depth,
+                        SELECT t.id as track_id, mf.id as media_file_id,
+                               mf.file_path, mf.bit_depth,
                                mf.sample_rate as mf_sample_rate, mf.is_lossless
                         FROM tracks t
                         JOIN media_files mf ON mf.track_id = t.id
@@ -476,13 +477,16 @@ class AudioAnalyzer:
                     """
                 else:
                     query_sql = """
-                        SELECT t.id as track_id, mf.file_path, mf.bit_depth,
+                        SELECT t.id as track_id, mf.id as media_file_id,
+                               mf.file_path, mf.bit_depth,
                                mf.sample_rate as mf_sample_rate, mf.is_lossless
                         FROM tracks t
                         LEFT JOIN audio_features af ON af.track_id = t.id
                         JOIN media_files mf ON mf.track_id = t.id
                             AND mf.is_analysis_source = true
                         WHERE af.id IS NULL
+                           OR (af.source_media_file_id IS NOT NULL
+                               AND af.source_media_file_id != mf.id)
                     """
 
                 params = {}
@@ -566,19 +570,20 @@ class AudioAnalyzer:
                             features = prep["librosa_features"]
                             features.update(clap_feat)
 
-                            if force:
-                                existing = db.query(AudioFeature).filter(
-                                    AudioFeature.track_id == row.track_id
-                                ).first()
-                                if existing:
-                                    for k, v in features.items():
-                                        setattr(existing, k, v)
-                                    existing.source_bit_depth = row.bit_depth
-                                    existing.source_sample_rate = row.mf_sample_rate
-                                    existing.source_is_lossless = row.is_lossless
-                                    db.commit()
-                                    stats["success"] += 1
-                                    continue
+                            # Update existing record (force mode or stale source)
+                            existing = db.query(AudioFeature).filter(
+                                AudioFeature.track_id == row.track_id
+                            ).first()
+                            if existing:
+                                for k, v in features.items():
+                                    setattr(existing, k, v)
+                                existing.source_media_file_id = row.media_file_id
+                                existing.source_bit_depth = row.bit_depth
+                                existing.source_sample_rate = row.mf_sample_rate
+                                existing.source_is_lossless = row.is_lossless
+                                db.commit()
+                                stats["success"] += 1
+                                continue
 
                             af = AudioFeature(
                                 track_id=row.track_id,
@@ -596,6 +601,7 @@ class AudioAnalyzer:
                                 vocal_instrumental=features.get("vocal_instrumental"),
                                 vocal_score=features.get("vocal_score"),
                                 danceability=features.get("danceability"),
+                                source_media_file_id=row.media_file_id,
                                 source_bit_depth=row.bit_depth,
                                 source_sample_rate=row.mf_sample_rate,
                                 source_is_lossless=row.is_lossless,

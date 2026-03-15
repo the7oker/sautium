@@ -363,6 +363,7 @@ class Embedding(Base):
     track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
 
     # Source quality info (from the media_file used for analysis)
+    source_media_file_id = Column(Integer, ForeignKey("media_files.id", ondelete="SET NULL"))
     source_bit_depth = Column(Integer)
     source_sample_rate = Column(Integer)
     source_is_lossless = Column(Boolean)
@@ -556,6 +557,7 @@ class AudioFeature(Base):
     danceability = Column(Float)
 
     # Source quality info
+    source_media_file_id = Column(Integer, ForeignKey("media_files.id", ondelete="SET NULL"))
     source_bit_depth = Column(Integer)
     source_sample_rate = Column(Integer)
     source_is_lossless = Column(Boolean)

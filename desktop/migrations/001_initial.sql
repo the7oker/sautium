@@ -152,6 +152,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
     vector vector(512) NOT NULL,
     model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE ON UPDATE CASCADE,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    source_media_file_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
     source_bit_depth INTEGER,
     source_sample_rate INTEGER,
     source_is_lossless BOOLEAN,
@@ -187,6 +188,7 @@ CREATE TABLE IF NOT EXISTS audio_features (
     vocal_instrumental VARCHAR(20),
     vocal_score DOUBLE PRECISION,
     danceability DOUBLE PRECISION,
+    source_media_file_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
     source_bit_depth INTEGER,
     source_sample_rate INTEGER,
     source_is_lossless BOOLEAN,
@@ -426,6 +428,7 @@ CREATE TABLE IF NOT EXISTS genre_desc_embeddings (
 CREATE INDEX IF NOT EXISTS idx_embedding_models_name ON embedding_models(name);
 CREATE INDEX IF NOT EXISTS idx_embeddings_model_id ON embeddings(model_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_track_id ON embeddings(track_id);
+CREATE INDEX IF NOT EXISTS idx_embeddings_source_mf ON embeddings(source_media_file_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_vector ON embeddings
     USING hnsw (vector vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
@@ -511,6 +514,7 @@ CREATE INDEX IF NOT EXISTS idx_external_metadata_data ON external_metadata USING
 
 -- Audio feature indexes
 CREATE INDEX IF NOT EXISTS idx_audio_features_track_id ON audio_features(track_id);
+CREATE INDEX IF NOT EXISTS idx_audio_features_source_mf ON audio_features(source_media_file_id);
 CREATE INDEX IF NOT EXISTS idx_audio_features_bpm ON audio_features(bpm);
 CREATE INDEX IF NOT EXISTS idx_audio_features_key ON audio_features(key, mode);
 CREATE INDEX IF NOT EXISTS idx_audio_features_energy ON audio_features(energy_db);

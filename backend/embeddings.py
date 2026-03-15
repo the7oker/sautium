@@ -196,6 +196,7 @@ class AudioEmbeddingGenerator:
 
     def _save_embedding(
         self, db: Session, track_id, vector: np.ndarray, model: EmbeddingModel,
+        source_media_file_id: Optional[int] = None,
         source_bit_depth: Optional[int] = None,
         source_sample_rate: Optional[int] = None,
         source_is_lossless: Optional[bool] = None,
@@ -212,6 +213,7 @@ class AudioEmbeddingGenerator:
             if new_score < old_score:
                 return  # Don't overwrite better quality embedding
             existing.vector = vector.tolist()
+            existing.source_media_file_id = source_media_file_id
             existing.source_bit_depth = source_bit_depth
             existing.source_sample_rate = source_sample_rate
             existing.source_is_lossless = source_is_lossless
@@ -220,6 +222,7 @@ class AudioEmbeddingGenerator:
                 vector=vector.tolist(),
                 model_id=model.id,
                 track_id=track_id,
+                source_media_file_id=source_media_file_id,
                 source_bit_depth=source_bit_depth,
                 source_sample_rate=source_sample_rate,
                 source_is_lossless=source_is_lossless,
@@ -256,15 +259,19 @@ class AudioEmbeddingGenerator:
             with get_db_context() as db:
                 embedding_model = self._get_or_create_embedding_model(db)
 
-                # Query tracks without embeddings, joining to analysis source media file
+                # Query tracks without embeddings OR with stale embeddings
+                # (analysis source changed since embedding was generated)
                 query_sql = """
-                    SELECT t.id as track_id, mf.file_path, mf.bit_depth,
+                    SELECT t.id as track_id, mf.id as media_file_id,
+                           mf.file_path, mf.bit_depth,
                            mf.sample_rate, mf.is_lossless
                     FROM tracks t
                     LEFT JOIN embeddings e ON e.track_id = t.id
                     JOIN media_files mf ON mf.track_id = t.id
                         AND mf.is_analysis_source = true
                     WHERE e.id IS NULL
+                       OR (e.source_media_file_id IS NOT NULL
+                           AND e.source_media_file_id != mf.id)
                 """
                 params = {}
 
@@ -348,6 +355,7 @@ class AudioEmbeddingGenerator:
                             if single is not None:
                                 self._save_embedding(
                                     db, row.track_id, single[0], embedding_model,
+                                    source_media_file_id=row.media_file_id,
                                     source_bit_depth=row.bit_depth,
                                     source_sample_rate=row.sample_rate,
                                     source_is_lossless=row.is_lossless,
@@ -362,6 +370,7 @@ class AudioEmbeddingGenerator:
                         for row, vector in zip(valid_rows, embeddings):
                             self._save_embedding(
                                 db, row.track_id, vector, embedding_model,
+                                source_media_file_id=row.media_file_id,
                                 source_bit_depth=row.bit_depth,
                                 source_sample_rate=row.sample_rate,
                                 source_is_lossless=row.is_lossless,
