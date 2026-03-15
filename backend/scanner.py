@@ -83,8 +83,13 @@ class LibraryScanner:
                     if frame:
                         return str(frame)
                 # Try MP4 atom (M4A, AAC, ALAC)
+                # Note: VorbisComment (FLAC/OGG) raises ValueError for non-ASCII
+                # keys like ©nam, so we guard with try/except.
                 if mp4_key and audio.tags:
-                    val = audio.tags.get(mp4_key)
+                    try:
+                        val = audio.tags.get(mp4_key)
+                    except (ValueError, KeyError):
+                        val = None
                     if val:
                         item = val[0] if isinstance(val, list) else val
                         # MP4 trkn/disk are tuples like (track_num, total)
@@ -129,16 +134,24 @@ class LibraryScanner:
                 "isrc": get_tag("isrc", "TSRC"),
             }
 
-            # Parse track number (handle "1/12" format)
+            # Parse track number (handle "1/12" format and vinyl "A1"/"B02")
             if metadata["track_number"]:
                 track_num = str(metadata["track_number"]).split("/")[0]
                 try:
                     metadata["track_number"] = int(track_num)
                 except ValueError:
-                    metadata["track_number"] = None
+                    # Vinyl side notation: A=side1, B=side2, C=side3, D=side4, ...
+                    # e.g. A1->track 1 disc 1, B02->track 2 disc 2, C03->track 3 disc 3
+                    vinyl_match = re.match(r'^([A-Za-z])0*(\d+)$', track_num)
+                    if vinyl_match:
+                        side = vinyl_match.group(1).upper()
+                        metadata["track_number"] = int(vinyl_match.group(2))
+                        metadata["disc_number"] = ord(side) - ord('A') + 1
+                    else:
+                        metadata["track_number"] = None
 
-            # Parse disc number
-            if metadata["disc_number"]:
+            # Parse disc number (skip if already set by vinyl notation above)
+            if metadata["disc_number"] and not isinstance(metadata["disc_number"], int):
                 disc_num = str(metadata["disc_number"]).split("/")[0]
                 try:
                     metadata["disc_number"] = int(disc_num)
@@ -412,87 +425,96 @@ class LibraryScanner:
                         album_title = metadata["title"]
                         logger.info(f"No album tag, using title as album: {album_title}")
 
-                    # Get or create canonical entities
-                    # Note: compound artist names (e.g. "Beth Hart & Joe Bonamassa")
-                    # are stored as-is. Splitting into individual artists is done
-                    # separately by normalize_artists.py (with Last.fm verification)
-                    # to avoid incorrectly splitting band names like "Simon & Garfunkel".
-                    artist = self.get_or_create_artist(db, artist_name)
-                    track = self.get_or_create_track(db, metadata["title"], artist_name)
-                    album = self.get_or_create_album(db, album_title, artist_name, metadata)
+                    # Use a savepoint so that a single-file error only rolls back
+                    # this file, not the entire batch since the last commit.
+                    savepoint = db.begin_nested()
+                    try:
+                        # Get or create canonical entities
+                        # Note: compound artist names (e.g. "Beth Hart & Joe Bonamassa")
+                        # are stored as-is. Splitting into individual artists is done
+                        # separately by normalize_artists.py (with Last.fm verification)
+                        # to avoid incorrectly splitting band names like "Simon & Garfunkel".
+                        artist = self.get_or_create_artist(db, artist_name)
+                        track = self.get_or_create_track(db, metadata["title"], artist_name)
+                        album = self.get_or_create_album(db, album_title, artist_name, metadata)
 
-                    # Get or create album variant (physical edition)
-                    variant = self.get_or_create_album_variant(
-                        db, album, settings.translate_to_host_path(str(file_path.parent)), metadata
-                    )
+                        # Get or create album variant (physical edition)
+                        variant = self.get_or_create_album_variant(
+                            db, album, settings.translate_to_host_path(str(file_path.parent)), metadata
+                        )
 
-                    # Create track-artist association (if not exists)
-                    existing_ta = db.query(TrackArtist).filter(
-                        TrackArtist.track_id == track.id,
-                        TrackArtist.artist_id == artist.id,
-                        TrackArtist.role == "primary",
-                    ).first()
-                    if not existing_ta:
-                        db.add(TrackArtist(
+                        # Create track-artist association (if not exists)
+                        existing_ta = db.query(TrackArtist).filter(
+                            TrackArtist.track_id == track.id,
+                            TrackArtist.artist_id == artist.id,
+                            TrackArtist.role == "primary",
+                        ).first()
+                        if not existing_ta:
+                            db.add(TrackArtist(
+                                track_id=track.id,
+                                artist_id=artist.id,
+                                role="primary",
+                            ))
+
+                        # Create album-artist association (if not exists)
+                        existing_aa = db.query(AlbumArtist).filter(
+                            AlbumArtist.album_id == album.id,
+                            AlbumArtist.artist_id == artist.id,
+                            AlbumArtist.role == "primary",
+                        ).first()
+                        if not existing_aa:
+                            db.add(AlbumArtist(
+                                album_id=album.id,
+                                artist_id=artist.id,
+                                role="primary",
+                            ))
+
+                        # Create track-genre associations (split composite genres)
+                        genre_name = metadata.get("genre")
+                        if genre_name and genre_name.strip():
+                            from normalize_genres import parse_genre_string, normalize_genre_name
+                            genre_names = parse_genre_string(genre_name)
+                            for gn in genre_names:
+                                gn = normalize_genre_name(gn)
+                                genre = self.get_or_create_genre(db, gn)
+                                existing_tg = db.query(TrackGenre).filter(
+                                    TrackGenre.track_id == track.id,
+                                    TrackGenre.genre_id == genre.id,
+                                ).first()
+                                if not existing_tg:
+                                    db.add(TrackGenre(
+                                        track_id=track.id,
+                                        genre_id=genre.id,
+                                    ))
+
+                        # Create media file (physical file on disk)
+                        media_file = MediaFile(
                             track_id=track.id,
-                            artist_id=artist.id,
-                            role="primary",
-                        ))
+                            album_variant_id=variant.id,
+                            file_path=metadata["file_path"],
+                            file_format=metadata.get("file_format", "FLAC"),
+                            is_lossless=metadata.get("is_lossless", True),
+                            file_size_bytes=metadata.get("file_size_bytes"),
+                            file_modified_at=metadata.get("file_modified_at"),
+                            sample_rate=metadata.get("sample_rate"),
+                            bit_depth=metadata.get("bit_depth"),
+                            bitrate=metadata.get("bitrate"),
+                            channels=metadata.get("channels"),
+                            duration_seconds=metadata.get("duration_seconds"),
+                            track_number=metadata.get("track_number"),
+                            disc_number=metadata.get("disc_number", 1),
+                            isrc=metadata.get("isrc"),
+                        )
+                        db.add(media_file)
+                        db.flush()
 
-                    # Create album-artist association (if not exists)
-                    existing_aa = db.query(AlbumArtist).filter(
-                        AlbumArtist.album_id == album.id,
-                        AlbumArtist.artist_id == artist.id,
-                        AlbumArtist.role == "primary",
-                    ).first()
-                    if not existing_aa:
-                        db.add(AlbumArtist(
-                            album_id=album.id,
-                            artist_id=artist.id,
-                            role="primary",
-                        ))
+                        # Update is_analysis_source: CD quality (16bit lossless) > lossless > lossy
+                        self._update_analysis_source(db, track.id)
 
-                    # Create track-genre associations (split composite genres)
-                    genre_name = metadata.get("genre")
-                    if genre_name and genre_name.strip():
-                        from normalize_genres import parse_genre_string, normalize_genre_name
-                        genre_names = parse_genre_string(genre_name)
-                        for gn in genre_names:
-                            gn = normalize_genre_name(gn)
-                            genre = self.get_or_create_genre(db, gn)
-                            existing_tg = db.query(TrackGenre).filter(
-                                TrackGenre.track_id == track.id,
-                                TrackGenre.genre_id == genre.id,
-                            ).first()
-                            if not existing_tg:
-                                db.add(TrackGenre(
-                                    track_id=track.id,
-                                    genre_id=genre.id,
-                                ))
-
-                    # Create media file (physical file on disk)
-                    media_file = MediaFile(
-                        track_id=track.id,
-                        album_variant_id=variant.id,
-                        file_path=metadata["file_path"],
-                        file_format=metadata.get("file_format", "FLAC"),
-                        is_lossless=metadata.get("is_lossless", True),
-                        file_size_bytes=metadata.get("file_size_bytes"),
-                        file_modified_at=metadata.get("file_modified_at"),
-                        sample_rate=metadata.get("sample_rate"),
-                        bit_depth=metadata.get("bit_depth"),
-                        bitrate=metadata.get("bitrate"),
-                        channels=metadata.get("channels"),
-                        duration_seconds=metadata.get("duration_seconds"),
-                        track_number=metadata.get("track_number"),
-                        disc_number=metadata.get("disc_number", 1),
-                        isrc=metadata.get("isrc"),
-                    )
-                    db.add(media_file)
-                    db.flush()
-
-                    # Update is_analysis_source: CD quality (16bit lossless) > lossless > lossy
-                    self._update_analysis_source(db, track.id)
+                        savepoint.commit()
+                    except Exception as e:
+                        savepoint.rollback()
+                        raise  # re-raise to be caught by outer except
 
                     stats["added"] += 1
                     if track.id not in seen_track_ids:
@@ -508,7 +530,6 @@ class LibraryScanner:
                 except Exception as e:
                     logger.error(f"Error processing {file_path}: {e}")
                     stats["errors"] += 1
-                    db.rollback()
 
             # Final commit
             db.commit()
