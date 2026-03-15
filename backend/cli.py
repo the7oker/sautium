@@ -1588,5 +1588,100 @@ def generate_enrichment_embeddings_cmd(limit, batch_size, force, emb_type):
         sys.exit(1)
 
 
+@cli.command("fix-analysis-source")
+@click.option("--dry-run", is_flag=True, help="Show what would be done without making changes")
+def fix_analysis_source(dry_run):
+    """Recalculate is_analysis_source for all tracks.
+
+    Sets the best quality file per track as analysis source.
+    Priority: CD (16bit lossless) > other lossless > lossy.
+    """
+    with get_db_context() as db:
+        # Count current state
+        result = db.execute(text(
+            "SELECT COUNT(DISTINCT track_id) FROM media_files WHERE is_analysis_source = true"
+        )).scalar()
+        click.echo(f"Current tracks with analysis source: {result}")
+
+        total_tracks = db.execute(text("SELECT COUNT(*) FROM tracks")).scalar()
+        click.echo(f"Total tracks: {total_tracks}")
+        click.echo(f"Missing analysis source: {total_tracks - result}")
+
+        if dry_run:
+            # Show breakdown by format for tracks that would get analysis source
+            rows = db.execute(text("""
+                WITH no_source AS (
+                    SELECT t.id as track_id
+                    FROM tracks t
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM media_files mf
+                        WHERE mf.track_id = t.id AND mf.is_analysis_source = true
+                    )
+                ),
+                best_file AS (
+                    SELECT mf.track_id, mf.file_format, mf.is_lossless,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY mf.track_id
+                               ORDER BY
+                                   (mf.bit_depth = 16 AND mf.is_lossless) DESC,
+                                   mf.is_lossless DESC,
+                                   mf.id
+                           ) as rn
+                    FROM media_files mf
+                    JOIN no_source ns ON ns.track_id = mf.track_id
+                )
+                SELECT file_format, is_lossless, COUNT(*) as cnt
+                FROM best_file WHERE rn = 1
+                GROUP BY file_format, is_lossless
+                ORDER BY cnt DESC
+            """)).fetchall()
+            click.echo("\nWould set analysis source for:")
+            for row in rows:
+                click.echo(f"  {row.file_format} (lossless={row.is_lossless}): {row.cnt}")
+            click.echo("\nRun without --dry-run to apply.")
+            return
+
+        # Reset all and recalculate
+        click.echo("Recalculating is_analysis_source for all tracks...")
+        db.execute(text("UPDATE media_files SET is_analysis_source = false"))
+
+        updated = db.execute(text("""
+            WITH ranked AS (
+                SELECT id, track_id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY track_id
+                           ORDER BY
+                               (bit_depth = 16 AND is_lossless) DESC,
+                               is_lossless DESC,
+                               id
+                       ) as rn
+                FROM media_files
+            )
+            UPDATE media_files SET is_analysis_source = true
+            WHERE id IN (SELECT id FROM ranked WHERE rn = 1)
+        """)).rowcount
+
+        db.commit()
+
+        # Verify
+        new_count = db.execute(text(
+            "SELECT COUNT(DISTINCT track_id) FROM media_files WHERE is_analysis_source = true"
+        )).scalar()
+
+        # Breakdown
+        rows = db.execute(text("""
+            SELECT file_format, is_lossless, COUNT(*) as cnt
+            FROM media_files WHERE is_analysis_source = true
+            GROUP BY file_format, is_lossless
+            ORDER BY cnt DESC
+        """)).fetchall()
+
+        click.echo(f"\nUpdated {updated} files.")
+        click.echo(f"Tracks with analysis source: {new_count} / {total_tracks}")
+        click.echo("\nBreakdown:")
+        for row in rows:
+            click.echo(f"  {row.file_format} (lossless={row.is_lossless}): {row.cnt}")
+
+
 if __name__ == "__main__":
     cli()
