@@ -124,18 +124,21 @@ class Settings(BaseSettings):
     def translate_to_host_path(self, scanner_path: str) -> str:
         """Translate a scanner-visible path to a native OS path for DB storage.
 
+        Always normalizes to forward slashes for consistency across platforms
+        and HQPlayer URI compatibility.
+
         Docker: /music/Blues/track.flac → E:/Music/Blues/track.flac
-        Launcher: E:/Music/Blues/track.flac → E:/Music/Blues/track.flac (no-op)
+        Launcher: E:\\Music\\Blues\\track.flac → E:/Music/Blues/track.flac
         """
         host = self.music_host_path
         if not host or host == self.music_library_path:
-            return scanner_path
+            return scanner_path.replace("\\", "/")
         # Replace the scanner prefix with the host prefix
         lib = self.music_library_path.rstrip("/\\")
         host = host.rstrip("/\\")
         if scanner_path.startswith(lib):
-            return host + scanner_path[len(lib):]
-        return scanner_path
+            return (host + scanner_path[len(lib):]).replace("\\", "/")
+        return scanner_path.replace("\\", "/")
 
     def translate_to_local_path(self, db_path: str) -> str:
         """Translate a DB-stored native path back to a local path for file access.
