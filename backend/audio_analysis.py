@@ -460,9 +460,6 @@ class AudioAnalyzer:
         clap_batch_size = 16
         prefetch_workers = 4
 
-        if not librosa_only:
-            self.load_model()
-
         try:
             with get_db_context() as db:
                 # Query tracks to analyze
@@ -509,6 +506,9 @@ class AudioAnalyzer:
                 if total == 0:
                     logger.info("No tracks pending audio analysis")
                     return stats
+
+                if not librosa_only:
+                    self.load_model()
 
                 logger.info(f"Analyzing {total} tracks (librosa_only={librosa_only}, "
                             f"prefetch={prefetch_workers}, clap_batch={clap_batch_size})")

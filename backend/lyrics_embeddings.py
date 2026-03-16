@@ -278,6 +278,23 @@ class LyricsEmbeddingGenerator:
             logger.info("No tracks pending lyrics embedding generation")
             return stats
 
+        # Pre-filter: skip rows whose lyrics become empty after cleaning
+        # to avoid loading the model for nothing
+        viable_rows = []
+        for row in rows:
+            prepared = prepare_lyrics_text(row.plain_lyrics)
+            if prepared.strip():
+                viable_rows.append(row)
+            else:
+                stats["skipped"] += 1
+                stats["processed"] += 1
+
+        if not viable_rows:
+            logger.info(f"All {len(rows)} tracks skipped after lyrics cleaning (no viable content)")
+            return stats
+
+        rows = viable_rows
+
         logger.info(f"Processing {len(rows)} tracks for lyrics embeddings")
         if max_duration_seconds:
             logger.info(f"Time limit: {max_duration_seconds}s ({max_duration_seconds/60:.1f} min)")

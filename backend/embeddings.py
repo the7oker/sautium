@@ -263,8 +263,6 @@ class AudioEmbeddingGenerator:
         stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0}
         start_time = time.time()
 
-        self.load_model()
-
         try:
             with get_db_context() as db:
                 embedding_model = self._get_or_create_embedding_model(db)
@@ -304,6 +302,8 @@ class AudioEmbeddingGenerator:
                 if total == 0:
                     logger.info("No tracks pending embedding generation")
                     return stats
+
+                self.load_model()
 
                 logger.info(
                     f"Processing {total} tracks (batch_size={self.batch_size})"
