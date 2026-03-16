@@ -418,11 +418,18 @@ class SyncClient:
 
     def _import_artist_bios(self, conn, items: list[dict]) -> int:
         with conn.cursor() as cur:
-            # Batch upsert artists
-            artist_values = [
-                (item["artist_uuid"], item["artist_name"])
-                for item in items if item.get("artist_name")
-            ]
+            # Deduplicate items by (artist_uuid, source) — last wins
+            deduped = {
+                (item["artist_uuid"], item.get("source", "sync")): item
+                for item in items
+            }
+            unique_items = list(deduped.values())
+
+            # Batch upsert artists (deduplicated by uuid)
+            artist_values = list({
+                item["artist_uuid"]: (item["artist_uuid"], item["artist_name"])
+                for item in unique_items if item.get("artist_name")
+            }.values())
             if artist_values:
                 psycopg2.extras.execute_values(
                     cur,
@@ -440,7 +447,7 @@ class SyncClient:
                     item.get("url"), item.get("listeners"),
                     item.get("playcount"),
                 )
-                for item in items
+                for item in unique_items
             ]
             psycopg2.extras.execute_values(
                 cur,
