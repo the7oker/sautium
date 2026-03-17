@@ -58,8 +58,24 @@ def build():
         "--hidden-import", "desktop.settings",
         "--hidden-import", "desktop.updater",
         "--hidden-import", "desktop.db_init",
+        "--hidden-import", "desktop.p2p",
+        "--hidden-import", "desktop.p2p.sync_queries",
+        "--hidden-import", "desktop.p2p.sync_server",
+        "--hidden-import", "desktop.p2p.dht_service",
+        "--hidden-import", "desktop.p2p.p2p_manager",
+        "--hidden-import", "desktop.sync_client",
+        "--hidden-import", "aiohttp",
         "--collect-all", "customtkinter",
     ]
+
+    # Bundle libtorrent if installed (C++ extension for DHT)
+    try:
+        import libtorrent
+        lt_path = str(Path(libtorrent.__file__).parent)
+        cmd.extend(["--hidden-import", "libtorrent"])
+        print(f"  libtorrent found: {lt_path}")
+    except ImportError:
+        print("  WARNING: libtorrent not installed — DHT will be disabled in build")
 
     if icon_path.exists():
         cmd.extend(["--icon", str(icon_path)])

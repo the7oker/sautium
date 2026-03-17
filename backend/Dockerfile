@@ -58,14 +58,18 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Optional: libtorrent for P2P DHT peer discovery (graceful degradation if unavailable)
+RUN pip install --no-cache-dir libtorrent || echo "WARNING: libtorrent not available — DHT peer discovery disabled"
+
 # Copy application code
 COPY . .
 
 # Create cache directory for models
 RUN mkdir -p /root/.cache
 
-# Expose FastAPI port
+# Expose FastAPI port and DHT UDP port
 EXPOSE 8000
+EXPOSE 19001/udp
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

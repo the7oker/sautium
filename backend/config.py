@@ -91,6 +91,11 @@ class Settings(BaseSettings):
     openai_compat_name: Optional[str] = None
     default_provider: str = "claude_code"
 
+    # P2P / DHT Configuration
+    p2p_enabled: bool = True              # Docker backend announces in DHT by default
+    p2p_dht_port: int = 19001             # UDP port for libtorrent DHT
+    p2p_announce_port: int = 8800         # external HTTP port announced to peers
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

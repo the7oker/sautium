@@ -431,6 +431,7 @@ class AudioAnalyzer:
         track_ids: Optional[list] = None,
         worker_id: Optional[int] = None,
         worker_count: Optional[int] = None,
+        cancel_flag=None,
     ) -> Dict[str, int]:
         """
         Batch analyze tracks with pipelined I/O, CPU, and GPU.
@@ -517,6 +518,10 @@ class AudioAnalyzer:
                 pbar = tqdm(total=total, desc="Analyzing audio", unit="track")
 
                 for batch_start in range(0, total, clap_batch_size):
+                    if cancel_flag and cancel_flag():
+                        logger.info("Audio analysis cancelled by user")
+                        break
+
                     if max_duration_seconds:
                         elapsed = time.time() - start_time
                         if elapsed >= max_duration_seconds:

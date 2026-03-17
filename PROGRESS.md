@@ -2371,6 +2371,82 @@ Implemented the first stage of P2P data synchronization (S1) using HTTP between 
 
 ---
 
+## P2P Phase P2: DHT Peer Discovery + Launcher Sync Server - DONE
+
+**Date:** 2026-03-17
+
+### What was done
+
+Implemented BitTorrent DHT-based peer discovery so that both the Docker backend and desktop launcher announce enriched artists and find each other automatically — no manual configuration needed.
+
+**DHT Service** (`desktop/p2p/dht_service.py`, `backend/dht_service.py`):
+- libtorrent DHT session with bootstrap from public routers (router.bittorrent.com, etc.)
+- Per-artist announce: `SHA1("MusicAIDJ-artist:" + artist_uuid)` as infohash
+- Announce HTTP sync port so peers know where to connect
+- Periodic re-announce every 15 minutes (~3 announces/sec for 2550 artists)
+- Async lookup with futures + 15s timeout, peer cache with 30min TTL
+- Graceful degradation: `HAS_LIBTORRENT` flag, works without libtorrent installed
+
+**Launcher P2P layer** (`desktop/p2p/`):
+- `sync_queries.py` — shared SQL logic extracted from `backend/routers/sync.py` (framework-agnostic, takes psycopg2 conn)
+- `sync_server.py` — aiohttp HTTP server (port 19000) serving same sync endpoints as FastAPI backend, with gzip + rate limiting
+- `dht_service.py` — libtorrent DHT on UDP port 19001
+- `p2p_manager.py` — orchestrates sync server + DHT in background asyncio thread (separate from tkinter main thread)
+- Auto-install P2P deps (`aiohttp`, `libtorrent`) via `_ensure_p2p_deps()` in launcher
+
+**Docker backend DHT integration** (`backend/main.py`, `backend/config.py`):
+- DHTService started in FastAPI `lifespan()` — same event loop as uvicorn
+- Queries enriched artists at startup, announces all 2550 in DHT (port 8800)
+- `POST /dht/reannounce` endpoint for updating announces after enrichment
+- Health endpoint returns `"type": "musicaidj-peer"` + DHT stats
+- Config: `P2P_ENABLED`, `P2P_DHT_PORT` (19001/udp), `P2P_ANNOUNCE_PORT` (8800)
+- `docker-compose.yml`: UDP port 19001 exposed for DHT
+
+**Enrichment cancel fix** (`backend/embeddings.py`, `backend/audio_analysis.py`, `backend/track_enrichment.py`):
+- `cancel_flag` parameter added to `generate_embeddings()` and `analyze_all()`
+- Checked on every batch iteration (was only checked between pipeline stages)
+- Cancel now responds within seconds instead of waiting for entire stage to finish
+
+### Architecture
+
+```
+Docker Backend (port 8800)          Desktop Launcher (port 19000)
+┌──────────────────────┐            ┌──────────────────────┐
+│ FastAPI + Sync API   │            │ aiohttp Sync Server  │
+│ DHT (UDP 19001)      │            │ DHT (UDP 19001)      │
+│ Announces 2550       │◄──DHT──►  │ Announces enriched   │
+│ artists @ port 8800  │            │ artists @ port 19000 │
+└──────────────────────┘            └──────────────────────┘
+```
+
+### Testing
+- Docker backend: DHT bootstrap ~1s, 277+ nodes, 2550 artists announced
+- Health: `{"type": "musicaidj-peer", "dht": {"running": true, "nodes": 277, "announced_artists": 2550}}`
+- libtorrent 2.0.11 wheel installs cleanly for Python 3.11 (cp311 manylinux wheel)
+- Fixed `dht_announce()` API: libtorrent 2.0.11 requires explicit flags parameter (pass `0`)
+
+### Files
+- `backend/dht_service.py` (new)
+- `backend/main.py` (modified — DHT in lifespan, health endpoint, reannounce)
+- `backend/config.py` (modified — P2P settings)
+- `backend/Dockerfile` (modified — libtorrent install)
+- `backend/embeddings.py` (modified — cancel_flag in batch loop)
+- `backend/audio_analysis.py` (modified — cancel_flag in batch loop)
+- `backend/track_enrichment.py` (modified — pass cancel_flag to GPU functions)
+- `docker-compose.yml` (modified — DHT UDP port, P2P env vars)
+- `desktop/p2p/__init__.py` (new)
+- `desktop/p2p/sync_queries.py` (new)
+- `desktop/p2p/sync_server.py` (new)
+- `desktop/p2p/dht_service.py` (new)
+- `desktop/p2p/p2p_manager.py` (new)
+- `desktop/launcher.py` (modified — P2P integration)
+- `desktop/requirements.txt` (modified — aiohttp, libtorrent)
+- `desktop/build.py` (modified — P2P hidden imports)
+- `desktop/config_manager.py` (modified — P2P config)
+- `P2P_NETWORK.md` (modified — updated architecture, phases, resolved questions)
+
+---
+
 ## Next Steps
 
 ### Phase 2: External Data & Text Embeddings - COMPLETE ✅
@@ -2408,6 +2484,12 @@ Implemented the first stage of P2P data synchronization (S1) using HTTP between 
   - `artist_members` junction table, `artist_type`, `verification_status` columns
   - Auto-runs Pass 1 after scan; POST `/normalize-artists?pass2=true` for Last.fm verification
   - Sync protocol updated with `artist_members` category (11 categories total)
+- [x] **P2P Phase P2** ✅ — DHT peer discovery + launcher sync server:
+  - Per-artist DHT announces (SHA1 infohash), libtorrent 2.0.11
+  - Launcher: aiohttp sync server (port 19000) + DHT (UDP 19001)
+  - Docker backend: DHT in FastAPI lifespan (announces 2550 artists @ port 8800)
+  - Both use identical protocol — Docker is just another peer, not a special server
+  - Enrichment cancel fix: `cancel_flag` propagated to GPU batch loops
 
 ### Phase 4: Voice Interface & Advanced Features
 - Whisper for voice input (Ukrainian/English)

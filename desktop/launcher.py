@@ -41,6 +41,7 @@ class LauncherApp(ctk.CTk):
         self.config = load_config()
         self.service_manager = ServiceManager(self.config)
         self.api_client = BackendAPIClient()
+        self.p2p_manager = None
         self.tray = None
         self._update_thread = None
         self._stats_timer = None
@@ -263,6 +264,9 @@ class LauncherApp(ctk.CTk):
         # Silently generate node identity if not present
         self._ensure_node_identity()
 
+        # Start P2P services if enabled
+        self._start_p2p_if_enabled()
+
         # Auto-trigger Last.fm auth if pending from wizard
         self._check_lastfm_pending_auth()
 
@@ -278,6 +282,74 @@ class LauncherApp(ctk.CTk):
                 logger.debug(f"Node identity generation skipped: {e}")
 
         threading.Thread(target=_gen, daemon=True).start()
+
+    @staticmethod
+    def _ensure_p2p_deps(progress_cb=None):
+        """Install P2P dependencies (aiohttp, libtorrent) if missing."""
+        missing = []
+        try:
+            import aiohttp  # noqa: F401
+        except ImportError:
+            missing.append("aiohttp>=3.9.1")
+
+        try:
+            import libtorrent  # noqa: F401
+        except ImportError:
+            missing.append("libtorrent>=2.0.0")
+
+        if not missing:
+            return True
+
+        if progress_cb:
+            progress_cb(f"Installing P2P dependencies: {', '.join(missing)}...")
+        logger.info(f"Installing P2P deps: {missing}")
+
+        cmd = [sys.executable, "-m", "pip", "install", "--quiet"] + missing
+        kwargs = {"capture_output": True, "text": True, "timeout": 300}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        result = subprocess.run(cmd, **kwargs)
+        if result.returncode != 0:
+            logger.warning(f"P2P deps install failed: {result.stderr[:200]}")
+            if progress_cb:
+                progress_cb(f"P2P deps install failed (non-critical)")
+            return False
+
+        logger.info("P2P dependencies installed")
+        return True
+
+    def _start_p2p_if_enabled(self):
+        """Start P2P services if enabled in config."""
+        p2p_cfg = self.config.get("p2p", {})
+        if not p2p_cfg.get("enabled", False):
+            return
+
+        def _start():
+            try:
+                def progress(msg):
+                    self.after(
+                        0,
+                        lambda: self._progress_text.configure(text=msg),
+                    )
+
+                # Auto-install P2P deps if missing
+                self._ensure_p2p_deps(progress_cb=progress)
+
+                from desktop.p2p.p2p_manager import P2PManager
+                from desktop.node_identity import get_node_id
+
+                db_dsn = self._get_local_db_dsn()
+                node_id = get_node_id() or ""
+
+                self.p2p_manager = P2PManager(db_dsn, self.config)
+                self.p2p_manager.start(
+                    node_id=node_id, progress_cb=progress
+                )
+            except Exception as e:
+                logger.error(f"P2P startup failed: {e}", exc_info=True)
+
+        threading.Thread(target=_start, daemon=True).start()
 
     def _check_lastfm_pending_auth(self):
         """If user enabled Last.fm in wizard, trigger authorization."""
@@ -588,16 +660,75 @@ class LauncherApp(ctk.CTk):
         return f"postgresql://musicai:{pw}@localhost:{port}/music_ai"
 
     def _sync_library(self):
-        """Sync enrichment data from a remote source into local database."""
-        source_url = self.config.get("sync", {}).get(
-            "source_url", "http://localhost:8800"
-        )
-
+        """Sync enrichment data from peers (P2P) or a remote source."""
         self._btn_sync.configure(state="disabled", text="Syncing...")
         self._btn_scan.configure(state="disabled")
         self._btn_enrich.configure(state="disabled")
-        self._progress_text.configure(text=f"Connecting to {source_url}...")
 
+        use_p2p = (
+            self.p2p_manager
+            and self.p2p_manager.is_running
+            and self.config.get("p2p", {}).get("enabled", False)
+        )
+
+        if use_p2p:
+            self._progress_text.configure(text="P2P sync: searching DHT...")
+            self._sync_library_p2p()
+        else:
+            source_url = self.config.get("sync", {}).get(
+                "source_url", "http://localhost:8800"
+            )
+            self._progress_text.configure(
+                text=f"Connecting to {source_url}..."
+            )
+            self._sync_library_source(source_url)
+
+    def _sync_library_p2p(self):
+        """Sync enrichment data from P2P network."""
+        def _do_sync():
+            # Normalize local artists before sync
+            self.after(0, lambda: self._progress_text.configure(
+                text="Normalizing artists..."))
+            norm_result = self.api_client.normalize_artists()
+            if norm_result:
+                p1 = norm_result.get("statistics", {}).get("pass1", {})
+                if p1.get("split", 0) > 0:
+                    logger.info(f"Pre-sync normalization: {p1}")
+
+            def progress(msg):
+                self.after(
+                    0, lambda: self._progress_text.configure(text=msg)
+                )
+
+            try:
+                stats = self.p2p_manager.sync_from_peers(
+                    progress_cb=progress
+                )
+            except Exception as e:
+                logger.error(f"P2P sync failed: {e}", exc_info=True)
+                self.after(0, lambda: self._progress_text.configure(
+                    text=f"P2P sync failed: {str(e)[:100]}"))
+                self.after(0, self._sync_done)
+                return
+
+            total = sum(
+                v for v in stats.values() if isinstance(v, int)
+            )
+            msg = f"P2P sync complete — {total} items imported"
+            if total > 0:
+                details = ", ".join(
+                    f"{k}: {v}" for k, v in stats.items()
+                    if isinstance(v, int) and v > 0
+                )
+                msg += f" ({details})"
+
+            self.after(0, lambda: self._progress_text.configure(text=msg))
+            self.after(0, self._sync_done)
+
+        threading.Thread(target=_do_sync, daemon=True).start()
+
+    def _sync_library_source(self, source_url: str):
+        """Sync enrichment data from a fixed source URL (legacy/fallback)."""
         def _do_sync():
             from desktop.sync_client import SyncClient
 
@@ -847,6 +978,11 @@ class LauncherApp(ctk.CTk):
         self.update()
 
         def _shutdown():
+            if self.p2p_manager:
+                try:
+                    self.p2p_manager.stop()
+                except Exception as e:
+                    logger.debug(f"P2P stop error: {e}")
             self.service_manager.stop_all()
             self.after(0, self._final_quit)
 

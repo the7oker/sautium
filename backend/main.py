@@ -3,6 +3,7 @@ Music AI DJ - FastAPI Application
 Main entry point for the API server.
 """
 
+import asyncio
 import logging
 import logging.config
 from contextlib import asynccontextmanager
@@ -19,10 +20,15 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from config import settings, get_settings, LOGGING_CONFIG
+from dht_service import DHTService, HAS_LIBTORRENT
 
 # Configure logging
 logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger(__name__)
+
+# Global DHT service reference (set during lifespan)
+_dht_service: DHTService | None = None
+_dht_reannounce_task: asyncio.Task | None = None
 
 
 @asynccontextmanager
@@ -59,9 +65,50 @@ async def lifespan(app: FastAPI):
     from routers.player import start_status_poller, stop_status_poller
     start_status_poller()
 
+    # Start DHT service for P2P peer discovery
+    global _dht_service, _dht_reannounce_task
+    if settings.p2p_enabled and HAS_LIBTORRENT:
+        try:
+            _dht_service = DHTService(
+                listen_port=settings.p2p_dht_port,
+                http_port=settings.p2p_announce_port,
+            )
+            await _dht_service.start()
+
+            # Query and announce enriched artists
+            artist_uuids = await asyncio.to_thread(_get_enriched_artist_uuids)
+            if artist_uuids:
+                await _dht_service.announce_artists(artist_uuids)
+                logger.info(
+                    f"P2P online: {len(artist_uuids)} artists announced "
+                    f"(HTTP port {settings.p2p_announce_port})"
+                )
+            else:
+                logger.info("P2P online: no enriched artists to announce")
+
+            # Periodic re-announce
+            _dht_reannounce_task = asyncio.create_task(
+                _dht_service.periodic_reannounce()
+            )
+        except Exception as e:
+            logger.error(f"DHT startup failed: {e}")
+            _dht_service = None
+    elif settings.p2p_enabled:
+        logger.warning("P2P enabled but libtorrent not installed — DHT disabled")
+
     yield
 
     # Shutdown
+    if _dht_reannounce_task:
+        _dht_reannounce_task.cancel()
+        try:
+            await _dht_reannounce_task
+        except asyncio.CancelledError:
+            pass
+    if _dht_service:
+        await _dht_service.stop()
+        _dht_service = None
+
     stop_status_poller()
     logger.info("Shutting down application")
 
@@ -90,6 +137,23 @@ def test_db_connection() -> bool:
     return True
 
 
+def _get_enriched_artist_uuids() -> list[str]:
+    """Query enriched artist UUIDs (has embedding or audio_features)."""
+    conn = psycopg2.connect(settings.database_url)
+    conn.autocommit = True
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT ta.artist_id::text
+            FROM track_artists ta
+            WHERE EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = ta.track_id)
+               OR EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id)
+        """)
+        return [row[0] for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 @app.get("/")
 async def root():
     """Redirect to Web UI."""
@@ -98,9 +162,10 @@ async def root():
 
 @app.get("/health")
 async def health_check() -> Dict[str, Any]:
-    """Detailed health check including database and GPU."""
+    """Detailed health check including database, GPU, and P2P status."""
     health_status = {
         "status": "healthy",
+        "type": "musicaidj-peer",
         "checks": {}
     }
 
@@ -133,7 +198,33 @@ async def health_check() -> Dict[str, Any]:
         "exists": settings.music_library_exists
     }
 
+    # P2P / DHT status
+    if _dht_service:
+        health_status["checks"]["dht"] = _dht_service.get_dht_stats()
+    else:
+        health_status["checks"]["dht"] = {
+            "available": HAS_LIBTORRENT,
+            "running": False,
+            "enabled": settings.p2p_enabled,
+        }
+
     return health_status
+
+
+@app.post("/dht/reannounce")
+async def dht_reannounce() -> Dict[str, Any]:
+    """Re-query enriched artists and announce new ones in DHT."""
+    if not _dht_service:
+        return {"success": False, "message": "DHT not running"}
+
+    artist_uuids = await asyncio.to_thread(_get_enriched_artist_uuids)
+    new_count = len(set(artist_uuids) - _dht_service._announced)
+    await _dht_service.announce_artists(artist_uuids)
+    return {
+        "success": True,
+        "total_announced": _dht_service.announced_count,
+        "new": new_count,
+    }
 
 
 @app.get("/config")

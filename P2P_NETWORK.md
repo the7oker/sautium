@@ -22,9 +22,10 @@
 
 | Дані | Фаза | Опис |
 |------|-------|------|
-| Метадані треків | P1 | Artist, album, title, year, genre, duration |
-| Audio embeddings | P3 | CLAP 512d вектори для пошуку схожості |
-| Audio features | P3 | Tempo, key, energy, danceability, etc. |
+| Метадані треків | P2 | Artist, album, title, year, genre, duration |
+| Audio embeddings | P2 | CLAP 512d вектори для пошуку схожості |
+| Audio features | P2 | Tempo, key, energy, danceability, etc. |
+| Artist enrichment | P2 | Bios, tags, similar artists |
 | Text embeddings | P3 | Multilingual 384d вектори (опис, теги) |
 | Тексти пісень | P4 | Lyrics (якщо не захищені авторським правом) |
 | Аудіо файли | P5 | Тільки легальний контент (незалежні виконавці, CC-ліцензії) |
@@ -55,17 +56,16 @@
 ├─────────────────────────────────────────────┤
 │  P2P LAYER (нове)                            │
 │  ├── Node Identity (Ed25519 keypair)         │
-│  ├── libtorrent DHT (peer discovery)         │
-│  ├── NAT Traversal (UPnP + STUN)            │
-│  ├── Peer Protocol (metadata exchange)       │
-│  ├── Network Search (cross-library queries)  │
-│  └── Peer Manager (connections, reputation)  │
+│  ├── aiohttp Sync Server (HTTP + JSON + gz)  │
+│  ├── libtorrent DHT (per-artist announces)   │
+│  ├── NAT Traversal (UPnP)                   │
+│  └── Sync Client (HTTP pull from peers)      │
 ├─────────────────────────────────────────────┤
 │  UI LAYER                                    │
 │  ├── Connect/Disconnect toggle               │
 │  ├── Network peers list                      │
-│  ├── Cross-library search                    │
-│  └── Chat (peer-to-peer messaging)           │
+│  ├── Cross-library search (Phase P3)         │
+│  └── Chat (Phase P4)                         │
 └─────────────────────────────────────────────┘
 ```
 
@@ -105,7 +105,7 @@
 |-----------|---------|-----|
 | DHT + file transfer | **`libtorrent`** (C++ з Python bindings) | Доступ до публічної BT DHT (мільйони нод), вбудований файловий обмін, pip-installable |
 | NAT traversal | **`miniupnpc`** (UPnP) + STUN | UPnP для роутера, STUN для визначення зовнішнього IP |
-| Transport | TCP + **msgpack** serialization | Для P2P протоколу поверх DHT discovery |
+| Transport | **HTTP + JSON + gzip** | Той самий sync протокол що вже працює (inventory → batch pull), без кастомного бінарного формату |
 | Identity | **`cryptography`** (Ed25519) | Стандарт, швидкий, компактні ключі (32 bytes) |
 | Async networking | **`asyncio`** + `aiohttp` | Вже використовується в проєкті |
 
@@ -203,32 +203,33 @@ Embeddings ідентифікуються через комбінацію **(tra
 
 ## DHT Discovery Strategy
 
-### Базовий рівень: Загальний infohash
+### Принцип: Анонсування по артистах
 
-Всі Music AI DJ ноди анонсують себе під одним infohash:
+Launcher **не анонсує себе як ноду** — він анонсує **кожного артиста**, на якого має enrichment дані
+(embedding або audio_features для хоча б 1 треку).
+
 ```python
-MUSICAIDJ_INFOHASH = SHA1("MusicAIDJ-network-v1")
-```
-Будь-яка нода може знайти інших учасників мережі через `get_peers(MUSICAIDJ_INFOHASH)`.
-
-### Розширений рівень: Анонсування по артистах (ідея)
-
-Для targeted discovery — анонсувати infohash для кожного артиста в бібліотеці:
-```python
-# Нода з Pink Floyd в бібліотеці анонсує:
+# Launcher з enriched Pink Floyd анонсує:
 artist_infohash = SHA1("MusicAIDJ-artist:" + artist_uuid)
-session.dht_announce(artist_infohash)
+session.dht_announce(artist_infohash, port=19000)
+
+# Інший launcher шукає enrichment для Pink Floyd:
+peers = session.dht_get_peers(artist_infohash)
+# → отримує IP:port launchers які мають enrichment для Pink Floyd
 ```
+
+**Критерій анонсу**: артист має хоча б 1 трек з embedding АБО audio_features.
+
+**Масштаб** (на прикладі master бази):
+- 2 550 enriched артистів → 2 550 DHT announces
+- Re-announce кожні 15 хв: ~3 announce/sec — мізер для libtorrent
+- Навіть 10k артистів (~11/sec) — в межах норми
 
 **Переваги:**
-- Швидкий пошук "хто має Pink Floyd?" без опитування всіх пірів
-- Автоматичне з'єднання з людьми зі схожими смаками
-- Масштабується краще ніж broadcast до всіх пірів
-
-**Обмеження:**
-- 30k треків ≈ 3-5k унікальних артистів ≈ 3-5k announce операцій
-- DHT re-announce кожні 15 хвилин — помірне навантаження
-- Можна обмежити: анонсувати тільки top-100 артистів або тільки тих де є embeddings
+- Точний пошук: "хто має Pink Floyd?" → прямий DHT lookup
+- Launcher шукає тільки конкретних артистів, не весь каталог
+- Не потрібен загальний infohash мережі (немає broadcast/flood)
+- Масштабується природно — чим більше учасників, тим більше артистів доступно
 
 ---
 
@@ -291,101 +292,117 @@ session.dht_announce(artist_infohash)
 
 ---
 
-### Phase P2: P2P Service + Local Testing
+### Phase P2: Launcher Sync Server + DHT Discovery
 
-**Мета**: Базовий P2P сервіс з handshake, тестування на одному комп'ютері.
+**Мета**: Launcher стає і клієнтом, і сервером. Знаходить пірів через DHT, синхронізується через HTTP.
+
+**Шлях користувача**:
+```
+Scan Library → Sync Library (DHT пошук пірів) → Enrich Tracks (те що не знайшов) → Анонс своїх артистів
+```
+
+**Архітектура процесів в launcher**:
+```
+Main Thread:   CustomTkinter GUI (tkinter mainloop)
+Background:    asyncio event loop (окремий потік)
+               ├── aiohttp HTTP server (порт 19000) — обслуговує sync запити від пірів
+               └── libtorrent DHT polling — анонси enriched артистів + пошук пірів
+```
 
 **Що зробити**:
 
-1. **P2P Service** (`backend/p2p/service.py`)
-   - Async TCP server на конфігурованому порті (default: 6881)
-   - Message protocol: length-prefixed msgpack frames
-   - Basic handshake: exchange node IDs, capabilities, library stats
+1. **Sync Server** (`desktop/p2p/sync_server.py`)
+   - aiohttp HTTP server на конфігурованому порті (default: 19000)
+   - Ті ж endpoints що в `backend/routers/sync.py`:
+     - `POST /api/sync/inventory` — inventory по track UUIDs
+     - `POST /api/sync/pull/{category}` — batch pull (11 категорій)
+   - JSON + gzip compression (стандартний HTTP Content-Encoding)
+   - Rate limiting на вхідні запити
 
-2. **Peer Protocol** (`backend/p2p/protocol.py`)
-   ```python
-   # Handshake
-   HELLO = {
-       "type": "hello",
-       "node_id": bytes,           # 20 bytes
-       "nickname": str,
-       "version": str,             # app version
-       "library_stats": {
-           "tracks": int,
-           "artists": int,
-           "albums": int,
-           "top_genres": list[str],
-           "has_embeddings": bool,
-           "has_audio_features": bool,
-       },
-       "public_key": bytes,        # Ed25519 public key
-       "signature": bytes,         # signs the message
-   }
+2. **Sync Queries** (`desktop/p2p/sync_queries.py`)
+   - SQL запити витягнуті з `backend/routers/sync.py` у спільний модуль
+   - Працює з будь-яким PostgreSQL з'єднанням (Docker або локальна БД)
+   - Без залежності від FastAPI/aiohttp — чиста бізнес-логіка
 
-   # Catalog exchange
-   CATALOG_REQUEST = {"type": "catalog_req", "page": int, "page_size": int}
-   CATALOG_RESPONSE = {"type": "catalog_res", "tracks": [...], "total": int}
+3. **DHT Service** (`desktop/p2p/dht_service.py`)
+   - libtorrent DHT session з bootstrap від публічних нод
+   - **Announce**: для кожного enriched артиста (embedding або audio_features)
+     ```python
+     infohash = SHA1("MusicAIDJ-artist:" + artist_uuid)
+     session.dht_announce(infohash, port=19000)
+     ```
+   - **Lookup**: знайти пірів з enrichment для конкретного артиста
+     ```python
+     peers = dht.get_peers(SHA1("MusicAIDJ-artist:" + artist_uuid))
+     # → [(ip, port), ...]
+     ```
+   - Periodic re-announce кожні 15 хвилин
+   - Кеш знайдених пірів (щоб не робити DHT lookup кожен раз)
 
-   # UUID set exchange (for sync)
-   UUID_SET = {"type": "uuid_set", "track_uuids": list[str]}
-   UUID_DIFF = {"type": "uuid_diff", "have": list[str], "missing": list[str]}
+4. **P2P Manager** (`desktop/p2p/p2p_manager.py`)
+   - Оркестрація: старт/стоп DHT + HTTP server
+   - Інтеграція з `SyncClient`: замість фіксованого `source_url` → DHT lookup
+   - Логіка Sync Library:
+     ```
+     1. Отримати список артистів без enrichment
+     2. Для кожного артиста: DHT lookup → знайти пір(и)
+     3. HTTP sync з кожним знайденим піром (стандартний inventory → pull)
+     4. Імпорт отриманих даних в локальну БД
+     ```
 
-   # Search
-   SEARCH_REQUEST = {"type": "search", "query": str, "filters": dict}
-   SEARCH_RESPONSE = {"type": "search_res", "results": [...]}
+5. **Launcher UI**
+   - Connect/Disconnect toggle (вмикає/вимикає DHT + HTTP server)
+   - Показати node ID
+   - Статус: "Online (announcing N artists, M peers found)"
 
-   # Similarity
-   SIMILAR_REQUEST = {"type": "similar", "embedding": list[float], "limit": int}
-   SIMILAR_RESPONSE = {"type": "similar_res", "results": [...]}
+**Docker backend = ще один пір**:
+Docker backend використовує той самий протокол. Різниця лише в обгортці —
+FastAPI замість aiohttp, але SQL запити ті ж самі через `sync_queries.py`.
 
-   # Ping/Pong
-   PING = {"type": "ping", "timestamp": float}
-   PONG = {"type": "pong", "timestamp": float}
-   ```
+**Структура файлів**:
+```
+desktop/p2p/
+  __init__.py
+  sync_server.py      # aiohttp HTTP server (sync endpoints)
+  sync_queries.py      # SQL запити (спільна логіка)
+  dht_service.py       # libtorrent DHT: announce + lookup
+  p2p_manager.py       # Оркестрація: старт/стоп, інтеграція з SyncClient
 
-3. **Launcher integration**
-   - Connect/Disconnect toggle в UI
-   - Показати node ID та nickname
-   - Список з'єднаних пірів
+backend/
+  dht_service.py       # Та ж DHT логіка для Docker backend
+  main.py              # DHT інтегровано в FastAPI lifespan
+  config.py            # P2P_ENABLED, P2P_DHT_PORT, P2P_ANNOUNCE_PORT
+```
 
-**Тестування**: 2-3 інстанси на localhost (різні порти, різні бази), handshake + catalog exchange.
+**Тестування**: 2 інстанси launcher на localhost (різні порти, різні бази),
+один з enrichment — інший робить Sync Library і отримує дані.
 
 ---
 
-### Phase P3: DHT Peer Discovery + Data Exchange
+### Phase P3: NAT Traversal + Cross-Library Search
 
-**Мета**: Ноди знаходять одне одного через BitTorrent DHT, обмінюються аналітикою.
+**Мета**: Забезпечити роботу через NAT (реальний інтернет) та додати крос-бібліотечний пошук.
 
-**DHT Client** (`backend/p2p/dht.py`):
-- `libtorrent` DHT session
-- Bootstrap від публічних DHT нод
-- Announce під infohash `SHA1("MusicAIDJ-network-v1")`
-- Опціонально: announce per-artist infohashes
-- Periodic re-announce (кожні 15 хвилин)
-- Get peers → список IP:port Music AI DJ нод
-
-**NAT Traversal** (`backend/p2p/nat.py`):
+**NAT Traversal** (`desktop/p2p/nat.py`):
 - UPnP port mapping через `miniupnpc` (автоматичне, без UI)
 - STUN для визначення зовнішнього IP:port
-- UDP hole punching для з'єднання через NAT
-- Fallback: працювати через outbound-only з'єднання
+- Fallback: DHT все одно працює через UDP outbound
 
-**Peer Manager** (`backend/p2p/peer_manager.py`):
-- Persistent список відомих пірів
-- Connection pooling (max 20-50 одночасних)
-- Ping/pong heartbeat
-- Peer exchange (PEX) — піри діляться списками інших пірів
+**Peer Cache** (розширення `p2p_manager.py`):
+- Persistent список відомих пірів (зберігати між сесіями)
+- Timeout на повільних/недоступних пірів
+- Пріоритизація пірів з більшою кількістю enriched артистів
 
-**Cross-Library Search:**
-- Distributed query до всіх з'єднаних пірів паралельно
-- Embedding-based similarity search по бібліотеках пірів
+**Cross-Library Search**:
+- "Хто з мережі має щось схоже на цей трек?" → embedding similarity
+- Distributed query до знайдених пірів паралельно
 - Library comparison (overlap analysis, taste similarity)
 - Timeout 5 секунд на повільних пірів
 
-**Web UI:**
-- Вкладка "Network" з списком пірів та їх library stats
-- Network search bar
-- "Users with similar taste" рейтинг
+**Handshake Protocol** (підготовка до P4):
+- Обмін node ID, library stats, capabilities
+- Потрібен для соціальних фіч (друзі, чат)
+- Ed25519 підпис повідомлень
 
 ---
 
@@ -528,38 +545,20 @@ session.dht_announce(artist_infohash)
 
 ### One Machine Testing (primary method)
 ```
-Terminal 1: Node A (port 6881, DB: musicaidj_a)
-Terminal 2: Node B (port 6882, DB: musicaidj_b)
-Terminal 3: Node C (port 6883, DB: musicaidj_c)
+Terminal 1: Launcher A (port 19000, DB: musicaidj_a) — має enrichment
+Terminal 2: Launcher B (port 19001, DB: musicaidj_b) — без enrichment, тільки scan
 ```
-Кожна нода з різним набором музики (3 маленькі тестові бібліотеки).
-
-### Docker Testing (network simulation)
-```yaml
-services:
-  node-a:
-    environment:
-      P2P_PORT: 6881
-      MUSIC_PATH: /music-a
-    volumes:
-      - ./test-library-a:/music-a:ro
-
-  node-b:
-    environment:
-      P2P_PORT: 6881
-      MUSIC_PATH: /music-b
-    volumes:
-      - ./test-library-b:/music-b:ro
-```
+Launcher A анонсує enriched артистів в DHT.
+Launcher B шукає тих самих артистів через DHT, знаходить Launcher A, синхронізується.
 
 ### Integration Test Scenario
-1. Node A starts → joins DHT → announces under MusicAIDJ infohash
-2. Node B starts → joins DHT → finds Node A via get_peers
-3. B connects to A → handshake → exchange library stats
-4. B sends artist UUIDs → A returns overlap + unique catalog
-5. B requests embeddings for interesting tracks → A returns vectors
-6. B does similarity search using A's embeddings locally
-7. A goes offline → B detects disconnect → continues working locally
+1. Launcher A starts → DHT bootstrap → announces enriched artists (per-artist infohash)
+2. Launcher B starts → DHT bootstrap → Sync Library
+3. B визначає артистів без enrichment → DHT lookup для кожного
+4. B знаходить A через DHT → HTTP sync (inventory → pull)
+5. B імпортує enrichment дані (embeddings, audio_features, bios, tags)
+6. B тепер сам може анонсувати ці артисти в DHT
+7. A goes offline → B продовжує працювати локально з отриманими даними
 
 ---
 
@@ -575,9 +574,17 @@ services:
    - Batch INSERT via `execute_values`, 500/batch, single DB connection
    - Compound artist UUID fix in scanner
    - Performance: ~125 tracks/sec (424 tracks in 3.4 sec)
-7. **[Phase S2]** TCP + msgpack sync protocol (direct peer connections)
-8. **[Phase P2]** Базовий P2P service з handshake
-9. **[Phase P2]** Тест: 2 ноди на localhost обмінюються hello + catalog
+7. ~~**[Phase P2]** Витягнути sync SQL логіку в `desktop/p2p/sync_queries.py`~~ ✅
+8. ~~**[Phase P2]** Реалізувати aiohttp sync server в launcher (`desktop/p2p/sync_server.py`)~~ ✅
+9. ~~**[Phase P2]** Реалізувати DHT service з per-artist announces (`desktop/p2p/dht_service.py`)~~ ✅
+10. ~~**[Phase P2]** P2P manager + інтеграція з SyncClient (`desktop/p2p/p2p_manager.py`)~~ ✅
+11. ~~**[Phase P2]** DHT в Docker backend (`backend/dht_service.py` + `main.py` lifespan)~~ ✅
+    - Docker анонсує enriched артистів в DHT, порт 8800 (зовнішній HTTP)
+    - Той самий `dht_service.py`, інтегрований в FastAPI lifespan
+    - `docker-compose.yml`: UDP порт 19001 для DHT
+12. **[Phase P2]** Тест: Docker backend + launcher знаходять один одного через DHT і синхронізуються
+13. **[Phase P3]** NAT traversal (UPnP) для роботи через інтернет
+14. **[Phase P3]** Cross-library search (embedding similarity між пірами)
 
 ---
 
@@ -592,10 +599,21 @@ services:
 | Bandwidth (70MB) | **gzip + lazy loading** | Metadata стиснений ~3MB. Embeddings — on demand, не при першому з'єднанні |
 | File sharing | **Phase P5** (libtorrent) | libtorrent підтримує повний BT protocol — використаємо коли буде готова платформа |
 
+## Resolved Questions (Phase P2)
+
+| Питання | Рішення | Обґрунтування |
+|---------|---------|---------------|
+| Transport protocol | **HTTP + JSON + gzip** | Той самий протокол що вже працює для sync. Без кастомного TCP/msgpack — простіше, надійніше, легше дебажити |
+| DHT strategy | **Per-artist announces** | Launcher анонсує не себе, а кожного enriched артиста. Точний пошук без broadcast |
+| Artist DHT announcement count | **Всіх enriched** (~2550) | 2550 announces кожні 15 хв = ~3/sec — мізер для libtorrent. Навіть 10k OK |
+| Handshake | **Не потрібен для P2** | Handshake потрібен тільки для соціальних фіч (друзі, чат) — це Phase P3/P4 |
+| Docker backend | **Той самий протокол** | Docker = ще один пір, та сама sync логіка, різниця тільки в обгортці (FastAPI vs aiohttp) |
+| libtorrent `dht_announce` API | **3 аргументи** (sha1, port, flags=0) | libtorrent 2.0.11 Python bindings вимагають explicit flags parameter |
+| libtorrent в Docker | **pip wheel** (cp311 manylinux) | Pre-built wheel 8.5MB, boost build deps не потрібні |
+
 ## Open Questions
 
-1. **Artist-based DHT announcement**: Скільки артистів анонсувати? Тільки top-N? Або всіх? Навантаження на DHT?
-2. **Embedding quantization**: Чи варто квантизувати 512 floats для передачі (float16, int8)? Економія bandwidth vs втрата точності?
-3. **Conflict resolution**: Якщо 2 піри мають різні Last.fm теги для одного артиста — хто "правий"?
-4. **PyInstaller + libtorrent**: Чи добре працює bundling C++ extension (.pyd) в .exe? Потрібно протестувати.
-5. **DHT announce rate**: libtorrent може мати обмеження на кількість announce операцій. Перевірити ліміти.
+1. **Embedding quantization**: Чи варто квантизувати 512 floats для передачі (float16, int8)? Економія bandwidth vs втрата точності?
+2. **Conflict resolution**: Якщо 2 піри мають різні Last.fm теги для одного артиста — хто "правий"?
+3. **PyInstaller + libtorrent**: Чи добре працює bundling C++ extension (.pyd) в .exe? Потрібно протестувати.
+4. **DHT announce rate limits**: Перевірити реальні ліміти libtorrent при 2500+ announces.

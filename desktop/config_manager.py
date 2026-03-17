@@ -54,6 +54,7 @@ DEFAULT_CONFIG = {
         "enabled": False,
         "node_name": None,
         "listen_port": 19000,
+        "manual_peers": [],
     },
     "sync": {
         "source_url": "http://localhost:8800",

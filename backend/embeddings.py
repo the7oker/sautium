@@ -240,7 +240,7 @@ class AudioEmbeddingGenerator:
             db.add(embedding)
         db.flush()
 
-    def generate_embeddings(self, limit: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[list] = None, worker_id: Optional[int] = None, worker_count: Optional[int] = None) -> Dict[str, int]:
+    def generate_embeddings(self, limit: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[list] = None, worker_id: Optional[int] = None, worker_count: Optional[int] = None, cancel_flag=None) -> Dict[str, int]:
         """
         Generate embeddings for tracks that don't have them yet.
 
@@ -348,6 +348,11 @@ class AudioEmbeddingGenerator:
                     prefetch_future = prefetch_pool.submit(_load_batch, batch_slices[0])
 
                     for batch_idx in tqdm(range(num_batches), desc="Generating embeddings", unit="batch"):
+                        # Check cancellation
+                        if cancel_flag and cancel_flag():
+                            logger.info("Embedding generation cancelled by user")
+                            break
+
                         # Check time limit
                         if max_duration_seconds:
                             elapsed = time.time() - start_time

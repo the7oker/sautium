@@ -114,7 +114,7 @@ def run_parallel_enrichment(
             _update_progress()
             gen = AudioEmbeddingGenerator()
             try:
-                emb_stats = gen.generate_embeddings(**gpu_kwargs)
+                emb_stats = gen.generate_embeddings(**gpu_kwargs, cancel_flag=cancel_flag)
                 combined["embeddings"] = emb_stats
                 pipeline_progress["gpu"] = f"GPU: {emb_stats.get('success', 0)} embeddings"
                 _update_progress()
@@ -130,7 +130,8 @@ def run_parallel_enrichment(
             analyzer = AudioAnalyzer()
             try:
                 af_stats = analyzer.analyze_all(
-                    force=force_audio_analysis, **gpu_kwargs
+                    force=force_audio_analysis, cancel_flag=cancel_flag,
+                    **gpu_kwargs
                 )
                 combined["audio_features"] = af_stats
                 pipeline_progress["gpu"] = f"GPU: {af_stats.get('success', 0)} features"
