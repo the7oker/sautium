@@ -1,5 +1,5 @@
 """
-Service lifecycle manager for Music AI DJ desktop launcher.
+Service lifecycle manager for Sautium desktop launcher.
 
 Manages three processes:
 1. PostgreSQL (pg_ctl)
@@ -507,7 +507,7 @@ class ServiceManager:
         if sys.platform != "win32":
             return
 
-        rule_name = f"Music AI DJ (port {port})"
+        rule_name = f"Sautium (port {port})"
         try:
             # Check if rule already exists
             check = subprocess.run(

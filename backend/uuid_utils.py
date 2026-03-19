@@ -10,8 +10,8 @@ import re
 import unicodedata
 import uuid
 
-# Fixed namespace for this project — never change this value!
-NAMESPACE = uuid.UUID('5ba7a9d0-1f8c-4c3d-9e7a-2b4f6c8d0e1f')
+# Fixed namespace for Sautium — uuid5(NAMESPACE_DNS, "sautium"). Never change!
+NAMESPACE = uuid.UUID('adc1ec0b-2c81-5e26-9938-a369c6f7a5e1')
 
 
 def normalize(text: str) -> str:

@@ -1,5 +1,5 @@
 """
-Shared sync SQL queries for Music AI DJ.
+Shared sync SQL queries for Sautium.
 
 Framework-agnostic module: takes a psycopg2 connection, returns dicts.
 Used by both the aiohttp P2P sync server and the FastAPI backend.

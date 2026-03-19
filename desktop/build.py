@@ -1,5 +1,5 @@
 """
-PyInstaller build script for Music AI DJ launcher.
+PyInstaller build script for Sautium launcher.
 
 Builds a single-file executable for the launcher UI.
 
@@ -37,7 +37,7 @@ def build():
         sys.executable, "-m", "PyInstaller",
         "--onefile",
         "--windowed",
-        "--name", "MusicAIDJ",
+        "--name", "Sautium",
         "--add-data", f"{desktop_dir / 'migrations'};desktop/migrations",
         "--add-data", f"{desktop_dir / 'assets'};desktop/assets",
         "--add-data", f"{ctk_path};customtkinter",
@@ -91,7 +91,7 @@ def build():
     entry_script.unlink(missing_ok=True)
 
     if result.returncode == 0:
-        print("Build successful! Output in dist/MusicAIDJ.exe")
+        print("Build successful! Output in dist/Sautium.exe")
     else:
         print("Build failed!")
         sys.exit(1)

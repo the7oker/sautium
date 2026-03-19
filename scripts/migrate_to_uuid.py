@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 # --- UUID generation (same as backend/uuid_utils.py) ---
 
-NAMESPACE = uuid.UUID('5ba7a9d0-1f8c-4c3d-9e7a-2b4f6c8d0e1f')
+NAMESPACE = uuid.UUID('adc1ec0b-2c81-5e26-9938-a369c6f7a5e1')
 
 def _normalize(text: str) -> str:
     return re.sub(r'\s+', ' ', unicodedata.normalize('NFC', text.strip().lower()))
@@ -1480,7 +1480,7 @@ def main():
             try:
                 with open(backup_file, 'w') as f:
                     subprocess.run(
-                        ["docker", "exec", "music-ai-postgres",
+                        ["docker", "exec", "sautium-postgres",
                          "pg_dump", "-U", "musicai", "music_ai"],
                         stdout=f, check=True, text=True
                     )

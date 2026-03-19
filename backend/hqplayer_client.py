@@ -134,6 +134,7 @@ class HQPlayerClient:
             return True
         except Exception as e:
             logger.error(f"Failed to send command: {e}")
+            self.disconnect()
             return False
 
     def _read_response(self) -> Optional[ET.Element]:
@@ -165,6 +166,7 @@ class HQPlayerClient:
             return None
         except Exception as e:
             logger.error(f"Failed to read response: {e}")
+            self.disconnect()
             return None
 
     def _execute_command(self, command: str, attributes: Optional[Dict[str, str]] = None,

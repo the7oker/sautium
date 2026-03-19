@@ -1,5 +1,5 @@
 """
-Configuration management for Music AI DJ.
+Configuration management for Sautium.
 Loads settings from environment variables with sensible defaults.
 """
 
@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # Application Info
-    app_name: str = "Music AI DJ"
+    app_name: str = "Sautium"
     app_version: str = "0.1.0"
     debug: bool = False
 

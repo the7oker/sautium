@@ -1,11 +1,11 @@
 """
-libtorrent DHT service for Music AI DJ.
+libtorrent DHT service for Sautium.
 
 Announces enriched artists in the BitTorrent DHT so other launchers
 can find this node and sync enrichment data via HTTP.
 
 Each enriched artist is announced under a unique infohash:
-    SHA1("MusicAIDJ-artist:" + artist_uuid)
+    SHA1("Sautium-artist:" + artist_uuid)
 
 Other launchers search for the same infohash to discover peers
 that have enrichment data for a specific artist.
@@ -28,7 +28,7 @@ except ImportError:
 
 
 # Prefix for artist infohash computation
-INFOHASH_PREFIX = "MusicAIDJ-artist:"
+INFOHASH_PREFIX = "Sautium-artist:"
 
 # DHT re-announce interval (seconds)
 REANNOUNCE_INTERVAL = 15 * 60  # 15 minutes

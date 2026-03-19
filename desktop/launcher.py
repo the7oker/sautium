@@ -1,5 +1,5 @@
 """
-Main launcher window for Music AI DJ.
+Main launcher window for Sautium.
 
 Shows service status, QR code for mobile access, and controls.
 Minimizes to system tray on close.
@@ -29,12 +29,12 @@ ctk.set_default_color_theme("blue")
 
 
 class LauncherApp(ctk.CTk):
-    """Main Music AI DJ launcher window."""
+    """Main Sautium launcher window."""
 
     def __init__(self):
         super().__init__()
 
-        self.title("Music AI DJ")
+        self.title("Sautium")
         self.geometry("480x790")
         self.resizable(False, False)
 
@@ -73,7 +73,7 @@ class LauncherApp(ctk.CTk):
         """Build the main launcher UI."""
         # Title
         ctk.CTkLabel(
-            self, text="Music AI DJ",
+            self, text="Sautium",
             font=ctk.CTkFont(size=24, weight="bold"),
         ).pack(pady=(15, 5))
 

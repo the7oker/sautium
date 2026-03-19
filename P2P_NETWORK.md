@@ -1,8 +1,8 @@
-# P2P Network — Music AI DJ
+# P2P Network — Sautium
 
 ## Vision
 
-Перетворити Music AI DJ з локального плеєра на **безсерверну P2P мережу**, де люди з великими офлайновими музичними бібліотеками можуть:
+Перетворити Sautium з локального плеєра на **безсерверну P2P мережу**, де люди з великими офлайновими музичними бібліотеками можуть:
 
 - **Ділитись аналітикою** — метадані, audio embeddings, аудіо фічі
 - **Шукати нову музику** — "хто з мережі має щось схоже на цей трек?"
@@ -43,7 +43,7 @@
 
 ```
 ┌─────────────────────────────────────────────┐
-│              Music AI DJ Node                │
+│              Sautium Node                │
 ├─────────────────────────────────────────────┤
 │  LOCAL LAYER (існуюче)                       │
 │  ├── PostgreSQL + pgvector                   │
@@ -136,7 +136,7 @@
 **Firewall (OS рівень):**
 - Windows автоматично показує prompt "Windows Security Alert" коли додаток слухає порт
 - Користувач натискає "Allow" один раз → правило зберігається назавжди
-- **Inno Setup інсталятор** (`desktop/installer/musicaidj.iss`) вже є в проєкті і працює з правами адміна
+- **Inno Setup інсталятор** (`desktop/installer/sautium.iss`) вже є в проєкті і працює з правами адміна
   → можемо додати `netsh advfirewall firewall add rule` в секцію `[Run]`
   (як робить qBittorrent — checkbox "Add Windows Firewall rule" в інсталяторі)
 - Для тонкого лаунчера (без інсталятора): Windows сам покаже prompt при першому запуску
@@ -163,7 +163,7 @@
 | Album | UUID v5 | `uuid5(NS, "album:{normalize(artist)}:{normalize(title)}")` | ✅ Готово |
 | Track | UUID v5 | `uuid5(NS, "song:{normalize(artist)}:{normalize(title)}")` | ✅ Готово |
 
-Namespace: `5ba7a9d0-1f8c-4c3d-9e7a-2b4f6c8d0e1f` (фіксований, в `backend/uuid_utils.py`)
+Namespace: `adc1ec0b-2c81-5e26-9938-a369c6f7a5e1` (фіксований, в `backend/uuid_utils.py`)
 
 ### Конвертовано в UUID v5 (Phase P1) ✅
 
@@ -210,7 +210,7 @@ Launcher **не анонсує себе як ноду** — він анонсу�
 
 ```python
 # Launcher з enriched Pink Floyd анонсує:
-artist_infohash = SHA1("MusicAIDJ-artist:" + artist_uuid)
+artist_infohash = SHA1("Sautium-artist:" + artist_uuid)
 session.dht_announce(artist_infohash, port=19000)
 
 # Інший launcher шукає enrichment для Pink Floyd:
@@ -286,7 +286,7 @@ peers = session.dht_get_peers(artist_infohash)
 
 **Node Identity** (`backend/p2p/identity.py`):
 - Генерація Ed25519 keypair при першому запуску
-- Збереження в `%LOCALAPPDATA%/MusicAIDJ/identity.key` (Windows)
+- Збереження в `%LOCALAPPDATA%/Sautium/identity.key` (Windows)
 - Node ID = SHA-256(public_key)[:20] (20 bytes, як у BitTorrent)
 - Nickname (user-configurable, default = random adjective+noun)
 
@@ -328,12 +328,12 @@ Background:    asyncio event loop (окремий потік)
    - libtorrent DHT session з bootstrap від публічних нод
    - **Announce**: для кожного enriched артиста (embedding або audio_features)
      ```python
-     infohash = SHA1("MusicAIDJ-artist:" + artist_uuid)
+     infohash = SHA1("Sautium-artist:" + artist_uuid)
      session.dht_announce(infohash, port=19000)
      ```
    - **Lookup**: знайти пірів з enrichment для конкретного артиста
      ```python
-     peers = dht.get_peers(SHA1("MusicAIDJ-artist:" + artist_uuid))
+     peers = dht.get_peers(SHA1("Sautium-artist:" + artist_uuid))
      # → [(ip, port), ...]
      ```
    - Periodic re-announce кожні 15 хвилин
@@ -545,8 +545,8 @@ backend/
 
 ### One Machine Testing (primary method)
 ```
-Terminal 1: Launcher A (port 19000, DB: musicaidj_a) — має enrichment
-Terminal 2: Launcher B (port 19001, DB: musicaidj_b) — без enrichment, тільки scan
+Terminal 1: Launcher A (port 19000, DB: sautium_a) — має enrichment
+Terminal 2: Launcher B (port 19001, DB: sautium_b) — без enrichment, тільки scan
 ```
 Launcher A анонсує enriched артистів в DHT.
 Launcher B шукає тих самих артистів через DHT, знаходить Launcher A, синхронізується.

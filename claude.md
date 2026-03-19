@@ -1,4 +1,4 @@
-# Music AI DJ Project
+# Sautium Project
 
 ## Project Overview
 
@@ -75,7 +75,7 @@ System should automatically detect quality source from folder structure:
 
 **Project Structure**:
 ```
-music-ai-dj/
+sautium-dj/
 ├── docker-compose.yml
 ├── .env.example
 ├── README.md
@@ -423,17 +423,17 @@ class AudioAnalyzer:
 **CLI Commands**:
 ```bash
 # Analyze all tracks
-docker exec music-ai-backend python cli.py analyze-audio
+docker exec sautium-backend python cli.py analyze-audio
 
 # Analyze specific track
-docker exec music-ai-backend python cli.py analyze-audio --track-id 123
+docker exec sautium-backend python cli.py analyze-audio --track-id 123
 
 # Re-analyze with updated models
-docker exec music-ai-backend python cli.py analyze-audio --force
+docker exec sautium-backend python cli.py analyze-audio --force
 
 # Search by features
-docker exec music-ai-backend python cli.py search-features --tempo 120-140 --key C --mode major
-docker exec music-ai-backend python cli.py search-features --danceability 0.7-1.0 --energy 0.8-1.0
+docker exec sautium-backend python cli.py search-features --tempo 120-140 --key C --mode major
+docker exec sautium-backend python cli.py search-features --danceability 0.7-1.0 --energy 0.8-1.0
 ```
 
 **Performance Considerations**:

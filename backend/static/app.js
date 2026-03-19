@@ -1,4 +1,4 @@
-/* Music AI DJ — Frontend Logic */
+/* Sautium — Frontend Logic */
 
 // -- State -------------------------------------------------------------------
 

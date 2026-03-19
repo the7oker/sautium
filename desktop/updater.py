@@ -1,5 +1,5 @@
 """
-Git-based auto-updater for Music AI DJ.
+Git-based auto-updater for Sautium.
 
 The application is a git clone. Updates are done via git pull.
 After update: check requirements.txt changes, run pip install if needed,

@@ -1,5 +1,5 @@
 """
-Command-line interface for Music AI DJ.
+Command-line interface for Sautium.
 """
 
 import logging
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 @click.group()
 def cli():
-    """Music AI DJ - AI-powered music library management."""
+    """Sautium - AI-powered music library management."""
     pass
 
 

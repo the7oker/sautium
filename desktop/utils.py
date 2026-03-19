@@ -1,5 +1,5 @@
 """
-Utility functions for Music AI DJ desktop launcher.
+Utility functions for Sautium desktop launcher.
 """
 
 import logging

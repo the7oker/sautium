@@ -1,5 +1,5 @@
 """
-Genius API integration for Music AI DJ.
+Genius API integration for Sautium.
 Fetches plain lyrics from Genius via the lyricsgenius library.
 
 Known issue: Genius.com hosts non-lyrics content (novels, legislation,

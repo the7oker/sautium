@@ -1,5 +1,5 @@
 """
-P2P Sync client for Music AI DJ.
+P2P Sync client for Sautium.
 
 Orchestrates enrichment data synchronization from a remote source
 (backend API or future P2P peer) into the local database.

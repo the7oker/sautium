@@ -20,7 +20,7 @@ DOCKER_DSN = "postgresql://musicai:supervisor@localhost:5432/music_ai"
 def get_launcher_dsn() -> str:
     """Build DSN from launcher config."""
     import os
-    cfg_path = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "MusicAIDJ" / "config.json"
+    cfg_path = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "Sautium" / "config.json"
     if cfg_path.exists():
         with open(cfg_path) as f:
             cfg = json.load(f)

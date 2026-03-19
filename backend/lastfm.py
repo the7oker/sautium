@@ -1,5 +1,5 @@
 """
-Last.fm API integration for Music AI DJ.
+Last.fm API integration for Sautium.
 Fetches artist bios, tags, and similar artists, storing in external_metadata table.
 """
 

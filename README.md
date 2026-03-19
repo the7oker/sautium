@@ -1,4 +1,4 @@
-# Music AI DJ
+# Sautium
 
 An AI-powered music library management system for personal FLAC collections. The system analyzes audio content, provides intelligent search and recommendations, and integrates with Claude AI for natural language music discovery.
 
@@ -32,7 +32,7 @@ An AI-powered music library management system for personal FLAC collections. The
 
 ```bash
 git clone <repository-url>
-cd music-ai-dj
+cd sautium-dj
 ```
 
 ### 2. Configure Environment
@@ -82,7 +82,7 @@ http://localhost:8000/docs
 ## Project Structure
 
 ```
-music-ai-dj/
+sautium-dj/
 ├── docker-compose.yml          # Docker services configuration
 ├── .env                        # Environment variables (not in git)
 ├── .env.example                # Environment template

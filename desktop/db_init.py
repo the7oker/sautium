@@ -278,7 +278,7 @@ def initialize_cluster(password: str, progress_cb: Optional[Callable] = None) ->
 def _configure_pg_hba(data_dir: Path) -> None:
     """Configure pg_hba.conf for localhost md5 auth."""
     hba_path = data_dir / "pg_hba.conf"
-    hba_content = """# Music AI DJ - PostgreSQL HBA Configuration
+    hba_content = """# Sautium - PostgreSQL HBA Configuration
 # TYPE  DATABASE  USER  ADDRESS  METHOD
 local   all       all            md5
 host    all       all   127.0.0.1/32  md5
@@ -295,7 +295,7 @@ def _configure_postgresql_conf(data_dir: Path) -> None:
     existing = conf_path.read_text() if conf_path.exists() else ""
 
     additions = """
-# Music AI DJ settings
+# Sautium settings
 listen_addresses = '127.0.0.1'
 shared_preload_libraries = ''
 log_destination = 'stderr'

@@ -1,5 +1,5 @@
 """
-Music AI DJ - FastAPI Application
+Sautium - FastAPI Application
 Main entry point for the API server.
 """
 
@@ -165,7 +165,7 @@ async def health_check() -> Dict[str, Any]:
     """Detailed health check including database, GPU, and P2P status."""
     health_status = {
         "status": "healthy",
-        "type": "musicaidj-peer",
+        "type": "sautium-peer",
         "checks": {}
     }
 

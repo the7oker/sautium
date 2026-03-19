@@ -89,8 +89,9 @@ def _status_poller():
                 _status_version += 1
                 _wake_sse_clients()
 
-        # Wait up to 1s, but wake early if _notify_update() signals
-        _status_changed.wait(timeout=1.0)
+        # Wait longer when disconnected to avoid log spam
+        poll_interval = 5.0 if _latest_status.get("state") == "disconnected" else 1.0
+        _status_changed.wait(timeout=poll_interval)
         _status_changed.clear()
 
 

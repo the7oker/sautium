@@ -1,5 +1,5 @@
 """
-Database models for Music AI DJ.
+Database models for Sautium.
 SQLAlchemy ORM models matching the PostgreSQL schema.
 
 Schema overview:

@@ -2,7 +2,7 @@
 P2P Sync API endpoints.
 
 Provides inventory and data pull endpoints for synchronizing
-enrichment data between Music AI DJ nodes.
+enrichment data between Sautium nodes.
 
 Protocol:
   1. POST /api/sync/inventory  — what enrichment data is available for given tracks?

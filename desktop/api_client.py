@@ -1,5 +1,5 @@
 """
-Minimal HTTP client for communicating with the Music AI DJ backend.
+Minimal HTTP client for communicating with the Sautium backend.
 
 Uses only urllib (no extra dependencies) to fetch stats and health info.
 """

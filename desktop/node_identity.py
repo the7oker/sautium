@@ -2,7 +2,7 @@
 Ed25519 node identity management for P2P networking.
 
 Generates and stores a persistent Ed25519 keypair used for node identification
-and message signing. Identity files are stored in %APPDATA%/MusicAIDJ/node_identity/.
+and message signing. Identity files are stored in %APPDATA%/Sautium/node_identity/.
 
 Requires the `cryptography` package. All functions degrade gracefully if unavailable.
 """

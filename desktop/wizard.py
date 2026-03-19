@@ -1,5 +1,5 @@
 """
-First-run setup wizard for Music AI DJ.
+First-run setup wizard for Sautium.
 
 A multi-step customtkinter wizard that collects:
 1. Welcome / intro
@@ -30,7 +30,7 @@ class SetupWizard(ctk.CTkToplevel):
     def __init__(self, parent, on_complete=None):
         super().__init__(parent)
 
-        self.title("Music AI DJ - Setup")
+        self.title("Sautium - Setup")
         self.geometry("600x500")
         self.resizable(False, False)
         self.transient(parent)
@@ -188,7 +188,7 @@ class SetupWizard(ctk.CTkToplevel):
     def _step_welcome(self):
         ctk.CTkLabel(
             self.content_frame,
-            text="Music AI DJ",
+            text="Sautium",
             font=ctk.CTkFont(size=28, weight="bold"),
         ).pack(pady=(30, 10))
 

@@ -1,5 +1,5 @@
 """
-LRCLIB API integration for Music AI DJ.
+LRCLIB API integration for Sautium.
 Fetches plain and synced (LRC) lyrics from lrclib.net.
 """
 
@@ -16,7 +16,7 @@ from models import TrackLyrics, ExternalMetadata
 logger = logging.getLogger(__name__)
 
 LRCLIB_BASE_URL = "https://lrclib.net"
-USER_AGENT = "MusicAIDJ/1.0 (https://github.com/music-ai-dj)"
+USER_AGENT = "Sautium/1.0 (https://github.com/sautium-dj)"
 
 
 class LrclibService:

@@ -1,5 +1,5 @@
 """
-Settings dialog for Music AI DJ.
+Settings dialog for Sautium.
 
 A tabbed CTkToplevel dialog for modifying application settings.
 """

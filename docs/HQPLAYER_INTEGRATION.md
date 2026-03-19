@@ -141,7 +141,7 @@ with HQPlayerConnection(host="172.26.80.1") as hqp:
     print(f"Position: {status.position:.1f}s / {status.length:.1f}s")
 ```
 
-### Integration with Music AI DJ Database
+### Integration with Sautium Database
 
 ```python
 from database import get_db_context

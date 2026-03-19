@@ -1,5 +1,5 @@
 """
-System tray integration for Music AI DJ.
+System tray integration for Sautium.
 
 Uses pystray to show an icon in the system tray with a context menu.
 """
@@ -47,9 +47,9 @@ def create_tray(
     )
 
     icon = pystray.Icon(
-        name="MusicAIDJ",
+        name="Sautium",
         icon=icon_image,
-        title="Music AI DJ",
+        title="Sautium",
         menu=menu,
     )
 

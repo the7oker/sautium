@@ -1,5 +1,5 @@
 """
-Search service for Music AI DJ.
+Search service for Sautium.
 Provides similarity search (by media file ID or text) and metadata filtering
 using pgvector cosine similarity over CLAP embeddings.
 

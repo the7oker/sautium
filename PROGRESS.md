@@ -1,4 +1,4 @@
-# Music AI DJ - Progress
+# Sautium - Progress
 
 ## Step 1.1: Project Setup & Docker Environment - DONE
 
@@ -967,27 +967,27 @@ FLAC file
 ### Usage examples
 ```bash
 # Run migration
-docker exec music-ai-postgres psql -U musicai -d music_ai -f /scripts/create_audio_features.sql
+docker exec sautium-postgres psql -U musicai -d music_ai -f /scripts/create_audio_features.sql
 
 # Test with 10 tracks
-docker exec music-ai-backend python cli.py analyze-audio --limit 10
+docker exec sautium-backend python cli.py analyze-audio --limit 10
 
 # Analyze all tracks
-docker exec music-ai-backend python cli.py analyze-audio
+docker exec sautium-backend python cli.py analyze-audio
 
 # Skip CLAP, only DSP features (faster)
-docker exec music-ai-backend python cli.py analyze-audio --librosa-only
+docker exec sautium-backend python cli.py analyze-audio --librosa-only
 
 # Search by features
-docker exec music-ai-backend python cli.py search-features --bpm-min 120 --bpm-max 140
-docker exec music-ai-backend python cli.py search-features --key Am
-docker exec music-ai-backend python cli.py search-features --instrument saxophone --vocal
-docker exec music-ai-backend python cli.py search-features --danceable --genre electronic
+docker exec sautium-backend python cli.py search-features --bpm-min 120 --bpm-max 140
+docker exec sautium-backend python cli.py search-features --key Am
+docker exec sautium-backend python cli.py search-features --instrument saxophone --vocal
+docker exec sautium-backend python cli.py search-features --danceable --genre electronic
 
 # RAG now understands audio features
-docker exec music-ai-backend python cli.py ask -q "Find me a fast instrumental track with piano"
-docker exec music-ai-backend python cli.py ask -q "Something danceable in D minor"
-docker exec music-ai-backend python cli.py ask -q "Slow atmospheric music with saxophone"
+docker exec sautium-backend python cli.py ask -q "Find me a fast instrumental track with piano"
+docker exec sautium-backend python cli.py ask -q "Something danceable in D minor"
+docker exec sautium-backend python cli.py ask -q "Slow atmospheric music with saxophone"
 ```
 
 ### Benefits
@@ -1186,50 +1186,50 @@ For each track, the pipeline runs steps in this order (only if data is missing):
 ### Usage examples
 ```bash
 # Complete enrichment after scan (all tracks, all steps)
-docker exec music-ai-backend python cli.py enrich-tracks
+docker exec sautium-backend python cli.py enrich-tracks
 
 # With filters - only Electronic genre, newest first
-docker exec music-ai-backend python cli.py enrich-tracks \
+docker exec sautium-backend python cli.py enrich-tracks \
   --genre Electronic \
   --newest-first \
   --limit 100
 
 # Only embeddings (skip expensive steps)
-docker exec music-ai-backend python cli.py enrich-tracks \
+docker exec sautium-backend python cli.py enrich-tracks \
   --skip-lastfm \
   --skip-audio-analysis \
   --limit 500
 
 # Only Last.fm enrichment (for tracks that have embeddings)
-docker exec music-ai-backend python cli.py enrich-tracks \
+docker exec sautium-backend python cli.py enrich-tracks \
   --skip-embeddings \
   --skip-text-embeddings \
   --skip-audio-analysis
 
 # Process first tracks of albums (for testing genre-specific features)
-docker exec music-ai-backend python cli.py enrich-tracks \
+docker exec sautium-backend python cli.py enrich-tracks \
   --track-number 1 \
   --genre IDM \
   --limit 20
 
 # Time-limited run (30 minutes)
-docker exec music-ai-backend python cli.py enrich-tracks \
+docker exec sautium-backend python cli.py enrich-tracks \
   --max-duration 1800 \
   --newest-first
 
 # Force regenerate embeddings for specific artist
-docker exec music-ai-backend python cli.py enrich-tracks \
+docker exec sautium-backend python cli.py enrich-tracks \
   --artist "Klaus Schulze" \
   --force-embeddings \
   --force-text-embeddings
 
 # Fast mode without audio analysis (embeddings + Last.fm only)
-docker exec music-ai-backend python cli.py enrich-tracks \
+docker exec sautium-backend python cli.py enrich-tracks \
   --skip-audio-analysis \
   --limit 1000
 
 # Vinyl-only enrichment
-docker exec music-ai-backend python cli.py enrich-tracks \
+docker exec sautium-backend python cli.py enrich-tracks \
   --quality Vinyl \
   --limit 50
 ```
@@ -1343,19 +1343,19 @@ The enrichment pipeline supports parallel processing through manual worker distr
 **Usage:**
 ```bash
 # Terminal 1 - Worker 0 of 3
-docker exec music-ai-backend python cli.py enrich-tracks \
+docker exec sautium-backend python cli.py enrich-tracks \
   --path "Electronic/Berlin School/Klaus Schulze" \
   --worker-id 0 --worker-count 3 \
   --max-duration 3600
 
 # Terminal 2 - Worker 1 of 3
-docker exec music-ai-backend python cli.py enrich-tracks \
+docker exec sautium-backend python cli.py enrich-tracks \
   --path "Electronic/Berlin School/Klaus Schulze" \
   --worker-id 1 --worker-count 3 \
   --max-duration 3600
 
 # Terminal 3 - Worker 2 of 3
-docker exec music-ai-backend python cli.py enrich-tracks \
+docker exec sautium-backend python cli.py enrich-tracks \
   --path "Electronic/Berlin School/Klaus Schulze" \
   --worker-id 2 --worker-count 3 \
   --max-duration 3600
@@ -2134,9 +2134,9 @@ Standalone desktop додаток для Windows з GUI.
 - `db_init.py` — ініціалізація БД з SQL міграцій
 - `settings.py` — Settings UI
 - `updater.py` — Git-based auto-updates
-- `build.py` — PyInstaller build → `dist/MusicAIDJ.exe`
+- `build.py` — PyInstaller build → `dist/Sautium.exe`
 - `migrations/001_initial.sql` — standalone database schema
-- `installer/musicaidj.iss` — Inno Setup installer
+- `installer/sautium.iss` — Inno Setup installer
 
 **Ключові особливості:**
 - Manages PostgreSQL, FastAPI, playback tracker як subprocess
@@ -2245,7 +2245,7 @@ AI DJ тепер може відповідати на питання "про щ�
 
 **Новий файл:** `desktop/node_identity.py`
 - Генерація Ed25519 keypair при першому запуску
-- Зберігання в `%APPDATA%/MusicAIDJ/node_identity/`
+- Зберігання в `%APPDATA%/Sautium/node_identity/`
 - Функції: `generate_identity()`, `get_node_id()`, `sign_message()`, `verify_signature()`
 - Graceful degradation якщо `cryptography` не встановлено
 
@@ -2381,7 +2381,7 @@ Implemented BitTorrent DHT-based peer discovery so that both the Docker backend 
 
 **DHT Service** (`desktop/p2p/dht_service.py`, `backend/dht_service.py`):
 - libtorrent DHT session with bootstrap from public routers (router.bittorrent.com, etc.)
-- Per-artist announce: `SHA1("MusicAIDJ-artist:" + artist_uuid)` as infohash
+- Per-artist announce: `SHA1("Sautium-artist:" + artist_uuid)` as infohash
 - Announce HTTP sync port so peers know where to connect
 - Periodic re-announce every 15 minutes (~3 announces/sec for 2550 artists)
 - Async lookup with futures + 15s timeout, peer cache with 30min TTL
@@ -2398,7 +2398,7 @@ Implemented BitTorrent DHT-based peer discovery so that both the Docker backend 
 - DHTService started in FastAPI `lifespan()` — same event loop as uvicorn
 - Queries enriched artists at startup, announces all 2550 in DHT (port 8800)
 - `POST /dht/reannounce` endpoint for updating announces after enrichment
-- Health endpoint returns `"type": "musicaidj-peer"` + DHT stats
+- Health endpoint returns `"type": "sautium-peer"` + DHT stats
 - Config: `P2P_ENABLED`, `P2P_DHT_PORT` (19001/udp), `P2P_ANNOUNCE_PORT` (8800)
 - `docker-compose.yml`: UDP port 19001 exposed for DHT
 
@@ -2421,7 +2421,7 @@ Docker Backend (port 8800)          Desktop Launcher (port 19000)
 
 ### Testing
 - Docker backend: DHT bootstrap ~1s, 277+ nodes, 2550 artists announced
-- Health: `{"type": "musicaidj-peer", "dht": {"running": true, "nodes": 277, "announced_artists": 2550}}`
+- Health: `{"type": "sautium-peer", "dht": {"running": true, "nodes": 277, "announced_artists": 2550}}`
 - libtorrent 2.0.11 wheel installs cleanly for Python 3.11 (cp311 manylinux wheel)
 - Fixed `dht_announce()` API: libtorrent 2.0.11 requires explicit flags parameter (pass `0`)
 

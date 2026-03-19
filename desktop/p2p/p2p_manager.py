@@ -1,5 +1,5 @@
 """
-P2P Manager for Music AI DJ.
+P2P Manager for Sautium.
 
 Orchestrates the aiohttp sync server and libtorrent DHT service.
 Runs in a background asyncio event loop thread, separate from the

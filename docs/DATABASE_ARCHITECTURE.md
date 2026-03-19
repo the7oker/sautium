@@ -1,8 +1,8 @@
-# Database Architecture - Music AI DJ
+# Database Architecture - Sautium
 
 ## Overview
 
-Music AI DJ uses a **hybrid approach** for metadata storage:
+Sautium uses a **hybrid approach** for metadata storage:
 - **Normalized tables** for well-understood, frequently-queried data
 - **Staging table** (`external_metadata`) for new/experimental metadata
 

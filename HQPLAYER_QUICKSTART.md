@@ -115,7 +115,7 @@ nc -zv 172.26.80.1 4321
 
 ### З Docker (після запуску контейнера)
 ```bash
-docker exec music-ai-backend nc -zv host.docker.internal 4321
+docker exec sautium-backend nc -zv host.docker.internal 4321
 ```
 
 ## Troubleshooting

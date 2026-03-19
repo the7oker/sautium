@@ -1,4 +1,4 @@
--- Music AI DJ - Full Schema (Canonical + Physical entities)
+-- Sautium - Full Schema (Canonical + Physical entities)
 -- ============================================================
 
 -- Extensions

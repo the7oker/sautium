@@ -1,4 +1,4 @@
--- Music AI DJ Database Schema
+-- Sautium Database Schema
 -- Canonical entities (UUID PKs) + Physical files (SERIAL PKs)
 
 -- Required extensions

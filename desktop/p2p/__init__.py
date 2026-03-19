@@ -1,1 +1,1 @@
-# P2P layer for Music AI DJ launcher
+# P2P layer for Sautium launcher

@@ -92,7 +92,7 @@ class SyncServer:
         return self._json_response(request, {
             "status": "ok",
             "node_id": self.node_id,
-            "type": "musicaidj-peer",
+            "type": "sautium-peer",
         })
 
     async def handle_inventory(self, request: web.Request) -> web.Response:
