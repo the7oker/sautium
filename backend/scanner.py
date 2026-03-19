@@ -8,6 +8,7 @@ and physical entities (AlbumVariant, MediaFile) per file on disk.
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
@@ -336,6 +337,13 @@ class LibraryScanner:
         """
         Scan library and import metadata to database.
 
+        Two-phase pipeline:
+          Phase 1 — extract metadata in parallel (ThreadPoolExecutor)
+          Phase 2 — import to DB single-threaded with entity caching
+
+        Disk reads stay roughly sequential (OS scheduler + small header
+        reads), so this is safe for both SSD and HDD.
+
         Args:
             limit: Maximum number of files to scan (for testing).
             skip_existing: Skip files already in database.
@@ -346,6 +354,8 @@ class LibraryScanner:
         Returns:
             Dictionary with statistics (processed, added, skipped, errors).
         """
+        from normalize_genres import parse_genre_string, normalize_genre_name
+
         stats = {
             "processed": 0,
             "added": 0,
@@ -359,7 +369,10 @@ class LibraryScanner:
             if progress_cb:
                 progress_cb(msg or f"Scanned {stats['processed']}/{total_files}", stats)
 
-        # Find audio files
+        def _cancelled() -> bool:
+            return cancel_check and cancel_check()
+
+        # ── Discover files ──────────────────────────────────────────
         if progress_cb:
             progress_cb("Discovering files...", stats)
         audio_files = self.find_audio_files(limit=limit, subpath=subpath)
@@ -369,41 +382,110 @@ class LibraryScanner:
             return stats
 
         total_files = len(audio_files)
-        _report(f"Found {total_files} files, starting scan...")
 
-        with get_db_context() as db:
-            # Get existing file paths for skip check
-            if skip_existing:
+        # ── Filter already-imported files ───────────────────────────
+        existing_paths: set = set()
+        if skip_existing:
+            with get_db_context() as db:
                 existing_paths = set(
-                    path[0] for path in db.query(MediaFile.file_path).all()
+                    row[0] for row in db.query(MediaFile.file_path).all()
                 )
-                logger.info(f"Found {len(existing_paths)} existing media files in database")
-            else:
-                existing_paths = set()
+            logger.info(f"Found {len(existing_paths)} existing media files in database")
 
-            # Process files with progress bar
-            for file_path in tqdm(audio_files, desc="Scanning files", unit="file"):
-                # Check for cancellation
-                if cancel_check and cancel_check():
-                    logger.info("Scan cancelled by user")
-                    db.commit()
+        files_to_process: List[Path] = []
+        for fp in audio_files:
+            if settings.translate_to_host_path(str(fp.absolute())) in existing_paths:
+                stats["skipped"] += 1
+            else:
+                files_to_process.append(fp)
+
+        stats["processed"] = stats["skipped"]
+
+        if not files_to_process:
+            stats["processed"] = total_files
+            _report(f"All {total_files} files already in database")
+            logger.info("No new files to process")
+            return stats
+
+        _report(f"Found {total_files} files, {len(files_to_process)} new")
+
+        # ── Phase 1: extract metadata in parallel ───────────────────
+        metadata_results: List[Tuple[Path, Dict[str, Any]]] = []
+        num_workers = min(4, os.cpu_count() or 4)
+        extract_done = 0
+        cancelled_in_phase1 = False
+
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            future_to_path = {
+                pool.submit(self.extract_metadata, fp): fp
+                for fp in files_to_process
+            }
+
+            for future in tqdm(
+                as_completed(future_to_path),
+                total=len(future_to_path),
+                desc="Extracting metadata",
+                unit="file",
+            ):
+                if _cancelled():
+                    cancelled_in_phase1 = True
+                    for f in future_to_path:
+                        f.cancel()
                     break
+
+                fp = future_to_path[future]
+                extract_done += 1
                 stats["processed"] += 1
 
-                # Report progress every 50 files
-                if stats["processed"] % 50 == 0:
-                    _report()
-
-                # Skip if already in database (compare translated path)
-                if skip_existing and settings.translate_to_host_path(str(file_path.absolute())) in existing_paths:
-                    stats["skipped"] += 1
-                    continue
-
-                # Extract metadata
-                metadata = self.extract_metadata(file_path)
-                if not metadata:
+                try:
+                    meta = future.result()
+                    if meta:
+                        metadata_results.append((fp, meta))
+                    else:
+                        stats["errors"] += 1
+                except Exception as e:
+                    logger.error(f"Error extracting metadata from {fp}: {e}")
                     stats["errors"] += 1
-                    continue
+
+                if extract_done % 100 == 0:
+                    _report(f"Extracting metadata: {extract_done}/{len(files_to_process)}")
+
+        logger.info(f"Metadata extracted for {len(metadata_results)} files "
+                     f"({stats['errors']} errors)")
+
+        if not metadata_results:
+            _report(f"Done: {stats['added']} added, {stats['skipped']} skipped, {stats['errors']} errors")
+            return stats
+
+        # ── Phase 2: import to database (single-threaded, cached) ───
+        # If cancel was pressed during Phase 1, we still import whatever
+        # metadata we managed to extract — cancel means "stop extracting",
+        # not "discard collected data". A second cancel during Phase 2
+        # will stop the import (keeping what was already committed).
+        _report(f"Importing {len(metadata_results)} files to database...")
+
+        # Entity caches — populated on demand, survive across files.
+        # Key = deterministic UUID (or directory_path for variants).
+        caches: Dict[str, dict] = {
+            "artist": {},
+            "track": {},
+            "album": {},
+            "genre": {},
+            "variant": {},     # dir_path -> AlbumVariant
+        }
+        # Association caches — avoid repeated DB existence checks.
+        assoc_ta: set = set()   # (track_id, artist_id, role)
+        assoc_aa: set = set()   # (album_id, artist_id, role)
+        assoc_tg: set = set()   # (track_id, genre_id)
+
+        with get_db_context() as db:
+            for file_path, metadata in tqdm(
+                metadata_results, desc="Importing", unit="file"
+            ):
+                if not cancelled_in_phase1 and _cancelled():
+                    logger.info("Scan cancelled by user during import")
+                    db.commit()
+                    break
 
                 try:
                     # Validate required fields
@@ -412,7 +494,6 @@ class LibraryScanner:
                         stats["errors"] += 1
                         continue
 
-                    # Get artist name (prefer album artist, fallback to artist)
                     artist_name = metadata.get("album_artist") or metadata.get("artist")
                     if not artist_name:
                         logger.warning(f"Missing artist for {file_path}, skipping")
@@ -421,73 +502,142 @@ class LibraryScanner:
 
                     album_title = metadata.get("album")
                     if not album_title:
-                        # Treat as a single — use track title as album name
                         album_title = metadata["title"]
                         logger.info(f"No album tag, using title as album: {album_title}")
 
-                    # Use a savepoint so that a single-file error only rolls back
-                    # this file, not the entire batch since the last commit.
+                    # Collect cache entries created inside the savepoint;
+                    # only commit them to the long-lived caches after the
+                    # savepoint succeeds (rollback safety).
+                    pending_cache: List[Tuple[str, Any, Any]] = []
+
                     savepoint = db.begin_nested()
                     try:
-                        # Get or create canonical entities
-                        # Note: compound artist names (e.g. "Beth Hart & Joe Bonamassa")
-                        # are stored as-is. Splitting into individual artists is done
-                        # separately by normalize_artists.py (with Last.fm verification)
-                        # to avoid incorrectly splitting band names like "Simon & Garfunkel".
-                        artist = self.get_or_create_artist(db, artist_name)
-                        track = self.get_or_create_track(db, metadata["title"], artist_name)
-                        album = self.get_or_create_album(db, album_title, artist_name, metadata)
+                        # ── Artist ──
+                        a_uid = artist_uuid(artist_name)
+                        if a_uid in caches["artist"]:
+                            artist = caches["artist"][a_uid]
+                        else:
+                            artist = db.query(Artist).filter(Artist.id == a_uid).first()
+                            if not artist:
+                                artist = Artist(id=a_uid, name=artist_name)
+                                db.add(artist)
+                                db.flush()
+                            pending_cache.append(("artist", a_uid, artist))
 
-                        # Get or create album variant (physical edition)
-                        variant = self.get_or_create_album_variant(
-                            db, album, settings.translate_to_host_path(str(file_path.parent)), metadata
-                        )
+                        # ── Track ──
+                        t_uid = track_uuid(metadata["title"], artist_name)
+                        if t_uid in caches["track"]:
+                            track = caches["track"][t_uid]
+                        else:
+                            track = db.query(Track).filter(Track.id == t_uid).first()
+                            if not track:
+                                track = Track(id=t_uid, title=metadata["title"])
+                                db.add(track)
+                                db.flush()
+                            pending_cache.append(("track", t_uid, track))
 
-                        # Create track-artist association (if not exists)
-                        existing_ta = db.query(TrackArtist).filter(
-                            TrackArtist.track_id == track.id,
-                            TrackArtist.artist_id == artist.id,
-                            TrackArtist.role == "primary",
-                        ).first()
-                        if not existing_ta:
-                            db.add(TrackArtist(
-                                track_id=track.id,
-                                artist_id=artist.id,
-                                role="primary",
-                            ))
+                        # ── Album ──
+                        al_uid = album_uuid(album_title, artist_name)
+                        if al_uid in caches["album"]:
+                            album = caches["album"][al_uid]
+                        else:
+                            album = db.query(Album).filter(Album.id == al_uid).first()
+                            if not album:
+                                album = Album(
+                                    id=al_uid,
+                                    title=album_title,
+                                    release_year=metadata.get("release_year"),
+                                    label=metadata.get("label"),
+                                    catalog_number=metadata.get("catalog_number"),
+                                )
+                                db.add(album)
+                                db.flush()
+                            pending_cache.append(("album", al_uid, album))
 
-                        # Create album-artist association (if not exists)
-                        existing_aa = db.query(AlbumArtist).filter(
-                            AlbumArtist.album_id == album.id,
-                            AlbumArtist.artist_id == artist.id,
-                            AlbumArtist.role == "primary",
-                        ).first()
-                        if not existing_aa:
-                            db.add(AlbumArtist(
-                                album_id=album.id,
-                                artist_id=artist.id,
-                                role="primary",
-                            ))
+                        # ── Album variant (physical edition) ──
+                        dir_path = settings.translate_to_host_path(str(file_path.parent))
+                        if dir_path in caches["variant"]:
+                            variant = caches["variant"][dir_path]
+                        else:
+                            variant = db.query(AlbumVariant).filter(
+                                AlbumVariant.directory_path == dir_path
+                            ).first()
+                            if not variant:
+                                variant = AlbumVariant(
+                                    album_id=album.id,
+                                    directory_path=dir_path,
+                                    sample_rate=metadata.get("sample_rate"),
+                                    bit_depth=metadata.get("bit_depth"),
+                                    is_lossless=metadata.get("is_lossless", True),
+                                )
+                                db.add(variant)
+                                db.flush()
+                            pending_cache.append(("variant", dir_path, variant))
 
-                        # Create track-genre associations (split composite genres)
+                        # ── Track-Artist association ──
+                        ta_key = (track.id, artist.id, "primary")
+                        if ta_key not in assoc_ta:
+                            existing_ta = db.query(TrackArtist).filter(
+                                TrackArtist.track_id == track.id,
+                                TrackArtist.artist_id == artist.id,
+                                TrackArtist.role == "primary",
+                            ).first()
+                            if not existing_ta:
+                                db.add(TrackArtist(
+                                    track_id=track.id,
+                                    artist_id=artist.id,
+                                    role="primary",
+                                ))
+                            assoc_ta.add(ta_key)
+
+                        # ── Album-Artist association ──
+                        aa_key = (album.id, artist.id, "primary")
+                        if aa_key not in assoc_aa:
+                            existing_aa = db.query(AlbumArtist).filter(
+                                AlbumArtist.album_id == album.id,
+                                AlbumArtist.artist_id == artist.id,
+                                AlbumArtist.role == "primary",
+                            ).first()
+                            if not existing_aa:
+                                db.add(AlbumArtist(
+                                    album_id=album.id,
+                                    artist_id=artist.id,
+                                    role="primary",
+                                ))
+                            assoc_aa.add(aa_key)
+
+                        # ── Track-Genre associations ──
                         genre_name = metadata.get("genre")
                         if genre_name and genre_name.strip():
-                            from normalize_genres import parse_genre_string, normalize_genre_name
                             genre_names = parse_genre_string(genre_name)
                             for gn in genre_names:
                                 gn = normalize_genre_name(gn)
-                                genre = self.get_or_create_genre(db, gn)
-                                existing_tg = db.query(TrackGenre).filter(
-                                    TrackGenre.track_id == track.id,
-                                    TrackGenre.genre_id == genre.id,
-                                ).first()
-                                if not existing_tg:
-                                    db.add(TrackGenre(
-                                        track_id=track.id,
-                                        genre_id=genre.id,
-                                    ))
+                                g_uid = genre_uuid(gn)
 
-                        # Create media file (physical file on disk)
+                                if g_uid in caches["genre"]:
+                                    genre = caches["genre"][g_uid]
+                                else:
+                                    genre = db.query(Genre).filter(Genre.id == g_uid).first()
+                                    if not genre:
+                                        genre = Genre(id=g_uid, name=gn)
+                                        db.add(genre)
+                                        db.flush()
+                                    pending_cache.append(("genre", g_uid, genre))
+
+                                tg_key = (track.id, genre.id)
+                                if tg_key not in assoc_tg:
+                                    existing_tg = db.query(TrackGenre).filter(
+                                        TrackGenre.track_id == track.id,
+                                        TrackGenre.genre_id == genre.id,
+                                    ).first()
+                                    if not existing_tg:
+                                        db.add(TrackGenre(
+                                            track_id=track.id,
+                                            genre_id=genre.id,
+                                        ))
+                                    assoc_tg.add(tg_key)
+
+                        # ── Media file ──
                         media_file = MediaFile(
                             track_id=track.id,
                             album_variant_id=variant.id,
@@ -508,23 +658,25 @@ class LibraryScanner:
                         db.add(media_file)
                         db.flush()
 
-                        # Update is_analysis_source: CD quality (16bit lossless) > lossless > lossy
                         self._update_analysis_source(db, track.id)
 
                         savepoint.commit()
                     except Exception as e:
                         savepoint.rollback()
-                        raise  # re-raise to be caught by outer except
+                        raise
+
+                    # Promote pending entries to long-lived caches
+                    for cache_name, key, obj in pending_cache:
+                        caches[cache_name][key] = obj
 
                     stats["added"] += 1
                     if track.id not in seen_track_ids:
                         seen_track_ids.add(track.id)
                         stats["unique_tracks"] += 1
 
-                    # Commit every 100 files to avoid huge transactions
                     if stats["added"] % 100 == 0:
                         db.commit()
-                        _report()
+                        _report(f"Importing: {stats['added']}/{len(metadata_results)}")
                         logger.info(f"Progress: {stats['added']} files added")
 
                 except Exception as e:
@@ -534,12 +686,18 @@ class LibraryScanner:
             # Final commit
             db.commit()
 
-        _report(f"Done: {stats['added']} added, {stats['skipped']} skipped, {stats['errors']} errors")
-        logger.info(
-            f"Scan complete: {stats['processed']} processed, "
-            f"{stats['added']} added, {stats['skipped']} skipped, "
-            f"{stats['errors']} errors"
-        )
+        if _cancelled():
+            _report(f"Cancelled: {stats['added']} added before cancel")
+            logger.info(f"Scan cancelled: {stats['added']} added, "
+                        f"{stats['skipped']} skipped, {stats['errors']} errors")
+        else:
+            stats["processed"] = total_files
+            _report(f"Done: {stats['added']} added, {stats['skipped']} skipped, {stats['errors']} errors")
+            logger.info(
+                f"Scan complete: {stats['processed']} processed, "
+                f"{stats['added']} added, {stats['skipped']} skipped, "
+                f"{stats['errors']} errors"
+            )
 
         return stats
 
