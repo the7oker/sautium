@@ -18,6 +18,7 @@ import psycopg2
 
 from desktop.api_client import BackendAPIClient
 from desktop.p2p import sync_queries
+from desktop.p2p.chat_service import ChatService
 from desktop.p2p.dht_service import DHTService
 from desktop.p2p.sync_server import SyncServer
 from desktop.sync_client import SyncClient
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class P2PManager:
-    """Orchestrates P2P sync server + DHT service."""
+    """Orchestrates P2P sync server + DHT service + chat."""
 
     def __init__(self, db_dsn: str, config: dict):
         self.db_dsn = db_dsn
@@ -35,13 +36,24 @@ class P2PManager:
         self._thread: Optional[threading.Thread] = None
         self._sync_server: Optional[SyncServer] = None
         self._dht_service: Optional[DHTService] = None
+        self._chat_service: Optional[ChatService] = None
         self._stop_event: Optional[asyncio.Event] = None
         self._reannounce_task: Optional[asyncio.Task] = None
+        self._pending_retry_task: Optional[asyncio.Task] = None
         self._running = False
+        self._on_message_cb: Optional[Callable] = None
 
     @property
     def is_running(self) -> bool:
         return self._running
+
+    def set_on_message_callback(self, cb: Callable):
+        """Set callback for incoming chat messages (called from P2P thread)."""
+        self._on_message_cb = cb
+
+    @property
+    def chat_service(self) -> Optional[ChatService]:
+        return self._chat_service
 
     def start(self, node_id: str = "", progress_cb: Callable = None):
         """Start P2P services in a background thread."""
@@ -53,15 +65,35 @@ class P2PManager:
         http_port = p2p_cfg.get("listen_port", 19000)
         dht_port = http_port + 1  # DHT on next port
 
+        # Load account info for chat
+        from desktop.node_identity import get_account_info
+        account_info = get_account_info()
+
         self._sync_server = SyncServer(
             db_dsn=self.db_dsn,
             port=http_port,
             node_id=node_id,
+            account_info=account_info,
         )
         self._dht_service = DHTService(
             listen_port=dht_port,
             http_port=http_port,
         )
+
+        # Initialize chat service if account exists
+        if account_info:
+            try:
+                from desktop.node_identity import get_private_key_raw
+                self._chat_service = ChatService(
+                    db_dsn=self.db_dsn,
+                    private_key_raw=get_private_key_raw(),
+                    public_key_hex=account_info["public_key_hex"],
+                )
+                self._sync_server.set_chat_service(
+                    self._chat_service, self._on_message_cb
+                )
+            except Exception as e:
+                logger.warning(f"Chat service init failed: {e}")
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
@@ -103,6 +135,17 @@ class P2PManager:
                 _progress("Starting DHT...")
                 await self._dht_service.start()
 
+                # Announce user identity in DHT
+                from desktop.node_identity import get_account_info
+                account_info = get_account_info()
+                if account_info and account_info.get("invite_code"):
+                    await self._dht_service.announce_user(
+                        account_info["invite_code"]
+                    )
+                    _progress(
+                        f"User announced: {account_info['invite_code']}"
+                    )
+
                 # Announce enriched artists
                 _progress("Querying enriched artists...")
                 artist_uuids = await self._get_enriched_artists()
@@ -121,6 +164,12 @@ class P2PManager:
                 self._reannounce_task = asyncio.create_task(
                     self._dht_service.periodic_reannounce()
                 )
+
+                # Start pending message retry loop
+                if self._chat_service:
+                    self._pending_retry_task = asyncio.create_task(
+                        self._retry_pending_messages()
+                    )
             else:
                 _progress(
                     "P2P online (HTTP only, DHT disabled — "
@@ -140,12 +189,13 @@ class P2PManager:
 
     async def _cleanup(self):
         """Clean shutdown of all services."""
-        if self._reannounce_task:
-            self._reannounce_task.cancel()
-            try:
-                await self._reannounce_task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._reannounce_task, self._pending_retry_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         if self._dht_service:
             await self._dht_service.stop()
@@ -404,11 +454,207 @@ class P2PManager:
             _progress(f"  Sync from {peer_addr} failed: {e}")
             return {}
 
+    # -------------------------------------------------------------------
+    # Chat operations (called from launcher thread)
+    # -------------------------------------------------------------------
+
+    def send_message(self, friend_id: int, content: str) -> bool:
+        """Send an encrypted message to a friend. Returns True if delivered."""
+        if not self._chat_service or not self._running:
+            return False
+
+        future = asyncio.run_coroutine_threadsafe(
+            self._async_send_message(friend_id, content),
+            self._loop,
+        )
+        try:
+            return future.result(timeout=30)
+        except Exception as e:
+            logger.error(f"Send message failed: {e}")
+            return False
+
+    async def _async_send_message(self, friend_id: int, content: str) -> bool:
+        """Async: encrypt and send message to a friend."""
+        msg = self._chat_service.prepare_outgoing(friend_id, content)
+        if not msg:
+            return False
+
+        # Get friend's invite code for DHT lookup
+        friends = self._chat_service.get_friends()
+        friend = next((f for f in friends if f["id"] == friend_id), None)
+        if not friend:
+            return False
+
+        # Find friend's address via DHT
+        peers = []
+        if self._dht_service and self._dht_service.is_available:
+            peers = await self._dht_service.lookup_user(
+                friend["invite_code"]
+            )
+
+        if not peers:
+            logger.info(
+                f"Friend {friend.get('username', '?')} offline, "
+                f"message queued"
+            )
+            return False
+
+        # Try each peer address
+        import aiohttp
+        for ip, port in peers:
+            url = f"http://{ip}:{port}/api/chat/message"
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        url, json=msg, timeout=aiohttp.ClientTimeout(total=10)
+                    ) as resp:
+                        if resp.status == 200:
+                            # Mark as delivered
+                            pending = self._chat_service.get_pending_messages()
+                            for pm in pending:
+                                if pm["friend_id"] == friend_id:
+                                    self._chat_service.mark_delivered(pm["id"])
+                            return True
+            except Exception as e:
+                logger.debug(f"Send to {ip}:{port} failed: {e}")
+
+        logger.info(f"Could not deliver to {friend.get('username', '?')}")
+        return False
+
+    def add_friend_by_invite(self, invite_code: str) -> Optional[dict]:
+        """
+        Add a friend by invite code: DHT lookup → handshake → add.
+
+        Returns friend info dict or None if failed.
+        Called from launcher thread (blocking).
+        """
+        if not self._running:
+            return None
+
+        future = asyncio.run_coroutine_threadsafe(
+            self._async_add_friend(invite_code),
+            self._loop,
+        )
+        try:
+            return future.result(timeout=30)
+        except Exception as e:
+            logger.error(f"Add friend failed: {e}")
+            return None
+
+    async def _async_add_friend(self, invite_code: str) -> Optional[dict]:
+        """Async: lookup invite code in DHT, handshake, add friend."""
+        if not self._dht_service:
+            return None
+
+        from desktop.node_identity import get_account_info, parse_invite_code
+        account = get_account_info()
+        if not account:
+            return None
+
+        # DHT lookup
+        peers = await self._dht_service.lookup_user(invite_code)
+        if not peers:
+            logger.info(f"User {invite_code} not found in DHT")
+            return None
+
+        # Try handshake with each peer
+        import aiohttp
+        handshake_data = {
+            "public_key_hex": account["public_key_hex"],
+            "username": account["username"],
+            "invite_code": account["invite_code"],
+        }
+
+        for ip, port in peers:
+            url = f"http://{ip}:{port}/api/chat/handshake"
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        url, json=handshake_data,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status == 200:
+                            result = await resp.json()
+                            if result.get("accepted"):
+                                # Add friend locally
+                                if self._chat_service:
+                                    self._chat_service.add_friend(
+                                        public_key_hex=result["public_key_hex"],
+                                        invite_code=result["invite_code"],
+                                        username=result.get("username", ""),
+                                    )
+                                return result
+            except Exception as e:
+                logger.debug(f"Handshake with {ip}:{port} failed: {e}")
+
+        return None
+
+    async def _retry_pending_messages(self):
+        """Periodically retry sending undelivered messages."""
+        while self._running:
+            await asyncio.sleep(60)  # check every minute
+            if not self._running or not self._chat_service:
+                break
+
+            pending = self._chat_service.get_pending_messages()
+            if not pending:
+                continue
+
+            # Group by friend
+            by_friend: dict[int, list[dict]] = {}
+            for msg in pending:
+                by_friend.setdefault(msg["friend_id"], []).append(msg)
+
+            for friend_id, messages in by_friend.items():
+                invite_code = messages[0]["invite_code"]
+                pubkey = messages[0]["public_key_hex"]
+
+                # Find friend via DHT
+                peers = []
+                if self._dht_service and self._dht_service.is_available:
+                    peers = await self._dht_service.lookup_user(invite_code)
+
+                if not peers:
+                    continue
+
+                # Try to deliver each message
+                import aiohttp
+                for msg in messages:
+                    encrypted = self._chat_service.encrypt_message(
+                        msg["content"], pubkey
+                    )
+                    payload = {
+                        "from_public_key": self._chat_service.public_key_hex,
+                        "encrypted": encrypted,
+                        "timestamp": msg["timestamp"].isoformat()
+                        if hasattr(msg["timestamp"], "isoformat")
+                        else str(msg["timestamp"]),
+                    }
+
+                    delivered = False
+                    for ip, port in peers:
+                        url = f"http://{ip}:{port}/api/chat/message"
+                        try:
+                            async with aiohttp.ClientSession() as session:
+                                async with session.post(
+                                    url, json=payload,
+                                    timeout=aiohttp.ClientTimeout(total=10),
+                                ) as resp:
+                                    if resp.status == 200:
+                                        delivered = True
+                                        break
+                        except Exception:
+                            pass
+
+                    if delivered:
+                        self._chat_service.mark_delivered(msg["id"])
+
     def get_status(self) -> dict:
         """Get P2P status for UI display."""
         status = {
             "running": self._running,
             "http_port": self.config.get("p2p", {}).get("listen_port", 19000),
+            "chat_available": self._chat_service is not None,
         }
         if self._dht_service:
             status.update(self._dht_service.get_dht_stats())

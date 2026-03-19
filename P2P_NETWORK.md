@@ -54,18 +54,19 @@
 │  ├── HQPlayer Control                        │
 │  └── Web UI                                  │
 ├─────────────────────────────────────────────┤
-│  P2P LAYER (нове)                            │
-│  ├── Node Identity (Ed25519 keypair)         │
-│  ├── aiohttp Sync Server (HTTP + JSON + gz)  │
-│  ├── libtorrent DHT (per-artist announces)   │
-│  ├── NAT Traversal (UPnP)                   │
-│  └── Sync Client (HTTP pull from peers)      │
+│  P2P LAYER                                     │
+│  ├── Account Identity (Argon2id + Ed25519)     │
+│  ├── aiohttp Sync Server (HTTP + JSON + gz)    │
+│  ├── libtorrent DHT (artists + user announces) │
+│  ├── E2E Chat (NaCl Box encryption)            │
+│  ├── NAT Traversal (UPnP)                     │
+│  └── Sync Client (HTTP pull from peers)        │
 ├─────────────────────────────────────────────┤
 │  UI LAYER                                    │
 │  ├── Connect/Disconnect toggle               │
 │  ├── Network peers list                      │
 │  ├── Cross-library search (Phase P3)         │
-│  └── Chat (Phase P4)                         │
+│  └── Chat (Phase P4) ← NEW                  │
 └─────────────────────────────────────────────┘
 ```
 
@@ -406,29 +407,73 @@ backend/
 
 ---
 
-### Phase P4: Social Features
+### Phase P4: Account System + Encrypted Chat ← CURRENT
 
-**Мета**: Комунікація між учасниками мережі.
+**Мета**: Портативна ідентичність, друзі та E2E зашифрований чат.
 
-1. **Peer-to-Peer Chat**
-   - Прямі повідомлення між нодами
-   - End-to-end encryption (X25519 key exchange + AES-256-GCM)
-   - Offline message queue (зберігати до наступного з'єднання)
+#### Account System (Deterministic Identity)
 
-2. **Nickname System**
-   - User-configurable nickname
-   - Публічний ключ як stable identifier
-   - Nickname uniqueness не гарантується (як у IRC)
+Користувач створює акаунт з username + password. Однаковий username + password
+на будь-якому пристрої = та сама ідентичність (ті ж ключі, той же invite code).
 
-3. **Music Recommendations**
+```
+username + password → Argon2id KDF (256MB, 4 iter) → 32-byte seed → Ed25519 keypair
+```
+
+**Invite Code**: `username#XXXX-XXXX-XXXX` (SHA-256(public_key)[:6] у hex)
+- Людино-читабельний, можна кинути в Telegram/Discord
+- Hash частина захищає від підробки (інший "bob42" матиме інший хеш)
+- Анонсується в DHT: `SHA1("Sautium-user:" + invite_code)`
+- При DHT lookup знаходиться IP:port → пряме з'єднання → обмін повними ключами
+
+**Бібліотеки**: `argon2-cffi` (KDF), `PyNaCl` (NaCl Box шифрування)
+
+#### Encrypted Chat
+
+- **NaCl Box** (Curve25519 + XSalsa20-Poly1305) — E2E шифрування
+- Ed25519 ключі конвертуються в Curve25519 для key exchange
+- Повідомлення зберігаються локально як plaintext (після дешифрування)
+- Offline queue: недоставлені повідомлення зберігаються, retry кожну хвилину через DHT
+
+**Протокол**:
+```
+POST /api/chat/handshake   — обмін публічними ключами (friend request)
+POST /api/chat/message     — зашифроване повідомлення
+POST /api/chat/key-rotation — сповіщення про зміну пароля/ключів
+```
+
+#### Key Rotation (зміна пароля)
+
+1. Генерується нова пара ключів (з нового пароля)
+2. Повідомлення `{new_public_key}` підписується **старим** приватним ключем
+3. Відправляється всім друзям через `/api/chat/key-rotation`
+4. Друг перевіряє підпис старим ключем → оновлює public key
+
+#### Friend List
+
+- Додавання по invite code: DHT lookup → handshake → mutual add
+- Зберігається в PostgreSQL (friends table)
+- Block/unblock, display name
+
+#### Що реалізовано
+
+| Компонент | Файл | Статус |
+|-----------|------|--------|
+| Account identity (Argon2id + Ed25519) | `desktop/node_identity.py` | ✅ |
+| Invite code (username#hash) | `desktop/node_identity.py` | ✅ |
+| Chat encryption (NaCl Box) | `desktop/p2p/chat_service.py` | ✅ |
+| Chat HTTP endpoints | `desktop/p2p/sync_server.py` | ✅ |
+| DHT user announce/lookup | `desktop/p2p/dht_service.py` | ✅ |
+| P2P chat integration | `desktop/p2p/p2p_manager.py` | ✅ |
+| DB tables (friends, messages) | `desktop/migrations/002_chat.sql` | ✅ |
+| Key rotation protocol | node_identity + sync_server | ✅ |
+| Pending message retry | p2p_manager | ✅ |
+| Chat UI в лаунчері | — | ⏳ TODO |
+
+5. **Music Recommendations** (Phase P4b)
    - "Рекомендую цей альбом" → broadcast до друзів
    - Shared playlists (список track metadata, не файли)
    - "Що зараз слухає [nickname]?" (opt-in)
-
-4. **Friends / Trust**
-   - Додати пір як "друг" (mutual follow)
-   - Приоритет з'єднання для друзів
-   - Автоматичне перепідключення до друзів
 
 ---
 
@@ -532,10 +577,15 @@ backend/
 - Шариться тільки metadata (ніяких файлових шляхів!)
 - Rate limiting на вхідні запити від пірів
 
+### Phase P4 (Chat) ✅
+- **Account system**: username + password → deterministic Ed25519 via Argon2id (256MB, 4 iterations)
+- **E2E encryption**: NaCl Box (Curve25519 + XSalsa20-Poly1305) — пароль/ключі ніколи не передаються
+- **Invite codes**: `username#XXXX-XXXX-XXXX` — тільки public key hash, не пароль
+- **Key rotation**: нові ключі підписуються старим ключем для верифікації
+- **Friend blocklist**: is_blocked flag, blocked friends не можуть надсилати повідомлення
+
 ### Future
-- End-to-end encryption для чату (X25519 + AES-256-GCM)
 - Selective sharing (вибрати які артисти/альбоми видимі)
-- Blocklist для небажаних нод
 - Bandwidth limiting (конфігурація в Settings)
 - IP reputation (автоматичний бан для flood/spam)
 
@@ -583,8 +633,13 @@ Launcher B шукає тих самих артистів через DHT, зна�
     - Той самий `dht_service.py`, інтегрований в FastAPI lifespan
     - `docker-compose.yml`: UDP порт 19001 для DHT
 12. **[Phase P2]** Тест: Docker backend + launcher знаходять один одного через DHT і синхронізуються
-13. **[Phase P3]** NAT traversal (UPnP) для роботи через інтернет
-14. **[Phase P3]** Cross-library search (embedding similarity між пірами)
+13. ~~**[Phase P4]** Account system (Argon2id → Ed25519) + invite codes~~ ✅
+14. ~~**[Phase P4]** E2E encrypted chat (NaCl Box) + friend list~~ ✅
+15. ~~**[Phase P4]** DHT user announces + lookup~~ ✅
+16. ~~**[Phase P4]** Chat HTTP endpoints + key rotation protocol~~ ✅
+17. **[Phase P4]** Chat UI в лаунчері (вкладка/діалог чату)
+18. **[Phase P3]** NAT traversal (UPnP) для роботи через інтернет
+19. **[Phase P3]** Cross-library search (embedding similarity між пірами)
 
 ---
 

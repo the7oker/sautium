@@ -55,6 +55,7 @@ DEFAULT_CONFIG = {
         "node_name": None,
         "listen_port": 19000,
         "manual_peers": [],
+        "chat_enabled": True,
     },
     "sync": {
         "source_url": "http://localhost:8800",

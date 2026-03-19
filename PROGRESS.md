@@ -2491,6 +2491,69 @@ Docker Backend (port 8800)          Desktop Launcher (port 19000)
   - Both use identical protocol — Docker is just another peer, not a special server
   - Enrichment cancel fix: `cancel_flag` propagated to GPU batch loops
 
+- [x] **P2P Phase P4: Account System + Encrypted Chat** ✅
+
+## P2P Phase P4: Account System + Encrypted Chat - DONE
+
+### What was done
+
+**Account System (Deterministic Identity)**:
+- Argon2id KDF: `username + password → 32-byte seed → Ed25519 keypair`
+  - Parameters: memory=256MB, iterations=4, parallelism=2
+  - Salt: `"{username}:sautium"` — different users with same password get different keys
+- Same username + password on any device = same keypair = same identity (portable)
+- Invite code: `username#XXXX-XXXX-XXXX` (SHA-256(public_key)[:6] in hex)
+  - Human-readable, shareable via messengers
+  - Hash part prevents impersonation (different keys → different hash)
+
+**E2E Encrypted Chat**:
+- NaCl Box encryption (Curve25519 + XSalsa20-Poly1305) via PyNaCl
+- Ed25519 keys converted to Curve25519 for Diffie-Hellman key exchange
+- Messages stored locally as plaintext after decryption (local DB, not transmitted)
+- Undelivered messages queued and retried every 60 seconds via DHT lookup
+
+**Chat Protocol (HTTP endpoints)**:
+- `POST /api/chat/handshake` — exchange public keys, mutual friend add (auto-accept)
+- `POST /api/chat/message` — send encrypted message
+- `POST /api/chat/key-rotation` — notify friends of password change (signed by old key)
+
+**Key Rotation (password change)**:
+1. Generate new keypair from new password
+2. Sign `{new_public_key, new_invite_code}` with OLD private key
+3. Send signed rotation message to all friends
+4. Friends verify old signature → update public key + invite code
+
+**DHT User Discovery**:
+- Users announced in DHT: `SHA1("Sautium-user:" + invite_code)`
+- Periodic re-announce alongside artist announces (every 15 min)
+- Friend lookup: invite_code → DHT → IP:port → HTTP handshake
+
+**Database (migration 002_chat.sql)**:
+- `friends` table: public_key_hex (unique), invite_code, username, display_name, is_blocked, last_seen, previous_public_key_hex
+- `chat_messages` table: friend_id FK, direction (in/out), content, timestamp, delivered, read
+- `pending_key_rotations` table: old/new keys, signed rotation message
+- Indexes: unread messages, pending delivery, invite code lookup
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `desktop/node_identity.py` | Extended: account creation (Argon2id), invite codes, key rotation, raw key export |
+| `desktop/p2p/chat_service.py` | NEW: NaCl Box encrypt/decrypt, friend CRUD, message storage, key rotation |
+| `desktop/p2p/dht_service.py` | Extended: user announce/lookup, user re-announce |
+| `desktop/p2p/sync_server.py` | Extended: 3 chat endpoints (handshake, message, key-rotation) |
+| `desktop/p2p/p2p_manager.py` | Extended: chat integration, send_message, add_friend_by_invite, pending retry loop |
+| `desktop/migrations/002_chat.sql` | NEW: friends, chat_messages, pending_key_rotations tables |
+| `desktop/config_manager.py` | Extended: p2p.chat_enabled config option |
+| `desktop/requirements.txt` | Added: argon2-cffi>=23.1.0, PyNaCl>=1.5.0 |
+
+### Design decisions
+- **Argon2id** (not bcrypt/scrypt): memory-hard, GPU-resistant, OWASP recommendation
+- **NaCl Box** (not AES-GCM): simpler API, nonce management built-in, audited crypto
+- **Auto-accept handshakes**: MVP simplicity. Manual approval can be added later
+- **Store plaintext locally**: messages are only in local DB, E2E encryption is for transport
+- **Invite code format**: `username#HASH` — both human-readable and cryptographically verifiable
+
 ### Phase 4: Voice Interface & Advanced Features
 - Whisper for voice input (Ukrainian/English)
 - TTS for voice output
@@ -2498,6 +2561,7 @@ Docker Backend (port 8800)          Desktop Launcher (port 19000)
 - Listening statistics and user preferences
 
 ### Upcoming
+- **Chat UI** in launcher (chat tab, friend list, message history)
 - Fetch more lyrics (extend library coverage)
 - Musixmatch as third lyrics source (if needed after Genius coverage analysis)
 - Audio analysis for remaining tracks

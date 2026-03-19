@@ -29,6 +29,7 @@ except ImportError:
 
 # Prefix for artist infohash computation
 INFOHASH_PREFIX = "Sautium-artist:"
+INFOHASH_PREFIX_USER = "Sautium-user:"
 
 # DHT re-announce interval (seconds)
 REANNOUNCE_INTERVAL = 15 * 60  # 15 minutes
@@ -57,6 +58,13 @@ def artist_infohash(artist_uuid: str) -> bytes:
     ).digest()
 
 
+def user_infohash(invite_code: str) -> bytes:
+    """Compute SHA1 infohash for a user invite code (for DHT announce/lookup)."""
+    return hashlib.sha1(
+        f"{INFOHASH_PREFIX_USER}{invite_code}".encode()
+    ).digest()
+
+
 class DHTService:
     """libtorrent-based DHT service for per-artist peer discovery."""
 
@@ -70,6 +78,7 @@ class DHTService:
         self.http_port = http_port
         self._session: Optional[object] = None  # lt.session
         self._announced: set[str] = set()  # artist UUIDs currently announced
+        self._user_invite_code: Optional[str] = None  # user's invite code
         self._peer_cache: dict[str, list[tuple[str, int, float]]] = {}
         self._running = False
         self._alert_task: Optional[asyncio.Task] = None
@@ -145,6 +154,53 @@ class DHTService:
         self._announced.clear()
         self._peer_cache.clear()
         logger.info("DHT service stopped")
+
+    async def announce_user(self, invite_code: str):
+        """Announce user's invite code in DHT for friend discovery."""
+        if not self._session:
+            return
+        self._user_invite_code = invite_code
+        ih = user_infohash(invite_code)
+        sha1 = lt.sha1_hash(ih)
+        self._session.dht_announce(sha1, self.http_port, 0)
+        logger.info(f"DHT: user announced ({invite_code})")
+
+    async def lookup_user(self, invite_code: str) -> list[tuple[str, int]]:
+        """Find a user by their invite code. Returns list of (ip, port)."""
+        cache_key = f"user:{invite_code}"
+        cached = self._get_cached_peers(cache_key)
+        if cached is not None:
+            return cached
+
+        if not self._session:
+            return []
+
+        ih = user_infohash(invite_code)
+        sha1 = lt.sha1_hash(ih)
+        ih_hex = sha1.to_string().hex()
+
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        self._pending_lookups.setdefault(ih_hex, []).append(future)
+        self._session.dht_get_peers(sha1)
+
+        try:
+            peers = await asyncio.wait_for(future, timeout=GET_PEERS_TIMEOUT)
+        except asyncio.TimeoutError:
+            if ih_hex in self._pending_lookups:
+                futures = self._pending_lookups[ih_hex]
+                if future in futures:
+                    futures.remove(future)
+                if not futures:
+                    del self._pending_lookups[ih_hex]
+            logger.debug(f"DHT lookup timeout for user {invite_code}")
+            return []
+
+        now = time.time()
+        self._peer_cache[cache_key] = [
+            (ip, port, now) for ip, port in peers
+        ]
+        return peers
 
     async def announce_artists(self, artist_uuids: list[str]):
         """Announce all enriched artists in DHT."""
@@ -254,13 +310,22 @@ class DHTService:
         return valid
 
     async def periodic_reannounce(self):
-        """Re-announce all artists every REANNOUNCE_INTERVAL seconds."""
+        """Re-announce all artists and user every REANNOUNCE_INTERVAL seconds."""
         while self._running:
             await asyncio.sleep(REANNOUNCE_INTERVAL)
             if not self._running or not self._session:
                 break
+
+            # Re-announce user
+            if self._user_invite_code:
+                ih = user_infohash(self._user_invite_code)
+                sha1 = lt.sha1_hash(ih)
+                self._session.dht_announce(sha1, self.http_port, 0)
+
+            # Re-announce artists
             logger.info(
-                f"Re-announcing {len(self._announced)} artists in DHT"
+                f"Re-announcing {len(self._announced)} artists "
+                f"+ user in DHT"
             )
             for uuid in list(self._announced):
                 ih = artist_infohash(uuid)
@@ -304,6 +369,7 @@ class DHTService:
                 "running": False,
                 "nodes": 0,
                 "announced_artists": 0,
+                "user_announced": False,
                 "cached_peers": 0,
             }
         status = self._session.status()
@@ -312,6 +378,7 @@ class DHTService:
             "running": self._running,
             "nodes": status.dht_nodes,
             "announced_artists": len(self._announced),
+            "user_announced": self._user_invite_code is not None,
             "cached_peers": sum(
                 len(v) for v in self._peer_cache.values()
             ),
