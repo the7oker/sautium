@@ -196,7 +196,7 @@ class ChatService:
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO chat_messages
+                    INSERT INTO p2p_messages
                         (friend_id, direction, content, timestamp, delivered)
                     VALUES (%s, %s, %s, %s, %s)
                     RETURNING id
@@ -218,14 +218,14 @@ class ChatService:
                 if before_id:
                     cur.execute("""
                         SELECT id, direction, content, timestamp, delivered, read
-                        FROM chat_messages
+                        FROM p2p_messages
                         WHERE friend_id = %s AND id < %s
                         ORDER BY id DESC LIMIT %s
                     """, (friend_id, before_id, limit))
                 else:
                     cur.execute("""
                         SELECT id, direction, content, timestamp, delivered, read
-                        FROM chat_messages
+                        FROM p2p_messages
                         WHERE friend_id = %s
                         ORDER BY id DESC LIMIT %s
                     """, (friend_id, limit))
@@ -242,7 +242,7 @@ class ChatService:
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    UPDATE chat_messages
+                    UPDATE p2p_messages
                     SET read = TRUE
                     WHERE friend_id = %s AND direction = 'in' AND read = FALSE
                 """, (friend_id,))
@@ -256,7 +256,7 @@ class ChatService:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT friend_id, COUNT(*)
-                    FROM chat_messages
+                    FROM p2p_messages
                     WHERE direction = 'in' AND read = FALSE
                     GROUP BY friend_id
                 """)
@@ -272,7 +272,7 @@ class ChatService:
                 cur.execute("""
                     SELECT m.id, m.friend_id, m.content, m.timestamp,
                            f.public_key_hex, f.invite_code
-                    FROM chat_messages m
+                    FROM p2p_messages m
                     JOIN friends f ON f.id = m.friend_id
                     WHERE m.direction = 'out' AND m.delivered = FALSE
                     ORDER BY m.timestamp
@@ -288,7 +288,7 @@ class ChatService:
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    UPDATE chat_messages SET delivered = TRUE WHERE id = %s
+                    UPDATE p2p_messages SET delivered = TRUE WHERE id = %s
                 """, (message_id,))
         finally:
             conn.close()

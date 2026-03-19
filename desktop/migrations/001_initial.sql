@@ -551,8 +551,17 @@ CREATE INDEX IF NOT EXISTS idx_track_stats_source ON track_stats(source);
 CREATE INDEX IF NOT EXISTS idx_track_stats_listeners ON track_stats(listeners);
 CREATE INDEX IF NOT EXISTS idx_track_stats_playcount ON track_stats(playcount);
 
--- Chat indexes
+-- Chat indexes (AI DJ sessions)
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id);
+
+-- P2P chat indexes
+CREATE INDEX IF NOT EXISTS idx_friends_invite_code ON friends(invite_code);
+CREATE INDEX IF NOT EXISTS idx_friends_username ON friends(username);
+CREATE INDEX IF NOT EXISTS idx_p2p_messages_friend ON p2p_messages(friend_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_p2p_messages_unread
+    ON p2p_messages(friend_id) WHERE direction = 'in' AND read = FALSE;
+CREATE INDEX IF NOT EXISTS idx_p2p_messages_pending
+    ON p2p_messages(friend_id) WHERE direction = 'out' AND delivered = FALSE;
 
 -- Listening history indexes
 CREATE INDEX IF NOT EXISTS idx_listening_history_media_file ON listening_history(media_file_id);
@@ -660,6 +669,43 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE TRIGGER trigger_external_metadata_updated_at BEFORE UPDATE ON external_metadata
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ============================================================
+-- P2P Chat (friends + encrypted messaging)
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS friends (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(64) NOT NULL DEFAULT '',
+    public_key_hex VARCHAR(128) NOT NULL UNIQUE,
+    invite_code VARCHAR(96) NOT NULL,
+    display_name VARCHAR(128) NOT NULL DEFAULT '',
+    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP,
+    is_blocked BOOLEAN DEFAULT FALSE,
+    previous_public_key_hex VARCHAR(128)
+);
+
+CREATE TABLE IF NOT EXISTS p2p_messages (
+    id SERIAL PRIMARY KEY,
+    friend_id INTEGER NOT NULL REFERENCES friends(id) ON DELETE CASCADE,
+    direction VARCHAR(3) NOT NULL CHECK (direction IN ('in', 'out')),
+    content TEXT NOT NULL,
+    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    delivered BOOLEAN DEFAULT FALSE,
+    read BOOLEAN DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS pending_key_rotations (
+    id SERIAL PRIMARY KEY,
+    friend_id INTEGER NOT NULL UNIQUE REFERENCES friends(id) ON DELETE CASCADE,
+    old_public_key_hex VARCHAR(128) NOT NULL,
+    new_public_key_hex VARCHAR(128) NOT NULL,
+    new_invite_code VARCHAR(96) NOT NULL,
+    rotation_message BYTEA NOT NULL,
+    signature BYTEA NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
 -- ============================================================
 -- Views
