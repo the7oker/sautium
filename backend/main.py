@@ -246,7 +246,7 @@ async def get_config() -> Dict[str, Any]:
 
 @app.get("/stats")
 async def get_stats() -> Dict[str, Any]:
-    """Get library statistics."""
+    """Get library statistics including enrichment coverage."""
     from sqlalchemy import text
     from database import get_db_context
 
@@ -255,6 +255,10 @@ async def get_stats() -> Dict[str, Any]:
         "total_media_files": 0, "tracks_with_embeddings": 0,
         "tracks_with_lyrics": 0, "total_duration_seconds": 0,
         "total_file_size_bytes": 0, "unique_genres": 0,
+        # Enrichment coverage
+        "tracks_with_features": 0,
+        "library_artists": 0, "artists_with_lastfm": 0,
+        "library_albums": 0, "albums_with_lastfm": 0,
     }
     try:
         with get_db_context() as db:
@@ -264,9 +268,32 @@ async def get_stats() -> Dict[str, Any]:
                 row = dict(result._mapping)
                 dur = row.get("total_duration_seconds")
                 row["total_duration_seconds"] = float(dur) if dur else 0
-                return {**defaults, **row}
             else:
-                return defaults
+                row = {}
+
+            # Enrichment coverage stats
+            enrichment_sql = """
+            SELECT
+                (SELECT COUNT(*) FROM audio_features) as tracks_with_features,
+                (SELECT COUNT(DISTINCT ta.artist_id) FROM track_artists ta) as library_artists,
+                (SELECT COUNT(DISTINCT a.id) FROM artists a
+                 JOIN track_artists ta ON ta.artist_id = a.id
+                 WHERE EXISTS (SELECT 1 FROM artist_bios ab WHERE ab.artist_id = a.id AND ab.source = 'lastfm')
+                ) as artists_with_lastfm,
+                (SELECT COUNT(DISTINCT av.album_id) FROM album_variants av
+                 JOIN media_files mf ON mf.album_variant_id = av.id
+                ) as library_albums,
+                (SELECT COUNT(DISTINCT al.id) FROM albums al
+                 JOIN album_variants av ON av.album_id = al.id
+                 JOIN media_files mf ON mf.album_variant_id = av.id
+                 WHERE EXISTS (SELECT 1 FROM album_info ai WHERE ai.album_id = al.id AND ai.source = 'lastfm')
+                ) as albums_with_lastfm
+            """
+            enr = db.execute(text(enrichment_sql)).fetchone()
+            if enr:
+                row.update(dict(enr._mapping))
+
+            return {**defaults, **row}
     except Exception as e:
         logger.error(f"Failed to get stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -492,8 +519,8 @@ def _enrich_worker(limit: Optional[int], skip_embeddings: bool,
         parts = [
             f"Emb: {emb_s.get('success', 0)}",
             f"Features: {af_s.get('success', 0)}",
-            f"Last.fm: {lastfm_s.get('processed', 0)}",
-            f"Lyrics: {lyrics_s.get('found', 0)}",
+            f"Last.fm: {lastfm_s.get('artists_success', 0)} artists, {lastfm_s.get('albums_success', 0)} albums",
+            f"Lyrics: {lyrics_s.get('found', 0)}/{lyrics_s.get('processed', 0)}",
         ]
         state["progress"] = " | ".join(parts)
         state["result"] = {"success": True, "statistics": result}

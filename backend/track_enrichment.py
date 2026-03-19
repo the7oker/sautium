@@ -164,11 +164,6 @@ def run_parallel_enrichment(
                     SELECT 1 FROM artist_bios ab
                     WHERE ab.artist_id = a.id AND ab.source = 'lastfm'
                 )
-                AND NOT EXISTS (
-                    SELECT 1 FROM external_metadata em
-                    WHERE em.entity_type = 'artist' AND em.entity_id = a.id::text
-                      AND em.source = 'lastfm' AND em.metadata_type = 'bio'
-                )
                 ORDER BY a.name
             """
             artists = db.execute(text(artist_sql)).fetchall()
@@ -208,11 +203,6 @@ def run_parallel_enrichment(
                 WHERE NOT EXISTS (
                     SELECT 1 FROM album_info ai
                     WHERE ai.album_id = al.id AND ai.source = 'lastfm'
-                )
-                AND NOT EXISTS (
-                    SELECT 1 FROM external_metadata em
-                    WHERE em.entity_type = 'album' AND em.entity_id = al.id::text
-                      AND em.source = 'lastfm' AND em.metadata_type = 'info'
                 )
                 ORDER BY a.name, al.title
             """
@@ -369,12 +359,8 @@ def _fetch_lyrics_batch(
             JOIN media_files mf ON mf.track_id = t.id AND mf.is_analysis_source = true
             JOIN album_variants av ON mf.album_variant_id = av.id
             JOIN albums al ON av.album_id = al.id
-            LEFT JOIN external_metadata em
-                ON em.entity_type = 'track'
-                AND em.entity_id = t.id::text
-                AND em.source = 'lrclib'
-                AND em.metadata_type = 'lyrics'
-            WHERE em.id IS NULL
+            LEFT JOIN track_lyrics tl ON tl.track_id = t.id AND tl.source = 'lrclib'
+            WHERE tl.id IS NULL
             ORDER BY t.title
         """
         if limit:

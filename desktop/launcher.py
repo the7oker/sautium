@@ -35,7 +35,7 @@ class LauncherApp(ctk.CTk):
         super().__init__()
 
         self.title("Sautium")
-        self.geometry("480x790")
+        self.geometry("480x870")
         self.resizable(False, False)
 
         self.config = load_config()
@@ -123,10 +123,31 @@ class LauncherApp(ctk.CTk):
         self._stat_labels = {}
         for i, (key, label) in enumerate([
             ("tracks", "Tracks"), ("artists", "Artists"),
-            ("albums", "Albums"), ("embeddings", "Embeddings"),
+            ("albums", "Albums"), ("genres", "Genres"),
         ]):
             lbl = ctk.CTkLabel(
                 stats_grid, text=f"{label}: —",
+                font=ctk.CTkFont(size=12), text_color="gray",
+            )
+            lbl.grid(row=i // 2, column=i % 2, sticky="w", padx=5, pady=1)
+            self._stat_labels[key] = lbl
+
+        # Enrichment stats section
+        ctk.CTkLabel(
+            stats_outer, text="Enrichment",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).pack(anchor="w", padx=10, pady=(5, 2))
+
+        enrich_grid = ctk.CTkFrame(stats_outer, fg_color="transparent")
+        enrich_grid.pack(fill="x", padx=10, pady=(0, 5))
+        enrich_grid.columnconfigure((0, 1), weight=1)
+
+        for i, (key, label) in enumerate([
+            ("embeddings", "Embeddings"), ("features", "Features"),
+            ("lastfm", "Last.fm"), ("lyrics", "Lyrics"),
+        ]):
+            lbl = ctk.CTkLabel(
+                enrich_grid, text=f"{label}: —",
                 font=ctk.CTkFont(size=12), text_color="gray",
             )
             lbl.grid(row=i // 2, column=i % 2, sticky="w", padx=5, pady=1)
@@ -460,23 +481,48 @@ class LauncherApp(ctk.CTk):
 
     def _update_stats_labels(self, data: dict):
         """Update stats labels from API response."""
-        mapping = {
-            "tracks": "total_tracks",
-            "artists": "total_artists",
-            "albums": "total_albums",
-            "embeddings": "tracks_with_embeddings",
+        total_tracks = int(data.get("total_tracks", 0))
+
+        # Library stats (simple counts)
+        simple = {
+            "tracks": ("Tracks", "total_tracks"),
+            "artists": ("Artists", "total_artists"),
+            "albums": ("Albums", "total_albums"),
+            "genres": ("Genres", "unique_genres"),
         }
-        display = {
-            "tracks": "Tracks",
-            "artists": "Artists",
-            "albums": "Albums",
-            "embeddings": "Embeddings",
-        }
-        for key, api_key in mapping.items():
-            value = data.get(api_key, "—")
+        for key, (label, api_key) in simple.items():
+            value = data.get(api_key, 0)
             if isinstance(value, (int, float)):
                 value = f"{int(value):,}"
-            self._stat_labels[key].configure(text=f"{display[key]}: {value}")
+            self._stat_labels[key].configure(text=f"{label}: {value}")
+
+        # Enrichment stats (coverage format: done / total)
+        embeddings = int(data.get("tracks_with_embeddings", 0))
+        features = int(data.get("tracks_with_features", 0))
+        lib_artists = int(data.get("library_artists", 0))
+        lastfm_artists = int(data.get("artists_with_lastfm", 0))
+        lib_albums = int(data.get("library_albums", 0))
+        lastfm_albums = int(data.get("albums_with_lastfm", 0))
+        lyrics = int(data.get("tracks_with_lyrics", 0))
+
+        lastfm_total = lib_artists + lib_albums
+        lastfm_done = lastfm_artists + lastfm_albums
+
+        enrichment = {
+            "embeddings": ("Embeddings", embeddings, total_tracks),
+            "features": ("Features", features, total_tracks),
+            "lastfm": ("Last.fm", lastfm_done, lastfm_total),
+            "lyrics": ("Lyrics", lyrics, total_tracks),
+        }
+        for key, (label, done, total) in enrichment.items():
+            if total > 0:
+                pct = done * 100 // total
+                txt = f"{label}: {done:,} / {total:,}  ({pct}%)"
+                color = "#22c55e" if pct == 100 else "#f59e0b" if pct >= 80 else "gray"
+            else:
+                txt = f"{label}: —"
+                color = "gray"
+            self._stat_labels[key].configure(text=txt, text_color=color)
 
     def _set_status(self, state: str, text: str):
         """Update status indicator."""
