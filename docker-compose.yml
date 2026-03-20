@@ -63,6 +63,8 @@ services:
       P2P_ENABLED: ${P2P_ENABLED:-true}
       P2P_DHT_PORT: ${P2P_DHT_PORT:-19001}
       P2P_ANNOUNCE_PORT: ${P2P_ANNOUNCE_PORT:-8800}
+      P2P_USERNAME: ${P2P_USERNAME:-}
+      P2P_PASSWORD: ${P2P_PASSWORD:-}
 
       # Multi-provider LLM support
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
