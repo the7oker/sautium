@@ -554,15 +554,6 @@ CREATE INDEX IF NOT EXISTS idx_track_stats_playcount ON track_stats(playcount);
 -- Chat indexes (AI DJ sessions)
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id);
 
--- P2P chat indexes
-CREATE INDEX IF NOT EXISTS idx_friends_invite_code ON friends(invite_code);
-CREATE INDEX IF NOT EXISTS idx_friends_username ON friends(username);
-CREATE INDEX IF NOT EXISTS idx_p2p_messages_friend ON p2p_messages(friend_id, id DESC);
-CREATE INDEX IF NOT EXISTS idx_p2p_messages_unread
-    ON p2p_messages(friend_id) WHERE direction = 'in' AND read = FALSE;
-CREATE INDEX IF NOT EXISTS idx_p2p_messages_pending
-    ON p2p_messages(friend_id) WHERE direction = 'out' AND delivered = FALSE;
-
 -- Listening history indexes
 CREATE INDEX IF NOT EXISTS idx_listening_history_media_file ON listening_history(media_file_id);
 CREATE INDEX IF NOT EXISTS idx_listening_history_track ON listening_history(track_id);
@@ -706,6 +697,14 @@ CREATE TABLE IF NOT EXISTS pending_key_rotations (
     signature BYTEA NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX IF NOT EXISTS idx_friends_invite_code ON friends(invite_code);
+CREATE INDEX IF NOT EXISTS idx_friends_username ON friends(username);
+CREATE INDEX IF NOT EXISTS idx_p2p_messages_friend ON p2p_messages(friend_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_p2p_messages_unread
+    ON p2p_messages(friend_id) WHERE direction = 'in' AND read = FALSE;
+CREATE INDEX IF NOT EXISTS idx_p2p_messages_pending
+    ON p2p_messages(friend_id) WHERE direction = 'out' AND delivered = FALSE;
 
 -- ============================================================
 -- Views
