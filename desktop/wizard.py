@@ -11,6 +11,8 @@ A multi-step customtkinter wizard that collects:
 
 import logging
 import shutil
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from tkinter import filedialog
@@ -735,6 +737,40 @@ class SetupWizard(ctk.CTkToplevel):
         self._progress_bar.set(0)
         self._progress_bar.pack_forget()  # Hidden until start
 
+    @staticmethod
+    def _ensure_crypto_deps(progress_cb=None):
+        """Install cryptography dependencies if missing."""
+        missing = []
+        for pkg, pip_name in [
+            ("cryptography", "cryptography>=41.0.0"),
+            ("argon2", "argon2-cffi>=23.1.0"),
+            ("nacl", "PyNaCl>=1.5.0"),
+        ]:
+            try:
+                __import__(pkg)
+            except ImportError:
+                missing.append(pip_name)
+
+        if not missing:
+            return
+
+        if progress_cb:
+            progress_cb(f"Installing: {', '.join(missing)}...")
+        logger.info(f"Installing crypto deps: {missing}")
+
+        cmd = [sys.executable, "-m", "pip", "install", "--quiet"] + missing
+        kwargs = {"capture_output": True, "text": True, "timeout": 300}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        result = subprocess.run(cmd, **kwargs)
+        if result.returncode != 0:
+            logger.error(f"Crypto deps install failed: {result.stderr[:300]}")
+            raise RuntimeError(
+                f"Failed to install dependencies: {', '.join(missing)}"
+            )
+        logger.info("Crypto dependencies installed")
+
     def _finish(self):
         """Save config and start initialization."""
         # Create account before saving config (don't persist password)
@@ -754,6 +790,9 @@ class SetupWizard(ctk.CTkToplevel):
             try:
                 def progress(msg):
                     self.after(0, lambda: self._progress_label.configure(text=msg))
+
+                # Install crypto dependencies if missing
+                self._ensure_crypto_deps(progress)
 
                 # Create account identity (or random if skipped)
                 if account_data:
