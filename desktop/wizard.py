@@ -41,6 +41,7 @@ class SetupWizard(ctk.CTkToplevel):
         self.current_step = 0
         self.steps = [
             self._step_welcome,
+            self._step_account,
             self._step_provider,
             self._step_hqplayer,
             self._step_lastfm,
@@ -122,7 +123,43 @@ class SetupWizard(ctk.CTkToplevel):
             self._finish()
 
     def _validate_step(self) -> bool:
-        if self.current_step == 1:  # Provider
+        if self.current_step == 1:  # Account
+            username = self._account_user_var.get().strip()
+            password = self._account_pass_var.get()
+            password2 = self._account_pass2_var.get()
+
+            if not username:
+                # Skip account — will use random identity
+                self.config["_account"] = None
+                return True
+
+            if len(username) < 3:
+                self._account_error.configure(
+                    text="Username must be at least 3 characters"
+                )
+                return False
+
+            if not password:
+                self._account_error.configure(text="Password is required")
+                return False
+
+            if len(password) < 8:
+                self._account_error.configure(
+                    text="Password must be at least 8 characters"
+                )
+                return False
+
+            if password != password2:
+                self._account_error.configure(text="Passwords don't match")
+                return False
+
+            self.config["_account"] = {
+                "username": username,
+                "password": password,
+            }
+            return True
+
+        if self.current_step == 2:  # Provider
             provider = self._provider_var.get()
             self.config["provider"] = provider
 
@@ -157,7 +194,7 @@ class SetupWizard(ctk.CTkToplevel):
 
             return True
 
-        if self.current_step == 2:  # HQPlayer
+        if self.current_step == 3:  # HQPlayer
             self.config["hqplayer"]["enabled"] = self._hqp_enabled_var.get()
             if self._hqp_enabled_var.get():
                 self.config["hqplayer"]["host"] = self._hqp_host_var.get().strip() or "localhost"
@@ -167,7 +204,7 @@ class SetupWizard(ctk.CTkToplevel):
                     self.config["hqplayer"]["port"] = 4321
             return True
 
-        if self.current_step == 3:  # Last.fm
+        if self.current_step == 4:  # Last.fm
             if self._lastfm_enabled_var.get():
                 username = self._lastfm_user_var.get().strip()
                 if not username:
@@ -217,6 +254,70 @@ class SetupWizard(ctk.CTkToplevel):
             row.pack(fill="x", padx=10, pady=2)
             ctk.CTkLabel(row, text=f"{label}:", width=100, anchor="w").pack(side="left")
             ctk.CTkLabel(row, text=value, anchor="w").pack(side="left", padx=5)
+
+    def _step_account(self):
+        ctk.CTkLabel(
+            self.content_frame,
+            text="P2P Identity",
+            font=ctk.CTkFont(size=22, weight="bold"),
+        ).pack(pady=(20, 5))
+
+        ctk.CTkLabel(
+            self.content_frame,
+            text=(
+                "Create an account for P2P chat and friend discovery.\n"
+                "Same username + password on any device = same identity."
+            ),
+            justify="center",
+        ).pack(pady=5)
+
+        fields_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+        fields_frame.pack(fill="x", padx=40, pady=10)
+
+        self._account_user_var = ctk.StringVar()
+        self._account_pass_var = ctk.StringVar()
+        self._account_pass2_var = ctk.StringVar()
+
+        ctk.CTkLabel(fields_frame, text="Username:").pack(anchor="w")
+        ctk.CTkEntry(
+            fields_frame,
+            textvariable=self._account_user_var,
+            width=300,
+            placeholder_text="your nickname",
+        ).pack(fill="x", pady=(0, 8))
+
+        ctk.CTkLabel(fields_frame, text="Password:").pack(anchor="w")
+        ctk.CTkEntry(
+            fields_frame,
+            textvariable=self._account_pass_var,
+            width=300,
+            show="*",
+            placeholder_text="min 8 characters",
+        ).pack(fill="x", pady=(0, 8))
+
+        ctk.CTkLabel(fields_frame, text="Confirm password:").pack(anchor="w")
+        ctk.CTkEntry(
+            fields_frame,
+            textvariable=self._account_pass2_var,
+            width=300,
+            show="*",
+        ).pack(fill="x", pady=(0, 5))
+
+        self._account_error = ctk.CTkLabel(
+            self.content_frame, text="", text_color="red",
+        )
+        self._account_error.pack()
+
+        ctk.CTkLabel(
+            self.content_frame,
+            text=(
+                "Leave empty to skip — a random identity will be created.\n"
+                "You can create an account later in Settings."
+            ),
+            text_color="gray",
+            font=ctk.CTkFont(size=12),
+            justify="center",
+        ).pack(pady=(5, 0))
 
     def _step_music_path(self):
         ctk.CTkLabel(
@@ -583,8 +684,11 @@ class SetupWizard(ctk.CTkToplevel):
         summary_frame = ctk.CTkFrame(self.content_frame)
         summary_frame.pack(fill="x", padx=20, pady=10)
 
+        account = self.config.get("_account")
+        account_text = account["username"] if account else "Random (no account)"
         lastfm_user = self.config.get("lastfm", {}).get("username")
         items = [
+            ("Identity", account_text),
             ("AI Provider", self.config.get("provider", "anthropic")),
             (
                 "HQPlayer",
@@ -633,6 +737,9 @@ class SetupWizard(ctk.CTkToplevel):
 
     def _finish(self):
         """Save config and start initialization."""
+        # Create account before saving config (don't persist password)
+        account_data = self.config.pop("_account", None)
+
         self.config["first_run_complete"] = True
         save_config(self.config)
 
@@ -645,13 +752,32 @@ class SetupWizard(ctk.CTkToplevel):
 
         def _init_thread():
             try:
+                def progress(msg):
+                    self.after(0, lambda: self._progress_label.configure(text=msg))
+
+                # Create account identity (or random if skipped)
+                if account_data:
+                    progress("Creating account identity...")
+                    from desktop.node_identity import create_account
+                    info = create_account(
+                        account_data["username"], account_data["password"]
+                    )
+                    logger.info(
+                        f"Account created: {info['invite_code']}"
+                    )
+                else:
+                    progress("Generating node identity...")
+                    from desktop.node_identity import (
+                        has_identity, generate_identity,
+                    )
+                    if not has_identity():
+                        generate_identity()
+
+                # Initialize database
                 from desktop.db_init import full_init
 
                 password = self.config.get("postgres_password", "changeme")
                 port = self.config.get("ports", {}).get("postgres", 5432)
-
-                def progress(msg):
-                    self.after(0, lambda: self._progress_label.configure(text=msg))
 
                 full_init(password, port=port, progress_cb=progress)
 
