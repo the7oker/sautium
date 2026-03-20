@@ -11,10 +11,12 @@ Identity files are stored in %APPDATA%/Sautium/node_identity/.
 Requires: `cryptography`, `argon2-cffi` (for accounts), `PyNaCl` (for chat encryption).
 """
 
+import datetime
 import hashlib
 import json
 import logging
 import os
+import ssl
 import stat
 from pathlib import Path
 from typing import Optional
@@ -80,6 +82,14 @@ def _save_keypair(private_key, info: dict) -> str:
     (d / "node_info.json").write_text(
         json.dumps(info, indent=2), encoding="utf-8"
     )
+
+    # Remove old TLS cert so it gets regenerated with the new node_id in CN
+    tls_cert = d / "tls_cert.pem"
+    tls_key = d / "tls_key.pem"
+    if tls_cert.exists():
+        tls_cert.unlink()
+    if tls_key.exists():
+        tls_key.unlink()
 
     return info["node_id"]
 
@@ -324,3 +334,93 @@ def verify_signature(message: bytes, signature: bytes, pubkey_hex: str) -> bool:
         return True
     except InvalidSignature:
         return False
+
+
+# ---------------------------------------------------------------------------
+# TLS certificate (self-signed, for P2P HTTPS transport)
+# ---------------------------------------------------------------------------
+
+def ensure_tls_cert() -> tuple[Path, Path]:
+    """
+    Generate self-signed TLS certificate if not exists.
+
+    Uses ECDSA P-256 for broad TLS compatibility.
+    Embeds the Ed25519 node_id in the certificate CN for identity verification.
+
+    Returns: (cert_path, key_path)
+    """
+    if not HAS_CRYPTO:
+        raise RuntimeError("cryptography package required")
+
+    d = _identity_dir()
+    cert_path = d / "tls_cert.pem"
+    key_path = d / "tls_key.pem"
+
+    if cert_path.exists() and key_path.exists():
+        return cert_path, key_path
+
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes
+
+    tls_key = ec.generate_private_key(ec.SECP256R1())
+    node_id = get_node_id() or "sautium-node"
+
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, node_id),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Sautium"),
+    ])
+
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(tls_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.utcnow())
+        .not_valid_after(
+            datetime.datetime.utcnow() + datetime.timedelta(days=3650)
+        )
+        .sign(tls_key, hashes.SHA256())
+    )
+
+    key_pem = tls_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+
+    key_path.write_bytes(key_pem)
+    try:
+        os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+    cert_path.write_bytes(cert_pem)
+
+    logger.info(f"Generated TLS certificate (CN={node_id[:16]}...)")
+    return cert_path, key_path
+
+
+def get_server_ssl_context() -> ssl.SSLContext:
+    """Create SSL context for the P2P sync server (HTTPS)."""
+    cert_path, key_path = ensure_tls_cert()
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(str(cert_path), str(key_path))
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    return ctx
+
+
+def get_client_ssl_context() -> ssl.SSLContext:
+    """
+    Create SSL context for connecting to P2P peers.
+
+    Accepts self-signed certificates (verification done at application level
+    via Ed25519 public key matching).
+    """
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    return ctx

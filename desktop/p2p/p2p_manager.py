@@ -418,9 +418,9 @@ class P2PManager:
         progress_cb,
     ) -> dict:
         """Sync enrichment data from a single peer. Returns stats dict."""
-        # Normalize address
+        # Normalize address: DHT peers use HTTPS, manual peers keep their scheme
         if "://" not in peer_addr:
-            peer_addr = f"http://{peer_addr}"
+            peer_addr = f"https://{peer_addr}"
 
         _progress(f"Connecting to {peer_addr}...")
         peer_api = BackendAPIClient(peer_addr)
@@ -502,9 +502,9 @@ class P2PManager:
         # Try each peer address
         import aiohttp
         for ip, port in peers:
-            url = f"http://{ip}:{port}/api/chat/message"
+            url = f"https://{ip}:{port}/api/chat/message"
             try:
-                async with aiohttp.ClientSession() as session:
+                async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
                     async with session.post(
                         url, json=msg, timeout=aiohttp.ClientTimeout(total=10)
                     ) as resp:
@@ -566,9 +566,9 @@ class P2PManager:
         }
 
         for ip, port in peers:
-            url = f"http://{ip}:{port}/api/chat/handshake"
+            url = f"https://{ip}:{port}/api/chat/handshake"
             try:
-                async with aiohttp.ClientSession() as session:
+                async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
                     async with session.post(
                         url, json=handshake_data,
                         timeout=aiohttp.ClientTimeout(total=10),
@@ -633,9 +633,9 @@ class P2PManager:
 
                     delivered = False
                     for ip, port in peers:
-                        url = f"http://{ip}:{port}/api/chat/message"
+                        url = f"https://{ip}:{port}/api/chat/message"
                         try:
-                            async with aiohttp.ClientSession() as session:
+                            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
                                 async with session.post(
                                     url, json=payload,
                                     timeout=aiohttp.ClientTimeout(total=10),

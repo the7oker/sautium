@@ -357,10 +357,22 @@ class SyncServer:
 
         self._runner = web.AppRunner(self._app, access_log=None)
         await self._runner.setup()
-        self._site = web.TCPSite(self._runner, "0.0.0.0", self.port)
+
+        # Enable TLS with self-signed certificate
+        ssl_ctx = None
+        try:
+            from desktop.node_identity import get_server_ssl_context
+            ssl_ctx = get_server_ssl_context()
+        except Exception as e:
+            logger.warning(f"TLS not available, falling back to HTTP: {e}")
+
+        self._site = web.TCPSite(
+            self._runner, "0.0.0.0", self.port, ssl_context=ssl_ctx
+        )
         try:
             await self._site.start()
-            logger.info(f"Sync server listening on port {self.port}")
+            proto = "HTTPS" if ssl_ctx else "HTTP"
+            logger.info(f"Sync server listening on {proto} port {self.port}")
         except OSError as e:
             logger.error(f"Failed to bind port {self.port}: {e}")
             raise
