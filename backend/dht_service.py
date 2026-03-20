@@ -29,8 +29,9 @@ except ImportError:
     logger.warning("libtorrent not installed — DHT disabled")
 
 
-# Prefix for artist infohash computation
+# Prefix for infohash computation
 INFOHASH_PREFIX = "Sautium-artist:"
+INFOHASH_PREFIX_USER = "Sautium-user:"
 
 # DHT re-announce interval (seconds)
 REANNOUNCE_INTERVAL = 15 * 60  # 15 minutes
@@ -59,6 +60,13 @@ def artist_infohash(artist_uuid: str) -> bytes:
     ).digest()
 
 
+def user_infohash(invite_code: str) -> bytes:
+    """Compute SHA1 infohash for a user invite code."""
+    return hashlib.sha1(
+        f"{INFOHASH_PREFIX_USER}{invite_code}".encode()
+    ).digest()
+
+
 class DHTService:
     """libtorrent-based DHT service for per-artist peer discovery."""
 
@@ -72,6 +80,7 @@ class DHTService:
         self.http_port = http_port
         self._session: Optional[object] = None  # lt.session
         self._announced: set[str] = set()  # artist UUIDs currently announced
+        self._user_invite_code: Optional[str] = None
         self._peer_cache: dict[str, list[tuple[str, int, float]]] = {}
         self._running = False
         self._alert_task: Optional[asyncio.Task] = None
@@ -147,6 +156,16 @@ class DHTService:
         self._announced.clear()
         self._peer_cache.clear()
         logger.info("DHT service stopped")
+
+    async def announce_user(self, invite_code: str):
+        """Announce user's invite code in DHT for friend discovery."""
+        if not self._session:
+            return
+        self._user_invite_code = invite_code
+        ih = user_infohash(invite_code)
+        sha1 = lt.sha1_hash(ih)
+        self._session.dht_announce(sha1, self.http_port, 0)
+        logger.info(f"DHT: user announced ({invite_code})")
 
     async def announce_artists(self, artist_uuids: list[str]):
         """Announce all enriched artists in DHT."""
@@ -256,13 +275,22 @@ class DHTService:
         return valid
 
     async def periodic_reannounce(self):
-        """Re-announce all artists every REANNOUNCE_INTERVAL seconds."""
+        """Re-announce all artists and user every REANNOUNCE_INTERVAL seconds."""
         while self._running:
             await asyncio.sleep(REANNOUNCE_INTERVAL)
             if not self._running or not self._session:
                 break
+
+            # Re-announce user
+            if self._user_invite_code:
+                ih = user_infohash(self._user_invite_code)
+                sha1 = lt.sha1_hash(ih)
+                self._session.dht_announce(sha1, self.http_port, 0)
+
+            # Re-announce artists
             logger.info(
-                f"Re-announcing {len(self._announced)} artists in DHT"
+                f"Re-announcing {len(self._announced)} artists "
+                f"+ user in DHT"
             )
             for uuid in list(self._announced):
                 ih = artist_infohash(uuid)

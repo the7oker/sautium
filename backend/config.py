@@ -95,6 +95,8 @@ class Settings(BaseSettings):
     p2p_enabled: bool = True              # Docker backend announces in DHT by default
     p2p_dht_port: int = 19001             # UDP port for libtorrent DHT
     p2p_announce_port: int = 8800         # external HTTP port announced to peers
+    p2p_username: str = ""
+    p2p_password: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",

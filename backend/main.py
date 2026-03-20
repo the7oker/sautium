@@ -65,6 +65,17 @@ async def lifespan(app: FastAPI):
     from routers.player import start_status_poller, stop_status_poller
     start_status_poller()
 
+    # Derive P2P identity
+    _p2p_identity = None
+    if settings.p2p_enabled and settings.p2p_username and settings.p2p_password:
+        try:
+            from p2p_identity import derive_identity
+            _p2p_identity = await asyncio.to_thread(
+                derive_identity, settings.p2p_username, settings.p2p_password
+            )
+        except Exception as e:
+            logger.warning(f"P2P identity derivation failed: {e}")
+
     # Start DHT service for P2P peer discovery
     global _dht_service, _dht_reannounce_task
     if settings.p2p_enabled and HAS_LIBTORRENT:
@@ -74,6 +85,12 @@ async def lifespan(app: FastAPI):
                 http_port=settings.p2p_announce_port,
             )
             await _dht_service.start()
+
+            # Announce user identity in DHT
+            if _p2p_identity:
+                await _dht_service.announce_user(
+                    _p2p_identity["invite_code"]
+                )
 
             # Query and announce enriched artists
             artist_uuids = await asyncio.to_thread(_get_enriched_artist_uuids)
