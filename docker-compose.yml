@@ -65,6 +65,7 @@ services:
       P2P_ANNOUNCE_PORT: ${P2P_ANNOUNCE_PORT:-8800}
       P2P_USERNAME: ${P2P_USERNAME:-}
       P2P_PASSWORD: ${P2P_PASSWORD:-}
+      P2P_EMAIL: ${P2P_EMAIL:-}
 
       # Multi-provider LLM support
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

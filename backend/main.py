@@ -71,7 +71,10 @@ async def lifespan(app: FastAPI):
         try:
             from p2p_identity import derive_identity
             _p2p_identity = await asyncio.to_thread(
-                derive_identity, settings.p2p_username, settings.p2p_password
+                derive_identity,
+                settings.p2p_username,
+                settings.p2p_password,
+                settings.p2p_email,
             )
         except Exception as e:
             logger.warning(f"P2P identity derivation failed: {e}")

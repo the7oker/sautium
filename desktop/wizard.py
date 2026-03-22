@@ -126,9 +126,32 @@ class SetupWizard(ctk.CTkToplevel):
 
     def _validate_step(self) -> bool:
         if self.current_step == 1:  # Account
+            # Phase 2: verify email code
+            if getattr(self, "_account_verify_phase", False):
+                code = self._verify_code_var.get().strip().upper()
+                if not code:
+                    self._account_error.configure(text="Enter the code from email")
+                    return False
+                if code != self._account_verify_code:
+                    self._account_error.configure(text="Invalid code")
+                    return False
+                # Verified!
+                self.config["_account"]["email"] = self._account_email_val
+                self.config["_account"]["email_verified"] = True
+                self._account_verify_phase = False
+                return True
+
+            # Phase 1: account fields
             username = self._account_user_var.get().strip()
             password = self._account_pass_var.get()
             password2 = self._account_pass2_var.get()
+            email = self._account_email_var.get().strip()
+
+            # Persist values for re-render
+            self._account_user_val = username
+            self._account_pass_val = password
+            self._account_pass2_val = password2
+            self._account_email_val = email
 
             if not username:
                 # Skip account — will use random identity
@@ -155,10 +178,43 @@ class SetupWizard(ctk.CTkToplevel):
                 self._account_error.configure(text="Passwords don't match")
                 return False
 
+            if email and "@" not in email:
+                self._account_error.configure(text="Invalid email address")
+                return False
+
             self.config["_account"] = {
                 "username": username,
                 "password": password,
             }
+
+            # If email provided — send verification and switch to phase 2
+            if email:
+                self._account_error.configure(
+                    text="Sending verification code...", text_color="gray"
+                )
+                self.update()
+
+                from desktop.p2p.email_verify import (
+                    generate_code, send_verification_email,
+                )
+                self._account_verify_code = generate_code()
+                sent = send_verification_email(
+                    to_email=email,
+                    code=self._account_verify_code,
+                    from_username=username,
+                )
+                if sent:
+                    self._account_verify_phase = True
+                    self._show_step()  # re-render as phase 2
+                    return False  # don't advance step
+                else:
+                    self._account_error.configure(
+                        text="Failed to send email. Proceeding without verification.",
+                        text_color="orange",
+                    )
+                    self.config["_account"]["email"] = email
+                    self.config["_account"]["email_verified"] = False
+
             return True
 
         if self.current_step == 2:  # Provider
@@ -258,6 +314,11 @@ class SetupWizard(ctk.CTkToplevel):
             ctk.CTkLabel(row, text=value, anchor="w").pack(side="left", padx=5)
 
     def _step_account(self):
+        # Two-phase step: phase 1 = fields, phase 2 = email verification
+        if getattr(self, "_account_verify_phase", False):
+            self._step_account_verify()
+            return
+
         ctk.CTkLabel(
             self.content_frame,
             text="P2P Identity",
@@ -276,9 +337,18 @@ class SetupWizard(ctk.CTkToplevel):
         fields_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
         fields_frame.pack(fill="x", padx=40, pady=10)
 
-        self._account_user_var = ctk.StringVar()
-        self._account_pass_var = ctk.StringVar()
-        self._account_pass2_var = ctk.StringVar()
+        self._account_user_var = ctk.StringVar(
+            value=getattr(self, "_account_user_val", "")
+        )
+        self._account_pass_var = ctk.StringVar(
+            value=getattr(self, "_account_pass_val", "")
+        )
+        self._account_pass2_var = ctk.StringVar(
+            value=getattr(self, "_account_pass2_val", "")
+        )
+        self._account_email_var = ctk.StringVar(
+            value=getattr(self, "_account_email_val", "")
+        )
 
         ctk.CTkLabel(fields_frame, text="Username:").pack(anchor="w")
         ctk.CTkEntry(
@@ -303,6 +373,14 @@ class SetupWizard(ctk.CTkToplevel):
             textvariable=self._account_pass2_var,
             width=300,
             show="*",
+        ).pack(fill="x", pady=(0, 8))
+
+        ctk.CTkLabel(fields_frame, text="Email (optional):").pack(anchor="w")
+        ctk.CTkEntry(
+            fields_frame,
+            textvariable=self._account_email_var,
+            width=300,
+            placeholder_text="for friend discovery",
         ).pack(fill="x", pady=(0, 5))
 
         self._account_error = ctk.CTkLabel(
@@ -313,13 +391,73 @@ class SetupWizard(ctk.CTkToplevel):
         ctk.CTkLabel(
             self.content_frame,
             text=(
-                "Leave empty to skip — a random identity will be created.\n"
+                "Leave all empty to skip — a random identity will be created.\n"
                 "You can create an account later in Settings."
             ),
             text_color="gray",
             font=ctk.CTkFont(size=12),
             justify="center",
         ).pack(pady=(5, 0))
+
+    def _step_account_verify(self):
+        """Phase 2: email verification code input."""
+        email = self._account_email_val
+
+        ctk.CTkLabel(
+            self.content_frame,
+            text="Email Verification",
+            font=ctk.CTkFont(size=22, weight="bold"),
+        ).pack(pady=(20, 5))
+
+        ctk.CTkLabel(
+            self.content_frame,
+            text=f"Verification code sent to:\n{email}",
+            justify="center",
+        ).pack(pady=10)
+
+        fields_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+        fields_frame.pack(fill="x", padx=40, pady=10)
+
+        self._verify_code_var = ctk.StringVar()
+
+        ctk.CTkLabel(fields_frame, text="Enter code from email:").pack(anchor="w")
+        ctk.CTkEntry(
+            fields_frame,
+            textvariable=self._verify_code_var,
+            width=200,
+            placeholder_text="e.g. X7K9M2",
+            font=ctk.CTkFont(size=18, family="Consolas"),
+        ).pack(anchor="w", pady=(0, 10))
+
+        self._account_error = ctk.CTkLabel(
+            self.content_frame, text="", text_color="red",
+        )
+        self._account_error.pack()
+
+        skip_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+        skip_frame.pack(pady=10)
+        ctk.CTkButton(
+            skip_frame,
+            text="Skip verification",
+            width=150,
+            fg_color="gray",
+            command=self._skip_email_verify,
+        ).pack()
+
+        ctk.CTkLabel(
+            self.content_frame,
+            text="Check your inbox (and spam folder).",
+            text_color="gray",
+            font=ctk.CTkFont(size=12),
+        ).pack(pady=(5, 0))
+
+    def _skip_email_verify(self):
+        """Skip email verification and proceed."""
+        self.config["_account"]["email"] = self._account_email_val
+        self.config["_account"]["email_verified"] = False
+        self._account_verify_phase = False
+        self.current_step += 1
+        self._show_step()
 
     def _step_music_path(self):
         ctk.CTkLabel(
@@ -799,7 +937,10 @@ class SetupWizard(ctk.CTkToplevel):
                     progress("Creating account identity...")
                     from desktop.node_identity import create_account
                     info = create_account(
-                        account_data["username"], account_data["password"]
+                        account_data["username"],
+                        account_data["password"],
+                        email=account_data.get("email", ""),
+                        email_verified=account_data.get("email_verified", False),
                     )
                     logger.info(
                         f"Account created: {info['invite_code']}"

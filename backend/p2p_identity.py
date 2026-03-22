@@ -20,7 +20,7 @@ ARGON2_PARALLELISM = 2
 ARGON2_HASH_LEN = 32
 
 
-def derive_identity(username: str, password: str) -> dict:
+def derive_identity(username: str, password: str, email: str = "") -> dict:
     """
     Derive P2P identity from username + password.
 
@@ -61,4 +61,5 @@ def derive_identity(username: str, password: str) -> dict:
         "public_key_hex": node_id,
         "username": username,
         "invite_code": invite_code,
+        "email": email,
     }

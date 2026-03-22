@@ -174,14 +174,19 @@ def verify_invite_code(invite_code: str, public_key_hex: str) -> bool:
     return digest.hex().upper() == hash_part
 
 
-def create_account(username: str, password: str) -> dict:
+def create_account(
+    username: str,
+    password: str,
+    email: str = "",
+    email_verified: bool = False,
+) -> dict:
     """
     Create or recover account from username + password.
 
     Uses Argon2id to derive deterministic Ed25519 keypair.
     Same username + password on any device = same keys = same identity.
 
-    Returns: {node_id, public_key_hex, algorithm, username, invite_code}
+    Returns: {node_id, public_key_hex, algorithm, username, invite_code, email, email_verified}
     """
     if not HAS_CRYPTO:
         raise RuntimeError("cryptography package required")
@@ -201,6 +206,8 @@ def create_account(username: str, password: str) -> dict:
         "algorithm": "Ed25519",
         "username": username,
         "invite_code": invite_code,
+        "email": email,
+        "email_verified": email_verified,
     }
     _save_keypair(private_key, info)
     logger.info(f"Account created: {username} (invite: {invite_code})")
