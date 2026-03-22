@@ -3,10 +3,9 @@ main = "verify.js"
 compatibility_date = "2024-01-01"
 
 # KV namespace for rate limiting
-# Create with: wrangler kv namespace create RATE_LIMITS
 [[kv_namespaces]]
 binding = "RATE_LIMITS"
-id = ""  # Fill after: wrangler kv namespace create RATE_LIMITS
+id = "bf74d396ca6c4b1cb46ff216ff2aa585"
 
 # Custom domain (optional): verify.sautium.net
 # Configure in Cloudflare dashboard: Workers → Triggers → Custom Domains
