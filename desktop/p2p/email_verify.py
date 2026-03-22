@@ -1,35 +1,30 @@
 """
-Email verification for P2P friend discovery.
+Email verification and signed invite delivery for Sautium.
 
-Proves email ownership by exchanging verification codes via email.
-Uses the Sautium verification worker (Cloudflare) to send emails.
+Uses the Cloudflare Worker as a trusted CA:
+- Verification: code sent to email → user enters code → email registered on Worker
+- Invite: signed request → Worker verifies signature → sends email with verified badge
 
-Flow (both online):
-  1. User1 wants to add User2 by email
-  2. Both apps generate random 6-char codes
-  3. Each app sends their code to the OTHER person's email via worker
-  4. Each user reads their email, enters the code in the app
-  5. Apps exchange entered codes via P2P connection
-  6. Each app verifies the code matches what they generated
-  7. Verified → add as friends
-
-Flow (invitee offline):
-  1. User1 sends an invite email to user2@email.com via worker
-  2. Email contains project description + invite code + download link
-  3. User2 installs Sautium, adds User1 by invite code
+All state-changing requests are signed with the user's Ed25519 private key.
+The Worker verifies the signature, so a modified client can't impersonate others.
 """
 
+import json
 import logging
 import secrets
 import string
 import urllib.error
 import urllib.request
-import json
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 VERIFY_WORKER_URL = "https://sautium-verify.sautium.workers.dev"
+
+_HEADERS = {
+    "Content-Type": "application/json",
+    "User-Agent": "Sautium/1.0",
+}
 
 
 def generate_code(length: int = 6) -> str:
@@ -38,132 +33,160 @@ def generate_code(length: int = 6) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
+def _post_worker(path: str, payload: dict) -> Optional[dict]:
+    """POST to the Worker API. Returns response dict or None on failure."""
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{VERIFY_WORKER_URL}{path}",
+            method="POST",
+            data=data,
+            headers=_HEADERS,
+        )
+        resp = urllib.request.urlopen(req, timeout=15)
+        return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        logger.error(f"Worker {path} failed ({e.code}): {body}")
+        return None
+    except Exception as e:
+        logger.error(f"Worker {path} failed: {e}")
+        return None
+
+
+def _sign_message(message: str) -> str:
+    """Sign a message with the node's Ed25519 key. Returns hex signature."""
+    from desktop.node_identity import sign_message
+    sig_bytes = sign_message(message.encode("utf-8"))
+    return sig_bytes.hex()
+
+
+def _get_identity() -> Optional[dict]:
+    """Get account info (invite_code, public_key_hex)."""
+    from desktop.node_identity import get_account_info
+    return get_account_info()
+
+
+# -------------------------------------------------------------------
+# Verification (prove email ownership)
+# -------------------------------------------------------------------
+
 def send_verification_email(
     to_email: str,
     code: str,
     from_username: str = "",
     invite_code: str = "",
 ) -> bool:
-    """
-    Send a verification code email via the Sautium worker.
-
-    Returns True if sent successfully.
-    """
-    payload = {
+    """Send a verification code email. Returns True if sent."""
+    result = _post_worker("/send-verification", {
         "to": to_email,
         "code": code,
         "from_username": from_username,
         "invite_code": invite_code,
-    }
+    })
+    if result and result.get("status") == "sent":
+        logger.info(f"Verification email sent to {to_email}")
+        return True
+    return False
 
-    try:
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            f"{VERIFY_WORKER_URL}/send-verification",
-            method="POST",
-            data=data,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "Sautium/1.0",
-            },
-        )
-        resp = urllib.request.urlopen(req, timeout=15)
-        result = json.loads(resp.read().decode("utf-8"))
-        if result.get("status") == "sent":
-            logger.info(f"Verification email sent to {to_email}")
-            return True
-        logger.warning(f"Verification send unexpected: {result}")
-        return False
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        logger.error(f"Verification email failed ({e.code}): {body}")
-        return False
-    except Exception as e:
-        logger.error(f"Verification email failed: {e}")
+
+def register_verified_email(email: str) -> bool:
+    """
+    Register verified email mapping on the Worker (after code confirmed).
+
+    Signs the request so the Worker can verify we own this invite code.
+    Returns True if registered.
+    """
+    identity = _get_identity()
+    if not identity:
+        logger.error("No account — can't register email")
         return False
 
+    invite_code = identity["invite_code"]
+    public_key_hex = identity["public_key_hex"]
+
+    message = f"register:{invite_code}:{email}"
+    signature = _sign_message(message)
+
+    result = _post_worker("/register-email", {
+        "invite_code": invite_code,
+        "email": email,
+        "public_key_hex": public_key_hex,
+        "signature": signature,
+    })
+    if result and result.get("status") == "registered":
+        logger.info(f"Email {email} registered for {invite_code}")
+        return True
+    return False
+
+
+# -------------------------------------------------------------------
+# Invite (send signed invite to someone)
+# -------------------------------------------------------------------
 
 def send_invite_email(
     to_email: str,
-    from_username: str,
-    invite_code: str,
     message: str = "",
 ) -> bool:
     """
-    Send an invite email to someone not yet on Sautium.
+    Send a signed invite email. Worker includes verified sender badge.
 
-    Returns True if sent successfully.
+    Returns True if sent.
     """
-    payload = {
+    identity = _get_identity()
+    if not identity:
+        logger.error("No account — can't send invite")
+        return False
+
+    invite_code = identity["invite_code"]
+    public_key_hex = identity["public_key_hex"]
+
+    sig_message = f"invite:{invite_code}:to:{to_email}"
+    signature = _sign_message(sig_message)
+
+    result = _post_worker("/send-invite", {
         "to": to_email,
-        "from_username": from_username,
         "invite_code": invite_code,
+        "public_key_hex": public_key_hex,
+        "signature": signature,
         "message": message,
-    }
-
-    try:
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            f"{VERIFY_WORKER_URL}/send-invite",
-            method="POST",
-            data=data,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "Sautium/1.0",
-            },
+    })
+    if result and result.get("status") == "sent":
+        verified = result.get("verified_sender", False)
+        logger.info(
+            f"Invite sent to {to_email} "
+            f"(verified={verified})"
         )
-        resp = urllib.request.urlopen(req, timeout=15)
-        result = json.loads(resp.read().decode("utf-8"))
-        if result.get("status") == "sent":
-            logger.info(f"Invite email sent to {to_email}")
-            return True
-        return False
-    except Exception as e:
-        logger.error(f"Invite email failed: {e}")
-        return False
+        return True
+    return False
 
+
+# -------------------------------------------------------------------
+# Verification handshake (for wizard)
+# -------------------------------------------------------------------
 
 class EmailVerification:
-    """Manages the email verification handshake between two peers."""
+    """Manages email verification flow in the wizard."""
 
     def __init__(self, my_username: str, my_invite_code: str):
         self.my_username = my_username
         self.my_invite_code = my_invite_code
-        # Code I generated and sent to the other party
         self._my_code: Optional[str] = None
-        # Code the other party sent to me (entered by user from email)
-        self._their_code: Optional[str] = None
         self.verified = False
 
-    def start(self, their_email: str) -> bool:
-        """
-        Start verification: generate code and send to their email.
-
-        Returns True if email was sent.
-        """
+    def start(self, email: str) -> bool:
+        """Send verification code to email. Returns True if sent."""
         self._my_code = generate_code()
         return send_verification_email(
-            to_email=their_email,
+            to_email=email,
             code=self._my_code,
             from_username=self.my_username,
             invite_code=self.my_invite_code,
         )
 
-    def enter_code(self, code: str):
-        """User enters the code they received in their email."""
-        self._their_code = code.strip().upper()
-
-    def get_code_for_peer(self) -> Optional[str]:
-        """Get the code entered by user (to send back to peer for verification)."""
-        return self._their_code
-
-    def verify_returned_code(self, returned_code: str) -> bool:
-        """
-        Verify the code returned by the peer matches what we sent.
-
-        If it matches, the peer proved they have access to their email.
-        """
+    def verify_code(self, entered_code: str) -> bool:
+        """Check if entered code matches. Returns True if valid."""
         if not self._my_code:
             return False
-        self.verified = returned_code.strip().upper() == self._my_code
+        self.verified = entered_code.strip().upper() == self._my_code
         return self.verified

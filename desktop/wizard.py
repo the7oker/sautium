@@ -945,6 +945,15 @@ class SetupWizard(ctk.CTkToplevel):
                     logger.info(
                         f"Account created: {info['invite_code']}"
                     )
+
+                    # Register verified email on Worker (CA mapping)
+                    if account_data.get("email_verified") and account_data.get("email"):
+                        progress("Registering verified email...")
+                        from desktop.p2p.email_verify import register_verified_email
+                        if register_verified_email(account_data["email"]):
+                            logger.info("Email registered on Worker CA")
+                        else:
+                            logger.warning("Email registration on Worker failed")
                 else:
                     progress("Generating node identity...")
                     from desktop.node_identity import (
