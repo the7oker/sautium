@@ -14,7 +14,7 @@ from pathlib import Path
 import psycopg2
 
 # Docker DB (source) — port 5432, password from .env
-DOCKER_DSN = "postgresql://musicai:supervisor@localhost:5432/music_ai"
+DOCKER_DSN = "postgresql://sautium:supervisor@localhost:5432/sautium"
 
 
 def get_launcher_dsn() -> str:
@@ -26,8 +26,8 @@ def get_launcher_dsn() -> str:
             cfg = json.load(f)
         pw = cfg.get("postgres_password", "changeme")
         port = cfg.get("ports", {}).get("postgres", 15432)
-        return f"postgresql://musicai:{pw}@localhost:{port}/music_ai"
-    return f"postgresql://musicai:changeme@localhost:15432/music_ai"
+        return f"postgresql://sautium:{pw}@localhost:{port}/sautium"
+    return f"postgresql://sautium:changeme@localhost:15432/sautium"
 
 
 def main():

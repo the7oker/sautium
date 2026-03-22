@@ -412,7 +412,7 @@ def create_database(
     port: int = 5432,
     progress_cb: Optional[Callable] = None,
 ) -> None:
-    """Create the musicai role, music_ai database, and install pgvector."""
+    """Create the sautium role, sautium database, and install pgvector."""
     if progress_cb:
         progress_cb("Creating database and user...")
 
@@ -430,35 +430,35 @@ def create_database(
         with conn.cursor() as cur:
             # Create role if not exists
             cur.execute(
-                "SELECT 1 FROM pg_roles WHERE rolname = 'musicai'"
+                "SELECT 1 FROM pg_roles WHERE rolname = 'sautium'"
             )
             if not cur.fetchone():
                 cur.execute(
-                    f"CREATE ROLE musicai WITH LOGIN PASSWORD %s",
+                    f"CREATE ROLE sautium WITH LOGIN PASSWORD %s",
                     (password,),
                 )
-                logger.info("Created role 'musicai'")
+                logger.info("Created role 'sautium'")
 
             # Create database if not exists
             cur.execute(
-                "SELECT 1 FROM pg_database WHERE datname = 'music_ai'"
+                "SELECT 1 FROM pg_database WHERE datname = 'sautium'"
             )
             if not cur.fetchone():
-                cur.execute("CREATE DATABASE music_ai OWNER musicai")
-                logger.info("Created database 'music_ai'")
+                cur.execute("CREATE DATABASE sautium OWNER sautium")
+                logger.info("Created database 'sautium'")
 
             # Grant privileges
-            cur.execute("GRANT ALL PRIVILEGES ON DATABASE music_ai TO musicai")
+            cur.execute("GRANT ALL PRIVILEGES ON DATABASE sautium TO sautium")
     finally:
         conn.close()
 
-    # Connect to music_ai as postgres to install extension and grant privileges
+    # Connect to sautium as postgres to install extension and grant privileges
     conn = psycopg2.connect(
         host="localhost",
         port=port,
         user="postgres",
         password=password,
-        dbname="music_ai",
+        dbname="sautium",
     )
     conn.autocommit = True
     try:
@@ -475,15 +475,15 @@ def create_database(
                 if progress_cb:
                     progress_cb("pgvector not available (embedding search disabled)")
 
-            # Grant schema privileges to musicai
-            cur.execute("GRANT ALL ON SCHEMA public TO musicai")
+            # Grant schema privileges to sautium
+            cur.execute("GRANT ALL ON SCHEMA public TO sautium")
             cur.execute(
                 "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
-                "GRANT ALL ON TABLES TO musicai"
+                "GRANT ALL ON TABLES TO sautium"
             )
             cur.execute(
                 "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
-                "GRANT ALL ON SEQUENCES TO musicai"
+                "GRANT ALL ON SEQUENCES TO sautium"
             )
     finally:
         conn.close()
@@ -516,9 +516,9 @@ def run_migrations(
     conn = psycopg2.connect(
         host="localhost",
         port=port,
-        user="musicai",
+        user="sautium",
         password=password,
-        dbname="music_ai",
+        dbname="sautium",
     )
     conn.autocommit = False
 

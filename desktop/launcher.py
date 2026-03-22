@@ -703,7 +703,7 @@ class LauncherApp(ctk.CTk):
         ports = self.config.get("ports", {})
         pw = self.config.get("postgres_password", "changeme")
         port = ports.get("postgres", 15432)
-        return f"postgresql://musicai:{pw}@localhost:{port}/music_ai"
+        return f"postgresql://sautium:{pw}@localhost:{port}/sautium"
 
     def _sync_library(self):
         """Sync enrichment data from peers (P2P) or a remote source."""

@@ -111,8 +111,8 @@ class ServiceManager:
             try:
                 conn = psycopg2.connect(
                     host="localhost", port=port,
-                    user="musicai", password=password,
-                    dbname="music_ai",
+                    user="sautium", password=password,
+                    dbname="sautium",
                     connect_timeout=2,
                 )
                 conn.close()
@@ -386,9 +386,9 @@ class ServiceManager:
             "--hqplayer-port", str(hqp.get("port", 4321)),
             "--db-host", "localhost",
             "--db-port", str(ports.get("postgres", 5432)),
-            "--db-user", "musicai",
+            "--db-user", "sautium",
             "--db-password", password,
-            "--db-name", "music_ai",
+            "--db-name", "sautium",
             "--http-port", str(ports.get("tracker", 8765)),
         ]
 
