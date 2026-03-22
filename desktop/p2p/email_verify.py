@@ -29,7 +29,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-VERIFY_WORKER_URL = "https://verify.sautium.net"
+VERIFY_WORKER_URL = "https://sautium-verify.sautium.workers.dev"
 
 
 def generate_code(length: int = 6) -> str:
