@@ -920,6 +920,9 @@ app.include_router(eq_router)
 from routers.sync import router as sync_router
 app.include_router(sync_router)
 
+from routers.p2p import router as p2p_router
+app.include_router(p2p_router)
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 

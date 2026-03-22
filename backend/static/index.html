@@ -7,95 +7,172 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#0f0f23">
   <title>Sautium</title>
-  <link rel="stylesheet" href="/static/style.css?v=7">
+  <link rel="stylesheet" href="/static/style.css?v=8">
 </head>
 <body>
+  <!-- Slide-out menu overlay -->
+  <div class="menu-overlay" id="menuOverlay" onclick="closeMenu()"></div>
+
+  <!-- Slide-out menu -->
+  <nav class="slide-menu" id="slideMenu">
+    <div class="menu-header">Sautium</div>
+    <button class="menu-item active" data-section="music" onclick="switchSection('music')">
+      <span class="menu-icon">&#9835;</span> Music
+    </button>
+    <button class="menu-item" data-section="friends" onclick="switchSection('friends')">
+      <span class="menu-icon">&#9787;</span> Friends
+      <span class="menu-badge" id="friendsBadge" style="display:none">0</span>
+    </button>
+    <button class="menu-item disabled">
+      <span class="menu-icon">&#9654;</span> HQPlayer
+      <span class="menu-soon">soon</span>
+    </button>
+    <button class="menu-item disabled">
+      <span class="menu-icon">&#9881;</span> Settings
+      <span class="menu-soon">soon</span>
+    </button>
+  </nav>
+
   <div class="container">
 
     <!-- Header -->
     <header>
-      <h1>Sautium</h1>
+      <button class="hamburger-btn" id="hamburgerBtn" onclick="toggleMenu()">&#9776;</button>
+      <h1 id="sectionTitle">Music</h1>
       <div class="connection-dot" id="connDot" title="HQPlayer connection"></div>
     </header>
 
-    <!-- Now Playing -->
-    <section class="now-playing" id="nowPlaying">
-      <div class="np-song np-idle" id="npSong">Not connected</div>
-      <div class="np-artist" id="npArtist"></div>
-      <div class="progress-row">
-        <div class="progress-bar">
-          <div class="progress-fill" id="progressFill"></div>
+    <!-- ============================================================ -->
+    <!-- SECTION: Music -->
+    <!-- ============================================================ -->
+    <section class="app-section active" id="section-music">
+
+      <!-- Now Playing -->
+      <section class="now-playing" id="nowPlaying">
+        <div class="np-song np-idle" id="npSong">Not connected</div>
+        <div class="np-artist" id="npArtist"></div>
+        <div class="progress-row">
+          <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+          <span class="progress-time" id="progressTime">00:00 / 00:00</span>
         </div>
-        <span class="progress-time" id="progressTime">00:00 / 00:00</span>
+        <div class="controls">
+          <button class="ctrl-btn" onclick="playerCmd('previous')" title="Previous">&#9198;</button>
+          <button class="ctrl-btn play-btn" id="playPauseBtn" onclick="togglePlayPause()" title="Play/Pause">&#9654;</button>
+          <button class="ctrl-btn" onclick="playerCmd('next')" title="Next">&#9197;</button>
+          <button class="ctrl-btn" onclick="playerCmd('stop')" title="Stop">&#9632;</button>
+        </div>
+        <div class="volume-row">
+          <button class="vol-btn" onclick="playerCmd('volume/down')">&#128265;</button>
+          <span class="vol-label" id="volLabel">-- dB</span>
+          <button class="vol-btn" onclick="playerCmd('volume/up')">&#128266;</button>
+        </div>
+        <div class="lyrics-toggle-row">
+          <button class="lyrics-toggle-btn" id="lyricsToggleBtn" onclick="toggleLyrics()">Lyrics</button>
+        </div>
+        <div class="lyrics-panel" id="lyricsPanel" style="display:none">
+          <div class="lyrics-content" id="lyricsContent">
+            <div class="lyrics-placeholder">Click "Lyrics" to load</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tabs -->
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="search" onclick="switchTab('search')">Search</button>
+        <button class="tab-btn" data-tab="chat" onclick="switchTab('chat')">AI DJ</button>
+        <button class="tab-btn" data-tab="queue" onclick="switchTab('queue')">Queue</button>
       </div>
-      <div class="controls">
-        <button class="ctrl-btn" onclick="playerCmd('previous')" title="Previous">&#9198;</button>
-        <button class="ctrl-btn play-btn" id="playPauseBtn" onclick="togglePlayPause()" title="Play/Pause">&#9654;</button>
-        <button class="ctrl-btn" onclick="playerCmd('next')" title="Next">&#9197;</button>
-        <button class="ctrl-btn" onclick="playerCmd('stop')" title="Stop">&#9632;</button>
-      </div>
-      <div class="volume-row">
-        <button class="vol-btn" onclick="playerCmd('volume/down')">&#128265;</button>
-        <span class="vol-label" id="volLabel">-- dB</span>
-        <button class="vol-btn" onclick="playerCmd('volume/up')">&#128266;</button>
-      </div>
-      <div class="lyrics-toggle-row">
-        <button class="lyrics-toggle-btn" id="lyricsToggleBtn" onclick="toggleLyrics()">Lyrics</button>
-      </div>
-      <div class="lyrics-panel" id="lyricsPanel" style="display:none">
-        <div class="lyrics-content" id="lyricsContent">
-          <div class="lyrics-placeholder">Click "Lyrics" to load</div>
+
+      <!-- Search Tab -->
+      <div class="tab-content active" id="tab-search">
+        <form class="search-form" onsubmit="doSearch(event)">
+          <input type="text" class="search-input" id="searchInput" placeholder="Artist, album, or track..." autocomplete="off">
+          <button type="submit" class="submit-btn">Go</button>
+        </form>
+        <div id="searchResults">
+          <div class="empty-state">Search your music library</div>
         </div>
       </div>
+
+      <!-- AI DJ Tab -->
+      <div class="tab-content" id="tab-chat">
+        <div class="session-bar" id="sessionBar">
+          <div class="session-list" id="sessionList"></div>
+          <button class="new-chat-btn" onclick="startNewChat()">+ New</button>
+        </div>
+        <div class="chat-messages" id="chatMessages">
+          <div class="empty-state">Ask the AI DJ for recommendations</div>
+        </div>
+        <div class="chat-bottom">
+          <div class="provider-selector" id="providerSelector"></div>
+          <form class="chat-form" onsubmit="sendChat(event)">
+            <input type="text" class="search-input" id="chatInput" placeholder="What should I play?" autocomplete="off">
+            <button type="submit" class="submit-btn" id="chatSendBtn">&#10148;</button>
+          </form>
+        </div>
+      </div>
+
+      <!-- Queue Tab -->
+      <div class="tab-content" id="tab-queue">
+        <div id="queueContent">
+          <div class="empty-state">No tracks in queue</div>
+        </div>
+      </div>
+
     </section>
 
-    <!-- Tabs -->
-    <div class="tabs">
-      <button class="tab-btn active" data-tab="search" onclick="switchTab('search')">Search</button>
-      <button class="tab-btn" data-tab="chat" onclick="switchTab('chat')">AI DJ</button>
-      <button class="tab-btn" data-tab="queue" onclick="switchTab('queue')">Queue</button>
-    </div>
+    <!-- ============================================================ -->
+    <!-- SECTION: Friends -->
+    <!-- ============================================================ -->
+    <section class="app-section" id="section-friends">
 
-    <!-- Search Tab -->
-    <div class="tab-content active" id="tab-search">
-      <form class="search-form" onsubmit="doSearch(event)">
-        <input type="text" class="search-input" id="searchInput" placeholder="Artist, album, or track..." autocomplete="off">
-        <button type="submit" class="submit-btn">Go</button>
-      </form>
-      <div id="searchResults">
-        <div class="empty-state">Search your music library</div>
-      </div>
-    </div>
-
-    <!-- AI DJ Tab -->
-    <div class="tab-content" id="tab-chat">
-      <div class="session-bar" id="sessionBar">
-        <div class="session-list" id="sessionList"></div>
-        <button class="new-chat-btn" onclick="startNewChat()">+ New</button>
-      </div>
-      <div class="chat-messages" id="chatMessages">
-        <div class="empty-state">Ask the AI DJ for recommendations</div>
-      </div>
-      <div class="chat-bottom">
-        <div class="provider-selector" id="providerSelector">
-          <!-- Populated dynamically by loadProviders() -->
+      <!-- My identity card -->
+      <div class="identity-card" id="identityCard">
+        <div class="identity-row">
+          <span class="identity-label">My invite code</span>
+          <button class="copy-btn" onclick="copyInviteCode()">Copy</button>
         </div>
-        <form class="chat-form" onsubmit="sendChat(event)">
-          <input type="text" class="search-input" id="chatInput" placeholder="What should I play?" autocomplete="off">
-          <button type="submit" class="submit-btn" id="chatSendBtn">&#10148;</button>
+        <div class="invite-code" id="myInviteCode">Loading...</div>
+      </div>
+
+      <!-- Add friend -->
+      <form class="add-friend-form" onsubmit="addFriend(event)">
+        <input type="text" class="search-input" id="addFriendInput"
+               placeholder="Enter invite code (user#XXXX-XXXX-XXXX)" autocomplete="off">
+        <button type="submit" class="submit-btn">Add</button>
+      </form>
+
+      <!-- Friends tabs -->
+      <div class="tabs">
+        <button class="tab-btn active" data-ftab="friend-list" onclick="switchFriendsTab('friend-list')">Friends</button>
+        <button class="tab-btn" data-ftab="friend-chat" onclick="switchFriendsTab('friend-chat')">Chat</button>
+      </div>
+
+      <!-- Friend list -->
+      <div class="ftab-content active" id="ftab-friend-list">
+        <div id="friendList">
+          <div class="empty-state">No friends yet. Share your invite code!</div>
+        </div>
+      </div>
+
+      <!-- Chat view -->
+      <div class="ftab-content" id="ftab-friend-chat">
+        <div id="chatFriendName" class="chat-friend-header">Select a friend to chat</div>
+        <div class="p2p-messages" id="p2pMessages">
+          <div class="empty-state">Select a friend from the list</div>
+        </div>
+        <form class="chat-form p2p-chat-form" id="p2pChatForm" onsubmit="sendP2PMessage(event)" style="display:none">
+          <input type="text" class="search-input" id="p2pChatInput" placeholder="Type a message..." autocomplete="off">
+          <button type="submit" class="submit-btn">&#10148;</button>
         </form>
       </div>
-    </div>
 
-    <!-- Queue Tab -->
-    <div class="tab-content" id="tab-queue">
-      <div id="queueContent">
-        <div class="empty-state">No tracks in queue</div>
-      </div>
-    </div>
+    </section>
 
   </div>
 
-  <script src="/static/app.js?v=9"></script>
+  <script src="/static/app.js?v=10"></script>
 </body>
 </html>

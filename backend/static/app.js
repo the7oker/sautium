@@ -935,6 +935,262 @@ function updateLyricsHighlight(positionSeconds) {
 // Cache for track change detection
 let _latest_status_cache = {};
 
+// -- Hamburger menu ----------------------------------------------------------
+
+let currentSection = "music";
+
+function toggleMenu() {
+  document.getElementById("slideMenu").classList.toggle("open");
+  document.getElementById("menuOverlay").classList.toggle("open");
+}
+
+function closeMenu() {
+  document.getElementById("slideMenu").classList.remove("open");
+  document.getElementById("menuOverlay").classList.remove("open");
+}
+
+function switchSection(name) {
+  if (name === currentSection) {
+    closeMenu();
+    return;
+  }
+
+  // Hide disabled items
+  const menuItem = document.querySelector(`.menu-item[data-section="${name}"]`);
+  if (!menuItem || menuItem.classList.contains("disabled")) {
+    closeMenu();
+    return;
+  }
+
+  currentSection = name;
+
+  // Update menu active state
+  document.querySelectorAll(".menu-item[data-section]").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.section === name);
+  });
+
+  // Switch section
+  document.querySelectorAll(".app-section").forEach(sec => {
+    sec.classList.toggle("active", sec.id === "section-" + name);
+  });
+
+  // Update title
+  const titles = { music: "Music", friends: "Friends" };
+  document.getElementById("sectionTitle").textContent = titles[name] || name;
+
+  // Load friends data on first visit
+  if (name === "friends" && !_friendsLoaded) {
+    loadAccountInfo();
+    loadFriends();
+    _friendsLoaded = true;
+  }
+
+  closeMenu();
+}
+
+// -- Friends section ---------------------------------------------------------
+
+let _friendsLoaded = false;
+let _friends = [];
+let _selectedFriendId = null;
+let _p2pPollInterval = null;
+
+function switchFriendsTab(name) {
+  document.querySelectorAll("[data-ftab]").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.ftab === name);
+  });
+  document.querySelectorAll(".ftab-content").forEach(div => {
+    div.classList.toggle("active", div.id === "ftab-" + name);
+  });
+}
+
+async function loadAccountInfo() {
+  try {
+    const resp = await fetch("/api/p2p/account");
+    const data = await resp.json();
+    const codeEl = document.getElementById("myInviteCode");
+    if (data.invite_code) {
+      codeEl.textContent = data.invite_code;
+    } else {
+      codeEl.textContent = "No account configured";
+      codeEl.style.color = "var(--text-dim)";
+    }
+  } catch {
+    document.getElementById("myInviteCode").textContent = "Error loading account";
+  }
+}
+
+function copyInviteCode() {
+  const code = document.getElementById("myInviteCode").textContent;
+  if (!code || code.startsWith("No") || code.startsWith("Error")) return;
+
+  navigator.clipboard.writeText(code).then(() => {
+    const btn = document.querySelector(".copy-btn");
+    btn.textContent = "Copied!";
+    btn.classList.add("copied");
+    setTimeout(() => {
+      btn.textContent = "Copy";
+      btn.classList.remove("copied");
+    }, 2000);
+  });
+}
+
+async function loadFriends() {
+  try {
+    const resp = await fetch("/api/p2p/friends");
+    _friends = await resp.json();
+    renderFriendList();
+  } catch {
+    document.getElementById("friendList").innerHTML =
+      '<div class="empty-state">Failed to load friends</div>';
+  }
+}
+
+function renderFriendList() {
+  const container = document.getElementById("friendList");
+
+  if (_friends.length === 0) {
+    container.innerHTML = '<div class="empty-state">No friends yet. Share your invite code!</div>';
+    return;
+  }
+
+  let html = "";
+  for (const f of _friends) {
+    const isOnline = f.last_seen &&
+      (Date.now() - new Date(f.last_seen).getTime()) < 35 * 60 * 1000;
+    const displayName = f.display_name || f.username || f.invite_code;
+    const statusText = isOnline ? "Online" : (f.last_seen ? "Last seen " + timeAgo(f.last_seen) : "Never seen");
+    const selected = f.id === _selectedFriendId;
+
+    html += `<div class="friend-card${selected ? " selected" : ""}" onclick="selectFriend(${f.id})">
+      <div class="friend-avatar${isOnline ? " online" : ""}">&#9787;</div>
+      <div class="friend-info">
+        <div class="friend-name">${esc(displayName)}</div>
+        <div class="friend-status">${esc(statusText)}</div>
+      </div>
+      ${f.unread_count ? `<div class="friend-unread">${f.unread_count}</div>` : ""}
+    </div>`;
+  }
+
+  container.innerHTML = html;
+}
+
+async function addFriend(e) {
+  e.preventDefault();
+  const input = document.getElementById("addFriendInput");
+  const code = input.value.trim();
+  if (!code) return;
+
+  input.disabled = true;
+
+  try {
+    const resp = await fetch("/api/p2p/friends/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ invite_code: code }),
+    });
+    const data = await resp.json();
+
+    if (data.error) {
+      alert("Failed: " + data.error);
+    } else {
+      input.value = "";
+      loadFriends();
+    }
+  } catch (err) {
+    alert("Error: " + err.message);
+  }
+
+  input.disabled = false;
+}
+
+async function selectFriend(friendId) {
+  _selectedFriendId = friendId;
+  renderFriendList();
+  switchFriendsTab("friend-chat");
+
+  const friend = _friends.find(f => f.id === friendId);
+  const nameEl = document.getElementById("chatFriendName");
+  nameEl.textContent = friend
+    ? (friend.display_name || friend.username || friend.invite_code)
+    : "Chat";
+
+  document.getElementById("p2pChatForm").style.display = "flex";
+  await loadP2PMessages(friendId);
+
+  // Start polling for new messages
+  if (_p2pPollInterval) clearInterval(_p2pPollInterval);
+  _p2pPollInterval = setInterval(() => loadP2PMessages(friendId), 5000);
+}
+
+async function loadP2PMessages(friendId) {
+  try {
+    const resp = await fetch(`/api/p2p/friends/${friendId}/messages`);
+    const messages = await resp.json();
+    renderP2PMessages(messages);
+  } catch {
+    document.getElementById("p2pMessages").innerHTML =
+      '<div class="empty-state">Failed to load messages</div>';
+  }
+}
+
+function renderP2PMessages(messages) {
+  const container = document.getElementById("p2pMessages");
+
+  if (messages.length === 0) {
+    container.innerHTML = '<div class="empty-state">No messages yet</div>';
+    return;
+  }
+
+  let html = "";
+  for (const m of messages) {
+    const timeStr = new Date(m.timestamp).toLocaleTimeString([], {
+      hour: "2-digit", minute: "2-digit"
+    });
+    html += `<div class="p2p-msg ${m.direction}">
+      ${esc(m.content)}
+      <div class="p2p-msg-time">${timeStr}${m.direction === "out" && !m.delivered ? " &#9201;" : ""}</div>
+    </div>`;
+  }
+
+  const wasAtBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 20;
+  container.innerHTML = html;
+  if (wasAtBottom) {
+    container.scrollTop = container.scrollHeight;
+  }
+}
+
+async function sendP2PMessage(e) {
+  e.preventDefault();
+  const input = document.getElementById("p2pChatInput");
+  const content = input.value.trim();
+  if (!content || !_selectedFriendId) return;
+
+  input.value = "";
+
+  try {
+    await fetch(`/api/p2p/friends/${_selectedFriendId}/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+    await loadP2PMessages(_selectedFriendId);
+  } catch (err) {
+    console.error("Send failed:", err);
+  }
+}
+
+function timeAgo(dateStr) {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + "m ago";
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + "h ago";
+  const days = Math.floor(hrs / 24);
+  return days + "d ago";
+}
+
 // -- Init --------------------------------------------------------------------
 
 // Load providers on startup
