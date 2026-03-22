@@ -62,7 +62,10 @@ def send_verification_email(
             f"{VERIFY_WORKER_URL}/send-verification",
             method="POST",
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "Sautium/1.0",
+            },
         )
         resp = urllib.request.urlopen(req, timeout=15)
         result = json.loads(resp.read().decode("utf-8"))
@@ -104,7 +107,10 @@ def send_invite_email(
             f"{VERIFY_WORKER_URL}/send-invite",
             method="POST",
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "Sautium/1.0",
+            },
         )
         resp = urllib.request.urlopen(req, timeout=15)
         result = json.loads(resp.read().decode("utf-8"))
