@@ -271,7 +271,7 @@ CREATE TABLE IF NOT EXISTS genre_descriptions (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (genre_id, source),
-    CHECK (summary IS NOT NULL OR content IS NOT NULL)
+    CHECK (summary IS NOT NULL OR content IS NOT NULL OR listeners IS NOT NULL OR playcount IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS idx_genre_descriptions_genre ON genre_descriptions(genre_id);
@@ -325,7 +325,7 @@ CREATE TABLE IF NOT EXISTS artist_bios (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (artist_id, source),
-    CHECK (summary IS NOT NULL OR content IS NOT NULL)
+    CHECK (summary IS NOT NULL OR content IS NOT NULL OR listeners IS NOT NULL OR playcount IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS idx_artist_bios_artist ON artist_bios(artist_id);
@@ -367,7 +367,7 @@ CREATE TABLE IF NOT EXISTS album_info (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (album_id, source),
-    CHECK (summary IS NOT NULL OR content IS NOT NULL)
+    CHECK (summary IS NOT NULL OR content IS NOT NULL OR listeners IS NOT NULL OR playcount IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS idx_album_info_album ON album_info(album_id);
