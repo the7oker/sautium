@@ -465,10 +465,17 @@ POST /api/chat/key-rotation — сповіщення про зміну паро�
 | Chat HTTP endpoints | `desktop/p2p/sync_server.py` | ✅ |
 | DHT user announce/lookup | `desktop/p2p/dht_service.py` | ✅ |
 | P2P chat integration | `desktop/p2p/p2p_manager.py` | ✅ |
-| DB tables (friends, messages) | `desktop/migrations/002_chat.sql` | ✅ |
+| DB tables (friends, messages) | `desktop/migrations/001_initial.sql` | ✅ |
 | Key rotation protocol | node_identity + sync_server | ✅ |
 | Pending message retry | p2p_manager | ✅ |
-| Chat UI в лаунчері | — | ⏳ TODO |
+| TLS transport (self-signed ECDSA) | `node_identity.py` + `sync_server.py` | ✅ |
+| Email verification (Cloudflare Worker) | `worker/verify.js` | ✅ |
+| Signed invite emails + verified badge | `worker/verify.js` + `email_verify.py` | ✅ |
+| Worker as CA (email→invite mapping) | `worker/verify.js` (KV store) | ✅ |
+| Web UI: hamburger menu + Friends section | `backend/static/` + `routers/p2p.py` | ✅ |
+| Docker backend P2P identity | `backend/p2p_identity.py` | ✅ |
+| Wizard: account + email verification | `desktop/wizard.py` | ✅ |
+| Mutual invite exchange (anti-impersonation) | design decided | ⏳ TODO |
 
 5. **Music Recommendations** (Phase P4b)
    - "Рекомендую цей альбом" → broadcast до друзів
@@ -583,6 +590,11 @@ POST /api/chat/key-rotation — сповіщення про зміну паро�
 - **Invite codes**: `username#XXXX-XXXX-XXXX` — тільки public key hash, не пароль
 - **Key rotation**: нові ключі підписуються старим ключем для верифікації
 - **Friend blocklist**: is_blocked flag, blocked friends не можуть надсилати повідомлення
+- **TLS transport**: self-signed ECDSA P-256 cert з node_id в CN, HTTPS для всіх P2P з'єднань
+- **Email verification**: Cloudflare Worker (sautium-verify) + Resend API для доставки
+- **Worker as CA**: зберігає `invite_code → verified_email` маппінг в KV, підписані запити (Ed25519)
+- **Mutual invite exchange**: обидва додають invite один одного → mutual confirmation (anti-impersonation)
+- **Verified sender badge**: invite email показує ✅ Verified або ⚠️ Unverified для відправника
 
 ### Future
 - Selective sharing (вибрати які артисти/альбоми видимі)
@@ -637,9 +649,15 @@ Launcher B шукає тих самих артистів через DHT, зна�
 14. ~~**[Phase P4]** E2E encrypted chat (NaCl Box) + friend list~~ ✅
 15. ~~**[Phase P4]** DHT user announces + lookup~~ ✅
 16. ~~**[Phase P4]** Chat HTTP endpoints + key rotation protocol~~ ✅
-17. **[Phase P4]** Chat UI в лаунчері (вкладка/діалог чату)
-18. **[Phase P3]** NAT traversal (UPnP) для роботи через інтернет
-19. **[Phase P3]** Cross-library search (embedding similarity між пірами)
+17. ~~**[Phase P4]** TLS transport (self-signed ECDSA + HTTPS)~~ ✅
+18. ~~**[Phase P4]** Email verification (Cloudflare Worker + Resend)~~ ✅
+19. ~~**[Phase P4]** Worker as CA (signed requests + email→invite mapping)~~ ✅
+20. ~~**[Phase P4]** Web UI: hamburger menu + Friends section (chat, friends)~~ ✅
+21. ~~**[Phase P4]** Docker backend P2P identity~~ ✅
+22. ~~**[Phase P4]** Wizard: account creation + email verification~~ ✅
+23. **[Phase P4]** Mutual invite exchange (auto-accept → require both sides)
+24. **[Phase P3]** NAT traversal (UPnP) для роботи через інтернет
+25. **[Phase P3]** Cross-library search (embedding similarity між пірами)
 
 ---
 

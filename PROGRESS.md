@@ -2491,9 +2491,9 @@ Docker Backend (port 8800)          Desktop Launcher (port 19000)
   - Both use identical protocol — Docker is just another peer, not a special server
   - Enrichment cancel fix: `cancel_flag` propagated to GPU batch loops
 
-- [x] **P2P Phase P4: Account System + Encrypted Chat** ✅
+- [x] **P2P Phase P4: Account + Chat + Email CA + Web UI** ✅
 
-## P2P Phase P4: Account System + Encrypted Chat - DONE
+## P2P Phase P4: Account + Encrypted Chat + Email CA + Web UI - DONE
 
 ### What was done
 
@@ -2528,31 +2528,74 @@ Docker Backend (port 8800)          Desktop Launcher (port 19000)
 - Periodic re-announce alongside artist announces (every 15 min)
 - Friend lookup: invite_code → DHT → IP:port → HTTP handshake
 
-**Database (migration 002_chat.sql)**:
+**Database** (integrated into `001_initial.sql`):
 - `friends` table: public_key_hex (unique), invite_code, username, display_name, is_blocked, last_seen, previous_public_key_hex
-- `chat_messages` table: friend_id FK, direction (in/out), content, timestamp, delivered, read
+- `p2p_messages` table: friend_id FK, direction (in/out), content, timestamp, delivered, read
 - `pending_key_rotations` table: old/new keys, signed rotation message
 - Indexes: unread messages, pending delivery, invite code lookup
+
+**TLS Transport**:
+- Self-signed ECDSA P-256 certificate with Ed25519 node_id in CN
+- Sync server listens on HTTPS, DHT peer connections use HTTPS
+- Certificate pinning via CN = public_key_hex verification
+- Cert auto-regenerated on key rotation
+
+**Email Verification & Worker CA**:
+- Cloudflare Worker (`sautium-verify.sautium.workers.dev`) + Resend API (`noreply@sautium.net`)
+- Email verification: code sent to user → user enters code → email registered on Worker
+- Worker stores `invite_code → verified_email` mapping in KV (trusted CA)
+- All state-changing requests signed with Ed25519 — modified client can't impersonate
+- Invite emails show green ✅ "Verified sender" or orange ⚠️ "Unverified" badge
+- Rate limiting: 5 emails/hour per IP, 10 per recipient
+
+**Friend Discovery** (mutual invite exchange):
+- Adding friends requires BOTH sides to enter each other's invite code
+- Prevents impersonation: leaked invite code alone is not enough
+- Email delivery via Worker for convenience (signed invites with verified badge)
+
+**Web UI**:
+- Hamburger menu (☰) → slide-out navigation: Music, Friends, HQPlayer (soon), Settings (soon)
+- Music section: existing player + Search/AI DJ/Queue tabs (unchanged)
+- Friends section: invite code display (Copy), add friend form, friend list (online/offline), P2P chat
+- FastAPI `/api/p2p/` router: account info, friend list, add friend, get/send messages
+
+**Docker Backend**:
+- P2P identity via env vars (P2P_USERNAME, P2P_PASSWORD, P2P_EMAIL)
+- `backend/p2p_identity.py`: derives identity using same Argon2id algorithm as desktop
+- Announces user invite code in DHT alongside enriched artists
+- Docker backend invite: `Sautium#FBE3-7BA9-57CE`
+
+**Wizard**:
+- Account step: username, password, confirm password, email (optional)
+- Email verification: inline code entry (two-phase step) with Skip option
+- After verification: email registered on Worker CA (signed request)
+- Auto-installs crypto dependencies (cryptography, argon2-cffi, PyNaCl)
 
 ### Files
 
 | File | Purpose |
 |------|---------|
-| `desktop/node_identity.py` | Extended: account creation (Argon2id), invite codes, key rotation, raw key export |
-| `desktop/p2p/chat_service.py` | NEW: NaCl Box encrypt/decrypt, friend CRUD, message storage, key rotation |
-| `desktop/p2p/dht_service.py` | Extended: user announce/lookup, user re-announce |
-| `desktop/p2p/sync_server.py` | Extended: 3 chat endpoints (handshake, message, key-rotation) |
-| `desktop/p2p/p2p_manager.py` | Extended: chat integration, send_message, add_friend_by_invite, pending retry loop |
-| `desktop/migrations/002_chat.sql` | NEW: friends, chat_messages, pending_key_rotations tables |
-| `desktop/config_manager.py` | Extended: p2p.chat_enabled config option |
-| `desktop/requirements.txt` | Added: argon2-cffi>=23.1.0, PyNaCl>=1.5.0 |
+| `desktop/node_identity.py` | Account creation (Argon2id), invite codes, key rotation, TLS cert, raw key export |
+| `desktop/p2p/chat_service.py` | NaCl Box encrypt/decrypt, friend CRUD, message storage, key rotation |
+| `desktop/p2p/dht_service.py` | User + artist DHT announce/lookup |
+| `desktop/p2p/sync_server.py` | HTTPS sync server + chat endpoints (handshake, message, key-rotation) |
+| `desktop/p2p/p2p_manager.py` | Chat integration, send_message, add_friend_by_invite, pending retry |
+| `desktop/p2p/email_verify.py` | Signed email verification + invite delivery via Worker |
+| `desktop/wizard.py` | Account + email verification in setup wizard |
+| `desktop/migrations/001_initial.sql` | friends, p2p_messages, pending_key_rotations tables |
+| `worker/verify.js` | Cloudflare Worker: email CA, signed invites, rate limiting |
+| `worker/wrangler.toml` | Worker deployment config |
+| `backend/p2p_identity.py` | Docker backend identity derivation |
+| `backend/routers/p2p.py` | FastAPI endpoints for Friends/Chat in web UI |
 
 ### Design decisions
 - **Argon2id** (not bcrypt/scrypt): memory-hard, GPU-resistant, OWASP recommendation
 - **NaCl Box** (not AES-GCM): simpler API, nonce management built-in, audited crypto
-- **Auto-accept handshakes**: MVP simplicity. Manual approval can be added later
+- **Mutual invite exchange** (not auto-accept): both sides must add each other — prevents impersonation
+- **Worker as CA** (not client-side verification): client code can be modified, server can't
 - **Store plaintext locally**: messages are only in local DB, E2E encryption is for transport
 - **Invite code format**: `username#HASH` — both human-readable and cryptographically verifiable
+- **TLS with self-signed certs**: encrypts P2P transport, identity verified at application level
 
 ### Phase 4: Voice Interface & Advanced Features
 - Whisper for voice input (Ukrainian/English)
@@ -2561,7 +2604,7 @@ Docker Backend (port 8800)          Desktop Launcher (port 19000)
 - Listening statistics and user preferences
 
 ### Upcoming
-- **Chat UI** in launcher (chat tab, friend list, message history)
+- **Mutual invite exchange** implementation (replace auto-accept handshake)
 - Fetch more lyrics (extend library coverage)
 - Musixmatch as third lyrics source (if needed after Genius coverage analysis)
 - Audio analysis for remaining tracks
