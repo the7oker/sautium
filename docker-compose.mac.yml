@@ -1,0 +1,152 @@
+# Docker Compose for macOS (Apple Silicon — M1/M2/M3/M4/M5)
+# Usage: docker compose -f docker-compose.mac.yml up --build
+#
+# Differences from main docker-compose.yml:
+#   - No NVIDIA GPU / CUDA (uses CPU-only PyTorch)
+#   - Dockerfile.mac instead of Dockerfile
+#   - No CUDA_VISIBLE_DEVICES env var
+#   - Mac-friendly path defaults
+
+services:
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: sautium-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-music_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-musicai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - sautium-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-musicai} -d ${POSTGRES_DB:-music_ai}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.mac
+    container_name: sautium-backend
+    environment:
+      # Database configuration
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-music_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-musicai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+
+      # Music library path (inside container)
+      MUSIC_LIBRARY_PATH: /music
+
+      # API Keys
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LASTFM_API_KEY: ${LASTFM_API_KEY}
+
+      # No GPU — CPU-only inference on Mac
+      # CUDA_VISIBLE_DEVICES is not set
+
+      # Application settings
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      # HQPlayer integration
+      HQPLAYER_HOST: ${HQPLAYER_HOST:-host.docker.internal}
+      HQPLAYER_PORT: ${HQPLAYER_PORT:-4321}
+      HQPLAYER_ENABLED: ${HQPLAYER_ENABLED:-false}
+
+      # Native OS path prefix for DB-stored paths
+      MUSIC_HOST_PATH: ${MUSIC_HOST_PATH:-}
+      TRACKER_URL: http://playback-tracker:8765
+
+      # Claude Code integration
+      CLAUDE_CODE_ENABLED: ${CLAUDE_CODE_ENABLED:-true}
+
+      # P2P / DHT
+      P2P_ENABLED: ${P2P_ENABLED:-true}
+      P2P_DHT_PORT: ${P2P_DHT_PORT:-19001}
+      P2P_ANNOUNCE_PORT: ${P2P_ANNOUNCE_PORT:-8800}
+      P2P_USERNAME: ${P2P_USERNAME:-}
+      P2P_PASSWORD: ${P2P_PASSWORD:-}
+      P2P_EMAIL: ${P2P_EMAIL:-}
+
+      # Multi-provider LLM support
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OPENAI_COMPAT_BASE_URL: ${OPENAI_COMPAT_BASE_URL:-}
+      OPENAI_COMPAT_API_KEY: ${OPENAI_COMPAT_API_KEY:-}
+      OPENAI_COMPAT_MODEL: ${OPENAI_COMPAT_MODEL:-}
+      OPENAI_COMPAT_NAME: ${OPENAI_COMPAT_NAME:-}
+      DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-claude_code}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backend:/app
+      - ./mcp:/app/mcp
+      - ./data/cache:/root/.cache
+      - ./data/generated_eq:/app/generated_eq
+      # Mount music library as read-only
+      # Mac path example: /Users/username/Music -> /music in container
+      - ${MUSIC_LIBRARY_PATH:-/Users/Shared/Music}:/music:ro
+      # Claude Code auth (OAuth tokens)
+      - ${HOME}/.claude/.credentials.json:/home/claudeuser/.claude/.credentials.json:ro
+    ports:
+      - "8800:8000"
+      - "${P2P_DHT_PORT:-19001}:${P2P_DHT_PORT:-19001}/udp"
+    networks:
+      - sautium-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # No GPU reservation — Apple Silicon GPU (MPS) is not available inside Docker
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  playback-tracker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.tracker
+    container_name: sautium-playback-tracker
+    environment:
+      # HQPlayer connection
+      HQPLAYER_HOST: ${HQPLAYER_HOST:-host.docker.internal}
+      HQPLAYER_PORT: ${HQPLAYER_PORT:-4321}
+
+      # Database configuration
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-music_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-musicai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+
+      # Last.fm Scrobbling
+      LASTFM_API_KEY: ${LASTFM_API_KEY}
+      LASTFM_API_SECRET: ${LASTFM_API_SECRET}
+      LASTFM_USERNAME: ${LASTFM_USERNAME}
+      LASTFM_SESSION_KEY: ${LASTFM_SESSION_KEY}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8765:8765"
+    networks:
+      - sautium-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    command: python playback_tracker.py --hqplayer-host ${HQPLAYER_HOST:-host.docker.internal} --db-host postgres
+
+networks:
+  sautium-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+    driver: local

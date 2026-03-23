@@ -1,0 +1,76 @@
+# Apple Silicon (ARM64) base image — no CUDA
+FROM python:3.11-slim-bookworm
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    # Audio processing libraries
+    ffmpeg \
+    libsndfile1 \
+    libsndfile1-dev \
+    # Build tools
+    build-essential \
+    git \
+    wget \
+    curl \
+    # PostgreSQL client
+    postgresql-client \
+    # Cleanup
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22 (for Claude Code CLI)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && npm install -g @anthropic-ai/claude-code \
+    && npm install -g postgres-mcp-server \
+    && npm cache clean --force
+
+# Non-root user for Claude Code (--dangerously-skip-permissions requires non-root)
+RUN useradd -m -s /bin/bash claudeuser \
+    && mkdir -p /home/claudeuser/.claude/debug \
+    && mkdir -p /home/claudeuser/.claude/projects \
+    && echo '{}' > /home/claudeuser/.claude/settings.json \
+    && chown -R claudeuser:claudeuser /home/claudeuser/.claude
+
+# Upgrade pip
+RUN python3 -m pip install --upgrade pip setuptools wheel
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements first for better Docker layer caching
+COPY requirements.txt .
+
+# Install PyTorch CPU-only for ARM64 (no CUDA available on Apple Silicon in Docker)
+# This avoids downloading ~2GB of CUDA libraries
+RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+# Install remaining Python dependencies (torch already installed above, pip will skip it)
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Optional: libtorrent for P2P DHT peer discovery (graceful degradation if unavailable)
+RUN pip install --no-cache-dir libtorrent || echo "WARNING: libtorrent not available — DHT peer discovery disabled"
+
+# Copy application code
+COPY . .
+
+# Create cache directory for models
+RUN mkdir -p /root/.cache
+
+# Expose FastAPI port and DHT UDP port
+EXPOSE 8000
+EXPOSE 19001/udp
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8000/ || exit 1
+
+# Default command (can be overridden in docker-compose.yml)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
