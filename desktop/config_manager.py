@@ -57,9 +57,7 @@ DEFAULT_CONFIG = {
         "manual_peers": [],
         "chat_enabled": True,
     },
-    "sync": {
-        "source_url": "http://localhost:8800",
-    },
+    "sync": {},
 }
 
 
