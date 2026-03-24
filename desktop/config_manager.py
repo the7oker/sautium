@@ -55,6 +55,7 @@ DEFAULT_CONFIG = {
         "enabled": False,
         "node_name": None,
         "listen_port": None,  # auto-generated on first run (random port)
+        "docker_ports": [8800],  # localhost ports to probe for Docker backends
         "manual_peers": [],
         "chat_enabled": True,
     },

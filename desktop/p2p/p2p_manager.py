@@ -93,9 +93,11 @@ class P2PManager:
             listen_port=dht_port,
             http_port=http_port,
         )
+        docker_ports = p2p_cfg.get("docker_ports", [])
         self._lan_discovery = LANDiscovery(
             sync_port=http_port,
             node_id=node_id,
+            localhost_probe_ports=docker_ports,
         )
         self._upnp = UPnPService(internal_port=http_port)
 

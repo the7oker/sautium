@@ -32,9 +32,6 @@ BEACON_INTERVAL = 30          # seconds between broadcasts
 PEER_EXPIRY = BEACON_INTERVAL * 4  # remove peer after 4 missed beacons
 PROTOCOL_VERSION = 1
 
-# Ports to probe on localhost for Docker/other backends that can't
-# do UDP broadcast (e.g., Docker containers on bridge network).
-LOCALHOST_PROBE_PORTS = [8800, 8000, 19000]
 
 
 class LANDiscovery:
@@ -45,10 +42,12 @@ class LANDiscovery:
         sync_port: int = 19000,
         node_id: str = "",
         discovery_port: int = LAN_DISCOVERY_PORT,
+        localhost_probe_ports: list[int] | None = None,
     ):
         self.sync_port = sync_port
         self.node_id = node_id
         self.discovery_port = discovery_port
+        self._localhost_probe_ports = localhost_probe_ports or []
 
         # {(ip, sync_port): {"node_id": ..., "artists": ..., "last_seen": ...}}
         self._peers: Dict[Tuple[str, int], dict] = {}
@@ -229,7 +228,7 @@ class LANDiscovery:
         ctx.verify_mode = ssl.CERT_NONE
 
         while self._running:
-            for port in LOCALHOST_PROBE_PORTS:
+            for port in self._localhost_probe_ports:
                 if port == self.sync_port:
                     continue  # skip ourselves
                 try:
