@@ -55,11 +55,20 @@ class P2PManager:
     def chat_service(self) -> Optional[ChatService]:
         return self._chat_service
 
-    def start(self, node_id: str = "", progress_cb: Callable = None):
-        """Start P2P services in a background thread."""
+    def start(self, node_id: str = "", progress_cb: Callable = None,
+              announce: bool = True):
+        """Start P2P services in a background thread.
+
+        Args:
+            announce: If True, announce enriched artists in DHT so peers
+                      can discover us.  If False, only start DHT for
+                      *discovering* other peers (passive/client mode).
+        """
         if self._running:
             logger.warning("P2P manager already running")
             return
+
+        self._announce = announce
 
         p2p_cfg = self.config.get("p2p", {})
         http_port = p2p_cfg.get("listen_port", 19000)
@@ -135,40 +144,46 @@ class P2PManager:
                 _progress("Starting DHT...")
                 await self._dht_service.start()
 
-                # Announce user identity in DHT
-                from desktop.node_identity import get_account_info
-                account_info = get_account_info()
-                if account_info and account_info.get("invite_code"):
-                    await self._dht_service.announce_user(
-                        account_info["invite_code"]
-                    )
-                    _progress(
-                        f"User announced: {account_info['invite_code']}"
+                if self._announce:
+                    # Announce user identity in DHT
+                    from desktop.node_identity import get_account_info
+                    account_info = get_account_info()
+                    if account_info and account_info.get("invite_code"):
+                        await self._dht_service.announce_user(
+                            account_info["invite_code"]
+                        )
+                        _progress(
+                            f"User announced: {account_info['invite_code']}"
+                        )
+
+                    # Announce enriched artists
+                    _progress("Querying enriched artists...")
+                    artist_uuids = await self._get_enriched_artists()
+                    if artist_uuids:
+                        _progress(
+                            f"Announcing {len(artist_uuids)} artists in DHT..."
+                        )
+                        await self._dht_service.announce_artists(artist_uuids)
+                        _progress(
+                            f"P2P online: {len(artist_uuids)} artists announced"
+                        )
+                    else:
+                        _progress("P2P online: no enriched artists to announce")
+
+                    # Start periodic re-announce
+                    self._reannounce_task = asyncio.create_task(
+                        self._dht_service.periodic_reannounce()
                     )
 
-                # Announce enriched artists
-                _progress("Querying enriched artists...")
-                artist_uuids = await self._get_enriched_artists()
-                if artist_uuids:
-                    _progress(
-                        f"Announcing {len(artist_uuids)} artists in DHT..."
-                    )
-                    await self._dht_service.announce_artists(artist_uuids)
-                    _progress(
-                        f"P2P online: {len(artist_uuids)} artists announced"
-                    )
+                    # Start pending message retry loop
+                    if self._chat_service:
+                        self._pending_retry_task = asyncio.create_task(
+                            self._retry_pending_messages()
+                        )
                 else:
-                    _progress("P2P online: no enriched artists to announce")
-
-                # Start periodic re-announce
-                self._reannounce_task = asyncio.create_task(
-                    self._dht_service.periodic_reannounce()
-                )
-
-                # Start pending message retry loop
-                if self._chat_service:
-                    self._pending_retry_task = asyncio.create_task(
-                        self._retry_pending_messages()
+                    _progress(
+                        "P2P online (discovery only — "
+                        "enable P2P in settings to share with peers)"
                     )
             else:
                 _progress(

@@ -354,11 +354,13 @@ class LauncherApp(ctk.CTk):
         return True
 
     def _start_p2p_if_enabled(self):
-        """Start P2P services if enabled in config."""
-        p2p_cfg = self.config.get("p2p", {})
-        if not p2p_cfg.get("enabled", False):
-            return
+        """Start P2P services (DHT always starts for peer discovery).
 
+        When p2p.enabled=True, the node also announces its artists so
+        other peers can discover and sync from it.
+        When p2p.enabled=False, DHT still starts in discovery-only mode
+        so "Sync Library" can find peers automatically.
+        """
         def _start():
             try:
                 def progress(msg):
@@ -376,9 +378,11 @@ class LauncherApp(ctk.CTk):
                 db_dsn = self._get_local_db_dsn()
                 node_id = get_node_id() or ""
 
+                announce = self.config.get("p2p", {}).get("enabled", False)
                 self.p2p_manager = P2PManager(db_dsn, self.config)
                 self.p2p_manager.start(
-                    node_id=node_id, progress_cb=progress
+                    node_id=node_id, progress_cb=progress,
+                    announce=announce,
                 )
             except Exception as e:
                 logger.error(f"P2P startup failed: {e}", exc_info=True)
@@ -719,18 +723,19 @@ class LauncherApp(ctk.CTk):
         return f"postgresql://sautium:{pw}@localhost:{port}/sautium"
 
     def _sync_library(self):
-        """Sync enrichment data from peers (P2P) or a remote source."""
+        """Sync enrichment data from peers (P2P) or a remote source.
+
+        Strategy:
+          1. Always try P2P/DHT first (if P2P manager is running)
+          2. Fall back to source_url only if P2P found no peers
+        """
         self._btn_sync.configure(state="disabled", text="Syncing...")
         self._btn_scan.configure(state="disabled")
         self._btn_enrich.configure(state="disabled")
 
-        use_p2p = (
-            self.p2p_manager
-            and self.p2p_manager.is_running
-            and self.config.get("p2p", {}).get("enabled", False)
-        )
+        has_p2p = self.p2p_manager and self.p2p_manager.is_running
 
-        if use_p2p:
+        if has_p2p:
             self._progress_text.configure(text="P2P sync: searching DHT...")
             self._sync_library_p2p()
         else:
@@ -743,7 +748,7 @@ class LauncherApp(ctk.CTk):
             self._sync_library_source(source_url)
 
     def _sync_library_p2p(self):
-        """Sync enrichment data from P2P network."""
+        """Sync enrichment data from P2P network, with source_url fallback."""
         def _do_sync():
             # Normalize local artists before sync
             self.after(0, lambda: self._progress_text.configure(
@@ -765,16 +770,29 @@ class LauncherApp(ctk.CTk):
                 )
             except Exception as e:
                 logger.error(f"P2P sync failed: {e}", exc_info=True)
+                stats = {}
+
+            p2p_total = sum(
+                v for v in stats.values() if isinstance(v, int)
+            )
+
+            # If P2P found nothing, fall back to configured source_url
+            if p2p_total == 0:
+                source_url = self.config.get("sync", {}).get(
+                    "source_url", ""
+                )
+                if source_url:
+                    progress(f"No DHT peers found, trying {source_url}...")
+                    self._do_source_sync(source_url, progress)
+                    return
+                # No peers and no source_url
                 self.after(0, lambda: self._progress_text.configure(
-                    text=f"P2P sync failed: {str(e)[:100]}"))
+                    text="No peers found. Wait for DHT or set source URL in settings."))
                 self.after(0, self._sync_done)
                 return
 
-            total = sum(
-                v for v in stats.values() if isinstance(v, int)
-            )
-            msg = f"P2P sync complete — {total} items imported"
-            if total > 0:
+            msg = f"P2P sync complete — {p2p_total} items imported"
+            if p2p_total > 0:
                 details = ", ".join(
                     f"{k}: {v}" for k, v in stats.items()
                     if isinstance(v, int) and v > 0
@@ -786,60 +804,61 @@ class LauncherApp(ctk.CTk):
 
         threading.Thread(target=_do_sync, daemon=True).start()
 
+    def _do_source_sync(self, source_url: str, progress_cb=None):
+        """Run source-URL sync (called from any thread). Updates UI on completion."""
+        from desktop.sync_client import SyncClient
+
+        def progress(msg):
+            self.after(0, lambda: self._progress_text.configure(text=msg))
+
+        cb = progress_cb or progress
+
+        source_api = BackendAPIClient(source_url)
+        health = source_api.get_health()
+        if not health:
+            cb(f"Sync source not reachable: {source_url}")
+            self.after(0, self._sync_done)
+            return
+
+        # Normalize local artists before sync to ensure UUID consistency
+        cb("Normalizing artists...")
+        norm_result = self.api_client.normalize_artists()
+        if norm_result:
+            p1 = norm_result.get("statistics", {}).get("pass1", {})
+            if p1.get("split", 0) > 0:
+                logger.info(f"Pre-sync normalization: {p1}")
+
+        db_dsn = self._get_local_db_dsn()
+
+        sync = SyncClient(
+            source_api, db_dsn,
+            batch_size=50, progress_cb=cb,
+        )
+
+        try:
+            stats = sync.run_sync()
+        except Exception as e:
+            logger.error(f"Sync failed: {e}", exc_info=True)
+            cb(f"Sync failed: {str(e)[:100]}")
+            self.after(0, self._sync_done)
+            return
+
+        total = sum(v for v in stats.values() if isinstance(v, int))
+        msg = f"Sync complete — {total} items imported"
+        if total > 0:
+            details = ", ".join(
+                f"{k}: {v}" for k, v in stats.items()
+                if isinstance(v, int) and v > 0
+            )
+            msg += f" ({details})"
+
+        self.after(0, lambda: self._progress_text.configure(text=msg))
+        self.after(0, self._sync_done)
+
     def _sync_library_source(self, source_url: str):
         """Sync enrichment data from a fixed source URL (legacy/fallback)."""
         def _do_sync():
-            from desktop.sync_client import SyncClient
-
-            source_api = BackendAPIClient(source_url)
-
-            # Verify source is reachable
-            health = source_api.get_health()
-            if not health:
-                self.after(0, lambda: self._progress_text.configure(
-                    text=f"Sync source not reachable: {source_url}"))
-                self.after(0, self._sync_done)
-                return
-
-            # Normalize local artists before sync to ensure UUID consistency
-            self.after(0, lambda: self._progress_text.configure(
-                text="Normalizing artists..."))
-            norm_result = self.api_client.normalize_artists()
-            if norm_result:
-                p1 = norm_result.get("statistics", {}).get("pass1", {})
-                if p1.get("split", 0) > 0:
-                    logger.info(f"Pre-sync normalization: {p1}")
-
-            db_dsn = self._get_local_db_dsn()
-
-            def progress(msg):
-                self.after(0, lambda: self._progress_text.configure(text=msg))
-
-            sync = SyncClient(
-                source_api, db_dsn,
-                batch_size=50, progress_cb=progress,
-            )
-
-            try:
-                stats = sync.run_sync()
-            except Exception as e:
-                logger.error(f"Sync failed: {e}", exc_info=True)
-                self.after(0, lambda: self._progress_text.configure(
-                    text=f"Sync failed: {str(e)[:100]}"))
-                self.after(0, self._sync_done)
-                return
-
-            total = sum(v for v in stats.values() if isinstance(v, int))
-            msg = f"Sync complete — {total} items imported"
-            if total > 0:
-                details = ", ".join(
-                    f"{k}: {v}" for k, v in stats.items()
-                    if isinstance(v, int) and v > 0
-                )
-                msg += f" ({details})"
-
-            self.after(0, lambda: self._progress_text.configure(text=msg))
-            self.after(0, self._sync_done)
+            self._do_source_sync(source_url)
 
         threading.Thread(target=_do_sync, daemon=True).start()
 
