@@ -162,6 +162,8 @@ class P2PManager:
                 if upnp_result:
                     ext_ip, ext_port = upnp_result
                     _progress(f"UPnP: {ext_ip}:{ext_port}")
+                    # Tell DHT to announce with the UPnP external port
+                    self._dht_service.set_announce_port(ext_port)
 
             # Start DHT
             if self._dht_service.is_available:

@@ -8,6 +8,7 @@ Generates .env file for the backend process.
 import json
 import logging
 import os
+import random
 import secrets
 import sys
 from pathlib import Path
@@ -53,7 +54,7 @@ DEFAULT_CONFIG = {
     "p2p": {
         "enabled": False,
         "node_name": None,
-        "listen_port": 19000,
+        "listen_port": None,  # auto-generated on first run (random port)
         "manual_peers": [],
         "chat_enabled": True,
     },
@@ -104,8 +105,21 @@ def load_config() -> dict:
         config = DEFAULT_CONFIG.copy()
 
     # Auto-generate postgres password if not set
+    changed = False
     if not config.get("postgres_password"):
         config["postgres_password"] = secrets.token_urlsafe(16)
+        changed = True
+
+    # Auto-generate random P2P listen port (unique per instance)
+    # Range 20000-29999 avoids common service ports
+    p2p = config.get("p2p", {})
+    if not p2p.get("listen_port"):
+        p2p["listen_port"] = random.randint(20000, 29999)
+        config["p2p"] = p2p
+        changed = True
+        logger.info(f"Generated random P2P port: {p2p['listen_port']}")
+
+    if changed:
         save_config(config)
 
     return config

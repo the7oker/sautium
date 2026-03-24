@@ -76,6 +76,7 @@ class DHTService:
         """
         self.listen_port = listen_port
         self.http_port = http_port
+        self._announce_port = http_port  # may differ if UPnP maps to another port
         self._session: Optional[object] = None  # lt.session
         self._announced: set[str] = set()  # artist UUIDs currently announced
         self._user_invite_code: Optional[str] = None  # user's invite code
@@ -92,6 +93,14 @@ class DHTService:
     @property
     def announced_count(self) -> int:
         return len(self._announced)
+
+    def set_announce_port(self, port: int):
+        """Update the port used in DHT announcements (e.g., from UPnP)."""
+        if port != self._announce_port:
+            logger.info(
+                f"DHT announce port changed: {self._announce_port} -> {port}"
+            )
+            self._announce_port = port
 
     async def start(self):
         """Create libtorrent session and bootstrap DHT."""
@@ -162,7 +171,7 @@ class DHTService:
         self._user_invite_code = invite_code
         ih = user_infohash(invite_code)
         sha1 = lt.sha1_hash(ih)
-        self._session.dht_announce(sha1, self.http_port, 0)
+        self._session.dht_announce(sha1, self._announce_port, 0)
         logger.info(f"DHT: user announced ({invite_code})")
 
     async def lookup_user(self, invite_code: str) -> list[tuple[str, int]]:
@@ -214,12 +223,12 @@ class DHTService:
 
         logger.info(
             f"Announcing {len(new_uuids)} artists in DHT "
-            f"(HTTP port {self.http_port})"
+            f"(announce port {self._announce_port})"
         )
         for uuid in new_uuids:
             ih = artist_infohash(uuid)
             sha1 = lt.sha1_hash(ih)
-            self._session.dht_announce(sha1, self.http_port, 0)
+            self._session.dht_announce(sha1, self._announce_port, 0)
             self._announced.add(uuid)
 
         logger.info(
@@ -320,7 +329,7 @@ class DHTService:
             if self._user_invite_code:
                 ih = user_infohash(self._user_invite_code)
                 sha1 = lt.sha1_hash(ih)
-                self._session.dht_announce(sha1, self.http_port, 0)
+                self._session.dht_announce(sha1, self._announce_port, 0)
 
             # Re-announce artists
             logger.info(
@@ -330,7 +339,7 @@ class DHTService:
             for uuid in list(self._announced):
                 ih = artist_infohash(uuid)
                 sha1 = lt.sha1_hash(ih)
-                self._session.dht_announce(sha1, self.http_port, 0)
+                self._session.dht_announce(sha1, self._announce_port, 0)
             logger.info("DHT re-announce complete")
 
     async def _poll_alerts(self):
