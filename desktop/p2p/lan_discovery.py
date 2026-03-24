@@ -32,6 +32,10 @@ BEACON_INTERVAL = 30          # seconds between broadcasts
 PEER_EXPIRY = BEACON_INTERVAL * 4  # remove peer after 4 missed beacons
 PROTOCOL_VERSION = 1
 
+# Ports to probe on localhost for Docker/other backends that can't
+# do UDP broadcast (e.g., Docker containers on bridge network).
+LOCALHOST_PROBE_PORTS = [8800, 8000, 19000]
+
 
 class LANDiscovery:
     """Broadcast/listen for Sautium peers on the local network."""
@@ -123,9 +127,10 @@ class LANDiscovery:
         sock.bind(("", self.discovery_port))
         self._sock = sock
 
-        # Start listener and broadcaster as tasks
+        # Start listener, broadcaster, and localhost prober
         self._listen_task = asyncio.create_task(self._listen_loop(loop))
         self._broadcast_task = asyncio.create_task(self._broadcast_loop(loop))
+        self._probe_task = asyncio.create_task(self._localhost_probe_loop())
 
         logger.info(
             f"LAN discovery started on UDP port {self.discovery_port} "
@@ -138,6 +143,7 @@ class LANDiscovery:
         for task in (
             getattr(self, "_listen_task", None),
             getattr(self, "_broadcast_task", None),
+            getattr(self, "_probe_task", None),
         ):
             if task:
                 task.cancel()
@@ -208,6 +214,64 @@ class LANDiscovery:
             except OSError:
                 return None, None
         return None, None
+
+    async def _localhost_probe_loop(self):
+        """Probe localhost ports for Docker/other backends that can't broadcast.
+
+        Checks /health for a Sautium peer signature, then registers it
+        as a discovered peer.  Skips our own sync_port.
+        """
+        import urllib.request
+        import ssl
+
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        while self._running:
+            for port in LOCALHOST_PROBE_PORTS:
+                if port == self.sync_port:
+                    continue  # skip ourselves
+                try:
+                    url = f"https://127.0.0.1:{port}/health"
+                    req = urllib.request.urlopen(url, timeout=2, context=ctx)
+                    data = json.loads(req.read().decode())
+                    if data.get("type") == "sautium-peer":
+                        key = ("127.0.0.1", port)
+                        is_new = key not in self._peers
+                        self._peers[key] = {
+                            "node_id": "",
+                            "artists": 0,  # unknown, but it's a valid peer
+                            "last_seen": time.time(),
+                            "localhost": True,
+                        }
+                        if is_new:
+                            logger.info(
+                                f"Localhost peer discovered: 127.0.0.1:{port}"
+                            )
+                except Exception:
+                    # Also try plain HTTP
+                    try:
+                        url = f"http://127.0.0.1:{port}/health"
+                        req = urllib.request.urlopen(url, timeout=2)
+                        data = json.loads(req.read().decode())
+                        if data.get("type") == "sautium-peer":
+                            key = ("127.0.0.1", port)
+                            is_new = key not in self._peers
+                            self._peers[key] = {
+                                "node_id": "",
+                                "artists": 0,
+                                "last_seen": time.time(),
+                                "localhost": True,
+                            }
+                            if is_new:
+                                logger.info(
+                                    f"Localhost peer discovered: "
+                                    f"127.0.0.1:{port} (HTTP)"
+                                )
+                    except Exception:
+                        pass
+            await asyncio.sleep(BEACON_INTERVAL)
 
     def update_enriched_count(self, count: int):
         """Update the artist count sent in beacons."""
