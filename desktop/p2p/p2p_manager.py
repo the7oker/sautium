@@ -20,14 +20,16 @@ from desktop.api_client import BackendAPIClient
 from desktop.p2p import sync_queries
 from desktop.p2p.chat_service import ChatService
 from desktop.p2p.dht_service import DHTService
+from desktop.p2p.lan_discovery import LANDiscovery
 from desktop.p2p.sync_server import SyncServer
+from desktop.p2p.upnp_service import UPnPService
 from desktop.sync_client import SyncClient
 
 logger = logging.getLogger(__name__)
 
 
 class P2PManager:
-    """Orchestrates P2P sync server + DHT service + chat."""
+    """Orchestrates P2P sync server + DHT + LAN discovery + UPnP."""
 
     def __init__(self, db_dsn: str, config: dict):
         self.db_dsn = db_dsn
@@ -36,10 +38,13 @@ class P2PManager:
         self._thread: Optional[threading.Thread] = None
         self._sync_server: Optional[SyncServer] = None
         self._dht_service: Optional[DHTService] = None
+        self._lan_discovery: Optional[LANDiscovery] = None
+        self._upnp: Optional[UPnPService] = None
         self._chat_service: Optional[ChatService] = None
         self._stop_event: Optional[asyncio.Event] = None
         self._reannounce_task: Optional[asyncio.Task] = None
         self._pending_retry_task: Optional[asyncio.Task] = None
+        self._lan_discovery_task: Optional[asyncio.Task] = None
         self._running = False
         self._on_message_cb: Optional[Callable] = None
 
@@ -88,6 +93,11 @@ class P2PManager:
             listen_port=dht_port,
             http_port=http_port,
         )
+        self._lan_discovery = LANDiscovery(
+            sync_port=http_port,
+            node_id=node_id,
+        )
+        self._upnp = UPnPService(internal_port=http_port)
 
         # Initialize chat service if account exists
         if account_info:
@@ -139,6 +149,20 @@ class P2PManager:
             _progress("Starting sync server...")
             await self._sync_server.start()
 
+            # Start LAN discovery (always — works behind any NAT)
+            _progress("Starting LAN discovery...")
+            await self._lan_discovery.start()
+
+            # Try UPnP port mapping (best-effort)
+            if self._upnp.is_available:
+                _progress("Trying UPnP port mapping...")
+                upnp_result = await asyncio.get_event_loop().run_in_executor(
+                    None, self._upnp.open_port
+                )
+                if upnp_result:
+                    ext_ip, ext_port = upnp_result
+                    _progress(f"UPnP: {ext_ip}:{ext_port}")
+
             # Start DHT
             if self._dht_service.is_available:
                 _progress("Starting DHT...")
@@ -164,6 +188,10 @@ class P2PManager:
                             f"Announcing {len(artist_uuids)} artists in DHT..."
                         )
                         await self._dht_service.announce_artists(artist_uuids)
+                        # Update LAN beacon with enriched count
+                        self._lan_discovery.update_enriched_count(
+                            len(artist_uuids)
+                        )
                         _progress(
                             f"P2P online: {len(artist_uuids)} artists announced"
                         )
@@ -187,8 +215,8 @@ class P2PManager:
                     )
             else:
                 _progress(
-                    "P2P online (HTTP only, DHT disabled — "
-                    "install libtorrent for peer discovery)"
+                    "P2P online (LAN only, DHT disabled — "
+                    "install libtorrent for internet discovery)"
                 )
 
             self._running = True
@@ -212,6 +240,10 @@ class P2PManager:
                 except asyncio.CancelledError:
                     pass
 
+        if self._lan_discovery:
+            await self._lan_discovery.stop()
+        if self._upnp:
+            self._upnp.close_port()
         if self._dht_service:
             await self._dht_service.stop()
         if self._sync_server:
@@ -360,9 +392,46 @@ class P2PManager:
                 if isinstance(v, int):
                     total_stats[k] = total_stats.get(k, 0) + v
 
-        # Step 4: DHT lookup for remaining unenriched artists
+        # Step 4: LAN peers (fast, works behind any NAT)
+        if self._lan_discovery:
+            lan_peers = self._lan_discovery.peers
+            if lan_peers:
+                _progress(f"Found {len(lan_peers)} LAN peers")
+                # Sort by artist count descending (prefer richer peers)
+                lan_peers_sorted = sorted(
+                    lan_peers,
+                    key=lambda p: (
+                        self._lan_discovery.get_peer_info(*p) or {}
+                    ).get("artists", 0),
+                    reverse=True,
+                )
+                for ip, port in lan_peers_sorted:
+                    still_unenriched = await self._get_unenriched_artists()
+                    if not still_unenriched:
+                        break
+                    peer_tracks = set()
+                    for au in still_unenriched:
+                        t = await self._get_track_uuids_for_artist(au)
+                        peer_tracks.update(t)
+                    if peer_tracks:
+                        info = self._lan_discovery.get_peer_info(ip, port)
+                        artist_count = (info or {}).get("artists", "?")
+                        _progress(
+                            f"LAN peer {ip}:{port} "
+                            f"({artist_count} artists)..."
+                        )
+                        synced = await self._sync_from_peer(
+                            f"{ip}:{port}",
+                            list(peer_tracks),
+                            _progress,
+                            progress_cb,
+                        )
+                        for k, v in synced.items():
+                            if isinstance(v, int):
+                                total_stats[k] = total_stats.get(k, 0) + v
+
+        # Step 5: DHT lookup for remaining unenriched artists (internet)
         if self._dht_service and self._dht_service.is_available:
-            # Re-check what's still unenriched after manual peers
             still_unenriched = await self._get_unenriched_artists()
             if still_unenriched:
                 _progress(
@@ -389,7 +458,6 @@ class P2PManager:
                     )
 
                     for (ip, port), artist_uuids in peer_to_artists.items():
-                        # Collect tracks for these artists
                         peer_tracks = set()
                         for au in artist_uuids:
                             t = await self._get_track_uuids_for_artist(au)
