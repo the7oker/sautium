@@ -909,8 +909,117 @@ class SetupWizard(ctk.CTkToplevel):
             )
         logger.info("Crypto dependencies installed")
 
+    def _check_macos_homebrew(self) -> bool:
+        """On macOS, check if Homebrew is installed. Show dialog if not."""
+        if sys.platform != "darwin":
+            return True
+
+        from desktop.db_init import _find_brew
+        if _find_brew():
+            return True
+
+        # Homebrew not found — show dialog
+        self._show_homebrew_dialog()
+        return False
+
+    def _show_homebrew_dialog(self):
+        """Show a dialog explaining how to install Homebrew."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Homebrew Required")
+        dialog.geometry("520x310")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ctk.CTkLabel(
+            dialog,
+            text="Homebrew Required",
+            font=ctk.CTkFont(size=20, weight="bold"),
+        ).pack(pady=(20, 5))
+
+        ctk.CTkLabel(
+            dialog,
+            text=(
+                "Sautium needs Homebrew to install PostgreSQL\n"
+                "on macOS. It's a one-time setup."
+            ),
+            justify="center",
+        ).pack(pady=5)
+
+        ctk.CTkLabel(
+            dialog,
+            text="Open Terminal and paste this command:",
+            text_color="gray",
+        ).pack(pady=(10, 3))
+
+        brew_cmd = '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+
+        cmd_frame = ctk.CTkFrame(dialog)
+        cmd_frame.pack(fill="x", padx=30, pady=5)
+
+        cmd_entry = ctk.CTkEntry(
+            cmd_frame, width=420,
+            font=ctk.CTkFont(size=12, family="Courier"),
+        )
+        cmd_entry.insert(0, brew_cmd)
+        cmd_entry.configure(state="readonly")
+        cmd_entry.pack(side="left", padx=(10, 5), pady=8)
+
+        def _copy():
+            dialog.clipboard_clear()
+            dialog.clipboard_append(brew_cmd)
+            copy_btn.configure(text="Copied!")
+            dialog.after(1500, lambda: copy_btn.configure(text="Copy"))
+
+        copy_btn = ctk.CTkButton(
+            cmd_frame, text="Copy", width=60, command=_copy,
+        )
+        copy_btn.pack(side="right", padx=(0, 10), pady=8)
+
+        ctk.CTkLabel(
+            dialog,
+            text=(
+                "After installing Homebrew, close Terminal\n"
+                "and click 'Retry' below."
+            ),
+            text_color="gray",
+            font=ctk.CTkFont(size=12),
+            justify="center",
+        ).pack(pady=8)
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(pady=10)
+
+        def _retry():
+            from desktop.db_init import _find_brew
+            if _find_brew():
+                dialog.destroy()
+                self._finish()
+            else:
+                retry_status.configure(
+                    text="Homebrew still not found. Check Terminal.",
+                    text_color="red",
+                )
+
+        ctk.CTkButton(
+            btn_frame, text="Retry", width=120, command=_retry,
+        ).pack(side="left", padx=10)
+
+        ctk.CTkButton(
+            btn_frame, text="Cancel", width=100,
+            command=dialog.destroy,
+            fg_color="transparent", border_width=1,
+        ).pack(side="left", padx=10)
+
+        retry_status = ctk.CTkLabel(dialog, text="", text_color="gray")
+        retry_status.pack()
+
     def _finish(self):
         """Save config and start initialization."""
+        # macOS: check Homebrew before proceeding
+        if not self._check_macos_homebrew():
+            return
+
         # Create account before saving config (don't persist password)
         account_data = self.config.pop("_account", None)
 

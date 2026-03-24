@@ -11,8 +11,11 @@ Handles:
 import glob
 import logging
 import os
+import platform
+import shutil
 import subprocess
 import sys
+import tarfile
 import time
 import urllib.request
 import zipfile
@@ -27,7 +30,7 @@ logger = logging.getLogger(__name__)
 # Migration tracking table
 MIGRATIONS_TABLE = "_schema_migrations"
 
-
+# Windows portable PostgreSQL
 PG_DOWNLOAD_URL = (
     "https://get.enterprisedb.com/postgresql/"
     "postgresql-16.8-1-windows-x64-binaries.zip"
@@ -38,14 +41,23 @@ PGVECTOR_DOWNLOAD_URL = (
     "releases/download/0.8.1_16/vector.v0.8.1-pg16.zip"
 )
 
+IS_MACOS = sys.platform == "darwin"
+IS_WINDOWS = sys.platform == "win32"
+
 
 def get_pg_bin_dir() -> Path:
-    """Get the PostgreSQL bin directory (portable install)."""
+    """Get the PostgreSQL bin directory (portable install or Homebrew)."""
     from desktop.utils import get_project_root
     project_root = get_project_root()
     pg_dir = project_root / "pgsql" / "bin"
     if pg_dir.exists():
         return pg_dir
+
+    # macOS: check Homebrew paths
+    if IS_MACOS:
+        brew_pg = _get_homebrew_pg_bin()
+        if brew_pg:
+            return brew_pg
 
     # Fallback: check PATH
     pg_ctl = _which("pg_ctl")
@@ -58,7 +70,11 @@ def get_pg_bin_dir() -> Path:
 
 
 def download_portable_postgres(progress_cb: Optional[Callable] = None) -> bool:
-    """Download and extract portable PostgreSQL for Windows."""
+    """Download/install PostgreSQL (Windows: portable zip, macOS: Homebrew)."""
+    if IS_MACOS:
+        return _install_postgres_macos(progress_cb)
+
+    # Windows: download portable binaries
     from desktop.utils import get_project_root
     project_root = get_project_root()
     pg_bin = project_root / "pgsql" / "bin"
@@ -111,6 +127,10 @@ def download_portable_postgres(progress_cb: Optional[Callable] = None) -> bool:
 
 def _download_pgvector(pgsql_dir: Path, progress_cb: Optional[Callable] = None) -> bool:
     """Download and install pgvector extension into portable PostgreSQL."""
+    # On macOS pgvector is installed via Homebrew alongside PostgreSQL
+    if IS_MACOS:
+        return True
+
     ext_dir = pgsql_dir / "share" / "extension"
     if (ext_dir / "vector.control").exists():
         logger.info("pgvector already installed")
@@ -137,7 +157,6 @@ def _download_pgvector(pgsql_dir: Path, progress_cb: Optional[Callable] = None) 
             lib_dir = pgsql_dir / "lib"
             ext_dir.mkdir(parents=True, exist_ok=True)
 
-            import shutil
             for f in tmp_path.rglob("*.dll"):
                 shutil.copy2(f, lib_dir / f.name)
                 logger.info(f"Installed {f.name} -> {lib_dir}")
@@ -161,6 +180,168 @@ def _download_pgvector(pgsql_dir: Path, progress_cb: Optional[Callable] = None) 
         zip_path.unlink(missing_ok=True)
 
 
+# ================================================================
+# macOS (Homebrew) support
+# ================================================================
+
+def _get_homebrew_prefix() -> Optional[str]:
+    """Get Homebrew prefix path."""
+    brew = shutil.which("brew")
+    if not brew:
+        # Check well-known locations
+        for path in ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]:
+            if os.path.isfile(path):
+                brew = path
+                break
+    if not brew:
+        return None
+    try:
+        result = subprocess.run(
+            [brew, "--prefix"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def _get_homebrew_pg_bin() -> Optional[Path]:
+    """Find PostgreSQL installed via Homebrew."""
+    brew = shutil.which("brew")
+    if not brew:
+        for path in ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]:
+            if os.path.isfile(path):
+                brew = path
+                break
+    if not brew:
+        return None
+
+    # Try versioned formulae first, then unversioned
+    for formula in ["postgresql@16", "postgresql@17", "postgresql@15", "postgresql"]:
+        try:
+            result = subprocess.run(
+                [brew, "--prefix", formula],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                bin_dir = Path(result.stdout.strip()) / "bin"
+                if (bin_dir / "pg_ctl").exists():
+                    logger.info(f"Found Homebrew PostgreSQL: {bin_dir}")
+                    return bin_dir
+        except Exception:
+            continue
+    return None
+
+
+def _find_brew() -> Optional[str]:
+    """Find the brew executable."""
+    brew = shutil.which("brew")
+    if brew:
+        return brew
+    for path in ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _install_postgres_macos(progress_cb: Optional[Callable] = None) -> bool:
+    """Install PostgreSQL + pgvector via Homebrew on macOS."""
+    # Check if already installed
+    brew_pg = _get_homebrew_pg_bin()
+    if brew_pg:
+        logger.info("PostgreSQL already installed via Homebrew")
+        # Ensure pgvector is also installed
+        _ensure_pgvector_homebrew(progress_cb)
+        return True
+
+    brew = _find_brew()
+    if not brew:
+        logger.error(
+            "Homebrew not found. Please install Homebrew first: "
+            "https://brew.sh"
+        )
+        if progress_cb:
+            progress_cb(
+                "Homebrew not found! Install it from https://brew.sh "
+                "then restart Sautium."
+            )
+        return False
+
+    try:
+        if progress_cb:
+            progress_cb("Installing PostgreSQL via Homebrew (may take a few minutes)...")
+
+        logger.info("Installing postgresql@16 via Homebrew...")
+        result = subprocess.run(
+            [brew, "install", "postgresql@16"],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode != 0:
+            logger.error(f"brew install postgresql@16 failed: {result.stderr}")
+            if progress_cb:
+                progress_cb(f"PostgreSQL install failed: {result.stderr[:200]}")
+            return False
+
+        logger.info("PostgreSQL installed via Homebrew")
+
+        # Install pgvector
+        _ensure_pgvector_homebrew(progress_cb)
+
+        if progress_cb:
+            progress_cb("PostgreSQL installed!")
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to install PostgreSQL via Homebrew: {e}")
+        if progress_cb:
+            progress_cb(f"PostgreSQL install failed: {e}")
+        return False
+
+
+def _ensure_pgvector_homebrew(progress_cb: Optional[Callable] = None) -> bool:
+    """Install pgvector via Homebrew if not already present."""
+    brew = _find_brew()
+    if not brew:
+        return False
+
+    # Check if pgvector is already installed
+    try:
+        result = subprocess.run(
+            [brew, "list", "pgvector"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            logger.info("pgvector already installed via Homebrew")
+            return True
+    except Exception:
+        pass
+
+    try:
+        if progress_cb:
+            progress_cb("Installing pgvector extension...")
+
+        logger.info("Installing pgvector via Homebrew...")
+        result = subprocess.run(
+            [brew, "install", "pgvector"],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            logger.warning(f"brew install pgvector failed: {result.stderr}")
+            if progress_cb:
+                progress_cb("pgvector install failed (non-critical)")
+            return False
+
+        logger.info("pgvector installed via Homebrew")
+        return True
+
+    except Exception as e:
+        logger.warning(f"Failed to install pgvector: {e}")
+        return False
+
+
 def get_pg_data_dir() -> Path:
     """Get the PostgreSQL data directory."""
     from desktop.config_manager import get_data_dir
@@ -169,8 +350,7 @@ def get_pg_data_dir() -> Path:
 
 def _which(name: str) -> Optional[str]:
     """Find executable in PATH, with .exe suffix on Windows."""
-    import shutil
-    if sys.platform == "win32" and not name.endswith(".exe"):
+    if IS_WINDOWS and not name.endswith(".exe"):
         name += ".exe"
     return shutil.which(name)
 
@@ -178,11 +358,14 @@ def _which(name: str) -> Optional[str]:
 def _get_pg_env() -> dict:
     """Get environment with PostgreSQL bin/lib in PATH."""
     env = os.environ.copy()
+    sep = os.pathsep
     try:
         pg_bin = get_pg_bin_dir()
         pg_lib = pg_bin.parent / "lib"
-        # Prepend pgsql/bin and pgsql/lib to PATH so DLLs are found
-        env["PATH"] = f"{pg_bin};{pg_lib};{env.get('PATH', '')}"
+        # Prepend pgsql/bin and pgsql/lib to PATH so DLLs/dylibs are found
+        env["PATH"] = f"{pg_bin}{sep}{pg_lib}{sep}{env.get('PATH', '')}"
+        if IS_MACOS:
+            env["DYLD_LIBRARY_PATH"] = f"{pg_lib}{sep}{env.get('DYLD_LIBRARY_PATH', '')}"
     except FileNotFoundError:
         pass
     return env
@@ -198,7 +381,7 @@ def _run_pg_cmd(cmd: list, env: Optional[dict] = None, timeout: int = 60) -> sub
         "timeout": timeout,
         "env": env,
     }
-    if sys.platform == "win32":
+    if IS_WINDOWS:
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
     logger.debug(f"Running: {' '.join(cmd)}")
@@ -227,7 +410,6 @@ def initialize_cluster(password: str, progress_cb: Optional[Callable] = None) ->
     # Clean up partially initialized pgdata (e.g. from a previous failed attempt)
     if data_dir.exists() and any(data_dir.iterdir()):
         logger.warning(f"pgdata exists but not initialized, cleaning up: {data_dir}")
-        import shutil
         shutil.rmtree(data_dir)
 
     # Create fresh pgdata directory
@@ -341,7 +523,7 @@ def start_postgres(port: int = 5432) -> bool:
         "-o", f"-p {port}",
     ]
     kwargs = {"env": env, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-    if sys.platform == "win32":
+    if IS_WINDOWS:
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
     proc = subprocess.Popen(cmd, **kwargs)
@@ -587,15 +769,15 @@ def full_init(
     3. Create database/role/pgvector (if needed)
     4. Run migrations
     """
-    # Auto-download PostgreSQL if missing on Windows
-    if sys.platform == "win32":
+    # Auto-download/install PostgreSQL if missing
+    if IS_WINDOWS or IS_MACOS:
         try:
             get_pg_bin_dir()
         except FileNotFoundError:
-            logger.info("PostgreSQL not found, downloading portable version...")
+            logger.info("PostgreSQL not found, installing...")
             if not download_portable_postgres(progress_cb):
                 raise RuntimeError(
-                    "Failed to download PostgreSQL. "
+                    "Failed to install PostgreSQL. "
                     "Check your internet connection and try again."
                 )
 

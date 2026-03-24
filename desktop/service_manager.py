@@ -51,15 +51,15 @@ class ServiceManager:
         port = self.ports.get("postgres", 5432)
         password = self.config.get("postgres_password", "changeme")
 
-        # Auto-download PostgreSQL if not found
+        # Auto-download/install PostgreSQL if not found
         try:
             get_pg_bin_dir()
         except FileNotFoundError:
-            if sys.platform == "win32":
+            if sys.platform in ("win32", "darwin"):
                 if not download_portable_postgres(progress_cb):
                     return False
             else:
-                logger.error("PostgreSQL not found")
+                logger.error("PostgreSQL not found. Install it manually.")
                 return False
 
         # Initialize cluster if needed
@@ -152,11 +152,13 @@ class ServiceManager:
         python = self._get_backend_python()
         logger.info(f"Backend Python for deps: {python}")
 
+        _cflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
         # Check if uvicorn already installed in backend Python
         check = subprocess.run(
             [python, "-c", "import uvicorn"],
             capture_output=True, text=True, timeout=30,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            creationflags=_cflags,
         )
         if check.returncode == 0:
             logger.info("Backend dependencies already installed")
@@ -172,29 +174,48 @@ class ServiceManager:
 
         logger.info("Installing backend dependencies...")
 
-        # Install torch with CUDA first (PyPI torch is CPU-only on Windows)
-        if progress_cb:
-            progress_cb("Installing PyTorch with CUDA (may take a few minutes)...")
-        torch_cmd = [
-            python, "-m", "pip", "install",
-            "torch", "torchvision", "torchaudio",
-            "--index-url", "https://download.pytorch.org/whl/cu124",
-            "--quiet",
-        ]
+        # Install PyTorch (CUDA on Windows, CPU/MPS on macOS)
+        is_macos = sys.platform == "darwin"
+        if is_macos:
+            if progress_cb:
+                progress_cb("Installing PyTorch (CPU/MPS)...")
+            torch_cmd = [
+                python, "-m", "pip", "install",
+                "torch", "torchvision", "torchaudio",
+                "--quiet",
+            ]
+        else:
+            if progress_cb:
+                progress_cb("Installing PyTorch with CUDA (may take a few minutes)...")
+            torch_cmd = [
+                python, "-m", "pip", "install",
+                "torch", "torchvision", "torchaudio",
+                "--index-url", "https://download.pytorch.org/whl/cu124",
+                "--quiet",
+            ]
+
         torch_env = os.environ.copy()
         torch_kwargs = {"capture_output": True, "text": True, "timeout": 600, "env": torch_env}
         if sys.platform == "win32":
             torch_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         torch_result = subprocess.run(torch_cmd, **torch_kwargs)
         if torch_result.returncode != 0:
-            logger.warning(f"CUDA torch install failed, falling back to default: {torch_result.stderr[:200]}")
+            logger.warning(f"PyTorch install failed, falling back to default: {torch_result.stderr[:200]}")
             if progress_cb:
-                progress_cb("CUDA torch failed, using CPU fallback...")
+                progress_cb("PyTorch install failed, using CPU fallback...")
 
-        # Verify torch + CUDA
-        verify_cmd = [python, "-c",
-                      "import torch; print(f'torch {torch.__version__}, CUDA: {torch.cuda.is_available()}',"
-                      "f'GPU: {torch.cuda.get_device_name(0)}' if torch.cuda.is_available() else '')"]
+        # Verify torch
+        if is_macos:
+            verify_code = (
+                "import torch; mps = torch.backends.mps.is_available() if hasattr(torch.backends, 'mps') else False; "
+                "print(f'torch {torch.__version__}, MPS: {mps}')"
+            )
+        else:
+            verify_code = (
+                "import torch; print(f'torch {torch.__version__}, CUDA: {torch.cuda.is_available()}',"
+                "f'GPU: {torch.cuda.get_device_name(0)}' if torch.cuda.is_available() else '')"
+            )
+        verify_cmd = [python, "-c", verify_code]
         verify_kwargs = {"capture_output": True, "text": True, "timeout": 30}
         if sys.platform == "win32":
             verify_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -210,16 +231,25 @@ class ServiceManager:
         cmd = [
             python, "-m", "pip", "install",
             "-r", str(req_file),
-            "--only-binary=:all:",
             "--quiet",
         ]
+        # On Windows, force binary-only to avoid build issues
+        if sys.platform == "win32":
+            cmd.insert(-1, "--only-binary=:all:")
 
         # Add pgsql/bin to PATH so pg_config is found for psycopg2
         # Force English locale to avoid encoding issues with pg_config
         env = os.environ.copy()
+        sep = os.pathsep
         pg_bin = self._project_root / "pgsql" / "bin"
         if pg_bin.exists():
-            env["PATH"] = f"{pg_bin};{env.get('PATH', '')}"
+            env["PATH"] = f"{pg_bin}{sep}{env.get('PATH', '')}"
+        # On macOS, also add Homebrew pg_config to PATH
+        if is_macos:
+            from desktop.db_init import _get_homebrew_pg_bin
+            brew_pg = _get_homebrew_pg_bin()
+            if brew_pg:
+                env["PATH"] = f"{brew_pg}{sep}{env.get('PATH', '')}"
         env["LANG"] = "C"
         env["LC_ALL"] = "C"
         env["PGCLIENTENCODING"] = "UTF8"

@@ -1,7 +1,9 @@
 """
 PyInstaller build script for Sautium launcher.
 
-Builds a single-file executable for the launcher UI.
+Builds a standalone application:
+  - Windows: dist/Sautium.exe  (single-file)
+  - macOS:   dist/Sautium.app  (.app bundle)
 
 Usage:
     python desktop/build.py
@@ -11,6 +13,12 @@ import importlib
 import subprocess
 import sys
 from pathlib import Path
+
+IS_MACOS = sys.platform == "darwin"
+IS_WINDOWS = sys.platform == "win32"
+
+# PyInstaller --add-data separator: `;` on Windows, `:` on macOS/Linux
+SEP = ";" if IS_WINDOWS else ":"
 
 
 def _get_package_path(package_name: str) -> str:
@@ -22,7 +30,6 @@ def _get_package_path(package_name: str) -> str:
 def build():
     project_root = Path(__file__).parent.parent
     desktop_dir = project_root / "desktop"
-    icon_path = desktop_dir / "assets" / "icon.ico"
 
     # Create a simple entry script that imports and runs the launcher
     entry_script = project_root / "_launcher_entry.py"
@@ -38,9 +45,8 @@ def build():
         "--onefile",
         "--windowed",
         "--name", "Sautium",
-        "--add-data", f"{desktop_dir / 'migrations'};desktop/migrations",
-        "--add-data", f"{desktop_dir / 'assets'};desktop/assets",
-        "--add-data", f"{ctk_path};customtkinter",
+        "--add-data", f"{desktop_dir / 'migrations'}{SEP}desktop/migrations",
+        "--add-data", f"{ctk_path}{SEP}customtkinter",
         "--hidden-import", "customtkinter",
         "--hidden-import", "pystray",
         "--hidden-import", "PIL",
@@ -50,6 +56,7 @@ def build():
         "--hidden-import", "psycopg2",
         "--hidden-import", "desktop",
         "--hidden-import", "desktop.launcher",
+        "--hidden-import", "desktop.__main__",
         "--hidden-import", "desktop.config_manager",
         "--hidden-import", "desktop.service_manager",
         "--hidden-import", "desktop.utils",
@@ -58,6 +65,7 @@ def build():
         "--hidden-import", "desktop.settings",
         "--hidden-import", "desktop.updater",
         "--hidden-import", "desktop.db_init",
+        "--hidden-import", "desktop.python_env",
         "--hidden-import", "desktop.p2p",
         "--hidden-import", "desktop.p2p.sync_queries",
         "--hidden-import", "desktop.p2p.sync_server",
@@ -68,21 +76,35 @@ def build():
         "--collect-all", "customtkinter",
     ]
 
+    # Assets (icon, etc.) — only if directory exists
+    assets_dir = desktop_dir / "assets"
+    if assets_dir.exists():
+        cmd.extend(["--add-data", f"{assets_dir}{SEP}desktop/assets"])
+
+    # Platform-specific icon
+    if IS_WINDOWS:
+        icon_path = assets_dir / "icon.ico"
+        if icon_path.exists():
+            cmd.extend(["--icon", str(icon_path)])
+    elif IS_MACOS:
+        icon_path = assets_dir / "icon.icns"
+        if icon_path.exists():
+            cmd.extend(["--icon", str(icon_path)])
+        # macOS bundle identifier
+        cmd.extend(["--osx-bundle-identifier", "net.sautium.launcher"])
+
     # Bundle libtorrent if installed (C++ extension for DHT)
     try:
         import libtorrent
-        lt_path = str(Path(libtorrent.__file__).parent)
         cmd.extend(["--hidden-import", "libtorrent"])
-        print(f"  libtorrent found: {lt_path}")
+        print(f"  libtorrent found: {Path(libtorrent.__file__).parent}")
     except ImportError:
         print("  WARNING: libtorrent not installed — DHT will be disabled in build")
 
-    if icon_path.exists():
-        cmd.extend(["--icon", str(icon_path)])
-
     cmd.append(str(entry_script))
 
-    print(f"Building launcher with PyInstaller...")
+    print("Building Sautium launcher with PyInstaller...")
+    print(f"Platform: {'macOS' if IS_MACOS else 'Windows' if IS_WINDOWS else 'Linux'}")
     print(f"Command: {' '.join(cmd)}")
 
     result = subprocess.run(cmd, cwd=str(project_root))
@@ -91,7 +113,12 @@ def build():
     entry_script.unlink(missing_ok=True)
 
     if result.returncode == 0:
-        print("Build successful! Output in dist/Sautium.exe")
+        if IS_MACOS:
+            print("\nBuild successful! Output: dist/Sautium.app")
+            print("To create a DMG installer: hdiutil create -volname Sautium "
+                  "-srcfolder dist/Sautium.app -ov dist/Sautium.dmg")
+        else:
+            print("\nBuild successful! Output: dist/Sautium.exe")
     else:
         print("Build failed!")
         sys.exit(1)
