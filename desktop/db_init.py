@@ -219,7 +219,7 @@ def _get_homebrew_pg_bin() -> Optional[Path]:
         return None
 
     # Try versioned formulae first, then unversioned
-    for formula in ["postgresql@16", "postgresql@17", "postgresql@15", "postgresql"]:
+    for formula in ["postgresql@17", "postgresql@16", "postgresql@15", "postgresql"]:
         try:
             result = subprocess.run(
                 [brew, "--prefix", formula],
@@ -273,13 +273,13 @@ def _install_postgres_macos(progress_cb: Optional[Callable] = None) -> bool:
         if progress_cb:
             progress_cb("Installing PostgreSQL via Homebrew (may take a few minutes)...")
 
-        logger.info("Installing postgresql@16 via Homebrew...")
+        logger.info("Installing postgresql@17 via Homebrew...")
         result = subprocess.run(
-            [brew, "install", "postgresql@16"],
+            [brew, "install", "postgresql@17"],
             capture_output=True, text=True, timeout=600,
         )
         if result.returncode != 0:
-            logger.error(f"brew install postgresql@16 failed: {result.stderr}")
+            logger.error(f"brew install postgresql@17 failed: {result.stderr}")
             if progress_cb:
                 progress_cb(f"PostgreSQL install failed: {result.stderr[:200]}")
             return False
@@ -302,12 +302,13 @@ def _install_postgres_macos(progress_cb: Optional[Callable] = None) -> bool:
 
 
 def _ensure_pgvector_homebrew(progress_cb: Optional[Callable] = None) -> bool:
-    """Install pgvector via Homebrew if not already present."""
+    """Install pgvector via Homebrew if not already present, and link into PG."""
     brew = _find_brew()
     if not brew:
         return False
 
     # Check if pgvector is already installed
+    installed = False
     try:
         result = subprocess.run(
             [brew, "list", "pgvector"],
@@ -315,31 +316,86 @@ def _ensure_pgvector_homebrew(progress_cb: Optional[Callable] = None) -> bool:
         )
         if result.returncode == 0:
             logger.info("pgvector already installed via Homebrew")
-            return True
+            installed = True
     except Exception:
         pass
 
-    try:
-        if progress_cb:
-            progress_cb("Installing pgvector extension...")
-
-        logger.info("Installing pgvector via Homebrew...")
-        result = subprocess.run(
-            [brew, "install", "pgvector"],
-            capture_output=True, text=True, timeout=300,
-        )
-        if result.returncode != 0:
-            logger.warning(f"brew install pgvector failed: {result.stderr}")
+    if not installed:
+        try:
             if progress_cb:
-                progress_cb("pgvector install failed (non-critical)")
+                progress_cb("Installing pgvector extension...")
+
+            logger.info("Installing pgvector via Homebrew...")
+            result = subprocess.run(
+                [brew, "install", "pgvector"],
+                capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode != 0:
+                logger.warning(f"brew install pgvector failed: {result.stderr}")
+                if progress_cb:
+                    progress_cb("pgvector install failed (non-critical)")
+                return False
+
+            logger.info("pgvector installed via Homebrew")
+            installed = True
+
+        except Exception as e:
+            logger.warning(f"Failed to install pgvector: {e}")
             return False
 
-        logger.info("pgvector installed via Homebrew")
-        return True
+    # Homebrew pgvector puts files under share/postgresql@NN/ but keg-only
+    # PostgreSQL uses share/postgresql/. Symlink if needed.
+    if installed:
+        _link_pgvector_to_pg(brew)
 
-    except Exception as e:
-        logger.warning(f"Failed to install pgvector: {e}")
-        return False
+    return installed
+
+
+def _link_pgvector_to_pg(brew: str) -> None:
+    """Symlink pgvector extension files into the active PostgreSQL prefix."""
+    pg_bin = _get_homebrew_pg_bin()
+    if not pg_bin:
+        return
+
+    pg_prefix = pg_bin.parent  # e.g. /opt/homebrew/opt/postgresql@17
+    pg_ext_dir = pg_prefix / "share" / "postgresql" / "extension"
+    pg_lib_dir = pg_prefix / "lib" / "postgresql"
+
+    # Already linked?
+    if (pg_ext_dir / "vector.control").exists():
+        return
+
+    # Find pgvector cellar path
+    try:
+        result = subprocess.run(
+            [brew, "--prefix", "pgvector"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return
+        pv_prefix = Path(result.stdout.strip())
+    except Exception:
+        return
+
+    # Try versioned subdirs (postgresql@17, postgresql@16, etc.)
+    for subdir in sorted(pv_prefix.glob("share/postgresql@*/extension"), reverse=True):
+        if (subdir / "vector.control").exists():
+            logger.info(f"Linking pgvector from {subdir} into {pg_ext_dir}")
+            pg_ext_dir.mkdir(parents=True, exist_ok=True)
+            for f in subdir.iterdir():
+                dest = pg_ext_dir / f.name
+                if not dest.exists():
+                    dest.symlink_to(f)
+            break
+
+    for subdir in sorted(pv_prefix.glob("lib/postgresql@*"), reverse=True):
+        dylib = subdir / "vector.dylib"
+        if dylib.exists():
+            pg_lib_dir.mkdir(parents=True, exist_ok=True)
+            dest = pg_lib_dir / "vector.dylib"
+            if not dest.exists():
+                dest.symlink_to(dylib)
+            break
 
 
 def get_pg_data_dir() -> Path:

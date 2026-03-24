@@ -3,6 +3,7 @@ Utility functions for Sautium desktop launcher.
 """
 
 import logging
+import platform
 import shutil
 import socket
 import subprocess
@@ -49,35 +50,61 @@ def detect_git() -> bool:
     return shutil.which("git") is not None
 
 
-def detect_cuda() -> Tuple[bool, Optional[str], Optional[float]]:
+def detect_gpu() -> Tuple[bool, Optional[str], Optional[float]]:
     """
-    Detect CUDA GPU via nvidia-smi.
+    Detect GPU / AI accelerator.
+
+    Checks NVIDIA CUDA first, then Apple Silicon (Metal / Neural Engine).
 
     Returns:
-        (available, gpu_name, vram_gb)
+        (available, gpu_name, vram_gb_or_None)
     """
+    # Try NVIDIA CUDA
     nvidia_smi = shutil.which("nvidia-smi")
-    if not nvidia_smi:
-        return False, None, None
+    if nvidia_smi:
+        try:
+            result = subprocess.run(
+                [nvidia_smi, "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                line = result.stdout.strip().split("\n")[0]
+                parts = [p.strip() for p in line.split(",")]
+                gpu_name = parts[0]
+                vram_mb = float(parts[1])
+                return True, gpu_name, round(vram_mb / 1024, 1)
+        except Exception as e:
+            logger.debug(f"nvidia-smi failed: {e}")
 
-    try:
-        result = subprocess.run(
-            [nvidia_smi, "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            line = result.stdout.strip().split("\n")[0]
-            parts = [p.strip() for p in line.split(",")]
-            gpu_name = parts[0]
-            vram_mb = float(parts[1])
-            return True, gpu_name, round(vram_mb / 1024, 1)
-    except Exception as e:
-        logger.debug(f"nvidia-smi failed: {e}")
+    # Apple Silicon (Metal + Neural Engine)
+    if sys.platform == "darwin" and platform.machine() == "arm64":
+        try:
+            result = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True, text=True, timeout=5,
+            )
+            chip_name = result.stdout.strip() if result.returncode == 0 else "Apple Silicon"
+            # Get unified memory size
+            result = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                capture_output=True, text=True, timeout=5,
+            )
+            mem_gb = None
+            if result.returncode == 0:
+                mem_gb = round(int(result.stdout.strip()) / (1024 ** 3), 1)
+            return True, f"{chip_name} (Metal)", mem_gb
+        except Exception as e:
+            logger.debug(f"Apple Silicon detection failed: {e}")
+            return True, "Apple Silicon (Metal)", None
 
     return False, None, None
+
+
+# Backward compatibility alias
+detect_cuda = detect_gpu
 
 
 def find_available_port(preferred: int) -> int:

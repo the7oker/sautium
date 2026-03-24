@@ -21,7 +21,7 @@ from typing import Optional
 import customtkinter as ctk
 
 from desktop.config_manager import load_config, save_config
-from desktop.utils import detect_claude_cli, detect_cuda, detect_git
+from desktop.utils import detect_claude_cli, detect_gpu, detect_git
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +35,11 @@ class SetupWizard(ctk.CTkToplevel):
         self.title("Sautium - Setup")
         self.geometry("600x500")
         self.resizable(False, False)
-        self.transient(parent)
+        if sys.platform != "darwin":
+            self.transient(parent)
         self.grab_set()
+        self.lift()
+        self.focus_force()
 
         self.on_complete = on_complete
         self.config = load_config()
@@ -52,7 +55,7 @@ class SetupWizard(ctk.CTkToplevel):
 
         # Detection results
         self._claude_available = detect_claude_cli()
-        self._cuda_available, self._gpu_name, self._gpu_vram = detect_cuda()
+        self._gpu_available, self._gpu_name, self._gpu_vram = detect_gpu()
         self._git_available = detect_git()
 
         # Main container
@@ -303,7 +306,8 @@ class SetupWizard(ctk.CTkToplevel):
         info_frame.pack(fill="x", pady=20, padx=40)
 
         items = [
-            ("GPU", f"{self._gpu_name} ({self._gpu_vram}GB)" if self._cuda_available else "Not detected"),
+            ("Accelerator", f"{self._gpu_name} ({self._gpu_vram}GB)" if self._gpu_available and self._gpu_vram else
+                            self._gpu_name if self._gpu_available else "Not detected"),
             ("Claude CLI", "Available" if self._claude_available else "Not found"),
             ("Git", "Available" if self._git_available else "Not found"),
         ]
@@ -842,7 +846,7 @@ class SetupWizard(ctk.CTkToplevel):
                 if lastfm_user
                 else "Disabled",
             ),
-            ("GPU", f"{self._gpu_name}" if self._cuda_available else "CPU mode"),
+            ("Accelerator", self._gpu_name if self._gpu_available else "CPU mode"),
         ]
 
         for label, value in items:

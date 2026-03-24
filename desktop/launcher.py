@@ -48,8 +48,13 @@ class LauncherApp(ctk.CTk):
 
         # Check first run
         if not self.config.get("first_run_complete"):
-            self.withdraw()
-            self.after(100, self._run_wizard)
+            # On macOS, move offscreen instead of withdraw — withdrawn parent hides transient children
+            if sys.platform == "darwin":
+                self.geometry("1x1+9999+9999")
+                self.overrideredirect(True)
+            else:
+                self.withdraw()
+            self.after(200, self._run_wizard)
         else:
             self._build_ui()
             self.after(100, self._startup_sequence)
@@ -63,11 +68,19 @@ class LauncherApp(ctk.CTk):
         def on_wizard_complete(config):
             self.config = config
             self.service_manager = ServiceManager(self.config)
+            if sys.platform == "darwin":
+                self.overrideredirect(False)
             self.deiconify()
+            self.geometry("480x870")
             self._build_ui()
+            self.lift()
+            self.focus_force()
             self.after(100, self._startup_sequence)
 
-        SetupWizard(self, on_complete=on_wizard_complete)
+        self.update_idletasks()
+        wiz = SetupWizard(self, on_complete=on_wizard_complete)
+        wiz.after(50, wiz.lift)
+        wiz.after(50, wiz.focus_force)
 
     def _build_ui(self):
         """Build the main launcher UI."""
