@@ -279,7 +279,8 @@ class LauncherApp(ctk.CTk):
         self._btn_open.configure(state="normal")
         self._btn_scan.configure(state="normal")
         self._btn_enrich.configure(state="normal")
-        self._btn_sync.configure(state="normal")
+        # Sync button stays disabled until P2P is ready
+        self._btn_sync.configure(state="disabled")
         self._progress_text.configure(text=gpu_text)
 
         # Connect API client to the right port
@@ -384,8 +385,14 @@ class LauncherApp(ctk.CTk):
                     node_id=node_id, progress_cb=progress,
                     announce=announce,
                 )
+                # Enable Sync button now that P2P is ready
+                self.after(0, lambda: self._btn_sync.configure(
+                    state="normal"))
             except Exception as e:
                 logger.error(f"P2P startup failed: {e}", exc_info=True)
+                # Enable Sync anyway — it will show a clear error
+                self.after(0, lambda: self._btn_sync.configure(
+                    state="normal"))
 
         threading.Thread(target=_start, daemon=True).start()
 
