@@ -299,7 +299,15 @@ class LauncherApp(ctk.CTk):
         # Silently generate node identity if not present
         self._ensure_node_identity()
 
-        # Start P2P services if enabled
+        # Stop previous P2P manager if running (e.g., after restart)
+        if self.p2p_manager:
+            try:
+                self.p2p_manager.stop()
+            except Exception as e:
+                logger.debug(f"P2P stop (pre-restart): {e}")
+            self.p2p_manager = None
+
+        # Start P2P services
         self._start_p2p_if_enabled()
 
         # Auto-trigger Last.fm auth if pending from wizard
