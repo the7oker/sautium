@@ -231,28 +231,14 @@ class LANDiscovery:
             for port in self._localhost_probe_ports:
                 if port == self.sync_port:
                     continue  # skip ourselves
-                try:
-                    url = f"https://127.0.0.1:{port}/health"
-                    req = urllib.request.urlopen(url, timeout=2, context=ctx)
-                    data = json.loads(req.read().decode())
-                    if data.get("type") == "sautium-peer":
-                        key = ("127.0.0.1", port)
-                        is_new = key not in self._peers
-                        self._peers[key] = {
-                            "node_id": "",
-                            "artists": 0,  # unknown, but it's a valid peer
-                            "last_seen": time.time(),
-                            "localhost": True,
-                        }
-                        if is_new:
-                            logger.info(
-                                f"Localhost peer discovered: 127.0.0.1:{port}"
-                            )
-                except Exception:
-                    # Also try plain HTTP
+                # Try HTTPS first (desktop sync servers), then HTTP (Docker)
+                for scheme in ("https", "http"):
                     try:
-                        url = f"http://127.0.0.1:{port}/health"
-                        req = urllib.request.urlopen(url, timeout=2)
+                        url = f"{scheme}://127.0.0.1:{port}/health"
+                        kw = {"timeout": 2}
+                        if scheme == "https":
+                            kw["context"] = ctx
+                        req = urllib.request.urlopen(url, **kw)
                         data = json.loads(req.read().decode())
                         if data.get("type") == "sautium-peer":
                             key = ("127.0.0.1", port)
@@ -262,14 +248,16 @@ class LANDiscovery:
                                 "artists": 0,
                                 "last_seen": time.time(),
                                 "localhost": True,
+                                "scheme": scheme,
                             }
                             if is_new:
                                 logger.info(
                                     f"Localhost peer discovered: "
-                                    f"127.0.0.1:{port} (HTTP)"
+                                    f"{scheme}://127.0.0.1:{port}"
                                 )
+                        break  # found it, don't try next scheme
                     except Exception:
-                        pass
+                        continue
             await asyncio.sleep(BEACON_INTERVAL)
 
     def update_enriched_count(self, count: int):

@@ -420,12 +420,14 @@ class P2PManager:
                     if peer_tracks:
                         info = self._lan_discovery.get_peer_info(ip, port)
                         artist_count = (info or {}).get("artists", "?")
+                        scheme = (info or {}).get("scheme", "https")
+                        peer_url = f"{scheme}://{ip}:{port}"
                         _progress(
-                            f"LAN peer {ip}:{port} "
+                            f"LAN peer {peer_url} "
                             f"({artist_count} artists)..."
                         )
                         synced = await self._sync_from_peer(
-                            f"{ip}:{port}",
+                            peer_url,
                             list(peer_tracks),
                             _progress,
                             progress_cb,
