@@ -212,7 +212,7 @@ CREATE TABLE IF NOT EXISTS artist_bios (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_artist_bios UNIQUE (artist_id, source),
-    CONSTRAINT chk_has_bio CHECK (summary IS NOT NULL OR content IS NOT NULL)
+    CONSTRAINT chk_has_bio CHECK (summary IS NOT NULL OR content IS NOT NULL OR listeners IS NOT NULL OR playcount IS NOT NULL)
 );
 
 CREATE TABLE IF NOT EXISTS artist_tags (
