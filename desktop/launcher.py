@@ -748,12 +748,7 @@ class LauncherApp(ctk.CTk):
             self._sync_library_source(source_url)
 
     def _sync_library_p2p(self):
-        """Sync enrichment data: P2P first, then source_url for remainder.
-
-        DHT on the same LAN behind NAT may only discover local peers.
-        After P2P sync, if unenriched tracks remain, also try source_url
-        to cover peers not reachable via DHT.
-        """
+        """Sync enrichment data from P2P network, with source_url fallback."""
         def _do_sync():
             # Normalize local artists before sync
             self.after(0, lambda: self._progress_text.configure(
@@ -769,7 +764,6 @@ class LauncherApp(ctk.CTk):
                     0, lambda: self._progress_text.configure(text=msg)
                 )
 
-            # Phase 1: P2P / DHT sync
             try:
                 stats = self.p2p_manager.sync_from_peers(
                     progress_cb=progress
@@ -782,34 +776,27 @@ class LauncherApp(ctk.CTk):
                 v for v in stats.values() if isinstance(v, int)
             )
 
-            # Phase 2: source_url for anything P2P missed
-            # (SyncClient._compute_needed skips what's already imported)
-            source_url = self.config.get("sync", {}).get(
-                "source_url", ""
-            )
-            if source_url:
-                if p2p_total == 0:
-                    progress(f"No DHT peers, trying {source_url}...")
-                else:
-                    progress(
-                        f"P2P: {p2p_total} items. "
-                        f"Checking {source_url} for more..."
-                    )
-                self._do_source_sync(source_url, progress)
-                return
-
+            # If P2P found nothing, fall back to configured source_url
             if p2p_total == 0:
+                source_url = self.config.get("sync", {}).get(
+                    "source_url", ""
+                )
+                if source_url:
+                    progress(f"No DHT peers found, trying {source_url}...")
+                    self._do_source_sync(source_url, progress)
+                    return
+                # No peers and no source_url
                 self.after(0, lambda: self._progress_text.configure(
-                    text="No peers found. Set source URL in settings."))
+                    text="No peers found. Wait for DHT or set source URL in settings."))
                 self.after(0, self._sync_done)
                 return
 
             msg = f"P2P sync complete — {p2p_total} items imported"
-            details = ", ".join(
-                f"{k}: {v}" for k, v in stats.items()
-                if isinstance(v, int) and v > 0
-            )
-            if details:
+            if p2p_total > 0:
+                details = ", ".join(
+                    f"{k}: {v}" for k, v in stats.items()
+                    if isinstance(v, int) and v > 0
+                )
                 msg += f" ({details})"
 
             self.after(0, lambda: self._progress_text.configure(text=msg))
