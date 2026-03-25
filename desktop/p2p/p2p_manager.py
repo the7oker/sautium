@@ -287,6 +287,28 @@ class P2PManager:
         finally:
             conn.close()
 
+    async def _get_tracks_for_artists(
+        self, artist_uuids: list[str]
+    ) -> list[str]:
+        """Get all track UUIDs for a list of artists (single query)."""
+        if not artist_uuids:
+            return []
+        loop = asyncio.get_event_loop()
+        conn = psycopg2.connect(self.db_dsn)
+        conn.autocommit = True
+        try:
+            def _query(c):
+                with c.cursor() as cur:
+                    cur.execute(
+                        "SELECT DISTINCT track_id::text FROM track_artists "
+                        "WHERE artist_id = ANY(%s::uuid[])",
+                        [artist_uuids],
+                    )
+                    return [r[0] for r in cur.fetchall()]
+            return await loop.run_in_executor(None, _query, conn)
+        finally:
+            conn.close()
+
     async def _get_track_uuids_for_artist(
         self, artist_uuid: str
     ) -> list[str]:
@@ -356,17 +378,13 @@ class P2PManager:
 
         _progress(f"Found {len(unenriched)} artists needing enrichment")
 
-        # Step 2: Collect track UUIDs for unenriched artists
-        all_track_uuids = set()
-        for artist_uuid in unenriched:
-            tracks = await self._get_track_uuids_for_artist(artist_uuid)
-            all_track_uuids.update(tracks)
+        # Step 2: Collect track UUIDs for all unenriched artists (single query)
+        track_uuids = await self._get_tracks_for_artists(unenriched)
 
-        if not all_track_uuids:
+        if not track_uuids:
             _progress("No tracks found for unenriched artists")
             return {"status": "no_tracks"}
 
-        track_uuids = list(all_track_uuids)
         _progress(f"Need enrichment for {len(track_uuids)} tracks")
 
         # Step 3: Try manual peers first (e.g., Docker backend)
