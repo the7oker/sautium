@@ -38,7 +38,7 @@ REANNOUNCE_INTERVAL = 15 * 60  # 15 minutes
 DHT_BOOTSTRAP_TIMEOUT = 30
 
 # How long to wait for get_peers results (seconds)
-GET_PEERS_TIMEOUT = 15
+GET_PEERS_TIMEOUT = 30
 
 # Peer cache TTL (seconds)
 PEER_CACHE_TTL = 30 * 60  # 30 minutes
@@ -134,20 +134,21 @@ class DHTService:
         await self._wait_for_dht_ready()
         logger.info("DHT bootstrap complete")
 
-    async def _wait_for_dht_ready(self):
-        """Wait until DHT has enough nodes."""
+    async def _wait_for_dht_ready(self, min_nodes: int = 20):
+        """Wait until DHT has enough nodes for reliable lookups."""
         deadline = time.time() + DHT_BOOTSTRAP_TIMEOUT
         while time.time() < deadline and self._running:
-            if self._session and self._session.status().dht_nodes > 0:
+            if self._session:
                 nodes = self._session.status().dht_nodes
-                logger.info(f"DHT has {nodes} nodes")
-                return
+                if nodes >= min_nodes:
+                    logger.info(f"DHT has {nodes} nodes")
+                    return
             await asyncio.sleep(1)
         if self._session:
             nodes = self._session.status().dht_nodes
             logger.warning(
-                f"DHT bootstrap timeout ({DHT_BOOTSTRAP_TIMEOUT}s), "
-                f"nodes: {nodes}"
+                f"DHT bootstrap: {nodes} nodes "
+                f"(wanted {min_nodes}, timeout {DHT_BOOTSTRAP_TIMEOUT}s)"
             )
 
     async def stop(self):
