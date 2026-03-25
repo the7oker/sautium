@@ -387,11 +387,9 @@ class LauncherApp(ctk.CTk):
                 db_dsn = self._get_local_db_dsn()
                 node_id = get_node_id() or ""
 
-                announce = self.config.get("p2p", {}).get("enabled", False)
                 self.p2p_manager = P2PManager(db_dsn, self.config)
                 self.p2p_manager.start(
                     node_id=node_id, progress_cb=progress,
-                    announce=announce,
                 )
                 # Enable Sync button now that P2P is ready
                 self.after(0, lambda: self._btn_sync.configure(
