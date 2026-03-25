@@ -534,7 +534,7 @@ class P2PManager:
         )
 
         try:
-            stats = await loop.run_in_executor(
+            stats = await asyncio.get_event_loop().run_in_executor(
                 None,
                 partial(sync_client.run_sync, track_uuids),
             )
