@@ -158,19 +158,63 @@ class LANDiscovery:
         logger.info("LAN discovery stopped")
 
     async def _broadcast_loop(self, loop: asyncio.AbstractEventLoop):
-        """Periodically broadcast beacon."""
+        """Periodically broadcast beacon on all network interfaces."""
         while self._running:
             try:
                 beacon = self._make_beacon(enriched_artists=0)
-                await loop.run_in_executor(
-                    None,
-                    lambda: self._sock.sendto(
-                        beacon, ("255.255.255.255", self.discovery_port)
-                    ),
-                )
+                # Send to both global and subnet broadcast addresses.
+                # 255.255.255.255 may not cross interfaces on multi-NIC
+                # machines (Windows with VMware/VPN adapters).
+                targets = {"255.255.255.255"}
+                for bcast in self._get_broadcast_addresses():
+                    targets.add(bcast)
+                for addr in targets:
+                    try:
+                        await loop.run_in_executor(
+                            None,
+                            lambda a=addr: self._sock.sendto(
+                                beacon, (a, self.discovery_port)
+                            ),
+                        )
+                    except OSError:
+                        pass
             except OSError as e:
                 logger.debug(f"LAN broadcast failed: {e}")
             await asyncio.sleep(BEACON_INTERVAL)
+
+    @staticmethod
+    def _get_broadcast_addresses() -> list[str]:
+        """Get subnet broadcast addresses for all network interfaces."""
+        import ipaddress
+        results = []
+        try:
+            import psutil
+            for name, addrs in psutil.net_if_addrs().items():
+                for addr in addrs:
+                    if addr.family == socket.AF_INET and addr.netmask:
+                        try:
+                            net = ipaddress.IPv4Network(
+                                f"{addr.address}/{addr.netmask}", strict=False
+                            )
+                            bcast = str(net.broadcast_address)
+                            if bcast != addr.address:
+                                results.append(bcast)
+                        except ValueError:
+                            pass
+        except ImportError:
+            # psutil not available — fallback to common subnets
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+                s.close()
+                # Assume /24
+                parts = ip.split(".")
+                parts[3] = "255"
+                results.append(".".join(parts))
+            except Exception:
+                pass
+        return results
 
     async def _listen_loop(self, loop: asyncio.AbstractEventLoop):
         """Listen for beacons from other peers."""
