@@ -383,9 +383,19 @@ class LauncherApp(ctk.CTk):
 
                 from desktop.p2p.p2p_manager import P2PManager
                 from desktop.node_identity import get_node_id
+                from desktop.p2p.lan_discovery import LAN_DISCOVERY_PORT
 
                 db_dsn = self._get_local_db_dsn()
                 node_id = get_node_id() or ""
+
+                p2p_cfg = self.config.get("p2p", {})
+                sync_port = p2p_cfg.get("listen_port", 20000)
+
+                # Open firewall for P2P ports (Windows)
+                self.service_manager._ensure_firewall_rule(
+                    LAN_DISCOVERY_PORT, "UDP")
+                self.service_manager._ensure_firewall_rule(
+                    sync_port, "TCP")
 
                 self.p2p_manager = P2PManager(db_dsn, self.config)
                 self.p2p_manager.start(

@@ -532,14 +532,13 @@ class ServiceManager:
         logger.info(f"{name} stopped")
 
     @staticmethod
-    def _ensure_firewall_rule(port: int) -> None:
+    def _ensure_firewall_rule(port: int, protocol: str = "TCP") -> None:
         """Add Windows Firewall rule to allow LAN access on the given port."""
         if sys.platform != "win32":
             return
 
-        rule_name = f"Sautium (port {port})"
+        rule_name = f"Sautium ({protocol} {port})"
         try:
-            # Check if rule already exists
             check = subprocess.run(
                 ["netsh", "advfirewall", "firewall", "show", "rule",
                  f"name={rule_name}"],
@@ -547,13 +546,12 @@ class ServiceManager:
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
             if check.returncode == 0 and rule_name in check.stdout:
-                return  # Rule already exists
+                return
 
-            # Create inbound rule
             subprocess.run(
                 ["netsh", "advfirewall", "firewall", "add", "rule",
                  f"name={rule_name}",
-                 "dir=in", "action=allow", "protocol=TCP",
+                 "dir=in", "action=allow", f"protocol={protocol}",
                  f"localport={port}", "profile=private"],
                 capture_output=True, text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
