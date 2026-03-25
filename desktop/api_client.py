@@ -139,7 +139,7 @@ class BackendAPIClient:
         return self._post_json(
             "/api/sync/inventory",
             body={"track_uuids": track_uuids},
-            timeout=30,
+            timeout=300,
         )
 
     def sync_pull(self, category: str, uuids: list[str]) -> Optional[dict]:
@@ -147,5 +147,5 @@ class BackendAPIClient:
         return self._post_json(
             f"/api/sync/pull/{category}",
             body={"uuids": uuids},
-            timeout=60,
+            timeout=300,
         )
