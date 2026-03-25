@@ -463,7 +463,15 @@ class P2PManager:
                         f"for {len(peer_map)} artists"
                     )
 
-                    for (ip, port), artist_uuids in peer_to_artists.items():
+                    # Resolve same-NAT peers: if a DHT peer has our
+                    # public IP, hairpin NAT likely fails.  Try LAN
+                    # IPs from ARP table instead.
+                    my_public_ip = await self._get_public_ip()
+                    resolved = await self._resolve_same_nat_peers(
+                        peer_to_artists, my_public_ip
+                    )
+
+                    for peer_addr, artist_uuids in resolved.items():
                         peer_tracks = set()
                         for au in artist_uuids:
                             t = await self._get_track_uuids_for_artist(au)
@@ -471,7 +479,7 @@ class P2PManager:
 
                         if peer_tracks:
                             synced = await self._sync_from_peer(
-                                f"{ip}:{port}",
+                                peer_addr,
                                 list(peer_tracks),
                                 _progress,
                                 progress_cb,
@@ -499,6 +507,114 @@ class P2PManager:
         _progress(f"P2P sync complete: {total_items} items synced")
         return total_stats
 
+    async def _get_public_ip(self) -> Optional[str]:
+        """Get our public IP (cached, best-effort)."""
+        if hasattr(self, "_cached_public_ip"):
+            return self._cached_public_ip
+        import urllib.request
+        loop = asyncio.get_event_loop()
+        try:
+            def _fetch():
+                try:
+                    return urllib.request.urlopen(
+                        "https://api.ipify.org", timeout=5
+                    ).read().decode().strip()
+                except Exception:
+                    return None
+            ip = await loop.run_in_executor(None, _fetch)
+            self._cached_public_ip = ip
+            return ip
+        except Exception:
+            return None
+
+    async def _resolve_same_nat_peers(
+        self,
+        peer_to_artists: dict[tuple, list[str]],
+        my_public_ip: Optional[str],
+    ) -> dict[str, list[str]]:
+        """Resolve DHT peers behind the same NAT to LAN IPs.
+
+        DHT returns (public_ip, port) which won't work via hairpin NAT.
+        For peers sharing our public IP, scan the LAN for that port.
+        Returns {peer_addr_str: [artist_uuids]}.
+        """
+        resolved: dict[str, list[str]] = {}
+        lan_ips = None
+
+        for (ip, port), artist_uuids in peer_to_artists.items():
+            if my_public_ip and ip == my_public_ip:
+                # Same NAT — try LAN IPs
+                if lan_ips is None:
+                    lan_ips = await self._get_lan_ips()
+                found = False
+                for lan_ip in lan_ips:
+                    addr = f"{lan_ip}:{port}"
+                    api = await self._try_connect_peer(addr)
+                    if api:
+                        resolved[api.base_url] = artist_uuids
+                        logger.info(
+                            f"Same-NAT peer {ip}:{port} → {api.base_url}"
+                        )
+                        found = True
+                        break
+                if not found:
+                    # Still try public IP as last resort
+                    resolved[f"{ip}:{port}"] = artist_uuids
+            else:
+                resolved[f"{ip}:{port}"] = artist_uuids
+
+        return resolved
+
+    async def _get_lan_ips(self) -> list[str]:
+        """Get LAN IPs from ARP table (other devices on the network)."""
+        import subprocess
+        loop = asyncio.get_event_loop()
+
+        def _parse_arp():
+            ips = []
+            try:
+                result = subprocess.run(
+                    ["arp", "-a"], capture_output=True, text=True, timeout=5
+                )
+                for line in result.stdout.splitlines():
+                    # Parse IPs from arp output (works on macOS/Linux/Windows)
+                    import re
+                    match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
+                    if match:
+                        ip = match.group(1)
+                        # Skip broadcast/multicast/localhost
+                        if not ip.endswith('.255') and not ip.startswith('224.') and ip != '127.0.0.1':
+                            ips.append(ip)
+            except Exception as e:
+                logger.debug(f"ARP table read failed: {e}")
+            return ips
+
+        return await loop.run_in_executor(None, _parse_arp)
+
+    async def _try_connect_peer(
+        self, peer_addr: str
+    ) -> Optional[BackendAPIClient]:
+        """Try to connect to a peer, testing HTTPS then HTTP.
+
+        Returns a working BackendAPIClient or None.
+        """
+        loop = asyncio.get_event_loop()
+
+        if "://" in peer_addr:
+            # Explicit scheme — try as-is
+            api = BackendAPIClient(peer_addr)
+            health = await loop.run_in_executor(None, api.get_health)
+            return api if health else None
+
+        # No scheme — try HTTPS (desktop peers) then HTTP (Docker)
+        for scheme in ("https", "http"):
+            url = f"{scheme}://{peer_addr}"
+            api = BackendAPIClient(url)
+            health = await loop.run_in_executor(None, api.get_health)
+            if health:
+                return api
+        return None
+
     async def _sync_from_peer(
         self,
         peer_addr: str,
@@ -507,17 +623,10 @@ class P2PManager:
         progress_cb,
     ) -> dict:
         """Sync enrichment data from a single peer. Returns stats dict."""
-        # Normalize address: DHT peers use HTTPS, manual peers keep their scheme
-        if "://" not in peer_addr:
-            peer_addr = f"https://{peer_addr}"
-
         _progress(f"Connecting to {peer_addr}...")
-        peer_api = BackendAPIClient(peer_addr)
 
-        # Verify peer is reachable
-        loop = asyncio.get_event_loop()
-        health = await loop.run_in_executor(None, peer_api.get_health)
-        if not health:
+        peer_api = await self._try_connect_peer(peer_addr)
+        if not peer_api:
             _progress(f"  {peer_addr} not reachable, skipping")
             return {}
 
