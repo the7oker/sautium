@@ -317,8 +317,13 @@ class DHTService:
         """Handle a libtorrent alert."""
         if isinstance(alert, lt.dht_get_peers_reply_alert):
             ih_hex = alert.info_hash.to_string().hex()
-            peers = [(p.address().to_string(), p.port())
-                     for p in alert.peers()]
+            raw_peers = alert.peers()
+            peers = []
+            for p in raw_peers:
+                if isinstance(p, tuple):
+                    peers.append((str(p[0]), int(p[1])))
+                else:
+                    peers.append((p.address().to_string(), p.port()))
             logger.debug(
                 f"DHT get_peers reply: {ih_hex[:16]}... "
                 f"-> {len(peers)} peers"
