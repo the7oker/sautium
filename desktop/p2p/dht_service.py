@@ -114,7 +114,10 @@ class DHTService:
             "enable_lsd": False,
             "enable_upnp": False,   # Phase P3
             "enable_natpmp": False,  # Phase P3
-            "alert_mask": lt.alert.category_t.dht_notification,
+            "alert_mask": int(
+                lt.alert.category_t.dht_notification
+                | lt.alert.category_t.dht_operation_notification
+            ),
         }
         self._session = lt.session(settings)
 

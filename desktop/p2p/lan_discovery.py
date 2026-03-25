@@ -215,13 +215,11 @@ class LANDiscovery:
         return None, None
 
     async def _localhost_probe_loop(self):
-        """Probe docker_ports on localhost AND all LAN IPs from ARP table.
+        """Probe docker_ports on localhost for Docker backends.
 
         Docker containers can't do UDP broadcast, so we actively probe
-        known ports. Checks /health for a sautium-peer signature.
+        known ports on localhost. Checks /health for a sautium-peer signature.
         """
-        import re
-        import subprocess
         import urllib.request
         import ssl
 
@@ -229,90 +227,37 @@ class LANDiscovery:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
 
-        # Get our own LAN IP to skip it
-        own_ip = self._get_own_lan_ip()
-
         while self._running:
-            if not self._localhost_probe_ports:
-                await asyncio.sleep(BEACON_INTERVAL)
-                continue
-
-            # Collect IPs to scan: localhost + all ARP neighbours
-            ips_to_scan = ["127.0.0.1"] + self._get_arp_ips(own_ip)
-
-            for ip in ips_to_scan:
-                for port in self._localhost_probe_ports:
-                    if port == self.sync_port and ip == "127.0.0.1":
-                        continue  # skip ourselves
-                    self._probe_peer(ip, port, ctx)
-
+            for port in self._localhost_probe_ports:
+                if port == self.sync_port:
+                    continue
+                for scheme in ("https", "http"):
+                    try:
+                        url = f"{scheme}://127.0.0.1:{port}/health"
+                        kw = {"timeout": 2}
+                        if scheme == "https":
+                            kw["context"] = ctx
+                        req = urllib.request.urlopen(url, **kw)
+                        data = json.loads(req.read().decode())
+                        if data.get("type") == "sautium-peer":
+                            key = ("127.0.0.1", port)
+                            is_new = key not in self._peers
+                            self._peers[key] = {
+                                "node_id": "",
+                                "artists": 0,
+                                "last_seen": time.time(),
+                                "localhost": True,
+                                "scheme": scheme,
+                            }
+                            if is_new:
+                                logger.info(
+                                    f"Localhost peer discovered: "
+                                    f"{scheme}://127.0.0.1:{port}"
+                                )
+                        break
+                    except Exception:
+                        continue
             await asyncio.sleep(BEACON_INTERVAL)
-
-    def _probe_peer(self, ip: str, port: int, ssl_ctx) -> bool:
-        """Try to reach a sautium-peer at ip:port. Returns True if found."""
-        import urllib.request
-
-        for scheme in ("https", "http"):
-            try:
-                url = f"{scheme}://{ip}:{port}/health"
-                kw = {"timeout": 2}
-                if scheme == "https":
-                    kw["context"] = ssl_ctx
-                req = urllib.request.urlopen(url, **kw)
-                data = json.loads(req.read().decode())
-                if data.get("type") == "sautium-peer":
-                    key = (ip, port)
-                    is_new = key not in self._peers
-                    self._peers[key] = {
-                        "node_id": "",
-                        "artists": 0,
-                        "last_seen": time.time(),
-                        "localhost": ip == "127.0.0.1",
-                        "scheme": scheme,
-                    }
-                    if is_new:
-                        logger.info(
-                            f"Peer discovered: {scheme}://{ip}:{port}"
-                        )
-                    return True
-            except Exception:
-                continue
-        return False
-
-    @staticmethod
-    def _get_own_lan_ip() -> Optional[str]:
-        """Get our own LAN IP address."""
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except Exception:
-            return None
-
-    @staticmethod
-    def _get_arp_ips(exclude_ip: Optional[str] = None) -> list[str]:
-        """Get LAN IPs from ARP table (neighbours on the network)."""
-        import re
-        import subprocess
-        ips = []
-        try:
-            result = subprocess.run(
-                ["arp", "-a"], capture_output=True, text=True, timeout=5
-            )
-            for line in result.stdout.splitlines():
-                m = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
-                if m:
-                    ip = m.group(1)
-                    if (ip != exclude_ip
-                            and not ip.endswith('.255')
-                            and not ip.startswith('224.')
-                            and ip != '127.0.0.1'):
-                        ips.append(ip)
-        except Exception:
-            pass
-        return ips
 
     def update_enriched_count(self, count: int):
         """Update the artist count sent in beacons."""
