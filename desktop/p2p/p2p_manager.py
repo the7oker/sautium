@@ -412,31 +412,23 @@ class P2PManager:
                     reverse=True,
                 )
                 for ip, port in lan_peers_sorted:
-                    still_unenriched = await self._get_unenriched_artists()
-                    if not still_unenriched:
-                        break
-                    peer_tracks = set()
-                    for au in still_unenriched:
-                        t = await self._get_track_uuids_for_artist(au)
-                        peer_tracks.update(t)
-                    if peer_tracks:
-                        info = self._lan_discovery.get_peer_info(ip, port)
-                        artist_count = (info or {}).get("artists", "?")
-                        scheme = (info or {}).get("scheme", "https")
-                        peer_url = f"{scheme}://{ip}:{port}"
-                        _progress(
-                            f"LAN peer {peer_url} "
-                            f"({artist_count} artists)..."
-                        )
-                        synced = await self._sync_from_peer(
-                            peer_url,
-                            list(peer_tracks),
-                            _progress,
-                            progress_cb,
-                        )
-                        for k, v in synced.items():
-                            if isinstance(v, int):
-                                total_stats[k] = total_stats.get(k, 0) + v
+                    info = self._lan_discovery.get_peer_info(ip, port)
+                    artist_count = (info or {}).get("artists", "?")
+                    scheme = (info or {}).get("scheme", "https")
+                    peer_url = f"{scheme}://{ip}:{port}"
+                    _progress(
+                        f"LAN peer {peer_url} "
+                        f"({artist_count} artists)..."
+                    )
+                    synced = await self._sync_from_peer(
+                        peer_url,
+                        track_uuids,
+                        _progress,
+                        progress_cb,
+                    )
+                    for k, v in synced.items():
+                        if isinstance(v, int):
+                            total_stats[k] = total_stats.get(k, 0) + v
 
         # Step 5: DHT lookup for remaining unenriched artists (internet)
         if self._dht_service and self._dht_service.is_available:
