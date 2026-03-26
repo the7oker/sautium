@@ -434,43 +434,43 @@ class P2PManager:
                         if isinstance(v, int):
                             total_stats[k] = total_stats.get(k, 0) + v
 
-        # Step 5: DHT lookup — find ANY Sautium peer, then sync ALL tracks
+        # Step 5: DHT lookup for remaining unenriched artists (internet)
         if self._dht_service and self._dht_service.is_available:
             still_unenriched = await self._get_unenriched_artists()
             if still_unenriched:
-                # Re-collect all unenriched tracks (some may have been
-                # synced by LAN peers in step 4)
-                remaining_tracks = await self._get_tracks_for_artists(
+                _progress(
+                    f"Searching DHT for {len(still_unenriched)} "
+                    f"remaining artists..."
+                )
+                peer_map = await self._dht_service.lookup_artists_batch(
                     still_unenriched
                 )
-                if remaining_tracks:
+
+                if peer_map:
+                    # Group by peer
+                    peer_to_artists: dict[tuple, list[str]] = {}
+                    for artist_uuid, peers in peer_map.items():
+                        for ip, port in peers:
+                            peer_key = (ip, port)
+                            peer_to_artists.setdefault(
+                                peer_key, []
+                            ).append(artist_uuid)
+
                     _progress(
-                        f"Searching DHT for {len(still_unenriched)} "
-                        f"remaining artists..."
-                    )
-                    peer_map = await self._dht_service.lookup_artists_batch(
-                        still_unenriched
+                        f"Found {len(peer_to_artists)} DHT peers "
+                        f"for {len(peer_map)} artists"
                     )
 
-                    if peer_map:
-                        # Deduplicate peers
-                        unique_peers = set()
-                        for peers in peer_map.values():
-                            for ip, port in peers:
-                                unique_peers.add((ip, port))
+                    for (ip, port), artist_uuids in peer_to_artists.items():
+                        peer_tracks = set()
+                        for au in artist_uuids:
+                            t = await self._get_track_uuids_for_artist(au)
+                            peer_tracks.update(t)
 
-                        _progress(
-                            f"Found {len(unique_peers)} DHT peers "
-                            f"for {len(peer_map)} artists"
-                        )
-
-                        # Send ALL unenriched tracks to each peer
-                        # (not just tracks for the artists found via DHT).
-                        # The peer may have more data than what DHT told us.
-                        for ip, port in unique_peers:
+                        if peer_tracks:
                             synced = await self._sync_from_peer(
                                 f"{ip}:{port}",
-                                remaining_tracks,
+                                list(peer_tracks),
                                 _progress,
                                 progress_cb,
                             )
@@ -479,10 +479,10 @@ class P2PManager:
                                     total_stats[k] = (
                                         total_stats.get(k, 0) + v
                                     )
-                    else:
-                        _progress("No peers found in DHT")
+                else:
+                    _progress("No peers found in DHT")
 
-        # Re-announce newly enriched artists
+        # Step 5: Re-announce newly enriched artists
         if total_stats and self._dht_service:
             _progress("Re-announcing newly enriched artists...")
             new_enriched = await self._get_enriched_artists()
