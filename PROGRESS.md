@@ -2492,6 +2492,7 @@ Docker Backend (port 8800)          Desktop Launcher (port 19000)
   - Enrichment cancel fix: `cancel_flag` propagated to GPU batch loops
 
 - [x] **P2P Phase P4: Account + Chat + Email CA + Web UI** ✅
+- [x] **P2P Phase P3: NAT Traversal + LAN Discovery** ✅ (2026-03-24 → 2026-03-26)
 
 ## P2P Phase P4: Account + Encrypted Chat + Email CA + Web UI - DONE
 
@@ -2607,4 +2608,117 @@ Docker Backend (port 8800)          Desktop Launcher (port 19000)
 - **Mutual invite exchange** implementation (replace auto-accept handshake)
 - Fetch more lyrics (extend library coverage)
 - Musixmatch as third lyrics source (if needed after Genius coverage analysis)
-- Audio analysis for remaining tracks
+
+---
+
+## P2P Phase P3: NAT Traversal + Real-World Sync — DONE (2026-03-24 → 2026-03-26)
+
+### Goal
+Make P2P sync work reliably across real networks: LAN (multiple machines on the same router) and internet (NAT/UPnP), replacing the earlier DHT-only approach with a layered discovery strategy.
+
+### What was done
+
+**LAN Discovery** (`desktop/p2p/lan_discovery.py` — new):
+- UDP broadcast on port 19002 to find peers on the local network without DHT
+- Sends `SAUTIUM_DISCOVER` datagram, peers respond with their sync port
+- Handles multi-NIC Windows setups: sends broadcast to each interface's subnet broadcast address (e.g. 192.168.1.255) in addition to 255.255.255.255
+- Localhost Docker probe: directly checks `127.0.0.1:8800` (Docker backend) so that LAN discovery also finds the local Docker container without DHT
+
+**UPnP Service** (`desktop/p2p/upnp_service.py` — new):
+- Wraps `miniupnpc` for automatic port mapping on home routers
+- Maps both the sync server port AND the DHT UDP port
+- Returns the router-assigned external IP:port for DHT announces so remote peers can reach us
+
+**Sync flow rewrite** (`desktop/p2p/p2p_manager.py` — full rewrite):
+- Layered discovery order: LAN peers first → DHT peers second
+- LAN peers preferred because they are faster and more reliable
+- Smart seed selection: find a seed for any one unenriched artist, then ask that same seed about ALL remaining unenriched artists (single inventory call covers everything)
+- Replaced hard-coded `source_url` fallback with pure P2P discovery — no static backend URL
+
+**DHT fixes** (`desktop/p2p/dht_service.py`, `backend/dht_service.py`):
+- `alert_mask` must include `dht_operation_notification` for `dht_get_peers_alert` to fire — was silently missing in earlier implementation
+- `peers()` return type changed in libtorrent 2.1+: returns list of tuples `(ip, port)` instead of objects with `.address()` and `.port()` — added compatibility handling
+- Announce port now set to the UPnP-mapped external port when available
+- Improved bootstrap: retry with fallback bootstrap nodes if initial bootstrap produces < 10 nodes
+
+**Sync server watchdog** (`desktop/p2p/sync_server.py`, `desktop/p2p/p2p_manager.py`):
+- Background coroutine monitors the aiohttp server health every 30 seconds
+- Auto-restarts sync server after network interface changes or OS sleep/wake cycles
+- Stops old P2P manager cleanly before restarting services (launcher.py)
+
+**Random P2P port per instance** (`desktop/config_manager.py`):
+- P2P sync port assigned randomly in range 20000–29999 on first run, then persisted in config
+- Avoids port conflicts when multiple Sautium instances run on the same machine
+- DHT port = sync port + 1
+
+**docker_ports config** (`desktop/config_manager.py`, `docker-compose.yml`, `docker-compose.mac.yml`):
+- Explicit `docker_ports` list in config instead of hardcoded probe list
+- Docker backend announces its actual mapped port; config avoids trying wrong ports
+
+**Removed `source_url`** (`desktop/config_manager.py`):
+- Static `source_url` config key removed — peers are now discovered dynamically via LAN + DHT
+- No manual IP address configuration needed
+
+**Windows integration** (`desktop/launcher.py`, `desktop/service_manager.py`):
+- Auto-install OpenSSL 1.1 DLLs (`libtorrent-windows-dll` PyPI package) at launch if missing — libtorrent on Windows requires these
+- Auto-add Windows Firewall rules for both sync server port and DHT port at startup
+- `service_manager.py` firewall rule helper updated to accept `protocol` parameter (TCP vs UDP)
+- Launcher always starts P2P on startup (previously skipped if P2P deps missing)
+
+**Sync timeouts** (`desktop/api_client.py`):
+- Increased all sync-related HTTP timeouts from 30s → 300s
+- Needed for large batch pulls over slower internet connections
+
+### Architecture (updated)
+
+```
+Sync trigger
+     │
+     ▼
+LAN Discovery (UDP broadcast + localhost Docker probe)
+     │ found LAN peers?
+     ├─── Yes → use LAN peers (fast, direct)
+     └─── No  → DHT lookup per artist
+                     │
+                     ▼
+              Found seed for artist X?
+                     │
+                     ▼
+              Ask seed about ALL unenriched artists (one inventory call)
+                     │
+                     ▼
+              Batch pull missing categories (gzip JSON)
+                     │
+                     ▼
+              Import into local DB
+```
+
+### Testing
+- LAN sync: Mac ↔ Windows on same router — fully working, ~125 tracks/sec throughput
+- Internet sync: Mac on mobile hotspot ↔ Windows at home via DHT + UPnP — working end-to-end
+- Multi-NIC Windows: subnet broadcast reaches peers across all active interfaces
+- Localhost: Docker backend found via direct probe without going through DHT
+
+### Files
+
+| File | Status | Change |
+|------|--------|--------|
+| `desktop/p2p/lan_discovery.py` | NEW | UDP broadcast + multi-NIC + localhost Docker probe |
+| `desktop/p2p/upnp_service.py` | NEW | miniupnpc multi-port mapping |
+| `desktop/p2p/p2p_manager.py` | REWRITTEN | LAN+DHT layered discovery, smart seed selection, watchdog |
+| `desktop/p2p/dht_service.py` | MODIFIED | alert_mask fix, peers() compat, UPnP port, bootstrap retry |
+| `backend/dht_service.py` | MODIFIED | same alert_mask + peers() fixes as desktop version |
+| `desktop/launcher.py` | MODIFIED | always start P2P, OpenSSL DLL auto-install, firewall rules, sync button timing |
+| `desktop/config_manager.py` | MODIFIED | random P2P port (20000–29999), docker_ports, removed source_url |
+| `desktop/service_manager.py` | MODIFIED | firewall rule protocol parameter (TCP/UDP) |
+| `desktop/api_client.py` | MODIFIED | sync timeouts 30s → 300s |
+| `docker-compose.yml` | MODIFIED | explicit docker_ports config |
+| `docker-compose.mac.yml` | MODIFIED | explicit docker_ports config |
+| `backend/Dockerfile.mac` | MODIFIED | libtorrent install adjustments |
+
+### Design decisions
+- **LAN first**: LAN peers are always faster and more reliable than DHT-discovered peers; DHT is the fallback, not the primary path
+- **Smart seed reuse**: One DHT lookup for any artist yields a seed; that same seed is queried for all other unenriched artists in a single inventory call — avoids N DHT lookups for N artists
+- **No source_url**: Removing the static fallback forces the code down the proper P2P path and avoids the false sense of security that a hardcoded URL provides
+- **Random port**: Prevents collisions without user configuration; persisted so the same port is used across restarts (important for UPnP mappings and firewall rules)
+- **Watchdog**: Network events (sleep, interface change, VPN connect) crash aiohttp silently; auto-restart recovers without user action

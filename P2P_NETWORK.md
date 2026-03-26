@@ -380,34 +380,126 @@ backend/
 
 ---
 
-### Phase P3: NAT Traversal + Cross-Library Search
+### Phase P3: NAT Traversal + LAN Discovery ✅ DONE (2026-03-24 → 2026-03-26)
 
-**Мета**: Забезпечити роботу через NAT (реальний інтернет) та додати крос-бібліотечний пошук.
+**Мета**: Забезпечити роботу через NAT (реальний інтернет) та LAN без ручного налаштування.
 
-**NAT Traversal** (`desktop/p2p/nat.py`):
-- UPnP port mapping через `miniupnpc` (автоматичне, без UI)
-- STUN для визначення зовнішнього IP:port
-- Fallback: DHT все одно працює через UDP outbound
+#### LAN Discovery (`desktop/p2p/lan_discovery.py`) ✅
 
-**Peer Cache** (розширення `p2p_manager.py`):
-- Persistent список відомих пірів (зберігати між сесіями)
-- Timeout на повільних/недоступних пірів
-- Пріоритизація пірів з більшою кількістю enriched артистів
+- UDP broadcast на порт 19002 для знаходження пірів у локальній мережі
+- Відповідь: sync port піра → пряме HTTP з'єднання без DHT
+- Підтримка multi-NIC Windows: broadcast до кожного subnet (наприклад 192.168.1.255) + 255.255.255.255
+- Localhost Docker probe: пряма перевірка `127.0.0.1:8800` (Docker backend) — знаходить локальний Docker без DHT
 
-**Cross-Library Search**:
+#### UPnP Service (`desktop/p2p/upnp_service.py`) ✅
+
+- `miniupnpc`: автоматичне відкриття портів на роутері (без взаємодії з користувачем)
+- Маппінг sync server port + DHT UDP port
+- Повертає зовнішній IP:port для DHT announces → remote peers можуть підключитись
+
+#### Layered Sync Flow ✅
+
+```
+Sync trigger
+     │
+     ▼
+LAN Discovery (UDP broadcast + localhost Docker probe)
+     │ знайдено LAN peers?
+     ├─── Так → використати LAN peers (швидко, надійно)
+     └─── Ні  → DHT lookup для одного артиста
+                     │
+                     ▼
+              Знайшли seed для артиста X?
+                     │
+                     ▼
+              Запит до seed про ВСІ unenriched артисти (один inventory call)
+                     │
+                     ▼
+              Batch pull відсутніх категорій (gzip JSON)
+                     │
+                     ▼
+              Import в локальну БД
+```
+
+**Smart seed reuse**: один DHT lookup знаходить seed → той самий seed обробляє всі unenriched артисти.
+Замість N DHT lookups для N артистів — 1 lookup + 1 inventory call.
+
+#### DHT Fixes ✅
+
+- `alert_mask` повинен включати `dht_operation_notification` для спрацювання `dht_get_peers_alert` — без цього DHT alerts мовчки ігноруються
+- `peers()` в libtorrent 2.1+ повертає список tuples `(ip, port)` замість об'єктів з `.address()/.port()` — додано compatibility handling
+- Announce port = UPnP-mapped external port (якщо UPnP доступний)
+- Bootstrap retry: якщо < 10 нод після першого bootstrap → fallback до резервних bootstrap нод
+
+#### Sync Server Watchdog ✅
+
+- Background coroutine перевіряє здоров'я aiohttp server кожні 30 секунд
+- Авто-рестарт після network events (sleep/wake, зміна інтерфейсу, VPN)
+- Launcher: зупиняє старий P2P manager перед рестартом сервісів (уникає port conflicts)
+
+#### Random P2P Port ✅
+
+- Порт присвоюється випадково в діапазоні 20000–29999 при першому запуску, потім зберігається в конфігу
+- DHT порт = sync порт + 1
+- Уникає конфліктів при кількох інстансах Sautium на одній машині
+- `docker_ports` в конфігу — явний список замість hardcoded probe list
+
+#### Windows Integration ✅
+
+- Авто-встановлення OpenSSL 1.1 DLLs (`libtorrent-windows-dll` PyPI) при запуску — необхідно для libtorrent на Windows
+- Авто-додавання Windows Firewall правил для sync port (TCP) і DHT port (UDP)
+- `service_manager.py` приймає параметр `protocol` (TCP/UDP) для правил firewall
+
+#### Видалено `source_url` ✅
+
+- Статичний `source_url` в конфігу прибрано — піри знаходяться виключно через LAN + DHT
+- Жодного ручного введення IP адрес не потрібно
+
+#### Тестування
+
+- LAN sync: Mac ↔ Windows на одному роутері — повністю працює (~125 треків/сек)
+- Internet sync: Mac на мобільному хотспоті ↔ Windows вдома через DHT + UPnP — end-to-end
+- Multi-NIC Windows: subnet broadcast досягає пірів через всі активні інтерфейси
+- Localhost: Docker backend знайдений через direct probe без DHT
+
+#### Нові файли
+
+| Файл | Призначення |
+|------|-------------|
+| `desktop/p2p/lan_discovery.py` | UDP broadcast + multi-NIC + localhost Docker probe |
+| `desktop/p2p/upnp_service.py` | miniupnpc: маппінг sync + DHT портів |
+
+#### Змінені файли
+
+| Файл | Зміни |
+|------|-------|
+| `desktop/p2p/p2p_manager.py` | Повний rewrite: LAN+DHT layered discovery, smart seed, watchdog |
+| `desktop/p2p/dht_service.py` | alert_mask fix, peers() compat, UPnP port, bootstrap retry |
+| `backend/dht_service.py` | Ті самі fixes що і desktop версія |
+| `desktop/launcher.py` | Always start P2P, OpenSSL DLL auto-install, firewall rules, sync button timing |
+| `desktop/config_manager.py` | Random P2P port, docker_ports, видалено source_url |
+| `desktop/service_manager.py` | Firewall rule protocol parameter (TCP/UDP) |
+| `desktop/api_client.py` | Sync timeouts 30s → 300s |
+| `docker-compose.yml` | Explicit docker_ports config |
+| `docker-compose.mac.yml` | Explicit docker_ports config |
+| `backend/Dockerfile.mac` | libtorrent install adjustments |
+
+---
+
+**Cross-Library Search** (залишено на майбутнє):
 - "Хто з мережі має щось схоже на цей трек?" → embedding similarity
 - Distributed query до знайдених пірів паралельно
 - Library comparison (overlap analysis, taste similarity)
 - Timeout 5 секунд на повільних пірів
 
-**Handshake Protocol** (підготовка до P4):
+**Handshake Protocol** (підготовка до P4, вже реалізовано в P4):
 - Обмін node ID, library stats, capabilities
 - Потрібен для соціальних фіч (друзі, чат)
 - Ed25519 підпис повідомлень
 
 ---
 
-### Phase P4: Account System + Encrypted Chat ← CURRENT
+### Phase P4: Account System + Encrypted Chat ✅ DONE
 
 **Мета**: Портативна ідентичність, друзі та E2E зашифрований чат.
 
@@ -655,9 +747,13 @@ Launcher B шукає тих самих артистів через DHT, зна�
 20. ~~**[Phase P4]** Web UI: hamburger menu + Friends section (chat, friends)~~ ✅
 21. ~~**[Phase P4]** Docker backend P2P identity~~ ✅
 22. ~~**[Phase P4]** Wizard: account creation + email verification~~ ✅
-23. **[Phase P4]** Mutual invite exchange (auto-accept → require both sides)
-24. **[Phase P3]** NAT traversal (UPnP) для роботи через інтернет
-25. **[Phase P3]** Cross-library search (embedding similarity між пірами)
+23. ~~**[Phase P4]** Mutual invite exchange (auto-accept → require both sides)~~ ⏳ TODO (design done, impl pending)
+24. ~~**[Phase P3]** NAT traversal (UPnP) для роботи через інтернет~~ ✅ (`upnp_service.py`)
+25. ~~**[Phase P3]** LAN discovery (UDP broadcast + localhost probe)~~ ✅ (`lan_discovery.py`)
+26. ~~**[Phase P3]** Layered sync flow (LAN first → DHT fallback, smart seed reuse)~~ ✅
+27. ~~**[Phase P3]** DHT fixes (alert_mask, peers() compat, random port, watchdog)~~ ✅
+28. **[Phase P3b]** Cross-library search (embedding similarity між пірами)
+29. **[Phase P4]** Mutual invite exchange (implement — replace auto-accept handshake)
 
 ---
 
@@ -683,6 +779,21 @@ Launcher B шукає тих самих артистів через DHT, зна�
 | Docker backend | **Той самий протокол** | Docker = ще один пір, та сама sync логіка, різниця тільки в обгортці (FastAPI vs aiohttp) |
 | libtorrent `dht_announce` API | **3 аргументи** (sha1, port, flags=0) | libtorrent 2.0.11 Python bindings вимагають explicit flags parameter |
 | libtorrent в Docker | **pip wheel** (cp311 manylinux) | Pre-built wheel 8.5MB, boost build deps не потрібні |
+
+## Resolved Questions (Phase P3)
+
+| Питання | Рішення | Обґрунтування |
+|---------|---------|---------------|
+| Як знаходити пірів без ручного IP? | **LAN broadcast + DHT** | LAN — миттєво, DHT — fallback для інтернет. Нуль ручних налаштувань |
+| DHT alerts мовчать | **alert_mask += dht_operation_notification** | Без цього прапора `dht_get_peers_alert` не генерується |
+| libtorrent 2.1+ peers() API | **tuple compat** | `(ip, port)` tuples замість об'єктів — handle обидва варіанти |
+| NAT traversal | **UPnP (`miniupnpc`)** | Працює на ~80% домашніх роутерів, без взаємодії з користувачем |
+| Port conflicts (кілька інстансів) | **Випадковий порт 20000–29999** | Зберігається в конфігу → той самий порт між рестартами |
+| source_url (статична адреса) | **Видалено** | Замінено динамічним P2P discovery (LAN + DHT) |
+| N DHT lookups для N артистів | **Smart seed reuse** | 1 lookup → 1 seed → 1 inventory call для всіх артистів |
+| Network crash (sleep/VPN) | **Sync server watchdog** | Auto-restart кожні 30с якщо сервер впав |
+| OpenSSL DLLs на Windows | **Auto-install `libtorrent-windows-dll`** | libtorrent на Windows потребує OpenSSL 1.1; ставиться автоматично при запуску |
+| Windows Firewall | **Auto-add rules при запуску** | TCP для sync port, UDP для DHT port — launcher додає правила з правами адміна |
 
 ## Open Questions
 
