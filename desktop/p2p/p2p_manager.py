@@ -213,8 +213,28 @@ class P2PManager:
 
             self._running = True
 
-            # Wait until stopped
-            await self._stop_event.wait()
+            # Monitor sync server — restart if it crashes
+            while not self._stop_event.is_set():
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(), timeout=30
+                    )
+                    break  # stop_event was set
+                except asyncio.TimeoutError:
+                    pass  # check sync server health
+
+                # Check if sync server site is still serving
+                if (self._sync_server and self._sync_server._site
+                        and self._sync_server._site._server is None):
+                    logger.warning(
+                        "Sync server crashed, restarting..."
+                    )
+                    try:
+                        await self._sync_server.stop()
+                        await self._sync_server.start()
+                        _progress("Sync server restarted")
+                    except Exception as e:
+                        logger.error(f"Sync server restart failed: {e}")
 
         except Exception as e:
             logger.error(f"P2P startup failed: {e}")
