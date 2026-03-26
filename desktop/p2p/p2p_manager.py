@@ -464,9 +464,9 @@ class P2PManager:
                             f"for {len(peer_map)} artists"
                         )
 
-                        # Send ALL unenriched tracks to each peer
-                        # (not just tracks for the artists found via DHT).
-                        # The peer may have more data than what DHT told us.
+                        # Try peers until one successfully syncs.
+                        # Send ALL unenriched tracks (not just the
+                        # artist-specific ones DHT returned).
                         for ip, port in unique_peers:
                             synced = await self._sync_from_peer(
                                 f"{ip}:{port}",
@@ -474,11 +474,17 @@ class P2PManager:
                                 _progress,
                                 progress_cb,
                             )
+                            peer_items = sum(
+                                v for v in synced.values()
+                                if isinstance(v, int)
+                            )
                             for k, v in synced.items():
                                 if isinstance(v, int):
                                     total_stats[k] = (
                                         total_stats.get(k, 0) + v
                                     )
+                            if peer_items > 0:
+                                break  # got data, no need to try more
                     else:
                         _progress("No peers found in DHT")
 
