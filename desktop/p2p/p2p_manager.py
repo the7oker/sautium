@@ -247,13 +247,24 @@ class P2PManager:
             return
 
         logger.info("Stopping P2P manager...")
-        if self._stop_event and self._loop:
+
+        # Signal DHT to stop waiting (breaks _wait_for_dht_ready)
+        if self._dht_service:
+            self._dht_service._running = False
+
+        # Signal the event loop to exit
+        if self._stop_event and self._loop and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._stop_event.set)
 
         if self._thread:
-            self._thread.join(timeout=10)
+            self._thread.join(timeout=5)
             if self._thread.is_alive():
-                logger.warning("P2P thread did not stop cleanly")
+                logger.warning("P2P thread did not stop in 5s, "
+                               "forcing cleanup...")
+                # Force-close the loop to unblock everything
+                if self._loop and not self._loop.is_closed():
+                    self._loop.call_soon_threadsafe(self._loop.stop)
+                self._thread.join(timeout=5)
 
         if self._loop and not self._loop.is_closed():
             self._loop.close()
