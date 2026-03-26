@@ -435,9 +435,18 @@ class P2PManager:
                             total_stats[k] = total_stats.get(k, 0) + v
 
         # Step 5: DHT lookup for remaining unenriched artists (internet)
+        #
+        # Flow: search DHT by artist → find seed → sync artist tracks →
+        # ask same seed about ALL remaining unenriched tracks (high
+        # probability it has more) → continue searching if gaps remain.
+        synced_peers: set[str] = set()  # peers already fully queried
+
         if self._dht_service and self._dht_service.is_available:
-            still_unenriched = await self._get_unenriched_artists()
-            if still_unenriched:
+            while True:
+                still_unenriched = await self._get_unenriched_artists()
+                if not still_unenriched:
+                    break
+
                 _progress(
                     f"Searching DHT for {len(still_unenriched)} "
                     f"remaining artists..."
@@ -445,44 +454,83 @@ class P2PManager:
                 peer_map = await self._dht_service.lookup_artists_batch(
                     still_unenriched
                 )
+                if not peer_map:
+                    _progress("No peers found in DHT")
+                    break
 
-                if peer_map:
-                    # Group by peer
-                    peer_to_artists: dict[tuple, list[str]] = {}
-                    for artist_uuid, peers in peer_map.items():
-                        for ip, port in peers:
-                            peer_key = (ip, port)
-                            peer_to_artists.setdefault(
-                                peer_key, []
+                # Collect unique NEW peers (skip already-queried)
+                new_peers: dict[tuple, list[str]] = {}
+                for artist_uuid, peers in peer_map.items():
+                    for ip, port in peers:
+                        key = f"{ip}:{port}"
+                        if key not in synced_peers:
+                            new_peers.setdefault(
+                                (ip, port), []
                             ).append(artist_uuid)
 
-                    _progress(
-                        f"Found {len(peer_to_artists)} DHT peers "
-                        f"for {len(peer_map)} artists"
+                if not new_peers:
+                    _progress("No new DHT peers to try")
+                    break
+
+                _progress(
+                    f"Found {len(new_peers)} new DHT peers "
+                    f"for {len(peer_map)} artists"
+                )
+
+                found_any = False
+                for (ip, port), artist_uuids in new_peers.items():
+                    peer_addr = f"{ip}:{port}"
+
+                    # Step A: sync tracks for the artists DHT told us about
+                    peer_tracks = await self._get_tracks_for_artists(
+                        artist_uuids
                     )
+                    if not peer_tracks:
+                        continue
 
-                    for (ip, port), artist_uuids in peer_to_artists.items():
-                        peer_tracks = set()
-                        for au in artist_uuids:
-                            t = await self._get_track_uuids_for_artist(au)
-                            peer_tracks.update(t)
+                    synced = await self._sync_from_peer(
+                        peer_addr, peer_tracks, _progress, progress_cb,
+                    )
+                    peer_items = sum(
+                        v for v in synced.values() if isinstance(v, int)
+                    )
+                    for k, v in synced.items():
+                        if isinstance(v, int):
+                            total_stats[k] = total_stats.get(k, 0) + v
 
-                        if peer_tracks:
-                            synced = await self._sync_from_peer(
-                                f"{ip}:{port}",
-                                list(peer_tracks),
-                                _progress,
-                                progress_cb,
-                            )
-                            for k, v in synced.items():
-                                if isinstance(v, int):
-                                    total_stats[k] = (
-                                        total_stats.get(k, 0) + v
-                                    )
-                else:
-                    _progress("No peers found in DHT")
+                    if peer_items == 0:
+                        continue  # not a Sautium peer, skip
 
-        # Step 5: Re-announce newly enriched artists
+                    found_any = True
+                    synced_peers.add(peer_addr)
+
+                    # Step B: this peer has data — ask it about ALL
+                    # remaining unenriched tracks too
+                    remaining = await self._get_unenriched_artists()
+                    if not remaining:
+                        break
+                    all_remaining_tracks = (
+                        await self._get_tracks_for_artists(remaining)
+                    )
+                    if all_remaining_tracks:
+                        _progress(
+                            f"Peer {peer_addr} has data, asking about "
+                            f"{len(all_remaining_tracks)} more tracks..."
+                        )
+                        synced2 = await self._sync_from_peer(
+                            peer_addr, all_remaining_tracks,
+                            _progress, progress_cb,
+                        )
+                        for k, v in synced2.items():
+                            if isinstance(v, int):
+                                total_stats[k] = (
+                                    total_stats.get(k, 0) + v
+                                )
+
+                if not found_any:
+                    break  # no new data from any peer, stop
+
+        # Re-announce newly enriched artists
         if total_stats and self._dht_service:
             _progress("Re-announcing newly enriched artists...")
             new_enriched = await self._get_enriched_artists()
