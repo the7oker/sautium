@@ -494,6 +494,10 @@ class P2PManager:
                     peer_items = sum(
                         v for v in synced.values() if isinstance(v, int)
                     )
+                    logger.info(
+                        f"Peer {peer_addr}: {peer_items} items "
+                        f"(synced keys: {list(synced.keys())})"
+                    )
                     for k, v in synced.items():
                         if isinstance(v, int):
                             total_stats[k] = total_stats.get(k, 0) + v
