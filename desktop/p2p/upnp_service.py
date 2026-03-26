@@ -1,16 +1,8 @@
 """
 UPnP / NAT-PMP port mapping for Sautium.
 
-Opens an external port on the router so this node is reachable from
+Opens external ports on the router so this node is reachable from
 the internet.  Uses miniupnpc (optional dependency).
-
-Usage:
-    upnp = UPnPService(internal_port=19000)
-    result = upnp.open_port()
-    if result:
-        external_ip, external_port = result
-        # Use in DHT announce
-    upnp.close_port()   # on shutdown
 """
 
 import logging
@@ -24,18 +16,20 @@ try:
 except ImportError:
     HAS_UPNP = False
 
-# Lease duration in seconds (0 = permanent until reboot/close)
-LEASE_DURATION = 3600  # 1 hour, re-map periodically
+LEASE_DURATION = 3600  # 1 hour
 
 
 class UPnPService:
-    """Manages a single UPnP port mapping for the sync server."""
+    """Manages UPnP port mappings for P2P connectivity."""
 
-    def __init__(self, internal_port: int = 19000, description: str = "Sautium P2P"):
-        self.internal_port = internal_port
-        self.description = description
+    def __init__(self, ports: list[int] = None):
+        """
+        Args:
+            ports: list of internal TCP ports to map (sync server, Docker, etc.)
+        """
+        self._ports = ports or []
         self._upnp = None
-        self._external_port: Optional[int] = None
+        self._mapped: list[Tuple[int, int]] = []  # (external, internal)
         self._external_ip: Optional[str] = None
 
     @property
@@ -43,24 +37,33 @@ class UPnPService:
         return HAS_UPNP
 
     @property
-    def external_address(self) -> Optional[Tuple[str, int]]:
-        """Return (external_ip, external_port) if mapped, else None."""
-        if self._external_ip and self._external_port:
-            return (self._external_ip, self._external_port)
+    def external_ip(self) -> Optional[str]:
+        return self._external_ip
+
+    def get_external_port(self, internal_port: int) -> Optional[int]:
+        """Get the external port mapped for a given internal port."""
+        for ext, intn in self._mapped:
+            if intn == internal_port:
+                return ext
         return None
 
-    def open_port(self) -> Optional[Tuple[str, int]]:
-        """Try to open external port via UPnP. Returns (ip, port) or None."""
+    def open_ports(self) -> Optional[str]:
+        """Map all configured ports via UPnP.
+
+        Returns external IP if successful, None otherwise.
+        """
         if not HAS_UPNP:
             logger.info("miniupnpc not installed — UPnP disabled")
             return None
 
+        if not self._ports:
+            return None
+
         try:
             u = miniupnpc.UPnP()
-            u.discoverdelay = 2000  # ms
-            devices = u.discover()
-            if devices == 0:
-                logger.info("No UPnP devices found on network")
+            u.discoverdelay = 2000
+            if u.discover() == 0:
+                logger.info("No UPnP devices found")
                 return None
 
             u.selectigd()
@@ -69,64 +72,56 @@ class UPnPService:
                 logger.warning("UPnP: could not determine external IP")
                 return None
 
-            # Try to map our internal port to the same external port
-            port = self.internal_port
-            for attempt in range(5):
-                try:
-                    result = u.addportmapping(
-                        port,           # external port
-                        "TCP",
-                        u.lanaddr,      # internal IP
-                        self.internal_port,
-                        self.description,
-                        "",             # remote host (any)
-                        LEASE_DURATION,
-                    )
-                    if result:
-                        self._upnp = u
-                        self._external_ip = external_ip
-                        self._external_port = port
-                        logger.info(
-                            f"UPnP mapped {external_ip}:{port} -> "
-                            f"{u.lanaddr}:{self.internal_port}"
-                        )
-                        return (external_ip, port)
-                except Exception:
-                    pass
-                # Port taken, try next
-                port += 1
+            self._upnp = u
+            self._external_ip = external_ip
 
-            logger.warning("UPnP: could not map any port after 5 attempts")
-            return None
+            for internal_port in self._ports:
+                ext = self._map_port(u, internal_port)
+                if ext:
+                    self._mapped.append((ext, internal_port))
+
+            if self._mapped:
+                mapped_str = ", ".join(
+                    f"{ext}->{intn}" for ext, intn in self._mapped
+                )
+                logger.info(f"UPnP: {external_ip} [{mapped_str}]")
+            return external_ip
 
         except Exception as e:
             logger.info(f"UPnP failed: {e}")
             return None
 
-    def close_port(self):
-        """Remove the UPnP port mapping."""
-        if self._upnp and self._external_port:
+    def _map_port(self, u, internal_port: int) -> Optional[int]:
+        """Map a single port, trying the same external port first."""
+        port = internal_port
+        for _ in range(5):
             try:
-                self._upnp.deleteportmapping(self._external_port, "TCP")
-                logger.info(f"UPnP mapping removed (port {self._external_port})")
-            except Exception as e:
-                logger.debug(f"UPnP close failed: {e}")
-            self._external_port = None
-            self._external_ip = None
-
-    def get_lan_ip(self) -> Optional[str]:
-        """Return LAN IP from UPnP discovery (reliable, no guessing)."""
-        if self._upnp:
-            return self._upnp.lanaddr
-        # Fallback: quick UPnP discover just for LAN IP
-        if not HAS_UPNP:
-            return None
-        try:
-            u = miniupnpc.UPnP()
-            u.discoverdelay = 1000
-            if u.discover() > 0:
-                u.selectigd()
-                return u.lanaddr
-        except Exception:
-            pass
+                result = u.addportmapping(
+                    port, "TCP", u.lanaddr, internal_port,
+                    f"Sautium ({internal_port})", "", LEASE_DURATION,
+                )
+                if result:
+                    logger.info(
+                        f"UPnP: {u.externalipaddress()}:{port} -> "
+                        f"{u.lanaddr}:{internal_port}"
+                    )
+                    return port
+            except Exception:
+                pass
+            port += 1
+        logger.warning(f"UPnP: could not map port {internal_port}")
         return None
+
+    def close_ports(self):
+        """Remove all UPnP port mappings."""
+        if not self._upnp:
+            return
+        for ext, _ in self._mapped:
+            try:
+                self._upnp.deleteportmapping(ext, "TCP")
+            except Exception:
+                pass
+        if self._mapped:
+            logger.info(f"UPnP: {len(self._mapped)} mappings removed")
+        self._mapped.clear()
+        self._external_ip = None

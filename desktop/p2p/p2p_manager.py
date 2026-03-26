@@ -90,7 +90,9 @@ class P2PManager:
             node_id=node_id,
             localhost_probe_ports=docker_ports,
         )
-        self._upnp = UPnPService(internal_port=http_port)
+        # UPnP: map sync port + any docker ports found on localhost
+        upnp_ports = [http_port] + docker_ports
+        self._upnp = UPnPService(ports=upnp_ports)
 
         # Initialize chat service if account exists
         if account_info:
@@ -149,14 +151,15 @@ class P2PManager:
             # Try UPnP port mapping (best-effort)
             if self._upnp.is_available:
                 _progress("Trying UPnP port mapping...")
-                upnp_result = await asyncio.get_event_loop().run_in_executor(
-                    None, self._upnp.open_port
+                ext_ip = await asyncio.get_event_loop().run_in_executor(
+                    None, self._upnp.open_ports
                 )
-                if upnp_result:
-                    ext_ip, ext_port = upnp_result
-                    _progress(f"UPnP: {ext_ip}:{ext_port}")
-                    # Tell DHT to announce with the UPnP external port
-                    self._dht_service.set_announce_port(ext_port)
+                if ext_ip:
+                    # Use UPnP external port for DHT announce
+                    ext_port = self._upnp.get_external_port(http_port)
+                    if ext_port:
+                        self._dht_service.set_announce_port(ext_port)
+                    _progress(f"UPnP: {ext_ip}")
 
             # Start DHT
             if self._dht_service.is_available:
@@ -231,7 +234,7 @@ class P2PManager:
         if self._lan_discovery:
             await self._lan_discovery.stop()
         if self._upnp:
-            self._upnp.close_port()
+            self._upnp.close_ports()
         if self._dht_service:
             await self._dht_service.stop()
         if self._sync_server:
