@@ -67,7 +67,8 @@ class P2PManager:
             return
 
         p2p_cfg = self.config.get("p2p", {})
-        http_port = p2p_cfg.get("listen_port", 19000)
+        self._http_port = p2p_cfg.get("listen_port", 19000)
+        http_port = self._http_port
         dht_port = http_port + 1  # DHT on next port
 
         # Load account info for chat
@@ -156,7 +157,7 @@ class P2PManager:
                 )
                 if ext_ip:
                     # Use UPnP external port for DHT announce
-                    ext_port = self._upnp.get_external_port(http_port)
+                    ext_port = self._upnp.get_external_port(self._http_port)
                     if ext_port:
                         self._dht_service.set_announce_port(ext_port)
                     _progress(f"UPnP: {ext_ip}")
