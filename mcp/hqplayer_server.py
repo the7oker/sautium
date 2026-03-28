@@ -545,7 +545,8 @@ def search_artists(query: str, limit: int = 10) -> str:
         rows = data.get("results", [])
         lines = [f"Artist search for '{query}' ({len(rows)} results):"]
         for r in rows:
-            line = f"  {r['similarity']:.4f} | {r['artist']} ({r['track_count']} tracks)"
+            gender_tag = f" [{r['gender']}]" if r.get('gender') and r['gender'] != 'unknown' else ""
+            line = f"  {r['similarity']:.4f} | {r['artist']}{gender_tag} ({r['track_count']} tracks)"
             if r.get("sample_tracks"):
                 line += f" — {r['sample_tracks']}"
             lines.append(line)

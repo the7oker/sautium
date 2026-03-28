@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS artists (
     id UUID PRIMARY KEY,
     name VARCHAR(500) NOT NULL UNIQUE,
     artist_type VARCHAR(20) DEFAULT 'unknown',
+    gender VARCHAR(10) DEFAULT 'unknown',
     verification_status VARCHAR(20) DEFAULT 'unverified',
     raw_name VARCHAR(500),
     lastfm_id VARCHAR(100),
@@ -34,6 +35,7 @@ CREATE TABLE IF NOT EXISTS artists (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_artist_type CHECK (artist_type IN ('unknown', 'solo', 'band', 'collaboration', 'orchestra', 'other')),
+    CONSTRAINT chk_gender CHECK (gender IN ('unknown', 'female', 'male', 'mixed')),
     CONSTRAINT chk_verification_status CHECK (verification_status IN ('unverified', 'suspicious', 'verified_band', 'verified_split', 'verified_collab'))
 );
 
@@ -473,6 +475,7 @@ CREATE INDEX IF NOT EXISTS idx_artists_name ON artists(name);
 CREATE INDEX IF NOT EXISTS idx_artists_name_trgm ON artists USING gin (name gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_artists_verification_status ON artists(verification_status);
 CREATE INDEX IF NOT EXISTS idx_artists_artist_type ON artists(artist_type);
+CREATE INDEX IF NOT EXISTS idx_artists_gender ON artists(gender);
 
 -- Artist members indexes
 CREATE INDEX IF NOT EXISTS idx_artist_members_compound ON artist_members(compound_artist_id);

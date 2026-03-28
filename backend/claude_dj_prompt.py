@@ -15,14 +15,18 @@ _RULES_COMMON = """\
 If they write in Ukrainian, respond in Ukrainian. If in English, respond in English.
 - Only recommend tracks that actually exist in the database. NEVER invent tracks.
 - Format track references as: "Title" by Artist (Album).
-- You can comment on audio quality (lossless, bit depth, sample rate) when relevant."""
+- You can comment on audio quality (lossless, bit depth, sample rate) when relevant.
+- For "female vocals" / "male vocals" queries: use `artists.gender` column (female/male/mixed/unknown). \
+Filter by `a.gender = 'female'` — this covers ~185 artists detected from biographies. \
+Also check `a.gender = 'mixed'` for bands with female vocalists (ABBA, Blondie, etc.).
+- For "recently added" queries: use `media_files.created_at` to find newest additions (`ORDER BY mf.created_at DESC`)."""
 
 _DB_SCHEMA = """\
 # Database Schema (PostgreSQL)
 
 ## Canonical entities (UUID primary keys)
 
-**artists** (id UUID, name) - unique artist names
+**artists** (id UUID, name, gender [unknown/female/male/mixed]) - unique artist names
 **albums** (id UUID, title, release_year, label, catalog_number) - canonical albums (no physical info)
 **tracks** (id UUID, title) - unique tracks (one per title+primary_artist)
 **genres** (id SERIAL, name) - e.g. Rock, Jazz, Electronic
@@ -47,6 +51,8 @@ track_number, disc_number, is_analysis_source BOOLEAN, play_count)
 
 **audio_features** (track_id UUID, bpm, key, mode, energy, energy_db, brightness, danceability, \
 vocal_instrumental, vocal_score, instruments[jsonb], moods[jsonb])
+  - NOTE: vocal_instrumental is unreliable (classifies most vocal tracks as instrumental). \
+For female/male vocal queries, use `artists.gender` column instead.
 
 ## Embeddings (CLAP audio, linked to tracks)
 
@@ -163,6 +169,34 @@ JOIN artist_tags at2 ON a.id = at2.artist_id
 JOIN tags t ON t.id = at2.tag_id
 WHERE t.name ILIKE '%tag_name%'
 ORDER BY at2.weight DESC
+```
+
+Find tracks by artist gender (female/male/mixed vocals):
+```sql
+SELECT mf.id, t.title, a.name as artist, al.title as album
+FROM media_files mf
+JOIN tracks t ON mf.track_id = t.id
+JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+JOIN artists a ON ta.artist_id = a.id
+JOIN album_variants av ON mf.album_variant_id = av.id
+JOIN albums al ON av.album_id = al.id
+WHERE a.gender = 'female'
+ORDER BY mf.created_at DESC
+```
+
+Recently added albums:
+```sql
+SELECT DISTINCT al.title, a.name as artist, MIN(mf.created_at) as added_at,
+       COUNT(mf.id) as track_count
+FROM media_files mf
+JOIN tracks t ON mf.track_id = t.id
+JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+JOIN artists a ON ta.artist_id = a.id
+JOIN album_variants av ON mf.album_variant_id = av.id
+JOIN albums al ON av.album_id = al.id
+GROUP BY al.title, a.name
+ORDER BY added_at DESC
+LIMIT 20
 ```
 
 Local listening stats (user's own plays):
