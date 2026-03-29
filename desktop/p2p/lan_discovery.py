@@ -239,6 +239,11 @@ class LANDiscovery:
                             f"LAN peer discovered: {ip}:{port} "
                             f"({info['artists']} artists)"
                         )
+                        # Warm up TLS connection in background so first
+                        # sync doesn't hit cold-start latency
+                        asyncio.ensure_future(
+                            self._warmup_peer(loop, ip, port)
+                        )
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -257,6 +262,31 @@ class LANDiscovery:
             except OSError:
                 return None, None
         return None, None
+
+    async def _warmup_peer(
+        self, loop: asyncio.AbstractEventLoop, ip: str, port: int
+    ):
+        """Do a background health check to warm up TLS/ARP/routing state."""
+        import ssl
+        import urllib.request
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        def _probe():
+            try:
+                urllib.request.urlopen(
+                    f"https://{ip}:{port}/health",
+                    timeout=5, context=ctx,
+                )
+            except Exception:
+                pass
+
+        try:
+            await loop.run_in_executor(None, _probe)
+            logger.debug(f"LAN peer warmup done: {ip}:{port}")
+        except Exception:
+            pass
 
     async def _localhost_probe_loop(self):
         """Probe docker_ports on localhost for Docker backends.

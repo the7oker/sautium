@@ -234,17 +234,34 @@ class P2PManager:
             while not self._stop_event.is_set():
                 try:
                     await asyncio.wait_for(
-                        self._stop_event.wait(), timeout=30
+                        self._stop_event.wait(), timeout=3
                     )
                     break  # stop_event was set
                 except asyncio.TimeoutError:
                     pass  # check sync server health
 
-                # Check if sync server site is still serving
-                if (self._sync_server and self._sync_server._site
-                        and self._sync_server._site._server is None):
+                # Check if sync server site is still serving.
+                # Python 3.13 proactor_events closes the listening
+                # socket and stops the accept loop on ANY OSError
+                # (e.g. WinError 64 during TLS handshake).  The
+                # _server object stays alive so we also check if
+                # the underlying socket is still open.
+                needs_restart = False
+                if self._sync_server and self._sync_server._site:
+                    site = self._sync_server._site
+                    if site._server is None:
+                        needs_restart = True
+                    elif site._server.sockets is not None and len(
+                        site._server.sockets
+                    ) == 0:
+                        needs_restart = True
+                    elif (site._server.sockets
+                          and site._server.sockets[0].fileno() == -1):
+                        needs_restart = True
+
+                if needs_restart:
                     logger.warning(
-                        "Sync server crashed, restarting..."
+                        "Sync server socket closed, restarting..."
                     )
                     try:
                         await self._sync_server.stop()
@@ -491,6 +508,7 @@ class P2PManager:
                         track_uuids,
                         _progress,
                         progress_cb,
+                        is_lan=True,
                     )
                     for k, v in synced.items():
                         if isinstance(v, int):
@@ -608,19 +626,33 @@ class P2PManager:
         return total_stats
 
     async def _try_connect_peer(
-        self, peer_addr: str
+        self, peer_addr: str, is_lan: bool = False,
     ) -> Optional[BackendAPIClient]:
         """Try to connect to a peer, testing HTTPS then HTTP.
 
         Returns a working BackendAPIClient or None.
+        For LAN peers (is_lan=True), retries once — the first connection
+        from a fresh process can fail due to OS-level cold-start overhead.
         """
         loop = asyncio.get_event_loop()
 
         if "://" in peer_addr:
             # Explicit scheme — try as-is
             api = BackendAPIClient(peer_addr)
-            health = await loop.run_in_executor(None, api.get_health)
-            return api if health else None
+            attempts = 2 if is_lan else 1
+            for attempt in range(attempts):
+                health = await loop.run_in_executor(
+                    None, api.get_health
+                )
+                if health:
+                    return api
+                if attempt == 0 and is_lan:
+                    logger.info(
+                        f"  LAN peer {peer_addr} not reachable, "
+                        f"retrying in 5s..."
+                    )
+                    await asyncio.sleep(5)
+            return None
 
         # No scheme — try HTTPS (desktop peers) then HTTP (Docker)
         for scheme in ("https", "http"):
@@ -637,11 +669,12 @@ class P2PManager:
         track_uuids: list[str],
         _progress,
         progress_cb,
+        is_lan: bool = False,
     ) -> dict:
         """Sync enrichment data from a single peer. Returns stats dict."""
         _progress(f"Connecting to {peer_addr}...")
 
-        peer_api = await self._try_connect_peer(peer_addr)
+        peer_api = await self._try_connect_peer(peer_addr, is_lan=is_lan)
         if not peer_api:
             _progress(f"  {peer_addr} not reachable, skipping")
             return {}
