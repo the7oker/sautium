@@ -98,6 +98,7 @@ class Settings(BaseSettings):
     p2p_username: str = ""
     p2p_password: str = ""
     p2p_email: str = ""
+    p2p_identity_dir: str = ""  # Path to node_identity dir (desktop mode)
 
     model_config = SettingsConfigDict(
         env_file=".env",

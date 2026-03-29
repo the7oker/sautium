@@ -29,7 +29,29 @@ _cached_identity = None
 
 def _get_identity():
     global _cached_identity
-    if _cached_identity is None and settings.p2p_username:
+    if _cached_identity is not None:
+        return _cached_identity
+    # Try reading pre-derived identity from node_info.json (desktop mode)
+    if settings.p2p_identity_dir:
+        import json
+        from pathlib import Path
+        info_path = Path(settings.p2p_identity_dir) / "node_info.json"
+        if info_path.exists():
+            try:
+                data = json.loads(info_path.read_text(encoding="utf-8"))
+                if data.get("username"):
+                    _cached_identity = {
+                        "node_id": data["node_id"],
+                        "public_key_hex": data["public_key_hex"],
+                        "username": data["username"],
+                        "invite_code": data["invite_code"],
+                        "email": data.get("email", ""),
+                    }
+                    return _cached_identity
+            except Exception:
+                pass
+    # Fallback: derive from username+password (Docker mode)
+    if settings.p2p_username:
         from p2p_identity import derive_identity
         _cached_identity = derive_identity(
             settings.p2p_username,

@@ -67,17 +67,37 @@ async def lifespan(app: FastAPI):
 
     # Derive P2P identity
     _p2p_identity = None
-    if settings.p2p_enabled and settings.p2p_username and settings.p2p_password:
-        try:
-            from p2p_identity import derive_identity
-            _p2p_identity = await asyncio.to_thread(
-                derive_identity,
-                settings.p2p_username,
-                settings.p2p_password,
-                settings.p2p_email,
-            )
-        except Exception as e:
-            logger.warning(f"P2P identity derivation failed: {e}")
+    if settings.p2p_enabled:
+        # Try reading pre-derived identity from node_info.json (desktop mode)
+        if settings.p2p_identity_dir:
+            import json as _json
+            from pathlib import Path as _Path
+            _info_path = _Path(settings.p2p_identity_dir) / "node_info.json"
+            if _info_path.exists():
+                try:
+                    _data = _json.loads(_info_path.read_text(encoding="utf-8"))
+                    if _data.get("username"):
+                        _p2p_identity = {
+                            "node_id": _data["node_id"],
+                            "public_key_hex": _data["public_key_hex"],
+                            "username": _data["username"],
+                            "invite_code": _data["invite_code"],
+                            "email": _data.get("email", ""),
+                        }
+                except Exception as e:
+                    logger.warning(f"Failed to read node_info.json: {e}")
+        # Fallback: derive from username+password (Docker mode)
+        if not _p2p_identity and settings.p2p_username and settings.p2p_password:
+            try:
+                from p2p_identity import derive_identity
+                _p2p_identity = await asyncio.to_thread(
+                    derive_identity,
+                    settings.p2p_username,
+                    settings.p2p_password,
+                    settings.p2p_email,
+                )
+            except Exception as e:
+                logger.warning(f"P2P identity derivation failed: {e}")
 
     # Start DHT service for P2P peer discovery
     global _dht_service, _dht_reannounce_task

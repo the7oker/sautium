@@ -122,6 +122,23 @@ class P2PManager:
     def _run_loop(self, node_id: str, progress_cb: Callable = None):
         """Background thread: run asyncio event loop."""
         asyncio.set_event_loop(self._loop)
+        # Suppress transient Windows network errors (WinError 64, etc.)
+        # that occur when a peer disconnects during TLS accept handshake.
+        _default_handler = self._loop.get_exception_handler()
+
+        def _exception_handler(loop, context):
+            exc = context.get("exception")
+            if isinstance(exc, OSError) and getattr(exc, "winerror", None) in (
+                64,   # network name no longer available
+                121,  # semaphore timeout
+            ):
+                return  # suppress
+            if _default_handler:
+                _default_handler(loop, context)
+            else:
+                loop.default_exception_handler(context)
+
+        self._loop.set_exception_handler(_exception_handler)
         try:
             self._loop.run_until_complete(
                 self._async_main(node_id, progress_cb)
