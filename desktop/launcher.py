@@ -1029,7 +1029,7 @@ class LauncherApp(ctk.CTk):
 
         dialog = ctk.CTkToplevel(self)
         dialog.title("Update Complete")
-        dialog.geometry("500x300")
+        dialog.geometry("500x350")
         dialog.transient(self)
 
         ctk.CTkLabel(
