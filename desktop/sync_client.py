@@ -168,6 +168,12 @@ class SyncClient:
             )
             stats[cat_key] = imported
 
+        # Step 5: Recompute artist gender from imported bios
+        if stats.get("artist_bios", 0) > 0:
+            gender_updated = self._update_artist_gender(needed.get("artist_bios", []))
+            if gender_updated:
+                self._progress(f"Updated gender for {gender_updated} artists.")
+
         total = sum(stats.values())
         self._progress(f"Sync complete. Imported {total} items across {len(stats)} categories.")
         return stats
@@ -715,3 +721,54 @@ class SyncClient:
                 page_size=500,
             )
         return len(items)
+
+    # -- Post-import enrichment -----------------------------------------------
+
+    def _update_artist_gender(self, artist_uuids: list[str]) -> int:
+        """Classify artist gender from bio pronouns (she/he/her/his/they).
+
+        Uses regexp_count with \\y word boundaries for accurate matching.
+        Only updates artists whose bios were just imported.
+        """
+        if not artist_uuids:
+            return 0
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """WITH pronoun_analysis AS (
+                        SELECT ab.artist_id,
+                            regexp_count(LOWER(ab.content), '\\yshe\\y')
+                                + regexp_count(LOWER(ab.content), '\\yher\\y') AS female_score,
+                            regexp_count(LOWER(ab.content), '\\yhe\\y')
+                                + regexp_count(LOWER(ab.content), '\\yhis\\y') AS male_score,
+                            regexp_count(LOWER(ab.content), '\\ythey\\y') AS group_score
+                        FROM artist_bios ab
+                        WHERE ab.artist_id = ANY(%s::uuid[])
+                          AND LENGTH(ab.content) > 200
+                    )
+                    UPDATE artists a
+                    SET gender = CASE
+                        WHEN pa.female_score >= 2 AND pa.female_score > pa.male_score * 2
+                             AND (pa.male_score = 0 OR (pa.female_score - pa.male_score) >= 4)
+                            THEN 'female'
+                        WHEN pa.male_score >= 2 AND pa.male_score > pa.female_score * 2
+                             AND (pa.female_score = 0 OR (pa.male_score - pa.female_score) >= 4)
+                            THEN 'male'
+                        WHEN pa.group_score > GREATEST(pa.female_score, pa.male_score)
+                             AND pa.group_score >= 3
+                            THEN 'mixed'
+                        ELSE 'unknown'
+                    END,
+                    updated_at = NOW()
+                    FROM pronoun_analysis pa
+                    WHERE a.id = pa.artist_id""",
+                    [artist_uuids],
+                )
+                updated = cur.rowcount
+            conn.commit()
+            return updated
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Gender classification failed: {e}")
+            return 0
