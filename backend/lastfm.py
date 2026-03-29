@@ -4,6 +4,7 @@ Fetches artist bios, tags, and similar artists, storing in external_metadata tab
 """
 
 import logging
+import re
 import time
 from typing import Dict, List, Optional, Any
 
@@ -195,8 +196,36 @@ class LastFmService:
         else:
             stored["similar_artists"] = False
 
+        # Update artist gender from bio pronouns
+        if stored.get("bio") and data.get("bio", {}).get("content"):
+            self._update_artist_gender(db, artist_id, data["bio"]["content"])
+
         db.commit()
         return stored
+
+    @staticmethod
+    def _update_artist_gender(db: Session, artist_id, bio_content: str) -> None:
+        """Classify artist gender from bio pronouns and update the artists row."""
+        if not bio_content or len(bio_content) < 200:
+            return
+        text_lower = bio_content.lower()
+        female_score = len(re.findall(r'\bshe\b', text_lower)) + len(re.findall(r'\bher\b', text_lower))
+        male_score = len(re.findall(r'\bhe\b', text_lower)) + len(re.findall(r'\bhis\b', text_lower))
+        group_score = len(re.findall(r'\bthey\b', text_lower))
+
+        if female_score >= 2 and female_score > male_score * 2 and (male_score == 0 or (female_score - male_score) >= 4):
+            gender = 'female'
+        elif male_score >= 2 and male_score > female_score * 2 and (female_score == 0 or (male_score - female_score) >= 4):
+            gender = 'male'
+        elif group_score > max(female_score, male_score) and group_score >= 3:
+            gender = 'mixed'
+        else:
+            gender = 'unknown'
+
+        db.execute(
+            text("UPDATE artists SET gender = :gender, updated_at = NOW() WHERE id = :id"),
+            {"gender": gender, "id": artist_id},
+        )
 
     def _store_similar_artists(
         self, db: Session, artist_id: int, artist_name: str, similar_data: List[Dict[str, Any]]
