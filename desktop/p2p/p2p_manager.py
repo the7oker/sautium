@@ -286,6 +286,20 @@ class P2PManager:
                     self._loop.call_soon_threadsafe(self._loop.stop)
                 self._thread.join(timeout=5)
 
+        # Ensure sync server socket is released even after forced stop
+        if self._sync_server:
+            try:
+                if self._sync_server._site:
+                    self._sync_server._site._server = None
+                if self._sync_server._runner:
+                    # Synchronously close the runner if loop is still open
+                    if self._loop and not self._loop.is_closed():
+                        self._loop.run_until_complete(
+                            self._sync_server._runner.cleanup()
+                        )
+            except Exception as e:
+                logger.debug(f"Sync server force cleanup: {e}")
+
         if self._loop and not self._loop.is_closed():
             self._loop.close()
 

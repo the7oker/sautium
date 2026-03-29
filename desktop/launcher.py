@@ -1010,7 +1010,9 @@ class LauncherApp(ctk.CTk):
 
             success, changelog = perform_update(
                 self.service_manager, self.config, progress_cb=progress,
+                p2p_manager=self.p2p_manager,
             )
+            self.p2p_manager = None
 
             if success:
                 self.after(0, lambda: self._show_changelog(changelog))

@@ -152,20 +152,28 @@ def perform_update(
     service_manager,
     config: dict,
     progress_cb: Optional[Callable] = None,
+    p2p_manager=None,
 ) -> Tuple[bool, List[str]]:
     """
     Full update sequence:
-    1. Stop backend + tracker (keep PostgreSQL)
+    1. Stop backend + tracker + P2P (keep PostgreSQL)
     2. git pull
     3. pip install if requirements changed
     4. Run migrations if new ones exist
-    5. Restart backend + tracker
+    5. Restart backend + tracker (P2P restarted by caller)
 
     Returns:
         (success, changelog_lines)
     """
     if progress_cb:
         progress_cb("Stopping services for update...")
+
+    # Stop P2P first (releases sync server port)
+    if p2p_manager:
+        try:
+            p2p_manager.stop()
+        except Exception as e:
+            logger.warning(f"P2P stop during update: {e}")
 
     # Stop backend and tracker
     service_manager.stop_tracker()

@@ -367,7 +367,8 @@ class SyncServer:
             logger.warning(f"TLS not available, falling back to HTTP: {e}")
 
         self._site = web.TCPSite(
-            self._runner, "0.0.0.0", self.port, ssl_context=ssl_ctx
+            self._runner, "0.0.0.0", self.port, ssl_context=ssl_ctx,
+            reuse_address=True,
         )
         try:
             await self._site.start()
