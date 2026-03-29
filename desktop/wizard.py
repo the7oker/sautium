@@ -33,7 +33,7 @@ class SetupWizard(ctk.CTkToplevel):
         super().__init__(parent)
 
         self.title("Sautium - Setup")
-        self.geometry("600x500")
+        self.geometry("600x560")
         self.resizable(False, False)
         if sys.platform != "darwin":
             self.transient(parent)
