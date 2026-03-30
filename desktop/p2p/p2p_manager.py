@@ -521,6 +521,30 @@ class P2PManager:
         # probability it has more) → continue searching if gaps remain.
         synced_peers: set[str] = set()  # peers already fully queried
 
+        # Build a set of DHT addresses to skip (only for our external IP):
+        # - our own node (external_ip:announce_port)
+        # - LAN peers via external IP (already synced above)
+        # - UPnP-mapped Docker ports (not Sautium sync servers)
+        skip_dht_addrs: set[str] = set()
+        ext_ip = self._upnp.external_ip if self._upnp else None
+        if ext_ip:
+            # Skip self
+            if self._dht_service:
+                skip_dht_addrs.add(
+                    f"{ext_ip}:{self._dht_service._announce_port}"
+                )
+            # Skip LAN peers (same router = same external IP)
+            if self._lan_discovery:
+                for lip, lport in self._lan_discovery.peers:
+                    skip_dht_addrs.add(f"{ext_ip}:{lport}")
+            # Skip UPnP-mapped Docker ports
+            if self._upnp:
+                for ext_port, int_port in self._upnp._mapped:
+                    skip_dht_addrs.add(f"{ext_ip}:{ext_port}")
+                    skip_dht_addrs.add(f"{ext_ip}:{int_port}")
+        if skip_dht_addrs:
+            logger.debug(f"DHT skip list: {skip_dht_addrs}")
+
         if self._dht_service and self._dht_service.is_available:
             while True:
                 still_unenriched = await self._get_unenriched_artists()
@@ -538,15 +562,17 @@ class P2PManager:
                     _progress("No peers found in DHT")
                     break
 
-                # Collect unique NEW peers (skip already-queried)
+                # Collect unique NEW peers (skip already-queried and
+                # self/LAN peers visible via external IP)
                 new_peers: dict[tuple, list[str]] = {}
                 for artist_uuid, peers in peer_map.items():
                     for ip, port in peers:
                         key = f"{ip}:{port}"
-                        if key not in synced_peers:
-                            new_peers.setdefault(
-                                (ip, port), []
-                            ).append(artist_uuid)
+                        if key in synced_peers or key in skip_dht_addrs:
+                            continue
+                        new_peers.setdefault(
+                            (ip, port), []
+                        ).append(artist_uuid)
 
                 if not new_peers:
                     _progress("No new DHT peers to try")
