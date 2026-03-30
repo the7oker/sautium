@@ -21,6 +21,8 @@ def _get_db():
     if _db_conn is None or _db_conn.closed:
         _db_conn = psycopg2.connect(settings.database_url)
         _db_conn.autocommit = True
+        with _db_conn.cursor() as cur:
+            cur.execute("SET timezone = 'UTC'")
     return _db_conn
 
 

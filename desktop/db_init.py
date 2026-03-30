@@ -535,6 +535,7 @@ def _configure_postgresql_conf(data_dir: Path) -> None:
     additions = """
 # Sautium settings
 listen_addresses = '127.0.0.1'
+timezone = 'UTC'
 shared_preload_libraries = ''
 log_destination = 'stderr'
 logging_collector = off

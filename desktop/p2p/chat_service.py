@@ -94,6 +94,8 @@ class ChatService:
         import psycopg2
         conn = psycopg2.connect(self.db_dsn)
         conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("SET timezone = 'UTC'")
         return conn
 
     def add_friend(

@@ -60,6 +60,8 @@ class SyncServer:
         if self._conn is None or self._conn.closed:
             self._conn = psycopg2.connect(self.db_dsn)
             self._conn.autocommit = True
+            with self._conn.cursor() as cur:
+                cur.execute("SET timezone = 'UTC'")
         return self._conn
 
     def _check_rate_limit(self, ip: str) -> bool:
