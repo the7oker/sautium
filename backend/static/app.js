@@ -1144,7 +1144,9 @@ function renderP2PMessages(messages) {
 
   let html = "";
   for (const m of messages) {
-    const timeStr = new Date(m.timestamp).toLocaleTimeString([], {
+    let ts = m.timestamp;
+    if (ts && !ts.includes("+") && !ts.includes("Z")) ts += "Z";
+    const timeStr = new Date(ts).toLocaleTimeString([], {
       hour: "2-digit", minute: "2-digit"
     });
     html += `<div class="p2p-msg ${m.direction}">

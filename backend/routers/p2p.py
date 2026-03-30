@@ -134,13 +134,8 @@ async def get_messages(friend_id: int, limit: int = 50) -> List[Dict[str, Any]]:
     """Get chat messages with a friend."""
     conn = _get_db()
     with conn.cursor() as cur:
-        # Convert naive timestamps to UTC regardless of server timezone:
-        # ::timestamptz interprets as session tz, AT TIME ZONE 'UTC'
-        # converts to UTC naive — then we append +00:00 for JS.
         cur.execute("""
-            SELECT id, direction, content,
-                   timestamp::timestamptz AT TIME ZONE 'UTC' as timestamp,
-                   delivered, read
+            SELECT id, direction, content, timestamp, delivered, read
             FROM p2p_messages
             WHERE friend_id = %s
             ORDER BY id DESC LIMIT %s
@@ -150,7 +145,7 @@ async def get_messages(friend_id: int, limit: int = 50) -> List[Dict[str, Any]]:
         rows.reverse()
         for row in rows:
             if row.get("timestamp"):
-                row["timestamp"] = row["timestamp"].isoformat() + "+00:00"
+                row["timestamp"] = row["timestamp"].isoformat()
         # Mark as read
         cur.execute("""
             UPDATE p2p_messages

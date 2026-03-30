@@ -1036,12 +1036,20 @@ class P2PManager:
                         )
                         break
 
+                    ts = msg["timestamp"]
+                    ts_str = (
+                        ts.isoformat()
+                        if hasattr(ts, "isoformat")
+                        else str(ts)
+                    )
+                    # DB stores naive UTC — add +00:00 so receiver
+                    # knows it's UTC
+                    if "+" not in ts_str and not ts_str.endswith("Z"):
+                        ts_str += "+00:00"
                     payload = {
                         "from_public_key": self._chat_service.public_key_hex,
                         "encrypted": encrypted,
-                        "timestamp": msg["timestamp"].isoformat()
-                        if hasattr(msg["timestamp"], "isoformat")
-                        else str(msg["timestamp"]),
+                        "timestamp": ts_str,
                     }
 
                     delivered = False
