@@ -219,19 +219,20 @@ class P2PManager:
                 self._reannounce_task = asyncio.create_task(
                     self._dht_service.periodic_reannounce()
                 )
-
-                # Start pending message retry loop + friend resolution
-                if self._chat_service:
-                    self._pending_retry_task = asyncio.create_task(
-                        self._retry_pending_messages()
-                    )
-                    self._resolve_friends_task = asyncio.create_task(
-                        self._resolve_pending_friends()
-                    )
             else:
                 _progress(
                     "P2P online (LAN only, DHT disabled — "
                     "install libtorrent for internet discovery)"
+                )
+
+            # Start pending message retry + friend resolution
+            # (works via LAN even without DHT)
+            if self._chat_service:
+                self._pending_retry_task = asyncio.create_task(
+                    self._retry_pending_messages()
+                )
+                self._resolve_friends_task = asyncio.create_task(
+                    self._resolve_pending_friends()
                 )
 
             self._running = True
@@ -884,7 +885,9 @@ class P2PManager:
 
         # Check LAN first (fast, no network delay)
         if self._lan_discovery:
+            # Try by invite_code (new beacons include it)
             lan = self._lan_discovery.find_peer_by_invite_code(invite_code)
+            # Try by public key / node_id
             if not lan and pubkey and not pubkey.startswith("pending:"):
                 lan = self._lan_discovery.find_peer_by_node_id(pubkey)
             if lan:
@@ -909,7 +912,7 @@ class P2PManager:
             await asyncio.sleep(15)  # check every 15 seconds
 
     async def _do_resolve_pending(self):
-        """Check LAN peers for pending friends and do handshake."""
+        """Check LAN/DHT peers for pending friends and do handshake."""
         friends = self._chat_service.get_friends()
         pending = [
             f for f in friends
@@ -935,11 +938,18 @@ class P2PManager:
             if not invite:
                 continue
 
-            # Find peer via LAN or DHT
+            # Collect candidate peers: targeted LAN/DHT + all LAN peers
             peers = await self._find_friend_peers(friend)
+
+            # Also try ALL LAN peers as fallback (remote may not
+            # advertise invite_code in beacon yet)
+            if not peers and self._lan_discovery:
+                peers = list(self._lan_discovery.peers)
+
             if not peers:
                 continue
 
+            resolved = False
             for ip, port in peers:
                 url = f"https://{ip}:{port}/api/chat/handshake"
                 try:
@@ -954,22 +964,30 @@ class P2PManager:
                                 result = await resp.json()
                                 if result.get("accepted"):
                                     self._chat_service.add_friend(
-                                        public_key_hex=result["public_key_hex"],
+                                        public_key_hex=result[
+                                            "public_key_hex"
+                                        ],
                                         invite_code=result.get(
                                             "invite_code", invite
                                         ),
-                                        username=result.get("username", ""),
+                                        username=result.get(
+                                            "username", ""
+                                        ),
                                     )
                                     logger.info(
                                         f"Pending friend resolved via "
-                                        f"handshake: {invite}"
+                                        f"handshake: {invite} "
+                                        f"({ip}:{port})"
                                     )
+                                    resolved = True
                                     break
                 except Exception as e:
                     logger.debug(
                         f"Handshake to {ip}:{port} for {invite} "
                         f"failed: {e}"
                     )
+            if resolved:
+                continue
 
     async def _retry_pending_messages(self):
         """Periodically retry sending undelivered messages."""
