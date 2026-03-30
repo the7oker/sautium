@@ -4,6 +4,7 @@ P2P API routes for Friends / Chat in web UI.
 Provides endpoints for account info, friend management, and messaging.
 """
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 from fastapi import APIRouter
 
@@ -133,8 +134,13 @@ async def get_messages(friend_id: int, limit: int = 50) -> List[Dict[str, Any]]:
     """Get chat messages with a friend."""
     conn = _get_db()
     with conn.cursor() as cur:
+        # Convert naive timestamps to UTC regardless of server timezone:
+        # ::timestamptz interprets as session tz, AT TIME ZONE 'UTC'
+        # converts to UTC naive — then we append +00:00 for JS.
         cur.execute("""
-            SELECT id, direction, content, timestamp, delivered, read
+            SELECT id, direction, content,
+                   timestamp::timestamptz AT TIME ZONE 'UTC' as timestamp,
+                   delivered, read
             FROM p2p_messages
             WHERE friend_id = %s
             ORDER BY id DESC LIMIT %s
@@ -144,13 +150,7 @@ async def get_messages(friend_id: int, limit: int = 50) -> List[Dict[str, Any]]:
         rows.reverse()
         for row in rows:
             if row.get("timestamp"):
-                # Timestamps are stored in UTC; append +00:00 so JS
-                # converts to the user's local timezone.
-                ts = row["timestamp"]
-                iso = ts.isoformat()
-                if not iso.endswith(("Z", "+00:00")) and ts.tzinfo is None:
-                    iso += "+00:00"
-                row["timestamp"] = iso
+                row["timestamp"] = row["timestamp"].isoformat() + "+00:00"
         # Mark as read
         cur.execute("""
             UPDATE p2p_messages
@@ -170,9 +170,9 @@ async def send_message(friend_id: int, body: Dict[str, str]) -> Dict[str, Any]:
     conn = _get_db()
     with conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO p2p_messages (friend_id, direction, content, delivered)
-            VALUES (%s, 'out', %s, FALSE)
+            INSERT INTO p2p_messages (friend_id, direction, content, timestamp, delivered)
+            VALUES (%s, 'out', %s, %s, FALSE)
             RETURNING id
-        """, (friend_id, content))
+        """, (friend_id, content, datetime.now(timezone.utc)))
         msg_id = cur.fetchone()[0]
         return {"id": msg_id, "status": "queued"}
