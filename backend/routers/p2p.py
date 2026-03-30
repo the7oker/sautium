@@ -147,7 +147,7 @@ async def get_messages(friend_id: int, limit: int = 50) -> List[Dict[str, Any]]:
         rows.reverse()
         for row in rows:
             if row.get("timestamp"):
-                row["timestamp"] = row["timestamp"].isoformat()
+                row["timestamp"] = row["timestamp"].isoformat() + "+00:00"
         # Mark as read
         cur.execute("""
             UPDATE p2p_messages
