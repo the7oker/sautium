@@ -41,15 +41,17 @@ class LANDiscovery:
         self,
         sync_port: int = 19000,
         node_id: str = "",
+        invite_code: str = "",
         discovery_port: int = LAN_DISCOVERY_PORT,
         localhost_probe_ports: list[int] | None = None,
     ):
         self.sync_port = sync_port
         self.node_id = node_id
+        self.invite_code = invite_code
         self.discovery_port = discovery_port
         self._localhost_probe_ports = localhost_probe_ports or []
 
-        # {(ip, sync_port): {"node_id": ..., "artists": ..., "last_seen": ...}}
+        # {(ip, sync_port): {"node_id": ..., "artists": ..., "invite_code": ..., "last_seen": ...}}
         self._peers: Dict[Tuple[str, int], dict] = {}
         self._running = False
         self._sock: Optional[socket.socket] = None
@@ -103,6 +105,7 @@ class LANDiscovery:
         return (sender_ip, sync_port, {
             "node_id": msg.get("node_id", ""),
             "artists": msg.get("artists", 0),
+            "invite_code": msg.get("invite_code", ""),
         })
 
     async def start(self):
@@ -338,6 +341,28 @@ class LANDiscovery:
         # The broadcast loop reads this on next iteration
         self._enriched_count = count
 
+    def find_peer_by_invite_code(self, invite_code: str) -> Optional[Tuple[str, int]]:
+        """Find a LAN peer by invite code. Returns (ip, port) or None."""
+        now = time.time()
+        for (ip, port), info in self._peers.items():
+            if now - info["last_seen"] >= PEER_EXPIRY:
+                continue
+            if info.get("invite_code") == invite_code:
+                return (ip, port)
+        return None
+
+    def find_peer_by_node_id(self, node_id: str) -> Optional[Tuple[str, int]]:
+        """Find a LAN peer by public key hex. Returns (ip, port) or None."""
+        if not node_id:
+            return None
+        now = time.time()
+        for (ip, port), info in self._peers.items():
+            if now - info["last_seen"] >= PEER_EXPIRY:
+                continue
+            if info.get("node_id") == node_id:
+                return (ip, port)
+        return None
+
     def _make_beacon(self, enriched_artists: int = 0) -> bytes:
         """Build beacon payload."""
         count = getattr(self, "_enriched_count", enriched_artists)
@@ -346,4 +371,5 @@ class LANDiscovery:
             "node_id": self.node_id,
             "sync_port": self.sync_port,
             "artists": count,
+            "invite_code": self.invite_code,
         }, separators=(",", ":")).encode("utf-8")

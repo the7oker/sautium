@@ -103,10 +103,28 @@ class ChatService:
         username: str = "",
         display_name: str = "",
     ) -> Optional[int]:
-        """Add a friend. Returns friend ID or None if already exists."""
+        """Add a friend. Resolves pending entries by invite_code. Returns friend ID."""
         conn = self._get_db()
         try:
             with conn.cursor() as cur:
+                # First, try to resolve a pending entry with matching invite_code
+                cur.execute("""
+                    UPDATE friends
+                    SET public_key_hex = %s,
+                        username = COALESCE(NULLIF(%s, ''), username),
+                        display_name = COALESCE(NULLIF(%s, ''), display_name)
+                    WHERE invite_code = %s AND public_key_hex LIKE 'pending:%%'
+                    RETURNING id
+                """, (public_key_hex, username, display_name, invite_code))
+                row = cur.fetchone()
+                if row:
+                    logger.info(
+                        f"Resolved pending friend {invite_code} → "
+                        f"{public_key_hex[:16]}..."
+                    )
+                    return row[0]
+
+                # No pending entry — regular upsert by public_key_hex
                 cur.execute("""
                     INSERT INTO friends (public_key_hex, invite_code, username, display_name)
                     VALUES (%s, %s, %s, %s)

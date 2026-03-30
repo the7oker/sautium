@@ -44,6 +44,7 @@ class P2PManager:
         self._stop_event: Optional[asyncio.Event] = None
         self._reannounce_task: Optional[asyncio.Task] = None
         self._pending_retry_task: Optional[asyncio.Task] = None
+        self._resolve_friends_task: Optional[asyncio.Task] = None
         self._lan_discovery_task: Optional[asyncio.Task] = None
         self._running = False
         self._on_message_cb: Optional[Callable] = None
@@ -86,9 +87,11 @@ class P2PManager:
             http_port=http_port,
         )
         docker_ports = p2p_cfg.get("docker_ports", [])
+        invite_code = account_info.get("invite_code", "") if account_info else ""
         self._lan_discovery = LANDiscovery(
             sync_port=http_port,
             node_id=node_id,
+            invite_code=invite_code,
             localhost_probe_ports=docker_ports,
         )
         # UPnP: map sync port + any docker ports found on localhost
@@ -217,10 +220,13 @@ class P2PManager:
                     self._dht_service.periodic_reannounce()
                 )
 
-                # Start pending message retry loop
+                # Start pending message retry loop + friend resolution
                 if self._chat_service:
                     self._pending_retry_task = asyncio.create_task(
                         self._retry_pending_messages()
+                    )
+                    self._resolve_friends_task = asyncio.create_task(
+                        self._resolve_pending_friends()
                     )
             else:
                 _progress(
@@ -278,7 +284,8 @@ class P2PManager:
 
     async def _cleanup(self):
         """Clean shutdown of all services."""
-        for task in (self._reannounce_task, self._pending_retry_task):
+        for task in (self._reannounce_task, self._pending_retry_task,
+                     self._resolve_friends_task):
             if task:
                 task.cancel()
                 try:
@@ -748,22 +755,29 @@ class P2PManager:
 
     async def _async_send_message(self, friend_id: int, content: str) -> bool:
         """Async: encrypt and send message to a friend."""
-        msg = self._chat_service.prepare_outgoing(friend_id, content)
-        if not msg:
-            return False
-
-        # Get friend's invite code for DHT lookup
+        # Check friend has a real public key before encrypting
         friends = self._chat_service.get_friends()
         friend = next((f for f in friends if f["id"] == friend_id), None)
         if not friend:
             return False
 
-        # Find friend's address via DHT
-        peers = []
-        if self._dht_service and self._dht_service.is_available:
-            peers = await self._dht_service.lookup_user(
-                friend["invite_code"]
+        if friend["public_key_hex"].startswith("pending:"):
+            logger.info(
+                f"Friend {friend.get('username', '?')} not yet resolved, "
+                f"message queued"
             )
+            # Store undelivered message even though we can't encrypt yet
+            self._chat_service.store_message(
+                friend_id, "out", content, delivered=False
+            )
+            return False
+
+        msg = self._chat_service.prepare_outgoing(friend_id, content)
+        if not msg:
+            return False
+
+        # Find friend's address via LAN + DHT
+        peers = await self._find_friend_peers(friend)
 
         if not peers:
             logger.info(
@@ -862,6 +876,101 @@ class P2PManager:
 
         return None
 
+    async def _find_friend_peers(self, friend: dict) -> list[tuple]:
+        """Find peer addresses for a friend via LAN and DHT."""
+        peers = []
+        invite_code = friend.get("invite_code", "")
+        pubkey = friend.get("public_key_hex", "")
+
+        # Check LAN first (fast, no network delay)
+        if self._lan_discovery:
+            lan = self._lan_discovery.find_peer_by_invite_code(invite_code)
+            if not lan and pubkey and not pubkey.startswith("pending:"):
+                lan = self._lan_discovery.find_peer_by_node_id(pubkey)
+            if lan:
+                peers.append(lan)
+
+        # Then DHT (internet)
+        if not peers and self._dht_service and self._dht_service.is_available:
+            dht_peers = await self._dht_service.lookup_user(invite_code)
+            peers.extend(dht_peers)
+
+        return peers
+
+    async def _resolve_pending_friends(self):
+        """Periodically resolve pending friends via LAN handshake."""
+        await asyncio.sleep(5)  # initial delay for LAN beacons to arrive
+        while self._running:
+            try:
+                if self._chat_service and self._lan_discovery:
+                    await self._do_resolve_pending()
+            except Exception as e:
+                logger.debug(f"Resolve pending friends error: {e}")
+            await asyncio.sleep(15)  # check every 15 seconds
+
+    async def _do_resolve_pending(self):
+        """Check LAN peers for pending friends and do handshake."""
+        friends = self._chat_service.get_friends()
+        pending = [
+            f for f in friends
+            if f["public_key_hex"].startswith("pending:")
+        ]
+        if not pending:
+            return
+
+        from desktop.node_identity import get_account_info
+        account = get_account_info()
+        if not account:
+            return
+
+        import aiohttp
+        handshake_data = {
+            "public_key_hex": account["public_key_hex"],
+            "username": account["username"],
+            "invite_code": account["invite_code"],
+        }
+
+        for friend in pending:
+            invite = friend.get("invite_code", "")
+            if not invite:
+                continue
+
+            # Find peer via LAN or DHT
+            peers = await self._find_friend_peers(friend)
+            if not peers:
+                continue
+
+            for ip, port in peers:
+                url = f"https://{ip}:{port}/api/chat/handshake"
+                try:
+                    async with aiohttp.ClientSession(
+                        connector=aiohttp.TCPConnector(ssl=False)
+                    ) as session:
+                        async with session.post(
+                            url, json=handshake_data,
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as resp:
+                            if resp.status == 200:
+                                result = await resp.json()
+                                if result.get("accepted"):
+                                    self._chat_service.add_friend(
+                                        public_key_hex=result["public_key_hex"],
+                                        invite_code=result.get(
+                                            "invite_code", invite
+                                        ),
+                                        username=result.get("username", ""),
+                                    )
+                                    logger.info(
+                                        f"Pending friend resolved via "
+                                        f"handshake: {invite}"
+                                    )
+                                    break
+                except Exception as e:
+                    logger.debug(
+                        f"Handshake to {ip}:{port} for {invite} "
+                        f"failed: {e}"
+                    )
+
     async def _retry_pending_messages(self):
         """Periodically retry sending undelivered messages."""
         while self._running:
@@ -882,10 +991,16 @@ class P2PManager:
                 invite_code = messages[0]["invite_code"]
                 pubkey = messages[0]["public_key_hex"]
 
-                # Find friend via DHT
-                peers = []
-                if self._dht_service and self._dht_service.is_available:
-                    peers = await self._dht_service.lookup_user(invite_code)
+                # Skip friends with pending public keys (can't encrypt)
+                if pubkey.startswith("pending:"):
+                    continue
+
+                # Find friend via LAN + DHT
+                friend_info = {
+                    "invite_code": invite_code,
+                    "public_key_hex": pubkey,
+                }
+                peers = await self._find_friend_peers(friend_info)
 
                 if not peers:
                     continue
@@ -893,9 +1008,16 @@ class P2PManager:
                 # Try to deliver each message
                 import aiohttp
                 for msg in messages:
-                    encrypted = self._chat_service.encrypt_message(
-                        msg["content"], pubkey
-                    )
+                    try:
+                        encrypted = self._chat_service.encrypt_message(
+                            msg["content"], pubkey
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Encrypt failed for friend {friend_id}: {e}"
+                        )
+                        break
+
                     payload = {
                         "from_public_key": self._chat_service.public_key_hex,
                         "encrypted": encrypted,

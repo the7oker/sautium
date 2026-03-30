@@ -205,8 +205,25 @@ class SyncServer:
                 request, {"error": "invite code mismatch"}, status=403
             )
 
-        # Auto-accept: add to friends if chat service available
+        # Mutual invite check: only accept if we already added this peer
         if self._chat_service:
+            friends = self._chat_service.get_friends()
+            already_added = any(
+                f["invite_code"] == peer_invite
+                or f["public_key_hex"] == peer_pubkey
+                for f in friends
+            )
+            if not already_added:
+                logger.info(
+                    f"Handshake rejected from {peer_username} "
+                    f"({peer_pubkey[:16]}...) — not in our friends list"
+                )
+                return self._json_response(
+                    request,
+                    {"accepted": False, "error": "not in friends list"},
+                    status=403,
+                )
+
             self._chat_service.add_friend(
                 public_key_hex=peer_pubkey,
                 invite_code=peer_invite,
