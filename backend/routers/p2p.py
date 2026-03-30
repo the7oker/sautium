@@ -144,7 +144,13 @@ async def get_messages(friend_id: int, limit: int = 50) -> List[Dict[str, Any]]:
         rows.reverse()
         for row in rows:
             if row.get("timestamp"):
-                row["timestamp"] = row["timestamp"].isoformat()
+                # Timestamps are stored in UTC; append +00:00 so JS
+                # converts to the user's local timezone.
+                ts = row["timestamp"]
+                iso = ts.isoformat()
+                if not iso.endswith(("Z", "+00:00")) and ts.tzinfo is None:
+                    iso += "+00:00"
+                row["timestamp"] = iso
         # Mark as read
         cur.execute("""
             UPDATE p2p_messages
