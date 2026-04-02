@@ -65,6 +65,10 @@ async def lifespan(app: FastAPI):
     from routers.player import start_status_poller, stop_status_poller
     start_status_poller()
 
+    # Start chat SSE listener
+    from routers.p2p import start_chat_listener, stop_chat_listener
+    start_chat_listener()
+
     # Derive P2P identity
     _p2p_identity = None
     if settings.p2p_enabled:
@@ -150,6 +154,7 @@ async def lifespan(app: FastAPI):
         _dht_service = None
 
     stop_status_poller()
+    stop_chat_listener()
     logger.info("Shutting down application")
 
 

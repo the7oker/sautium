@@ -4,17 +4,94 @@ P2P API routes for Friends / Chat in web UI.
 Provides endpoints for account info, friend management, and messaging.
 """
 
+import asyncio
+import json
+import logging
+import select
+import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 
 import psycopg2
+import psycopg2.extensions
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/p2p", tags=["p2p"])
 
 _db_conn = None
+
+# -- Chat SSE infrastructure --------------------------------------------------
+
+_chat_sse_clients: list = []  # list of (asyncio.Event, asyncio.AbstractEventLoop)
+_chat_sse_lock = threading.Lock()
+_chat_listener_thread: Optional[threading.Thread] = None
+_chat_listener_running = False
+
+
+def _wake_chat_sse_clients():
+    """Thread-safe: signal all chat SSE generators to push updates."""
+    with _chat_sse_lock:
+        for evt, loop in _chat_sse_clients:
+            loop.call_soon_threadsafe(evt.set)
+
+
+def _chat_db_listener():
+    """Background thread: LISTEN for PostgreSQL chat notifications."""
+    while _chat_listener_running:
+        conn = None
+        try:
+            conn = psycopg2.connect(settings.database_url)
+            conn.set_isolation_level(
+                psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT
+            )
+            with conn.cursor() as cur:
+                cur.execute("LISTEN sautium_chat")
+
+            while _chat_listener_running:
+                ready = select.select([conn], [], [], 5)
+                if ready[0]:
+                    conn.poll()
+                    if conn.notifies:
+                        while conn.notifies:
+                            conn.notifies.pop(0)
+                        _wake_chat_sse_clients()
+        except Exception as e:
+            logger.debug(f"Chat DB listener error: {e}")
+            if _chat_listener_running:
+                import time
+                time.sleep(5)
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+
+def start_chat_listener():
+    """Start the background DB listener thread for chat SSE."""
+    global _chat_listener_thread, _chat_listener_running
+    if _chat_listener_thread and _chat_listener_thread.is_alive():
+        return
+    _chat_listener_running = True
+    _chat_listener_thread = threading.Thread(
+        target=_chat_db_listener, daemon=True, name="chat-sse-listener"
+    )
+    _chat_listener_thread.start()
+
+
+def stop_chat_listener():
+    """Stop the background DB listener thread."""
+    global _chat_listener_running
+    _chat_listener_running = False
+    if _chat_listener_thread:
+        _chat_listener_thread.join(timeout=10)
 
 
 def _get_db():
@@ -177,4 +254,48 @@ async def send_message(friend_id: int, body: Dict[str, str]) -> Dict[str, Any]:
             RETURNING id
         """, (friend_id, content, datetime.now(timezone.utc), msg_uuid))
         msg_id = cur.fetchone()[0]
+        # Wake up P2P delivery loop + SSE clients immediately
+        cur.execute("NOTIFY sautium_chat")
         return {"id": msg_id, "message_uuid": msg_uuid, "status": "queued"}
+
+
+@router.get("/chat/stream")
+async def chat_stream():
+    """SSE endpoint: pushes chat update notifications in real-time."""
+    loop = asyncio.get_event_loop()
+    evt = asyncio.Event()
+
+    async def event_generator():
+        try:
+            with _chat_sse_lock:
+                _chat_sse_clients.append((evt, loop))
+
+            # Initial ping so the client knows the connection is live
+            yield "data: {}\n\n"
+
+            while True:
+                try:
+                    await asyncio.wait_for(evt.wait(), timeout=15.0)
+                    evt.clear()
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+
+                yield f"data: {{\"ts\":{int(datetime.now(timezone.utc).timestamp())}}}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            with _chat_sse_lock:
+                _chat_sse_clients[:] = [
+                    (e, l) for e, l in _chat_sse_clients if e is not evt
+                ]
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

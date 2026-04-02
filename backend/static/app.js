@@ -66,6 +66,29 @@ function connectStatusSSE() {
   };
 }
 
+// -- Chat SSE stream ----------------------------------------------------------
+
+function connectChatSSE() {
+  if (_chatSSE) return; // already connected
+
+  _chatSSE = new EventSource("/api/p2p/chat/stream");
+
+  _chatSSE.onmessage = (event) => {
+    _chatSSERetryDelay = 1000;
+    if (_selectedFriendId) {
+      loadP2PMessages(_selectedFriendId);
+      loadFriends(); // update unread badges
+    }
+  };
+
+  _chatSSE.onerror = () => {
+    _chatSSE.close();
+    _chatSSE = null;
+    setTimeout(connectChatSSE, _chatSSERetryDelay);
+    _chatSSERetryDelay = Math.min(_chatSSERetryDelay * 1.5, 10000);
+  };
+}
+
 async function pollStatus() {
   try {
     const resp = await fetch("/api/player/status");
@@ -993,7 +1016,8 @@ function switchSection(name) {
 let _friendsLoaded = false;
 let _friends = [];
 let _selectedFriendId = null;
-let _p2pPollInterval = null;
+let _chatSSE = null;
+let _chatSSERetryDelay = 1000;
 
 function switchFriendsTab(name) {
   document.querySelectorAll("[data-ftab]").forEach(btn => {
@@ -1117,10 +1141,7 @@ async function selectFriend(friendId) {
 
   document.getElementById("p2pChatForm").style.display = "flex";
   await loadP2PMessages(friendId);
-
-  // Start polling for new messages
-  if (_p2pPollInterval) clearInterval(_p2pPollInterval);
-  _p2pPollInterval = setInterval(() => loadP2PMessages(friendId), 5000);
+  connectChatSSE();
 }
 
 async function loadP2PMessages(friendId) {

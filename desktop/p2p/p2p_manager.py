@@ -10,11 +10,14 @@ Provides P2P sync: find peers via DHT, sync enrichment data via HTTP.
 
 import asyncio
 import logging
+import select
 import threading
+import time
 from functools import partial
 from typing import Callable, Optional
 
 import psycopg2
+import psycopg2.extensions
 
 from desktop.api_client import BackendAPIClient
 from desktop.p2p import sync_queries
@@ -42,12 +45,17 @@ class P2PManager:
         self._upnp: Optional[UPnPService] = None
         self._chat_service: Optional[ChatService] = None
         self._stop_event: Optional[asyncio.Event] = None
+        self._chat_notify: Optional[asyncio.Event] = None
         self._reannounce_task: Optional[asyncio.Task] = None
         self._pending_retry_task: Optional[asyncio.Task] = None
         self._resolve_friends_task: Optional[asyncio.Task] = None
         self._lan_discovery_task: Optional[asyncio.Task] = None
+        self._db_listen_task: Optional[asyncio.Task] = None
         self._running = False
         self._on_message_cb: Optional[Callable] = None
+        # Peer address cache: friend_id -> peers_list
+        # Persists until connection failure triggers refresh.
+        self._friend_peer_cache: dict[int, list[tuple]] = {}
 
     @property
     def is_running(self) -> bool:
@@ -56,6 +64,11 @@ class P2PManager:
     def set_on_message_callback(self, cb: Callable):
         """Set callback for incoming chat messages (called from P2P thread)."""
         self._on_message_cb = cb
+
+    def notify_new_message(self):
+        """Wake up the chat delivery loop immediately (thread-safe)."""
+        if self._loop and self._chat_notify and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._chat_notify.set)
 
     @property
     def chat_service(self) -> Optional[ChatService]:
@@ -154,6 +167,7 @@ class P2PManager:
     async def _async_main(self, node_id: str, progress_cb: Callable = None):
         """Main async routine: start services, announce, wait."""
         self._stop_event = asyncio.Event()
+        self._chat_notify = asyncio.Event()
 
         def _progress(msg):
             logger.info(msg)
@@ -233,6 +247,9 @@ class P2PManager:
                 )
                 self._resolve_friends_task = asyncio.create_task(
                     self._resolve_pending_friends()
+                )
+                self._db_listen_task = asyncio.create_task(
+                    self._listen_for_db_notifications()
                 )
 
             self._running = True
@@ -315,8 +332,11 @@ class P2PManager:
             self._dht_service._running = False
 
         # Signal the event loop to exit
-        if self._stop_event and self._loop and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(self._stop_event.set)
+        if self._loop and not self._loop.is_closed():
+            if self._stop_event:
+                self._loop.call_soon_threadsafe(self._stop_event.set)
+            if self._chat_notify:
+                self._loop.call_soon_threadsafe(self._chat_notify.set)
 
         if self._thread:
             self._thread.join(timeout=5)
@@ -789,24 +809,38 @@ class P2PManager:
             )
             return False
 
-        # Try each peer address
+        # Try each peer address; on total failure refresh cache and retry once
         import aiohttp
-        for ip, port in peers:
-            url = f"https://{ip}:{port}/api/chat/message"
-            try:
-                async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
-                    async with session.post(
-                        url, json=msg, timeout=aiohttp.ClientTimeout(total=10)
-                    ) as resp:
-                        if resp.status == 200:
-                            # Mark this specific message as delivered
-                            if msg_uuid:
-                                self._chat_service.mark_delivered_by_uuid(
-                                    msg_uuid
-                                )
-                            return True
-            except Exception as e:
-                logger.debug(f"Send to {ip}:{port} failed: {e}")
+
+        async def _try_send(targets: list[tuple]) -> bool:
+            for ip, port in targets:
+                url = f"https://{ip}:{port}/api/chat/message"
+                try:
+                    async with aiohttp.ClientSession(
+                        connector=aiohttp.TCPConnector(ssl=False)
+                    ) as session:
+                        async with session.post(
+                            url, json=msg,
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as resp:
+                            if resp.status == 200:
+                                if msg_uuid:
+                                    self._chat_service.mark_delivered_by_uuid(
+                                        msg_uuid
+                                    )
+                                return True
+                except Exception as e:
+                    logger.debug(f"Send to {ip}:{port} failed: {e}")
+            return False
+
+        if await _try_send(peers):
+            return True
+
+        # All cached peers failed — refresh and retry once
+        fresh = await self._find_friend_peers(friend, refresh=True)
+        if fresh and fresh != peers:
+            if await _try_send(fresh):
+                return True
 
         logger.info(f"Could not deliver to {friend.get('username', '?')}")
         return False
@@ -890,17 +924,30 @@ class P2PManager:
 
         return None
 
-    async def _find_friend_peers(self, friend: dict) -> list[tuple]:
-        """Find peer addresses for a friend via LAN and DHT."""
+    async def _find_friend_peers(
+        self, friend: dict, refresh: bool = False,
+    ) -> list[tuple]:
+        """Find peer addresses for a friend via cache, LAN, or DHT.
+
+        Args:
+            friend: friend dict with id, invite_code, public_key_hex.
+            refresh: if True, skip cache and do fresh LAN/DHT lookup.
+                     If fresh lookup finds nothing, the old cached
+                     address is kept (peer may come back at same addr).
+        """
+        fid = friend.get("id")
+
+        # Return cached unless refresh requested
+        if not refresh and fid and fid in self._friend_peer_cache:
+            return self._friend_peer_cache[fid]
+
         peers = []
         invite_code = friend.get("invite_code", "")
         pubkey = friend.get("public_key_hex", "")
 
         # Check LAN first (fast, no network delay)
         if self._lan_discovery:
-            # Try by invite_code (new beacons include it)
             lan = self._lan_discovery.find_peer_by_invite_code(invite_code)
-            # Try by public key / node_id
             if not lan and pubkey and not pubkey.startswith("pending:"):
                 lan = self._lan_discovery.find_peer_by_node_id(pubkey)
             if lan:
@@ -911,7 +958,14 @@ class P2PManager:
             dht_peers = await self._dht_service.lookup_user(invite_code)
             peers.extend(dht_peers)
 
-        return peers
+        if fid:
+            if peers:
+                # Update cache with new address
+                self._friend_peer_cache[fid] = peers
+            # If nothing found — keep old cached address (peer may
+            # come back at the same address later)
+
+        return peers or (self._friend_peer_cache.get(fid, []) if fid else [])
 
     async def _sync_chat_history(
         self, friend: dict, peers: list[tuple],
@@ -1172,9 +1226,50 @@ class P2PManager:
                 except Exception:
                     pass
 
+    async def _listen_for_db_notifications(self):
+        """Listen for PostgreSQL NOTIFY on 'sautium_chat' channel.
+
+        Wakes up ``_sync_chat_histories`` instantly when the backend
+        inserts a new outgoing message (NOTIFY sautium_chat).
+        """
+        while self._running:
+            conn = None
+            try:
+                conn = psycopg2.connect(self.db_dsn)
+                conn.set_isolation_level(
+                    psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT
+                )
+                with conn.cursor() as cur:
+                    cur.execute("LISTEN sautium_chat")
+
+                while self._running:
+                    # Block up to 5 s waiting for data on the socket
+                    ready = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: select.select([conn], [], [], 5),
+                    )
+                    if ready[0]:
+                        conn.poll()
+                        while conn.notifies:
+                            conn.notifies.pop(0)
+                        if self._chat_notify:
+                            self._chat_notify.set()
+            except Exception as e:
+                logger.debug(f"DB LISTEN error: {e}")
+                await asyncio.sleep(5)
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
     async def _sync_chat_histories(self):
-        """Periodically sync chat histories with friends who have
-        pending messages.
+        """Sync chat histories with friends who have pending messages.
+
+        Wakes up immediately on ``_chat_notify`` event (triggered by
+        PostgreSQL NOTIFY or ``notify_new_message()``) or falls back
+        to a 60-second polling interval.
 
         Hybrid approach (pull + push):
           1. Pull history from friend's peer (handles identity
@@ -1185,7 +1280,13 @@ class P2PManager:
              pull when ready)
         """
         while self._running:
-            await asyncio.sleep(60)  # check every minute
+            try:
+                await asyncio.wait_for(
+                    self._chat_notify.wait(), timeout=60
+                )
+                self._chat_notify.clear()
+            except asyncio.TimeoutError:
+                pass  # 60 s elapsed — do periodic check
             if not self._running or not self._chat_service:
                 break
 
@@ -1227,6 +1328,16 @@ class P2PManager:
                     await self._push_pending_messages(
                         fid, pubkey, still_pending, peers
                     )
+                    # If messages still undelivered — refresh peer
+                    # cache so next cycle does a fresh LAN/DHT lookup
+                    leftovers = [
+                        m for m in self._chat_service.get_pending_messages()
+                        if m["friend_id"] == fid
+                    ]
+                    if leftovers:
+                        await self._find_friend_peers(
+                            friend_info, refresh=True
+                        )
 
     def get_status(self) -> dict:
         """Get P2P status for UI display."""

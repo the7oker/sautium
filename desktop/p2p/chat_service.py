@@ -227,7 +227,9 @@ class ChatService:
                     RETURNING id
                 """, (friend_id, direction, content, timestamp, delivered,
                       message_uuid))
-                return cur.fetchone()[0]
+                msg_id = cur.fetchone()[0]
+                cur.execute("NOTIFY sautium_chat")
+                return msg_id
         finally:
             conn.close()
 
@@ -318,6 +320,8 @@ class ChatService:
                 cur.execute("""
                     UPDATE p2p_messages SET delivered = TRUE WHERE id = %s
                 """, (message_id,))
+                if cur.rowcount:
+                    cur.execute("NOTIFY sautium_chat")
         finally:
             conn.close()
 
@@ -330,6 +334,8 @@ class ChatService:
                     UPDATE p2p_messages SET delivered = TRUE
                     WHERE message_uuid = %s AND direction = 'out'
                 """, (message_uuid,))
+                if cur.rowcount:
+                    cur.execute("NOTIFY sautium_chat")
         finally:
             conn.close()
 
