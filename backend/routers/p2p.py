@@ -4,6 +4,7 @@ P2P API routes for Friends / Chat in web UI.
 Provides endpoints for account info, friend management, and messaging.
 """
 
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 from fastapi import APIRouter
@@ -137,7 +138,8 @@ async def get_messages(friend_id: int, limit: int = 50) -> List[Dict[str, Any]]:
     conn = _get_db()
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT id, direction, content, timestamp, delivered, read
+            SELECT id, direction, content, timestamp, delivered, read,
+                   message_uuid
             FROM p2p_messages
             WHERE friend_id = %s
             ORDER BY id DESC LIMIT %s
@@ -164,12 +166,15 @@ async def send_message(friend_id: int, body: Dict[str, str]) -> Dict[str, Any]:
     if not content:
         return {"error": "Empty message"}
 
+    msg_uuid = str(uuid.uuid4())
     conn = _get_db()
     with conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO p2p_messages (friend_id, direction, content, timestamp, delivered)
-            VALUES (%s, 'out', %s, %s, FALSE)
+            INSERT INTO p2p_messages
+                (friend_id, direction, content, timestamp, delivered,
+                 message_uuid)
+            VALUES (%s, 'out', %s, %s, FALSE, %s)
             RETURNING id
-        """, (friend_id, content, datetime.now(timezone.utc)))
+        """, (friend_id, content, datetime.now(timezone.utc), msg_uuid))
         msg_id = cur.fetchone()[0]
-        return {"id": msg_id, "status": "queued"}
+        return {"id": msg_id, "message_uuid": msg_uuid, "status": "queued"}

@@ -17,6 +17,7 @@ import base64
 import json
 import logging
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -208,19 +209,24 @@ class ChatService:
         content: str,
         timestamp: Optional[datetime] = None,
         delivered: bool = True,
+        message_uuid: Optional[str] = None,
     ) -> int:
         """Store a chat message (plaintext). Returns message ID."""
         if timestamp is None:
             timestamp = datetime.now(timezone.utc)
+        if message_uuid is None:
+            message_uuid = str(uuid.uuid4())
         conn = self._get_db()
         try:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO p2p_messages
-                        (friend_id, direction, content, timestamp, delivered)
-                    VALUES (%s, %s, %s, %s, %s)
+                        (friend_id, direction, content, timestamp, delivered,
+                         message_uuid)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     RETURNING id
-                """, (friend_id, direction, content, timestamp, delivered))
+                """, (friend_id, direction, content, timestamp, delivered,
+                      message_uuid))
                 return cur.fetchone()[0]
         finally:
             conn.close()
@@ -237,14 +243,16 @@ class ChatService:
             with conn.cursor() as cur:
                 if before_id:
                     cur.execute("""
-                        SELECT id, direction, content, timestamp, delivered, read
+                        SELECT id, direction, content, timestamp, delivered,
+                               read, message_uuid
                         FROM p2p_messages
                         WHERE friend_id = %s AND id < %s
                         ORDER BY id DESC LIMIT %s
                     """, (friend_id, before_id, limit))
                 else:
                     cur.execute("""
-                        SELECT id, direction, content, timestamp, delivered, read
+                        SELECT id, direction, content, timestamp, delivered,
+                               read, message_uuid
                         FROM p2p_messages
                         WHERE friend_id = %s
                         ORDER BY id DESC LIMIT %s
@@ -285,13 +293,13 @@ class ChatService:
             conn.close()
 
     def get_pending_messages(self) -> list[dict]:
-        """Get all undelivered outgoing messages (for retry when friend comes online)."""
+        """Get all undelivered outgoing messages."""
         conn = self._get_db()
         try:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT m.id, m.friend_id, m.content, m.timestamp,
-                           f.public_key_hex, f.invite_code
+                           m.message_uuid, f.public_key_hex, f.invite_code
                     FROM p2p_messages m
                     JOIN friends f ON f.id = m.friend_id
                     WHERE m.direction = 'out' AND m.delivered = FALSE
@@ -310,6 +318,152 @@ class ChatService:
                 cur.execute("""
                     UPDATE p2p_messages SET delivered = TRUE WHERE id = %s
                 """, (message_id,))
+        finally:
+            conn.close()
+
+    def mark_delivered_by_uuid(self, message_uuid: str):
+        """Mark an outgoing message as delivered by its UUID."""
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE p2p_messages SET delivered = TRUE
+                    WHERE message_uuid = %s AND direction = 'out'
+                """, (message_uuid,))
+        finally:
+            conn.close()
+
+    def _has_message_uuid(self, message_uuid: str) -> bool:
+        """Check if a message with this UUID already exists."""
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM p2p_messages WHERE message_uuid = %s",
+                    (message_uuid,),
+                )
+                return cur.fetchone() is not None
+        finally:
+            conn.close()
+
+    # -------------------------------------------------------------------
+    # History sync
+    # -------------------------------------------------------------------
+
+    def get_history_for_export(
+        self, friend_id: int, since: Optional[datetime] = None,
+    ) -> list[dict]:
+        """Get all messages for a friend, for history sync export.
+
+        Returns messages from our perspective (direction as stored).
+        """
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                if since:
+                    cur.execute("""
+                        SELECT message_uuid, direction, content, timestamp
+                        FROM p2p_messages
+                        WHERE friend_id = %s AND timestamp > %s
+                        ORDER BY timestamp
+                    """, (friend_id, since))
+                else:
+                    cur.execute("""
+                        SELECT message_uuid, direction, content, timestamp
+                        FROM p2p_messages
+                        WHERE friend_id = %s
+                        ORDER BY timestamp
+                    """, (friend_id,))
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def import_history(
+        self,
+        friend_id: int,
+        messages: list[dict],
+    ) -> dict:
+        """Import messages from a peer's history response.
+
+        Messages have direction from the PEER's perspective, so we flip:
+          peer's "in"  → our "out" (we sent it, they received it)
+          peer's "out" → our "in"  (they sent it to us)
+
+        Deduplicates by message_uuid. Marks our outgoing messages as
+        delivered (the peer has them).
+
+        Returns: {imported: int, skipped: int, delivered: int}
+        """
+        imported = 0
+        skipped = 0
+        delivered = 0
+
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                for msg in messages:
+                    msg_uuid = msg.get("message_uuid")
+                    if not msg_uuid:
+                        skipped += 1
+                        continue
+
+                    # Check if we already have this message
+                    cur.execute(
+                        "SELECT id, direction, delivered FROM p2p_messages "
+                        "WHERE message_uuid = %s",
+                        (msg_uuid,),
+                    )
+                    existing = cur.fetchone()
+
+                    if existing:
+                        # We already have it — but if it's our outgoing
+                        # message and not yet marked delivered, mark it now
+                        # (the peer confirmed they have it)
+                        ex_id, ex_dir, ex_delivered = existing
+                        if ex_dir == "out" and not ex_delivered:
+                            cur.execute(
+                                "UPDATE p2p_messages SET delivered = TRUE "
+                                "WHERE id = %s",
+                                (ex_id,),
+                            )
+                            delivered += 1
+                        skipped += 1
+                        continue
+
+                    # Flip direction: peer's perspective → our perspective
+                    peer_dir = msg["direction"]
+                    our_dir = "out" if peer_dir == "in" else "in"
+
+                    ts = msg["timestamp"]
+                    if isinstance(ts, str):
+                        ts = datetime.fromisoformat(ts)
+
+                    # Fallback dedup for old messages (pre-UUID migration):
+                    # check by timestamp + direction + content
+                    cur.execute(
+                        "SELECT 1 FROM p2p_messages "
+                        "WHERE friend_id = %s AND timestamp = %s "
+                        "AND direction = %s AND content = %s",
+                        (friend_id, ts, our_dir, msg["content"]),
+                    )
+                    if cur.fetchone():
+                        skipped += 1
+                        continue
+
+                    is_delivered = True  # both in & out are confirmed
+
+                    cur.execute("""
+                        INSERT INTO p2p_messages
+                            (friend_id, direction, content, timestamp,
+                             delivered, message_uuid)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """, (friend_id, our_dir, msg["content"], ts,
+                          is_delivered, msg_uuid))
+                    imported += 1
+
+            return {"imported": imported, "skipped": skipped,
+                    "delivered": delivered}
         finally:
             conn.close()
 
@@ -393,7 +547,7 @@ class ChatService:
         Prepare an outgoing message: encrypt + store locally.
 
         Returns dict for HTTP sending:
-            {from_public_key, encrypted, timestamp}
+            {from_public_key, encrypted, timestamp, message_uuid}
         Or None if friend not found.
         """
         conn = self._get_db()
@@ -411,19 +565,25 @@ class ChatService:
             conn.close()
 
         ts = datetime.now(timezone.utc)
+        msg_uuid = str(uuid.uuid4())
         encrypted = self.encrypt_message(content, friend_pubkey)
 
         # Store plaintext locally (not yet delivered)
-        self.store_message(friend_id, "out", content, ts, delivered=False)
+        self.store_message(
+            friend_id, "out", content, ts,
+            delivered=False, message_uuid=msg_uuid,
+        )
 
         return {
             "from_public_key": self.public_key_hex,
             "encrypted": encrypted,
             "timestamp": ts.isoformat(),
+            "message_uuid": msg_uuid,
         }
 
     def handle_incoming(self, sender_public_key: str, encrypted_b64: str,
-                        timestamp_iso: str) -> Optional[dict]:
+                        timestamp_iso: str,
+                        message_uuid: Optional[str] = None) -> Optional[dict]:
         """
         Handle an incoming encrypted message.
 
@@ -437,6 +597,12 @@ class ChatService:
             logger.info(f"Message from blocked friend: {friend.get('username', '?')}")
             return None
 
+        # Dedup by message_uuid
+        if message_uuid and self._has_message_uuid(message_uuid):
+            logger.debug(f"Duplicate message {message_uuid[:8]}, skipping")
+            return {"friend_id": friend["id"], "content": "", "timestamp": None,
+                    "duplicate": True}
+
         try:
             content = self.decrypt_message(encrypted_b64, sender_public_key)
         except CryptoError:
@@ -444,7 +610,10 @@ class ChatService:
             return None
 
         ts = datetime.fromisoformat(timestamp_iso)
-        self.store_message(friend["id"], "in", content, ts, delivered=True)
+        self.store_message(
+            friend["id"], "in", content, ts,
+            delivered=True, message_uuid=message_uuid,
+        )
         self.update_friend_last_seen(sender_public_key)
 
         return {

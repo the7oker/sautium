@@ -687,7 +687,8 @@ CREATE TABLE IF NOT EXISTS p2p_messages (
     content TEXT NOT NULL,
     timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     delivered BOOLEAN DEFAULT FALSE,
-    read BOOLEAN DEFAULT FALSE
+    read BOOLEAN DEFAULT FALSE,
+    message_uuid UUID DEFAULT gen_random_uuid()
 );
 
 CREATE TABLE IF NOT EXISTS pending_key_rotations (
@@ -708,6 +709,8 @@ CREATE INDEX IF NOT EXISTS idx_p2p_messages_unread
     ON p2p_messages(friend_id) WHERE direction = 'in' AND read = FALSE;
 CREATE INDEX IF NOT EXISTS idx_p2p_messages_pending
     ON p2p_messages(friend_id) WHERE direction = 'out' AND delivered = FALSE;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_p2p_messages_uuid
+    ON p2p_messages(message_uuid) WHERE message_uuid IS NOT NULL;
 
 -- ============================================================
 -- Views

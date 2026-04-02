@@ -225,11 +225,11 @@ class P2PManager:
                     "install libtorrent for internet discovery)"
                 )
 
-            # Start pending message retry + friend resolution
+            # Start chat history sync + friend resolution
             # (works via LAN even without DHT)
             if self._chat_service:
                 self._pending_retry_task = asyncio.create_task(
-                    self._retry_pending_messages()
+                    self._sync_chat_histories()
                 )
                 self._resolve_friends_task = asyncio.create_task(
                     self._resolve_pending_friends()
@@ -777,13 +777,15 @@ class P2PManager:
         if not msg:
             return False
 
+        msg_uuid = msg.get("message_uuid")
+
         # Find friend's address via LAN + DHT
         peers = await self._find_friend_peers(friend)
 
         if not peers:
             logger.info(
                 f"Friend {friend.get('username', '?')} offline, "
-                f"message queued"
+                f"message queued for history sync"
             )
             return False
 
@@ -797,11 +799,11 @@ class P2PManager:
                         url, json=msg, timeout=aiohttp.ClientTimeout(total=10)
                     ) as resp:
                         if resp.status == 200:
-                            # Mark as delivered
-                            pending = self._chat_service.get_pending_messages()
-                            for pm in pending:
-                                if pm["friend_id"] == friend_id:
-                                    self._chat_service.mark_delivered(pm["id"])
+                            # Mark this specific message as delivered
+                            if msg_uuid:
+                                self._chat_service.mark_delivered_by_uuid(
+                                    msg_uuid
+                                )
                             return True
             except Exception as e:
                 logger.debug(f"Send to {ip}:{port} failed: {e}")
@@ -871,6 +873,17 @@ class P2PManager:
                                         invite_code=result["invite_code"],
                                         username=result.get("username", ""),
                                     )
+                                    # Sync chat history after handshake
+                                    friend = (
+                                        self._chat_service
+                                        .get_friend_by_public_key(
+                                            result["public_key_hex"]
+                                        )
+                                    )
+                                    if friend:
+                                        await self._sync_chat_history(
+                                            friend, [(ip, port)]
+                                        )
                                 return result
             except Exception as e:
                 logger.debug(f"Handshake with {ip}:{port} failed: {e}")
@@ -899,6 +912,100 @@ class P2PManager:
             peers.extend(dht_peers)
 
         return peers
+
+    async def _sync_chat_history(
+        self, friend: dict, peers: list[tuple],
+    ) -> dict:
+        """Request chat history from a friend's peer and import it.
+
+        Args:
+            friend: friend dict with id, public_key_hex, username, etc.
+            peers: list of (ip, port) tuples for the friend's peer.
+
+        Returns: import stats {imported, skipped, delivered} or {}.
+        """
+        if not self._chat_service or not peers:
+            return {}
+
+        friend_pubkey = friend.get("public_key_hex", "")
+        if not friend_pubkey or friend_pubkey.startswith("pending:"):
+            return {}
+
+        from desktop.node_identity import get_account_info
+        account = get_account_info()
+        if not account:
+            return {}
+
+        payload = {"public_key_hex": account["public_key_hex"]}
+
+        import aiohttp
+        for ip, port in peers:
+            url = f"https://{ip}:{port}/api/chat/history"
+            try:
+                async with aiohttp.ClientSession(
+                    connector=aiohttp.TCPConnector(ssl=False)
+                ) as session:
+                    async with session.post(
+                        url, json=payload,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as resp:
+                        if resp.status != 200:
+                            continue
+                        data = await resp.json()
+            except Exception as e:
+                logger.debug(f"History request to {ip}:{port} failed: {e}")
+                continue
+
+            # Decrypt each message and prepare for import
+            raw_messages = data.get("messages", [])
+            if not raw_messages:
+                logger.debug(
+                    f"No history from {ip}:{port} for "
+                    f"{friend.get('username', '?')}"
+                )
+                return {"imported": 0, "skipped": 0, "delivered": 0}
+
+            decrypted = []
+            for msg in raw_messages:
+                try:
+                    content = self._chat_service.decrypt_message(
+                        msg["encrypted"], friend_pubkey
+                    )
+                    decrypted.append({
+                        "message_uuid": msg.get("message_uuid"),
+                        "direction": msg["direction"],
+                        "content": content,
+                        "timestamp": msg["timestamp"],
+                    })
+                except Exception as e:
+                    logger.debug(f"Failed to decrypt history msg: {e}")
+
+            if not decrypted:
+                return {"imported": 0, "skipped": 0, "delivered": 0}
+
+            stats = self._chat_service.import_history(
+                friend["id"], decrypted
+            )
+            logger.info(
+                f"History sync with {friend.get('username', '?')}: "
+                f"{stats}"
+            )
+
+            # Notify UI if new messages were imported
+            if stats.get("imported", 0) > 0 and self._on_message_cb:
+                try:
+                    self._on_message_cb({
+                        "friend_id": friend["id"],
+                        "content": "",
+                        "timestamp": None,
+                        "history_sync": True,
+                    })
+                except Exception:
+                    pass
+
+            return stats
+
+        return {}
 
     async def _resolve_pending_friends(self):
         """Periodically resolve pending friends via LAN handshake."""
@@ -980,6 +1087,18 @@ class P2PManager:
                                         f"({ip}:{port})"
                                     )
                                     resolved = True
+                                    # Sync chat history after handshake
+                                    resolved_friend = (
+                                        self._chat_service
+                                        .get_friend_by_public_key(
+                                            result["public_key_hex"]
+                                        )
+                                    )
+                                    if resolved_friend:
+                                        await self._sync_chat_history(
+                                            resolved_friend,
+                                            [(ip, port)],
+                                        )
                                     break
                 except Exception as e:
                     logger.debug(
@@ -989,8 +1108,82 @@ class P2PManager:
             if resolved:
                 continue
 
-    async def _retry_pending_messages(self):
-        """Periodically retry sending undelivered messages."""
+    async def _push_pending_messages(
+        self,
+        friend_id: int,
+        pubkey: str,
+        messages: list[dict],
+        peers: list[tuple],
+    ):
+        """Push undelivered messages to a friend's peer.
+
+        Stops immediately on 403 (peer doesn't have us as friend —
+        they will pull history when they add us).
+        """
+        import aiohttp
+        for msg in messages:
+            try:
+                encrypted = self._chat_service.encrypt_message(
+                    msg["content"], pubkey
+                )
+            except Exception as e:
+                logger.error(
+                    f"Encrypt failed for friend {friend_id}: {e}"
+                )
+                break
+
+            ts = msg["timestamp"]
+            ts_str = (
+                ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+            )
+            if "+" not in ts_str and not ts_str.endswith("Z"):
+                ts_str += "+00:00"
+
+            payload = {
+                "from_public_key": self._chat_service.public_key_hex,
+                "encrypted": encrypted,
+                "timestamp": ts_str,
+                "message_uuid": msg.get("message_uuid", ""),
+            }
+
+            for ip, port in peers:
+                url = f"https://{ip}:{port}/api/chat/message"
+                try:
+                    async with aiohttp.ClientSession(
+                        connector=aiohttp.TCPConnector(ssl=False)
+                    ) as session:
+                        async with session.post(
+                            url, json=payload,
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as resp:
+                            if resp.status == 200:
+                                self._chat_service.mark_delivered(
+                                    msg["id"]
+                                )
+                                break
+                            if resp.status == 403:
+                                # Peer doesn't have us — stop pushing,
+                                # they'll pull history when they add us
+                                logger.debug(
+                                    f"Push rejected (403) by "
+                                    f"{ip}:{port}, stopping"
+                                )
+                                return
+                except Exception:
+                    pass
+
+    async def _sync_chat_histories(self):
+        """Periodically sync chat histories with friends who have
+        pending messages.
+
+        Hybrid approach (pull + push):
+          1. Pull history from friend's peer (handles identity
+             restoration and catching up)
+          2. Push remaining undelivered messages (handles normal
+             offline delivery)
+          3. Stop pushing on 403 (peer hasn't added us — they'll
+             pull when ready)
+        """
         while self._running:
             await asyncio.sleep(60)  # check every minute
             if not self._running or not self._chat_service:
@@ -1000,75 +1193,40 @@ class P2PManager:
             if not pending:
                 continue
 
-            # Group by friend
-            by_friend: dict[int, list[dict]] = {}
+            # Collect unique friends with undelivered messages
+            seen_friends: set[int] = set()
             for msg in pending:
-                by_friend.setdefault(msg["friend_id"], []).append(msg)
+                fid = msg["friend_id"]
+                if fid in seen_friends:
+                    continue
+                seen_friends.add(fid)
 
-            for friend_id, messages in by_friend.items():
-                invite_code = messages[0]["invite_code"]
-                pubkey = messages[0]["public_key_hex"]
-
-                # Skip friends with pending public keys (can't encrypt)
+                pubkey = msg["public_key_hex"]
                 if pubkey.startswith("pending:"):
                     continue
 
-                # Find friend via LAN + DHT
                 friend_info = {
-                    "invite_code": invite_code,
+                    "id": fid,
+                    "invite_code": msg["invite_code"],
                     "public_key_hex": pubkey,
+                    "username": "",
                 }
                 peers = await self._find_friend_peers(friend_info)
-
                 if not peers:
                     continue
 
-                # Try to deliver each message
-                import aiohttp
-                for msg in messages:
-                    try:
-                        encrypted = self._chat_service.encrypt_message(
-                            msg["content"], pubkey
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Encrypt failed for friend {friend_id}: {e}"
-                        )
-                        break
+                # Step 1: Pull history (may mark our msgs as delivered)
+                await self._sync_chat_history(friend_info, peers)
 
-                    ts = msg["timestamp"]
-                    ts_str = (
-                        ts.isoformat()
-                        if hasattr(ts, "isoformat")
-                        else str(ts)
+                # Step 2: Push remaining undelivered messages
+                still_pending = [
+                    m for m in self._chat_service.get_pending_messages()
+                    if m["friend_id"] == fid
+                ]
+                if still_pending:
+                    await self._push_pending_messages(
+                        fid, pubkey, still_pending, peers
                     )
-                    # DB stores naive UTC — add +00:00 so receiver
-                    # knows it's UTC
-                    if "+" not in ts_str and not ts_str.endswith("Z"):
-                        ts_str += "+00:00"
-                    payload = {
-                        "from_public_key": self._chat_service.public_key_hex,
-                        "encrypted": encrypted,
-                        "timestamp": ts_str,
-                    }
-
-                    delivered = False
-                    for ip, port in peers:
-                        url = f"https://{ip}:{port}/api/chat/message"
-                        try:
-                            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
-                                async with session.post(
-                                    url, json=payload,
-                                    timeout=aiohttp.ClientTimeout(total=10),
-                                ) as resp:
-                                    if resp.status == 200:
-                                        delivered = True
-                                        break
-                        except Exception:
-                            pass
-
-                    if delivered:
-                        self._chat_service.mark_delivered(msg["id"])
 
     def get_status(self) -> dict:
         """Get P2P status for UI display."""

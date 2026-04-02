@@ -261,6 +261,7 @@ class SyncServer:
             sender_pubkey = body.get("from_public_key", "")
             encrypted = body.get("encrypted", "")
             timestamp = body.get("timestamp", "")
+            message_uuid = body.get("message_uuid", "")
         except (json.JSONDecodeError, Exception):
             return self._json_response(
                 request, {"error": "invalid JSON"}, status=400
@@ -272,7 +273,8 @@ class SyncServer:
             )
 
         result = self._chat_service.handle_incoming(
-            sender_pubkey, encrypted, timestamp
+            sender_pubkey, encrypted, timestamp,
+            message_uuid=message_uuid or None,
         )
 
         if result is None:
@@ -288,6 +290,91 @@ class SyncServer:
                 logger.debug(f"Message callback error: {e}")
 
         return self._json_response(request, {"status": "delivered"})
+
+    async def handle_chat_history(self, request: web.Request) -> web.Response:
+        """POST /api/chat/history — return conversation history for a friend.
+
+        The requester sends their public key. We return all messages from
+        our perspective, with each message's content encrypted using the
+        requester's public key.
+
+        Request:  {public_key_hex, since (optional ISO timestamp)}
+        Response: {messages: [{message_uuid, direction, encrypted, timestamp}]}
+        """
+        ip = request.remote or "unknown"
+        if not self._check_rate_limit(ip):
+            return self._json_response(
+                request, {"error": "rate limited"}, status=429
+            )
+
+        if not self._chat_service:
+            return self._json_response(
+                request, {"error": "chat not available"}, status=503
+            )
+
+        try:
+            body = await request.json()
+            requester_pubkey = body.get("public_key_hex", "")
+            since_iso = body.get("since")
+        except (json.JSONDecodeError, Exception):
+            return self._json_response(
+                request, {"error": "invalid JSON"}, status=400
+            )
+
+        if not requester_pubkey:
+            return self._json_response(
+                request, {"error": "missing public_key_hex"}, status=400
+            )
+
+        # Verify requester is a known friend
+        friend = self._chat_service.get_friend_by_public_key(requester_pubkey)
+        if not friend:
+            return self._json_response(
+                request, {"error": "not a friend"}, status=403
+            )
+        if friend.get("is_blocked"):
+            return self._json_response(
+                request, {"error": "blocked"}, status=403
+            )
+
+        # Parse optional since timestamp
+        from datetime import datetime
+        since = None
+        if since_iso:
+            try:
+                since = datetime.fromisoformat(since_iso)
+            except (ValueError, TypeError):
+                pass
+
+        # Get messages for this friend from our DB
+        messages = self._chat_service.get_history_for_export(
+            friend["id"], since=since
+        )
+
+        # Encrypt each message's content with requester's public key
+        result_messages = []
+        for msg in messages:
+            encrypted = self._chat_service.encrypt_message(
+                msg["content"], requester_pubkey
+            )
+            ts = msg["timestamp"]
+            ts_str = (
+                ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+            )
+            if "+" not in ts_str and not ts_str.endswith("Z"):
+                ts_str += "+00:00"
+            result_messages.append({
+                "message_uuid": msg["message_uuid"],
+                "direction": msg["direction"],
+                "encrypted": encrypted,
+                "timestamp": ts_str,
+            })
+
+        logger.info(
+            f"History export for {friend.get('username', '?')}: "
+            f"{len(result_messages)} messages"
+        )
+        return self._json_response(request, {"messages": result_messages})
 
     async def handle_chat_key_rotation(
         self, request: web.Request
@@ -369,6 +456,9 @@ class SyncServer:
         )
         self._app.router.add_post(
             "/api/chat/message", self.handle_chat_message
+        )
+        self._app.router.add_post(
+            "/api/chat/history", self.handle_chat_history
         )
         self._app.router.add_post(
             "/api/chat/key-rotation", self.handle_chat_key_rotation
