@@ -656,6 +656,13 @@ Test AI assistant with diverse queries to verify quality:
 
 ---
 
+## Architecture Rules
+
+- All solutions must be at senior engineer level — consider scalability, existing patterns in the project, proper data types, and edge cases before writing code
+- Prefer event-driven (SSE, NOTIFY, WebSocket) over polling
+
+---
+
 ## Key Principles
 
 1. **Incremental Progress**: Each step independently testable
