@@ -303,7 +303,7 @@ class P2PManager:
     async def _cleanup(self):
         """Clean shutdown of all services."""
         for task in (self._reannounce_task, self._pending_retry_task,
-                     self._resolve_friends_task):
+                     self._resolve_friends_task, self._db_listen_task):
             if task:
                 task.cancel()
                 try:
@@ -985,12 +985,21 @@ class P2PManager:
         if not friend_pubkey or friend_pubkey.startswith("pending:"):
             return {}
 
-        from desktop.node_identity import get_account_info
+        from desktop.node_identity import get_account_info, sign_message
         account = get_account_info()
         if not account:
             return {}
 
-        payload = {"public_key_hex": account["public_key_hex"]}
+        # Sign request to prove key ownership (prevents metadata leakage)
+        import uuid as _uuid
+        nonce = str(_uuid.uuid4())
+        sig_bytes = sign_message(f"history_request:{nonce}".encode("utf-8"))
+
+        payload = {
+            "public_key_hex": account["public_key_hex"],
+            "nonce": nonce,
+            "signature": sig_bytes.hex(),
+        }
 
         import aiohttp
         for ip, port in peers:

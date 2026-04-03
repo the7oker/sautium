@@ -31,6 +31,9 @@ logger = logging.getLogger(__name__)
 RATE_LIMIT_PER_MINUTE = 60
 RATE_LIMIT_WINDOW = 60  # seconds
 
+# Max UUIDs per request (prevents memory/DB DoS)
+MAX_UUIDS_PER_REQUEST = 10_000
+
 
 class SyncServer:
     """HTTP server that serves sync endpoints for peer-to-peer data exchange."""
@@ -46,7 +49,6 @@ class SyncServer:
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
-        self._conn: Optional[psycopg2.extensions.connection] = None
         # Rate limiting state
         self._request_counts: dict[str, list[float]] = defaultdict(list)
 
@@ -55,26 +57,30 @@ class SyncServer:
         self._chat_service = chat_service
         self._on_message_cb = on_message_cb
 
-    def _get_db(self) -> psycopg2.extensions.connection:
-        """Get or create a persistent DB connection."""
-        if self._conn is None or self._conn.closed:
-            self._conn = psycopg2.connect(self.db_dsn)
-            self._conn.autocommit = True
-            with self._conn.cursor() as cur:
-                cur.execute("SET timezone = 'UTC'")
-        return self._conn
+    def _new_db(self) -> psycopg2.extensions.connection:
+        """Create a new DB connection (caller must close it)."""
+        conn = psycopg2.connect(self.db_dsn)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("SET timezone = 'UTC'")
+        return conn
 
     def _check_rate_limit(self, ip: str) -> bool:
         """Return True if the request is allowed, False if rate-limited."""
         now = time.time()
         # Clean old entries
-        self._request_counts[ip] = [
-            t for t in self._request_counts[ip]
+        timestamps = [
+            t for t in self._request_counts.get(ip, [])
             if now - t < RATE_LIMIT_WINDOW
         ]
-        if len(self._request_counts[ip]) >= RATE_LIMIT_PER_MINUTE:
+        if not timestamps:
+            # Remove empty entries to prevent unbounded dict growth
+            self._request_counts.pop(ip, None)
+        if len(timestamps) >= RATE_LIMIT_PER_MINUTE:
+            self._request_counts[ip] = timestamps
             return False
-        self._request_counts[ip].append(now)
+        timestamps.append(now)
+        self._request_counts[ip] = timestamps
         return True
 
     def _json_response(self, request: web.Request, data: dict,
@@ -93,8 +99,15 @@ class SyncServer:
     async def _run_query(self, func, *args):
         """Run a blocking sync_queries function in the thread pool executor."""
         loop = asyncio.get_event_loop()
-        conn = self._get_db()
-        return await loop.run_in_executor(None, partial(func, conn, *args))
+
+        def _with_conn():
+            conn = self._new_db()
+            try:
+                return func(conn, *args)
+            finally:
+                conn.close()
+
+        return await loop.run_in_executor(None, _with_conn)
 
     # -----------------------------------------------------------------------
     # Route handlers
@@ -124,6 +137,12 @@ class SyncServer:
                 request, {"error": "invalid JSON"}, status=400
             )
 
+        if not isinstance(track_uuids, list) or len(track_uuids) > MAX_UUIDS_PER_REQUEST:
+            return self._json_response(
+                request, {"error": f"track_uuids must be a list of at most {MAX_UUIDS_PER_REQUEST} items"},
+                status=400,
+            )
+
         try:
             result = await self._run_query(
                 sync_queries.get_inventory, track_uuids
@@ -132,7 +151,7 @@ class SyncServer:
         except Exception as e:
             logger.error(f"Inventory query failed: {e}")
             return self._json_response(
-                request, {"error": str(e)}, status=500
+                request, {"error": "internal error"}, status=500
             )
 
     async def handle_pull(self, request: web.Request) -> web.Response:
@@ -158,13 +177,19 @@ class SyncServer:
                 request, {"error": "invalid JSON"}, status=400
             )
 
+        if not isinstance(uuids, list) or len(uuids) > MAX_UUIDS_PER_REQUEST:
+            return self._json_response(
+                request, {"error": f"uuids must be a list of at most {MAX_UUIDS_PER_REQUEST} items"},
+                status=400,
+            )
+
         try:
             result = await self._run_query(handler, uuids)
             return self._json_response(request, result)
         except Exception as e:
             logger.error(f"Pull {category} failed: {e}")
             return self._json_response(
-                request, {"error": str(e)}, status=500
+                request, {"error": "internal error"}, status=500
             )
 
     # -----------------------------------------------------------------------
@@ -294,11 +319,11 @@ class SyncServer:
     async def handle_chat_history(self, request: web.Request) -> web.Response:
         """POST /api/chat/history — return conversation history for a friend.
 
-        The requester sends their public key. We return all messages from
-        our perspective, with each message's content encrypted using the
-        requester's public key.
+        The requester sends their public key + Ed25519 signature to prove
+        key ownership (prevents metadata leakage to third parties).
 
-        Request:  {public_key_hex, since (optional ISO timestamp)}
+        Request:  {public_key_hex, signature, nonce, since (optional ISO timestamp)}
+          signature = Ed25519_sign("history_request:{nonce}")
         Response: {messages: [{message_uuid, direction, encrypted, timestamp}]}
         """
         ip = request.remote or "unknown"
@@ -316,6 +341,8 @@ class SyncServer:
             body = await request.json()
             requester_pubkey = body.get("public_key_hex", "")
             since_iso = body.get("since")
+            signature_hex = body.get("signature", "")
+            nonce = body.get("nonce", "")
         except (json.JSONDecodeError, Exception):
             return self._json_response(
                 request, {"error": "invalid JSON"}, status=400
@@ -324,6 +351,25 @@ class SyncServer:
         if not requester_pubkey:
             return self._json_response(
                 request, {"error": "missing public_key_hex"}, status=400
+            )
+
+        # Verify proof-of-possession: requester must sign a nonce
+        if not signature_hex or not nonce:
+            return self._json_response(
+                request, {"error": "missing signature or nonce"}, status=400
+            )
+
+        from desktop.node_identity import verify_signature
+        try:
+            sig_bytes = bytes.fromhex(signature_hex)
+            msg_bytes = f"history_request:{nonce}".encode("utf-8")
+            if not verify_signature(msg_bytes, sig_bytes, requester_pubkey):
+                return self._json_response(
+                    request, {"error": "invalid signature"}, status=403
+                )
+        except (ValueError, Exception):
+            return self._json_response(
+                request, {"error": "invalid signature"}, status=403
             )
 
         # Verify requester is a known friend
@@ -493,6 +539,4 @@ class SyncServer:
             await self._site.stop()
         if self._runner:
             await self._runner.cleanup()
-        if self._conn and not self._conn.closed:
-            self._conn.close()
         logger.info("Sync server stopped")

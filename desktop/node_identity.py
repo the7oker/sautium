@@ -255,12 +255,17 @@ def rotate_keys(username: str, new_password: str) -> dict:
     Change password → new keypair. Returns key rotation message
     that should be sent to all friends (signed by old key).
 
+    Safety: derives new keys and signs rotation message BEFORE
+    overwriting disk.  Old keys are preserved until the signed
+    message is ready, so a crash at any point before _save_keypair
+    leaves the old identity intact.
+
     Returns: {new_info, rotation_message, old_signature}
     """
     if not HAS_CRYPTO:
         raise RuntimeError("cryptography package required")
 
-    # Load old key for signing the rotation message
+    # 1. Load old key (still on disk, untouched)
     old_private = _load_private_key()
     old_pub_raw = old_private.public_key().public_bytes(
         encoding=serialization.Encoding.Raw,
@@ -268,20 +273,37 @@ def rotate_keys(username: str, new_password: str) -> dict:
     )
     old_public_key_hex = old_pub_raw.hex()
 
-    # Create new account (overwrites old keys)
-    new_info = create_account(username, new_password)
+    # 2. Derive new keypair in memory (DO NOT write to disk yet)
+    new_seed = derive_seed(username, new_password)
+    new_private = Ed25519PrivateKey.from_private_bytes(new_seed)
+    new_pub_raw = new_private.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    new_public_key_hex = new_pub_raw.hex()
+    new_invite_code = make_invite_code(username, new_pub_raw)
 
-    # Sign rotation message with OLD key: "I'm moving to this new key"
+    # 3. Build and sign rotation message with OLD key
     rotation_msg = json.dumps({
         "type": "key_rotation",
         "old_public_key": old_public_key_hex,
-        "new_public_key": new_info["public_key_hex"],
-        "new_invite_code": new_info["invite_code"],
+        "new_public_key": new_public_key_hex,
+        "new_invite_code": new_invite_code,
     }, separators=(",", ":")).encode("utf-8")
 
     old_signature = old_private.sign(rotation_msg)
 
-    logger.info(f"Key rotation: {old_public_key_hex[:16]}... → {new_info['public_key_hex'][:16]}...")
+    # 4. Only NOW persist new keys to disk (point of no return)
+    new_info = {
+        "node_id": new_public_key_hex,
+        "public_key_hex": new_public_key_hex,
+        "algorithm": "Ed25519",
+        "username": username,
+        "invite_code": new_invite_code,
+    }
+    _save_keypair(new_private, new_info)
+
+    logger.info(f"Key rotation: {old_public_key_hex[:16]}... → {new_public_key_hex[:16]}...")
     return {
         "new_info": new_info,
         "rotation_message": rotation_msg,

@@ -406,6 +406,7 @@ class ChatService:
         delivered = 0
 
         conn = self._get_db()
+        conn.autocommit = False
         try:
             with conn.cursor() as cur:
                 for msg in messages:
@@ -468,8 +469,12 @@ class ChatService:
                           is_delivered, msg_uuid))
                     imported += 1
 
+            conn.commit()
             return {"imported": imported, "skipped": skipped,
                     "delivered": delivered}
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -524,6 +529,15 @@ class ChatService:
                     return False
 
                 new_pubkey, new_invite = row
+
+                # Read OLD public key before overwriting
+                cur.execute(
+                    "SELECT public_key_hex FROM friends WHERE id = %s",
+                    (friend_id,),
+                )
+                old_row = cur.fetchone()
+                old_pubkey = old_row[0] if old_row else None
+
                 cur.execute("""
                     UPDATE friends
                     SET previous_public_key_hex = public_key_hex,
@@ -536,9 +550,9 @@ class ChatService:
                     DELETE FROM pending_key_rotations WHERE friend_id = %s
                 """, (friend_id,))
 
-                # Invalidate cached Box
-                if new_pubkey in self._boxes:
-                    del self._boxes[new_pubkey]
+                # Invalidate cached Box for the OLD key (now stale)
+                if old_pubkey and old_pubkey in self._boxes:
+                    del self._boxes[old_pubkey]
 
                 return True
         finally:

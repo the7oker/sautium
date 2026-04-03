@@ -189,11 +189,27 @@ async function handleInvite(request, env, corsHeaders) {
 async function handleLookupEmail(url, env, corsHeaders) {
   /**
    * Look up verified email for an invite code.
-   * GET /lookup-email?invite_code=user%23XXXX-XXXX-XXXX
+   * GET /lookup-email?invite_code=user%23XXXX-XXXX-XXXX&requester_key=HEX&signature=HEX
+   *
+   * Requires Ed25519 signature over "lookup:{invite_code}" to prevent
+   * unauthenticated email enumeration.
    */
   const inviteCode = url.searchParams.get("invite_code");
+  const requesterKey = url.searchParams.get("requester_key");
+  const signature = url.searchParams.get("signature");
+
   if (!inviteCode) {
     return json({ error: "missing invite_code" }, corsHeaders, 400);
+  }
+
+  if (!requesterKey || !signature) {
+    return json({ error: "missing requester_key or signature" }, corsHeaders, 400);
+  }
+
+  const sigMessage = `lookup:${inviteCode}`;
+  const valid = await verifySignature(sigMessage, signature, requesterKey);
+  if (!valid) {
+    return json({ error: "invalid signature" }, corsHeaders, 403);
   }
 
   const email = await env.RATE_LIMITS.get(`verified:${inviteCode}`);
@@ -288,22 +304,30 @@ async function checkRateLimit(env, ip, recipient) {
   const ipKey = `rl:ip:${ip}`;
   const recipientKey = `rl:to:${recipient}`;
 
-  const ipCount = parseInt(await env.RATE_LIMITS.get(ipKey)) || 0;
-  if (ipCount >= RATE_LIMIT_PER_IP) {
+  // Increment FIRST, then check (pessimistic).
+  // KV has no atomic increment; concurrent requests may read
+  // the same base value.  By writing the incremented value
+  // before the check we ensure that at least one racing writer
+  // sees the over-limit value on its next request.  Worst case:
+  // N concurrent requests all read count C and all write C+1,
+  // allowing up to N extra emails — but the NEXT wave sees
+  // the (still only C+1) value and blocks.  Halved limits
+  // compensate for this one-burst tolerance.
+  const ipCount = (parseInt(await env.RATE_LIMITS.get(ipKey)) || 0) + 1;
+  await env.RATE_LIMITS.put(ipKey, String(ipCount), {
+    expirationTtl: RATE_LIMIT_WINDOW,
+  });
+  if (ipCount > RATE_LIMIT_PER_IP) {
     return "rate limited (too many requests from your IP)";
   }
 
-  const recipientCount = parseInt(await env.RATE_LIMITS.get(recipientKey)) || 0;
-  if (recipientCount >= RATE_LIMIT_PER_RECIPIENT) {
+  const recipientCount = (parseInt(await env.RATE_LIMITS.get(recipientKey)) || 0) + 1;
+  await env.RATE_LIMITS.put(recipientKey, String(recipientCount), {
+    expirationTtl: RATE_LIMIT_WINDOW,
+  });
+  if (recipientCount > RATE_LIMIT_PER_RECIPIENT) {
     return "rate limited (too many emails to this address)";
   }
-
-  await env.RATE_LIMITS.put(ipKey, String(ipCount + 1), {
-    expirationTtl: RATE_LIMIT_WINDOW,
-  });
-  await env.RATE_LIMITS.put(recipientKey, String(recipientCount + 1), {
-    expirationTtl: RATE_LIMIT_WINDOW,
-  });
 
   return null;
 }
