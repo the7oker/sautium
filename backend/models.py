@@ -17,7 +17,6 @@ Schema overview:
 """
 
 import uuid as _uuid
-from datetime import datetime
 from typing import Optional, List
 
 from sqlalchemy import (
@@ -46,14 +45,10 @@ class EmbeddingModel(Base):
     description = Column(Text)
     dimension = Column(Integer, nullable=False)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     embeddings = relationship("Embedding", back_populates="model")
-
-    __table_args__ = (
-        Index("idx_embedding_models_name", "name"),
-    )
 
     def __repr__(self):
         return f"<EmbeddingModel(id={self.id}, name='{self.name}')>"
@@ -73,14 +68,15 @@ class Artist(Base):
     # Normalization metadata
     artist_type = Column(String(20), default="unknown")       # unknown/solo/band/collaboration/orchestra/other
     verification_status = Column(String(20), default="unverified")  # unverified/suspicious/verified_band/verified_split/verified_collab
+    gender = Column(String(10), default="unknown")              # unknown/female/male/mixed
     raw_name = Column(String(500))                             # original tag value before normalization
 
     # External service IDs
     lastfm_id = Column(String(100))
     musicbrainz_id = Column(String(100))
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
     track_associations = relationship("TrackArtist", back_populates="artist", cascade="all, delete-orphan")
@@ -93,9 +89,13 @@ class Artist(Base):
     member_of = relationship("ArtistMember", foreign_keys="ArtistMember.member_artist_id", back_populates="member_artist", cascade="all, delete-orphan")
 
     __table_args__ = (
-        Index("idx_artists_name", "name"),
         Index("idx_artists_verification_status", "verification_status"),
         Index("idx_artists_artist_type", "artist_type"),
+        Index("idx_artists_gender", "gender"),
+        CheckConstraint(
+            "gender IN ('unknown', 'female', 'male', 'mixed')",
+            name="chk_gender",
+        ),
         CheckConstraint(
             "artist_type IN ('unknown', 'solo', 'band', 'collaboration', 'orchestra', 'other')",
             name="chk_artist_type",
@@ -128,8 +128,8 @@ class Album(Base):
 
     user_rating = Column(Numeric(3, 2))
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
     variants = relationship("AlbumVariant", back_populates="album", cascade="all, delete-orphan")
@@ -155,8 +155,8 @@ class Track(Base):
     id = Column(UUID(as_uuid=True), primary_key=True)
     title = Column(String(500), nullable=False)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
     artist_associations = relationship("TrackArtist", back_populates="track", cascade="all, delete-orphan")
@@ -183,14 +183,13 @@ class TrackArtist(Base):
     __tablename__ = "track_artists"
 
     track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
-    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE"), primary_key=True)
+    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
     role = Column(String(50), primary_key=True, default="primary")
 
     track = relationship("Track", back_populates="artist_associations")
     artist = relationship("Artist", back_populates="track_associations")
 
     __table_args__ = (
-        Index("idx_track_artists_track_id", "track_id"),
         Index("idx_track_artists_artist_id", "artist_id"),
     )
 
@@ -209,7 +208,6 @@ class TrackGenre(Base):
     genre = relationship("Genre", back_populates="track_associations")
 
     __table_args__ = (
-        Index("idx_track_genres_track_id", "track_id"),
         Index("idx_track_genres_genre_id", "genre_id"),
     )
 
@@ -229,7 +227,6 @@ class AlbumArtist(Base):
     artist = relationship("Artist", back_populates="album_associations")
 
     __table_args__ = (
-        Index("idx_album_artists_album_id", "album_id"),
         Index("idx_album_artists_artist_id", "artist_id"),
     )
 
@@ -253,7 +250,6 @@ class ArtistMember(Base):
     member_artist = relationship("Artist", foreign_keys=[member_artist_id], back_populates="member_of")
 
     __table_args__ = (
-        Index("idx_artist_members_compound", "compound_artist_id"),
         Index("idx_artist_members_member", "member_artist_id"),
     )
 
@@ -277,8 +273,8 @@ class AlbumVariant(Base):
     bit_depth = Column(Integer)
     is_lossless = Column(Boolean, default=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
     album = relationship("Album", back_populates="variants")
@@ -286,7 +282,6 @@ class AlbumVariant(Base):
 
     __table_args__ = (
         Index("idx_album_variants_album_id", "album_id"),
-        Index("idx_album_variants_directory", "directory_path"),
     )
 
     def __repr__(self):
@@ -306,7 +301,7 @@ class MediaFile(Base):
     file_format = Column(String(10), default="FLAC")
     is_lossless = Column(Boolean, default=True)
     file_size_bytes = Column(BigInteger)
-    file_modified_at = Column(DateTime)
+    file_modified_at = Column(DateTime(timezone=True))
 
     # Audio characteristics
     sample_rate = Column(Integer)
@@ -324,13 +319,13 @@ class MediaFile(Base):
 
     # User data
     play_count = Column(Integer, default=0)
-    last_played_at = Column(DateTime)
+    last_played_at = Column(DateTime(timezone=True))
 
     # External IDs
     isrc = Column(String(20))
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
     track = relationship("Track", back_populates="media_files")
@@ -339,10 +334,12 @@ class MediaFile(Base):
     __table_args__ = (
         Index("idx_media_files_track_id", "track_id"),
         Index("idx_media_files_album_variant_id", "album_variant_id"),
-        Index("idx_media_files_file_path", "file_path"),
         Index("idx_media_files_play_count", "play_count"),
         Index("idx_media_files_analysis_source", "track_id", "is_analysis_source",
               postgresql_where="is_analysis_source = true"),
+        CheckConstraint("file_size_bytes IS NULL OR file_size_bytes >= 0", name="chk_mf_file_size"),
+        CheckConstraint("duration_seconds IS NULL OR duration_seconds >= 0", name="chk_mf_duration"),
+        CheckConstraint("play_count >= 0", name="chk_mf_play_count"),
     )
 
     def __repr__(self):
@@ -368,8 +365,8 @@ class Embedding(Base):
     source_sample_rate = Column(Integer)
     source_is_lossless = Column(Boolean)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     model = relationship("EmbeddingModel", back_populates="embeddings")
     track = relationship("Track", back_populates="embedding")
@@ -380,7 +377,6 @@ class Embedding(Base):
               postgresql_with={"m": 16, "ef_construction": 64},
               postgresql_ops={"vector": "vector_cosine_ops"}),
         Index("idx_embeddings_model_id", "model_id"),
-        Index("idx_embeddings_track_id", "track_id"),
     )
 
     def __repr__(self):
@@ -396,8 +392,8 @@ class TextEmbedding(Base):
     model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     model = relationship("EmbeddingModel", backref="text_embeddings")
     track = relationship("Track", back_populates="text_embedding")
@@ -409,7 +405,6 @@ class TextEmbedding(Base):
               postgresql_with={"m": 16, "ef_construction": 64},
               postgresql_ops={"vector": "vector_cosine_ops"}),
         Index("idx_text_embeddings_model_id", "model_id"),
-        Index("idx_text_embeddings_track_id", "track_id"),
     )
 
     def __repr__(self):
@@ -427,8 +422,8 @@ class LyricsEmbedding(Base):
     chunk_index = Column(Integer, nullable=False, default=0)
     chunk_text = Column(Text)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     model = relationship("EmbeddingModel", backref="lyrics_embeddings")
     track = relationship("Track", back_populates="lyrics_embeddings")
@@ -439,7 +434,6 @@ class LyricsEmbedding(Base):
               postgresql_using="hnsw",
               postgresql_with={"m": 16, "ef_construction": 64},
               postgresql_ops={"vector": "vector_cosine_ops"}),
-        Index("idx_lyrics_embeddings_track_id", "track_id"),
         Index("idx_lyrics_embeddings_model_id", "model_id"),
     )
 
@@ -458,8 +452,8 @@ class ArtistBioEmbedding(Base):
     chunk_index = Column(Integer, nullable=False, default=0)
     chunk_text = Column(Text)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     model = relationship("EmbeddingModel")
     artist = relationship("Artist")
@@ -470,7 +464,6 @@ class ArtistBioEmbedding(Base):
               postgresql_using="hnsw",
               postgresql_with={"m": 16, "ef_construction": 64},
               postgresql_ops={"vector": "vector_cosine_ops"}),
-        Index("idx_artist_bio_emb_artist", "artist_id"),
         Index("idx_artist_bio_emb_model", "model_id"),
     )
 
@@ -486,8 +479,8 @@ class AlbumInfoEmbedding(Base):
     chunk_index = Column(Integer, nullable=False, default=0)
     chunk_text = Column(Text)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     model = relationship("EmbeddingModel")
     album = relationship("Album")
@@ -498,7 +491,6 @@ class AlbumInfoEmbedding(Base):
               postgresql_using="hnsw",
               postgresql_with={"m": 16, "ef_construction": 64},
               postgresql_ops={"vector": "vector_cosine_ops"}),
-        Index("idx_album_info_emb_album", "album_id"),
         Index("idx_album_info_emb_model", "model_id"),
     )
 
@@ -514,8 +506,8 @@ class GenreDescEmbedding(Base):
     chunk_index = Column(Integer, nullable=False, default=0)
     chunk_text = Column(Text)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     model = relationship("EmbeddingModel")
     genre = relationship("Genre")
@@ -526,7 +518,6 @@ class GenreDescEmbedding(Base):
               postgresql_using="hnsw",
               postgresql_with={"m": 16, "ef_construction": 64},
               postgresql_ops={"vector": "vector_cosine_ops"}),
-        Index("idx_genre_desc_emb_genre", "genre_id"),
         Index("idx_genre_desc_emb_model", "model_id"),
     )
 
@@ -562,18 +553,21 @@ class AudioFeature(Base):
     source_sample_rate = Column(Integer)
     source_is_lossless = Column(Boolean)
 
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     track = relationship("Track", back_populates="audio_feature")
 
     __table_args__ = (
-        Index("idx_audio_features_track_id", "track_id"),
         Index("idx_audio_features_bpm", "bpm"),
         Index("idx_audio_features_key", "key", "mode"),
         Index("idx_audio_features_energy", "energy_db"),
         Index("idx_audio_features_danceability", "danceability"),
         Index("idx_audio_features_vocal", "vocal_instrumental"),
+        CheckConstraint("bpm IS NULL OR bpm > 0", name="chk_af_bpm"),
+        CheckConstraint("key_confidence IS NULL OR (key_confidence >= 0 AND key_confidence <= 1)", name="chk_af_key_confidence"),
+        CheckConstraint("danceability IS NULL OR (danceability >= 0 AND danceability <= 1)", name="chk_af_danceability"),
+        CheckConstraint("vocal_score IS NULL OR (vocal_score >= 0 AND vocal_score <= 1)", name="chk_af_vocal_score"),
     )
 
     def __repr__(self):
@@ -591,15 +585,11 @@ class Genre(Base):
     id = Column(UUID(as_uuid=True), primary_key=True)
     name = Column(String(100), nullable=False, unique=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     track_associations = relationship("TrackGenre", back_populates="genre", cascade="all, delete-orphan")
     descriptions = relationship("GenreDescription", back_populates="genre", cascade="all, delete-orphan")
-
-    __table_args__ = (
-        Index("idx_genres_name", "name"),
-    )
 
     def __repr__(self):
         return f"<Genre(id={self.id}, name='{self.name}')>"
@@ -617,13 +607,12 @@ class GenreDescription(Base):
     content = Column(Text)
     url = Column(String(500))
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     genre = relationship("Genre", back_populates="descriptions")
 
     __table_args__ = (
-        Index("idx_genre_descriptions_genre", "genre_id"),
         Index("idx_genre_descriptions_source", "source"),
         UniqueConstraint("genre_id", "source", name="uq_genre_descriptions"),
         CheckConstraint("summary IS NOT NULL OR content IS NOT NULL", name="chk_has_description"),
@@ -644,14 +633,13 @@ class Tag(Base):
     id = Column(UUID(as_uuid=True), primary_key=True)
     name = Column(String(100), nullable=False, unique=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     artist_associations = relationship("ArtistTag", back_populates="tag", cascade="all, delete-orphan")
     album_associations = relationship("AlbumTag", back_populates="tag", cascade="all, delete-orphan")
 
     __table_args__ = (
-        Index("idx_tags_name", "name"),
         Index("idx_tags_name_lower", "name", postgresql_ops={"name": "text_pattern_ops"}),
         CheckConstraint("LENGTH(TRIM(name)) > 0", name="chk_tag_name_not_empty"),
     )
@@ -674,14 +662,13 @@ class ArtistTag(Base):
     weight = Column(Integer, nullable=False)
     source = Column(String(50), nullable=False)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     artist = relationship("Artist", back_populates="tag_associations")
     tag = relationship("Tag", back_populates="artist_associations")
 
     __table_args__ = (
-        Index("idx_artist_tags_artist", "artist_id"),
         Index("idx_artist_tags_tag", "tag_id"),
         Index("idx_artist_tags_source", "source"),
         Index("idx_artist_tags_weight", "weight"),
@@ -707,18 +694,17 @@ class ArtistBio(Base):
     listeners = Column(Integer)
     playcount = Column(BigInteger)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     artist = relationship("Artist", back_populates="bios")
 
     __table_args__ = (
-        Index("idx_artist_bios_artist", "artist_id"),
         Index("idx_artist_bios_source", "source"),
         Index("idx_artist_bios_listeners", "listeners", postgresql_where=(Column("listeners") != None)),
         Index("idx_artist_bios_playcount", "playcount", postgresql_where=(Column("playcount") != None)),
         UniqueConstraint("artist_id", "source", name="uq_artist_bios"),
-        CheckConstraint("summary IS NOT NULL OR content IS NOT NULL", name="chk_has_bio"),
+        CheckConstraint("summary IS NOT NULL OR content IS NOT NULL OR listeners IS NOT NULL OR playcount IS NOT NULL", name="chk_has_bio"),
     )
 
     def __repr__(self):
@@ -735,14 +721,13 @@ class SimilarArtist(Base):
     match_score = Column(Numeric(5, 4), nullable=False)
     source = Column(String(50), nullable=False)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     artist = relationship("Artist", foreign_keys=[artist_id], back_populates="similar_to")
     similar_artist = relationship("Artist", foreign_keys=[similar_artist_id], back_populates="similar_from")
 
     __table_args__ = (
-        Index("idx_similar_artists_artist", "artist_id"),
         Index("idx_similar_artists_similar", "similar_artist_id"),
         Index("idx_similar_artists_source", "source"),
         Index("idx_similar_artists_match", "match_score"),
@@ -773,18 +758,17 @@ class AlbumInfo(Base):
     listeners = Column(Integer)
     playcount = Column(BigInteger)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     album = relationship("Album", back_populates="info_records")
 
     __table_args__ = (
-        Index("idx_album_info_album", "album_id"),
         Index("idx_album_info_source", "source"),
         Index("idx_album_info_listeners", "listeners", postgresql_where=(Column("listeners") != None)),
         Index("idx_album_info_playcount", "playcount", postgresql_where=(Column("playcount") != None)),
         UniqueConstraint("album_id", "source", name="uq_album_info"),
-        CheckConstraint("summary IS NOT NULL OR content IS NOT NULL", name="chk_has_album_info"),
+        CheckConstraint("summary IS NOT NULL OR content IS NOT NULL OR listeners IS NOT NULL OR playcount IS NOT NULL", name="chk_has_album_info"),
     )
 
     def __repr__(self):
@@ -801,14 +785,13 @@ class AlbumTag(Base):
     weight = Column(Integer, nullable=False)
     source = Column(String(50), nullable=False)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     album = relationship("Album", back_populates="tag_associations")
     tag = relationship("Tag", back_populates="album_associations")
 
     __table_args__ = (
-        Index("idx_album_tags_album", "album_id"),
         Index("idx_album_tags_tag", "tag_id"),
         Index("idx_album_tags_source", "source"),
         Index("idx_album_tags_weight", "weight"),
@@ -833,16 +816,20 @@ class LocalPlayStats(Base):
     skip_count = Column(Integer, nullable=False, default=0)
     total_listen_time = Column(Numeric(12, 2), nullable=False, default=0)
     avg_percent_listened = Column(Numeric(5, 2), nullable=False, default=0)
-    last_played_at = Column(DateTime)
+    last_played_at = Column(DateTime(timezone=True))
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     track = relationship("Track", back_populates="local_play_stats")
 
     __table_args__ = (
         Index("idx_local_play_stats_last_played", "last_played_at"),
         Index("idx_local_play_stats_play_count", "play_count"),
+        CheckConstraint("play_count >= 0", name="chk_lps_play_count"),
+        CheckConstraint("skip_count >= 0", name="chk_lps_skip_count"),
+        CheckConstraint("total_listen_time >= 0", name="chk_lps_listen_time"),
+        CheckConstraint("avg_percent_listened >= 0 AND avg_percent_listened <= 100", name="chk_lps_avg_pct"),
     )
 
     def __repr__(self):
@@ -860,15 +847,14 @@ class TrackStats(Base):
     listeners = Column(Integer)
     playcount = Column(BigInteger)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     track = relationship("Track", back_populates="stats")
 
     __table_args__ = (
         UniqueConstraint("track_id", "source", name="uq_track_stats"),
         CheckConstraint("listeners IS NOT NULL OR playcount IS NOT NULL", name="chk_has_track_stats"),
-        Index("idx_track_stats_track", "track_id"),
         Index("idx_track_stats_source", "source"),
         Index("idx_track_stats_listeners", "listeners"),
         Index("idx_track_stats_playcount", "playcount"),
@@ -891,8 +877,8 @@ class TrackLyrics(Base):
     instrumental = Column(Boolean, default=False)
     external_id = Column(Integer)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     track = relationship("Track", back_populates="lyrics")
 
@@ -919,8 +905,8 @@ class ExternalMetadata(Base):
     metadata_type = Column(String(50), nullable=False)
     data = Column(JSONB, nullable=False)
 
-    fetched_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    fetched_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
     fetch_status = Column(String(20), default='success')
     error_message = Column(Text)
 

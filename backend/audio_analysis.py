@@ -201,7 +201,7 @@ class AudioAnalyzer:
         # librosa may return an array; extract scalar
         if hasattr(tempo, '__len__'):
             tempo = float(tempo[0]) if len(tempo) > 0 else 0.0
-        features["bpm"] = round(float(tempo), 2)
+        features["bpm"] = round(float(tempo), 2) if tempo > 0 else None
 
         # Key detection
         key_info = self._detect_key(y, sr)

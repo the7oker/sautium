@@ -15,8 +15,8 @@ CREATE TABLE IF NOT EXISTS embedding_models (
     name VARCHAR(100) NOT NULL UNIQUE,
     description TEXT,
     dimension INTEGER NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 -- ============================================================
@@ -32,8 +32,8 @@ CREATE TABLE IF NOT EXISTS artists (
     raw_name VARCHAR(500),
     lastfm_id VARCHAR(100),
     musicbrainz_id VARCHAR(100),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_artist_type CHECK (artist_type IN ('unknown', 'solo', 'band', 'collaboration', 'orchestra', 'other')),
     CONSTRAINT chk_gender CHECK (gender IN ('unknown', 'female', 'male', 'mixed')),
     CONSTRAINT chk_verification_status CHECK (verification_status IN ('unverified', 'suspicious', 'verified_band', 'verified_split', 'verified_collab'))
@@ -49,29 +49,29 @@ CREATE TABLE IF NOT EXISTS albums (
     musicbrainz_id VARCHAR(100),
     lastfm_id VARCHAR(100),
     user_rating NUMERIC(3, 2) CHECK (user_rating >= 0 AND user_rating <= 5),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS tracks (
     id UUID PRIMARY KEY,
     title VARCHAR(500) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS genres (
     id UUID PRIMARY KEY,
     name VARCHAR(100) NOT NULL UNIQUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS tags (
     id UUID PRIMARY KEY,
     name VARCHAR(100) NOT NULL UNIQUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_tag_name_not_empty CHECK (LENGTH(TRIM(name)) > 0)
 );
 
@@ -117,8 +117,8 @@ CREATE TABLE IF NOT EXISTS album_variants (
     sample_rate INTEGER,
     bit_depth INTEGER,
     is_lossless BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS media_files (
@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS media_files (
     file_format VARCHAR(10) DEFAULT 'FLAC',
     is_lossless BOOLEAN DEFAULT TRUE,
     file_size_bytes BIGINT,
-    file_modified_at TIMESTAMP,
+    file_modified_at TIMESTAMPTZ,
     sample_rate INTEGER,
     bit_depth INTEGER,
     bitrate INTEGER,
@@ -139,10 +139,13 @@ CREATE TABLE IF NOT EXISTS media_files (
     disc_number INTEGER DEFAULT 1,
     is_analysis_source BOOLEAN DEFAULT FALSE,
     play_count INTEGER DEFAULT 0,
-    last_played_at TIMESTAMP,
+    last_played_at TIMESTAMPTZ,
     isrc VARCHAR(20),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_mf_file_size CHECK (file_size_bytes IS NULL OR file_size_bytes >= 0),
+    CONSTRAINT chk_mf_duration CHECK (duration_seconds IS NULL OR duration_seconds >= 0),
+    CONSTRAINT chk_mf_play_count CHECK (play_count >= 0)
 );
 
 -- ============================================================
@@ -158,8 +161,8 @@ CREATE TABLE IF NOT EXISTS embeddings (
     source_bit_depth INTEGER,
     source_sample_rate INTEGER,
     source_is_lossless BOOLEAN,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (track_id, model_id)
 );
 
@@ -168,8 +171,8 @@ CREATE TABLE IF NOT EXISTS text_embeddings (
     vector vector(1024) NOT NULL,
     model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE ON UPDATE CASCADE,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (track_id, model_id)
 );
 
@@ -194,8 +197,12 @@ CREATE TABLE IF NOT EXISTS audio_features (
     source_bit_depth INTEGER,
     source_sample_rate INTEGER,
     source_is_lossless BOOLEAN,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_af_bpm CHECK (bpm IS NULL OR bpm > 0),
+    CONSTRAINT chk_af_key_confidence CHECK (key_confidence IS NULL OR (key_confidence >= 0 AND key_confidence <= 1)),
+    CONSTRAINT chk_af_danceability CHECK (danceability IS NULL OR (danceability >= 0 AND danceability <= 1)),
+    CONSTRAINT chk_af_vocal_score CHECK (vocal_score IS NULL OR (vocal_score >= 0 AND vocal_score <= 1))
 );
 
 -- ============================================================
@@ -211,8 +218,8 @@ CREATE TABLE IF NOT EXISTS artist_bios (
     url VARCHAR(500),
     listeners INTEGER,
     playcount BIGINT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_artist_bios UNIQUE (artist_id, source),
     CONSTRAINT chk_has_bio CHECK (summary IS NOT NULL OR content IS NOT NULL OR listeners IS NOT NULL OR playcount IS NOT NULL)
 );
@@ -223,8 +230,8 @@ CREATE TABLE IF NOT EXISTS artist_tags (
     tag_id UUID NOT NULL REFERENCES tags(id) ON DELETE CASCADE ON UPDATE CASCADE,
     weight INTEGER NOT NULL CHECK (weight >= 0 AND weight <= 100),
     source VARCHAR(50) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_artist_tags UNIQUE (artist_id, tag_id, source)
 );
 
@@ -234,8 +241,8 @@ CREATE TABLE IF NOT EXISTS similar_artists (
     similar_artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     match_score NUMERIC(5, 4) NOT NULL CHECK (match_score >= 0 AND match_score <= 1),
     source VARCHAR(50) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_similar_artists UNIQUE (artist_id, similar_artist_id, source),
     CONSTRAINT chk_not_self_similar CHECK (artist_id != similar_artist_id)
 );
@@ -249,8 +256,8 @@ CREATE TABLE IF NOT EXISTS album_info (
     url VARCHAR(500),
     listeners INTEGER,
     playcount BIGINT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_album_info UNIQUE (album_id, source),
     CONSTRAINT chk_has_album_info CHECK (summary IS NOT NULL OR content IS NOT NULL OR listeners IS NOT NULL OR playcount IS NOT NULL)
 );
@@ -261,8 +268,8 @@ CREATE TABLE IF NOT EXISTS album_tags (
     tag_id UUID NOT NULL REFERENCES tags(id) ON DELETE CASCADE ON UPDATE CASCADE,
     weight INTEGER NOT NULL CHECK (weight >= 0 AND weight <= 100),
     source VARCHAR(50) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_album_tags UNIQUE (album_id, tag_id, source)
 );
 
@@ -273,8 +280,8 @@ CREATE TABLE IF NOT EXISTS genre_descriptions (
     summary TEXT,
     content TEXT,
     url VARCHAR(500),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_genre_descriptions UNIQUE (genre_id, source),
     CONSTRAINT chk_has_description CHECK (summary IS NOT NULL OR content IS NOT NULL)
 );
@@ -285,8 +292,8 @@ CREATE TABLE IF NOT EXISTS track_stats (
     source VARCHAR(50) NOT NULL,
     listeners INTEGER,
     playcount BIGINT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_track_stats UNIQUE (track_id, source),
     CONSTRAINT chk_has_track_stats CHECK (listeners IS NOT NULL OR playcount IS NOT NULL)
 );
@@ -298,8 +305,8 @@ CREATE TABLE IF NOT EXISTS external_metadata (
     source VARCHAR(50) NOT NULL,
     metadata_type VARCHAR(50) NOT NULL,
     data JSONB NOT NULL,
-    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    fetched_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     fetch_status VARCHAR(20) DEFAULT 'success',
     error_message TEXT,
     CONSTRAINT uq_external_metadata UNIQUE (entity_type, entity_id, source, metadata_type)
@@ -313,8 +320,8 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     id SERIAL PRIMARY KEY,
     title VARCHAR(500),
     claude_session_id VARCHAR(100),
-    created_at TIMESTAMP DEFAULT now(),
-    updated_at TIMESTAMP DEFAULT now()
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS chat_messages (
@@ -329,8 +336,8 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     tracks_retrieved INTEGER,
     is_not_relevant BOOLEAN DEFAULT FALSE,
     feedback_comment TEXT,
-    feedback_at TIMESTAMP,
-    created_at TIMESTAMP DEFAULT now()
+    feedback_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now()
 );
 
 -- ============================================================
@@ -341,13 +348,13 @@ CREATE TABLE IF NOT EXISTS listening_history (
     id SERIAL PRIMARY KEY,
     media_file_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    started_at TIMESTAMP NOT NULL,
-    ended_at TIMESTAMP,
+    started_at TIMESTAMPTZ NOT NULL,
+    ended_at TIMESTAMPTZ,
     duration_listened NUMERIC(10, 2) CHECK (duration_listened >= 0),
     percent_listened NUMERIC(5, 2) CHECK (percent_listened >= 0 AND percent_listened <= 100),
     completed BOOLEAN DEFAULT FALSE,
     skipped BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS local_play_stats (
@@ -356,9 +363,13 @@ CREATE TABLE IF NOT EXISTS local_play_stats (
     skip_count INTEGER NOT NULL DEFAULT 0,
     total_listen_time NUMERIC(12, 2) NOT NULL DEFAULT 0,
     avg_percent_listened NUMERIC(5, 2) NOT NULL DEFAULT 0,
-    last_played_at TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    last_played_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_lps_play_count CHECK (play_count >= 0),
+    CONSTRAINT chk_lps_skip_count CHECK (skip_count >= 0),
+    CONSTRAINT chk_lps_listen_time CHECK (total_listen_time >= 0),
+    CONSTRAINT chk_lps_avg_pct CHECK (avg_percent_listened >= 0 AND avg_percent_listened <= 100)
 );
 
 CREATE TABLE IF NOT EXISTS track_lyrics (
@@ -368,9 +379,9 @@ CREATE TABLE IF NOT EXISTS track_lyrics (
     plain_lyrics TEXT,
     synced_lyrics TEXT,
     instrumental BOOLEAN DEFAULT FALSE,
-    language VARCHAR(10),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    external_id INTEGER,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(track_id, source)
 );
 
@@ -381,8 +392,8 @@ CREATE TABLE IF NOT EXISTS lyrics_embeddings (
     vector vector(1024) NOT NULL,
     chunk_index INTEGER NOT NULL DEFAULT 0,
     chunk_text TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(track_id, model_id, chunk_index)
 );
 
@@ -393,8 +404,8 @@ CREATE TABLE IF NOT EXISTS artist_bio_embeddings (
     vector vector(1024) NOT NULL,
     chunk_index INTEGER NOT NULL DEFAULT 0,
     chunk_text TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (artist_id, model_id, chunk_index)
 );
 
@@ -405,8 +416,8 @@ CREATE TABLE IF NOT EXISTS album_info_embeddings (
     vector vector(1024) NOT NULL,
     chunk_index INTEGER NOT NULL DEFAULT 0,
     chunk_text TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (album_id, model_id, chunk_index)
 );
 
@@ -417,8 +428,8 @@ CREATE TABLE IF NOT EXISTS genre_desc_embeddings (
     vector vector(1024) NOT NULL,
     chunk_index INTEGER NOT NULL DEFAULT 0,
     chunk_text TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (genre_id, model_id, chunk_index)
 );
 
@@ -426,10 +437,8 @@ CREATE TABLE IF NOT EXISTS genre_desc_embeddings (
 -- Indexes
 -- ============================================================
 
--- Embedding indexes
-CREATE INDEX IF NOT EXISTS idx_embedding_models_name ON embedding_models(name);
+-- Embedding indexes (single-column indexes on leading PK/UNIQUE columns omitted — covered by constraint indexes)
 CREATE INDEX IF NOT EXISTS idx_embeddings_model_id ON embeddings(model_id);
-CREATE INDEX IF NOT EXISTS idx_embeddings_track_id ON embeddings(track_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_source_mf ON embeddings(source_media_file_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_vector ON embeddings
     USING hnsw (vector vector_cosine_ops)
@@ -437,48 +446,41 @@ CREATE INDEX IF NOT EXISTS idx_embeddings_vector ON embeddings
 
 -- Text embedding indexes
 CREATE INDEX IF NOT EXISTS idx_text_embeddings_model_id ON text_embeddings(model_id);
-CREATE INDEX IF NOT EXISTS idx_text_embeddings_track_id ON text_embeddings(track_id);
 CREATE INDEX IF NOT EXISTS idx_text_embeddings_vector ON text_embeddings
     USING hnsw (vector vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
 -- Lyrics embedding indexes
-CREATE INDEX IF NOT EXISTS idx_lyrics_embeddings_track_id ON lyrics_embeddings(track_id);
 CREATE INDEX IF NOT EXISTS idx_lyrics_embeddings_model_id ON lyrics_embeddings(model_id);
 CREATE INDEX IF NOT EXISTS idx_lyrics_embeddings_vector ON lyrics_embeddings
     USING hnsw (vector vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
 -- Artist bio embedding indexes
-CREATE INDEX IF NOT EXISTS idx_artist_bio_emb_artist ON artist_bio_embeddings(artist_id);
 CREATE INDEX IF NOT EXISTS idx_artist_bio_emb_model ON artist_bio_embeddings(model_id);
 CREATE INDEX IF NOT EXISTS idx_artist_bio_emb_vector ON artist_bio_embeddings
     USING hnsw (vector vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
 -- Album info embedding indexes
-CREATE INDEX IF NOT EXISTS idx_album_info_emb_album ON album_info_embeddings(album_id);
 CREATE INDEX IF NOT EXISTS idx_album_info_emb_model ON album_info_embeddings(model_id);
 CREATE INDEX IF NOT EXISTS idx_album_info_emb_vector ON album_info_embeddings
     USING hnsw (vector vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
 -- Genre description embedding indexes
-CREATE INDEX IF NOT EXISTS idx_genre_desc_emb_genre ON genre_desc_embeddings(genre_id);
 CREATE INDEX IF NOT EXISTS idx_genre_desc_emb_model ON genre_desc_embeddings(model_id);
 CREATE INDEX IF NOT EXISTS idx_genre_desc_emb_vector ON genre_desc_embeddings
     USING hnsw (vector vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
 -- Core table indexes
-CREATE INDEX IF NOT EXISTS idx_artists_name ON artists(name);
 CREATE INDEX IF NOT EXISTS idx_artists_name_trgm ON artists USING gin (name gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_artists_verification_status ON artists(verification_status);
 CREATE INDEX IF NOT EXISTS idx_artists_artist_type ON artists(artist_type);
 CREATE INDEX IF NOT EXISTS idx_artists_gender ON artists(gender);
 
 -- Artist members indexes
-CREATE INDEX IF NOT EXISTS idx_artist_members_compound ON artist_members(compound_artist_id);
 CREATE INDEX IF NOT EXISTS idx_artist_members_member ON artist_members(member_artist_id);
 CREATE INDEX IF NOT EXISTS idx_albums_title ON albums(title);
 CREATE INDEX IF NOT EXISTS idx_albums_title_trgm ON albums USING gin (title gin_trgm_ops);
@@ -486,24 +488,17 @@ CREATE INDEX IF NOT EXISTS idx_albums_release_year ON albums(release_year);
 CREATE INDEX IF NOT EXISTS idx_albums_lastfm_id ON albums(lastfm_id);
 CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
 CREATE INDEX IF NOT EXISTS idx_tracks_title_trgm ON tracks USING gin (title gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_genres_name ON genres(name);
-CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name);
 CREATE INDEX IF NOT EXISTS idx_tags_name_lower ON tags(name text_pattern_ops);
 
 -- Association indexes
-CREATE INDEX IF NOT EXISTS idx_track_artists_track_id ON track_artists(track_id);
 CREATE INDEX IF NOT EXISTS idx_track_artists_artist_id ON track_artists(artist_id);
-CREATE INDEX IF NOT EXISTS idx_album_artists_album_id ON album_artists(album_id);
 CREATE INDEX IF NOT EXISTS idx_album_artists_artist_id ON album_artists(artist_id);
-CREATE INDEX IF NOT EXISTS idx_track_genres_track_id ON track_genres(track_id);
 CREATE INDEX IF NOT EXISTS idx_track_genres_genre_id ON track_genres(genre_id);
 
 -- Physical entity indexes
 CREATE INDEX IF NOT EXISTS idx_album_variants_album_id ON album_variants(album_id);
-CREATE INDEX IF NOT EXISTS idx_album_variants_directory ON album_variants(directory_path);
 CREATE INDEX IF NOT EXISTS idx_media_files_track_id ON media_files(track_id);
 CREATE INDEX IF NOT EXISTS idx_media_files_album_variant_id ON media_files(album_variant_id);
-CREATE INDEX IF NOT EXISTS idx_media_files_file_path ON media_files(file_path);
 CREATE INDEX IF NOT EXISTS idx_media_files_play_count ON media_files(play_count);
 CREATE INDEX IF NOT EXISTS idx_media_files_analysis_source ON media_files(track_id, is_analysis_source)
     WHERE is_analysis_source = true;
@@ -516,7 +511,6 @@ CREATE INDEX IF NOT EXISTS idx_external_metadata_status ON external_metadata(fet
 CREATE INDEX IF NOT EXISTS idx_external_metadata_data ON external_metadata USING gin (data);
 
 -- Audio feature indexes
-CREATE INDEX IF NOT EXISTS idx_audio_features_track_id ON audio_features(track_id);
 CREATE INDEX IF NOT EXISTS idx_audio_features_source_mf ON audio_features(source_media_file_id);
 CREATE INDEX IF NOT EXISTS idx_audio_features_bpm ON audio_features(bpm);
 CREATE INDEX IF NOT EXISTS idx_audio_features_key ON audio_features(key, mode);
@@ -527,29 +521,22 @@ CREATE INDEX IF NOT EXISTS idx_audio_features_instruments ON audio_features USIN
 CREATE INDEX IF NOT EXISTS idx_audio_features_moods ON audio_features USING gin (moods);
 
 -- Metadata indexes
-CREATE INDEX IF NOT EXISTS idx_artist_bios_artist ON artist_bios(artist_id);
 CREATE INDEX IF NOT EXISTS idx_artist_bios_source ON artist_bios(source);
 CREATE INDEX IF NOT EXISTS idx_artist_bios_listeners ON artist_bios(listeners) WHERE listeners IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_artist_bios_playcount ON artist_bios(playcount) WHERE playcount IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_artist_tags_artist ON artist_tags(artist_id);
 CREATE INDEX IF NOT EXISTS idx_artist_tags_tag ON artist_tags(tag_id);
 CREATE INDEX IF NOT EXISTS idx_artist_tags_source ON artist_tags(source);
 CREATE INDEX IF NOT EXISTS idx_artist_tags_weight ON artist_tags(weight);
-CREATE INDEX IF NOT EXISTS idx_similar_artists_artist ON similar_artists(artist_id);
 CREATE INDEX IF NOT EXISTS idx_similar_artists_similar ON similar_artists(similar_artist_id);
 CREATE INDEX IF NOT EXISTS idx_similar_artists_source ON similar_artists(source);
 CREATE INDEX IF NOT EXISTS idx_similar_artists_match ON similar_artists(match_score);
-CREATE INDEX IF NOT EXISTS idx_album_info_album ON album_info(album_id);
 CREATE INDEX IF NOT EXISTS idx_album_info_source ON album_info(source);
 CREATE INDEX IF NOT EXISTS idx_album_info_listeners ON album_info(listeners) WHERE listeners IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_album_info_playcount ON album_info(playcount) WHERE playcount IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_album_tags_album ON album_tags(album_id);
 CREATE INDEX IF NOT EXISTS idx_album_tags_tag ON album_tags(tag_id);
 CREATE INDEX IF NOT EXISTS idx_album_tags_source ON album_tags(source);
 CREATE INDEX IF NOT EXISTS idx_album_tags_weight ON album_tags(weight);
-CREATE INDEX IF NOT EXISTS idx_genre_descriptions_genre ON genre_descriptions(genre_id);
 CREATE INDEX IF NOT EXISTS idx_genre_descriptions_source ON genre_descriptions(source);
-CREATE INDEX IF NOT EXISTS idx_track_stats_track_id ON track_stats(track_id);
 CREATE INDEX IF NOT EXISTS idx_track_stats_source ON track_stats(source);
 CREATE INDEX IF NOT EXISTS idx_track_stats_listeners ON track_stats(listeners);
 CREATE INDEX IF NOT EXISTS idx_track_stats_playcount ON track_stats(playcount);
@@ -664,6 +651,26 @@ DO $$ BEGIN CREATE TRIGGER trigger_external_metadata_updated_at BEFORE UPDATE ON
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+DO $$ BEGIN CREATE TRIGGER trg_text_embeddings_updated_at BEFORE UPDATE ON text_embeddings
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN CREATE TRIGGER trg_chat_sessions_updated_at BEFORE UPDATE ON chat_sessions
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN CREATE TRIGGER trg_local_play_stats_updated_at BEFORE UPDATE ON local_play_stats
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN CREATE TRIGGER trg_track_lyrics_updated_at BEFORE UPDATE ON track_lyrics
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN CREATE TRIGGER trg_track_stats_updated_at BEFORE UPDATE ON track_stats
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- ============================================================
 -- P2P Chat (friends + encrypted messaging)
 -- ============================================================
@@ -674,8 +681,8 @@ CREATE TABLE IF NOT EXISTS friends (
     public_key_hex VARCHAR(128) NOT NULL UNIQUE,
     invite_code VARCHAR(96) NOT NULL,
     display_name VARCHAR(128) NOT NULL DEFAULT '',
-    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_seen TIMESTAMP,
+    added_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMPTZ,
     is_blocked BOOLEAN DEFAULT FALSE,
     previous_public_key_hex VARCHAR(128)
 );
@@ -685,7 +692,7 @@ CREATE TABLE IF NOT EXISTS p2p_messages (
     friend_id INTEGER NOT NULL REFERENCES friends(id) ON DELETE CASCADE,
     direction VARCHAR(3) NOT NULL CHECK (direction IN ('in', 'out')),
     content TEXT NOT NULL,
-    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     delivered BOOLEAN DEFAULT FALSE,
     read BOOLEAN DEFAULT FALSE,
     message_uuid UUID DEFAULT gen_random_uuid()
@@ -699,7 +706,7 @@ CREATE TABLE IF NOT EXISTS pending_key_rotations (
     new_invite_code VARCHAR(96) NOT NULL,
     rotation_message BYTEA NOT NULL,
     signature BYTEA NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_friends_invite_code ON friends(invite_code);
