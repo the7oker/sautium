@@ -34,6 +34,10 @@ Name: "{commondesktop}\Sautium"; Filename: "{app}\Sautium.exe"
 Name: "{group}\Uninstall Sautium"; Filename: "{uninstallexe}"
 
 [Run]
+; Firewall rules for P2P (UDP broadcast + TCP sync on any port in range)
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Sautium P2P"""; StatusMsg: "Updating firewall rules..."; Flags: runhidden waituntilterminated; Check: not IsUninstaller
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Sautium P2P"" dir=in action=allow protocol=UDP localport=19002 profile=private"; StatusMsg: "Adding firewall rule (UDP)..."; Flags: runhidden waituntilterminated
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Sautium P2P"" dir=in action=allow protocol=TCP localport=20000-29999 profile=private"; StatusMsg: "Adding firewall rule (TCP)..."; Flags: runhidden waituntilterminated
 ; Clone repository on first install
 Filename: "git"; Parameters: "clone https://github.com/user/sautium.git ""{app}\repo"""; StatusMsg: "Cloning repository..."; Flags: runhidden waituntilterminated
 ; Install PyTorch with CUDA support (PyPI default is CPU-only on Windows)
@@ -42,6 +46,10 @@ Filename: "{app}\python312\python.exe"; Parameters: "-m pip install torch torchv
 Filename: "{app}\python312\python.exe"; Parameters: "-m pip install -r ""{app}\repo\backend\requirements-base.txt"" --quiet"; StatusMsg: "Installing dependencies..."; Flags: runhidden waituntilterminated
 ; Install desktop requirements
 Filename: "{app}\python312\python.exe"; Parameters: "-m pip install -r ""{app}\repo\desktop\requirements.txt"" --quiet"; StatusMsg: "Installing launcher dependencies..."; Flags: runhidden waituntilterminated
+
+[UninstallRun]
+; Remove firewall rules on uninstall
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Sautium P2P"""; Flags: runhidden waituntilterminated
 
 [UninstallDelete]
 ; Clean up generated files but NOT %APPDATA%/Sautium

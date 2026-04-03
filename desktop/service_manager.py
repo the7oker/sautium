@@ -533,11 +533,11 @@ class ServiceManager:
 
     @staticmethod
     def _ensure_firewall_rule(port: int, protocol: str = "TCP") -> None:
-        """Add Windows Firewall rule to allow LAN access on the given port.
+        """Best-effort Windows Firewall rule (no UAC prompt).
 
-        Tries without elevation first; if that fails (non-admin process),
-        shells out via ShellExecuteW with 'runas' to trigger a one-time
-        UAC prompt.
+        Firewall rules are normally created by the Inno Setup installer
+        which runs elevated.  This method is a fallback for dev/portable
+        installs — it tries without elevation and logs a warning on failure.
         """
         if sys.platform != "win32":
             return
@@ -553,7 +553,6 @@ class ServiceManager:
             if check.returncode == 0 and rule_name in check.stdout:
                 return  # rule already exists
 
-            # Try adding without elevation (works if already admin)
             add = subprocess.run(
                 ["netsh", "advfirewall", "firewall", "add", "rule",
                  f"name={rule_name}",
@@ -564,32 +563,12 @@ class ServiceManager:
             )
             if add.returncode == 0:
                 logger.info(f"Firewall rule created: {rule_name}")
-                return
-
-            # Non-admin — use ShellExecuteW with 'runas' for UAC elevation
-            logger.info(
-                f"Firewall rule needs elevation, requesting admin: "
-                f"{rule_name}"
-            )
-            import ctypes
-            args = (
-                f'advfirewall firewall add rule name="{rule_name}" '
-                f"dir=in action=allow protocol={protocol} "
-                f"localport={port} profile=private"
-            )
-            ret = ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", "netsh", args, None, 0,
-            )
-            # ShellExecuteW returns >32 on success
-            if ret > 32:
-                logger.info(f"Firewall rule created (elevated): {rule_name}")
             else:
-                logger.warning(
-                    f"Firewall rule elevation declined (code {ret}): "
-                    f"{rule_name} — P2P may not work for remote peers"
+                logger.debug(
+                    f"Firewall rule not created (needs admin): {rule_name}"
                 )
         except Exception as e:
-            logger.warning(f"Could not create firewall rule: {e}")
+            logger.debug(f"Could not create firewall rule: {e}")
 
     @staticmethod
     def _kill_orphan_on_port(port: int) -> None:
