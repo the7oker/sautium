@@ -533,11 +533,11 @@ class ServiceManager:
 
     @staticmethod
     def _ensure_firewall_rule(port: int, protocol: str = "TCP") -> None:
-        """Best-effort Windows Firewall rule (no UAC prompt).
+        """Add Windows Firewall rule, with UAC elevation if needed.
 
-        Firewall rules are normally created by the Inno Setup installer
-        which runs elevated.  This method is a fallback for dev/portable
-        installs — it tries without elevation and logs a warning on failure.
+        Skips silently if the rule already exists.  Tries without elevation
+        first; on failure requests admin via ShellExecuteW (one-time UAC
+        prompt per missing rule).
         """
         if sys.platform != "win32":
             return
@@ -553,6 +553,7 @@ class ServiceManager:
             if check.returncode == 0 and rule_name in check.stdout:
                 return  # rule already exists
 
+            # Try without elevation (works if already admin)
             add = subprocess.run(
                 ["netsh", "advfirewall", "firewall", "add", "rule",
                  f"name={rule_name}",
@@ -563,9 +564,23 @@ class ServiceManager:
             )
             if add.returncode == 0:
                 logger.info(f"Firewall rule created: {rule_name}")
+                return
+
+            # Elevate via UAC
+            import ctypes
+            args = (
+                f'advfirewall firewall add rule name="{rule_name}" '
+                f"dir=in action=allow protocol={protocol} "
+                f"localport={port} profile=private"
+            )
+            ret = ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", "netsh", args, None, 0,
+            )
+            if ret > 32:
+                logger.info(f"Firewall rule created (elevated): {rule_name}")
             else:
-                logger.debug(
-                    f"Firewall rule not created (needs admin): {rule_name}"
+                logger.warning(
+                    f"Firewall elevation declined: {rule_name}"
                 )
         except Exception as e:
             logger.debug(f"Could not create firewall rule: {e}")
