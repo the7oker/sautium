@@ -510,7 +510,11 @@ class SyncServer:
             "/api/chat/key-rotation", self.handle_chat_key_rotation
         )
 
-        self._runner = web.AppRunner(self._app, access_log=None)
+        self._runner = web.AppRunner(
+            self._app,
+            access_log=None,
+            keepalive_timeout=30,    # close idle keep-alive after 30s
+        )
         await self._runner.setup()
 
         # Enable TLS with self-signed certificate
@@ -524,6 +528,7 @@ class SyncServer:
         self._site = web.TCPSite(
             self._runner, "0.0.0.0", self.port, ssl_context=ssl_ctx,
             reuse_address=True,
+            shutdown_timeout=5.0,    # fast restart on health-check failure
         )
         try:
             await self._site.start()

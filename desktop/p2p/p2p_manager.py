@@ -254,42 +254,28 @@ class P2PManager:
 
             self._running = True
 
-            # Monitor sync server — restart if it crashes
+            # Monitor sync server — restart if it crashes.
+            # Check every 10 seconds with a self-health probe.
+            self._health_fail_count = 0
             while not self._stop_event.is_set():
                 try:
                     await asyncio.wait_for(
-                        self._stop_event.wait(), timeout=3
+                        self._stop_event.wait(), timeout=10
                     )
                     break  # stop_event was set
                 except asyncio.TimeoutError:
                     pass  # check sync server health
 
-                # Check if sync server site is still serving.
-                # Python 3.13 proactor_events closes the listening
-                # socket and stops the accept loop on ANY OSError
-                # (e.g. WinError 64 during TLS handshake).  The
-                # _server object stays alive so we also check if
-                # the underlying socket is still open.
-                needs_restart = False
-                if self._sync_server and self._sync_server._site:
-                    site = self._sync_server._site
-                    if site._server is None:
-                        needs_restart = True
-                    elif site._server.sockets is not None and len(
-                        site._server.sockets
-                    ) == 0:
-                        needs_restart = True
-                    elif (site._server.sockets
-                          and site._server.sockets[0].fileno() == -1):
-                        needs_restart = True
+                needs_restart = await self._check_sync_server_health()
 
                 if needs_restart:
                     logger.warning(
-                        "Sync server socket closed, restarting..."
+                        "Sync server not responding, restarting..."
                     )
                     try:
                         await self._sync_server.stop()
                         await self._sync_server.start()
+                        self._health_fail_count = 0
                         _progress("Sync server restarted")
                     except Exception as e:
                         logger.error(f"Sync server restart failed: {e}")
@@ -299,6 +285,62 @@ class P2PManager:
             _progress(f"P2P error: {e}")
         finally:
             await self._cleanup()
+
+    async def _check_sync_server_health(self) -> bool:
+        """Check if the sync server is actually accepting connections.
+
+        Returns True if the server needs to be restarted.
+
+        First checks socket-level state (fast), then falls back to a
+        self-connection probe every 3 consecutive failures to avoid
+        false positives from transient network hiccups.
+        """
+        if not self._sync_server or not self._sync_server._site:
+            return True
+
+        site = self._sync_server._site
+        # Fast checks: server object or socket clearly dead
+        if site._server is None:
+            return True
+        if site._server.sockets is not None and len(
+            site._server.sockets
+        ) == 0:
+            return True
+        try:
+            if (site._server.sockets
+                    and site._server.sockets[0].fileno() == -1):
+                return True
+        except Exception:
+            return True
+
+        # Self-connection probe: catches the Python 3.13 proactor bug
+        # where the socket looks alive but the accept loop is dead.
+        import ssl
+        import socket
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2)
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            wrapped = ctx.wrap_socket(sock, server_hostname="localhost")
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: wrapped.connect(("127.0.0.1", self._http_port)),
+            )
+            wrapped.close()
+            self._health_fail_count = 0
+            return False  # server is healthy
+        except Exception:
+            self._health_fail_count += 1
+            if self._health_fail_count >= 2:
+                logger.warning(
+                    f"Sync server health check failed "
+                    f"{self._health_fail_count} times"
+                )
+                return True  # needs restart
+            return False  # might be transient
 
     async def _cleanup(self):
         """Clean shutdown of all services."""
