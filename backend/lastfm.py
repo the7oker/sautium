@@ -50,7 +50,7 @@ class LastFmService:
         try:
             artist = self.network.get_artist(artist_name)
 
-            # Get bio
+            # Get bio — first API call, also validates artist exists
             bio_data = None
             try:
                 bio = artist.get_bio_summary()
@@ -60,6 +60,8 @@ class LastFmService:
                     "content": content,
                     "url": artist.get_url(),
                 }
+            except pylast.WSError:
+                raise  # re-raise so outer handler catches "Artist not found"
             except Exception as e:
                 logger.debug(f"No bio for {artist_name}: {e}")
 
@@ -81,6 +83,8 @@ class LastFmService:
                     "listeners": int(artist.get_listener_count()),
                     "playcount": int(artist.get_playcount()),
                 }
+            except pylast.WSError:
+                raise
             except Exception as e:
                 logger.debug(f"No stats for {artist_name}: {e}")
 
@@ -96,8 +100,14 @@ class LastFmService:
                         }
                         for similar_artist in similar
                     ]
+                except pylast.WSError:
+                    raise
                 except Exception as e:
                     logger.debug(f"No similar artists for {artist_name}: {e}")
+
+            # If all API calls failed, artist doesn't exist
+            if not bio_data and not stats_data and not tags_data and not similar_data:
+                return None
 
             return {
                 "bio": bio_data,
@@ -107,7 +117,7 @@ class LastFmService:
             }
 
         except pylast.WSError as e:
-            if "Artist not found" in str(e):
+            if "not found" in str(e).lower():
                 logger.info(f"Artist not found on Last.fm: {artist_name}")
                 return None
             else:
@@ -765,7 +775,7 @@ class LastFmService:
         try:
             album = self.network.get_album(artist_name, album_title)
 
-            # Get wiki
+            # Get wiki — first API call, also validates album exists
             wiki_data = None
             try:
                 summary = album.get_wiki_summary()
@@ -776,6 +786,8 @@ class LastFmService:
                         "content": content,
                         "url": album.get_url(),
                     }
+            except pylast.WSError:
+                raise  # re-raise so outer handler catches "Album not found"
             except Exception as e:
                 logger.debug(f"No wiki for {artist_name} - {album_title}: {e}")
 
@@ -786,6 +798,8 @@ class LastFmService:
                     "listeners": int(album.get_listener_count()),
                     "playcount": int(album.get_playcount()),
                 }
+            except pylast.WSError:
+                raise
             except Exception as e:
                 logger.debug(f"No stats for {artist_name} - {album_title}: {e}")
 
@@ -811,8 +825,14 @@ class LastFmService:
                     }
                     for track in tracks
                 ]
+            except pylast.WSError:
+                raise
             except Exception as e:
                 logger.debug(f"No tracks for {artist_name} - {album_title}: {e}")
+
+            # If all API calls failed, album doesn't exist
+            if not wiki_data and not stats_data and not tags_data and not tracks_data:
+                return None
 
             return {
                 "wiki": wiki_data,
@@ -822,7 +842,7 @@ class LastFmService:
             }
 
         except pylast.WSError as e:
-            if "Album not found" in str(e):
+            if "not found" in str(e).lower():
                 logger.info(f"Album not found on Last.fm: {artist_name} - {album_title}")
                 return None
             else:

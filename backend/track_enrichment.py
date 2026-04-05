@@ -94,7 +94,7 @@ def run_parallel_enrichment(
     try:
         from normalize_artists import normalize_artists as do_normalize
         with get_db_context() as db:
-            norm_stats = do_normalize(db, pass1=True, pass2=False)
+            norm_stats = do_normalize(db, pass1=True, pass2=True)
             splits = norm_stats.get('pass1', {}).get('split', 0)
             if splits > 0:
                 logger.info(f"Pre-enrich normalization: {splits} artists split")

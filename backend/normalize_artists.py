@@ -36,6 +36,8 @@ SAFE_SEPARATORS = [
     (r'\s+feat\.?\s+',   'feat.'),
     (r'\s+ft\.?\s+',     'ft.'),
     (r'\s+vs\.?\s+',     'vs.'),
+    (r'\s+pres\.?\s+',   'pres.'),
+    (r'\s+aka\s+',       'aka'),
 ]
 
 # Patterns that MIGHT be band names — need Last.fm verification
@@ -44,8 +46,35 @@ SUSPICIOUS_SEPARATORS = [
     (r',\s+',      ','),
     (r'\s+and\s+', 'and'),
     (r'\s+with\s+','with'),
-    (r'\s+/\s+',   '/'),
+    (r'\s*/\s*',   '/'),      # slash with or without spaces (BORIS BREJCHA/VARIOUS)
 ]
+
+
+def _clean_artist_name(name: str) -> str:
+    """Strip trailing separators, placeholders, and fix whitespace artifacts."""
+    # Collapse multiple spaces
+    name = re.sub(r'\s{2,}', ' ', name)
+    # Remove placeholder suffixes: "X/VARIOUS", "X & Various Artists"
+    _ph = r'(?:various(?:\s+artists?)?|va|unknown(?:\s+artist)?)'
+    name = re.sub(r'\s*[/&,;]\s*' + _ph + r'\s*$', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'^\s*' + _ph + r'\s*[/&,;]\s*', '', name, flags=re.IGNORECASE)
+    # Strip trailing separators: & ; , /
+    name = re.sub(r'[\s&;,/]+$', '', name)
+    # Strip trailing incomplete patterns: "feat." "feat" "ft." at end
+    name = re.sub(r'\s+(?:feat\.?|ft\.?|pres\.?)\s*$', '', name, flags=re.IGNORECASE)
+    return name.strip()
+
+
+# Placeholder names that are not real artists — drop from split results
+_PLACEHOLDER_NAMES = {
+    'various', 'various artists', 'various artist', 'va',
+    'unknown', 'unknown artist',
+}
+
+
+def _filter_parts(parts: List[str]) -> List[str]:
+    """Remove placeholder names from split results."""
+    return [p for p in parts if p.strip().lower() not in _PLACEHOLDER_NAMES]
 
 
 def detect_compound_type(name: str) -> Optional[Tuple[str, str, List[str]]]:
@@ -57,19 +86,22 @@ def detect_compound_type(name: str) -> Optional[Tuple[str, str, List[str]]]:
         ('suspicious', separator_label, [parts]) — needs verification
         None — not compound
     """
+    # Pre-clean the name
+    cleaned = _clean_artist_name(name)
+
     # Check safe patterns first (higher priority)
     for pattern, label in SAFE_SEPARATORS:
-        if re.search(pattern, name, re.IGNORECASE):
-            parts = re.split(pattern, name, flags=re.IGNORECASE)
-            parts = [p.strip() for p in parts if p.strip()]
+        if re.search(pattern, cleaned, re.IGNORECASE):
+            parts = re.split(pattern, cleaned, flags=re.IGNORECASE)
+            parts = _filter_parts([p.strip() for p in parts if p.strip()])
             if len(parts) > 1:
                 return ('safe', label, parts)
 
     # Check suspicious patterns
     for pattern, label in SUSPICIOUS_SEPARATORS:
-        if re.search(pattern, name, re.IGNORECASE):
-            parts = re.split(pattern, name, flags=re.IGNORECASE)
-            parts = [p.strip() for p in parts if p.strip()]
+        if re.search(pattern, cleaned, re.IGNORECASE):
+            parts = re.split(pattern, cleaned, flags=re.IGNORECASE)
+            parts = _filter_parts([p.strip() for p in parts if p.strip()])
             if len(parts) > 1:
                 return ('suspicious', label, parts)
 
@@ -350,6 +382,72 @@ def normalize_compound_artist(
 
 # ─── Two-pass normalization ───────────────────────────────────────────────
 
+def _clean_all_artist_names(db: Session, dry_run: bool = False) -> Dict:
+    """
+    Pre-step: fix malformed artist names across ALL statuses.
+    Removes placeholders (VARIOUS), trailing separators, double spaces.
+    """
+    logger.info("=== Pre-step: cleaning artist names ===")
+
+    all_artists = db.execute(text("""
+        SELECT id::text, name FROM artists
+        WHERE verification_status NOT IN ('verified_split')
+        ORDER BY name
+    """)).fetchall()
+
+    cleaned_count = 0
+    merged_count = 0
+    for artist_id, name in all_artists:
+        cleaned = _clean_artist_name(name)
+        if cleaned == name or not cleaned:
+            continue
+
+        if not dry_run:
+            new_id = str(artist_uuid(cleaned))
+            # Check if cleaned name already exists as different artist
+            existing = db.execute(text(
+                "SELECT id::text FROM artists WHERE id = :id"
+            ), {"id": new_id}).first()
+            if existing and existing[0] != artist_id:
+                # Merge: reassign track_artists/album references to existing artist
+                target_id = existing[0]
+                # Reassign track_artists (skip if already linked to target)
+                db.execute(text("""
+                    UPDATE track_artists SET artist_id = :target
+                    WHERE artist_id = :old
+                    AND NOT EXISTS (
+                        SELECT 1 FROM track_artists ta2
+                        WHERE ta2.track_id = track_artists.track_id
+                        AND ta2.artist_id = :target
+                        AND ta2.role = track_artists.role
+                    )
+                """), {"target": target_id, "old": artist_id})
+                # Delete duplicate track_artists that would violate unique constraint
+                db.execute(text(
+                    "DELETE FROM track_artists WHERE artist_id = :old"
+                ), {"old": artist_id})
+                # Delete the dirty artist (CASCADE handles other FK refs)
+                db.execute(text(
+                    "DELETE FROM artists WHERE id = :id"
+                ), {"id": artist_id})
+                merged_count += 1
+                logger.info(f"Merged: '{name}' -> existing '{cleaned}'")
+                continue
+
+            db.execute(text(
+                "UPDATE artists SET name = :name WHERE id = :id"
+            ), {"name": cleaned, "id": artist_id})
+
+        cleaned_count += 1
+        logger.info(f"Cleaned name: '{name}' -> '{cleaned}'")
+
+    if not dry_run and cleaned_count > 0:
+        db.commit()
+
+    logger.info(f"Pre-step done: {cleaned_count} names cleaned, {merged_count} merged out of {len(all_artists)} scanned")
+    return {'cleaned': cleaned_count, 'merged': merged_count, 'scanned': len(all_artists)}
+
+
 def normalize_pass1(db: Session, dry_run: bool = False) -> Dict:
     """
     Pass 1: Split safe patterns (feat./ft./featuring/vs.) without external lookups.
@@ -473,23 +571,64 @@ def normalize_pass2(db: Session, dry_run: bool = False) -> Dict:
             continue
 
         if compound_info:
-            # Found on Last.fm — treat as a recognized entity (band/project)
-            listeners = compound_info.get('stats', {}).get('listeners', 0)
-            if isinstance(listeners, str):
-                listeners = int(listeners) if listeners.isdigit() else 0
+            # Found on Last.fm — but is it a real band or just a collaboration page?
+            compound_listeners = compound_info.get('stats', {}).get('listeners', 0)
+            if isinstance(compound_listeners, str):
+                compound_listeners = int(compound_listeners) if compound_listeners.isdigit() else 0
 
-            logger.info(f"  Found on Last.fm: '{name}' ({listeners} listeners) -> verified_band")
+            # Check if individual parts have significantly more listeners
+            is_collaboration = False
+            if len(parts) >= 2 and compound_listeners < 50000:
+                parts_listeners = []
+                for part in parts:
+                    try:
+                        part_info = lastfm.get_artist_info(part, fetch_similar=False)
+                        time.sleep(0.25)
+                        pl = 0
+                        if part_info:
+                            pl = part_info.get('stats', {}).get('listeners', 0)
+                            if isinstance(pl, str):
+                                pl = int(pl) if pl.isdigit() else 0
+                        parts_listeners.append((part, pl))
+                    except Exception:
+                        parts_listeners.append((part, 0))
 
-            if not dry_run:
-                db.execute(text("""
-                    UPDATE artists SET
-                        verification_status = 'verified_band',
-                        artist_type = 'band',
-                        raw_name = COALESCE(raw_name, name)
-                    WHERE id = :id
-                """), {"id": artist_id})
+                # Collaboration if ALL parts individually have >10x compound listeners
+                # and at least one part has meaningful listeners
+                if parts_listeners and all(pl > compound_listeners * 10 for _, pl in parts_listeners):
+                    max_part_listeners = max(pl for _, pl in parts_listeners)
+                    if max_part_listeners > 1000:
+                        is_collaboration = True
+                        parts_str = ', '.join(f"{p} ({pl})" for p, pl in parts_listeners)
+                        logger.info(
+                            f"  Collaboration detected: '{name}' ({compound_listeners}) "
+                            f"vs parts: {parts_str} -> splitting"
+                        )
 
-            total['verified_band'] += 1
+            if not is_collaboration:
+                logger.info(f"  Found on Last.fm: '{name}' ({compound_listeners} listeners) -> verified_band")
+
+                if not dry_run:
+                    db.execute(text("""
+                        UPDATE artists SET
+                            verification_status = 'verified_band',
+                            artist_type = 'band',
+                            raw_name = COALESCE(raw_name, name)
+                        WHERE id = :id
+                    """), {"id": artist_id})
+
+                total['verified_band'] += 1
+            else:
+                if not dry_run:
+                    stats = normalize_compound_artist(
+                        db, artist_id, name, parts, 'verified_split'
+                    )
+                    total['tracks_updated'] += stats['tracks_updated']
+                    total['albums_updated'] += stats['albums_updated']
+                    total['tracks_merged'] += stats['tracks_merged']
+                    total['albums_merged'] += stats['albums_merged']
+
+                total['verified_split'] += 1
         else:
             # Not found on Last.fm — split into individual artists
             logger.info(f"  Not on Last.fm: '{name}' -> splitting into {parts}")
@@ -536,6 +675,10 @@ def normalize_artists(
         Dict with pass1/pass2 stats
     """
     stats = {}
+
+    # Pre-step: clean malformed names for ALL artists (placeholders, trailing junk)
+    clean_stats = _clean_all_artist_names(db, dry_run=dry_run)
+    stats['cleaned'] = clean_stats
 
     if pass1:
         # Run Pass 1 iteratively — splitting "A vs. B feat. C" first produces
