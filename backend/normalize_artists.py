@@ -38,6 +38,7 @@ SAFE_SEPARATORS = [
     (r'\s+vs\.?\s+',     'vs.'),
     (r'\s+pres\.?\s+',   'pres.'),
     (r'\s+aka\s+',       'aka'),
+    (r'\s+meets\s+',     'meets'),
 ]
 
 # Patterns that MIGHT be band names — need Last.fm verification
@@ -640,9 +641,8 @@ def normalize_pass2(db: Session, dry_run: bool = False) -> Dict:
             compound_info = lastfm.get_artist_info(name, fetch_similar=False)
             time.sleep(0.25)
         except Exception as e:
-            logger.error(f"  Last.fm error for '{name}': {e}")
-            total['errors'] += 1
-            continue
+            logger.warning(f"  Last.fm lookup failed for '{name}': {e} — treating as not found")
+            compound_info = None
 
         if compound_info:
             # Found on Last.fm — but is it a real band or just a collaboration page?
@@ -650,34 +650,32 @@ def normalize_pass2(db: Session, dry_run: bool = False) -> Dict:
             if isinstance(compound_listeners, str):
                 compound_listeners = int(compound_listeners) if compound_listeners.isdigit() else 0
 
-            # Check if individual parts have significantly more listeners
+            # Always check individual parts — collaboration if ANY part
+            # is a known artist with more listeners than the compound name
             is_collaboration = False
-            if len(parts) >= 2 and compound_listeners < 50000:
-                parts_listeners = []
-                for part in parts:
-                    try:
-                        part_info = lastfm.get_artist_info(part, fetch_similar=False)
-                        time.sleep(0.25)
-                        pl = 0
-                        if part_info:
-                            pl = part_info.get('stats', {}).get('listeners', 0)
-                            if isinstance(pl, str):
-                                pl = int(pl) if pl.isdigit() else 0
-                        parts_listeners.append((part, pl))
-                    except Exception:
-                        parts_listeners.append((part, 0))
+            parts_listeners = []
+            for part in parts:
+                try:
+                    part_info = lastfm.get_artist_info(part, fetch_similar=False)
+                    time.sleep(0.25)
+                    pl = 0
+                    if part_info:
+                        pl = part_info.get('stats', {}).get('listeners', 0)
+                        if isinstance(pl, str):
+                            pl = int(pl) if pl.isdigit() else 0
+                    parts_listeners.append((part, pl))
+                except Exception:
+                    parts_listeners.append((part, 0))
 
-                # Collaboration if ALL parts individually have >10x compound listeners
-                # and at least one part has meaningful listeners
-                if parts_listeners and all(pl > compound_listeners * 10 for _, pl in parts_listeners):
-                    max_part_listeners = max(pl for _, pl in parts_listeners)
-                    if max_part_listeners > 1000:
-                        is_collaboration = True
-                        parts_str = ', '.join(f"{p} ({pl})" for p, pl in parts_listeners)
-                        logger.info(
-                            f"  Collaboration detected: '{name}' ({compound_listeners}) "
-                            f"vs parts: {parts_str} -> splitting"
-                        )
+            for _, pl in parts_listeners:
+                if pl > compound_listeners and pl >= 1000:
+                    is_collaboration = True
+                    parts_str = ', '.join(f"{p} ({l})" for p, l in parts_listeners)
+                    logger.info(
+                        f"  Collaboration detected: '{name}' ({compound_listeners}) "
+                        f"vs parts: {parts_str} -> splitting"
+                    )
+                    break
 
             if not is_collaboration:
                 logger.info(f"  Found on Last.fm: '{name}' ({compound_listeners} listeners) -> verified_band")
