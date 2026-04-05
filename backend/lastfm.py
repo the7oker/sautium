@@ -37,6 +37,32 @@ class LastFmService:
         )
         logger.info("Last.fm service initialized")
 
+    @staticmethod
+    def _with_retry(fn, max_retries=3, base_delay=2.0):
+        """Call fn() with exponential backoff on rate limit / transient errors.
+
+        Last.fm error code 29 = "Rate limit exceeded".
+        Also retries on network-level failures (timeout, connection reset).
+        """
+        for attempt in range(max_retries + 1):
+            try:
+                return fn()
+            except pylast.WSError as e:
+                err_str = str(e).lower()
+                if ('rate limit' in err_str or 'try again' in err_str) and attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"Rate limited, retry {attempt + 1}/{max_retries} in {delay:.0f}s")
+                    time.sleep(delay)
+                    continue
+                raise
+            except (pylast.NetworkError, ConnectionError, TimeoutError, OSError) as e:
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"Network error ({type(e).__name__}), retry {attempt + 1}/{max_retries} in {delay:.0f}s")
+                    time.sleep(delay)
+                    continue
+                raise
+
     def get_artist_info(self, artist_name: str, fetch_similar: bool = True) -> Optional[Dict[str, Any]]:
         """
         Fetch artist info from Last.fm.
@@ -437,7 +463,9 @@ class LastFmService:
         fetch_similar = has_tracks
 
         try:
-            data = self.get_artist_info(artist_name, fetch_similar=fetch_similar)
+            data = self._with_retry(
+                lambda: self.get_artist_info(artist_name, fetch_similar=fetch_similar)
+            )
 
             if data is None:
                 # Artist not found
@@ -550,8 +578,8 @@ class LastFmService:
         logger.info(f"Enriching genre: {genre_name} (ID: {genre_id})")
 
         try:
-            # Fetch from Last.fm
-            data = self.get_tag_info(genre_name)
+            # Fetch from Last.fm (with retry on rate limit / network errors)
+            data = self._with_retry(lambda: self.get_tag_info(genre_name))
 
             if data is None:
                 # Tag not found
@@ -858,8 +886,8 @@ class LastFmService:
         logger.info(f"Enriching album: {artist_name} - {album_title} (ID: {album_id})")
 
         try:
-            # Fetch from Last.fm
-            data = self.get_album_info(artist_name, album_title)
+            # Fetch from Last.fm (with retry on rate limit / network errors)
+            data = self._with_retry(lambda: self.get_album_info(artist_name, album_title))
 
             if data is None:
                 # Album not found — record in external_metadata to avoid re-processing
@@ -1124,8 +1152,8 @@ class LastFmService:
         logger.info(f"Enriching track: {artist_name} - {track_title} (ID: {track_id})")
 
         try:
-            # Fetch from Last.fm
-            stats = self.get_track_stats(artist_name, track_title)
+            # Fetch from Last.fm (with retry on rate limit / network errors)
+            stats = self._with_retry(lambda: self.get_track_stats(artist_name, track_title))
 
             if stats is None:
                 # Track not found or no stats — record in external_metadata to avoid re-processing

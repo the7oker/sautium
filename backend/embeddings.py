@@ -407,8 +407,8 @@ class AudioEmbeddingGenerator:
 
                         db.commit()
                 finally:
-                    io_pool.shutdown(wait=False)
-                    prefetch_pool.shutdown(wait=False)
+                    io_pool.shutdown(wait=True, cancel_futures=True)
+                    prefetch_pool.shutdown(wait=True, cancel_futures=True)
 
                 logger.info(
                     f"Embedding generation complete: "

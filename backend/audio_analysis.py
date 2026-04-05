@@ -141,17 +141,23 @@ class AudioAnalyzer:
 
     # --- Audio loading ---
 
-    def _load_middle_segment(self, file_path: str, sr: int) -> Optional[np.ndarray]:
-        """Load the middle N seconds of an audio file at given sample rate."""
+    def _load_middle_segment(self, file_path: str, sr: int, total_duration: float = None) -> Optional[np.ndarray]:
+        """Load the middle N seconds of an audio file at given sample rate.
+
+        When total_duration is known (from DB), uses librosa's offset/duration
+        to decode only the needed segment — avoids loading entire hi-res files
+        (DSD/192kHz can be 200+ MB per file).
+        """
         try:
-            audio, _ = librosa.load(file_path, sr=sr, mono=True)
-            total_samples = len(audio)
-            target_samples = self.duration * sr
+            offset = 0.0
+            load_duration = None
 
-            if total_samples > target_samples:
-                start = (total_samples - target_samples) // 2
-                audio = audio[start:start + target_samples]
+            if total_duration and total_duration > self.duration:
+                offset = (total_duration - self.duration) / 2.0
+                load_duration = float(self.duration)
 
+            audio, _ = librosa.load(file_path, sr=sr, mono=True,
+                                    offset=offset, duration=load_duration)
             return audio
         except Exception as e:
             logger.error(f"Failed to load audio {file_path} at {sr}Hz: {e}")
@@ -404,11 +410,11 @@ class AudioAnalyzer:
 
         return results
 
-    def _load_and_extract_librosa(self, file_path: str) -> Optional[Dict]:
+    def _load_and_extract_librosa(self, file_path: str, duration_seconds: float = None) -> Optional[Dict]:
         """Load audio + extract librosa features (I/O + CPU). Thread-safe."""
         try:
             local_path = settings.translate_to_local_path(file_path)
-            y_48k = self._load_middle_segment(local_path, self.clap_sr)
+            y_48k = self._load_middle_segment(local_path, self.clap_sr, total_duration=duration_seconds)
             if y_48k is None:
                 return None
 
@@ -468,7 +474,8 @@ class AudioAnalyzer:
                     query_sql = """
                         SELECT t.id as track_id, mf.id as media_file_id,
                                mf.file_path, mf.bit_depth,
-                               mf.sample_rate as mf_sample_rate, mf.is_lossless
+                               mf.sample_rate as mf_sample_rate, mf.is_lossless,
+                               mf.duration_seconds
                         FROM tracks t
                         JOIN LATERAL (
                             SELECT * FROM media_files
@@ -480,7 +487,8 @@ class AudioAnalyzer:
                     query_sql = """
                         SELECT t.id as track_id, mf.id as media_file_id,
                                mf.file_path, mf.bit_depth,
-                               mf.sample_rate as mf_sample_rate, mf.is_lossless
+                               mf.sample_rate as mf_sample_rate, mf.is_lossless,
+                               mf.duration_seconds
                         FROM tracks t
                         LEFT JOIN audio_features af ON af.track_id = t.id
                         JOIN LATERAL (
@@ -522,6 +530,8 @@ class AudioAnalyzer:
 
                 # Process in batches: prefetch + librosa in threads, CLAP on GPU
                 pbar = tqdm(total=total, desc="Analyzing audio", unit="track")
+                # Single thread pool for all batches (avoid 2000+ pool creations)
+                _io_pool = ThreadPoolExecutor(max_workers=prefetch_workers)
 
                 for batch_start in range(0, total, clap_batch_size):
                     if cancel_flag and cancel_flag():
@@ -538,36 +548,44 @@ class AudioAnalyzer:
 
                     # Phase 1: parallel load + librosa (I/O + CPU)
                     prepared = []  # (row, librosa_features, audio_48k)
-                    with ThreadPoolExecutor(max_workers=prefetch_workers) as pool:
-                        future_to_row = {
-                            pool.submit(self._load_and_extract_librosa, row.file_path): row
-                            for row in batch_rows
-                        }
-                        for future in as_completed(future_to_row):
-                            row = future_to_row[future]
-                            stats["processed"] += 1
-                            try:
-                                result = future.result()
-                                if result is not None:
-                                    prepared.append((row, result))
-                                else:
-                                    stats["failed"] += 1
-                            except Exception as e:
+                    future_to_row = {
+                        _io_pool.submit(
+                            self._load_and_extract_librosa, row.file_path,
+                            float(row.duration_seconds) if row.duration_seconds else None,
+                        ): row
+                        for row in batch_rows
+                    }
+                    for future in as_completed(future_to_row):
+                        row = future_to_row[future]
+                        stats["processed"] += 1
+                        try:
+                            result = future.result()
+                            if result is not None:
+                                prepared.append((row, result))
+                            else:
                                 stats["failed"] += 1
-                                logger.error(f"Prefetch failed for {row.track_id}: {e}")
+                        except Exception as e:
+                            stats["failed"] += 1
+                            logger.error(f"Prefetch failed for {row.track_id}: {e}")
 
                     if not prepared:
                         pbar.update(len(batch_rows))
                         continue
 
-                    # Phase 2: batch CLAP on GPU
+                    # Phase 2: batch CLAP on GPU (with single-item fallback)
                     if not librosa_only and self.model is not None:
                         audio_arrays = [p[1]["audio_48k"] for p in prepared]
                         try:
                             clap_results = self._extract_clap_features_batch(audio_arrays)
                         except Exception as e:
-                            logger.error(f"CLAP batch failed: {e}")
-                            clap_results = [{}] * len(prepared)
+                            logger.warning(f"CLAP batch failed, falling back to single: {e}")
+                            clap_results = []
+                            for audio in audio_arrays:
+                                try:
+                                    single = self._extract_clap_features_batch([audio])
+                                    clap_results.append(single[0])
+                                except Exception:
+                                    clap_results.append({})
                     else:
                         clap_results = [{}] * len(prepared)
 
@@ -575,59 +593,61 @@ class AudioAnalyzer:
                     for _, prep in prepared:
                         del prep["audio_48k"]
 
-                    # Phase 3: merge features + save to DB
+                    # Phase 3: merge features + save to DB (savepoint per track, commit per batch)
                     for (row, prep), clap_feat in zip(prepared, clap_results):
                         try:
                             features = prep["librosa_features"]
                             features.update(clap_feat)
 
-                            # Update existing record (force mode or stale source)
-                            existing = db.query(AudioFeature).filter(
-                                AudioFeature.track_id == row.track_id
-                            ).first()
-                            if existing:
-                                for k, v in features.items():
-                                    setattr(existing, k, v)
-                                existing.source_media_file_id = row.media_file_id
-                                existing.source_bit_depth = row.bit_depth
-                                existing.source_sample_rate = row.mf_sample_rate
-                                existing.source_is_lossless = row.is_lossless
-                                db.commit()
-                                stats["success"] += 1
-                                continue
-
-                            af = AudioFeature(
-                                track_id=row.track_id,
-                                bpm=features.get("bpm"),
-                                key=features.get("key"),
-                                mode=features.get("mode"),
-                                key_confidence=features.get("key_confidence"),
-                                energy=features.get("energy"),
-                                energy_db=features.get("energy_db"),
-                                brightness=features.get("brightness"),
-                                dynamic_range_db=features.get("dynamic_range_db"),
-                                zero_crossing_rate=features.get("zero_crossing_rate"),
-                                instruments=features.get("instruments"),
-                                moods=features.get("moods"),
-                                vocal_instrumental=features.get("vocal_instrumental"),
-                                vocal_score=features.get("vocal_score"),
-                                danceability=features.get("danceability"),
-                                source_media_file_id=row.media_file_id,
-                                source_bit_depth=row.bit_depth,
-                                source_sample_rate=row.mf_sample_rate,
-                                source_is_lossless=row.is_lossless,
-                            )
-                            db.add(af)
-                            db.commit()
+                            savepoint = db.begin_nested()
+                            try:
+                                existing = db.query(AudioFeature).filter(
+                                    AudioFeature.track_id == row.track_id
+                                ).first()
+                                if existing:
+                                    for k, v in features.items():
+                                        setattr(existing, k, v)
+                                    existing.source_media_file_id = row.media_file_id
+                                    existing.source_bit_depth = row.bit_depth
+                                    existing.source_sample_rate = row.mf_sample_rate
+                                    existing.source_is_lossless = row.is_lossless
+                                else:
+                                    af = AudioFeature(
+                                        track_id=row.track_id,
+                                        bpm=features.get("bpm"),
+                                        key=features.get("key"),
+                                        mode=features.get("mode"),
+                                        key_confidence=features.get("key_confidence"),
+                                        energy=features.get("energy"),
+                                        energy_db=features.get("energy_db"),
+                                        brightness=features.get("brightness"),
+                                        dynamic_range_db=features.get("dynamic_range_db"),
+                                        zero_crossing_rate=features.get("zero_crossing_rate"),
+                                        instruments=features.get("instruments"),
+                                        moods=features.get("moods"),
+                                        vocal_instrumental=features.get("vocal_instrumental"),
+                                        vocal_score=features.get("vocal_score"),
+                                        danceability=features.get("danceability"),
+                                        source_media_file_id=row.media_file_id,
+                                        source_bit_depth=row.bit_depth,
+                                        source_sample_rate=row.mf_sample_rate,
+                                        source_is_lossless=row.is_lossless,
+                                    )
+                                    db.add(af)
+                                savepoint.commit()
+                            except Exception:
+                                savepoint.rollback()
+                                raise
                             stats["success"] += 1
 
                         except Exception as e:
-                            db.rollback()
                             stats["failed"] += 1
                             logger.error(f"Failed to save features for {row.track_id}: {e}")
 
+                    db.commit()
                     pbar.update(len(batch_rows))
 
+                _io_pool.shutdown(wait=True, cancel_futures=True)
                 pbar.close()
                 logger.info(
                     f"Audio analysis complete: {stats['success']} success, {stats['failed']} failed"

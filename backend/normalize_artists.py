@@ -716,6 +716,12 @@ def normalize_pass2(db: Session, dry_run: bool = False) -> Dict:
 
             total['verified_split'] += 1
 
+        # Periodic commit — Last.fm lookups are slow, protect against crashes
+        processed = total['verified_band'] + total['verified_split'] + total['errors']
+        if not dry_run and processed > 0 and processed % 50 == 0:
+            db.commit()
+            logger.info(f"Pass 2 checkpoint: {processed} artists processed")
+
     if not dry_run:
         db.commit()
 
