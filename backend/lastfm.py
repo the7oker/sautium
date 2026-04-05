@@ -255,15 +255,15 @@ class LastFmService:
 
             # Get or create similar artist
             normalized_name = similar_name.strip()
+            from uuid_utils import artist_uuid
+            similar_id = artist_uuid(normalized_name)
             similar_artist = db.query(Artist).filter(
-                Artist.name.ilike(normalized_name)
+                Artist.id == similar_id
             ).first()
 
             if not similar_artist:
-                # Create new artist with deterministic UUID
-                from uuid_utils import artist_uuid
                 similar_artist = Artist(
-                    id=artist_uuid(normalized_name),
+                    id=similar_id,
                     name=normalized_name,
                 )
                 db.add(similar_artist)
