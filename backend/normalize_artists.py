@@ -397,21 +397,46 @@ def _clean_all_artist_names(db: Session, dry_run: bool = False) -> Dict:
 
     cleaned_count = 0
     merged_count = 0
+    tracks_updated = 0
+    albums_updated = 0
     for artist_id, name in all_artists:
         cleaned = _clean_artist_name(name)
         if cleaned == name or not cleaned:
             continue
 
         if not dry_run:
-            new_id = str(artist_uuid(cleaned))
+            new_artist_id = str(artist_uuid(cleaned))
             # Check if cleaned name already exists as different artist
             existing = db.execute(text(
                 "SELECT id::text FROM artists WHERE id = :id"
-            ), {"id": new_id}).first()
+            ), {"id": new_artist_id}).first()
             if existing and existing[0] != artist_id:
-                # Merge: reassign track_artists/album references to existing artist
+                # Merge: target artist already exists
                 target_id = existing[0]
-                # Reassign track_artists (skip if already linked to target)
+
+                # Recalculate track UUIDs (primary artist name changed)
+                tracks = db.execute(text("""
+                    SELECT t.id::text, t.title FROM tracks t
+                    JOIN track_artists ta ON ta.track_id = t.id
+                    WHERE ta.artist_id = :aid AND ta.role = 'primary'
+                """), {"aid": artist_id}).fetchall()
+                for old_track_id, title in tracks:
+                    new_track_id = str(track_uuid(title, cleaned))
+                    _update_track_uuid(db, old_track_id, new_track_id)
+                    tracks_updated += 1
+
+                # Recalculate album UUIDs
+                albums = db.execute(text("""
+                    SELECT a.id::text, a.title FROM albums a
+                    JOIN album_artists aa ON aa.album_id = a.id
+                    WHERE aa.artist_id = :aid AND aa.role = 'primary'
+                """), {"aid": artist_id}).fetchall()
+                for old_album_id, title in albums:
+                    new_album_id_str = str(album_uuid(title, cleaned))
+                    _update_album_uuid(db, old_album_id, new_album_id_str)
+                    albums_updated += 1
+
+                # Reassign artist associations to target
                 db.execute(text("""
                     UPDATE track_artists SET artist_id = :target
                     WHERE artist_id = :old
@@ -422,21 +447,63 @@ def _clean_all_artist_names(db: Session, dry_run: bool = False) -> Dict:
                         AND ta2.role = track_artists.role
                     )
                 """), {"target": target_id, "old": artist_id})
-                # Delete duplicate track_artists that would violate unique constraint
                 db.execute(text(
                     "DELETE FROM track_artists WHERE artist_id = :old"
                 ), {"old": artist_id})
-                # Delete the dirty artist (CASCADE handles other FK refs)
+                db.execute(text("""
+                    UPDATE album_artists SET artist_id = :target
+                    WHERE artist_id = :old
+                    AND NOT EXISTS (
+                        SELECT 1 FROM album_artists aa2
+                        WHERE aa2.album_id = album_artists.album_id
+                        AND aa2.artist_id = :target
+                        AND aa2.role = album_artists.role
+                    )
+                """), {"target": target_id, "old": artist_id})
+                db.execute(text(
+                    "DELETE FROM album_artists WHERE artist_id = :old"
+                ), {"old": artist_id})
+                # Delete the dirty artist (CASCADE handles remaining FK refs)
                 db.execute(text(
                     "DELETE FROM artists WHERE id = :id"
                 ), {"id": artist_id})
                 merged_count += 1
-                logger.info(f"Merged: '{name}' -> existing '{cleaned}'")
+                logger.info(f"Merged: '{name}' -> existing '{cleaned}' ({len(tracks)} tracks, {len(albums)} albums)")
                 continue
 
-            db.execute(text(
-                "UPDATE artists SET name = :name WHERE id = :id"
-            ), {"name": cleaned, "id": artist_id})
+            # Rename: update artist ID + name, recalculate track/album UUIDs
+            if new_artist_id != artist_id:
+                # Recalculate track UUIDs
+                tracks = db.execute(text("""
+                    SELECT t.id::text, t.title FROM tracks t
+                    JOIN track_artists ta ON ta.track_id = t.id
+                    WHERE ta.artist_id = :aid AND ta.role = 'primary'
+                """), {"aid": artist_id}).fetchall()
+                for old_track_id, title in tracks:
+                    new_track_id = str(track_uuid(title, cleaned))
+                    _update_track_uuid(db, old_track_id, new_track_id)
+                    tracks_updated += 1
+
+                # Recalculate album UUIDs
+                albums = db.execute(text("""
+                    SELECT a.id::text, a.title FROM albums a
+                    JOIN album_artists aa ON aa.album_id = a.id
+                    WHERE aa.artist_id = :aid AND aa.role = 'primary'
+                """), {"aid": artist_id}).fetchall()
+                for old_album_id, title in albums:
+                    new_album_id_str = str(album_uuid(title, cleaned))
+                    _update_album_uuid(db, old_album_id, new_album_id_str)
+                    albums_updated += 1
+
+                # Update artist ID (ON UPDATE CASCADE propagates to track_artists, etc.)
+                db.execute(text(
+                    "UPDATE artists SET id = :new_id, name = :name WHERE id = :old_id"
+                ), {"new_id": new_artist_id, "name": cleaned, "old_id": artist_id})
+            else:
+                # UUID unchanged (e.g. only whitespace diff) — just update name
+                db.execute(text(
+                    "UPDATE artists SET name = :name WHERE id = :id"
+                ), {"name": cleaned, "id": artist_id})
 
         cleaned_count += 1
         logger.info(f"Cleaned name: '{name}' -> '{cleaned}'")
@@ -444,8 +511,15 @@ def _clean_all_artist_names(db: Session, dry_run: bool = False) -> Dict:
     if not dry_run and cleaned_count > 0:
         db.commit()
 
-    logger.info(f"Pre-step done: {cleaned_count} names cleaned, {merged_count} merged out of {len(all_artists)} scanned")
-    return {'cleaned': cleaned_count, 'merged': merged_count, 'scanned': len(all_artists)}
+    logger.info(
+        f"Pre-step done: {cleaned_count} cleaned, {merged_count} merged, "
+        f"{tracks_updated} tracks updated, {albums_updated} albums updated"
+    )
+    return {
+        'cleaned': cleaned_count, 'merged': merged_count,
+        'tracks_updated': tracks_updated, 'albums_updated': albums_updated,
+        'scanned': len(all_artists),
+    }
 
 
 def normalize_pass1(db: Session, dry_run: bool = False) -> Dict:
