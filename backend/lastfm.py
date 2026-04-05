@@ -418,22 +418,25 @@ class LastFmService:
 
     def enrich_artist(
         self, db: Session, artist_id: int, artist_name: str,
-        skip_similar: bool = False,
     ) -> Dict[str, Any]:
         """
         Fetch Last.fm data for an artist and store in database.
 
-        Args:
-            skip_similar: If True, fetch bio/tags but don't store similar artists.
-                         Use for external artists not in the music library.
+        Bio/tags are always fetched. Similar artists are only fetched
+        if the artist has tracks in the catalog (prevents similar-of-similar).
 
         Returns summary dict with status and stored flags.
         """
         logger.info(f"Enriching artist: {artist_name} (ID: {artist_id})")
 
+        # Only fetch similar for artists with tracks in catalog
+        has_tracks = db.execute(text("""
+            SELECT 1 FROM track_artists WHERE artist_id = :id LIMIT 1
+        """), {"id": str(artist_id)}).first() is not None
+        fetch_similar = has_tracks
+
         try:
-            # Fetch from Last.fm (skip similar artists API call when not needed)
-            data = self.get_artist_info(artist_name, fetch_similar=not skip_similar)
+            data = self.get_artist_info(artist_name, fetch_similar=fetch_similar)
 
             if data is None:
                 # Artist not found
@@ -457,7 +460,7 @@ class LastFmService:
 
             # Store in database (also updates lastfm_id)
             stored = self.store_artist_metadata(
-                db, artist_id, artist_name, data, store_similar=not skip_similar
+                db, artist_id, artist_name, data, store_similar=fetch_similar
             )
 
             return {
