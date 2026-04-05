@@ -276,8 +276,11 @@ class AudioEmbeddingGenerator:
                            mf.duration_seconds
                     FROM tracks t
                     LEFT JOIN embeddings e ON e.track_id = t.id
-                    JOIN media_files mf ON mf.track_id = t.id
-                        AND mf.is_analysis_source = true
+                    JOIN LATERAL (
+                        SELECT * FROM media_files
+                        WHERE track_id = t.id AND is_analysis_source = true
+                        ORDER BY id LIMIT 1
+                    ) mf ON true
                     WHERE e.id IS NULL
                        OR (e.source_media_file_id IS NOT NULL
                            AND e.source_media_file_id != mf.id)

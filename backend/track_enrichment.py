@@ -372,7 +372,11 @@ def _fetch_lyrics_batch(
             FROM tracks t
             JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
             JOIN artists a ON ta.artist_id = a.id
-            JOIN media_files mf ON mf.track_id = t.id AND mf.is_analysis_source = true
+            JOIN LATERAL (
+                SELECT * FROM media_files
+                WHERE track_id = t.id AND is_analysis_source = true
+                ORDER BY id LIMIT 1
+            ) mf ON true
             JOIN album_variants av ON mf.album_variant_id = av.id
             JOIN albums al ON av.album_id = al.id
             WHERE NOT EXISTS (

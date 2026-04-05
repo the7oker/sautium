@@ -470,8 +470,11 @@ class AudioAnalyzer:
                                mf.file_path, mf.bit_depth,
                                mf.sample_rate as mf_sample_rate, mf.is_lossless
                         FROM tracks t
-                        JOIN media_files mf ON mf.track_id = t.id
-                            AND mf.is_analysis_source = true
+                        JOIN LATERAL (
+                            SELECT * FROM media_files
+                            WHERE track_id = t.id AND is_analysis_source = true
+                            ORDER BY id LIMIT 1
+                        ) mf ON true
                     """
                 else:
                     query_sql = """
@@ -480,8 +483,11 @@ class AudioAnalyzer:
                                mf.sample_rate as mf_sample_rate, mf.is_lossless
                         FROM tracks t
                         LEFT JOIN audio_features af ON af.track_id = t.id
-                        JOIN media_files mf ON mf.track_id = t.id
-                            AND mf.is_analysis_source = true
+                        JOIN LATERAL (
+                            SELECT * FROM media_files
+                            WHERE track_id = t.id AND is_analysis_source = true
+                            ORDER BY id LIMIT 1
+                        ) mf ON true
                         WHERE af.id IS NULL
                            OR (af.source_media_file_id IS NOT NULL
                                AND af.source_media_file_id != mf.id)
