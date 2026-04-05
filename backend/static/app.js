@@ -16,6 +16,7 @@ let lyricsVisible = false;
 let lyricsData = null;         // {synced_lyrics, plain_lyrics, instrumental, ...}
 let lyricsTrackKey = null;     // "artist|song" to detect track changes
 let lyricsMediaFileId = null;  // media_file_id used for fetching
+let _lyricsLines = [];         // cached .lyrics-line elements
 
 // -- DOM refs ----------------------------------------------------------------
 
@@ -148,6 +149,7 @@ function updateNowPlaying(data) {
     lyricsTrackKey = newTrackKey;
     lyricsData = null;
     lyricsMediaFileId = null;
+    _lyricsLines = [];
     if (lyricsVisible) {
       fetchLyricsForCurrentTrack();
     }
@@ -282,7 +284,7 @@ async function doSearch(e) {
 
     renderAlbumList(searchResults, albums);
   } catch (err) {
-    searchResults.innerHTML = '<div class="empty-state">Search error: ' + err.message + "</div>";
+    searchResults.innerHTML = '<div class="empty-state">Search error: ' + esc(err.message) + "</div>";
   }
 }
 
@@ -338,8 +340,8 @@ function renderAlbumList(container, albums) {
             '<div class="album-title">' + esc(album.artist) + " \u2014 " + esc(album.album) + "</div>" +
             '<div class="album-meta">' + esc(meta) + "</div>" +
           "</div>" +
-          '<button class="album-play-btn" data-album="' + esc(album.album) +
-            '" data-artist="' + esc(album.artist) + '">&#9654;</button>' +
+          '<button class="album-play-btn" data-album="' + escAttr(album.album) +
+            '" data-artist="' + escAttr(album.artist) + '">&#9654;</button>' +
         "</div>" +
         '<div class="album-tracks" id="tracks-' + albumId + '" style="display:none">';
 
@@ -578,7 +580,7 @@ function renderProviderSelector() {
   for (const p of providersData) {
     const isActive = p.id === selectedProvider;
     html += '<button class="provider-btn' + (isActive ? " active" : "") +
-      '" data-provider="' + p.id + '" onclick="selectProvider(\'' + p.id + '\')">' +
+      '" data-provider="' + escAttr(p.id) + '">' +
       esc(p.name) + '</button>';
   }
   html += '</div>';
@@ -591,13 +593,21 @@ function renderProviderSelector() {
       // Show short model name
       const shortName = formatModelName(m);
       html += '<button class="model-btn' + (isActive ? " active" : "") +
-        '" data-model="' + m + '" onclick="selectModelBtn(\'' + esc(m) + '\')">' +
+        '" data-model="' + escAttr(m) + '">' +
         esc(shortName) + '</button>';
     }
     html += '</div>';
   }
 
   container.innerHTML = html;
+
+  // Event delegation (avoids inline onclick + escaping issues)
+  container.querySelectorAll(".provider-btn").forEach(btn => {
+    btn.addEventListener("click", () => selectProvider(btn.dataset.provider));
+  });
+  container.querySelectorAll(".model-btn").forEach(btn => {
+    btn.addEventListener("click", () => selectModelBtn(btn.dataset.model));
+  });
 }
 
 function formatModelName(model) {
@@ -642,6 +652,10 @@ async function sendChat(e) {
   const msg = chatInput.value.trim();
   if (!msg) return;
 
+  // Disable immediately to prevent double-submit race condition
+  chatInput.value = "";
+  chatSendBtn.disabled = true;
+
   // Create session if needed
   if (!currentSessionId) {
     try {
@@ -655,6 +669,7 @@ async function sendChat(e) {
       chatMessages.innerHTML = "";
     } catch (err) {
       appendChatBubble("assistant", "Error creating session: " + err.message);
+      chatSendBtn.disabled = false;
       return;
     }
   }
@@ -665,8 +680,6 @@ async function sendChat(e) {
 
   // Add user message bubble
   appendChatBubble("user", msg);
-  chatInput.value = "";
-  chatSendBtn.disabled = true;
 
   // Show loading
   const loadingId = "chat-loading-" + Date.now();
@@ -729,7 +742,11 @@ function appendChatBubble(role, text, tracks, retrievalLog, model, tracksRetriev
     .replace(/\n/g, "<br>")
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/\*(.+?)\*/g, "<em>$1</em>")
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t, u) =>
+      /^https?:\/\//i.test(u)
+        ? '<a href="' + u.replace(/"/g, '&quot;') + '" target="_blank" rel="noopener noreferrer">' + t + '</a>'
+        : t
+    );
   div.innerHTML = html;
 
   chatMessages.appendChild(div);
@@ -842,6 +859,10 @@ function esc(str) {
   return el.innerHTML;
 }
 
+function escAttr(str) {
+  return esc(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 // -- Lyrics ------------------------------------------------------------------
 
 function toggleLyrics() {
@@ -899,6 +920,7 @@ function renderLyrics(data) {
 
   if (data.instrumental) {
     content.innerHTML = '<div class="lyrics-instrumental">Instrumental</div>';
+    _lyricsLines = [];
     return;
   }
 
@@ -910,23 +932,25 @@ function renderLyrics(data) {
         esc(line.text || "") + '</div>';
     }
     content.innerHTML = html;
+    _lyricsLines = content.querySelectorAll(".lyrics-line");
     return;
   }
 
   if (data.plain_lyrics) {
     content.innerHTML = '<div class="lyrics-plain">' + esc(data.plain_lyrics) + '</div>';
+    _lyricsLines = [];
     return;
   }
 
   content.innerHTML = '<div class="lyrics-placeholder">No lyrics available</div>';
+  _lyricsLines = [];
 }
 
 function updateLyricsHighlight(positionSeconds) {
   if (!lyricsVisible || !lyricsData || !lyricsData.synced_lyrics) return;
 
   const positionMs = positionSeconds * 1000;
-  const lines = document.querySelectorAll(".lyrics-line");
-  if (lines.length === 0) return;
+  if (_lyricsLines.length === 0) return;
 
   let activeIdx = -1;
   for (let i = lyricsData.synced_lyrics.length - 1; i >= 0; i--) {
@@ -936,15 +960,15 @@ function updateLyricsHighlight(positionSeconds) {
     }
   }
 
-  lines.forEach((line, idx) => {
+  _lyricsLines.forEach((line, idx) => {
     line.classList.toggle("active", idx === activeIdx);
     line.classList.toggle("past", idx < activeIdx);
   });
 
   // Auto-scroll to active line
-  if (activeIdx >= 0 && lines[activeIdx]) {
+  if (activeIdx >= 0 && _lyricsLines[activeIdx]) {
     const panel = document.getElementById("lyricsPanel");
-    const activeLine = lines[activeIdx];
+    const activeLine = _lyricsLines[activeIdx];
     const panelRect = panel.getBoundingClientRect();
     const lineRect = activeLine.getBoundingClientRect();
 
@@ -986,6 +1010,12 @@ function switchSection(name) {
   }
 
   currentSection = name;
+
+  // Close chat SSE when leaving friends section (prevent memory leak)
+  if (name !== "friends" && _chatSSE) {
+    _chatSSE.close();
+    _chatSSE = null;
+  }
 
   // Update menu active state
   document.querySelectorAll(".menu-item[data-section]").forEach(btn => {
@@ -1048,14 +1078,18 @@ function copyInviteCode() {
   const code = document.getElementById("myInviteCode").textContent;
   if (!code || code.startsWith("No") || code.startsWith("Error")) return;
 
+  const btn = document.querySelector(".copy-btn");
   navigator.clipboard.writeText(code).then(() => {
-    const btn = document.querySelector(".copy-btn");
     btn.textContent = "Copied!";
     btn.classList.add("copied");
     setTimeout(() => {
       btn.textContent = "Copy";
       btn.classList.remove("copied");
     }, 2000);
+  }).catch(() => {
+    // Clipboard API unavailable (non-HTTPS LAN access)
+    btn.textContent = "Failed";
+    setTimeout(() => { btn.textContent = "Copy"; }, 2000);
   });
 }
 
@@ -1223,3 +1257,9 @@ loadProviders();
 fetchPlaylist();
 
 connectStatusSSE();
+
+// Cleanup SSE connections on page unload
+window.addEventListener("beforeunload", () => {
+  if (_sseSource) _sseSource.close();
+  if (_chatSSE) _chatSSE.close();
+});

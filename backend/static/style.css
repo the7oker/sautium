@@ -161,6 +161,17 @@ body {
   font-style: italic;
 }
 
+/* Focus visible (keyboard navigation) */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button:focus:not(:focus-visible),
+input:focus:not(:focus-visible) {
+  outline: none;
+}
+
 /* Sections */
 .app-section {
   display: none;

@@ -37,7 +37,7 @@
 
     <!-- Header -->
     <header>
-      <button class="hamburger-btn" id="hamburgerBtn" onclick="toggleMenu()">&#9776;</button>
+      <button class="hamburger-btn" id="hamburgerBtn" onclick="toggleMenu()" aria-label="Menu">&#9776;</button>
       <h1 id="sectionTitle">Music</h1>
       <div class="connection-dot" id="connDot" title="HQPlayer connection"></div>
     </header>
@@ -48,7 +48,7 @@
     <section class="app-section active" id="section-music">
 
       <!-- Now Playing -->
-      <section class="now-playing" id="nowPlaying">
+      <section class="now-playing" id="nowPlaying" aria-live="polite">
         <div class="np-song np-idle" id="npSong">Not connected</div>
         <div class="np-artist" id="npArtist"></div>
         <div class="progress-row">
@@ -58,15 +58,15 @@
           <span class="progress-time" id="progressTime">00:00 / 00:00</span>
         </div>
         <div class="controls">
-          <button class="ctrl-btn" onclick="playerCmd('previous')" title="Previous">&#9198;</button>
-          <button class="ctrl-btn play-btn" id="playPauseBtn" onclick="togglePlayPause()" title="Play/Pause">&#9654;</button>
-          <button class="ctrl-btn" onclick="playerCmd('next')" title="Next">&#9197;</button>
-          <button class="ctrl-btn" onclick="playerCmd('stop')" title="Stop">&#9632;</button>
+          <button class="ctrl-btn" onclick="playerCmd('previous')" title="Previous" aria-label="Previous track">&#9198;</button>
+          <button class="ctrl-btn play-btn" id="playPauseBtn" onclick="togglePlayPause()" title="Play/Pause" aria-label="Play or pause">&#9654;</button>
+          <button class="ctrl-btn" onclick="playerCmd('next')" title="Next" aria-label="Next track">&#9197;</button>
+          <button class="ctrl-btn" onclick="playerCmd('stop')" title="Stop" aria-label="Stop playback">&#9632;</button>
         </div>
         <div class="volume-row">
-          <button class="vol-btn" onclick="playerCmd('volume/down')">&#128265;</button>
+          <button class="vol-btn" onclick="playerCmd('volume/down')" aria-label="Volume down">&#128265;</button>
           <span class="vol-label" id="volLabel">-- dB</span>
-          <button class="vol-btn" onclick="playerCmd('volume/up')">&#128266;</button>
+          <button class="vol-btn" onclick="playerCmd('volume/up')" aria-label="Volume up">&#128266;</button>
         </div>
         <div class="lyrics-toggle-row">
           <button class="lyrics-toggle-btn" id="lyricsToggleBtn" onclick="toggleLyrics()">Lyrics</button>
