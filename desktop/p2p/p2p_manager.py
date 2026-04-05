@@ -315,32 +315,35 @@ class P2PManager:
 
         # Self-connection probe: catches the Python 3.13 proactor bug
         # where the socket looks alive but the accept loop is dead.
-        import ssl
+        # Plain TCP connect is enough — if the accept loop is dead the OS
+        # won't complete the handshake regardless of TLS.
         import socket
 
+        sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2)
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            wrapped = ctx.wrap_socket(sock, server_hostname="localhost")
+            sock.settimeout(3)
             await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: wrapped.connect(("127.0.0.1", self._http_port)),
+                lambda: sock.connect(("127.0.0.1", self._http_port)),
             )
-            wrapped.close()
             self._health_fail_count = 0
             return False  # server is healthy
-        except Exception:
+        except Exception as exc:
             self._health_fail_count += 1
-            if self._health_fail_count >= 2:
+            if self._health_fail_count >= 3:
                 logger.warning(
-                    f"Sync server health check failed "
-                    f"{self._health_fail_count} times"
+                    "Sync server health check failed "
+                    f"{self._health_fail_count} times: {exc}"
                 )
                 return True  # needs restart
             return False  # might be transient
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
 
     async def _cleanup(self):
         """Clean shutdown of all services."""
