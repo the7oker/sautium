@@ -605,7 +605,7 @@ class GenreDescription(Base):
 
     summary = Column(Text)
     content = Column(Text)
-    url = Column(String(500))
+    url = Column(Text)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -690,7 +690,7 @@ class ArtistBio(Base):
 
     summary = Column(Text)
     content = Column(Text)
-    url = Column(String(500))
+    url = Column(Text)
     listeners = Column(Integer)
     playcount = Column(BigInteger)
 
@@ -754,7 +754,7 @@ class AlbumInfo(Base):
 
     summary = Column(Text)
     content = Column(Text)
-    url = Column(String(500))
+    url = Column(Text)
     listeners = Column(Integer)
     playcount = Column(BigInteger)
 
