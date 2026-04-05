@@ -242,14 +242,15 @@ class LastFmService:
     ) -> int:
         """
         Store similar artists in normalized similar_artists table.
-        Filters out compound artists and creates artist records as needed.
+        Only links to artists that already exist in the library (have tracks).
+        Never creates new artist records — prevents unbounded DB growth.
 
         Returns number of similar artists stored.
         """
-        # Import here to avoid circular dependency
-        from normalize_artists import detect_compound_type
+        from uuid_utils import artist_uuid
 
         stored_count = 0
+        skipped_count = 0
 
         for similar in similar_data:
             similar_name = similar.get("name")
@@ -258,51 +259,42 @@ class LastFmService:
             if not similar_name:
                 continue
 
-            # Skip compound artists (e.g., "Pete Namlook & Klaus Schulze")
-            if detect_compound_type(similar_name):
-                logger.debug(f"Skipping compound similar artist: {similar_name}")
-                continue
-
-            # Get or create similar artist
+            # Only link to artists that exist in our library with tracks
             normalized_name = similar_name.strip()
-            from uuid_utils import artist_uuid
-            similar_id = artist_uuid(normalized_name)
-            similar_artist = db.query(Artist).filter(
-                Artist.id == similar_id
-            ).first()
+            sid = artist_uuid(normalized_name)
+            library_artist = db.execute(text("""
+                SELECT a.id FROM artists a
+                JOIN track_artists ta ON ta.artist_id = a.id
+                WHERE a.id = :id
+                LIMIT 1
+            """), {"id": str(sid)}).first()
 
-            if not similar_artist:
-                similar_artist = Artist(
-                    id=similar_id,
-                    name=normalized_name,
-                )
-                db.add(similar_artist)
-                db.flush()
-                logger.info(f"Created new artist from similar: {normalized_name} (ID: {similar_artist.id})")
+            if not library_artist:
+                skipped_count += 1
+                continue
 
             # Check if relationship already exists
             existing = db.query(SimilarArtist).filter(
                 SimilarArtist.artist_id == artist_id,
-                SimilarArtist.similar_artist_id == similar_artist.id,
+                SimilarArtist.similar_artist_id == sid,
                 SimilarArtist.source == "lastfm"
             ).first()
 
             if existing:
-                # Update match score if changed
                 if abs(float(existing.match_score) - match_score) > 0.0001:
                     existing.match_score = Decimal(str(match_score))
-                    logger.debug(f"Updated match score for {artist_name} -> {similar_name}: {match_score}")
             else:
-                # Create new relationship
                 similar_rel = SimilarArtist(
                     artist_id=artist_id,
-                    similar_artist_id=similar_artist.id,
+                    similar_artist_id=sid,
                     match_score=Decimal(str(match_score)),
                     source="lastfm"
                 )
                 db.add(similar_rel)
                 stored_count += 1
-                logger.debug(f"Added similar artist: {artist_name} -> {similar_name} (match: {match_score})")
+
+        if skipped_count > 0:
+            logger.debug(f"Similar artists for {artist_name}: {stored_count} linked, {skipped_count} skipped (not in library)")
 
         return stored_count
 
