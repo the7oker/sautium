@@ -9,53 +9,16 @@ import json
 import logging
 from typing import Optional
 
-import psycopg2
-import psycopg2.extras
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from config import settings
+from db_pool import db_query as _db_query, db_query_one as _db_query_one, db_execute as _db_execute
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
-# ---------------------------------------------------------------------------
-# DB helpers (reuse pattern from player.py)
-# ---------------------------------------------------------------------------
-
-_db_conn: Optional[psycopg2.extensions.connection] = None
-
-
-def _get_db() -> psycopg2.extensions.connection:
-    global _db_conn
-    if _db_conn is None or _db_conn.closed:
-        _db_conn = psycopg2.connect(settings.database_url)
-        _db_conn.autocommit = True
-    return _db_conn
-
-
-def _db_query(sql: str, params=None) -> list[dict]:
-    conn = _get_db()
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, params)
-        return [dict(row) for row in cur.fetchall()]
-
-
-def _db_query_one(sql: str, params=None) -> Optional[dict]:
-    rows = _db_query(sql, params)
-    return rows[0] if rows else None
-
-
-def _db_execute(sql: str, params=None) -> Optional[dict]:
-    """Execute INSERT/UPDATE and return first row if RETURNING is used."""
-    conn = _get_db()
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, params)
-        if cur.description:
-            row = cur.fetchone()
-            return dict(row) if row else None
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +272,7 @@ async def list_providers():
 @router.get("/sessions")
 async def list_sessions(limit: int = 50):
     """List chat sessions, newest first."""
+    limit = min(limit, 200)
     rows = _db_query("""
         SELECT s.id, s.title, s.created_at, s.updated_at,
                COUNT(m.id) as message_count
@@ -456,7 +420,7 @@ async def send_message(session_id: int, req: ChatMessageRequest):
             )
     except Exception as e:
         logger.error(f"Provider '{provider_name}' failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="AI provider request failed")
 
     answer = result.get("answer", "")
     tracks = _validate_tracks(result.get("tracks", []))

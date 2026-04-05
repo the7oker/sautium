@@ -13,18 +13,27 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 import psycopg2
 import psycopg2.extensions
 from config import settings
+from db_pool import db_query as _db_query, db_execute as _db_execute, get_conn as _get_conn
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/p2p", tags=["p2p"])
 
-_db_conn = None
+
+class AddFriendRequest(BaseModel):
+    invite_code: str = Field(..., min_length=3, pattern=r".+#.+")
+
+
+class SendMessageRequest(BaseModel):
+    content: str = Field(..., min_length=1, max_length=10000)
+
 
 # -- Chat SSE infrastructure --------------------------------------------------
 
@@ -94,14 +103,6 @@ def stop_chat_listener():
         _chat_listener_thread.join(timeout=10)
 
 
-def _get_db():
-    global _db_conn
-    if _db_conn is None or _db_conn.closed:
-        _db_conn = psycopg2.connect(settings.database_url)
-        _db_conn.autocommit = True
-        with _db_conn.cursor() as cur:
-            cur.execute("SET timezone = 'UTC'")
-    return _db_conn
 
 
 # Cache identity to avoid re-deriving (Argon2id is slow)
@@ -159,104 +160,97 @@ async def get_account() -> Dict[str, Any]:
 @router.get("/friends")
 async def list_friends() -> List[Dict[str, Any]]:
     """List all friends with unread counts."""
-    conn = _get_db()
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT f.id, f.username, f.public_key_hex, f.invite_code,
-                   f.display_name, f.added_at, f.last_seen, f.is_blocked,
-                   COALESCE(u.unread, 0) as unread_count
-            FROM friends f
-            LEFT JOIN (
-                SELECT friend_id, COUNT(*) as unread
-                FROM p2p_messages
-                WHERE direction = 'in' AND read = FALSE
-                GROUP BY friend_id
-            ) u ON u.friend_id = f.id
-            ORDER BY f.display_name, f.username
-        """)
-        cols = [d[0] for d in cur.description]
-        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
-        for row in rows:
-            for k in ("added_at", "last_seen"):
-                if row.get(k):
-                    row[k] = row[k].isoformat()
-        return rows
+    rows = _db_query("""
+        SELECT f.id, f.username, f.public_key_hex, f.invite_code,
+               f.display_name, f.added_at, f.last_seen, f.is_blocked,
+               COALESCE(u.unread, 0) as unread_count
+        FROM friends f
+        LEFT JOIN (
+            SELECT friend_id, COUNT(*) as unread
+            FROM p2p_messages
+            WHERE direction = 'in' AND read = FALSE
+            GROUP BY friend_id
+        ) u ON u.friend_id = f.id
+        ORDER BY f.display_name, f.username
+    """)
+    for row in rows:
+        for k in ("added_at", "last_seen"):
+            if row.get(k):
+                row[k] = row[k].isoformat()
+    return rows
 
 
 @router.post("/friends/add")
-async def add_friend(body: Dict[str, str]) -> Dict[str, Any]:
+async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
     """Add a friend by invite code."""
-    invite_code = body.get("invite_code", "").strip()
-    if not invite_code or "#" not in invite_code:
-        return {"error": "Invalid invite code format"}
-
+    invite_code = req.invite_code.strip()
     username = invite_code.split("#")[0]
 
-    conn = _get_db()
     try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO friends (username, public_key_hex, invite_code, display_name)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (public_key_hex) DO UPDATE
-                    SET invite_code = EXCLUDED.invite_code,
-                        username = EXCLUDED.username
-                RETURNING id
-            """, (username, f"pending:{invite_code}", invite_code, username))
-            row = cur.fetchone()
-            return {"id": row[0], "username": username, "invite_code": invite_code}
+        row = _db_execute("""
+            INSERT INTO friends (username, public_key_hex, invite_code, display_name)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (public_key_hex) DO UPDATE
+                SET invite_code = EXCLUDED.invite_code,
+                    username = EXCLUDED.username
+            RETURNING id
+        """, (username, f"pending:{invite_code}", invite_code, username))
+        return {"id": row["id"], "username": username, "invite_code": invite_code}
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Failed to add friend: {e}")
+        raise HTTPException(status_code=500, detail="Failed to add friend")
 
 
 @router.get("/friends/{friend_id}/messages")
 async def get_messages(friend_id: int, limit: int = 50) -> List[Dict[str, Any]]:
     """Get chat messages with a friend."""
-    conn = _get_db()
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT id, direction, content, timestamp, delivered, read,
-                   message_uuid
-            FROM p2p_messages
-            WHERE friend_id = %s
-            ORDER BY id DESC LIMIT %s
-        """, (friend_id, limit))
-        cols = [d[0] for d in cur.description]
-        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
-        rows.reverse()
-        for row in rows:
-            if row.get("timestamp"):
-                row["timestamp"] = row["timestamp"].isoformat() + "+00:00"
-        # Mark as read
-        cur.execute("""
-            UPDATE p2p_messages
-            SET read = TRUE
-            WHERE friend_id = %s AND direction = 'in' AND read = FALSE
-        """, (friend_id,))
-        return rows
+    limit = min(limit, 500)
+    rows = _db_query("""
+        SELECT id, direction, content, timestamp, delivered, read,
+               message_uuid
+        FROM p2p_messages
+        WHERE friend_id = %s
+        ORDER BY id DESC LIMIT %s
+    """, (friend_id, limit))
+    rows.reverse()
+    for row in rows:
+        if row.get("timestamp"):
+            row["timestamp"] = row["timestamp"].isoformat() + "+00:00"
+    return rows
+
+
+@router.post("/friends/{friend_id}/messages/read")
+async def mark_messages_read(friend_id: int) -> Dict[str, Any]:
+    """Mark all incoming messages from a friend as read."""
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE p2p_messages
+                SET read = TRUE
+                WHERE friend_id = %s AND direction = 'in' AND read = FALSE
+            """, (friend_id,))
+            return {"ok": True, "updated": cur.rowcount}
 
 
 @router.post("/friends/{friend_id}/send")
-async def send_message(friend_id: int, body: Dict[str, str]) -> Dict[str, Any]:
+async def send_message(friend_id: int, req: SendMessageRequest) -> Dict[str, Any]:
     """Send a message to a friend (stored locally, P2P delivery via manager)."""
-    content = body.get("content", "").strip()
-    if not content:
-        return {"error": "Empty message"}
+    content = req.content.strip()
 
     msg_uuid = str(uuid.uuid4())
-    conn = _get_db()
-    with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO p2p_messages
-                (friend_id, direction, content, timestamp, delivered,
-                 message_uuid)
-            VALUES (%s, 'out', %s, %s, FALSE, %s)
-            RETURNING id
-        """, (friend_id, content, datetime.now(timezone.utc), msg_uuid))
-        msg_id = cur.fetchone()[0]
-        # Wake up P2P delivery loop + SSE clients immediately
-        cur.execute("NOTIFY sautium_chat")
-        return {"id": msg_id, "message_uuid": msg_uuid, "status": "queued"}
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO p2p_messages
+                    (friend_id, direction, content, timestamp, delivered,
+                     message_uuid)
+                VALUES (%s, 'out', %s, %s, FALSE, %s)
+                RETURNING id
+            """, (friend_id, content, datetime.now(timezone.utc), msg_uuid))
+            msg_id = cur.fetchone()[0]
+            # Wake up P2P delivery loop + SSE clients immediately
+            cur.execute("NOTIFY sautium_chat")
+            return {"id": msg_id, "message_uuid": msg_uuid, "status": "queued"}
 
 
 @router.get("/chat/stream")

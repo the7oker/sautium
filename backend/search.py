@@ -238,35 +238,39 @@ def search_by_text(
     Returns:
         Dict with results list, count, and query_text.
     """
-    from embeddings import AudioEmbeddingGenerator
+    import model_cache
 
     limit = limit or settings.default_search_limit
     min_similarity = min_similarity if min_similarity is not None else settings.min_similarity_threshold
     filters = filters or {}
 
-    # Generate text embedding via CLAP
-    generator = AudioEmbeddingGenerator()
-    text_vector = generator.text_to_embedding(query_text)
-    generator.unload_model()
+    # Generate text embedding via cached CLAP model
+    def _load_clap():
+        from embeddings import AudioEmbeddingGenerator
+        gen = AudioEmbeddingGenerator()
+        gen.load_model()
+        return gen
 
-    # Format vector as pgvector literal
-    vector_str = "'" + "[" + ",".join(str(float(x)) for x in text_vector) + "]" + "'::vector"
+    generator = model_cache.get_model("clap", _load_clap)
+    text_vector = generator.text_to_embedding(query_text)
+
+    qvec = _to_vector_param(text_vector)
 
     filter_sql, filter_params = _apply_filters(filters)
     af_join = "LEFT JOIN audio_features af ON t.id = af.track_id" if _needs_audio_features_join(filters) else ""
 
     similarity_sql = text(f"""
         {EMBEDDING_SIMILARITY_SELECT},
-               1 - (e.vector <=> {vector_str}) as similarity
+               1 - (e.vector <=> :qvec::vector) as similarity
         {EMBEDDING_SIMILARITY_FROM}
         {af_join}
-        WHERE 1 - (e.vector <=> {vector_str}) >= :min_similarity
+        WHERE 1 - (e.vector <=> :qvec::vector) >= :min_similarity
           {filter_sql}
-        ORDER BY e.vector <=> {vector_str}
+        ORDER BY e.vector <=> :qvec::vector
         LIMIT :limit
     """)
 
-    params = {"min_similarity": min_similarity, "limit": limit}
+    params = {"qvec": qvec, "min_similarity": min_similarity, "limit": limit}
     params.update(filter_params)
 
     rows = db.execute(similarity_sql, params).fetchall()
@@ -427,7 +431,7 @@ def search_by_lyrics(
     Returns:
         Dict with results list, count, and query_text.
     """
-    from lyrics_embeddings import LyricsEmbeddingGenerator
+    import model_cache
 
     limit = limit or settings.default_search_limit
     min_similarity = min_similarity if min_similarity is not None else 0.3
@@ -443,13 +447,17 @@ def search_by_lyrics(
 
     model_id = model_row.id
 
-    # Generate query embedding
-    generator = LyricsEmbeddingGenerator()
-    query_vector = generator.query_to_embedding(query_text)
-    generator.unload_model()
+    # Generate query embedding via cached lyrics model
+    def _load_lyrics():
+        from lyrics_embeddings import LyricsEmbeddingGenerator
+        gen = LyricsEmbeddingGenerator()
+        gen.load_model()
+        return gen
 
-    # Format vector as pgvector literal
-    vector_str = "'" + "[" + ",".join(str(float(x)) for x in query_vector) + "]" + "'::vector"
+    generator = model_cache.get_model("lyrics", _load_lyrics)
+    query_vector = generator.query_to_embedding(query_text)
+
+    qvec = _to_vector_param(query_vector)
 
     # Search: GROUP BY track_id, take MAX similarity across chunks
     # Use subquery with DISTINCT ON to avoid duplicates from genre joins
@@ -465,11 +473,11 @@ def search_by_lyrics(
                    matches.similarity
             FROM (
                 SELECT le.track_id,
-                       MAX(1 - (le.vector <=> {vector_str})) as similarity
+                       MAX(1 - (le.vector <=> :qvec::vector)) as similarity
                 FROM lyrics_embeddings le
                 WHERE le.model_id = :model_id
                 GROUP BY le.track_id
-                HAVING MAX(1 - (le.vector <=> {vector_str})) >= :min_similarity
+                HAVING MAX(1 - (le.vector <=> :qvec::vector)) >= :min_similarity
             ) matches
             JOIN tracks t ON matches.track_id = t.id
             JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
@@ -491,7 +499,7 @@ def search_by_lyrics(
         LIMIT :limit
     """)
 
-    params = {"model_id": model_id, "min_similarity": min_similarity, "limit": limit}
+    params = {"qvec": qvec, "model_id": model_id, "min_similarity": min_similarity, "limit": limit}
     rows = db.execute(similarity_sql, params).fetchall()
 
     results = [_build_track_result(row) for row in rows]
@@ -500,18 +508,22 @@ def search_by_lyrics(
 
 
 def _encode_enrichment_query(query_text: str) -> "np.ndarray":
-    """Encode a text query using the enrichment embedding model (BGE-M3)."""
-    from enrichment_embeddings import _BaseEnrichmentGenerator
-    gen = _BaseEnrichmentGenerator()
-    gen.load_model()
-    vector = gen.model.encode(query_text, normalize_embeddings=True)
-    gen.unload_model()
-    return vector
+    """Encode a text query using the cached enrichment embedding model (BGE-M3)."""
+    import model_cache
+
+    def _load_enrichment():
+        from enrichment_embeddings import _BaseEnrichmentGenerator
+        gen = _BaseEnrichmentGenerator()
+        gen.load_model()
+        return gen
+
+    gen = model_cache.get_model("enrichment", _load_enrichment)
+    return gen.model.encode(query_text, normalize_embeddings=True)
 
 
-def _vector_literal(vector) -> str:
-    """Format a numpy vector as a pgvector SQL literal."""
-    return "'" + "[" + ",".join(str(float(x)) for x in vector) + "]" + "'::vector"
+def _to_vector_param(vector) -> str:
+    """Format a vector as a pgvector string parameter for :param::vector binding."""
+    return "[" + ",".join(str(float(x)) for x in vector) + "]"
 
 
 def _get_text_model_id(db: Session):
@@ -543,7 +555,7 @@ def search_artists_by_bio(
         return {"error": "Text embedding model not found", "results": [], "count": 0}
 
     query_vector = _encode_enrichment_query(query_text)
-    vector_str = _vector_literal(query_vector)
+    qvec = _to_vector_param(query_vector)
 
     sql = text(f"""
         SELECT
@@ -567,11 +579,11 @@ def search_artists_by_bio(
             ) as sample_tracks
         FROM (
             SELECT abe.artist_id,
-                   MAX(1 - (abe.vector <=> {vector_str})) as similarity
+                   MAX(1 - (abe.vector <=> :qvec::vector)) as similarity
             FROM artist_bio_embeddings abe
             WHERE abe.model_id = :model_id
             GROUP BY abe.artist_id
-            HAVING MAX(1 - (abe.vector <=> {vector_str})) >= :min_similarity
+            HAVING MAX(1 - (abe.vector <=> :qvec::vector)) >= :min_similarity
         ) matches
         JOIN artists a ON matches.artist_id = a.id
         ORDER BY matches.similarity DESC
@@ -579,7 +591,7 @@ def search_artists_by_bio(
     """)
 
     rows = db.execute(sql, {
-        "model_id": model_id, "min_similarity": min_similarity, "limit": limit,
+        "qvec": qvec, "model_id": model_id, "min_similarity": min_similarity, "limit": limit,
     }).fetchall()
 
     results = [
@@ -617,7 +629,7 @@ def search_albums_by_info(
         return {"error": "Text embedding model not found", "results": [], "count": 0}
 
     query_vector = _encode_enrichment_query(query_text)
-    vector_str = _vector_literal(query_vector)
+    qvec = _to_vector_param(query_vector)
 
     sql = text(f"""
         SELECT
@@ -632,11 +644,11 @@ def search_albums_by_info(
              WHERE av2.album_id = al.id) as track_count
         FROM (
             SELECT aie.album_id,
-                   MAX(1 - (aie.vector <=> {vector_str})) as similarity
+                   MAX(1 - (aie.vector <=> :qvec::vector)) as similarity
             FROM album_info_embeddings aie
             WHERE aie.model_id = :model_id
             GROUP BY aie.album_id
-            HAVING MAX(1 - (aie.vector <=> {vector_str})) >= :min_similarity
+            HAVING MAX(1 - (aie.vector <=> :qvec::vector)) >= :min_similarity
         ) matches
         JOIN albums al ON matches.album_id = al.id
         -- Get primary artist via first track on this album
@@ -654,7 +666,7 @@ def search_albums_by_info(
     """)
 
     rows = db.execute(sql, {
-        "model_id": model_id, "min_similarity": min_similarity, "limit": limit,
+        "qvec": qvec, "model_id": model_id, "min_similarity": min_similarity, "limit": limit,
     }).fetchall()
 
     results = [
@@ -692,7 +704,7 @@ def search_genres_by_description(
         return {"error": "Text embedding model not found", "results": [], "count": 0}
 
     query_vector = _encode_enrichment_query(query_text)
-    vector_str = _vector_literal(query_vector)
+    qvec = _to_vector_param(query_vector)
 
     sql = text(f"""
         SELECT
@@ -712,11 +724,11 @@ def search_genres_by_description(
             ) as sample_artists
         FROM (
             SELECT gde.genre_id,
-                   MAX(1 - (gde.vector <=> {vector_str})) as similarity
+                   MAX(1 - (gde.vector <=> :qvec::vector)) as similarity
             FROM genre_desc_embeddings gde
             WHERE gde.model_id = :model_id
             GROUP BY gde.genre_id
-            HAVING MAX(1 - (gde.vector <=> {vector_str})) >= :min_similarity
+            HAVING MAX(1 - (gde.vector <=> :qvec::vector)) >= :min_similarity
         ) matches
         JOIN genres g ON matches.genre_id = g.id
         ORDER BY matches.similarity DESC
@@ -724,7 +736,7 @@ def search_genres_by_description(
     """)
 
     rows = db.execute(sql, {
-        "model_id": model_id, "min_similarity": min_similarity, "limit": limit,
+        "qvec": qvec, "model_id": model_id, "min_similarity": min_similarity, "limit": limit,
     }).fetchall()
 
     results = [

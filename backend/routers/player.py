@@ -13,13 +13,12 @@ import time
 from typing import Optional
 
 import httpx
-import psycopg2
-import psycopg2.extras
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from config import settings
+from db_pool import db_query as _db_query, db_query_one as _db_query_one, get_conn as _get_conn
 from hqplayer_client import HQPlayerClient, PlaybackState, format_time, file_path_to_uri
 from lrclib import LrclibService
 
@@ -125,7 +124,6 @@ def stop_status_poller():
 
 _hqp_client: Optional[HQPlayerClient] = None
 _hqp_lock = threading.Lock()  # Prevent concurrent HQPlayer TCP commands
-_db_conn: Optional[psycopg2.extensions.connection] = None
 
 
 def _get_hqp() -> HQPlayerClient:
@@ -191,25 +189,6 @@ def _hqp_cmd(func):
             return func(hqp)
 
 
-def _get_db() -> psycopg2.extensions.connection:
-    """Get or create PostgreSQL connection (lazy, auto-reconnect)."""
-    global _db_conn
-    if _db_conn is None or _db_conn.closed:
-        _db_conn = psycopg2.connect(settings.database_url)
-        _db_conn.autocommit = True
-    return _db_conn
-
-
-def _db_query(sql: str, params=None) -> list[dict]:
-    conn = _get_db()
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, params)
-        return [dict(row) for row in cur.fetchall()]
-
-
-def _db_query_one(sql: str, params=None) -> Optional[dict]:
-    rows = _db_query(sql, params)
-    return rows[0] if rows else None
 
 
 def _register_playlist(track_ids: list[int]) -> bool:
@@ -258,6 +237,7 @@ class PlayTracksRequest(BaseModel):
 @router.get("/search")
 async def search_tracks(q: str = "", limit: int = 20):
     """Two-stage search grouped by albums: exact ILIKE first, fuzzy trigram fallback."""
+    limit = min(limit, 100)
     q = q.strip()
     if not q:
         return {"albums": [], "count": 0}
@@ -371,37 +351,52 @@ def get_playlist():
             logger.info("Playlist is empty")
             return {"tracks": [], "count": 0}
 
-        # Extract URIs and convert back to DB paths
-        tracks_with_info = []
+        # Convert URIs to DB paths in bulk
+        path_to_idx: dict[str, list[int]] = {}
+        idx_to_hqp: dict[int, dict] = {}
         for idx, hqp_track in enumerate(hqp_tracks):
             uri = hqp_track["uri"]
-            logger.debug(f"Processing track {idx}: URI={uri}")
+            idx_to_hqp[idx] = hqp_track
 
-            # Strip file:// prefix to get the DB path (DB now stores native OS paths)
             if uri.startswith("file:///"):
-                db_path = uri[8:]  # Remove file:///
+                db_path = uri[8:]
             elif uri.startswith("file://"):
-                db_path = uri[7:]  # Remove file://
+                db_path = uri[7:]
             else:
-                logger.warning(f"Unsupported URI format: {uri}")
                 continue
 
-            # Normalize: backslashes → forward slashes, decode percent-encoded brackets
             db_path = db_path.replace("\\", "/")
             db_path = db_path.replace("%5B", "[").replace("%5D", "]")
-            logger.debug(f"  Converted: {uri} -> {db_path}")
+            path_to_idx.setdefault(db_path, []).append(idx)
 
-            # Query DB for track info
-            row = _db_query_one("""
-                SELECT mf.id, t.title, mf.track_number, a.name as artist
+        # Single batch query for all paths
+        all_paths = list(path_to_idx.keys())
+        db_rows_by_path: dict[str, dict] = {}
+        if all_paths:
+            rows_batch = _db_query("""
+                SELECT mf.id, mf.file_path, t.title, mf.track_number, a.name as artist
                 FROM media_files mf
                 JOIN tracks t ON mf.track_id = t.id
                 JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
                 JOIN artists a ON ta.artist_id = a.id
-                WHERE mf.file_path = %(path)s
-            """, {"path": db_path})
+                WHERE mf.file_path = ANY(%(paths)s)
+            """, {"paths": all_paths})
+            for r in rows_batch:
+                db_rows_by_path[r["file_path"]] = r
 
-            logger.debug(f"  DB lookup: {'found' if row else 'not found'}")
+        # Build result preserving original order
+        tracks_with_info = []
+        for idx in range(len(hqp_tracks)):
+            hqp_track = idx_to_hqp.get(idx)
+            if hqp_track is None:
+                continue
+
+            # Find the DB row for this index
+            row = None
+            for path, indices in path_to_idx.items():
+                if idx in indices:
+                    row = db_rows_by_path.get(path)
+                    break
 
             if row:
                 tracks_with_info.append({
@@ -412,8 +407,6 @@ def get_playlist():
                     "index": idx,
                 })
             else:
-                # Fallback to HQPlayer metadata
-                logger.warning(f"Track not found in DB, using HQPlayer metadata")
                 tracks_with_info.append({
                     "id": None,
                     "title": hqp_track["song"] or "Unknown",
@@ -792,8 +785,7 @@ def play_tracks(req: PlayTracksRequest):
     if not req.track_ids:
         raise HTTPException(status_code=400, detail="No track IDs provided")
 
-    placeholders = ", ".join(str(int(tid)) for tid in req.track_ids)
-    rows = _db_query(f"""
+    rows = _db_query("""
         SELECT mf.id, mf.file_path, t.title, a.name as artist, al.title as album
         FROM media_files mf
         JOIN tracks t ON mf.track_id = t.id
@@ -801,9 +793,9 @@ def play_tracks(req: PlayTracksRequest):
         JOIN artists a ON ta.artist_id = a.id
         JOIN album_variants av ON mf.album_variant_id = av.id
         JOIN albums al ON av.album_id = al.id
-        WHERE mf.id IN ({placeholders})
-        ORDER BY array_position(ARRAY[{placeholders}]::int[], mf.id)
-    """)
+        WHERE mf.id = ANY(%(ids)s)
+        ORDER BY array_position(%(ids)s, mf.id)
+    """, {"ids": req.track_ids})
 
     if not rows:
         raise HTTPException(status_code=404, detail="No tracks found")

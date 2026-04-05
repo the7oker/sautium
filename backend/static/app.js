@@ -1149,6 +1149,8 @@ async function loadP2PMessages(friendId) {
     const resp = await fetch(`/api/p2p/friends/${friendId}/messages`);
     const messages = await resp.json();
     renderP2PMessages(messages);
+    // Mark messages as read (fire-and-forget)
+    fetch(`/api/p2p/friends/${friendId}/messages/read`, { method: "POST" });
   } catch {
     document.getElementById("p2pMessages").innerHTML =
       '<div class="empty-state">Failed to load messages</div>';

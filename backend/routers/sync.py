@@ -14,42 +14,16 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-import psycopg2
-import psycopg2.extras
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config import settings
+from db_pool import db_query as _db_query, db_query_one as _db_query_one
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
 
-# ---------------------------------------------------------------------------
-# DB helpers
-# ---------------------------------------------------------------------------
-
-_db_conn: Optional[psycopg2.extensions.connection] = None
-
-
-def _get_db() -> psycopg2.extensions.connection:
-    global _db_conn
-    if _db_conn is None or _db_conn.closed:
-        _db_conn = psycopg2.connect(settings.database_url)
-        _db_conn.autocommit = True
-    return _db_conn
-
-
-def _db_query(sql: str, params=None) -> list[dict]:
-    conn = _get_db()
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, params)
-        return [dict(row) for row in cur.fetchall()]
-
-
-def _uuid_list(rows: list[dict], column: str) -> list[str]:
-    """Extract a column from query rows as a list of UUID strings."""
-    return [str(row[column]) for row in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -57,11 +31,11 @@ def _uuid_list(rows: list[dict], column: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 class InventoryRequest(BaseModel):
-    track_uuids: list[str]
+    track_uuids: list[str] = Field(default_factory=list, max_length=50000)
 
 
 class PullRequest(BaseModel):
-    uuids: list[str]
+    uuids: list[str] = Field(default_factory=list, max_length=10000)
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +61,8 @@ async def get_inventory(req: InventoryRequest) -> dict:
     The requester sends track UUIDs from their library.
     The response contains categorized UUID lists indicating which
     enrichment data this node can provide.
+
+    Uses 3 consolidated CTE queries instead of 15 separate ones.
     """
     if not req.track_uuids:
         return dict(_EMPTY_INVENTORY)
@@ -94,153 +70,74 @@ async def get_inventory(req: InventoryRequest) -> dict:
     uuids = req.track_uuids
 
     try:
-        # -- Track-level data --
-        tracks = _uuid_list(
-            _db_query("SELECT id FROM tracks WHERE id = ANY(%s::uuid[])", [uuids]),
-            "id",
-        )
-        embeddings = _uuid_list(
-            _db_query(
-                "SELECT DISTINCT track_id FROM embeddings WHERE track_id = ANY(%s::uuid[])",
-                [uuids],
-            ),
-            "track_id",
-        )
-        audio_features = _uuid_list(
-            _db_query(
-                "SELECT DISTINCT track_id FROM audio_features WHERE track_id = ANY(%s::uuid[])",
-                [uuids],
-            ),
-            "track_id",
-        )
-        lyrics = _uuid_list(
-            _db_query(
-                "SELECT DISTINCT track_id FROM track_lyrics WHERE track_id = ANY(%s::uuid[])",
-                [uuids],
-            ),
-            "track_id",
-        )
-        track_stats = _uuid_list(
-            _db_query(
-                "SELECT DISTINCT track_id FROM track_stats WHERE track_id = ANY(%s::uuid[])",
-                [uuids],
-            ),
-            "track_id",
-        )
+        # Query 1: Track-level + genre data (7 categories, 1 round-trip)
+        track_row = _db_query_one("""
+            WITH uuids AS (SELECT unnest(%(u)s::uuid[]) AS id)
+            SELECT
+                ARRAY(SELECT t.id::text FROM tracks t
+                      WHERE t.id IN (SELECT id FROM uuids)) AS tracks,
+                ARRAY(SELECT DISTINCT e.track_id::text FROM embeddings e
+                      WHERE e.track_id IN (SELECT id FROM uuids)) AS embeddings,
+                ARRAY(SELECT DISTINCT af.track_id::text FROM audio_features af
+                      WHERE af.track_id IN (SELECT id FROM uuids)) AS audio_features,
+                ARRAY(SELECT DISTINCT tl.track_id::text FROM track_lyrics tl
+                      WHERE tl.track_id IN (SELECT id FROM uuids)) AS lyrics,
+                ARRAY(SELECT DISTINCT ts.track_id::text FROM track_stats ts
+                      WHERE ts.track_id IN (SELECT id FROM uuids)) AS track_stats,
+                ARRAY(SELECT DISTINCT tg.genre_id::text FROM track_genres tg
+                      WHERE tg.track_id IN (SELECT id FROM uuids)) AS genres,
+                ARRAY(SELECT DISTINCT gd.genre_id::text FROM genre_descriptions gd
+                      JOIN track_genres tg ON tg.genre_id = gd.genre_id
+                      WHERE tg.track_id IN (SELECT id FROM uuids)) AS genre_descriptions
+        """, {"u": uuids})
 
-        # -- Related artists (via track_artists) --
-        artists = _uuid_list(
-            _db_query(
-                "SELECT DISTINCT artist_id FROM track_artists WHERE track_id = ANY(%s::uuid[])",
-                [uuids],
-            ),
-            "artist_id",
-        )
-        artist_bios = _uuid_list(
-            _db_query(
-                """SELECT DISTINCT ab.artist_id FROM artist_bios ab
-                   INNER JOIN track_artists ta ON ta.artist_id = ab.artist_id
-                   WHERE ta.track_id = ANY(%s::uuid[])""",
-                [uuids],
-            ),
-            "artist_id",
-        )
-        artist_tags = _uuid_list(
-            _db_query(
-                """SELECT DISTINCT at2.artist_id FROM artist_tags at2
-                   INNER JOIN track_artists ta ON ta.artist_id = at2.artist_id
-                   WHERE ta.track_id = ANY(%s::uuid[])""",
-                [uuids],
-            ),
-            "artist_id",
-        )
-        similar_artists = _uuid_list(
-            _db_query(
-                """SELECT DISTINCT sa.artist_id FROM similar_artists sa
-                   INNER JOIN track_artists ta ON ta.artist_id = sa.artist_id
-                   WHERE ta.track_id = ANY(%s::uuid[])""",
-                [uuids],
-            ),
-            "artist_id",
-        )
+        # Query 2: Artist data (5 categories, 1 round-trip)
+        artist_row = _db_query_one("""
+            WITH uuids AS (SELECT unnest(%(u)s::uuid[]) AS id),
+                 rel AS (SELECT DISTINCT ta.artist_id FROM track_artists ta
+                         WHERE ta.track_id IN (SELECT id FROM uuids))
+            SELECT
+                ARRAY(SELECT artist_id::text FROM rel) AS artists,
+                ARRAY(SELECT DISTINCT ab.artist_id::text FROM artist_bios ab
+                      WHERE ab.artist_id IN (SELECT artist_id FROM rel)) AS artist_bios,
+                ARRAY(SELECT DISTINCT at2.artist_id::text FROM artist_tags at2
+                      WHERE at2.artist_id IN (SELECT artist_id FROM rel)) AS artist_tags,
+                ARRAY(SELECT DISTINCT sa.artist_id::text FROM similar_artists sa
+                      WHERE sa.artist_id IN (SELECT artist_id FROM rel)) AS similar_artists,
+                ARRAY(SELECT DISTINCT am.compound_artist_id::text FROM artist_members am
+                      WHERE am.compound_artist_id IN (SELECT artist_id FROM rel)) AS artist_members
+        """, {"u": uuids})
 
-        # -- Artist members (compound → member) --
-        artist_members = _uuid_list(
-            _db_query(
-                """SELECT DISTINCT am.compound_artist_id AS artist_id
-                   FROM artist_members am
-                   INNER JOIN track_artists ta ON ta.artist_id = am.compound_artist_id
-                   WHERE ta.track_id = ANY(%s::uuid[])""",
-                [uuids],
-            ),
-            "artist_id",
-        )
-
-        # -- Related albums (track → media_files → album_variants → album) --
-        albums = _uuid_list(
-            _db_query(
-                """SELECT DISTINCT av.album_id FROM album_variants av
-                   INNER JOIN media_files mf ON mf.album_variant_id = av.id
-                   WHERE mf.track_id = ANY(%s::uuid[])""",
-                [uuids],
-            ),
-            "album_id",
-        )
-        album_info = _uuid_list(
-            _db_query(
-                """SELECT DISTINCT ai.album_id FROM album_info ai
-                   INNER JOIN album_variants av ON av.album_id = ai.album_id
-                   INNER JOIN media_files mf ON mf.album_variant_id = av.id
-                   WHERE mf.track_id = ANY(%s::uuid[])""",
-                [uuids],
-            ),
-            "album_id",
-        )
-        album_tags = _uuid_list(
-            _db_query(
-                """SELECT DISTINCT at2.album_id FROM album_tags at2
-                   INNER JOIN album_variants av ON av.album_id = at2.album_id
-                   INNER JOIN media_files mf ON mf.album_variant_id = av.id
-                   WHERE mf.track_id = ANY(%s::uuid[])""",
-                [uuids],
-            ),
-            "album_id",
-        )
-
-        # -- Related genres (via track_genres) --
-        genres = _uuid_list(
-            _db_query(
-                "SELECT DISTINCT genre_id FROM track_genres WHERE track_id = ANY(%s::uuid[])",
-                [uuids],
-            ),
-            "genre_id",
-        )
-        genre_descriptions = _uuid_list(
-            _db_query(
-                """SELECT DISTINCT gd.genre_id FROM genre_descriptions gd
-                   INNER JOIN track_genres tg ON tg.genre_id = gd.genre_id
-                   WHERE tg.track_id = ANY(%s::uuid[])""",
-                [uuids],
-            ),
-            "genre_id",
-        )
+        # Query 3: Album data (3 categories, 1 round-trip)
+        album_row = _db_query_one("""
+            WITH uuids AS (SELECT unnest(%(u)s::uuid[]) AS id),
+                 rel AS (SELECT DISTINCT av.album_id FROM album_variants av
+                         JOIN media_files mf ON mf.album_variant_id = av.id
+                         WHERE mf.track_id IN (SELECT id FROM uuids))
+            SELECT
+                ARRAY(SELECT album_id::text FROM rel) AS albums,
+                ARRAY(SELECT DISTINCT ai.album_id::text FROM album_info ai
+                      WHERE ai.album_id IN (SELECT album_id FROM rel)) AS album_info,
+                ARRAY(SELECT DISTINCT at2.album_id::text FROM album_tags at2
+                      WHERE at2.album_id IN (SELECT album_id FROM rel)) AS album_tags
+        """, {"u": uuids})
 
         return {
-            "tracks": tracks,
-            "lyrics": lyrics,
-            "embeddings": embeddings,
-            "audio_features": audio_features,
-            "track_stats": track_stats,
-            "artists": artists,
-            "artist_bios": artist_bios,
-            "artist_tags": artist_tags,
-            "similar_artists": similar_artists,
-            "artist_members": artist_members,
-            "albums": albums,
-            "album_info": album_info,
-            "album_tags": album_tags,
-            "genres": genres,
-            "genre_descriptions": genre_descriptions,
+            "tracks": track_row["tracks"],
+            "lyrics": track_row["lyrics"],
+            "embeddings": track_row["embeddings"],
+            "audio_features": track_row["audio_features"],
+            "track_stats": track_row["track_stats"],
+            "artists": artist_row["artists"],
+            "artist_bios": artist_row["artist_bios"],
+            "artist_tags": artist_row["artist_tags"],
+            "similar_artists": artist_row["similar_artists"],
+            "artist_members": artist_row["artist_members"],
+            "albums": album_row["albums"],
+            "album_info": album_row["album_info"],
+            "album_tags": album_row["album_tags"],
+            "genres": track_row["genres"],
+            "genre_descriptions": track_row["genre_descriptions"],
         }
 
     except Exception as e:

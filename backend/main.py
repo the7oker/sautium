@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 # Global DHT service reference (set during lifespan)
 _dht_service: DHTService | None = None
 _dht_reannounce_task: asyncio.Task | None = None
+_model_cleanup_task: asyncio.Task | None = None
+
+
+async def _model_cleanup_loop():
+    """Periodically unload idle ML models to free GPU memory."""
+    import model_cache
+    while True:
+        await asyncio.sleep(60)
+        model_cache.cleanup_idle()
 
 
 @asynccontextmanager
@@ -140,9 +149,20 @@ async def lifespan(app: FastAPI):
     elif settings.p2p_enabled:
         logger.warning("P2P enabled but libtorrent not installed — DHT disabled")
 
+    # Start model cache cleanup task
+    global _model_cleanup_task
+    _model_cleanup_task = asyncio.create_task(_model_cleanup_loop())
+
     yield
 
     # Shutdown
+    if _model_cleanup_task:
+        _model_cleanup_task.cancel()
+        try:
+            await _model_cleanup_task
+        except asyncio.CancelledError:
+            pass
+
     if _dht_reannounce_task:
         _dht_reannounce_task.cancel()
         try:
@@ -155,6 +175,14 @@ async def lifespan(app: FastAPI):
 
     stop_status_poller()
     stop_chat_listener()
+
+    # Cleanup resources
+    import model_cache
+    model_cache.shutdown()
+
+    from db_pool import close_pool
+    close_pool()
+
     logger.info("Shutting down application")
 
 
@@ -173,13 +201,14 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 def test_db_connection() -> bool:
     """Test PostgreSQL connection."""
     conn = psycopg2.connect(settings.database_url)
-    cursor = conn.cursor()
-    cursor.execute("SELECT version();")
-    version = cursor.fetchone()
-    cursor.close()
-    conn.close()
-    logger.debug(f"PostgreSQL version: {version[0]}")
-    return True
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT version();")
+            version = cursor.fetchone()
+        logger.debug(f"PostgreSQL version: {version[0]}")
+        return True
+    finally:
+        conn.close()
 
 
 def _get_enriched_artist_uuids() -> list[str]:
@@ -341,7 +370,7 @@ async def get_stats() -> Dict[str, Any]:
             return {**defaults, **row}
     except Exception as e:
         logger.error(f"Failed to get stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to retrieve library stats")
 
 
 # -- Scan background task -------------------------------------------------------
