@@ -117,7 +117,7 @@ class LastFmService:
             }
 
         except pylast.WSError as e:
-            if "not" in str(e).lower() and "found" in str(e).lower():
+            if "not found" in str(e).lower():
                 logger.info(f"Artist not found on Last.fm: {artist_name}")
                 return None
             else:
@@ -837,7 +837,7 @@ class LastFmService:
             }
 
         except pylast.WSError as e:
-            if "not" in str(e).lower() and "found" in str(e).lower():
+            if "not found" in str(e).lower():
                 logger.info(f"Album not found on Last.fm: {artist_name} - {album_title}")
                 return None
             else:
