@@ -515,10 +515,11 @@ class SyncServer:
             async with _aiohttp.ClientSession(
                 connector=_aiohttp.TCPConnector(ssl=False),
             ) as session:
-                await session.post(
+                async with session.post(
                     f"http://127.0.0.1:{self._backend_port}/api/p2p/chat/wake",
                     timeout=_aiohttp.ClientTimeout(total=2),
-                )
+                ):
+                    pass
         except Exception:
             pass  # Fallback: DB NOTIFY will wake SSE eventually
 
