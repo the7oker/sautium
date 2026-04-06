@@ -99,6 +99,7 @@ class Settings(BaseSettings):
     p2p_password: str = ""
     p2p_email: str = ""
     p2p_identity_dir: str = ""  # Path to node_identity dir (desktop mode)
+    p2p_listen_port: int = 0   # Desktop sync server port (direct chat delivery)
 
     model_config = SettingsConfigDict(
         env_file=".env",

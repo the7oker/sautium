@@ -39,13 +39,16 @@ class SyncServer:
     """HTTP server that serves sync endpoints for peer-to-peer data exchange."""
 
     def __init__(self, db_dsn: str, port: int = 19000, node_id: str = "",
-                 account_info: Optional[dict] = None):
+                 account_info: Optional[dict] = None,
+                 backend_port: int = 0):
         self.db_dsn = db_dsn
         self.port = port
         self.node_id = node_id
         self.account_info = account_info  # {username, public_key_hex, invite_code}
+        self._backend_port = backend_port
         self._chat_service = None  # set via set_chat_service()
         self._on_message_cb: Optional[Callable] = None
+        self._delivery_trigger_cb: Optional[Callable] = None
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
@@ -56,6 +59,10 @@ class SyncServer:
         """Attach chat service for handling chat endpoints."""
         self._chat_service = chat_service
         self._on_message_cb = on_message_cb
+
+    def set_delivery_trigger(self, cb: Callable):
+        """Set callback to trigger immediate P2P message delivery."""
+        self._delivery_trigger_cb = cb
 
     def _new_db(self) -> psycopg2.extensions.connection:
         """Create a new DB connection (caller must close it)."""
@@ -314,6 +321,9 @@ class SyncServer:
             except Exception as e:
                 logger.debug(f"Message callback error: {e}")
 
+        # Wake backend SSE clients so receiver's UI updates instantly
+        asyncio.ensure_future(self._wake_backend_sse())
+
         return self._json_response(request, {"status": "delivered"})
 
     async def handle_chat_history(self, request: web.Request) -> web.Response:
@@ -484,6 +494,34 @@ class SyncServer:
 
         return self._json_response(request, {"status": "accepted"})
 
+    async def handle_trigger_send(self, request: web.Request) -> web.Response:
+        """POST /api/chat/trigger-send — trigger immediate P2P delivery.
+
+        Called by the backend after a new outgoing message is saved.
+        """
+        if self._delivery_trigger_cb:
+            try:
+                self._delivery_trigger_cb()
+            except Exception as e:
+                logger.debug(f"Delivery trigger error: {e}")
+        return self._json_response(request, {"ok": True})
+
+    async def _wake_backend_sse(self):
+        """Tell the local backend to wake SSE clients (incoming message)."""
+        if not self._backend_port:
+            return
+        import aiohttp as _aiohttp
+        try:
+            async with _aiohttp.ClientSession(
+                connector=_aiohttp.TCPConnector(ssl=False),
+            ) as session:
+                await session.post(
+                    f"http://127.0.0.1:{self._backend_port}/api/p2p/chat/wake",
+                    timeout=_aiohttp.ClientTimeout(total=2),
+                )
+        except Exception:
+            pass  # Fallback: DB NOTIFY will wake SSE eventually
+
     # -----------------------------------------------------------------------
     # Lifecycle
     # -----------------------------------------------------------------------
@@ -508,6 +546,9 @@ class SyncServer:
         )
         self._app.router.add_post(
             "/api/chat/key-rotation", self.handle_chat_key_rotation
+        )
+        self._app.router.add_post(
+            "/api/chat/trigger-send", self.handle_trigger_send
         )
 
         self._runner = web.AppRunner(

@@ -205,6 +205,7 @@ def generate_env_file(config: dict, env_path: Path) -> None:
         "",
         "# P2P Identity",
         f"P2P_IDENTITY_DIR={identity_dir}",
+        f"P2P_LISTEN_PORT={config.get('p2p', {}).get('listen_port', 0)}",
         "",
         "# Application",
         "LOG_LEVEL=INFO",

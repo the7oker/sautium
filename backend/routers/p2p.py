@@ -8,10 +8,13 @@ import asyncio
 import json
 import logging
 import select
+import ssl
 import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+import httpx
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -249,9 +252,35 @@ async def send_message(friend_id: int, req: SendMessageRequest) -> Dict[str, Any
                 RETURNING id
             """, (friend_id, content, datetime.now(timezone.utc), msg_uuid))
             msg_id = cur.fetchone()[0]
-            # Wake up P2P delivery loop + SSE clients immediately
-            cur.execute("NOTIFY sautium_chat")
-            return {"id": msg_id, "message_uuid": msg_uuid, "status": "queued"}
+
+    # Wake SSE clients immediately (sender sees own message)
+    _wake_chat_sse_clients()
+
+    # Trigger P2P delivery via sync server (fire-and-forget)
+    asyncio.create_task(_trigger_sync_server_delivery())
+
+    return {"id": msg_id, "message_uuid": msg_uuid, "status": "queued"}
+
+
+async def _trigger_sync_server_delivery():
+    """Fire-and-forget: tell the desktop sync server to push pending messages."""
+    port = settings.p2p_listen_port
+    if not port:
+        return
+    try:
+        async with httpx.AsyncClient(
+            verify=False, timeout=httpx.Timeout(3.0),
+        ) as client:
+            await client.post(f"https://127.0.0.1:{port}/api/chat/trigger-send")
+    except Exception:
+        pass  # Fallback: pending loop will pick it up
+
+
+@router.post("/chat/wake")
+async def chat_wake() -> Dict[str, str]:
+    """Wake SSE clients immediately (called by sync server on incoming message)."""
+    _wake_chat_sse_clients()
+    return {"ok": "true"}
 
 
 @router.get("/chat/stream")

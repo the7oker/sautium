@@ -89,11 +89,13 @@ class P2PManager:
         from desktop.node_identity import get_account_info
         account_info = get_account_info()
 
+        backend_port = self.config.get("ports", {}).get("web", 0)
         self._sync_server = SyncServer(
             db_dsn=self.db_dsn,
             port=http_port,
             node_id=node_id,
             account_info=account_info,
+            backend_port=backend_port,
         )
         self._dht_service = DHTService(
             listen_port=dht_port,
@@ -122,6 +124,9 @@ class P2PManager:
                 )
                 self._sync_server.set_chat_service(
                     self._chat_service, self._on_message_cb
+                )
+                self._sync_server.set_delivery_trigger(
+                    self.notify_new_message
                 )
             except Exception as e:
                 logger.warning(f"Chat service init failed: {e}")
