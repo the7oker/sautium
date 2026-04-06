@@ -981,32 +981,37 @@ class P2PManager:
     ) -> list[tuple]:
         """Find peer addresses for a friend via cache, LAN, or DHT.
 
+        Always checks LAN first (even with cache) — LAN peers are
+        faster and more reliable than DHT/external addresses.
+
         Args:
             friend: friend dict with id, invite_code, public_key_hex.
-            refresh: if True, skip cache and do fresh LAN/DHT lookup.
+            refresh: if True, skip cache and do fresh DHT lookup.
                      If fresh lookup finds nothing, the old cached
                      address is kept (peer may come back at same addr).
         """
         fid = friend.get("id")
-
-        # Return cached unless refresh requested
-        if not refresh and fid and fid in self._friend_peer_cache:
-            return self._friend_peer_cache[fid]
-
-        peers = []
         invite_code = friend.get("invite_code", "")
         pubkey = friend.get("public_key_hex", "")
 
-        # Check LAN first (fast, no network delay)
+        # Always check LAN first — instant, and overrides stale DHT cache
+        peers = []
         if self._lan_discovery:
             lan = self._lan_discovery.find_peer_by_invite_code(invite_code)
             if not lan and pubkey and not pubkey.startswith("pending:"):
                 lan = self._lan_discovery.find_peer_by_node_id(pubkey)
             if lan:
                 peers.append(lan)
+                if fid:
+                    self._friend_peer_cache[fid] = peers
+                return peers
+
+        # Return cached if available (and not refreshing)
+        if not refresh and fid and fid in self._friend_peer_cache:
+            return self._friend_peer_cache[fid]
 
         # Then DHT (internet)
-        if not peers and self._dht_service and self._dht_service.is_available:
+        if self._dht_service and self._dht_service.is_available:
             dht_peers = await self._dht_service.lookup_user(invite_code)
             peers.extend(dht_peers)
 
