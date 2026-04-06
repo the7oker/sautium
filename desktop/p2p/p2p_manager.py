@@ -56,6 +56,8 @@ class P2PManager:
         # Peer address cache: friend_id -> peers_list
         # Persists until connection failure triggers refresh.
         self._friend_peer_cache: dict[int, list[tuple]] = {}
+        # Friends whose history has been pulled this session (skip re-pull)
+        self._history_synced_friends: set[int] = set()
 
     @property
     def is_running(self) -> bool:
@@ -1222,10 +1224,11 @@ class P2PManager:
                 continue
 
     async def _deliver_pending_fast(self):
-        """Fast path: push pending messages without pulling history first.
+        """Fast path: push pending messages, pull history once per session.
 
         Called directly from sync_server trigger-send endpoint.
-        Skips the heavyweight history pull — just encrypts and pushes.
+        First call per friend does a history pull (for identity restoration
+        and multi-device sync), subsequent calls skip it.
         """
         if not self._chat_service:
             return
@@ -1254,10 +1257,20 @@ class P2PManager:
             if not peers:
                 continue
 
-            friend_pending = [m for m in pending if m["friend_id"] == fid]
-            await self._push_pending_messages(
-                fid, pubkey, friend_pending, peers
-            )
+            # Pull history once per session per friend
+            if fid not in self._history_synced_friends:
+                await self._sync_chat_history(friend_info, peers)
+                self._history_synced_friends.add(fid)
+
+            # Re-check pending (pull may have marked some as delivered)
+            friend_pending = [
+                m for m in self._chat_service.get_pending_messages()
+                if m["friend_id"] == fid
+            ]
+            if friend_pending:
+                await self._push_pending_messages(
+                    fid, pubkey, friend_pending, peers
+                )
 
     async def _push_pending_messages(
         self,
@@ -1409,8 +1422,10 @@ class P2PManager:
                 if not peers:
                     continue
 
-                # Step 1: Pull history (may mark our msgs as delivered)
-                await self._sync_chat_history(friend_info, peers)
+                # Step 1: Pull history once per session
+                if fid not in self._history_synced_friends:
+                    await self._sync_chat_history(friend_info, peers)
+                    self._history_synced_friends.add(fid)
 
                 # Step 2: Push remaining undelivered messages
                 still_pending = [
