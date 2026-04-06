@@ -126,7 +126,7 @@ class P2PManager:
                     self._chat_service, self._on_message_cb
                 )
                 self._sync_server.set_delivery_trigger(
-                    self.notify_new_message
+                    self._deliver_pending_fast
                 )
             except Exception as e:
                 logger.warning(f"Chat service init failed: {e}")
@@ -1221,6 +1221,44 @@ class P2PManager:
             if resolved:
                 continue
 
+    async def _deliver_pending_fast(self):
+        """Fast path: push pending messages without pulling history first.
+
+        Called directly from sync_server trigger-send endpoint.
+        Skips the heavyweight history pull — just encrypts and pushes.
+        """
+        if not self._chat_service:
+            return
+        pending = self._chat_service.get_pending_messages()
+        if not pending:
+            return
+
+        seen_friends: set[int] = set()
+        for msg in pending:
+            fid = msg["friend_id"]
+            if fid in seen_friends:
+                continue
+            seen_friends.add(fid)
+
+            pubkey = msg["public_key_hex"]
+            if pubkey.startswith("pending:"):
+                continue
+
+            friend_info = {
+                "id": fid,
+                "invite_code": msg["invite_code"],
+                "public_key_hex": pubkey,
+                "username": "",
+            }
+            peers = await self._find_friend_peers(friend_info)
+            if not peers:
+                continue
+
+            friend_pending = [m for m in pending if m["friend_id"] == fid]
+            await self._push_pending_messages(
+                fid, pubkey, friend_pending, peers
+            )
+
     async def _push_pending_messages(
         self,
         friend_id: int,
@@ -1234,56 +1272,52 @@ class P2PManager:
         they will pull history when they add us).
         """
         import aiohttp
-        for msg in messages:
-            try:
-                encrypted = self._chat_service.encrypt_message(
-                    msg["content"], pubkey
-                )
-            except Exception as e:
-                logger.error(
-                    f"Encrypt failed for friend {friend_id}: {e}"
-                )
-                break
-
-            ts = msg["timestamp"]
-            ts_str = (
-                ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
-            )
-            if "+" not in ts_str and not ts_str.endswith("Z"):
-                ts_str += "+00:00"
-
-            payload = {
-                "from_public_key": self._chat_service.public_key_hex,
-                "encrypted": encrypted,
-                "timestamp": ts_str,
-                "message_uuid": msg.get("message_uuid", ""),
-            }
-
-            for ip, port in peers:
-                url = f"https://{ip}:{port}/api/chat/message"
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(ssl=False),
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as session:
+            for msg in messages:
                 try:
-                    async with aiohttp.ClientSession(
-                        connector=aiohttp.TCPConnector(ssl=False)
-                    ) as session:
-                        async with session.post(
-                            url, json=payload,
-                            timeout=aiohttp.ClientTimeout(total=10),
-                        ) as resp:
+                    encrypted = self._chat_service.encrypt_message(
+                        msg["content"], pubkey
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Encrypt failed for friend {friend_id}: {e}"
+                    )
+                    break
+
+                ts = msg["timestamp"]
+                ts_str = (
+                    ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                )
+                if "+" not in ts_str and not ts_str.endswith("Z"):
+                    ts_str += "+00:00"
+
+                payload = {
+                    "from_public_key": self._chat_service.public_key_hex,
+                    "encrypted": encrypted,
+                    "timestamp": ts_str,
+                    "message_uuid": msg.get("message_uuid", ""),
+                }
+
+                for ip, port in peers:
+                    url = f"https://{ip}:{port}/api/chat/message"
+                    try:
+                        async with session.post(url, json=payload) as resp:
                             if resp.status == 200:
                                 self._chat_service.mark_delivered(
                                     msg["id"]
                                 )
                                 break
                             if resp.status == 403:
-                                # Peer doesn't have us — stop pushing,
-                                # they'll pull history when they add us
                                 logger.debug(
                                     f"Push rejected (403) by "
                                     f"{ip}:{port}, stopping"
                                 )
                                 return
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
 
     async def _listen_for_db_notifications(self):
         """Listen for PostgreSQL NOTIFY on 'sautium_chat' channel.

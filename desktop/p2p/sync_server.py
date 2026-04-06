@@ -501,7 +501,7 @@ class SyncServer:
         """
         if self._delivery_trigger_cb:
             try:
-                self._delivery_trigger_cb()
+                await self._delivery_trigger_cb()
             except Exception as e:
                 logger.debug(f"Delivery trigger error: {e}")
         return self._json_response(request, {"ok": True})
