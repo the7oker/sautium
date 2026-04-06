@@ -64,6 +64,8 @@ class ChatService:
         self._curve_private = ed25519_to_curve25519_private(private_key_raw)
         # Cache Box instances per friend public key
         self._boxes: dict[str, Box] = {}
+        # Persistent DB connection (avoids 2s connect overhead per call)
+        self._conn = None
 
     def _get_box(self, friend_public_key_hex: str) -> Box:
         """Get or create NaCl Box for a friend."""
@@ -93,11 +95,28 @@ class ChatService:
 
     def _get_db(self):
         import psycopg2
+        # Reuse persistent connection (psycopg2.connect takes ~2s on Windows)
+        if self._conn is not None:
+            try:
+                with self._conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                return self._conn
+            except Exception:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
         conn = psycopg2.connect(self.db_dsn)
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute("SET timezone = 'UTC'")
+        self._conn = conn
         return conn
+
+    def _return_db(self, conn):
+        """No-op: connection is kept alive for reuse."""
+        pass
 
     def add_friend(
         self,
@@ -140,7 +159,7 @@ class ChatService:
                 row = cur.fetchone()
                 return row[0] if row else None
         finally:
-            conn.close()
+            self._return_db(conn)
 
     def remove_friend(self, friend_id: int) -> bool:
         """Remove a friend and all their messages."""
@@ -150,7 +169,7 @@ class ChatService:
                 cur.execute("DELETE FROM friends WHERE id = %s", (friend_id,))
                 return cur.rowcount > 0
         finally:
-            conn.close()
+            self._return_db(conn)
 
     def get_friends(self) -> list[dict]:
         """Get all friends."""
@@ -166,7 +185,7 @@ class ChatService:
                 cols = [d[0] for d in cur.description]
                 return [dict(zip(cols, row)) for row in cur.fetchall()]
         finally:
-            conn.close()
+            self._return_db(conn)
 
     def get_friend_by_public_key(self, public_key_hex: str) -> Optional[dict]:
         """Find a friend by their public key."""
@@ -184,7 +203,7 @@ class ChatService:
                 cols = [d[0] for d in cur.description]
                 return dict(zip(cols, row))
         finally:
-            conn.close()
+            self._return_db(conn)
 
     def update_friend_last_seen(self, public_key_hex: str):
         """Update last_seen timestamp for a friend."""
@@ -196,7 +215,7 @@ class ChatService:
                     WHERE public_key_hex = %s
                 """, (public_key_hex,))
         finally:
-            conn.close()
+            self._return_db(conn)
 
     # -------------------------------------------------------------------
     # Message storage
@@ -231,7 +250,7 @@ class ChatService:
                 cur.execute("NOTIFY sautium_chat")
                 return msg_id
         finally:
-            conn.close()
+            self._return_db(conn)
 
     def get_messages(
         self,
@@ -264,7 +283,7 @@ class ChatService:
                 rows.reverse()  # chronological order
                 return rows
         finally:
-            conn.close()
+            self._return_db(conn)
 
     def mark_messages_read(self, friend_id: int):
         """Mark all unread incoming messages from a friend as read."""
@@ -277,7 +296,7 @@ class ChatService:
                     WHERE friend_id = %s AND direction = 'in' AND read = FALSE
                 """, (friend_id,))
         finally:
-            conn.close()
+            self._return_db(conn)
 
     def get_unread_counts(self) -> dict[int, int]:
         """Get unread message counts per friend. Returns {friend_id: count}."""
@@ -292,7 +311,7 @@ class ChatService:
                 """)
                 return {row[0]: row[1] for row in cur.fetchall()}
         finally:
-            conn.close()
+            self._return_db(conn)
 
     def get_pending_messages(self) -> list[dict]:
         """Get all undelivered outgoing messages."""
@@ -310,7 +329,7 @@ class ChatService:
                 cols = [d[0] for d in cur.description]
                 return [dict(zip(cols, row)) for row in cur.fetchall()]
         finally:
-            conn.close()
+            self._return_db(conn)
 
     def mark_delivered(self, message_id: int):
         """Mark an outgoing message as delivered."""
@@ -323,7 +342,7 @@ class ChatService:
                 if cur.rowcount:
                     cur.execute("NOTIFY sautium_chat")
         finally:
-            conn.close()
+            self._return_db(conn)
 
     def mark_delivered_by_uuid(self, message_uuid: str):
         """Mark an outgoing message as delivered by its UUID."""
@@ -337,7 +356,7 @@ class ChatService:
                 if cur.rowcount:
                     cur.execute("NOTIFY sautium_chat")
         finally:
-            conn.close()
+            self._return_db(conn)
 
     def _has_message_uuid(self, message_uuid: str) -> bool:
         """Check if a message with this UUID already exists."""
@@ -350,7 +369,7 @@ class ChatService:
                 )
                 return cur.fetchone() is not None
         finally:
-            conn.close()
+            self._return_db(conn)
 
     # -------------------------------------------------------------------
     # History sync
@@ -383,7 +402,7 @@ class ChatService:
                 cols = [d[0] for d in cur.description]
                 return [dict(zip(cols, row)) for row in cur.fetchall()]
         finally:
-            conn.close()
+            self._return_db(conn)
 
     def import_history(
         self,
@@ -476,7 +495,8 @@ class ChatService:
             conn.rollback()
             raise
         finally:
-            conn.close()
+            conn.autocommit = True
+            self._return_db(conn)
 
     # -------------------------------------------------------------------
     # Key rotation
@@ -512,7 +532,7 @@ class ChatService:
                     new_invite_code, rotation_message, signature,
                 ))
         finally:
-            conn.close()
+            self._return_db(conn)
 
     def apply_key_rotation(self, friend_id: int) -> bool:
         """Apply a pending key rotation: update friend's public key."""
@@ -556,7 +576,7 @@ class ChatService:
 
                 return True
         finally:
-            conn.close()
+            self._return_db(conn)
 
     # -------------------------------------------------------------------
     # High-level send/receive
@@ -582,7 +602,7 @@ class ChatService:
                     return None
                 friend_pubkey = row[0]
         finally:
-            conn.close()
+            self._return_db(conn)
 
         ts = datetime.now(timezone.utc)
         msg_uuid = str(uuid.uuid4())
