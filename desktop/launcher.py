@@ -434,6 +434,33 @@ class LauncherApp(ctk.CTk):
         except Exception as e:
             logger.warning(f"OpenSSL DLL fix failed: {e}")
 
+    @staticmethod
+    def _reload_p2p_modules():
+        """Reload P2P modules after git pull so new code takes effect.
+
+        The backend runs as a subprocess (gets new code on restart),
+        but P2P modules run in the launcher process — Python's import
+        cache keeps the old code in memory after git pull.
+        """
+        import importlib
+        module_names = [
+            "desktop.p2p.sync_queries",
+            "desktop.p2p.chat_service",
+            "desktop.p2p.lan_discovery",
+            "desktop.p2p.dht_service",
+            "desktop.p2p.upnp_service",
+            "desktop.p2p.sync_server",
+            "desktop.p2p.p2p_manager",
+            "desktop.node_identity",
+            "desktop.sync_client",
+        ]
+        for name in module_names:
+            if name in sys.modules:
+                try:
+                    importlib.reload(sys.modules[name])
+                except Exception as e:
+                    logger.debug(f"Reload {name}: {e}")
+
     def _start_p2p_if_enabled(self):
         """Start P2P services (DHT always starts for peer discovery).
 
@@ -1015,6 +1042,9 @@ class LauncherApp(ctk.CTk):
             self.p2p_manager = None
 
             if success:
+                # Reload P2P modules so new code takes effect
+                # (backend is a separate process, but P2P runs in-process)
+                self._reload_p2p_modules()
                 self.after(0, lambda: self._show_changelog(changelog))
                 self.after(0, self._on_services_ready)
             else:
