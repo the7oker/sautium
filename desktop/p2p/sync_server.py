@@ -498,13 +498,18 @@ class SyncServer:
         """POST /api/chat/trigger-send — trigger immediate P2P delivery.
 
         Called by the backend after a new outgoing message is saved.
+        Returns immediately; delivery runs in the background.
         """
         if self._delivery_trigger_cb:
-            try:
-                await self._delivery_trigger_cb()
-            except Exception as e:
-                logger.debug(f"Delivery trigger error: {e}")
+            asyncio.ensure_future(self._run_delivery_trigger())
         return self._json_response(request, {"ok": True})
+
+    async def _run_delivery_trigger(self):
+        """Run the delivery trigger callback with error handling."""
+        try:
+            await self._delivery_trigger_cb()
+        except Exception as e:
+            logger.debug(f"Delivery trigger error: {e}")
 
     async def _wake_backend_sse(self):
         """Tell the local backend to wake SSE clients (incoming message)."""
