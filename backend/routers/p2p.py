@@ -215,7 +215,8 @@ async def get_messages(friend_id: int, limit: int = 50) -> List[Dict[str, Any]]:
     rows.reverse()
     for row in rows:
         if row.get("timestamp"):
-            row["timestamp"] = row["timestamp"].isoformat() + "+00:00"
+            ts = row["timestamp"]
+            row["timestamp"] = ts.isoformat() if ts.tzinfo else ts.isoformat() + "+00:00"
     return rows
 
 
