@@ -190,16 +190,33 @@ class SetupWizard(ctk.CTkToplevel):
                 "password": password,
             }
 
-            # If email provided — send verification and switch to phase 2
+            # If email provided — check if already verified, otherwise send code
             if email:
                 self._account_error.configure(
-                    text="Sending verification code...", text_color="gray"
+                    text="Checking email...", text_color="gray"
                 )
                 self.update()
 
                 from desktop.p2p.email_verify import (
                     generate_code, send_verification_email,
+                    is_email_already_verified,
                 )
+
+                # Skip verification if email was already verified for this identity
+                if is_email_already_verified(email, username, password):
+                    self.config["_account"]["email"] = email
+                    self.config["_account"]["email_verified"] = True
+                    self._account_error.configure(
+                        text="Email already verified!", text_color="green"
+                    )
+                    self.update()
+                    return True
+
+                self._account_error.configure(
+                    text="Sending verification code...", text_color="gray"
+                )
+                self.update()
+
                 self._account_verify_code = generate_code()
                 sent = send_verification_email(
                     to_email=email,

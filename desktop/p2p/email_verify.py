@@ -86,6 +86,66 @@ def _get_worker(path: str, params: dict) -> Optional[dict]:
 
 
 # -------------------------------------------------------------------
+# Check if email already verified
+# -------------------------------------------------------------------
+
+def is_email_already_verified(
+    email: str,
+    username: str = "",
+    password: str = "",
+) -> bool:
+    """
+    Check if this email is already verified on the Worker for our invite code.
+
+    If the user reinstalls with the same username+password, the Worker
+    still has the mapping — no need to re-verify.
+
+    Accepts username+password for wizard (identity not yet created on disk).
+    Falls back to existing identity if no credentials provided.
+    """
+    if username and password:
+        # Derive identity temporarily (wizard context — account not saved yet)
+        from desktop.node_identity import derive_seed
+        import hashlib
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives import serialization
+
+        seed = derive_seed(username, password)
+        private_key = Ed25519PrivateKey.from_private_bytes(seed)
+        pub_raw = private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        public_key_hex = pub_raw.hex()
+        digest = hashlib.sha256(pub_raw).digest()[:6]
+        h = digest.hex().upper()
+        invite_code = f"{username}#{h[:4]}-{h[4:8]}-{h[8:]}"
+
+        message = f"check-email:{invite_code}:{email}"
+        sig = private_key.sign(message.encode("utf-8"))
+        signature = sig.hex()
+    else:
+        identity = _get_identity()
+        if not identity:
+            return False
+        invite_code = identity["invite_code"]
+        public_key_hex = identity["public_key_hex"]
+        message = f"check-email:{invite_code}:{email}"
+        signature = _sign_message(message)
+
+    result = _get_worker("/check-email", {
+        "invite_code": invite_code,
+        "email": email,
+        "public_key_hex": public_key_hex,
+        "signature": signature,
+    })
+    if result and result.get("verified"):
+        logger.info(f"Email {email} already verified for {invite_code}")
+        return True
+    return False
+
+
+# -------------------------------------------------------------------
 # Verification (prove email ownership)
 # -------------------------------------------------------------------
 

@@ -16,12 +16,13 @@
  *   POST /send-verification  — send verification code to email
  *   POST /register-email     — store verified email mapping (after code confirmed)
  *   POST /send-invite        — send signed invite email with verified sender
+ *   GET  /check-email        — check if email already verified for invite code
  *   POST /accept-invite      — accept an invite (stores reciprocal + notifies sender)
  *   GET  /pending-accepts    — poll for accepted invites (one-time pickup)
  *   GET  /health             — health check
  */
 
-const RATE_LIMIT_PER_IP = 5;
+const RATE_LIMIT_PER_IP = 20;
 const RATE_LIMIT_PER_RECIPIENT = 10;
 const RATE_LIMIT_WINDOW = 3600;
 const ACCEPT_TTL_SECONDS = 30 * 24 * 3600; // 30 days — must match SENT_INVITES_TTL_DAYS on backend/desktop
@@ -57,6 +58,10 @@ export default {
 
       if (url.pathname === "/send-invite" && request.method === "POST") {
         return await handleInvite(request, env, corsHeaders);
+      }
+
+      if (url.pathname === "/check-email" && request.method === "GET") {
+        return await handleCheckEmail(url, env, corsHeaders);
       }
 
       if (url.pathname === "/accept-invite" && request.method === "POST") {
@@ -190,6 +195,39 @@ async function handleInvite(request, env, corsHeaders) {
   }
 
   return json({ status: "sent", verified_sender: !!verifiedEmail }, corsHeaders);
+}
+
+async function handleCheckEmail(url, env, corsHeaders) {
+  /**
+   * Check if an email is already verified for an invite code.
+   *
+   * GET /check-email?invite_code=X&email=Y&public_key_hex=Z&signature=S
+   * Signature over: "check-email:{invite_code}:{email}"
+   *
+   * Returns {verified: true} only if the stored email matches exactly.
+   * Safe: requires signature (proves key ownership), doesn't leak emails.
+   */
+  const inviteCode = url.searchParams.get("invite_code");
+  const email = url.searchParams.get("email");
+  const publicKeyHex = url.searchParams.get("public_key_hex");
+  const signature = url.searchParams.get("signature");
+
+  if (!inviteCode || !email || !publicKeyHex || !signature) {
+    return json({ error: "missing fields" }, corsHeaders, 400);
+  }
+
+  if (!await verifyInviteCode(inviteCode, publicKeyHex)) {
+    return json({ error: "invite code doesn't match public key" }, corsHeaders, 403);
+  }
+
+  const message = `check-email:${inviteCode}:${email}`;
+  const valid = await verifySignature(message, signature, publicKeyHex);
+  if (!valid) {
+    return json({ error: "invalid signature" }, corsHeaders, 403);
+  }
+
+  const stored = await env.RATE_LIMITS.get(`verified:${inviteCode}`);
+  return json({ verified: stored === email }, corsHeaders);
 }
 
 async function handleAcceptInvite(request, env, corsHeaders) {
