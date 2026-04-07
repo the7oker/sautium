@@ -24,6 +24,7 @@
 const RATE_LIMIT_PER_IP = 5;
 const RATE_LIMIT_PER_RECIPIENT = 10;
 const RATE_LIMIT_WINDOW = 3600;
+const ACCEPT_TTL_SECONDS = 30 * 24 * 3600; // 30 days — must match SENT_INVITES_TTL_DAYS on backend/desktop
 const FROM_EMAIL = "noreply@sautium.net";
 const FROM_NAME = "Sautium";
 
@@ -224,7 +225,7 @@ async function handleAcceptInvite(request, env, corsHeaders) {
   // Store acceptance in KV (TTL 30 days)
   const acceptKey = `accepted:${their_invite_code}:${my_invite_code}`;
   await env.RATE_LIMITS.put(acceptKey, new Date().toISOString(), {
-    expirationTtl: 30 * 24 * 3600,
+    expirationTtl: ACCEPT_TTL_SECONDS,
   });
 
   // Try to notify the sender (Masha) via their verified email
