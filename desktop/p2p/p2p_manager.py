@@ -1305,11 +1305,15 @@ class P2PManager:
         """One-time startup check for pending accepts from the Worker.
 
         Picks up accepts that arrived while we were offline.
+        Only runs if we have outstanding email invites (marker file).
         After startup, accepts are handled via the nudge mechanism
         (peer sends /api/chat/invite-accepted when both are online).
         """
         await asyncio.sleep(10)  # initial delay for network setup
         try:
+            if not self._has_pending_invites():
+                return
+
             loop = asyncio.get_event_loop()
             accepts = await loop.run_in_executor(
                 None, self._fetch_pending_accepts_sync
@@ -1328,6 +1332,24 @@ class P2PManager:
                 logger.info(f"Startup: auto-added friend from pending accept: {inv}")
         except Exception as e:
             logger.debug(f"Startup pending accepts check error: {e}")
+
+    def _has_pending_invites(self) -> bool:
+        """Check DB for unreciprocated sent invites."""
+        try:
+            import psycopg2
+            conn = psycopg2.connect(self.db_dsn)
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM sent_invites "
+                        "WHERE reciprocated = FALSE LIMIT 1"
+                    )
+                    return cur.fetchone() is not None
+            finally:
+                conn.close()
+        except Exception:
+            return False
 
     @staticmethod
     def _fetch_pending_accepts_sync() -> list[dict]:

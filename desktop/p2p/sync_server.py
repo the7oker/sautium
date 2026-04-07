@@ -555,8 +555,18 @@ class SyncServer:
                 request, {"error": "invite code mismatch"}, status=403
             )
 
-        # Check Worker for pending accepts (blocking call → run in executor)
+        # Check DB first — skip Worker call if no pending invites
         loop = asyncio.get_event_loop()
+        has_pending = await loop.run_in_executor(
+            None, self._has_pending_invites_db
+        )
+        if not has_pending:
+            return self._json_response(
+                request, {"accepted": False, "error": "no pending invites"},
+                status=403,
+            )
+
+        # Check Worker for pending accepts (blocking call → run in executor)
         accepts = await loop.run_in_executor(None, self._fetch_pending_accepts)
 
         # Look for this peer among the accepts
@@ -586,6 +596,22 @@ class SyncServer:
             "username": self.account_info.get("username", ""),
             "invite_code": self.account_info.get("invite_code", ""),
         })
+
+    def _has_pending_invites_db(self) -> bool:
+        """Blocking: check DB for unreciprocated sent invites."""
+        try:
+            conn = self._new_db()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM sent_invites "
+                        "WHERE reciprocated = FALSE LIMIT 1"
+                    )
+                    return cur.fetchone() is not None
+            finally:
+                conn.close()
+        except Exception:
+            return False
 
     @staticmethod
     def _fetch_pending_accepts() -> list[dict]:

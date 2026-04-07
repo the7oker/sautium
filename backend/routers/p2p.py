@@ -426,6 +426,15 @@ async def invite_by_email(req: InviteByEmailRequest) -> Dict[str, Any]:
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result["error"])
 
+    # Track sent invite in DB
+    try:
+        _db_execute("""
+            INSERT INTO sent_invites (to_email)
+            VALUES (%s)
+        """, (to_email,))
+    except Exception as e:
+        logger.debug(f"Failed to track sent invite: {e}")
+
     return {
         "status": "sent",
         "to": to_email,
@@ -435,7 +444,17 @@ async def invite_by_email(req: InviteByEmailRequest) -> Dict[str, Any]:
 
 @router.get("/pending-accepts")
 async def pending_accepts() -> Dict[str, Any]:
-    """Check the Worker for invite codes that accepted our invites."""
+    """Check the Worker for invite codes that accepted our invites.
+
+    Skips the Worker call if no unreciprocated invites exist locally.
+    """
+    # Early return: no pending invites → no reason to ask the Worker
+    pending_count = _db_query("""
+        SELECT COUNT(*) as cnt FROM sent_invites WHERE reciprocated = FALSE
+    """)
+    if not pending_count or pending_count[0]["cnt"] == 0:
+        return {"accepts": [], "skipped": True}
+
     identity = _get_identity()
     if not identity:
         return {"accepts": []}
@@ -478,6 +497,16 @@ async def pending_accepts() -> Dict[str, Any]:
             logger.info(f"Auto-added friend from pending accept: {acc_invite}")
         except Exception as e:
             logger.error(f"Failed to auto-add {acc_invite}: {e}")
+
+    # Mark sent invites as reciprocated
+    if added:
+        try:
+            _db_execute("""
+                UPDATE sent_invites SET reciprocated = TRUE, reciprocated_at = NOW()
+                WHERE reciprocated = FALSE
+            """)
+        except Exception as e:
+            logger.debug(f"Failed to mark invites reciprocated: {e}")
 
     return {"accepts": accepts, "added": added}
 
