@@ -1330,6 +1330,8 @@ class P2PManager:
                     display_name=username,
                 )
                 logger.info(f"Startup: auto-added friend from pending accept: {inv}")
+            if accepts and self._sync_server:
+                await self._sync_server._wake_backend_sse()
         except Exception as e:
             logger.debug(f"Startup pending accepts check error: {e}")
 

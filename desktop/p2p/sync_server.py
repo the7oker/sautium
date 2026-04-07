@@ -589,6 +589,8 @@ class SyncServer:
                 f"Invite-accepted nudge: auto-added {peer_username} "
                 f"({peer_pubkey[:16]}...)"
             )
+            # Wake Web UI so the new friend appears immediately
+            asyncio.ensure_future(self._wake_backend_sse())
 
         return self._json_response(request, {
             "accepted": True,

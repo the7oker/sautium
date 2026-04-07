@@ -76,9 +76,9 @@ function connectChatSSE() {
 
   _chatSSE.onmessage = (event) => {
     _chatSSERetryDelay = 1000;
+    loadFriends();
     if (_selectedFriendId) {
       loadP2PMessages(_selectedFriendId);
-      loadFriends(); // update unread badges
     }
   };
 
@@ -1031,11 +1031,14 @@ function switchSection(name) {
   const titles = { music: "Music", friends: "Friends" };
   document.getElementById("sectionTitle").textContent = titles[name] || name;
 
-  // Load friends data on first visit
-  if (name === "friends" && !_friendsLoaded) {
-    loadAccountInfo();
-    loadFriends();
-    _friendsLoaded = true;
+  // Load friends data on first visit + connect SSE for live updates
+  if (name === "friends") {
+    if (!_friendsLoaded) {
+      loadAccountInfo();
+      loadFriends();
+      _friendsLoaded = true;
+    }
+    connectChatSSE();
   }
 
   closeMenu();
