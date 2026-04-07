@@ -49,6 +49,7 @@ class P2PManager:
         self._reannounce_task: Optional[asyncio.Task] = None
         self._pending_retry_task: Optional[asyncio.Task] = None
         self._resolve_friends_task: Optional[asyncio.Task] = None
+        self._pending_accepts_task: Optional[asyncio.Task] = None
         self._lan_discovery_task: Optional[asyncio.Task] = None
         self._db_listen_task: Optional[asyncio.Task] = None
         self._running = False
@@ -257,6 +258,9 @@ class P2PManager:
                 )
                 self._db_listen_task = asyncio.create_task(
                     self._listen_for_db_notifications()
+                )
+                self._pending_accepts_task = asyncio.create_task(
+                    self._poll_pending_accepts()
                 )
 
             self._running = True
@@ -1232,6 +1236,17 @@ class P2PManager:
                                             [(ip, port)],
                                         )
                                     break
+
+                            # Handshake rejected — try nudge (auto-reciprocate
+                            # via Worker). Peer checks their pending accepts
+                            # and adds us if found.
+                            if resp.status == 403:
+                                resolved = await self._try_nudge(
+                                    ip, port, invite, handshake_data,
+                                    session,
+                                )
+                                if resolved:
+                                    break
                 except Exception as e:
                     logger.debug(
                         f"Handshake to {ip}:{port} for {invite} "
@@ -1239,6 +1254,86 @@ class P2PManager:
                     )
             if resolved:
                 continue
+
+    async def _try_nudge(
+        self,
+        ip: str,
+        port: int,
+        invite: str,
+        handshake_data: dict,
+        session,
+    ) -> bool:
+        """Send invite-accepted nudge to a peer after handshake rejection.
+
+        The peer checks the Worker for pending accepts and auto-adds us.
+        Returns True if the nudge succeeded and the friend was resolved.
+        """
+        url = f"https://{ip}:{port}/api/chat/invite-accepted"
+        try:
+            import aiohttp
+            async with session.post(
+                url, json=handshake_data,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    if result.get("accepted"):
+                        self._chat_service.add_friend(
+                            public_key_hex=result["public_key_hex"],
+                            invite_code=result.get("invite_code", invite),
+                            username=result.get("username", ""),
+                        )
+                        logger.info(
+                            f"Pending friend resolved via nudge: "
+                            f"{invite} ({ip}:{port})"
+                        )
+                        resolved_friend = (
+                            self._chat_service.get_friend_by_public_key(
+                                result["public_key_hex"]
+                            )
+                        )
+                        if resolved_friend:
+                            await self._sync_chat_history(
+                                resolved_friend, [(ip, port)],
+                            )
+                        return True
+        except Exception as e:
+            logger.debug(f"Nudge to {ip}:{port} for {invite} failed: {e}")
+        return False
+
+    async def _poll_pending_accepts(self):
+        """One-time startup check for pending accepts from the Worker.
+
+        Picks up accepts that arrived while we were offline.
+        After startup, accepts are handled via the nudge mechanism
+        (peer sends /api/chat/invite-accepted when both are online).
+        """
+        await asyncio.sleep(10)  # initial delay for network setup
+        try:
+            loop = asyncio.get_event_loop()
+            accepts = await loop.run_in_executor(
+                None, self._fetch_pending_accepts_sync
+            )
+            for accept in accepts:
+                inv = accept.get("invite_code", "")
+                if not inv or not self._chat_service:
+                    continue
+                username = inv.split("#")[0]
+                self._chat_service.add_friend(
+                    public_key_hex=f"pending:{inv}",
+                    invite_code=inv,
+                    username=username,
+                    display_name=username,
+                )
+                logger.info(f"Startup: auto-added friend from pending accept: {inv}")
+        except Exception as e:
+            logger.debug(f"Startup pending accepts check error: {e}")
+
+    @staticmethod
+    def _fetch_pending_accepts_sync() -> list[dict]:
+        """Blocking: fetch pending accepts from Worker."""
+        from desktop.p2p.email_verify import check_pending_accepts
+        return check_pending_accepts()
 
     async def _deliver_pending_fast(self):
         """Fast path: push pending messages first, pull history in background.

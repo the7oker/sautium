@@ -16,7 +16,8 @@
  *   POST /send-verification  — send verification code to email
  *   POST /register-email     — store verified email mapping (after code confirmed)
  *   POST /send-invite        — send signed invite email with verified sender
- *   GET  /lookup-email       — check verified email for an invite code
+ *   POST /accept-invite      — accept an invite (stores reciprocal + notifies sender)
+ *   GET  /pending-accepts    — poll for accepted invites (one-time pickup)
  *   GET  /health             — health check
  */
 
@@ -57,8 +58,12 @@ export default {
         return await handleInvite(request, env, corsHeaders);
       }
 
-      if (url.pathname === "/lookup-email" && request.method === "GET") {
-        return await handleLookupEmail(url, env, corsHeaders);
+      if (url.pathname === "/accept-invite" && request.method === "POST") {
+        return await handleAcceptInvite(request, env, corsHeaders);
+      }
+
+      if (url.pathname === "/pending-accepts" && request.method === "GET") {
+        return await handlePendingAccepts(url, env, corsHeaders);
       }
 
       return json({ error: "not found" }, corsHeaders, 404);
@@ -186,38 +191,104 @@ async function handleInvite(request, env, corsHeaders) {
   return json({ status: "sent", verified_sender: !!verifiedEmail }, corsHeaders);
 }
 
-async function handleLookupEmail(url, env, corsHeaders) {
+async function handleAcceptInvite(request, env, corsHeaders) {
   /**
-   * Look up verified email for an invite code.
-   * GET /lookup-email?invite_code=user%23XXXX-XXXX-XXXX&requester_key=HEX&signature=HEX
+   * Accept an invite: store reciprocal mapping + notify sender via email.
    *
-   * Requires Ed25519 signature over "lookup:{invite_code}" to prevent
-   * unauthenticated email enumeration.
+   * When Sasha adds Masha's invite code, Sasha's app calls this endpoint.
+   * The worker stores the acceptance and (if Masha has a verified email)
+   * sends Sasha's invite code to Masha automatically.
+   *
+   * Body: {my_invite_code, their_invite_code, public_key_hex, signature}
+   * Signature is over: "accept:{my_invite_code}:{their_invite_code}"
    */
-  const inviteCode = url.searchParams.get("invite_code");
-  const requesterKey = url.searchParams.get("requester_key");
-  const signature = url.searchParams.get("signature");
+  const body = await request.json();
+  const { my_invite_code, their_invite_code, public_key_hex, signature } = body;
 
-  if (!inviteCode) {
-    return json({ error: "missing invite_code" }, corsHeaders, 400);
+  if (!my_invite_code || !their_invite_code || !public_key_hex || !signature) {
+    return json({ error: "missing fields" }, corsHeaders, 400);
   }
 
-  if (!requesterKey || !signature) {
-    return json({ error: "missing requester_key or signature" }, corsHeaders, 400);
+  // Verify caller owns my_invite_code
+  if (!await verifyInviteCode(my_invite_code, public_key_hex)) {
+    return json({ error: "invite code doesn't match public key" }, corsHeaders, 403);
   }
 
-  const sigMessage = `lookup:${inviteCode}`;
-  const valid = await verifySignature(sigMessage, signature, requesterKey);
+  // Verify signature
+  const message = `accept:${my_invite_code}:${their_invite_code}`;
+  const valid = await verifySignature(message, signature, public_key_hex);
   if (!valid) {
     return json({ error: "invalid signature" }, corsHeaders, 403);
   }
 
-  const email = await env.RATE_LIMITS.get(`verified:${inviteCode}`);
-  return json({
-    invite_code: inviteCode,
-    email: email || null,
-    verified: !!email,
-  }, corsHeaders);
+  // Store acceptance in KV (TTL 30 days)
+  const acceptKey = `accepted:${their_invite_code}:${my_invite_code}`;
+  await env.RATE_LIMITS.put(acceptKey, new Date().toISOString(), {
+    expirationTtl: 30 * 24 * 3600,
+  });
+
+  // Try to notify the sender (Masha) via their verified email
+  let notified = false;
+  const senderEmail = await env.RATE_LIMITS.get(`verified:${their_invite_code}`);
+  if (senderEmail) {
+    const myUsername = my_invite_code.split("#")[0];
+    const myVerifiedEmail = await env.RATE_LIMITS.get(`verified:${my_invite_code}`);
+
+    const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+    const rateLimitResult = await checkRateLimit(env, ip, senderEmail);
+    if (!rateLimitResult) {
+      const html = acceptNotificationEmailHtml(myUsername, my_invite_code, myVerifiedEmail);
+      const result = await sendEmail(env, senderEmail, `${myUsername} accepted your Sautium invite`, html);
+      notified = result.ok;
+    }
+  }
+
+  return json({ status: "accepted", notified }, corsHeaders);
+}
+
+async function handlePendingAccepts(url, env, corsHeaders) {
+  /**
+   * Check who accepted my invites (polling endpoint).
+   *
+   * GET /pending-accepts?invite_code=user%23XXXX&signature=HEX&public_key_hex=HEX
+   *
+   * Returns list of invite codes that accepted, then deletes them (one-time pickup).
+   */
+  const inviteCode = url.searchParams.get("invite_code");
+  const publicKeyHex = url.searchParams.get("public_key_hex");
+  const signature = url.searchParams.get("signature");
+
+  if (!inviteCode || !publicKeyHex || !signature) {
+    return json({ error: "missing fields" }, corsHeaders, 400);
+  }
+
+  // Verify caller owns this invite code
+  if (!await verifyInviteCode(inviteCode, publicKeyHex)) {
+    return json({ error: "invite code doesn't match public key" }, corsHeaders, 403);
+  }
+
+  const message = `pending-accepts:${inviteCode}`;
+  const valid = await verifySignature(message, signature, publicKeyHex);
+  if (!valid) {
+    return json({ error: "invalid signature" }, corsHeaders, 403);
+  }
+
+  // List all KV keys with prefix accepted:{my_invite}:
+  const prefix = `accepted:${inviteCode}:`;
+  const listed = await env.RATE_LIMITS.list({ prefix });
+
+  const accepts = [];
+  for (const key of listed.keys) {
+    // key.name = "accepted:{their_invite}:{acceptor_invite}"
+    const acceptorInvite = key.name.slice(prefix.length);
+    const acceptedAt = await env.RATE_LIMITS.get(key.name);
+    accepts.push({ invite_code: acceptorInvite, accepted_at: acceptedAt });
+
+    // Delete after pickup (one-time)
+    await env.RATE_LIMITS.delete(key.name);
+  }
+
+  return json({ accepts }, corsHeaders);
 }
 
 // -----------------------------------------------------------------------
@@ -393,6 +464,37 @@ function inviteEmailHtml(fromUsername, inviteCode, verifiedEmail, message) {
               border-radius: 6px; text-decoration: none; font-weight: bold;">
       Download Sautium
     </a>
+  </p>
+  <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+  <p style="color: #999; font-size: 11px;">
+    <a href="https://sautium.net" style="color: #666;">sautium.net</a>
+  </p>
+</body>
+</html>`;
+}
+
+function acceptNotificationEmailHtml(fromUsername, inviteCode, verifiedEmail) {
+  const verifiedBadge = verifiedEmail
+    ? `<div style="background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 6px; padding: 8px 12px; margin: 12px 0; font-size: 13px;">
+        &#9989; Verified: <strong>${escapeHtml(verifiedEmail)}</strong>
+       </div>`
+    : `<div style="background: #fff3e0; border: 1px solid #ffcc80; border-radius: 6px; padding: 8px 12px; margin: 12px 0; font-size: 13px;">
+        &#9888; Unverified sender
+       </div>`;
+
+  return `<!DOCTYPE html>
+<html>
+<body style="font-family: -apple-system, sans-serif; max-width: 480px; margin: 0 auto; padding: 20px;">
+  <h2 style="color: #333;">Invite accepted!</h2>
+  <p><strong>${escapeHtml(fromUsername)}</strong> accepted your invite and wants to connect on Sautium.</p>
+  ${verifiedBadge}
+  <p>Their invite code:</p>
+  <div style="background: #f0f0f0; padding: 12px 16px; border-radius: 8px; margin: 12px 0;">
+    <code style="font-size: 16px; font-weight: bold;">${escapeHtml(inviteCode)}</code>
+  </div>
+  <p style="font-size: 13px; color: #666;">
+    Sautium will add them automatically next time you open the app.
+    Or paste the code manually: Friends &rarr; Add Friend.
   </p>
   <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
   <p style="color: #999; font-size: 11px;">

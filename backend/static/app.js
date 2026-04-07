@@ -1162,6 +1162,56 @@ async function addFriend(e) {
   input.disabled = false;
 }
 
+async function sendInviteByEmail(e) {
+  e.preventDefault();
+  const input = document.getElementById("inviteEmailInput");
+  const btn = document.getElementById("inviteEmailBtn");
+  const status = document.getElementById("inviteEmailStatus");
+  const email = input.value.trim();
+  if (!email) return;
+
+  input.disabled = true;
+  btn.disabled = true;
+  status.style.display = "block";
+  status.style.color = "var(--text-dim)";
+  status.textContent = "Sending...";
+
+  try {
+    const resp = await fetch("/api/p2p/invite-by-email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to_email: email }),
+    });
+    const data = await resp.json();
+
+    if (resp.ok) {
+      status.style.color = "#4caf50";
+      status.textContent = "Invite sent!" + (data.verified_sender ? " (verified sender)" : "");
+      input.value = "";
+    } else {
+      status.style.color = "#f44336";
+      status.textContent = data.detail || data.error || "Failed to send";
+    }
+  } catch (err) {
+    status.style.color = "#f44336";
+    status.textContent = "Error: " + err.message;
+  }
+
+  input.disabled = false;
+  btn.disabled = false;
+  setTimeout(() => { status.style.display = "none"; }, 5000);
+}
+
+async function checkPendingAccepts() {
+  try {
+    const resp = await fetch("/api/p2p/pending-accepts");
+    const data = await resp.json();
+    if (data.added && data.added.length > 0) {
+      loadFriends();
+    }
+  } catch { /* silent */ }
+}
+
 async function selectFriend(friendId) {
   _selectedFriendId = friendId;
   renderFriendList();
@@ -1257,6 +1307,10 @@ loadProviders();
 fetchPlaylist();
 
 connectStatusSSE();
+
+// Check for pending invite accepts once on page load
+// (ongoing accepts are handled by P2P nudge mechanism)
+checkPendingAccepts();
 
 // Cleanup SSE connections on page unload
 window.addEventListener("beforeunload", () => {

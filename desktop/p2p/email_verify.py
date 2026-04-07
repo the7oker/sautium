@@ -14,6 +14,7 @@ import logging
 import secrets
 import string
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Optional
 
@@ -65,6 +66,23 @@ def _get_identity() -> Optional[dict]:
     """Get account info (invite_code, public_key_hex)."""
     from desktop.node_identity import get_account_info
     return get_account_info()
+
+
+def _get_worker(path: str, params: dict) -> Optional[dict]:
+    """GET from the Worker API with query params. Returns response dict or None."""
+    try:
+        query = urllib.parse.urlencode(params)
+        url = f"{VERIFY_WORKER_URL}{path}?{query}"
+        req = urllib.request.Request(url, method="GET", headers=_HEADERS)
+        resp = urllib.request.urlopen(req, timeout=15)
+        return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        logger.error(f"Worker GET {path} failed ({e.code}): {body}")
+        return None
+    except Exception as e:
+        logger.error(f"Worker GET {path} failed: {e}")
+        return None
 
 
 # -------------------------------------------------------------------
@@ -159,6 +177,76 @@ def send_invite_email(
         )
         return True
     return False
+
+
+# -------------------------------------------------------------------
+# Accept invite (auto-reciprocate)
+# -------------------------------------------------------------------
+
+def accept_invite(their_invite_code: str) -> Optional[dict]:
+    """
+    Notify the Worker that we accepted someone's invite.
+
+    The Worker stores the acceptance and sends our invite code to the
+    sender's verified email (if available).
+
+    Returns {"status": "accepted", "notified": bool} or None on failure.
+    """
+    identity = _get_identity()
+    if not identity:
+        logger.error("No account — can't accept invite")
+        return None
+
+    my_invite = identity["invite_code"]
+    public_key_hex = identity["public_key_hex"]
+
+    message = f"accept:{my_invite}:{their_invite_code}"
+    signature = _sign_message(message)
+
+    result = _post_worker("/accept-invite", {
+        "my_invite_code": my_invite,
+        "their_invite_code": their_invite_code,
+        "public_key_hex": public_key_hex,
+        "signature": signature,
+    })
+    if result and result.get("status") == "accepted":
+        notified = result.get("notified", False)
+        logger.info(
+            f"Accepted invite from {their_invite_code} "
+            f"(sender notified={notified})"
+        )
+        return result
+    return None
+
+
+def check_pending_accepts() -> list[dict]:
+    """
+    Poll the Worker for invite codes that accepted our invites.
+
+    Returns list of {"invite_code": "...", "accepted_at": "..."}.
+    Worker deletes entries after pickup (one-time).
+    """
+    identity = _get_identity()
+    if not identity:
+        return []
+
+    my_invite = identity["invite_code"]
+    public_key_hex = identity["public_key_hex"]
+
+    message = f"pending-accepts:{my_invite}"
+    signature = _sign_message(message)
+
+    result = _get_worker("/pending-accepts", {
+        "invite_code": my_invite,
+        "public_key_hex": public_key_hex,
+        "signature": signature,
+    })
+    if result and "accepts" in result:
+        accepts = result["accepts"]
+        if accepts:
+            logger.info(f"Pending accepts: {len(accepts)} new")
+        return accepts
+    return []
 
 
 # -------------------------------------------------------------------

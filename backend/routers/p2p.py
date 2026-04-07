@@ -38,6 +38,11 @@ class SendMessageRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=10000)
 
 
+class InviteByEmailRequest(BaseModel):
+    to_email: str = Field(..., min_length=5)
+    message: str = Field(default="", max_length=500)
+
+
 # -- Chat SSE infrastructure --------------------------------------------------
 
 _chat_sse_clients: list = []  # list of (asyncio.Event, asyncio.AbstractEventLoop)
@@ -146,6 +151,93 @@ def _get_identity():
     return _cached_identity
 
 
+VERIFY_WORKER_URL = "https://sautium-verify.sautium.workers.dev"
+
+# Cached private key for signing Worker requests
+_cached_private_key = None
+
+
+def _get_private_key():
+    """Load or derive the Ed25519 private key for signing."""
+    global _cached_private_key
+    if _cached_private_key is not None:
+        return _cached_private_key
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization
+    from pathlib import Path
+
+    # Desktop mode: read PEM from identity dir
+    if settings.p2p_identity_dir:
+        key_path = Path(settings.p2p_identity_dir) / "node_ed25519.key"
+        if key_path.exists():
+            pem = key_path.read_bytes()
+            _cached_private_key = serialization.load_pem_private_key(pem, password=None)
+            return _cached_private_key
+
+    # Docker mode: derive from username + password
+    if settings.p2p_username and settings.p2p_password:
+        from p2p_identity import ARGON2_TIME_COST, ARGON2_MEMORY_COST, ARGON2_PARALLELISM, ARGON2_HASH_LEN
+        from argon2.low_level import hash_secret_raw, Type
+        salt = f"{settings.p2p_username}:sautium".encode("utf-8")
+        seed = hash_secret_raw(
+            secret=settings.p2p_password.encode("utf-8"),
+            salt=salt,
+            time_cost=ARGON2_TIME_COST,
+            memory_cost=ARGON2_MEMORY_COST,
+            parallelism=ARGON2_PARALLELISM,
+            hash_len=ARGON2_HASH_LEN,
+            type=Type.ID,
+        )
+        _cached_private_key = Ed25519PrivateKey.from_private_bytes(seed)
+        return _cached_private_key
+
+    return None
+
+
+def _sign_message(message: str) -> Optional[str]:
+    """Sign a message with our Ed25519 key. Returns hex signature or None."""
+    key = _get_private_key()
+    if not key:
+        return None
+    sig = key.sign(message.encode("utf-8"))
+    return sig.hex()
+
+
+async def _worker_post(path: str, payload: dict) -> Optional[dict]:
+    """POST to the Cloudflare Worker. Returns response dict or None."""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+            resp = await client.post(
+                f"{VERIFY_WORKER_URL}{path}",
+                json=payload,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning(f"Worker {path} returned {resp.status_code}: {resp.text}")
+            return None
+    except Exception as e:
+        logger.error(f"Worker {path} failed: {e}")
+        return None
+
+
+async def _worker_get(path: str, params: dict) -> Optional[dict]:
+    """GET from the Cloudflare Worker. Returns response dict or None."""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+            resp = await client.get(
+                f"{VERIFY_WORKER_URL}{path}",
+                params=params,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning(f"Worker GET {path} returned {resp.status_code}: {resp.text}")
+            return None
+    except Exception as e:
+        logger.error(f"Worker GET {path} failed: {e}")
+        return None
+
+
 @router.get("/account")
 async def get_account() -> Dict[str, Any]:
     """Get current P2P account info (invite code, username)."""
@@ -185,7 +277,7 @@ async def list_friends() -> List[Dict[str, Any]]:
 
 @router.post("/friends/add")
 async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
-    """Add a friend by invite code."""
+    """Add a friend by invite code. Also notifies the Worker for auto-reciprocate."""
     invite_code = req.invite_code.strip()
     username = invite_code.split("#")[0]
 
@@ -198,10 +290,40 @@ async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
                     username = EXCLUDED.username
             RETURNING id
         """, (username, f"pending:{invite_code}", invite_code, username))
+
+        # Fire-and-forget: notify Worker that we accepted this invite
+        asyncio.create_task(_accept_invite_on_worker(invite_code))
+
         return {"id": row["id"], "username": username, "invite_code": invite_code}
     except Exception as e:
         logger.error(f"Failed to add friend: {e}")
         raise HTTPException(status_code=500, detail="Failed to add friend")
+
+
+async def _accept_invite_on_worker(their_invite_code: str):
+    """Notify the Worker that we accepted someone's invite (auto-reciprocate)."""
+    identity = _get_identity()
+    if not identity:
+        return
+
+    my_invite = identity["invite_code"]
+    public_key_hex = identity["public_key_hex"]
+
+    message = f"accept:{my_invite}:{their_invite_code}"
+    signature = _sign_message(message)
+    if not signature:
+        logger.warning("Cannot sign accept-invite — no private key")
+        return
+
+    result = await _worker_post("/accept-invite", {
+        "my_invite_code": my_invite,
+        "their_invite_code": their_invite_code,
+        "public_key_hex": public_key_hex,
+        "signature": signature,
+    })
+    if result and result.get("status") == "accepted":
+        notified = result.get("notified", False)
+        logger.info(f"Accept-invite sent for {their_invite_code} (notified={notified})")
 
 
 @router.get("/friends/{friend_id}/messages")
@@ -274,6 +396,90 @@ async def _trigger_sync_server_delivery():
             await client.post(f"https://127.0.0.1:{port}/api/chat/trigger-send")
     except Exception:
         pass  # Fallback: pending loop will pick it up
+
+
+@router.post("/invite-by-email")
+async def invite_by_email(req: InviteByEmailRequest) -> Dict[str, Any]:
+    """Send an invite email to someone via the Cloudflare Worker."""
+    identity = _get_identity()
+    if not identity:
+        raise HTTPException(status_code=400, detail="No P2P account configured")
+
+    invite_code = identity["invite_code"]
+    public_key_hex = identity["public_key_hex"]
+    to_email = req.to_email.strip()
+
+    sig_message = f"invite:{invite_code}:to:{to_email}"
+    signature = _sign_message(sig_message)
+    if not signature:
+        raise HTTPException(status_code=500, detail="Cannot sign request")
+
+    result = await _worker_post("/send-invite", {
+        "to": to_email,
+        "invite_code": invite_code,
+        "public_key_hex": public_key_hex,
+        "signature": signature,
+        "message": req.message,
+    })
+    if not result:
+        raise HTTPException(status_code=502, detail="Worker request failed")
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+
+    return {
+        "status": "sent",
+        "to": to_email,
+        "verified_sender": result.get("verified_sender", False),
+    }
+
+
+@router.get("/pending-accepts")
+async def pending_accepts() -> Dict[str, Any]:
+    """Check the Worker for invite codes that accepted our invites."""
+    identity = _get_identity()
+    if not identity:
+        return {"accepts": []}
+
+    invite_code = identity["invite_code"]
+    public_key_hex = identity["public_key_hex"]
+
+    message = f"pending-accepts:{invite_code}"
+    signature = _sign_message(message)
+    if not signature:
+        return {"accepts": []}
+
+    result = await _worker_get("/pending-accepts", {
+        "invite_code": invite_code,
+        "public_key_hex": public_key_hex,
+        "signature": signature,
+    })
+    if not result:
+        return {"accepts": []}
+
+    accepts = result.get("accepts", [])
+
+    # Auto-add accepted friends
+    added = []
+    for accept in accepts:
+        acc_invite = accept.get("invite_code", "")
+        if not acc_invite:
+            continue
+        acc_username = acc_invite.split("#")[0]
+        try:
+            row = _db_execute("""
+                INSERT INTO friends (username, public_key_hex, invite_code, display_name)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (public_key_hex) DO UPDATE
+                    SET invite_code = EXCLUDED.invite_code,
+                        username = EXCLUDED.username
+                RETURNING id
+            """, (acc_username, f"pending:{acc_invite}", acc_invite, acc_username))
+            added.append({"id": row["id"], "invite_code": acc_invite})
+            logger.info(f"Auto-added friend from pending accept: {acc_invite}")
+        except Exception as e:
+            logger.error(f"Failed to auto-add {acc_invite}: {e}")
+
+    return {"accepts": accepts, "added": added}
 
 
 @router.post("/chat/wake")

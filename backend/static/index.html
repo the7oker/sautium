@@ -137,12 +137,20 @@
         <div class="invite-code" id="myInviteCode">Loading...</div>
       </div>
 
-      <!-- Add friend -->
+      <!-- Add friend by invite code -->
       <form class="add-friend-form" onsubmit="addFriend(event)">
         <input type="text" class="search-input" id="addFriendInput"
                placeholder="Enter invite code (user#XXXX-XXXX-XXXX)" autocomplete="off">
         <button type="submit" class="submit-btn">Add</button>
       </form>
+
+      <!-- Send invite by email -->
+      <form class="add-friend-form" onsubmit="sendInviteByEmail(event)" style="margin-top: 4px;">
+        <input type="email" class="search-input" id="inviteEmailInput"
+               placeholder="Send invite to email" autocomplete="off">
+        <button type="submit" class="submit-btn" id="inviteEmailBtn">Invite</button>
+      </form>
+      <div id="inviteEmailStatus" style="display:none; font-size: 12px; padding: 4px 8px; margin-top: 2px;"></div>
 
       <!-- Friends tabs -->
       <div class="tabs">
@@ -173,6 +181,6 @@
 
   </div>
 
-  <script src="/static/app.js?v=10"></script>
+  <script src="/static/app.js?v=11"></script>
 </body>
 </html>

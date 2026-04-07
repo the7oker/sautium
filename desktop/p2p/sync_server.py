@@ -511,6 +511,92 @@ class SyncServer:
         except Exception as e:
             logger.debug(f"Delivery trigger error: {e}")
 
+    async def handle_invite_accepted(self, request: web.Request) -> web.Response:
+        """POST /api/chat/invite-accepted — peer nudge after accepting our invite.
+
+        When Sasha accepts Masha's invite (via Worker), Sasha's P2P manager
+        finds Masha online and sends this nudge. Masha's server checks the
+        Worker for pending accepts, auto-adds Sasha, and returns handshake
+        data so Sasha can resolve the friend immediately.
+
+        Request:  {public_key_hex, username, invite_code}
+        Response: {accepted: true/false, public_key_hex, username, invite_code}
+        """
+        ip = request.remote or "unknown"
+        if not self._check_rate_limit(ip):
+            return self._json_response(
+                request, {"error": "rate limited"}, status=429
+            )
+
+        if not self.account_info:
+            return self._json_response(
+                request, {"error": "no account configured"}, status=503
+            )
+
+        try:
+            body = await request.json()
+            peer_pubkey = body.get("public_key_hex", "")
+            peer_username = body.get("username", "")
+            peer_invite = body.get("invite_code", "")
+        except (json.JSONDecodeError, Exception):
+            return self._json_response(
+                request, {"error": "invalid JSON"}, status=400
+            )
+
+        if not peer_pubkey or not peer_invite:
+            return self._json_response(
+                request, {"error": "missing fields"}, status=400
+            )
+
+        # Verify invite code matches public key
+        from desktop.node_identity import verify_invite_code
+        if not verify_invite_code(peer_invite, peer_pubkey):
+            return self._json_response(
+                request, {"error": "invite code mismatch"}, status=403
+            )
+
+        # Check Worker for pending accepts (blocking call → run in executor)
+        loop = asyncio.get_event_loop()
+        accepts = await loop.run_in_executor(None, self._fetch_pending_accepts)
+
+        # Look for this peer among the accepts
+        found = any(a.get("invite_code") == peer_invite for a in accepts)
+
+        if not found:
+            return self._json_response(
+                request, {"accepted": False, "error": "no pending accept found"},
+                status=403,
+            )
+
+        # Auto-add the peer as friend
+        if self._chat_service:
+            self._chat_service.add_friend(
+                public_key_hex=peer_pubkey,
+                invite_code=peer_invite,
+                username=peer_username,
+            )
+            logger.info(
+                f"Invite-accepted nudge: auto-added {peer_username} "
+                f"({peer_pubkey[:16]}...)"
+            )
+
+        return self._json_response(request, {
+            "accepted": True,
+            "public_key_hex": self.account_info.get("public_key_hex", ""),
+            "username": self.account_info.get("username", ""),
+            "invite_code": self.account_info.get("invite_code", ""),
+        })
+
+    @staticmethod
+    def _fetch_pending_accepts() -> list[dict]:
+        """Blocking: check Worker for pending accepts."""
+        try:
+            from desktop.p2p.email_verify import check_pending_accepts
+            return check_pending_accepts()
+        except Exception as e:
+            logger.error(f"Failed to fetch pending accepts: {e}")
+            return []
+
     async def _wake_backend_sse(self):
         """Tell the local backend to wake SSE clients (incoming message)."""
         if not self._backend_port:
@@ -555,6 +641,9 @@ class SyncServer:
         )
         self._app.router.add_post(
             "/api/chat/trigger-send", self.handle_trigger_send
+        )
+        self._app.router.add_post(
+            "/api/chat/invite-accepted", self.handle_invite_accepted
         )
 
         self._runner = web.AppRunner(
