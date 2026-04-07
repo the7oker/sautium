@@ -1157,10 +1157,26 @@ class P2PManager:
     async def _do_resolve_pending(self):
         """Check LAN/DHT peers for pending friends and do handshake."""
         friends = self._chat_service.get_friends()
-        pending = [
-            f for f in friends
-            if f["public_key_hex"].startswith("pending:")
-        ]
+
+        # Collect invite codes that are already resolved (have real public key)
+        resolved_invites = {
+            f["invite_code"] for f in friends
+            if not f["public_key_hex"].startswith("pending:")
+        }
+
+        pending = []
+        for f in friends:
+            if not f["public_key_hex"].startswith("pending:"):
+                continue
+            if f["invite_code"] in resolved_invites:
+                # Stale duplicate — real entry already exists, remove this one
+                self._chat_service.remove_friend(f["id"])
+                logger.info(
+                    f"Removed stale pending entry for {f['invite_code']}"
+                )
+                continue
+            pending.append(f)
+
         if not pending:
             return
 
@@ -1321,6 +1337,10 @@ class P2PManager:
             for accept in accepts:
                 inv = accept.get("invite_code", "")
                 if not inv or not self._chat_service:
+                    continue
+                # Skip if already exists (may have been added via nudge)
+                existing = self._chat_service.get_friends()
+                if any(f["invite_code"] == inv for f in existing):
                     continue
                 username = inv.split("#")[0]
                 self._chat_service.add_friend(

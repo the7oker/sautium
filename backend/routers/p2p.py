@@ -478,12 +478,21 @@ async def pending_accepts() -> Dict[str, Any]:
 
     accepts = result.get("accepts", [])
 
-    # Auto-add accepted friends
+    # Auto-add accepted friends (skip if already exists by invite_code)
     added = []
     for accept in accepts:
         acc_invite = accept.get("invite_code", "")
         if not acc_invite:
             continue
+
+        # Check if friend already exists (may have been added via nudge)
+        existing = _db_query(
+            "SELECT id FROM friends WHERE invite_code = %s LIMIT 1",
+            (acc_invite,),
+        )
+        if existing:
+            continue
+
         acc_username = acc_invite.split("#")[0]
         try:
             row = _db_execute("""
