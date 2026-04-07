@@ -606,7 +606,8 @@ class SyncServer:
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT 1 FROM sent_invites LIMIT 1"
+                        "SELECT 1 FROM sent_invites "
+                        "WHERE sent_at > NOW() - INTERVAL '30 days' LIMIT 1"
                     )
                     return cur.fetchone() is not None
             finally:
