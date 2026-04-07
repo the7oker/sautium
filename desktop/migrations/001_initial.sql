@@ -712,14 +712,8 @@ CREATE TABLE IF NOT EXISTS pending_key_rotations (
 CREATE TABLE IF NOT EXISTS sent_invites (
     id SERIAL PRIMARY KEY,
     to_email VARCHAR(255) NOT NULL,
-    their_invite_code VARCHAR(96),
-    sent_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    reciprocated BOOLEAN DEFAULT FALSE,
-    reciprocated_at TIMESTAMPTZ
+    sent_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
-
-CREATE INDEX IF NOT EXISTS idx_sent_invites_pending
-    ON sent_invites(id) WHERE reciprocated = FALSE;
 
 CREATE INDEX IF NOT EXISTS idx_friends_invite_code ON friends(invite_code);
 CREATE INDEX IF NOT EXISTS idx_friends_username ON friends(username);

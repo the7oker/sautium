@@ -449,9 +449,7 @@ async def pending_accepts() -> Dict[str, Any]:
     Skips the Worker call if no unreciprocated invites exist locally.
     """
     # Early return: no pending invites → no reason to ask the Worker
-    pending_count = _db_query("""
-        SELECT COUNT(*) as cnt FROM sent_invites WHERE reciprocated = FALSE
-    """)
+    pending_count = _db_query("SELECT COUNT(*) as cnt FROM sent_invites")
     if not pending_count or pending_count[0]["cnt"] == 0:
         return {"accepts": [], "skipped": True}
 
@@ -498,15 +496,12 @@ async def pending_accepts() -> Dict[str, Any]:
         except Exception as e:
             logger.error(f"Failed to auto-add {acc_invite}: {e}")
 
-    # Mark sent invites as reciprocated
+    # Clean up — no need to keep reciprocated invites
     if added:
         try:
-            _db_execute("""
-                UPDATE sent_invites SET reciprocated = TRUE, reciprocated_at = NOW()
-                WHERE reciprocated = FALSE
-            """)
+            _db_execute("DELETE FROM sent_invites")
         except Exception as e:
-            logger.debug(f"Failed to mark invites reciprocated: {e}")
+            logger.debug(f"Failed to clean sent invites: {e}")
 
     return {"accepts": accepts, "added": added}
 
