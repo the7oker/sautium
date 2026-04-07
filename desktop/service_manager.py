@@ -503,29 +503,35 @@ class ServiceManager:
     # ================================================================
 
     def _stop_process(self, proc: Optional[subprocess.Popen], name: str) -> None:
-        """Gracefully stop a subprocess."""
+        """Gracefully stop a subprocess (process tree)."""
         if proc is None or proc.poll() is not None:
             return
 
         logger.info(f"Stopping {name} (PID {proc.pid})...")
 
         try:
-            if sys.platform == "win32":
-                # On Windows, terminate the process tree
-                parent = psutil.Process(proc.pid)
-                for child in parent.children(recursive=True):
-                    child.terminate()
-                parent.terminate()
-                proc.wait(timeout=10)
-            else:
-                proc.send_signal(signal.SIGTERM)
-                proc.wait(timeout=10)
+            # Terminate entire process tree on all platforms
+            parent = psutil.Process(proc.pid)
+            children = parent.children(recursive=True)
+            for child in children:
+                child.terminate()
+            parent.terminate()
+            proc.wait(timeout=10)
         except psutil.NoSuchProcess:
             pass
         except subprocess.TimeoutExpired:
             logger.warning(f"{name} didn't stop gracefully, killing...")
-            proc.kill()
-            proc.wait(timeout=5)
+            try:
+                parent = psutil.Process(proc.pid)
+                for child in parent.children(recursive=True):
+                    child.kill()
+                parent.kill()
+            except psutil.NoSuchProcess:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
         except Exception as e:
             logger.error(f"Error stopping {name}: {e}")
 

@@ -1115,11 +1115,24 @@ class LauncherApp(ctk.CTk):
         threading.Thread(target=_shutdown, daemon=True).start()
 
     def _final_quit(self):
+        # Cancel periodic stats timer
+        if self._stats_timer:
+            try:
+                self.after_cancel(self._stats_timer)
+            except Exception:
+                pass
+            self._stats_timer = None
         if self.tray:
             try:
                 self.tray.stop()
             except Exception:
                 pass
+        # Cancel ALL pending Tcl after-events to avoid
+        # "invalid command name" errors from CustomTkinter internals
+        try:
+            self.tk.eval('foreach id [after info] {after cancel $id}')
+        except Exception:
+            pass
         self.destroy()
 
 

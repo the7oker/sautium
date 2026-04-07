@@ -414,7 +414,19 @@ class P2PManager:
             except Exception as e:
                 logger.debug(f"Sync server force cleanup: {e}")
 
+        # Cancel all remaining asyncio tasks to suppress
+        # "Task was destroyed but it is pending" warnings
         if self._loop and not self._loop.is_closed():
+            try:
+                pending = asyncio.all_tasks(self._loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    self._loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+            except Exception:
+                pass
             self._loop.close()
 
         self._running = False
