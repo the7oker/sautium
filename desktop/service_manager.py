@@ -305,6 +305,7 @@ class ServiceManager:
             "main:app",
             "--host", "0.0.0.0",
             "--port", str(port),
+            "--timeout-graceful-shutdown", "5",
         ]
 
         # Ensure Windows Firewall allows LAN access
@@ -344,6 +345,9 @@ class ServiceManager:
         """Stop the backend process."""
         self._stop_process(self.backend_proc, "Backend")
         self.backend_proc = None
+        if hasattr(self, "_backend_log_file") and self._backend_log_file:
+            self._backend_log_file.close()
+            self._backend_log_file = None
 
     def _wait_for_backend(self, port: int, timeout: int = 120) -> bool:
         """Wait for the backend /health endpoint to respond."""
@@ -510,28 +514,31 @@ class ServiceManager:
         logger.info(f"Stopping {name} (PID {proc.pid})...")
 
         try:
-            # Terminate entire process tree on all platforms
             parent = psutil.Process(proc.pid)
             children = parent.children(recursive=True)
-            for child in children:
-                child.terminate()
-            parent.terminate()
-            proc.wait(timeout=10)
+
+            # On Unix, send SIGINT (Ctrl+C) to parent — uvicorn handles it cleanly.
+            # On Windows, terminate the whole tree (SIGINT is unreliable).
+            if sys.platform != "win32":
+                parent.send_signal(signal.SIGINT)
+            else:
+                for child in children:
+                    child.terminate()
+                parent.terminate()
+
+            # Wait for the whole process tree
+            gone, alive = psutil.wait_procs([parent] + children, timeout=10)
+
+            if alive:
+                logger.warning(f"{name} didn't stop gracefully, killing {len(alive)} process(es)...")
+                for p in alive:
+                    try:
+                        p.kill()
+                    except psutil.NoSuchProcess:
+                        pass
+                psutil.wait_procs(alive, timeout=5)
         except psutil.NoSuchProcess:
             pass
-        except subprocess.TimeoutExpired:
-            logger.warning(f"{name} didn't stop gracefully, killing...")
-            try:
-                parent = psutil.Process(proc.pid)
-                for child in parent.children(recursive=True):
-                    child.kill()
-                parent.kill()
-            except psutil.NoSuchProcess:
-                pass
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
         except Exception as e:
             logger.error(f"Error stopping {name}: {e}")
 
