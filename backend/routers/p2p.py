@@ -71,7 +71,7 @@ def _chat_db_listener():
                 cur.execute("LISTEN sautium_chat")
 
             while _chat_listener_running:
-                ready = select.select([conn], [], [], 5)
+                ready = select.select([conn], [], [], 1)
                 if ready[0]:
                     conn.poll()
                     if conn.notifies:
@@ -82,7 +82,7 @@ def _chat_db_listener():
             logger.debug(f"Chat DB listener error: {e}")
             if _chat_listener_running:
                 import time
-                time.sleep(5)
+                time.sleep(1)
         finally:
             if conn:
                 try:
@@ -108,7 +108,7 @@ def stop_chat_listener():
     global _chat_listener_running
     _chat_listener_running = False
     if _chat_listener_thread:
-        _chat_listener_thread.join(timeout=10)
+        _chat_listener_thread.join(timeout=3)
 
 
 
