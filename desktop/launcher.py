@@ -980,14 +980,16 @@ class LauncherApp(ctk.CTk):
         self._update_thread.start()
 
     def _show_update_result(self, has_updates: bool, count: int):
-        self._btn_update.configure(state="normal", text="Check for Updates")
+        self._btn_update.configure(state="normal", text="Check for Updates",
+                                   fg_color="transparent")
         if not has_updates:
             self._progress_text.configure(text="You're up to date!")
             self.after(3000, lambda: self._progress_text.configure(text=""))
 
     def _show_update_dialog(self, count: int, old_hash: str):
         """Show update confirmation dialog."""
-        self._btn_update.configure(state="normal", text="Check for Updates")
+        self._btn_update.configure(state="normal", text="Check for Updates",
+                                   fg_color="transparent")
 
         dialog = ctk.CTkToplevel(self)
         dialog.title("Update Available")
