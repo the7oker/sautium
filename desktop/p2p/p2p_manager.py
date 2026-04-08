@@ -1327,10 +1327,14 @@ class P2PManager:
         """
         await asyncio.sleep(10)  # initial delay for network setup
         try:
-            if not self._has_pending_invites():
+            loop = asyncio.get_event_loop()
+
+            has_pending = await loop.run_in_executor(
+                None, self._has_pending_invites
+            )
+            if not has_pending:
                 return
 
-            loop = asyncio.get_event_loop()
             accepts = await loop.run_in_executor(
                 None, self._fetch_pending_accepts_sync
             )
