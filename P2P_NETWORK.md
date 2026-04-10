@@ -1,810 +1,289 @@
 # P2P Network — Sautium
 
-## Vision
-
-Перетворити Sautium з локального плеєра на **безсерверну P2P мережу**, де люди з великими офлайновими музичними бібліотеками можуть:
-
-- **Ділитись аналітикою** — метадані, audio embeddings, аудіо фічі
-- **Шукати нову музику** — "хто з мережі має щось схоже на цей трек?"
-- **Знаходити однодумців** — люди зі схожими музичними смаками
-- **Спілкуватись** — чат між учасниками мережі
-- **Обмінюватись файлами** (майбутнє) — легальний контент, незалежні виконавці
-
-### Чому це потрібно
-
-Стрімінгові сервіси домінують, але велика аудиторія все ще:
-- Збирає FLAC бібліотеки з торентів, CD, вінілу
-- Хоче якісний звук (HQPlayer, DSD upsampling)
-- Не має інструментів для discovery нової музики у своїй офлайн-колекції
-- Ізольовані — не бачать що слухають інші колекціонери
-
-### Що шариться
-
-| Дані | Фаза | Опис |
-|------|-------|------|
-| Метадані треків | P2 | Artist, album, title, year, genre, duration |
-| Audio embeddings | P2 | CLAP 512d вектори для пошуку схожості |
-| Audio features | P2 | Tempo, key, energy, danceability, etc. |
-| Artist enrichment | P2 | Bios, tags, similar artists |
-| Text embeddings | P3 | Multilingual 384d вектори (опис, теги) |
-| Тексти пісень | P4 | Lyrics (якщо не захищені авторським правом) |
-| Аудіо файли | P5 | Тільки легальний контент (незалежні виконавці, CC-ліцензії) |
-
-### Що НЕ шариться
-
-- Локальні шляхи до файлів
-- Дані HQPlayer/плеєра
-- Приватні нотатки користувача
-- Історія прослуховування (якщо користувач не обрав шарити)
+Design notes for the P2P layer. Describes **why** things are the way they are —
+implementation details live in the code (`desktop/p2p/`, `backend/dht_service.py`).
 
 ---
 
-## Architecture Overview
+## Vision
+
+Перетворити Sautium з локального плеєра на **безсерверну P2P мережу**, де люди
+з великими офлайновими FLAC бібліотеками можуть ділитись метаданими, audio
+embeddings, features, знаходити однодумців і спілкуватись — без центрального
+сервера (тільки публічні bootstrap ресурси).
+
+**Що шариться**: metadata, CLAP embeddings, audio features, bios/tags, chat
+(P4), lyrics (P4+), audio files (P5, лише легальний контент).
+
+**Що НЕ шариться**: локальні шляхи, стан плеєра, приватні нотатки, історія
+прослуховування (якщо користувач не обрав ділитись).
+
+---
+
+## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│              Sautium Node                │
-├─────────────────────────────────────────────┤
-│  LOCAL LAYER (існуюче)                       │
-│  ├── PostgreSQL + pgvector                   │
-│  ├── FastAPI Backend (search, AI DJ, etc.)   │
-│  ├── CLAP Audio Embeddings (512d)            │
-│  ├── Text Embeddings (384d)                  │
-│  ├── Audio Features (tempo, key, energy...)  │
-│  ├── HQPlayer Control                        │
-│  └── Web UI                                  │
-├─────────────────────────────────────────────┤
-│  P2P LAYER                                     │
-│  ├── Account Identity (Argon2id + Ed25519)     │
-│  ├── aiohttp Sync Server (HTTP + JSON + gz)    │
-│  ├── libtorrent DHT (artists + user announces) │
-│  ├── E2E Chat (NaCl Box encryption)            │
-│  ├── NAT Traversal (UPnP)                     │
-│  └── Sync Client (HTTP pull from peers)        │
-├─────────────────────────────────────────────┤
-│  UI LAYER                                    │
-│  ├── Connect/Disconnect toggle               │
-│  ├── Network peers list                      │
-│  ├── Cross-library search (Phase P3)         │
-│  └── Chat (Phase P4) ← NEW                  │
-└─────────────────────────────────────────────┘
+Sautium Node
+├── Local layer: PostgreSQL+pgvector, FastAPI, CLAP/text embeddings, HQPlayer, Web UI
+├── P2P layer:    Account identity (Argon2id+Ed25519) → aiohttp sync server
+│                 libtorrent DHT (per-artist + per-user announces)
+│                 E2E chat (NaCl Box) → NAT traversal (UPnP)
+│                 Sync client (HTTP pull, layered LAN→DHT)
+└── UI layer:     Connect/Disconnect, peers list, Friends/Chat, cross-library search
 ```
 
-### Network Topology
-
-```
-                ┌──────────────────────┐
-                │ BitTorrent DHT       │
-                │ (router.bittorrent   │
-                │  .com, etc.)         │
-                └──────┬───────────────┘
-                       │ bootstrap
-            ┌──────────┴──────────┐
-            │                     │
-    ┌───────┴───────┐    ┌───────┴───────┐
-    │   Node A      │    │   Node B      │
-    │ (Kyiv)        │◄──►│ (Berlin)      │
-    │ 12,000 tracks │    │ 8,000 tracks  │
-    └───────┬───────┘    └───────┬───────┘
-            │                     │
-            │    ┌───────────┐    │
-            └───►│  Node C   │◄──┘
-                 │ (Tokyo)   │
-                 │ 45k tracks│
-                 └───────────┘
-
-Зв'язки: прямі UDP/TCP через NAT (UPnP + hole punching)
-```
+Node A (Kyiv) ↔ Node B (Berlin) ↔ Node C (Tokyo) — прямі UDP/TCP з'єднання
+через NAT (UPnP + STUN-подібний hole punching), bootstrap через публічну
+BitTorrent DHT.
 
 ---
 
 ## Technology Choices
 
-### P2P & Networking
-
 | Component | Library | Why |
 |-----------|---------|-----|
-| DHT + file transfer | **`libtorrent`** (C++ з Python bindings) | Доступ до публічної BT DHT (мільйони нод), вбудований файловий обмін, pip-installable |
-| NAT traversal | **`miniupnpc`** (UPnP) + STUN | UPnP для роутера, STUN для визначення зовнішнього IP |
-| Transport | **HTTP + JSON + gzip** | Той самий sync протокол що вже працює (inventory → batch pull), без кастомного бінарного формату |
-| Identity | **`cryptography`** (Ed25519) | Стандарт, швидкий, компактні ключі (32 bytes) |
-| Async networking | **`asyncio`** + `aiohttp` | Вже використовується в проєкті |
+| DHT + file transfer | **libtorrent** (C++ with Python bindings) | Доступ до публічної BT DHT, вбудований файлообмін, pip-installable |
+| NAT traversal | **miniupnpc** (UPnP) + STUN | UPnP для роутера, STUN для визначення зовнішнього IP |
+| Transport | **HTTP + JSON + gzip** | Той самий протокол sync що вже працює; без кастомного бінарного формату |
+| Identity | **cryptography** (Ed25519) + **argon2-cffi** | Стандарт, компактні 32-byte ключі; Argon2id для deterministic identity |
+| Chat encryption | **PyNaCl** (NaCl Box) | Curve25519 + XSalsa20-Poly1305, проста API |
+| TLS | Self-signed ECDSA P-256 | Node ID в CN, HTTPS для всіх P2P з'єднань |
+| Async networking | **asyncio** + **aiohttp** | Вже використовується в проєкті |
 
-### Чому libtorrent, а НЕ kademlia (pure Python)
+### Чому libtorrent, а НЕ `kademlia` (pure Python) — **критичне рішення**
 
-> **ВАЖЛИВО**: Бібліотека `kademlia` (bmuller) **несумісна** з BitTorrent DHT!
-> - Використовує MsgPack serialization (BT DHT використовує Bencode)
+> Бібліотека `kademlia` (bmuller) **несумісна** з BitTorrent DHT:
+> - MsgPack serialization (BT DHT використовує Bencode)
 > - Різні RPC операції (STORE/FIND_VALUE vs get_peers/announce_peer)
-> - Неможливо підключитись до router.bittorrent.com
-> - Створює **окрему приватну мережу** яку треба будувати з нуля
+> - Неможливо підключитись до `router.bittorrent.com`
+> - Фактично створює **окрему приватну мережу** яку треба будувати з нуля
 
-**libtorrent переваги:**
-- Доступ до публічної BitTorrent DHT (мільйони нод — не треба будувати мережу з нуля)
-- BEP44 — зберігання довільних даних в DHT (mutable/immutable items)
-- Вбудований файловий обмін (BitTorrent protocol) — для фази P5
-- Pre-built wheels: `pip install libtorrent` працює на Windows (Python 3.10-3.13)
-- Додатковий пакет `libtorrent-windows-dll` для OpenSSL DLL на Windows
+libtorrent дає доступ до мільйонів існуючих нод + вбудований файлообмін для
+майбутньої Phase P5, pip-installable на Windows/Linux/Mac.
 
 ### "Безсерверність"
 
-Зовнішні безкоштовні ресурси (не потрібно орендувати сервер):
-- **Bootstrap DHT**: `router.bittorrent.com:6881`, `dht.transmissionbt.com:6881`
-- **STUN servers**: `stun.l.google.com:19302`, `stun.cloudflare.com:3478`
-- **Relay fallback**: якщо потрібно — Oracle Cloud Free Tier, або relay через інших пірів мережі
-
-### Windows Firewall & NAT — вирішено
-
-**Firewall (OS рівень):**
-- Windows автоматично показує prompt "Windows Security Alert" коли додаток слухає порт
-- Користувач натискає "Allow" один раз → правило зберігається назавжди
-- **Inno Setup інсталятор** (`desktop/installer/sautium.iss`) вже є в проєкті і працює з правами адміна
-  → можемо додати `netsh advfirewall firewall add rule` в секцію `[Run]`
-  (як робить qBittorrent — checkbox "Add Windows Firewall rule" в інсталяторі)
-- Для тонкого лаунчера (без інсталятора): Windows сам покаже prompt при першому запуску
-
-**NAT (роутер рівень):**
-- UPnP (`miniupnpc`) — автоматичне відкриття порту на роутері, без взаємодії з користувачем
-- Увімкнений на більшості домашніх роутерів за замовчуванням (~80%)
-- Fallback: DHT все одно працює через UDP outbound (outbound завжди дозволений)
+Безкоштовні публічні ресурси (не потрібно орендувати сервер):
+- **DHT bootstrap**: `router.bittorrent.com:6881`, `dht.transmissionbt.com:6881`
+- **STUN**: `stun.l.google.com:19302`, `stun.cloudflare.com:3478`
+- **Relay fallback**: Oracle Cloud Free Tier або relay через інших пірів
 
 ---
 
-## Content-Addressable IDs (Детерміновані UUID)
+## Content-Addressable IDs (Deterministic UUID v5)
 
-### Принцип
+Для P2P обміну однакові дані мусять мати однаковий ID на всіх нодах. Namespace
+`adc1ec0b-2c81-5e26-9938-a369c6f7a5e1` (в `backend/uuid_utils.py`).
 
-Для P2P обміну важливо щоб **однакові дані мали однаковий ID** на всіх нодах.
-Проєкт вже використовує UUID v5 для core entities — треба розширити на всі shareable дані.
+| Entity | Formula |
+|--------|---------|
+| Artist | `uuid5(NS, "artist:{normalize(name)}")` |
+| Album | `uuid5(NS, "album:{normalize(artist)}:{normalize(title)}")` |
+| Track | `uuid5(NS, "song:{normalize(artist)}:{normalize(title)}")` |
+| Genre | `uuid5(NS, "genre:{normalize(name)}")` |
+| Tag | `uuid5(NS, "tag:{normalize(name)}")` |
+| EmbeddingModel | `uuid5(NS, "embedding_model:{normalize(name)}")` |
 
-### Поточний стан (вже реалізовано)
-
-| Entity | ID Type | Формула | Статус |
-|--------|---------|---------|--------|
-| Artist | UUID v5 | `uuid5(NS, "artist:{normalize(name)}")` | ✅ Готово |
-| Album | UUID v5 | `uuid5(NS, "album:{normalize(artist)}:{normalize(title)}")` | ✅ Готово |
-| Track | UUID v5 | `uuid5(NS, "song:{normalize(artist)}:{normalize(title)}")` | ✅ Готово |
-
-Namespace: `adc1ec0b-2c81-5e26-9938-a369c6f7a5e1` (фіксований, в `backend/uuid_utils.py`)
-
-### Конвертовано в UUID v5 (Phase P1) ✅
-
-| Entity | Формула | Статус |
-|--------|---------|--------|
-| Genre | `uuid5(NS, "genre:{normalize(name)}")` | ✅ Готово (міграція 002) |
-| Tag | `uuid5(NS, "tag:{normalize(name)}")` | ✅ Готово (міграція 002) |
-| EmbeddingModel | `uuid5(NS, "embedding_model:{normalize(name)}")` | ✅ Готово (міграція 002) |
-
-Міграція `002_uuid_genres_tags_models.sql` включає дедуплікацію case-варіантів (напр. "Blues"/"blues") перед конвертацією.
-
-### Embeddings та Audio Features
-
-Embeddings ідентифікуються через комбінацію **(track_uuid, model_uuid)** — обидва вже детерміновані.
-Сам embedding ID може залишитись SERIAL (він не шариться — шариться вектор прив'язаний до track_uuid).
-
-**Стратегія обміну:**
-1. Пір А надсилає список своїх track UUIDs
-2. Пір Б відповідає які з них у нього є / яких нема
-3. Для спільних треків — можна порівняти embeddings / features
-4. Для відсутніх — отримати metadata + embeddings від піра
-
-### Протокол обміну даними
-
-```
-Пір A (запитувач)                     Пір B (відповідач)
-─────────────────                     ─────────────────
-1. "Ось мої track UUIDs"  ──────►
-                           ◄──────  2. "Ось які я маю / не маю"
-3. "Дай metadata для цих"  ──────►
-                           ◄──────  4. Metadata + embeddings (gzip)
-```
-
-**Стиснення**: 30k треків metadata ≈ 15MB JSON → ~3MB gzip. Embeddings (512 floats × 30k) ≈ 60MB → ~25MB gzip.
+Embeddings ідентифікуються через `(track_uuid, model_uuid)` — обидва
+детерміновані. Сам embedding PK може залишитись SERIAL (не шариться — шариться
+вектор, прив'язаний до `track_uuid`).
 
 ---
 
 ## DHT Discovery Strategy
 
-### Принцип: Анонсування по артистах
+### Принцип: announce **по артистах**, не по ноді
 
-Launcher **не анонсує себе як ноду** — він анонсує **кожного артиста**, на якого має enrichment дані
-(embedding або audio_features для хоча б 1 треку).
+Launcher не анонсує себе як єдину ноду. Замість цього — анонсує **кожного
+артиста**, на якого має enrichment (embedding або audio_features хоча б для 1
+треку):
 
 ```python
-# Launcher з enriched Pink Floyd анонсує:
 artist_infohash = SHA1("Sautium-artist:" + artist_uuid)
-session.dht_announce(artist_infohash, port=19000)
-
-# Інший launcher шукає enrichment для Pink Floyd:
-peers = session.dht_get_peers(artist_infohash)
-# → отримує IP:port launchers які мають enrichment для Pink Floyd
+session.dht_announce(artist_infohash, port=sync_port, flags=0)
 ```
-
-**Критерій анонсу**: артист має хоча б 1 трек з embedding АБО audio_features.
-
-**Масштаб** (на прикладі master бази):
-- 2 550 enriched артистів → 2 550 DHT announces
-- Re-announce кожні 15 хв: ~3 announce/sec — мізер для libtorrent
-- Навіть 10k артистів (~11/sec) — в межах норми
 
 **Переваги:**
 - Точний пошук: "хто має Pink Floyd?" → прямий DHT lookup
-- Launcher шукає тільки конкретних артистів, не весь каталог
-- Не потрібен загальний infohash мережі (немає broadcast/flood)
-- Масштабується природно — чим більше учасників, тим більше артистів доступно
+- Без broadcast/flood: шукаємо тільки потрібних артистів
+- Природне масштабування: більше учасників → більше артистів
+- ~2550 announces кожні 15 хв = ~3/sec — мізер для libtorrent
 
----
-
-## Implementation Plan
-
-### Phase P0: Launcher ↔ Backend Bridge
-
-**Мета**: Windows launcher отримує дані з FastAPI backend через REST API.
-Це фундамент — P2P layer буде обмінюватись саме цими даними.
-
-**Що зробити**:
-
-1. **Backend API для експорту даних** (`/api/export/`)
-   ```
-   GET /api/export/catalog          → повний каталог (artists, albums, tracks metadata)
-   GET /api/export/embeddings       → audio embeddings (track_uuid → vector)
-   GET /api/export/text-embeddings  → text embeddings
-   GET /api/export/audio-features   → аудіо фічі (tempo, key, energy, etc.)
-   GET /api/export/stats            → агреговані статистики бібліотеки
-   ```
-
-2. **Launcher API client** (`desktop/api_client.py`)
-   - HTTP клієнт для з'єднання з `localhost:8000`
-   - Кешування відповідей (SQLite або JSON файли)
-   - Health check / connection status
-
-3. **Launcher UI updates**
-   - Показати статистику бібліотеки в головному вікні
-   - Індикатор з'єднання з backend
-   - Кнопка "Library Info" з деталями
-
-**Критерій готовності**: Launcher показує реальні дані з backend (кількість треків, артистів, статус embeddings).
-
----
-
-### Phase P1: DB Refactoring + Node Identity
-
-**Мета**: Підготувати базу до P2P обміну та створити криптографічну ідентичність ноди.
-
-**DB Refactoring:**
-
-1. **Genre** → UUID v5 primary key
-   - `uuid5(NS, "genre:{normalize(name)}")`
-   - Оновити `track_genres`, `genre_descriptions` foreign keys
-   - Міграційний скрипт (як існуючий `migrate_to_uuid.py`)
-
-2. **Tag** → UUID v5 primary key
-   - `uuid5(NS, "tag:{normalize(name)}")`
-   - Оновити `artist_tags`, `album_tags` foreign keys
-
-3. **EmbeddingModel** → UUID v5 primary key
-   - `uuid5(NS, "model:{name}")`
-   - Оновити `embeddings`, `text_embeddings`, `lyrics_embeddings` foreign keys
-
-**Node Identity** (`backend/p2p/identity.py`):
-- Генерація Ed25519 keypair при першому запуску
-- Збереження в `%LOCALAPPDATA%/Sautium/identity.key` (Windows)
-- Node ID = SHA-256(public_key)[:20] (20 bytes, як у BitTorrent)
-- Nickname (user-configurable, default = random adjective+noun)
-
----
-
-### Phase P2: Launcher Sync Server + DHT Discovery
-
-**Мета**: Launcher стає і клієнтом, і сервером. Знаходить пірів через DHT, синхронізується через HTTP.
-
-**Шлях користувача**:
-```
-Scan Library → Sync Library (DHT пошук пірів) → Enrich Tracks (те що не знайшов) → Анонс своїх артистів
-```
-
-**Архітектура процесів в launcher**:
-```
-Main Thread:   CustomTkinter GUI (tkinter mainloop)
-Background:    asyncio event loop (окремий потік)
-               ├── aiohttp HTTP server (порт 19000) — обслуговує sync запити від пірів
-               └── libtorrent DHT polling — анонси enriched артистів + пошук пірів
-```
-
-**Що зробити**:
-
-1. **Sync Server** (`desktop/p2p/sync_server.py`)
-   - aiohttp HTTP server на конфігурованому порті (default: 19000)
-   - Ті ж endpoints що в `backend/routers/sync.py`:
-     - `POST /api/sync/inventory` — inventory по track UUIDs
-     - `POST /api/sync/pull/{category}` — batch pull (11 категорій)
-   - JSON + gzip compression (стандартний HTTP Content-Encoding)
-   - Rate limiting на вхідні запити
-
-2. **Sync Queries** (`desktop/p2p/sync_queries.py`)
-   - SQL запити витягнуті з `backend/routers/sync.py` у спільний модуль
-   - Працює з будь-яким PostgreSQL з'єднанням (Docker або локальна БД)
-   - Без залежності від FastAPI/aiohttp — чиста бізнес-логіка
-
-3. **DHT Service** (`desktop/p2p/dht_service.py`)
-   - libtorrent DHT session з bootstrap від публічних нод
-   - **Announce**: для кожного enriched артиста (embedding або audio_features)
-     ```python
-     infohash = SHA1("Sautium-artist:" + artist_uuid)
-     session.dht_announce(infohash, port=19000)
-     ```
-   - **Lookup**: знайти пірів з enrichment для конкретного артиста
-     ```python
-     peers = dht.get_peers(SHA1("Sautium-artist:" + artist_uuid))
-     # → [(ip, port), ...]
-     ```
-   - Periodic re-announce кожні 15 хвилин
-   - Кеш знайдених пірів (щоб не робити DHT lookup кожен раз)
-
-4. **P2P Manager** (`desktop/p2p/p2p_manager.py`)
-   - Оркестрація: старт/стоп DHT + HTTP server
-   - Інтеграція з `SyncClient`: замість фіксованого `source_url` → DHT lookup
-   - Логіка Sync Library:
-     ```
-     1. Отримати список артистів без enrichment
-     2. Для кожного артиста: DHT lookup → знайти пір(и)
-     3. HTTP sync з кожним знайденим піром (стандартний inventory → pull)
-     4. Імпорт отриманих даних в локальну БД
-     ```
-
-5. **Launcher UI**
-   - Connect/Disconnect toggle (вмикає/вимикає DHT + HTTP server)
-   - Показати node ID
-   - Статус: "Online (announcing N artists, M peers found)"
-
-**Docker backend = ще один пір**:
-Docker backend використовує той самий протокол. Різниця лише в обгортці —
-FastAPI замість aiohttp, але SQL запити ті ж самі через `sync_queries.py`.
-
-**Структура файлів**:
-```
-desktop/p2p/
-  __init__.py
-  sync_server.py      # aiohttp HTTP server (sync endpoints)
-  sync_queries.py      # SQL запити (спільна логіка)
-  dht_service.py       # libtorrent DHT: announce + lookup
-  p2p_manager.py       # Оркестрація: старт/стоп, інтеграція з SyncClient
-
-backend/
-  dht_service.py       # Та ж DHT логіка для Docker backend
-  main.py              # DHT інтегровано в FastAPI lifespan
-  config.py            # P2P_ENABLED, P2P_DHT_PORT, P2P_ANNOUNCE_PORT
-```
-
-**Тестування**: 2 інстанси launcher на localhost (різні порти, різні бази),
-один з enrichment — інший робить Sync Library і отримує дані.
-
----
-
-### Phase P3: NAT Traversal + LAN Discovery ✅ DONE (2026-03-24 → 2026-03-26)
-
-**Мета**: Забезпечити роботу через NAT (реальний інтернет) та LAN без ручного налаштування.
-
-#### LAN Discovery (`desktop/p2p/lan_discovery.py`) ✅
-
-- UDP broadcast на порт 19002 для знаходження пірів у локальній мережі
-- Відповідь: sync port піра → пряме HTTP з'єднання без DHT
-- Підтримка multi-NIC Windows: broadcast до кожного subnet (наприклад 192.168.1.255) + 255.255.255.255
-- Localhost Docker probe: пряма перевірка `127.0.0.1:8800` (Docker backend) — знаходить локальний Docker без DHT
-
-#### UPnP Service (`desktop/p2p/upnp_service.py`) ✅
-
-- `miniupnpc`: автоматичне відкриття портів на роутері (без взаємодії з користувачем)
-- Маппінг sync server port + DHT UDP port
-- Повертає зовнішній IP:port для DHT announces → remote peers можуть підключитись
-
-#### Layered Sync Flow ✅
+### Layered sync flow (P3)
 
 ```
 Sync trigger
      │
      ▼
-LAN Discovery (UDP broadcast + localhost Docker probe)
-     │ знайдено LAN peers?
-     ├─── Так → використати LAN peers (швидко, надійно)
-     └─── Ні  → DHT lookup для одного артиста
-                     │
-                     ▼
-              Знайшли seed для артиста X?
-                     │
-                     ▼
-              Запит до seed про ВСІ unenriched артисти (один inventory call)
-                     │
-                     ▼
-              Batch pull відсутніх категорій (gzip JSON)
-                     │
-                     ▼
-              Import в локальну БД
+LAN Discovery (UDP broadcast на 19002 + localhost Docker probe)
+     │
+     ├── Peers found → direct HTTP (швидко, надійно)
+     └── None → DHT lookup для одного артиста → знайти seed
+                        │
+                        ▼
+                  Inventory call до seed про ВСІ unenriched артисти
+                        │
+                        ▼
+                  Batch pull (gzip JSON) → import
 ```
 
-**Smart seed reuse**: один DHT lookup знаходить seed → той самий seed обробляє всі unenriched артисти.
-Замість N DHT lookups для N артистів — 1 lookup + 1 inventory call.
+**Smart seed reuse**: 1 DHT lookup + 1 inventory call замість N lookups для N
+артистів.
 
-#### DHT Fixes ✅
+### Account Identity + Chat Discovery
 
-- `alert_mask` повинен включати `dht_operation_notification` для спрацювання `dht_get_peers_alert` — без цього DHT alerts мовчки ігноруються
-- `peers()` в libtorrent 2.1+ повертає список tuples `(ip, port)` замість об'єктів з `.address()/.port()` — додано compatibility handling
-- Announce port = UPnP-mapped external port (якщо UPnP доступний)
-- Bootstrap retry: якщо < 10 нод після першого bootstrap → fallback до резервних bootstrap нод
+Для Phase P4 крім per-artist announces додано **per-user announces**:
+```python
+user_infohash = SHA1("Sautium-user:" + invite_code)
+session.dht_announce(user_infohash, port=sync_port, flags=0)
+```
 
-#### Sync Server Watchdog ✅
-
-- Background coroutine перевіряє здоров'я aiohttp server кожні 30 секунд
-- Авто-рестарт після network events (sleep/wake, зміна інтерфейсу, VPN)
-- Launcher: зупиняє старий P2P manager перед рестартом сервісів (уникає port conflicts)
-
-#### Random P2P Port ✅
-
-- Порт присвоюється випадково в діапазоні 20000–29999 при першому запуску, потім зберігається в конфігу
-- DHT порт = sync порт + 1
-- Уникає конфліктів при кількох інстансах Sautium на одній машині
-- `docker_ports` в конфігу — явний список замість hardcoded probe list
-
-#### Windows Integration ✅
-
-- Авто-встановлення OpenSSL 1.1 DLLs (`libtorrent-windows-dll` PyPI) при запуску — необхідно для libtorrent на Windows
-- Авто-додавання Windows Firewall правил для sync port (TCP) і DHT port (UDP)
-- `service_manager.py` приймає параметр `protocol` (TCP/UDP) для правил firewall
-
-#### Видалено `source_url` ✅
-
-- Статичний `source_url` в конфігу прибрано — піри знаходяться виключно через LAN + DHT
-- Жодного ручного введення IP адрес не потрібно
-
-#### Тестування
-
-- LAN sync: Mac ↔ Windows на одному роутері — повністю працює (~125 треків/сек)
-- Internet sync: Mac на мобільному хотспоті ↔ Windows вдома через DHT + UPnP — end-to-end
-- Multi-NIC Windows: subnet broadcast досягає пірів через всі активні інтерфейси
-- Localhost: Docker backend знайдений через direct probe без DHT
-
-#### Нові файли
-
-| Файл | Призначення |
-|------|-------------|
-| `desktop/p2p/lan_discovery.py` | UDP broadcast + multi-NIC + localhost Docker probe |
-| `desktop/p2p/upnp_service.py` | miniupnpc: маппінг sync + DHT портів |
-
-#### Змінені файли
-
-| Файл | Зміни |
-|------|-------|
-| `desktop/p2p/p2p_manager.py` | Повний rewrite: LAN+DHT layered discovery, smart seed, watchdog |
-| `desktop/p2p/dht_service.py` | alert_mask fix, peers() compat, UPnP port, bootstrap retry |
-| `backend/dht_service.py` | Ті самі fixes що і desktop версія |
-| `desktop/launcher.py` | Always start P2P, OpenSSL DLL auto-install, firewall rules, sync button timing |
-| `desktop/config_manager.py` | Random P2P port, docker_ports, видалено source_url |
-| `desktop/service_manager.py` | Firewall rule protocol parameter (TCP/UDP) |
-| `desktop/api_client.py` | Sync timeouts 30s → 300s |
-| `docker-compose.yml` | Explicit docker_ports config |
-| `docker-compose.mac.yml` | Explicit docker_ports config |
-| `backend/Dockerfile.mac` | libtorrent install adjustments |
+Друг з `invite_code` робить DHT lookup → отримує IP:port → встановлює HTTPS
+з'єднання для handshake/chat. Offline queue: недоставлені повідомлення
+зберігаються, retry кожну хвилину через повторний DHT lookup.
 
 ---
 
-**Cross-Library Search** (залишено на майбутнє):
-- "Хто з мережі має щось схоже на цей трек?" → embedding similarity
-- Distributed query до знайдених пірів паралельно
-- Library comparison (overlap analysis, taste similarity)
-- Timeout 5 секунд на повільних пірів
+## Account System (Phase P4)
 
-**Handshake Protocol** (підготовка до P4, вже реалізовано в P4):
-- Обмін node ID, library stats, capabilities
-- Потрібен для соціальних фіч (друзі, чат)
-- Ed25519 підпис повідомлень
-
----
-
-### Phase P4: Account System + Encrypted Chat ✅ DONE
-
-**Мета**: Портативна ідентичність, друзі та E2E зашифрований чат.
-
-#### Account System (Deterministic Identity)
-
-Користувач створює акаунт з username + password. Однаковий username + password
-на будь-якому пристрої = та сама ідентичність (ті ж ключі, той же invite code).
+Deterministic identity: однаковий username+password на будь-якому пристрої =
+та сама ідентичність (ті ж ключі, той же invite code).
 
 ```
 username + password → Argon2id KDF (256MB, 4 iter) → 32-byte seed → Ed25519 keypair
 ```
 
-**Invite Code**: `username#XXXX-XXXX-XXXX` (SHA-256(public_key)[:6] у hex)
-- Людино-читабельний, можна кинути в Telegram/Discord
-- Hash частина захищає від підробки (інший "bob42" матиме інший хеш)
-- Анонсується в DHT: `SHA1("Sautium-user:" + invite_code)`
-- При DHT lookup знаходиться IP:port → пряме з'єднання → обмін повними ключами
+**Invite Code**: `username#XXXX-XXXX-XXXX` де XXXX — `SHA-256(public_key)[:6]` у
+hex. Людино-читабельний, але hash частина захищає від підробки (інший "bob42"
+матиме інший hash).
 
-**Бібліотеки**: `argon2-cffi` (KDF), `PyNaCl` (NaCl Box шифрування)
-
-#### Encrypted Chat
-
-- **NaCl Box** (Curve25519 + XSalsa20-Poly1305) — E2E шифрування
-- Ed25519 ключі конвертуються в Curve25519 для key exchange
-- Повідомлення зберігаються локально як plaintext (після дешифрування)
-- Offline queue: недоставлені повідомлення зберігаються, retry кожну хвилину через DHT
-
-**Протокол**:
-```
-POST /api/chat/handshake   — обмін публічними ключами (friend request)
-POST /api/chat/message     — зашифроване повідомлення
-POST /api/chat/key-rotation — сповіщення про зміну пароля/ключів
-```
-
-#### Key Rotation (зміна пароля)
-
-1. Генерується нова пара ключів (з нового пароля)
+**Key rotation** (зміна пароля):
+1. Нова пара ключів (з нового пароля)
 2. Повідомлення `{new_public_key}` підписується **старим** приватним ключем
-3. Відправляється всім друзям через `/api/chat/key-rotation`
-4. Друг перевіряє підпис старим ключем → оновлює public key
+3. Розсилається друзям через `/api/chat/key-rotation`
+4. Друг перевіряє підпис старим ключем → оновлює record
 
-#### Friend List
+### Email verification (optional)
 
-- Додавання по invite code: DHT lookup → handshake → mutual add
-- Зберігається в PostgreSQL (friends table)
-- Block/unblock, display name
+Cloudflare Worker (`sautium-verify.sautium.workers.dev`) + Resend:
+- Signed requests (Ed25519) — модифікований клієнт не може підробити запит
+- KV store маппить `invite_code → verified_email`
+- Invite emails показують ✅ Verified / ⚠️ Unverified badge
+- Auto-reciprocate: якщо обидва акаунти verified через Worker KV
 
-#### Що реалізовано
+### Mutual invite exchange (anti-impersonation)
 
-| Компонент | Файл | Статус |
-|-----------|------|--------|
-| Account identity (Argon2id + Ed25519) | `desktop/node_identity.py` | ✅ |
-| Invite code (username#hash) | `desktop/node_identity.py` | ✅ |
-| Chat encryption (NaCl Box) | `desktop/p2p/chat_service.py` | ✅ |
-| Chat HTTP endpoints | `desktop/p2p/sync_server.py` | ✅ |
-| DHT user announce/lookup | `desktop/p2p/dht_service.py` | ✅ |
-| P2P chat integration | `desktop/p2p/p2p_manager.py` | ✅ |
-| DB tables (friends, messages) | `desktop/migrations/001_initial.sql` | ✅ |
-| Key rotation protocol | node_identity + sync_server | ✅ |
-| Pending message retry | p2p_manager | ✅ |
-| TLS transport (self-signed ECDSA) | `node_identity.py` + `sync_server.py` | ✅ |
-| Email verification (Cloudflare Worker) | `worker/verify.js` | ✅ |
-| Signed invite emails + verified badge | `worker/verify.js` + `email_verify.py` | ✅ |
-| Worker as CA (email→invite mapping) | `worker/verify.js` (KV store) | ✅ |
-| Web UI: hamburger menu + Friends section | `backend/static/` + `routers/p2p.py` | ✅ |
-| Docker backend P2P identity | `backend/p2p_identity.py` | ✅ |
-| Wizard: account + email verification | `desktop/wizard.py` | ✅ |
-| Mutual invite exchange (anti-impersonation) | `chat_service.py` + `sync_server.py` | ✅ |
-| Email-based auto-reciprocate invites | `email_verify.py` + Worker KV | ✅ |
-| Event-driven chat delivery (SSE + direct HTTP) | `routers/p2p.py` + `chat_service.py` | ✅ |
-| Live Friends list updates via SSE | `routers/p2p.py` | ✅ |
-| Chat history sync for identity restoration | `chat_service.py` | ✅ |
-
-5. **Music Recommendations** (Phase P4b)
-   - "Рекомендую цей альбом" → broadcast до друзів
-   - Shared playlists (список track metadata, не файли)
-   - "Що зараз слухає [nickname]?" (opt-in)
-
----
-
-### Phase P5: File Sharing (BitTorrent)
-
-**Мета**: Обмін аудіо файлами для легального контенту.
-
-**Легальні кейси:**
-- Незалежні виконавці (indie artists, hobby musicians)
-- Creative Commons ліцензії
-- Авторські релізи
-- Демо-записи
-
-**Реалізація** (libtorrent вже вміє все це):
-- Створення .torrent файлів для шарених альбомів/треків
-- Seeding через libtorrent (DHT tracker, без центрального трекера)
-- Piece-based transfer з swarming (декілька пірів → швидше)
-- Resume downloads (перервані завантаження продовжуються)
-- Верифікація цілісності (piece hashes)
-
-**UI:**
-- Позначка "Share this album" для легального контенту
-- Download progress / seeding status
-- Bandwidth limiting
-
-**Юридична safety:**
-- Користувач явно обирає що шарити (opt-in)
-- Попередження про авторські права
-- Система тегів ліцензій (CC-BY, CC-SA, Public Domain, Self-Released)
+Витік invite code не створює friendship автоматично — **обидва** мусять додати
+invite code один одного. Handshake завершується успішно тільки коли seen_by_both.
+Без цього — витік одного коду давав би fake friendship.
 
 ---
 
 ## Data Format for P2P Exchange
 
-### Shared Catalog Entry (per track)
+### Catalog entry (per track)
 ```json
 {
-  "track_uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "track_uuid": "550e8400-...",
   "title": "Comfortably Numb",
-  "artist_uuid": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+  "artist_uuid": "6ba7b810-...",
   "artist_name": "Pink Floyd",
-  "album_uuid": "7ca7b810-9dad-11d1-80b4-00c04fd430c8",
+  "album_uuid": "7ca7b810-...",
   "album_title": "The Wall",
   "year": 1979,
-  "genres": [
-    {"uuid": "...", "name": "Progressive Rock"},
-    {"uuid": "...", "name": "Art Rock"}
-  ],
+  "genres": [{"uuid": "...", "name": "Progressive Rock"}],
   "duration_seconds": 382,
   "available_formats": [
-    {"format": "FLAC", "sample_rate": 96000, "bit_depth": 24, "lossless": true},
-    {"format": "FLAC", "sample_rate": 44100, "bit_depth": 16, "lossless": true}
+    {"format": "FLAC", "sample_rate": 96000, "bit_depth": 24, "lossless": true}
   ]
 }
 ```
 
-### Embedding Exchange (lazy, on demand)
+### Embedding exchange (on demand)
 ```json
 {
-  "track_uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "track_uuid": "...",
   "model_uuid": "...",
   "model_name": "laion/clap-htsat-unfused",
   "vector": [0.123, -0.456, ...]
 }
 ```
 
-### Audio Features Exchange
-```json
-{
-  "track_uuid": "550e8400-e29b-41d4-a716-446655440000",
-  "tempo": 63.2,
-  "key": 2, "mode": 0,
-  "energy": 0.45, "danceability": 0.22,
-  "acousticness": 0.35, "brightness": 0.38
-}
+### Bulk protocol
+```
+Phase 1: Catalog sync
+  A → B: artist UUIDs set (compact)
+  B → A: overlap report + unique artists (gzip JSON)
+
+Phase 2 & 3: Embeddings + features (lazy, on demand, gzip)
 ```
 
-### Bulk Exchange Protocol
-
-```
-Фаза 1: Catalog sync (lightweight)
-  A → B: "Ось мої artist UUIDs" (compact set)
-  B → A: "Маю 80% overlap. Ось мої унікальні artists + їх tracks" (gzip)
-
-Фаза 2: Embedding sync (on demand)
-  A → B: "Дай embeddings для цих track UUIDs" (list)
-  B → A: Embedding vectors (gzip, ~2 bytes/float з quantization)
-
-Фаза 3: Feature sync (on demand)
-  A → B: "Дай audio features для цих track UUIDs" (list)
-  B → A: Feature values (gzip JSON)
-```
+**Compression**: 30k tracks metadata ≈ 15MB JSON → ~3MB gzip. Embeddings
+(512 floats × 30k) ≈ 60MB → ~25MB gzip.
 
 ---
 
 ## Security Considerations
 
-### Phase 1 (MVP)
-- Ed25519 keypair для ідентифікації
-- **Connect/Disconnect кнопка** (повний контроль користувача)
-- Шариться тільки metadata (ніяких файлових шляхів!)
+### Phase 1–3 (MVP + sync)
+- Ed25519 identity (portable, deterministic)
+- Connect/Disconnect kill switch (повний контроль користувача)
+- Тільки metadata шариться (ніяких файлових шляхів)
 - Rate limiting на вхідні запити від пірів
+- Self-signed ECDSA P-256 TLS для всього P2P трафіку
 
-### Phase P4 (Chat) ✅
-- **Account system**: username + password → deterministic Ed25519 via Argon2id (256MB, 4 iterations)
-- **E2E encryption**: NaCl Box (Curve25519 + XSalsa20-Poly1305) — пароль/ключі ніколи не передаються
-- **Invite codes**: `username#XXXX-XXXX-XXXX` — тільки public key hash, не пароль
-- **Key rotation**: нові ключі підписуються старим ключем для верифікації
-- **Friend blocklist**: is_blocked flag, blocked friends не можуть надсилати повідомлення
-- **TLS transport**: self-signed ECDSA P-256 cert з node_id в CN, HTTPS для всіх P2P з'єднань
-- **Email verification**: Cloudflare Worker (sautium-verify) + Resend API для доставки
-- **Worker as CA**: зберігає `invite_code → verified_email` маппінг в KV, підписані запити (Ed25519)
-- **Mutual invite exchange**: обидва додають invite один одного → mutual confirmation (anti-impersonation)
-- **Verified sender badge**: invite email показує ✅ Verified або ⚠️ Unverified для відправника
+### Phase P4 (Chat)
+- E2E encryption NaCl Box — пароль/ключі ніколи не передаються по мережі
+- Mutual invite exchange — витік invite code не дає friendship
+- Email verification опціональна — Worker діє як CA, не як relay
+- Friend blocklist — blocked friends не можуть надсилати повідомлення
 
 ### Future
-- Selective sharing (вибрати які артисти/альбоми видимі)
-- Bandwidth limiting (конфігурація в Settings)
-- IP reputation (автоматичний бан для flood/spam)
+- Selective sharing (вибір які артисти/альбоми видимі)
+- Bandwidth limiting
+- IP reputation (авто-бан flood/spam)
 
 ---
 
-## Testing Strategy
+## Design Decisions (lessons learned)
 
-### One Machine Testing (primary method)
-```
-Terminal 1: Launcher A (port 19000, DB: sautium_a) — має enrichment
-Terminal 2: Launcher B (port 19001, DB: sautium_b) — без enrichment, тільки scan
-```
-Launcher A анонсує enriched артистів в DHT.
-Launcher B шукає тих самих артистів через DHT, знаходить Launcher A, синхронізується.
-
-### Integration Test Scenario
-1. Launcher A starts → DHT bootstrap → announces enriched artists (per-artist infohash)
-2. Launcher B starts → DHT bootstrap → Sync Library
-3. B визначає артистів без enrichment → DHT lookup для кожного
-4. B знаходить A через DHT → HTTP sync (inventory → pull)
-5. B імпортує enrichment дані (embeddings, audio_features, bios, tags)
-6. B тепер сам може анонсувати ці артисти в DHT
-7. A goes offline → B продовжує працювати локально з отриманими даними
-
----
-
-## Immediate Next Steps (Priority Order)
-
-1. ~~**[Phase P0]** Додати export API в backend~~ ✅ (backend вже має `/stats` endpoint)
-2. ~~**[Phase P0]** Створити API client в launcher~~ ✅ (`desktop/api_client.py`)
-3. ~~**[Phase P0]** Показати library stats в launcher UI~~ ✅ (stats section в launcher)
-4. ~~**[Phase P1]** DB refactoring: Genre, Tag, EmbeddingModel → UUID v5~~ ✅ (міграція 002)
-5. ~~**[Phase P1]** Реалізувати node identity (Ed25519 keypair)~~ ✅ (`desktop/node_identity.py`)
-6. ~~**[Phase S1]** HTTP sync: inventory → batch pull → import~~ ✅ (`backend/routers/sync.py`, `desktop/sync_client.py`)
-   - 12 API endpoints (1 inventory + 11 pull categories)
-   - Batch INSERT via `execute_values`, 500/batch, single DB connection
-   - Compound artist UUID fix in scanner
-   - Performance: ~125 tracks/sec (424 tracks in 3.4 sec)
-7. ~~**[Phase P2]** Витягнути sync SQL логіку в `desktop/p2p/sync_queries.py`~~ ✅
-8. ~~**[Phase P2]** Реалізувати aiohttp sync server в launcher (`desktop/p2p/sync_server.py`)~~ ✅
-9. ~~**[Phase P2]** Реалізувати DHT service з per-artist announces (`desktop/p2p/dht_service.py`)~~ ✅
-10. ~~**[Phase P2]** P2P manager + інтеграція з SyncClient (`desktop/p2p/p2p_manager.py`)~~ ✅
-11. ~~**[Phase P2]** DHT в Docker backend (`backend/dht_service.py` + `main.py` lifespan)~~ ✅
-    - Docker анонсує enriched артистів в DHT, порт 8800 (зовнішній HTTP)
-    - Той самий `dht_service.py`, інтегрований в FastAPI lifespan
-    - `docker-compose.yml`: UDP порт 19001 для DHT
-12. **[Phase P2]** Тест: Docker backend + launcher знаходять один одного через DHT і синхронізуються
-13. ~~**[Phase P4]** Account system (Argon2id → Ed25519) + invite codes~~ ✅
-14. ~~**[Phase P4]** E2E encrypted chat (NaCl Box) + friend list~~ ✅
-15. ~~**[Phase P4]** DHT user announces + lookup~~ ✅
-16. ~~**[Phase P4]** Chat HTTP endpoints + key rotation protocol~~ ✅
-17. ~~**[Phase P4]** TLS transport (self-signed ECDSA + HTTPS)~~ ✅
-18. ~~**[Phase P4]** Email verification (Cloudflare Worker + Resend)~~ ✅
-19. ~~**[Phase P4]** Worker as CA (signed requests + email→invite mapping)~~ ✅
-20. ~~**[Phase P4]** Web UI: hamburger menu + Friends section (chat, friends)~~ ✅
-21. ~~**[Phase P4]** Docker backend P2P identity~~ ✅
-22. ~~**[Phase P4]** Wizard: account creation + email verification~~ ✅
-23. ~~**[Phase P4]** Mutual invite exchange (auto-accept → require both sides)~~ ✅ (enforced in handshake)
-24. ~~**[Phase P3]** NAT traversal (UPnP) для роботи через інтернет~~ ✅ (`upnp_service.py`)
-25. ~~**[Phase P3]** LAN discovery (UDP broadcast + localhost probe)~~ ✅ (`lan_discovery.py`)
-26. ~~**[Phase P3]** Layered sync flow (LAN first → DHT fallback, smart seed reuse)~~ ✅
-27. ~~**[Phase P3]** DHT fixes (alert_mask, peers() compat, random port, watchdog)~~ ✅
-28. ~~**[Phase P4]** Email-based auto-reciprocate invites (Worker KV + signed requests)~~ ✅
-29. ~~**[Phase P4]** Event-driven chat delivery (replace polling with SSE + direct HTTP push)~~ ✅
-30. ~~**[Phase P4]** Backend/P2P/Frontend/Data pipeline audits (security, concurrency, perf)~~ ✅
-31. **[Phase P3b]** Cross-library search (embedding similarity між пірами)
-32. **[Phase P4b]** Music recommendations broadcast + shared playlists
+| Decision | Rationale |
+|----------|-----------|
+| **libtorrent over pure-python kademlia** | kademlia несумісна з BT DHT, створила б приватну мережу з нуля |
+| **HTTP+JSON+gzip over custom binary** | Той самий протокол що sync; дебажиться curl'ом |
+| **Per-artist DHT announces** | Точний пошук без broadcast, природне масштабування |
+| **Deterministic identity (Argon2id)** | Однаковий username+password = та сама нода на будь-якому пристрої |
+| **Mutual invite exchange** | Витік invite code не дає friendship — обидві сторони мусять підтвердити |
+| **Email as convenience, not trust root** | Worker доставляє і флагує verified badge, але mutual exchange все одно P2P |
+| **Smart seed reuse** | 1 DHT lookup + 1 inventory call замість N lookups для N артистів |
+| **Random P2P port 20000–29999** | Уникає конфліктів кількох інстансів на одній машині; зберігається в конфігу |
+| **Event-driven chat delivery (SSE + direct HTTP)** | Polling коштував ~8s latency; SSE + direct push — миттєвий |
+| **Persistent DB connections in long-lived services** | ChatService з per-call connection коштував 2s/повідомлення |
+| **alert_mask += dht_operation_notification** | Без цього `dht_get_peers_alert` мовчки не генерується (libtorrent gotcha) |
+| **libtorrent 2.1+ `peers()` compat** | Повертає `(ip, port)` tuples замість об'єктів — треба handle обидва |
+| **Idempotent enrichment** | Кожен enrichment task мусить бути безпечний для re-run — це correctness, не оптимізація |
 
 ---
-
-## Resolved Questions
-
-| Питання | Рішення | Обґрунтування |
-|---------|---------|---------------|
-| libtorrent vs kademlia | **libtorrent** | kademlia несумісна з BT DHT (різні протоколи). libtorrent дає доступ до мільйонів нод + вбудований файлообмін |
-| Windows Firewall | **Inno Setup** + автопромпт | Інсталятор додає правило. Або Windows сам показує prompt при першому запуску |
-| NAT traversal | **UPnP** (`miniupnpc`) | Автоматичне відкриття порту на роутері без взаємодії з користувачем |
-| Embedding compatibility | **Model UUID v5** | ID моделі = uuid5(NS, model_name). Однакові моделі → однакові UUID на всіх нодах |
-| Bandwidth (70MB) | **gzip + lazy loading** | Metadata стиснений ~3MB. Embeddings — on demand, не при першому з'єднанні |
-| File sharing | **Phase P5** (libtorrent) | libtorrent підтримує повний BT protocol — використаємо коли буде готова платформа |
-
-## Resolved Questions (Phase P2)
-
-| Питання | Рішення | Обґрунтування |
-|---------|---------|---------------|
-| Transport protocol | **HTTP + JSON + gzip** | Той самий протокол що вже працює для sync. Без кастомного TCP/msgpack — простіше, надійніше, легше дебажити |
-| DHT strategy | **Per-artist announces** | Launcher анонсує не себе, а кожного enriched артиста. Точний пошук без broadcast |
-| Artist DHT announcement count | **Всіх enriched** (~2550) | 2550 announces кожні 15 хв = ~3/sec — мізер для libtorrent. Навіть 10k OK |
-| Handshake | **Не потрібен для P2** | Handshake потрібен тільки для соціальних фіч (друзі, чат) — це Phase P3/P4 |
-| Docker backend | **Той самий протокол** | Docker = ще один пір, та сама sync логіка, різниця тільки в обгортці (FastAPI vs aiohttp) |
-| libtorrent `dht_announce` API | **3 аргументи** (sha1, port, flags=0) | libtorrent 2.0.11 Python bindings вимагають explicit flags parameter |
-| libtorrent в Docker | **pip wheel** (cp311 manylinux) | Pre-built wheel 8.5MB, boost build deps не потрібні |
-
-## Resolved Questions (Phase P3)
-
-| Питання | Рішення | Обґрунтування |
-|---------|---------|---------------|
-| Як знаходити пірів без ручного IP? | **LAN broadcast + DHT** | LAN — миттєво, DHT — fallback для інтернет. Нуль ручних налаштувань |
-| DHT alerts мовчать | **alert_mask += dht_operation_notification** | Без цього прапора `dht_get_peers_alert` не генерується |
-| libtorrent 2.1+ peers() API | **tuple compat** | `(ip, port)` tuples замість об'єктів — handle обидва варіанти |
-| NAT traversal | **UPnP (`miniupnpc`)** | Працює на ~80% домашніх роутерів, без взаємодії з користувачем |
-| Port conflicts (кілька інстансів) | **Випадковий порт 20000–29999** | Зберігається в конфігу → той самий порт між рестартами |
-| source_url (статична адреса) | **Видалено** | Замінено динамічним P2P discovery (LAN + DHT) |
-| N DHT lookups для N артистів | **Smart seed reuse** | 1 lookup → 1 seed → 1 inventory call для всіх артистів |
-| Network crash (sleep/VPN) | **Sync server watchdog** | Auto-restart кожні 30с якщо сервер впав |
-| OpenSSL DLLs на Windows | **Auto-install `libtorrent-windows-dll`** | libtorrent на Windows потребує OpenSSL 1.1; ставиться автоматично при запуску |
-| Windows Firewall | **Auto-add rules при запуску** | TCP для sync port, UDP для DHT port — launcher додає правила з правами адміна |
 
 ## Open Questions
 
-1. **Embedding quantization**: Чи варто квантизувати 512 floats для передачі (float16, int8)? Економія bandwidth vs втрата точності?
-2. **Conflict resolution**: Якщо 2 піри мають різні Last.fm теги для одного артиста — хто "правий"?
-3. **PyInstaller + libtorrent**: Чи добре працює bundling C++ extension (.pyd) в .exe? Потрібно протестувати.
-4. **DHT announce rate limits**: Перевірити реальні ліміти libtorrent при 2500+ announces.
+1. **Embedding quantization**: чи варто квантизувати 512 floats для передачі
+   (float16, int8)? Економія bandwidth vs втрата точності.
+2. **Conflict resolution**: якщо 2 піри мають різні Last.fm теги для одного
+   артиста — хто "правий"?
+3. **PyInstaller + libtorrent**: чи добре працює bundling C++ extension (.pyd)
+   в .exe? Треба протестувати.
+4. **DHT announce rate limits**: реальні ліміти libtorrent при 2500+ announces.
+
+---
+
+## Future Phases
+
+- **P3b: Cross-library search** — "хто з мережі має щось схоже на цей трек?"
+  через embedding similarity. Distributed query паралельно до знайдених пірів,
+  5s timeout.
+- **P4b: Music recommendations** — broadcast "рекомендую альбом" до друзів,
+  shared playlists (список track metadata, не файли).
+- **P5: File sharing** — libtorrent BitTorrent для легального контенту
+  (indie artists, Creative Commons, self-released). Opt-in, система тегів
+  ліцензій (CC-BY, CC-SA, Public Domain, Self-Released).
