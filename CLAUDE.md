@@ -36,26 +36,6 @@ See:
 
 ---
 
-## Library Structure (authoritative for the scanner)
-
-```
-E:\Music\{Genre}\{Artist}\{Album}\{Track}.flac
-```
-
-Artist folder sub-folders encode the quality source:
-
-| Sub-folder | quality_source |
-|------------|----------------|
-| `[Vinyl]`  | `Vinyl`        |
-| `[TR24]`   | `Hi-Res`       |
-| `[MP3]`    | `MP3`          |
-| none       | `CD` (default) |
-
-The path contains the tag — detect quality from path substrings, not metadata.
-The library path is configurable (HDD → SSD migration is a real scenario).
-
----
-
 ## Architecture Rules
 
 - **Senior-engineer level only.** Before writing code, consider scalability,
