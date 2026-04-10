@@ -562,6 +562,7 @@ def search_artists_by_bio(
             a.id as artist_id,
             a.name as artist_name,
             a.gender as artist_gender,
+            a.is_vocalist as artist_vocal,
             matches.similarity,
             (SELECT COUNT(*) FROM track_artists ta2
              WHERE ta2.artist_id = a.id AND ta2.role = 'primary') as track_count,
@@ -599,6 +600,7 @@ def search_artists_by_bio(
             "artist_id": str(r.artist_id),
             "artist": r.artist_name,
             "gender": r.artist_gender,
+            "is_vocalist": r.artist_vocal,
             "similarity": round(float(r.similarity), 4),
             "track_count": r.track_count,
             "sample_tracks": r.sample_tracks,

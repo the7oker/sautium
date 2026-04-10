@@ -236,6 +236,7 @@ class LastFmService:
         # Update artist gender from bio pronouns
         if stored.get("bio") and data.get("bio", {}).get("content"):
             self._update_artist_gender(db, artist_id, data["bio"]["content"])
+            self._update_artist_is_vocalist(db, artist_id, data["bio"]["content"])
 
         db.commit()
         return stored
@@ -262,6 +263,60 @@ class LastFmService:
         db.execute(
             text("UPDATE artists SET gender = :gender, updated_at = NOW() WHERE id = :id"),
             {"gender": gender, "id": artist_id},
+        )
+
+    # Strong: unambiguous vocal/singer terms (each occurrence is a high-confidence signal).
+    _VOCAL_STRONG_PATTERNS = (
+        r'\bsinger\b', r'\bsingers\b',
+        r'\bvocalist\b', r'\bvocalists\b',
+        r'\bfrontman\b', r'\bfrontwoman\b',
+        r'\bcrooner\b', r'\bchanteuse\b',
+        r'\bsoprano\b', r'\btenor\b', r'\bbaritone\b', r'\bcontralto\b',
+        r'\brapper\b',
+    )
+    # Medium: weaker terms, sometimes used metaphorically ("voice of a generation").
+    _VOCAL_MEDIUM_PATTERNS = (
+        r'\bvocal\b', r'\bvocals\b',
+        r'\bsinging\b', r'\bsings\b', r'\bsang\b',
+        r'\brapping\b',
+    )
+    _INSTRUMENTAL_PATTERNS = (
+        r'\binstrumental\b', r'\binstrumentals\b', r'\binstrumentalist\b',
+    )
+
+    @staticmethod
+    def _update_artist_is_vocalist(db: Session, artist_id, bio_content: str) -> None:
+        """Classify artist as vocal/instrumental from bio keywords.
+
+        Rules:
+            - Short bios (< 200 chars) stay 'unknown'.
+            - Any strong or medium vocal keyword → 'vocal'.
+            - Only instrumental keywords, no vocal ones → 'instrumental'.
+            - Otherwise → 'unknown'.
+        """
+        if not bio_content or len(bio_content) < 200:
+            return
+        text_lower = bio_content.lower()
+
+        vocal_hits = sum(
+            len(re.findall(p, text_lower))
+            for p in LastFmService._VOCAL_STRONG_PATTERNS + LastFmService._VOCAL_MEDIUM_PATTERNS
+        )
+        instrumental_hits = sum(
+            len(re.findall(p, text_lower))
+            for p in LastFmService._INSTRUMENTAL_PATTERNS
+        )
+
+        if vocal_hits >= 1:
+            is_vocalist = 'vocal'
+        elif instrumental_hits >= 1:
+            is_vocalist = 'instrumental'
+        else:
+            is_vocalist = 'unknown'
+
+        db.execute(
+            text("UPDATE artists SET is_vocalist = :v, updated_at = NOW() WHERE id = :id"),
+            {"v": is_vocalist, "id": artist_id},
         )
 
     def _store_similar_artists(

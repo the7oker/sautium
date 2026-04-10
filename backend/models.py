@@ -24,12 +24,26 @@ from sqlalchemy import (
     Boolean, ForeignKey, CheckConstraint, Index, ARRAY, UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ENUM, JSONB, UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from pgvector.sqlalchemy import Vector
 
 Base = declarative_base()
+
+
+# ENUM types declared in the SQL migration; SQLAlchemy references them without
+# re-creating (create_type=False) so table creation in tests stays lightweight.
+ArtistGenderEnum = ENUM(
+    "unknown", "female", "male", "mixed",
+    name="artist_gender",
+    create_type=False,
+)
+ArtistVocalistEnum = ENUM(
+    "unknown", "vocal", "instrumental",
+    name="artist_vocalist",
+    create_type=False,
+)
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -68,7 +82,8 @@ class Artist(Base):
     # Normalization metadata
     artist_type = Column(String(20), default="unknown")       # unknown/solo/band/collaboration/orchestra/other
     verification_status = Column(String(20), default="unverified")  # unverified/suspicious/verified_band/verified_split/verified_collab
-    gender = Column(String(10), default="unknown")              # unknown/female/male/mixed
+    gender = Column(ArtistGenderEnum, default="unknown")        # unknown/female/male/mixed
+    is_vocalist = Column(ArtistVocalistEnum, default="unknown") # unknown/vocal/instrumental
     raw_name = Column(String(500))                             # original tag value before normalization
 
     # External service IDs
@@ -92,10 +107,7 @@ class Artist(Base):
         Index("idx_artists_verification_status", "verification_status"),
         Index("idx_artists_artist_type", "artist_type"),
         Index("idx_artists_gender", "gender"),
-        CheckConstraint(
-            "gender IN ('unknown', 'female', 'male', 'mixed')",
-            name="chk_gender",
-        ),
+        Index("idx_artists_is_vocalist", "is_vocalist"),
         CheckConstraint(
             "artist_type IN ('unknown', 'solo', 'band', 'collaboration', 'orchestra', 'other')",
             name="chk_artist_type",

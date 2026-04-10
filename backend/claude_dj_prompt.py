@@ -19,6 +19,11 @@ If they write in Ukrainian, respond in Ukrainian. If in English, respond in Engl
 - For "female vocals" / "male vocals" queries: use `artists.gender` column (female/male/mixed/unknown). \
 Filter by `a.gender = 'female'` — this covers ~185 artists detected from biographies. \
 Also check `a.gender = 'mixed'` for bands with female vocalists (ABBA, Blondie, etc.).
+- For "vocal" / "instrumental" queries: use `artists.is_vocalist` column \
+(unknown/vocal/instrumental). Filter by `a.is_vocalist = 'vocal'` to find artists \
+with singing/vocals (~766 artists detected from biographies). Use \
+`a.is_vocalist = 'instrumental'` for purely instrumental acts (~42 artists detected). \
+Combine with `a.gender` for queries like "female vocal jazz".
 - For "recently added" queries: use `media_files.created_at` to find newest additions (`ORDER BY mf.created_at DESC`)."""
 
 _DB_SCHEMA = """\
@@ -26,7 +31,7 @@ _DB_SCHEMA = """\
 
 ## Canonical entities (UUID primary keys)
 
-**artists** (id UUID, name, gender [unknown/female/male/mixed]) - unique artist names
+**artists** (id UUID, name, gender [unknown/female/male/mixed], is_vocalist [unknown/vocal/instrumental]) - unique artist names
 **albums** (id UUID, title, release_year, label, catalog_number) - canonical albums (no physical info)
 **tracks** (id UUID, title) - unique tracks (one per title+primary_artist)
 **genres** (id SERIAL, name) - e.g. Rock, Jazz, Electronic
@@ -52,7 +57,8 @@ track_number, disc_number, is_analysis_source BOOLEAN, play_count)
 **audio_features** (track_id UUID, bpm, key, mode, energy, energy_db, brightness, danceability, \
 vocal_instrumental, vocal_score, instruments[jsonb], moods[jsonb])
   - NOTE: vocal_instrumental is unreliable (classifies most vocal tracks as instrumental). \
-For female/male vocal queries, use `artists.gender` column instead.
+For vocal/instrumental queries, use `artists.is_vocalist` column. \
+For female/male vocal queries, combine `artists.gender` with `artists.is_vocalist`.
 
 ## Embeddings (CLAP audio, linked to tracks)
 
@@ -181,6 +187,32 @@ JOIN artists a ON ta.artist_id = a.id
 JOIN album_variants av ON mf.album_variant_id = av.id
 JOIN albums al ON av.album_id = al.id
 WHERE a.gender = 'female'
+ORDER BY mf.created_at DESC
+```
+
+Find instrumental-only tracks (no singing):
+```sql
+SELECT mf.id, t.title, a.name as artist, al.title as album
+FROM media_files mf
+JOIN tracks t ON mf.track_id = t.id
+JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+JOIN artists a ON ta.artist_id = a.id
+JOIN album_variants av ON mf.album_variant_id = av.id
+JOIN albums al ON av.album_id = al.id
+WHERE a.is_vocalist = 'instrumental'
+ORDER BY mf.created_at DESC
+```
+
+Find female vocal tracks (combine gender + is_vocalist):
+```sql
+SELECT mf.id, t.title, a.name as artist, al.title as album
+FROM media_files mf
+JOIN tracks t ON mf.track_id = t.id
+JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+JOIN artists a ON ta.artist_id = a.id
+JOIN album_variants av ON mf.album_variant_id = av.id
+JOIN albums al ON av.album_id = al.id
+WHERE a.gender IN ('female', 'mixed') AND a.is_vocalist = 'vocal'
 ORDER BY mf.created_at DESC
 ```
 

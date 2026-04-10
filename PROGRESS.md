@@ -2836,3 +2836,34 @@ Multiple iterations (`9853def`, `b168065`, `096e83b`, `8951ea7`, `244ea38`, `e18
 - **Email as a convenience layer, not a trust root**: the Worker delivers signed invites and flags a verified badge, but the mutual exchange still happens P2P — the Worker cannot impersonate a user
 - **Persistent DB connections in long-lived services**: `ChatService` opening a new connection per call cost 2 seconds per message. Connection reuse is the default now
 - **Idempotent enrichment**: every enrichment task must be safe to re-run. "Skip if already done" is a correctness property, not an optimization
+
+---
+
+## Vocalist Classification + Enum Conversion — DONE (2026-04-10)
+
+### What changed
+- **`artists.is_vocalist` column** (`unknown`/`vocal`/`instrumental`) — classifies artists from Last.fm bio keywords by analogy with `gender`:
+  - **Strong keywords** (any match → `vocal`): `singer(s)`, `vocalist(s)`, `frontman`, `frontwoman`, `crooner`, `chanteuse`, `soprano`, `tenor`, `baritone`, `contralto`, `rapper`
+  - **Medium keywords** (also count toward `vocal`): `vocal(s)`, `singing`, `sings`, `sang`, `rapping`
+  - **Instrumental keywords** (only when no vocal hits → `instrumental`): `instrumental(s)`, `instrumentalist`
+  - Bios < 200 chars stay `unknown`.
+- Runtime classifier in `backend/lastfm.py::LastFmService._update_artist_is_vocalist` (called after bio storage).
+- Batch classifier in `desktop/sync_client.py::_update_artist_is_vocalist` (runs post-import when `artist_bios` are pulled from peers — mirrors the `gender` pipeline).
+- **Backfill result** on current library (1693 bios): 766 vocal, 42 instrumental, 1766 unknown. Spot-checks: Adele/Sade/Sinatra/Led Zeppelin/ABBA → `vocal`; Tangerine Dream/Jon Hopkins/Chemical Brothers/The Ventures → `instrumental`.
+
+### Enum conversion
+`artists.gender` and `artists.is_vocalist` were `VARCHAR` with CHECK constraints. Replaced with PostgreSQL `ENUM` types:
+- `CREATE TYPE artist_gender AS ENUM ('unknown', 'female', 'male', 'mixed')`
+- `CREATE TYPE artist_vocalist AS ENUM ('unknown', 'vocal', 'instrumental')`
+- Redundant `chk_gender` / `chk_is_vocalist` CHECK constraints dropped — ENUM enforces valid values natively.
+- `backend/models.py` uses `postgresql.ENUM(..., create_type=False)` — table creation stays lightweight; the SQL migration owns type creation.
+
+### Prompt + search integration
+- `backend/claude_dj_prompt.py` — schema section lists `is_vocalist`, rules cover "vocal/instrumental" queries, new SQL patterns for instrumental-only and `gender + is_vocalist` combined filters.
+- `backend/search.py::search_artists_by_bio` now returns `is_vocalist` alongside `gender`.
+- `mcp/hqplayer_server.py` artist search output shows both tags (e.g. `[female/vocal]`).
+
+### Why enum
+- Type-level enforcement — invalid values can't sneak in via raw SQL.
+- Smaller on-disk footprint than `VARCHAR(15)` (4 bytes per row vs. variable).
+- Self-documenting schema: `\d+ artists` shows the allowed values directly.

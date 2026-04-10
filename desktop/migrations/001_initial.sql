@@ -7,6 +7,18 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- ============================================================
+-- Enum types (created before referencing tables)
+-- ============================================================
+
+DO $$ BEGIN
+    CREATE TYPE artist_gender AS ENUM ('unknown', 'female', 'male', 'mixed');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE artist_vocalist AS ENUM ('unknown', 'vocal', 'instrumental');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ============================================================
 -- Embedding models (shared metadata)
 -- ============================================================
 
@@ -27,7 +39,8 @@ CREATE TABLE IF NOT EXISTS artists (
     id UUID PRIMARY KEY,
     name VARCHAR(500) NOT NULL UNIQUE,
     artist_type VARCHAR(20) DEFAULT 'unknown',
-    gender VARCHAR(10) DEFAULT 'unknown',
+    gender artist_gender DEFAULT 'unknown',
+    is_vocalist artist_vocalist DEFAULT 'unknown',
     verification_status VARCHAR(20) DEFAULT 'unverified',
     raw_name VARCHAR(500),
     lastfm_id VARCHAR(100),
@@ -35,7 +48,6 @@ CREATE TABLE IF NOT EXISTS artists (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_artist_type CHECK (artist_type IN ('unknown', 'solo', 'band', 'collaboration', 'orchestra', 'other')),
-    CONSTRAINT chk_gender CHECK (gender IN ('unknown', 'female', 'male', 'mixed')),
     CONSTRAINT chk_verification_status CHECK (verification_status IN ('unverified', 'suspicious', 'verified_band', 'verified_split', 'verified_collab'))
 );
 
@@ -479,6 +491,7 @@ CREATE INDEX IF NOT EXISTS idx_artists_name_trgm ON artists USING gin (name gin_
 CREATE INDEX IF NOT EXISTS idx_artists_verification_status ON artists(verification_status);
 CREATE INDEX IF NOT EXISTS idx_artists_artist_type ON artists(artist_type);
 CREATE INDEX IF NOT EXISTS idx_artists_gender ON artists(gender);
+CREATE INDEX IF NOT EXISTS idx_artists_is_vocalist ON artists(is_vocalist);
 
 -- Artist members indexes
 CREATE INDEX IF NOT EXISTS idx_artist_members_member ON artist_members(member_artist_id);

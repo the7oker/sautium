@@ -168,11 +168,14 @@ class SyncClient:
             )
             stats[cat_key] = imported
 
-        # Step 5: Recompute artist gender from imported bios
+        # Step 5: Recompute artist gender and vocalist status from imported bios
         if stats.get("artist_bios", 0) > 0:
             gender_updated = self._update_artist_gender(needed.get("artist_bios", []))
             if gender_updated:
                 self._progress(f"Updated gender for {gender_updated} artists.")
+            vocal_updated = self._update_artist_is_vocalist(needed.get("artist_bios", []))
+            if vocal_updated:
+                self._progress(f"Updated vocalist status for {vocal_updated} artists.")
 
         total = sum(stats.values())
         self._progress(f"Sync complete. Imported {total} items across {len(stats)} categories.")
@@ -771,4 +774,66 @@ class SyncClient:
         except Exception as e:
             conn.rollback()
             logger.error(f"Gender classification failed: {e}")
+            return 0
+
+    def _update_artist_is_vocalist(self, artist_uuids: list[str]) -> int:
+        """Classify artists as vocal/instrumental from bio keywords.
+
+        Rules mirror LastFmService._update_artist_is_vocalist:
+            - Any vocal keyword (strong or medium) → 'vocal'.
+            - Only instrumental keywords → 'instrumental'.
+            - Otherwise → 'unknown'.
+        Only updates artists whose bios were just imported.
+        """
+        if not artist_uuids:
+            return 0
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    r"""WITH vocal_analysis AS (
+                        SELECT ab.artist_id,
+                            regexp_count(LOWER(ab.content), '\ysinger\y')
+                            + regexp_count(LOWER(ab.content), '\ysingers\y')
+                            + regexp_count(LOWER(ab.content), '\yvocalist\y')
+                            + regexp_count(LOWER(ab.content), '\yvocalists\y')
+                            + regexp_count(LOWER(ab.content), '\yfrontman\y')
+                            + regexp_count(LOWER(ab.content), '\yfrontwoman\y')
+                            + regexp_count(LOWER(ab.content), '\ycrooner\y')
+                            + regexp_count(LOWER(ab.content), '\ychanteuse\y')
+                            + regexp_count(LOWER(ab.content), '\ysoprano\y')
+                            + regexp_count(LOWER(ab.content), '\ytenor\y')
+                            + regexp_count(LOWER(ab.content), '\ybaritone\y')
+                            + regexp_count(LOWER(ab.content), '\ycontralto\y')
+                            + regexp_count(LOWER(ab.content), '\yrapper\y')
+                            + regexp_count(LOWER(ab.content), '\yvocal\y')
+                            + regexp_count(LOWER(ab.content), '\yvocals\y')
+                            + regexp_count(LOWER(ab.content), '\ysinging\y')
+                            + regexp_count(LOWER(ab.content), '\ysings\y')
+                            + regexp_count(LOWER(ab.content), '\ysang\y')
+                            + regexp_count(LOWER(ab.content), '\yrapping\y') AS vocal_hits,
+                            regexp_count(LOWER(ab.content), '\yinstrumental\y')
+                            + regexp_count(LOWER(ab.content), '\yinstrumentals\y')
+                            + regexp_count(LOWER(ab.content), '\yinstrumentalist\y') AS instr_hits
+                        FROM artist_bios ab
+                        WHERE ab.artist_id = ANY(%s::uuid[])
+                          AND LENGTH(ab.content) > 200
+                    )
+                    UPDATE artists a
+                    SET is_vocalist = CASE
+                        WHEN va.vocal_hits >= 1 THEN 'vocal'
+                        WHEN va.instr_hits >= 1 THEN 'instrumental'
+                        ELSE 'unknown'
+                    END,
+                    updated_at = NOW()
+                    FROM vocal_analysis va
+                    WHERE a.id = va.artist_id""",
+                    [artist_uuids],
+                )
+                updated = cur.rowcount
+            conn.commit()
+            return updated
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Vocalist classification failed: {e}")
             return 0
