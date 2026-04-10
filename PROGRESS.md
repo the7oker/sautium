@@ -2722,3 +2722,117 @@ LAN Discovery (UDP broadcast + localhost Docker probe)
 - **No source_url**: Removing the static fallback forces the code down the proper P2P path and avoids the false sense of security that a hardcoded URL provides
 - **Random port**: Prevents collisions without user configuration; persisted so the same port is used across restarts (important for UPnP mappings and firewall rules)
 - **Watchdog**: Network events (sleep, interface change, VPN connect) crash aiohttp silently; auto-restart recovers without user action
+
+---
+
+## P2P Phase P4 Hardening & Chat Maturity — DONE (2026-03-27 → 2026-04-10)
+
+### Goal
+Stabilize the chat stack after the initial P4 landing: deliver messages in real time instead of seconds, enforce mutual invites end-to-end, add email-based onboarding, and clean up the audit backlog across backend, P2P, frontend and data pipeline layers.
+
+### Chat Delivery — Event-Driven Rewrite
+
+**Problem**: First P4 release polled for incoming chat via DB polling loops and re-ran a full history pull on every send, producing ~8 second delivery latency and a ~2 second-per-DB-call bottleneck.
+
+**Fixes** (in chronological order — each commit is a measurable latency drop):
+- Pull chat history once per session instead of per message (`04b6e01`)
+- Bypass history pull on inbound delivery, reuse TCP session (`eacf1fc`)
+- Fix unclosed aiohttp connections in `_wake_backend_sse` (`9e2c02d`)
+- Push outgoing messages before pulling history; return trigger-send immediately (`254e867`)
+- Reuse a persistent DB connection in `ChatService` (fixed 2s/call bottleneck, `9c61f17`)
+- Replace `LISTEN/NOTIFY` polling with direct HTTP calls from the chat service to the backend (`240baaa`)
+- Replace polling loop entirely with event-driven `NOTIFY + SSE` delivery to the web UI (`4f3656f`)
+- Reduce chat listener `select()`/`sleep()` timeouts so shutdown doesn't stall 10s (`f625fdc`)
+
+**Result**: Chat now delivers in well under a second on LAN/localhost, and the backend no longer sits in a busy polling loop.
+
+### Mutual Invite Exchange — Enforced
+
+**Problem**: P4 landed with an auto-accept handshake — a leaked invite code was enough to become a friend, defeating impersonation protection.
+
+**Fix** (`04848ec`): handshake now requires both sides to have added each other's invite code. A pending friend row is created on the first side, resolved via LAN/DHT on the second side, then promoted to a full friend only after mutual confirmation.
+
+- `95ac84b`: chat tasks resolve pending friends in LAN-only mode and fan out across all LAN peers
+- `86dbc82`: dedupe friend rows and suppress handshake spam when both sides retry concurrently
+- `a3020c5`: move `_has_pending_invites` off the event loop via `run_in_executor`
+
+### Email-Based Invite System
+
+**Goal**: Onboarding via email instead of copy-pasting invite codes through Telegram.
+
+**Implementation** (`552564b` and follow-ups):
+- Cloudflare Worker stores `invite_code → verified_email` in KV (verified at signup via signed Ed25519 request)
+- Sender submits recipient email + own signed payload → Worker looks up the recipient's invite code, sends a signed invite email via Resend
+- Recipient opens Sautium, which pulls pending invites by invite code and auto-adds the sender as a pending friend, completing the mutual exchange automatically
+- `0210142`: skip Worker calls entirely when no invites are pending (avoids hitting rate limit on idle clients)
+- `532a349`: live-update Friends list via SSE when auto-add fires
+- `16cc2b8` / `14685d7`: `sent_invites` cleanup — delete on reciprocation, 30-day TTL fallback
+- `816c23f`: extract `ACCEPT_TTL_SECONDS` constant in the Worker
+- `90910a6`: skip email re-verification on reinstall if the invite code hasn't changed; raise Worker rate limit to 20 emails/IP/hour
+
+### Audit Pass — Backend, P2P, Frontend, Data Pipeline
+
+Four targeted audit commits hardened the respective layers:
+
+- **Backend API audit** (`d002256`): security, performance and thread-safety fixes across FastAPI routers
+- **Security & concurrency audit in P2P layer** (`3237345`): 10 issues fixed (races in friend CRUD, missing locks, unbounded queues)
+- **Frontend audit** (`18dc1b8`): XSS sanitization, a chat send-race, memory leaks in SSE listeners, accessibility
+- **Data pipeline audit** (`a2d42b6`): memory leaks, thread leaks, rate limits, batch error handling in enrichment
+- **DB schema audit** (`b9c4953`): ORM↔SQL parity, `TIMESTAMPTZ` everywhere, removed redundant indexes
+
+### Chat Timestamps
+
+Multiple iterations (`9853def`, `b168065`, `096e83b`, `8951ea7`, `244ea38`, `e182aee`) converged on:
+- Force UTC timezone on every PostgreSQL connection
+- Return timestamps with explicit `+00:00` from backend
+- Frontend converts UTC → local; no double-suffix `Invalid Date` artifacts
+
+### Chat History Sync
+
+`b10e8e0`: when the user restores their identity on a new device (same username + password), chat history is pulled from the peer instead of starting empty. Uses the same Argon2id-derived keypair to decrypt archived messages.
+
+### Artist Normalization & Enrichment Robustness
+
+- **Gender classification** (`f1910ac`): Last.fm enrichment now classifies artist gender for downstream filtering ("female vocals")
+- **Collaboration splitting** (`bc1d4d5`, `ad16aa9`, `1ff61ab`): Pass 2 of normalization splits `A & B`, `A, B` and `A vs B` collaborations with Last.fm verification
+- **UUID cascading** (`02e2045`): when an artist name is cleaned the UUID is recalculated and cascaded via `ON UPDATE CASCADE`
+- **Similar-artist cleanup** (`18de199`): only link similar artists that actually exist in the library — dropped ~12k orphaned links
+- **Idempotent enrichment** (`318d6c2`, `143083f`): `enrich-tracks` no longer re-processes tracks that were already checked on previous runs
+- **`has_tracks` auto-detect** (`067482b`): `enrich_artist` infers this itself instead of trusting the caller
+- **URL columns → TEXT** (`e5b39bf`, `ef20ab0`): `VARCHAR(500)` was too short for some encoded Last.fm URLs
+
+### Windows Reliability
+
+- **Firewall elevation** (`8a13327`, `a08a5e7`, `a9cab23`): first landed as installer-time rules, then reverted to a one-time UAC prompt at launcher startup — more reliable when the user installed without admin rights
+- **Dead accept loop detection** (`837718d`, `8a13327`): sync server detects and recovers from Windows accept() errors that used to silently kill the server
+- **Account display in web UI** (`87350a3`): suppress Windows accept-loop noise in logs
+- **Auto-update reload** (`180afd7`): reload P2P modules after `git pull` instead of requiring a full restart
+- **Port conflict after update restart** (`0b23b66`): release the sync port cleanly before rebind
+- **Peer discovery** (`6296d30`): always prefer LAN over cached DHT address — fixes the case where an old DHT entry beat a working LAN peer
+- **DHT exclusions** (`86baf1b`): skip self, LAN peers and Docker ports when resolving DHT peers to avoid loops
+
+### Shutdown Reliability
+
+- `fd77c7a`: clean shutdown — Tcl errors on CustomTkinter widgets, backend shutdown timeout, asyncio warning suppression
+- `22fa76f`, `f625fdc`: backend wasn't stopping gracefully on macOS (10s timeout → fix chat listener timeouts)
+
+### Sync Server Health Check
+
+`01e7ad7`: drop TLS from the watchdog health probe (the self-signed cert handshake was racing shutdown), fix the socket leak when the check failed, log the actual error instead of swallowing it.
+
+### UI Polish
+
+- `6869397`: squished OK button in Update Complete dialog
+- `0ee9a82`: squished Back/Next buttons in setup wizard step 2
+- `ad69a06`: update button was staying highlighted after a successful update
+
+### Architecture Rules
+
+`9c38c86`: renamed `claude.md` → `CLAUDE.md` and added an Architecture Rules section: senior-level solutions only, event-driven (SSE/NOTIFY/WebSocket) preferred over polling. This rule directly drove the chat delivery rewrite above.
+
+### Design decisions
+- **Event-driven everywhere**: polling is banned in new code. The chat rewrite proved the latency cost of DB polling (~8s) was not acceptable, and SSE + direct HTTP is simple enough that there's no reason to fall back
+- **Mutual invites, enforced in code not docs**: the earlier "design decided, impl pending" state was a real vulnerability — a leaked invite code granted friendship. Both sides must add each other before the handshake completes
+- **Email as a convenience layer, not a trust root**: the Worker delivers signed invites and flags a verified badge, but the mutual exchange still happens P2P — the Worker cannot impersonate a user
+- **Persistent DB connections in long-lived services**: `ChatService` opening a new connection per call cost 2 seconds per message. Connection reuse is the default now
+- **Idempotent enrichment**: every enrichment task must be safe to re-run. "Skip if already done" is a correctness property, not an optimization

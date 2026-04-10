@@ -567,7 +567,11 @@ POST /api/chat/key-rotation — сповіщення про зміну паро�
 | Web UI: hamburger menu + Friends section | `backend/static/` + `routers/p2p.py` | ✅ |
 | Docker backend P2P identity | `backend/p2p_identity.py` | ✅ |
 | Wizard: account + email verification | `desktop/wizard.py` | ✅ |
-| Mutual invite exchange (anti-impersonation) | design decided | ⏳ TODO |
+| Mutual invite exchange (anti-impersonation) | `chat_service.py` + `sync_server.py` | ✅ |
+| Email-based auto-reciprocate invites | `email_verify.py` + Worker KV | ✅ |
+| Event-driven chat delivery (SSE + direct HTTP) | `routers/p2p.py` + `chat_service.py` | ✅ |
+| Live Friends list updates via SSE | `routers/p2p.py` | ✅ |
+| Chat history sync for identity restoration | `chat_service.py` | ✅ |
 
 5. **Music Recommendations** (Phase P4b)
    - "Рекомендую цей альбом" → broadcast до друзів
@@ -747,13 +751,16 @@ Launcher B шукає тих самих артистів через DHT, зна�
 20. ~~**[Phase P4]** Web UI: hamburger menu + Friends section (chat, friends)~~ ✅
 21. ~~**[Phase P4]** Docker backend P2P identity~~ ✅
 22. ~~**[Phase P4]** Wizard: account creation + email verification~~ ✅
-23. ~~**[Phase P4]** Mutual invite exchange (auto-accept → require both sides)~~ ⏳ TODO (design done, impl pending)
+23. ~~**[Phase P4]** Mutual invite exchange (auto-accept → require both sides)~~ ✅ (enforced in handshake)
 24. ~~**[Phase P3]** NAT traversal (UPnP) для роботи через інтернет~~ ✅ (`upnp_service.py`)
 25. ~~**[Phase P3]** LAN discovery (UDP broadcast + localhost probe)~~ ✅ (`lan_discovery.py`)
 26. ~~**[Phase P3]** Layered sync flow (LAN first → DHT fallback, smart seed reuse)~~ ✅
 27. ~~**[Phase P3]** DHT fixes (alert_mask, peers() compat, random port, watchdog)~~ ✅
-28. **[Phase P3b]** Cross-library search (embedding similarity між пірами)
-29. **[Phase P4]** Mutual invite exchange (implement — replace auto-accept handshake)
+28. ~~**[Phase P4]** Email-based auto-reciprocate invites (Worker KV + signed requests)~~ ✅
+29. ~~**[Phase P4]** Event-driven chat delivery (replace polling with SSE + direct HTTP push)~~ ✅
+30. ~~**[Phase P4]** Backend/P2P/Frontend/Data pipeline audits (security, concurrency, perf)~~ ✅
+31. **[Phase P3b]** Cross-library search (embedding similarity між пірами)
+32. **[Phase P4b]** Music recommendations broadcast + shared playlists
 
 ---
 
