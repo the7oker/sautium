@@ -27,9 +27,8 @@
       <span class="menu-icon">&#9654;</span> HQPlayer
       <span class="menu-soon">soon</span>
     </button>
-    <button class="menu-item disabled">
+    <button class="menu-item" data-section="settings" onclick="switchSection('settings')">
       <span class="menu-icon">&#9881;</span> Settings
-      <span class="menu-soon">soon</span>
     </button>
   </nav>
 
@@ -179,8 +178,96 @@
 
     </section>
 
+    <!-- ============================================================ -->
+    <!-- SECTION: Settings -->
+    <!-- ============================================================ -->
+    <section class="app-section" id="section-settings">
+
+      <!-- Settings tabs -->
+      <div class="tabs">
+        <button class="tab-btn active" data-stab="settings-account" onclick="switchSettingsTab('settings-account')">Account</button>
+        <button class="tab-btn" data-stab="settings-hqplayer" onclick="switchSettingsTab('settings-hqplayer')">HQPlayer</button>
+        <button class="tab-btn" data-stab="settings-lastfm" onclick="switchSettingsTab('settings-lastfm')">Last.fm</button>
+      </div>
+
+      <!-- Account Tab -->
+      <div class="stab-content active" id="stab-settings-account">
+        <div class="settings-group">
+          <div class="settings-label">Username</div>
+          <div class="settings-value" id="settingsUsername">&mdash;</div>
+        </div>
+        <div class="settings-group">
+          <div class="settings-row">
+            <span class="settings-label">Invite code</span>
+            <button class="copy-btn" onclick="copySettingsInviteCode()">Copy</button>
+          </div>
+          <div class="settings-value mono" id="settingsInviteCode">&mdash;</div>
+        </div>
+        <div class="settings-group" id="settingsEmailGroup" style="display:none">
+          <div class="settings-row">
+            <span class="settings-label">Email</span>
+            <span class="settings-badge" id="settingsEmailBadge"></span>
+          </div>
+          <div class="settings-value" id="settingsEmail">&mdash;</div>
+          <div id="emailVerifySection" style="display:none; margin-top: 8px;">
+            <button class="settings-action-btn" id="sendVerifyBtn" onclick="sendEmailVerifyCode()">Send verification code</button>
+          </div>
+          <div id="emailCodeSection" style="display:none; margin-top: 8px;">
+            <div class="settings-hint">Check your inbox and enter the code:</div>
+            <form class="add-friend-form" onsubmit="submitEmailVerifyCode(event)">
+              <input type="text" class="search-input" id="emailVerifyCodeInput"
+                     placeholder="e.g. X7K9M2" autocomplete="off" maxlength="6"
+                     style="font-family: monospace; text-transform: uppercase; letter-spacing: 2px;">
+              <button type="submit" class="submit-btn" id="verifyCodeBtn">Confirm</button>
+            </form>
+            <div id="emailVerifyStatus" style="display:none; font-size: 12px; padding: 4px 0; margin-top: 2px;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- HQPlayer Tab -->
+      <div class="stab-content" id="stab-settings-hqplayer">
+        <div class="settings-group">
+          <div class="settings-label">Status</div>
+          <div class="settings-value" id="settingsHqpStatus">&mdash;</div>
+        </div>
+        <div class="settings-group">
+          <div class="settings-label">Host</div>
+          <div class="settings-value mono" id="settingsHqpHost">&mdash;</div>
+        </div>
+        <div class="settings-group">
+          <div class="settings-label">Port</div>
+          <div class="settings-value mono" id="settingsHqpPort">&mdash;</div>
+        </div>
+      </div>
+
+      <!-- Last.fm Tab -->
+      <div class="stab-content" id="stab-settings-lastfm">
+        <div class="settings-group">
+          <div class="settings-label">Username</div>
+          <div class="settings-value" id="settingsLastfmUser">&mdash;</div>
+        </div>
+        <div class="settings-group">
+          <div class="settings-row">
+            <span class="settings-label">Authorization</span>
+            <span class="settings-badge" id="settingsLastfmBadge"></span>
+          </div>
+          <div id="lastfmAuthSection" style="margin-top: 8px;">
+            <button class="settings-action-btn" id="lastfmAuthBtn" onclick="startLastfmAuth()" style="display:none">Authorize scrobbling</button>
+            <div id="lastfmAuthUrl" style="display:none; margin-top: 6px;">
+              <div class="settings-hint">Open this URL in your browser to authorize:</div>
+              <a id="lastfmAuthLink" href="#" target="_blank" class="settings-link"></a>
+              <button class="settings-action-btn" onclick="completeLastfmAuth()" style="margin-top: 8px;">Complete authorization</button>
+            </div>
+            <div id="lastfmAuthStatus" style="display:none; font-size: 12px; padding: 4px 0; margin-top: 2px;"></div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
   </div>
 
-  <script src="/static/app.js?v=11"></script>
+  <script src="/static/app.js?v=12"></script>
 </body>
 </html>

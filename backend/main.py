@@ -315,6 +315,13 @@ async def get_config() -> Dict[str, Any]:
         "embedding_batch_size": settings.embedding_batch_size,
         "default_search_limit": settings.default_search_limit,
         "min_similarity_threshold": settings.min_similarity_threshold,
+        "hqplayer_enabled": settings.hqplayer_enabled,
+        "hqplayer_host": settings.hqplayer_host,
+        "hqplayer_port": settings.hqplayer_port,
+        "lastfm_username": settings.lastfm_username or "",
+        "lastfm_authorized": bool(settings.lastfm_session_key),
+        "postgres_port": settings.postgres_port,
+        "p2p_enabled": settings.p2p_enabled,
     }
 
 

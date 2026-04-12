@@ -1028,7 +1028,7 @@ function switchSection(name) {
   });
 
   // Update title
-  const titles = { music: "Music", friends: "Friends" };
+  const titles = { music: "Music", friends: "Friends", settings: "Settings" };
   document.getElementById("sectionTitle").textContent = titles[name] || name;
 
   // Load friends data on first visit + connect SSE for live updates
@@ -1039,6 +1039,13 @@ function switchSection(name) {
       _friendsLoaded = true;
     }
     connectChatSSE();
+  }
+
+  if (name === "settings") {
+    if (!_settingsLoaded) {
+      loadSettings();
+      _settingsLoaded = true;
+    }
   }
 
   closeMenu();
@@ -1299,6 +1306,218 @@ function timeAgo(dateStr) {
   if (hrs < 24) return hrs + "h ago";
   const days = Math.floor(hrs / 24);
   return days + "d ago";
+}
+
+// -- Settings section --------------------------------------------------------
+
+let _settingsLoaded = false;
+
+function switchSettingsTab(name) {
+  document.querySelectorAll("[data-stab]").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.stab === name);
+  });
+  document.querySelectorAll(".stab-content").forEach(div => {
+    div.classList.toggle("active", div.id === "stab-" + name);
+  });
+}
+
+async function loadSettings() {
+  // Load account info + email status + config in parallel
+  const [accountResp, emailResp, configResp] = await Promise.allSettled([
+    fetch("/api/p2p/account"),
+    fetch("/api/p2p/email/status"),
+    fetch("/config"),
+  ]);
+
+  // Account
+  if (accountResp.status === "fulfilled" && accountResp.value.ok) {
+    const acc = await accountResp.value.json();
+    document.getElementById("settingsUsername").textContent = acc.username || "—";
+    document.getElementById("settingsInviteCode").textContent = acc.invite_code || "—";
+
+    if (acc.email) {
+      document.getElementById("settingsEmailGroup").style.display = "";
+      document.getElementById("settingsEmail").textContent = acc.email;
+    }
+  }
+
+  // Email verification status
+  if (emailResp.status === "fulfilled" && emailResp.value.ok) {
+    const em = await emailResp.value.json();
+    if (em.email) {
+      document.getElementById("settingsEmailGroup").style.display = "";
+      const badge = document.getElementById("settingsEmailBadge");
+      if (em.verified) {
+        badge.textContent = "Verified";
+        badge.className = "settings-badge verified";
+        document.getElementById("emailVerifySection").style.display = "none";
+      } else {
+        badge.textContent = "Not verified";
+        badge.className = "settings-badge unverified";
+        document.getElementById("emailVerifySection").style.display = "";
+      }
+    }
+  }
+
+  // Config (HQPlayer, Last.fm)
+  if (configResp.status === "fulfilled" && configResp.value.ok) {
+    const cfg = await configResp.value.json();
+
+    // HQPlayer
+    const hqpEnabled = cfg.hqplayer_enabled;
+    document.getElementById("settingsHqpStatus").textContent = hqpEnabled ? "Enabled" : "Disabled";
+    document.getElementById("settingsHqpStatus").style.color = hqpEnabled ? "var(--accent)" : "var(--text-dim)";
+    document.getElementById("settingsHqpHost").textContent = cfg.hqplayer_host || "—";
+    document.getElementById("settingsHqpPort").textContent = cfg.hqplayer_port || "—";
+
+    // Last.fm
+    document.getElementById("settingsLastfmUser").textContent = cfg.lastfm_username || "—";
+    const lfBadge = document.getElementById("settingsLastfmBadge");
+    const lfAuthBtn = document.getElementById("lastfmAuthBtn");
+    if (cfg.lastfm_authorized) {
+      lfBadge.textContent = "Authorized";
+      lfBadge.className = "settings-badge verified";
+      lfAuthBtn.style.display = "none";
+    } else {
+      lfBadge.textContent = "Not authorized";
+      lfBadge.className = "settings-badge unverified";
+      lfAuthBtn.style.display = "";
+    }
+  }
+}
+
+function copySettingsInviteCode() {
+  const code = document.getElementById("settingsInviteCode").textContent;
+  if (!code || code === "—") return;
+
+  const btn = document.querySelector("#stab-settings-account .copy-btn");
+  navigator.clipboard.writeText(code).then(() => {
+    btn.textContent = "Copied!";
+    btn.classList.add("copied");
+    setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 2000);
+  }).catch(() => {
+    btn.textContent = "Failed";
+    setTimeout(() => { btn.textContent = "Copy"; }, 2000);
+  });
+}
+
+async function sendEmailVerifyCode() {
+  const btn = document.getElementById("sendVerifyBtn");
+  btn.disabled = true;
+  btn.textContent = "Sending...";
+
+  try {
+    const resp = await fetch("/api/p2p/email/send-code", { method: "POST" });
+    const data = await resp.json();
+
+    if (resp.ok) {
+      document.getElementById("emailVerifySection").style.display = "none";
+      document.getElementById("emailCodeSection").style.display = "";
+      document.getElementById("emailVerifyCodeInput").focus();
+    } else {
+      btn.textContent = data.detail || "Error";
+      setTimeout(() => { btn.textContent = "Send verification code"; btn.disabled = false; }, 3000);
+    }
+  } catch (err) {
+    btn.textContent = "Network error";
+    setTimeout(() => { btn.textContent = "Send verification code"; btn.disabled = false; }, 3000);
+  }
+}
+
+async function submitEmailVerifyCode(e) {
+  e.preventDefault();
+  const input = document.getElementById("emailVerifyCodeInput");
+  const btn = document.getElementById("verifyCodeBtn");
+  const status = document.getElementById("emailVerifyStatus");
+  const code = input.value.trim();
+  if (!code) return;
+
+  input.disabled = true;
+  btn.disabled = true;
+
+  try {
+    const resp = await fetch("/api/p2p/email/verify-code", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    const data = await resp.json();
+
+    if (data.verified) {
+      document.getElementById("emailCodeSection").style.display = "none";
+      const badge = document.getElementById("settingsEmailBadge");
+      badge.textContent = "Verified";
+      badge.className = "settings-badge verified";
+      status.style.display = "none";
+    } else {
+      status.style.display = "block";
+      status.style.color = "#f44336";
+      status.textContent = data.error || data.detail || "Invalid code";
+      input.disabled = false;
+      btn.disabled = false;
+      input.focus();
+      input.select();
+    }
+  } catch (err) {
+    status.style.display = "block";
+    status.style.color = "#f44336";
+    status.textContent = "Network error";
+    input.disabled = false;
+    btn.disabled = false;
+  }
+}
+
+async function startLastfmAuth() {
+  const btn = document.getElementById("lastfmAuthBtn");
+  btn.disabled = true;
+  btn.textContent = "Starting...";
+
+  try {
+    const resp = await fetch("/lastfm/auth/start", { method: "POST" });
+    const data = await resp.json();
+
+    if (data.auth_url) {
+      btn.style.display = "none";
+      const urlDiv = document.getElementById("lastfmAuthUrl");
+      const link = document.getElementById("lastfmAuthLink");
+      link.href = data.auth_url;
+      link.textContent = data.auth_url;
+      urlDiv.style.display = "";
+    } else {
+      btn.textContent = "Error — try again";
+      btn.disabled = false;
+    }
+  } catch {
+    btn.textContent = "Network error";
+    setTimeout(() => { btn.textContent = "Authorize scrobbling"; btn.disabled = false; }, 3000);
+  }
+}
+
+async function completeLastfmAuth() {
+  const status = document.getElementById("lastfmAuthStatus");
+  status.style.display = "block";
+  status.style.color = "var(--text-dim)";
+  status.textContent = "Completing...";
+
+  try {
+    const resp = await fetch("/lastfm/auth/complete", { method: "POST" });
+    const data = await resp.json();
+
+    if (data.success) {
+      status.style.color = "var(--accent)";
+      status.textContent = "Authorized successfully!";
+      document.getElementById("lastfmAuthUrl").style.display = "none";
+      const badge = document.getElementById("settingsLastfmBadge");
+      badge.textContent = "Authorized";
+      badge.className = "settings-badge verified";
+    } else {
+      status.style.color = "#f44336";
+      status.textContent = data.detail || "Authorization failed";
+    }
+  } catch {
+    status.style.color = "#f44336";
+    status.textContent = "Network error";
+  }
 }
 
 // -- Init --------------------------------------------------------------------

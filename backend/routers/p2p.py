@@ -7,8 +7,10 @@ Provides endpoints for account info, friend management, and messaging.
 import asyncio
 import json
 import logging
+import secrets
 import select
 import ssl
+import string
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -40,6 +42,10 @@ class SendMessageRequest(BaseModel):
 
 class InviteByEmailRequest(BaseModel):
     to_email: str = Field(..., min_length=5)
+
+
+class VerifyCodeRequest(BaseModel):
+    code: str = Field(..., min_length=1, max_length=10)
     message: str = Field(default="", max_length=500)
 
 
@@ -517,6 +523,105 @@ async def pending_accepts() -> Dict[str, Any]:
         pass
 
     return {"accepts": accepts, "added": added}
+
+
+# -- Email verification -------------------------------------------------------
+
+_pending_email_verify: dict = {}
+
+
+def _generate_verify_code(length: int = 6) -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+@router.get("/email/status")
+async def email_status() -> Dict[str, Any]:
+    """Check if the configured P2P email is verified on the Worker."""
+    identity = _get_identity()
+    if not identity or not identity.get("email"):
+        return {"email": "", "verified": False}
+
+    email = identity["email"]
+    invite_code = identity["invite_code"]
+    public_key_hex = identity["public_key_hex"]
+
+    message = f"check-email:{invite_code}:{email}"
+    signature = _sign_message(message)
+    if not signature:
+        return {"email": email, "verified": False}
+
+    result = await _worker_get("/check-email", {
+        "invite_code": invite_code,
+        "email": email,
+        "public_key_hex": public_key_hex,
+        "signature": signature,
+    })
+
+    verified = bool(result and result.get("verified"))
+    return {"email": email, "verified": verified}
+
+
+@router.post("/email/send-code")
+async def email_send_code() -> Dict[str, Any]:
+    """Generate and send a verification code to the configured P2P email."""
+    identity = _get_identity()
+    if not identity or not identity.get("email"):
+        raise HTTPException(400, "No email configured (set P2P_EMAIL in .env)")
+
+    email = identity["email"]
+    code = _generate_verify_code()
+
+    result = await _worker_post("/send-verification", {
+        "to": email,
+        "code": code,
+        "from_username": identity["username"],
+        "invite_code": identity["invite_code"],
+    })
+
+    if not result or result.get("status") != "sent":
+        raise HTTPException(502, "Failed to send verification email")
+
+    _pending_email_verify["code"] = code
+    _pending_email_verify["email"] = email
+
+    return {"status": "sent", "email": email}
+
+
+@router.post("/email/verify-code")
+async def email_verify_code(req: VerifyCodeRequest) -> Dict[str, Any]:
+    """Verify entered code and register the email on the Worker."""
+    if not _pending_email_verify.get("code"):
+        raise HTTPException(400, "No verification in progress — send code first")
+
+    if req.code.strip().upper() != _pending_email_verify["code"]:
+        return {"verified": False, "error": "Invalid code"}
+
+    identity = _get_identity()
+    if not identity:
+        raise HTTPException(500, "Identity not available")
+
+    email = _pending_email_verify["email"]
+    invite_code = identity["invite_code"]
+    public_key_hex = identity["public_key_hex"]
+
+    message = f"register:{invite_code}:{email}"
+    signature = _sign_message(message)
+    if not signature:
+        raise HTTPException(500, "Cannot sign request")
+
+    result = await _worker_post("/register-email", {
+        "invite_code": invite_code,
+        "email": email,
+        "public_key_hex": public_key_hex,
+        "signature": signature,
+    })
+
+    if not result or result.get("status") != "registered":
+        raise HTTPException(502, "Failed to register email on verification server")
+
+    _pending_email_verify.clear()
+    return {"verified": True, "email": email}
 
 
 @router.post("/chat/wake")
