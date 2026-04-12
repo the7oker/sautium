@@ -77,3 +77,4 @@ backend/mcp-docker.json
 
 # PyInstaller
 *.spec
+/worker/.wrangler/cache/
