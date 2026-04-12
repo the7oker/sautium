@@ -22,9 +22,9 @@ from typing import Optional, List
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, Numeric, BigInteger, Float,
     Boolean, ForeignKey, CheckConstraint, Index, ARRAY, UniqueConstraint,
-    func,
+    LargeBinary, func,
 )
-from sqlalchemy.dialects.postgresql import ENUM, JSONB, UUID
+from sqlalchemy.dialects.postgresql import BYTEA, ENUM, JSONB, UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from pgvector.sqlalchemy import Vector
@@ -336,12 +336,17 @@ class MediaFile(Base):
     # External IDs
     isrc = Column(String(20))
 
+    # Cover art (resolved by background worker)
+    cover_id = Column(UUID(as_uuid=True), ForeignKey("covers.id", ondelete="SET NULL"))
+    cover_processed_at = Column(DateTime(timezone=True))  # NULL = pending
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
     track = relationship("Track", back_populates="media_files")
     album_variant = relationship("AlbumVariant", back_populates="media_files")
+    cover = relationship("Cover")
 
     __table_args__ = (
         Index("idx_media_files_track_id", "track_id"),
@@ -349,6 +354,9 @@ class MediaFile(Base):
         Index("idx_media_files_play_count", "play_count"),
         Index("idx_media_files_analysis_source", "track_id", "is_analysis_source",
               postgresql_where="is_analysis_source = true"),
+        Index("idx_media_files_cover_id", "cover_id"),
+        Index("idx_media_files_cover_pending", "id",
+              postgresql_where="cover_processed_at IS NULL"),
         CheckConstraint("file_size_bytes IS NULL OR file_size_bytes >= 0", name="chk_mf_file_size"),
         CheckConstraint("duration_seconds IS NULL OR duration_seconds >= 0", name="chk_mf_duration"),
         CheckConstraint("play_count >= 0", name="chk_mf_play_count"),
@@ -356,6 +364,44 @@ class MediaFile(Base):
 
     def __repr__(self):
         return f"<MediaFile(id={self.id}, track_id={self.track_id})>"
+
+
+class Cover(Base):
+    """Resized + encoded album cover (WebP), dedup'd by BLAKE2b content hash."""
+    __tablename__ = "covers"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    content_hash = Column(BYTEA, nullable=False, unique=True)
+    perceptual_hash = Column(BigInteger)             # imagehash.phash, 64-bit
+
+    source_type = Column(String(16), nullable=False)  # 'external' | 'embedded'
+    source_path = Column(Text)                        # fs path or 'flac:{path}#{idx}'
+    source_mtime = Column(DateTime(timezone=True))
+
+    orig_width = Column(Integer)
+    orig_height = Column(Integer)
+    orig_format = Column(String(16))                  # 'jpeg' | 'png' | 'tiff' | ...
+    orig_bytes = Column(Integer)
+
+    width = Column(Integer, nullable=False)
+    height = Column(Integer, nullable=False)
+    data = Column(BYTEA, nullable=False)
+    bytes = Column(Integer, nullable=False)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_covers_phash", "perceptual_hash",
+              postgresql_where="perceptual_hash IS NOT NULL"),
+        CheckConstraint(
+            "source_type IN ('external', 'embedded')",
+            name="chk_covers_source_type",
+        ),
+    )
+
+    def __repr__(self):
+        return f"<Cover(id={self.id}, {self.width}x{self.height}, {self.bytes} bytes)>"
 
 
 # ───────────────────────────────────────────────────────────────────────────

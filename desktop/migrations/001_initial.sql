@@ -133,6 +133,26 @@ CREATE TABLE IF NOT EXISTS album_variants (
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS covers (
+    id UUID PRIMARY KEY,                             -- uuid5(NS, 'cover:' || hash_hex)
+    content_hash BYTEA NOT NULL UNIQUE,              -- BLAKE2b-256 of original bytes
+    perceptual_hash BIGINT,                          -- pHash (64-bit), nullable
+    source_type VARCHAR(16) NOT NULL,                -- 'external' | 'embedded'
+    source_path TEXT,                                -- fs path or 'flac:{path}#{idx}'
+    source_mtime TIMESTAMPTZ,
+    orig_width INTEGER,
+    orig_height INTEGER,
+    orig_format VARCHAR(16),                         -- 'jpeg' | 'png' | 'tiff' | 'webp' | 'bmp'
+    orig_bytes INTEGER,
+    width INTEGER NOT NULL,                          -- encoded WebP width
+    height INTEGER NOT NULL,                         -- encoded WebP height
+    data BYTEA NOT NULL,                             -- WebP q=85 bytes
+    bytes INTEGER NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_covers_source_type CHECK (source_type IN ('external', 'embedded'))
+);
+
 CREATE TABLE IF NOT EXISTS media_files (
     id SERIAL PRIMARY KEY,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -153,6 +173,8 @@ CREATE TABLE IF NOT EXISTS media_files (
     play_count INTEGER DEFAULT 0,
     last_played_at TIMESTAMPTZ,
     isrc VARCHAR(20),
+    cover_id UUID REFERENCES covers(id) ON DELETE SET NULL,
+    cover_processed_at TIMESTAMPTZ,                  -- NULL = pending cover resolution
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_mf_file_size CHECK (file_size_bytes IS NULL OR file_size_bytes >= 0),
@@ -515,6 +537,13 @@ CREATE INDEX IF NOT EXISTS idx_media_files_album_variant_id ON media_files(album
 CREATE INDEX IF NOT EXISTS idx_media_files_play_count ON media_files(play_count);
 CREATE INDEX IF NOT EXISTS idx_media_files_analysis_source ON media_files(track_id, is_analysis_source)
     WHERE is_analysis_source = true;
+CREATE INDEX IF NOT EXISTS idx_media_files_cover_id ON media_files(cover_id);
+CREATE INDEX IF NOT EXISTS idx_media_files_cover_pending ON media_files(id)
+    WHERE cover_processed_at IS NULL;
+
+-- Cover art indexes
+CREATE INDEX IF NOT EXISTS idx_covers_phash ON covers(perceptual_hash)
+    WHERE perceptual_hash IS NOT NULL;
 
 -- External metadata indexes
 CREATE INDEX IF NOT EXISTS idx_external_metadata_entity ON external_metadata(entity_type, entity_id);
@@ -602,6 +631,25 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN CREATE TRIGGER update_media_files_updated_at BEFORE UPDATE ON media_files
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN CREATE TRIGGER trg_covers_updated_at BEFORE UPDATE ON covers
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Notify background worker when a media_file needs cover resolution.
+CREATE OR REPLACE FUNCTION notify_cover_pending() RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.cover_processed_at IS NULL THEN
+        PERFORM pg_notify('cover_pending', NEW.id::text);
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$ BEGIN CREATE TRIGGER trg_cover_pending
+    AFTER INSERT OR UPDATE OF cover_processed_at ON media_files
+    FOR EACH ROW EXECUTE FUNCTION notify_cover_pending();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN CREATE TRIGGER update_embeddings_updated_at BEFORE UPDATE ON embeddings

@@ -1,0 +1,280 @@
+"""
+Cover art ingestion.
+
+Scan flow (per media_file):
+  1. embedded FLAC PICTURE type 3 (front cover) — preferred source
+  2. external file in album directory (priority: cover > folder > front > ...)
+
+Each source is hashed (BLAKE2b-256) for dedup, resized to 1024px WebP q=85 and
+stored as a blob. Perceptual hash (imagehash.phash) is computed for future
+near-duplicate detection (different encodings / re-rips of same art).
+
+Public entry points:
+  resolve_cover_for_media_file(db, media_file_id) -> Optional[UUID]
+  process_pending(db, media_file_id) -> Optional[UUID]   # + marks row processed
+"""
+
+import hashlib
+import logging
+import uuid
+from datetime import datetime, timezone
+from io import BytesIO
+from pathlib import Path
+from typing import Optional, Tuple
+
+import imagehash
+from mutagen.flac import FLAC
+from PIL import Image, UnidentifiedImageError
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from config import settings
+from uuid_utils import NAMESPACE
+
+logger = logging.getLogger(__name__)
+
+# Album booklets scanned for print can reach ~50 MP — raise default bomb guard.
+Image.MAX_IMAGE_PIXELS = 200_000_000
+
+TARGET_MAX_DIM = 1024
+WEBP_QUALITY = 85
+
+# Filename priority (higher rank = earlier in tuple).
+_NAME_PRIORITY: Tuple[str, ...] = ("cover", "folder", "front", "albumart", "album")
+
+# Extension priority — prefer lossless masters since we re-encode to WebP anyway.
+_EXT_PRIORITY = {
+    ".tiff": 5, ".tif": 5,
+    ".png": 4,
+    ".webp": 3,
+    ".jpg": 2, ".jpeg": 2,
+    ".bmp": 1,
+}
+
+
+def _cover_uuid(content_hash: bytes) -> uuid.UUID:
+    """Deterministic UUID v5 from content hash."""
+    return uuid.uuid5(NAMESPACE, f"cover:{content_hash.hex()}")
+
+
+def _phash_to_signed_int64(unsigned: int) -> int:
+    """Reinterpret an unsigned 64-bit bit pattern as signed int64 for BIGINT storage.
+
+    imagehash returns 0..2^64-1; PostgreSQL BIGINT is signed (-2^63..2^63-1).
+    Bit pattern is preserved — equality and bit-level ops (xor / popcount) still work.
+    """
+    if unsigned >= (1 << 63):
+        return unsigned - (1 << 64)
+    return unsigned
+
+
+def find_external_cover(album_dir: Path) -> Optional[Path]:
+    """Return best-ranked cover file in the directory, or None.
+
+    Name rank dominates extension rank: a `front.png` beats `cover.jpg` only if
+    `cover` is absent. TIFF/PNG beats JPEG at equal name rank.
+    """
+    best: Optional[Path] = None
+    best_score = -1
+    try:
+        entries = list(album_dir.iterdir())
+    except (PermissionError, OSError, FileNotFoundError) as e:
+        logger.debug(f"find_external_cover({album_dir}): {e}")
+        return None
+
+    for entry in entries:
+        if not entry.is_file():
+            continue
+        ext = entry.suffix.lower()
+        ext_rank = _EXT_PRIORITY.get(ext)
+        if ext_rank is None:
+            continue
+        stem = entry.stem.lower()
+        for name_idx, name in enumerate(_NAME_PRIORITY):
+            if stem == name or stem.startswith(name):
+                name_rank = len(_NAME_PRIORITY) - name_idx
+                score = name_rank * 10 + ext_rank
+                if score > best_score:
+                    best_score = score
+                    best = entry
+                break
+    return best
+
+
+def extract_embedded_cover(flac_path: Path) -> Optional[bytes]:
+    """Return raw bytes of the front-cover PICTURE (type 3), or None."""
+    try:
+        flac = FLAC(str(flac_path))
+    except Exception as e:
+        logger.debug(f"FLAC read failed {flac_path}: {e}")
+        return None
+    for pic in flac.pictures:
+        if pic.type == 3:  # 3 = Cover (front)
+            return bytes(pic.data)
+    return None
+
+
+def _encode_and_hash(data: bytes):
+    """Decode source bytes → (webp_bytes, w, h, orig_w, orig_h, orig_format, phash).
+
+    phash is computed from the original (resize-invariant anyway).
+    Returns None if PIL cannot identify the format.
+    """
+    try:
+        img = Image.open(BytesIO(data))
+        img.load()
+    except (UnidentifiedImageError, OSError) as e:
+        logger.debug(f"PIL decode failed: {e}")
+        return None
+
+    orig_w, orig_h = img.size
+    orig_format = (img.format or "").lower()
+
+    phash_int: Optional[int] = None
+    try:
+        phash_int = _phash_to_signed_int64(int(str(imagehash.phash(img)), 16))
+    except Exception as e:
+        logger.debug(f"phash failed: {e}")
+
+    if img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGB")
+
+    if max(orig_w, orig_h) > TARGET_MAX_DIM:
+        img.thumbnail((TARGET_MAX_DIM, TARGET_MAX_DIM), Image.LANCZOS)
+
+    buf = BytesIO()
+    img.save(buf, "WEBP", quality=WEBP_QUALITY, method=6)
+    webp_bytes = buf.getvalue()
+    webp_w, webp_h = img.size
+
+    return webp_bytes, webp_w, webp_h, orig_w, orig_h, orig_format, phash_int
+
+
+def ingest_cover(
+    db: Session,
+    data: bytes,
+    source_type: str,
+    source_path: str,
+    source_mtime: Optional[float] = None,
+) -> Optional[uuid.UUID]:
+    """Hash, dedup, encode + insert cover. Returns cover UUID or None on failure."""
+    content_hash = hashlib.blake2b(data, digest_size=32).digest()
+
+    existing = db.execute(
+        text("SELECT id FROM covers WHERE content_hash = :h"),
+        {"h": content_hash},
+    ).first()
+    if existing:
+        return existing[0]
+
+    encoded = _encode_and_hash(data)
+    if encoded is None:
+        return None
+    webp_bytes, w, h, orig_w, orig_h, orig_format, phash_int = encoded
+
+    cover_id = _cover_uuid(content_hash)
+    mtime_dt = (
+        datetime.fromtimestamp(source_mtime, tz=timezone.utc)
+        if source_mtime is not None
+        else None
+    )
+
+    db.execute(
+        text(
+            """
+            INSERT INTO covers (
+                id, content_hash, perceptual_hash,
+                source_type, source_path, source_mtime,
+                orig_width, orig_height, orig_format, orig_bytes,
+                width, height, data, bytes
+            ) VALUES (
+                :id, :ch, :ph,
+                :st, :sp, :smt,
+                :ow, :oh, :of, :ob,
+                :w, :h, :d, :b
+            )
+            ON CONFLICT (content_hash) DO NOTHING
+            """
+        ),
+        {
+            "id": cover_id,
+            "ch": content_hash,
+            "ph": phash_int,
+            "st": source_type,
+            "sp": source_path,
+            "smt": mtime_dt,
+            "ow": orig_w,
+            "oh": orig_h,
+            "of": orig_format or None,
+            "ob": len(data),
+            "w": w,
+            "h": h,
+            "d": webp_bytes,
+            "b": len(webp_bytes),
+        },
+    )
+    return cover_id
+
+
+def resolve_cover_for_media_file(db: Session, media_file_id: int) -> Optional[uuid.UUID]:
+    """Locate the cover for one media_file and ingest it. Returns cover_id or None."""
+    row = db.execute(
+        text("SELECT file_path FROM media_files WHERE id = :id"),
+        {"id": media_file_id},
+    ).first()
+    if not row:
+        return None
+    db_path = row[0]
+    local_path = Path(settings.translate_to_local_path(db_path))
+
+    if not local_path.exists():
+        logger.debug(f"media_file {media_file_id}: path missing {local_path}")
+        return None
+
+    # 1. Embedded front cover (FLAC only — other lossless formats can be added later)
+    if local_path.suffix.lower() == ".flac":
+        data = extract_embedded_cover(local_path)
+        if data:
+            return ingest_cover(
+                db,
+                data,
+                source_type="embedded",
+                source_path=f"flac:{db_path}#0",
+                source_mtime=local_path.stat().st_mtime,
+            )
+
+    # 2. External file in the album directory
+    ext = find_external_cover(local_path.parent)
+    if ext is None:
+        return None
+    try:
+        data = ext.read_bytes()
+    except (OSError, PermissionError) as e:
+        logger.debug(f"read external cover failed {ext}: {e}")
+        return None
+    return ingest_cover(
+        db,
+        data,
+        source_type="external",
+        source_path=settings.translate_to_host_path(str(ext)),
+        source_mtime=ext.stat().st_mtime,
+    )
+
+
+def process_pending(db: Session, media_file_id: int) -> Optional[uuid.UUID]:
+    """Resolve cover for one pending media_file and mark it processed.
+
+    Caller is responsible for the outer transaction (commit/rollback).
+    """
+    cover_id = resolve_cover_for_media_file(db, media_file_id)
+    db.execute(
+        text(
+            """
+            UPDATE media_files
+            SET cover_id = :cid, cover_processed_at = now()
+            WHERE id = :mid
+            """
+        ),
+        {"cid": cover_id, "mid": media_file_id},
+    )
+    return cover_id

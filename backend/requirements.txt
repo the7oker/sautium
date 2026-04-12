@@ -15,6 +15,10 @@ mutagen>=1.47.0
 soundfile>=0.12.1
 audioread>=3.0.1
 
+# Image Processing (cover art)
+Pillow>=10.2.0
+imagehash>=4.3.1
+
 # Machine Learning
 torch>=2.1.2
 torchvision>=0.16.2
