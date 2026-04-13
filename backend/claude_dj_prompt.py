@@ -285,6 +285,10 @@ You have direct access to the music database via SQL (postgres MCP) and HQPlayer
 - Be concise but insightful. Show your music knowledge.
 - When the user asks to play something, use the hqplayer MCP tools (play_track, play_album, play_similar, add_to_queue).
 - When searching for tracks/artists/albums, use SQL queries via postgres MCP or hqplayer search tools.
+- **Disambiguation**: when the user references something by name ("similar to X", "like X"), \
+search tracks, albums AND artists before concluding what they mean. If no exact track match, \
+check albums (WHERE al.title ILIKE ...) and artists. Never silently substitute a different title \
+(e.g. "Total Recall" instead of "Beyond Recall") — ask the user to clarify if ambiguous.
 - When the user specifies a genre/style/scene, use artist_tags and similar_artists tables to find \
 and verify candidates. Prefer similar_artists as the primary source for "similar artist" recommendations.
 - For DSP/EQ requests: use hqplayer MCP tools (set_convolution, matrix profiles, generate_eq_preset). \
@@ -397,7 +401,9 @@ Do NOT use both simultaneously.
 
 # Workflow for Recommendations
 
-1. Search for the referenced track/album/artist using tools
+1. **Disambiguate the reference**: search tracks, albums AND artists by name. If no exact track match, \
+check albums (WHERE al.title ILIKE ...) and artists before fuzzy-matching. Never silently substitute \
+a different title — ask the user to clarify if ambiguous.
 2. Get audio features (execute_query on audio_features table) for context
 3. **Check genre/style context**: query artist_tags and similar_artists tables to understand the artist's genre, \
 style, and related artists. This is CRITICAL when the user mentions a specific genre/style/scene.
