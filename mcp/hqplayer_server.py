@@ -417,37 +417,38 @@ def search_similar(track_id: int, limit: int = 15) -> str:
         sql = """
             WITH target AS (
                 SELECT e.vector FROM embeddings e WHERE e.track_id = %(db_track_id)s LIMIT 1
+            ),
+            nn AS (
+                SELECT e2.track_id,
+                       1 - (e2.vector <=> (SELECT vector FROM target)) as similarity
+                FROM embeddings e2
+                WHERE e2.track_id != %(db_track_id)s
+                ORDER BY e2.vector <=> (SELECT vector FROM target)
+                LIMIT %(nn_limit)s
             )
             SELECT sub.id, sub.title, sub.artist, sub.album,
                    sub.genre, sub.is_lossless, sub.duration_seconds,
-                   track_matches.similarity
-            FROM (
-                SELECT DISTINCT ON (t2.id) t2.id as track_id, t2.title,
-                       1 - (e2.vector <=> (SELECT vector FROM target)) as similarity
-                FROM tracks t2
-                JOIN embeddings e2 ON e2.track_id = t2.id
-                WHERE t2.id != %(db_track_id)s
-                ORDER BY t2.id, e2.vector <=> (SELECT vector FROM target)
-            ) track_matches
+                   nn.similarity
+            FROM nn
             JOIN LATERAL (
                 SELECT mf.id, mf.duration_seconds, mf.is_lossless,
                        a.name as artist, al.title as album, g.name as genre,
                        t.title
                 FROM media_files mf
-                JOIN tracks t ON mf.track_id = track_matches.track_id
-                JOIN track_artists ta ON track_matches.track_id = ta.track_id AND ta.role = 'primary'
+                JOIN tracks t ON mf.track_id = nn.track_id
+                JOIN track_artists ta ON nn.track_id = ta.track_id AND ta.role = 'primary'
                 JOIN artists a ON ta.artist_id = a.id
                 JOIN album_variants av ON mf.album_variant_id = av.id
                 JOIN albums al ON av.album_id = al.id
-                LEFT JOIN track_genres tg ON track_matches.track_id = tg.track_id
+                LEFT JOIN track_genres tg ON nn.track_id = tg.track_id
                 LEFT JOIN genres g ON tg.genre_id = g.id
-                WHERE mf.track_id = track_matches.track_id
+                WHERE mf.track_id = nn.track_id
                 ORDER BY mf.id LIMIT 1
             ) sub ON true
-            ORDER BY track_matches.similarity DESC
+            ORDER BY nn.similarity DESC
             LIMIT %(limit)s
         """
-        rows = _db_query(sql, {"db_track_id": db_track_id, "limit": limit})
+        rows = _db_query(sql, {"db_track_id": db_track_id, "limit": limit, "nn_limit": limit * 2})
 
         # Get source track info
         source = _db_query_one("""
@@ -894,36 +895,37 @@ def play_similar(track_id: int, limit: int = 10) -> str:
         sql = """
             WITH target AS (
                 SELECT e.vector FROM embeddings e WHERE e.track_id = %(db_track_id)s LIMIT 1
+            ),
+            nn AS (
+                SELECT e2.track_id,
+                       1 - (e2.vector <=> (SELECT vector FROM target)) as similarity
+                FROM embeddings e2
+                WHERE e2.track_id != %(db_track_id)s
+                ORDER BY e2.vector <=> (SELECT vector FROM target)
+                LIMIT %(nn_limit)s
             )
             SELECT sub.id, sub.file_path, sub.title, sub.artist, sub.album,
-                   track_matches.similarity
-            FROM (
-                SELECT DISTINCT ON (t2.id) t2.id as track_id, t2.title,
-                       1 - (e2.vector <=> (SELECT vector FROM target)) as similarity
-                FROM tracks t2
-                JOIN embeddings e2 ON e2.track_id = t2.id
-                WHERE t2.id != %(db_track_id)s
-                ORDER BY t2.id, e2.vector <=> (SELECT vector FROM target)
-            ) track_matches
+                   nn.similarity
+            FROM nn
             JOIN LATERAL (
                 SELECT mf.id, mf.file_path, mf.duration_seconds,
                        a.name as artist, al.title as album, g.name as genre,
                        t.title
                 FROM media_files mf
-                JOIN tracks t ON mf.track_id = track_matches.track_id
-                JOIN track_artists ta ON track_matches.track_id = ta.track_id AND ta.role = 'primary'
+                JOIN tracks t ON mf.track_id = nn.track_id
+                JOIN track_artists ta ON nn.track_id = ta.track_id AND ta.role = 'primary'
                 JOIN artists a ON ta.artist_id = a.id
                 JOIN album_variants av ON mf.album_variant_id = av.id
                 JOIN albums al ON av.album_id = al.id
-                LEFT JOIN track_genres tg ON track_matches.track_id = tg.track_id
+                LEFT JOIN track_genres tg ON nn.track_id = tg.track_id
                 LEFT JOIN genres g ON tg.genre_id = g.id
-                WHERE mf.track_id = track_matches.track_id
+                WHERE mf.track_id = nn.track_id
                 ORDER BY mf.id LIMIT 1
             ) sub ON true
-            ORDER BY track_matches.similarity DESC
+            ORDER BY nn.similarity DESC
             LIMIT %(limit)s
         """
-        rows = _db_query(sql, {"db_track_id": db_track_id, "limit": limit})
+        rows = _db_query(sql, {"db_track_id": db_track_id, "limit": limit, "nn_limit": limit * 2})
 
         if not rows:
             return "No similar tracks found."

@@ -26,7 +26,7 @@ else:
     MCP_CONFIG_PATH = "/app/mcp-docker.json"
 DEFAULT_MODEL = "sonnet"
 ALLOWED_MODELS = {"sonnet", "haiku"}
-TIMEOUT_SECONDS = 120
+TIMEOUT_SECONDS = 180
 CLAUDE_USER = "claudeuser"  # non-root user (--dangerously-skip-permissions requires non-root)
 
 
