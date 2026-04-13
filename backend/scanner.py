@@ -716,3 +716,95 @@ def scan_library(limit: Optional[int] = None, skip_existing: bool = True, subpat
     """
     scanner = LibraryScanner()
     return scanner.scan_and_import(limit=limit, skip_existing=skip_existing, subpath=subpath)
+
+
+def prune_missing_files(progress_cb: Optional[callable] = None, subpath: Optional[str] = None) -> Dict[str, int]:
+    """Remove DB records for files that no longer exist on disk.
+
+    Uses a single directory scan + set difference instead of per-file exists()
+    calls, which is orders of magnitude faster on WSL2/network mounts.
+
+    Deletion order: MediaFile → Track → AlbumVariant → Album → Artist.
+    DB-level ON DELETE CASCADE handles child tables (embeddings, stats, etc).
+    """
+    from sqlalchemy import text
+
+    stats = {"checked": 0, "pruned": 0, "orphan_tracks": 0,
+             "orphan_variants": 0, "orphan_albums": 0, "orphan_artists": 0}
+
+    if progress_cb:
+        progress_cb("Discovering files on disk...")
+
+    scanner = LibraryScanner()
+    disk_files = scanner.find_audio_files(subpath=subpath)
+    disk_paths = {settings.translate_to_host_path(str(fp.absolute())) for fp in disk_files}
+
+    with get_db_context() as db:
+        query = db.query(MediaFile.id, MediaFile.file_path)
+        if subpath:
+            query = query.filter(MediaFile.file_path.like(f"%{subpath}%"))
+        all_files = query.all()
+        stats["checked"] = len(all_files)
+
+        if progress_cb:
+            progress_cb(f"Comparing {len(all_files)} DB records against {len(disk_paths)} files on disk...")
+
+        missing_ids = []
+        for mf_id, file_path in all_files:
+            if file_path not in disk_paths:
+                missing_ids.append(mf_id)
+                logger.info(f"Missing: {file_path}")
+
+        if not missing_ids:
+            logger.info("Prune: no missing files found")
+            return stats
+
+        stats["pruned"] = len(missing_ids)
+        logger.info(f"Pruning {len(missing_ids)} missing media files")
+
+        if progress_cb:
+            progress_cb(f"Removing {len(missing_ids)} missing files...")
+
+        db.query(MediaFile).filter(MediaFile.id.in_(missing_ids)).delete(synchronize_session=False)
+
+        r = db.execute(text("""
+            DELETE FROM tracks WHERE id IN (
+                SELECT t.id FROM tracks t
+                LEFT JOIN media_files mf ON mf.track_id = t.id
+                WHERE mf.id IS NULL
+            )
+        """))
+        stats["orphan_tracks"] = r.rowcount
+
+        r = db.execute(text("""
+            DELETE FROM album_variants WHERE id IN (
+                SELECT av.id FROM album_variants av
+                LEFT JOIN media_files mf ON mf.album_variant_id = av.id
+                WHERE mf.id IS NULL
+            )
+        """))
+        stats["orphan_variants"] = r.rowcount
+
+        r = db.execute(text("""
+            DELETE FROM albums WHERE id IN (
+                SELECT a.id FROM albums a
+                LEFT JOIN album_variants av ON av.album_id = a.id
+                WHERE av.id IS NULL
+            )
+        """))
+        stats["orphan_albums"] = r.rowcount
+
+        r = db.execute(text("""
+            DELETE FROM artists WHERE id IN (
+                SELECT ar.id FROM artists ar
+                LEFT JOIN track_artists ta ON ta.artist_id = ar.id
+                LEFT JOIN album_artists aa ON aa.artist_id = ar.id
+                WHERE ta.track_id IS NULL AND aa.album_id IS NULL
+            )
+        """))
+        stats["orphan_artists"] = r.rowcount
+
+        db.commit()
+
+    logger.info(f"Prune complete: {stats}")
+    return stats

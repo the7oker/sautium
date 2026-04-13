@@ -542,7 +542,7 @@ _scan_state: Dict[str, Any] = {
 _scan_lock = threading.Lock()
 
 
-def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[str]):
+def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[str], prune: bool = False):
     """Background worker for library scanning."""
     state = _scan_state
     try:
@@ -575,6 +575,18 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                         logger.info(f"Post-scan normalization: {norm_stats}")
             except Exception as e:
                 logger.error(f"Post-scan normalization failed: {e}")
+
+            if prune:
+                state["progress"] = "Pruning missing files..."
+                try:
+                    from scanner import prune_missing_files
+                    prune_stats = prune_missing_files(progress_cb=lambda msg: state.update(progress=msg), subpath=subpath)
+                    result["prune"] = prune_stats
+                    logger.info(f"Prune results: {prune_stats}")
+                except Exception as e:
+                    logger.error(f"Prune failed: {e}")
+                    result["prune_error"] = str(e)
+
             state["progress"] = "Scan complete"
         state["result"] = result
 
@@ -591,6 +603,7 @@ async def scan_start(
     limit: Optional[int] = None,
     skip_existing: bool = True,
     subpath: Optional[str] = None,
+    prune: bool = False,
 ) -> Dict[str, Any]:
     """Start library scan as a background task. Poll /scan/status for progress."""
     with _scan_lock:
@@ -603,7 +616,7 @@ async def scan_start(
 
     t = threading.Thread(
         target=_scan_worker,
-        args=(limit, skip_existing, subpath),
+        args=(limit, skip_existing, subpath, prune),
         daemon=True,
     )
     t.start()

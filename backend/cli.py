@@ -59,7 +59,8 @@ def _resolve_filters(filter_artist, filter_album, filter_genre, filter_path,
 @click.option("--limit", "-l", type=int, default=None, help="Limit number of files to scan (for testing)")
 @click.option("--no-skip", is_flag=True, help="Don't skip existing files (re-scan all)")
 @click.option("--path", "-p", type=str, default=None, help="Scan specific subdirectory (e.g., 'Electronic/Berlin School/Klaus Schulze')")
-def scan(limit, no_skip, path):
+@click.option("--prune", is_flag=True, help="Remove DB records for files that no longer exist on disk")
+def scan(limit, no_skip, path, prune):
     """Scan music library and import metadata to database."""
     click.echo(f"🎵 Starting library scan...")
     click.echo(f"📁 Library path: {settings.music_library_path}")
@@ -90,6 +91,25 @@ def scan(limit, no_skip, path):
         click.echo(f"\n❌ Error: {e}", err=True)
         logger.exception("Scan failed")
         sys.exit(1)
+
+    if prune:
+        click.echo(f"\n🧹 Pruning missing files...")
+        try:
+            from scanner import prune_missing_files
+            prune_stats = prune_missing_files(subpath=path)
+
+            click.echo(f"   • Checked: {prune_stats['checked']} files")
+            click.echo(f"   • Pruned: {prune_stats['pruned']} missing files")
+            if prune_stats['pruned'] > 0:
+                click.echo(f"   • Orphan tracks removed: {prune_stats['orphan_tracks']}")
+                click.echo(f"   • Orphan album variants removed: {prune_stats['orphan_variants']}")
+                click.echo(f"   • Orphan albums removed: {prune_stats['orphan_albums']}")
+                click.echo(f"   • Orphan artists removed: {prune_stats['orphan_artists']}")
+            else:
+                click.echo(f"   ✅ All files present on disk")
+        except Exception as e:
+            click.echo(f"\n❌ Prune error: {e}", err=True)
+            logger.exception("Prune failed")
 
 
 @cli.command("generate-embeddings")
