@@ -28,12 +28,16 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 (for Claude Code CLI)
+# Node.js 22 (for Claude Code CLI + MCP servers)
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && npm install -g @anthropic-ai/claude-code \
-    && npm install -g postgres-mcp-server \
+    && npm install -g @modelcontextprotocol/server-postgres \
     && npm cache clean --force
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
 
 # Non-root user for Claude Code (--dangerously-skip-permissions requires non-root)
 RUN useradd -m -s /bin/bash claudeuser \
