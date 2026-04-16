@@ -158,6 +158,10 @@ function updateNowPlaying(data) {
     updateLyricsHighlight(data.position);
   }
 
+  // Update discover "similar to now playing" + radio mode
+  updateDiscoverSimilar(data);
+  _radioCheck();
+
   // Update queue highlighting
   if (currentPlaylist.length > 0 && data.track_index !== undefined) {
     const queueItems = document.querySelectorAll(".queue-item");
@@ -1518,6 +1522,425 @@ async function completeLastfmAuth() {
     status.style.color = "#f44336";
     status.textContent = "Network error";
   }
+}
+
+// -- Discover ----------------------------------------------------------------
+
+let discoverMode = "sound";
+let radioMode = false;
+let _radioQueuing = false; // prevent concurrent queue-next calls
+
+const discoverPlaceholders = {
+  sound: "energetic rock with heavy drums",
+  lyrics: "songs about loneliness and rain",
+  artists: "British progressive rock band from 70s",
+  albums: "live recording, jazz concert",
+  genres: "electronic music with African rhythms",
+};
+
+function setDiscoverMode(mode) {
+  discoverMode = mode;
+  document.querySelectorAll(".discover-mode").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.mode === mode);
+  });
+  const input = document.getElementById("discoverInput");
+  input.placeholder = discoverPlaceholders[mode] || "";
+  input.focus();
+}
+
+function updateDiscoverSimilar(data) {
+  const section = document.getElementById("discoverSimilar");
+  if (!section) return;
+
+  const hasTrack = data.state !== "disconnected" && data.state !== "stopped" && data.song;
+  section.style.display = hasTrack ? "" : "none";
+
+  if (hasTrack) {
+    const info = document.getElementById("discoverNowPlaying");
+    info.innerHTML =
+      '<div class="discover-similar-song">' + esc(data.song) + '</div>' +
+      '<div class="discover-similar-artist">' + esc(data.artist || "") +
+      (data.album ? " \u2014 " + esc(data.album) : "") + '</div>';
+  }
+}
+
+function _getCurrentMediaFileId() {
+  const status = _latest_status_cache;
+  if (!status || !status.song) return null;
+  const idx = status.track_index;
+  if (currentPlaylist.length > 0 && idx !== undefined && idx >= 1) {
+    const track = currentPlaylist[idx - 1];
+    if (track && track.id) return track.id;
+  }
+  return null;
+}
+
+async function findSimilar() {
+  const trackId = _getCurrentMediaFileId();
+  if (!trackId) return;
+
+  const resultsDiv = document.getElementById("discoverResults");
+  resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span>Searching...</div>';
+
+  try {
+    const params = new URLSearchParams({ track_id: trackId, limit: "20" });
+    const resp = await fetch("/search/similar?" + params, { method: "POST" });
+    const data = await resp.json();
+
+    if (data.error) {
+      resultsDiv.innerHTML = '<div class="empty-state">' + esc(data.error) + '</div>';
+      return;
+    }
+
+    renderDiscoverTracks(resultsDiv, data.results);
+  } catch (err) {
+    resultsDiv.innerHTML = '<div class="empty-state">Error: ' + esc(err.message) + '</div>';
+  }
+}
+
+async function discoverSearch(e) {
+  e.preventDefault();
+  const query = document.getElementById("discoverInput").value.trim();
+  if (!query) return;
+
+  const resultsDiv = document.getElementById("discoverResults");
+  const btn = document.getElementById("discoverSearchBtn");
+  resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span>Searching...</div>';
+  btn.disabled = true;
+
+  try {
+    let resp;
+    const params = new URLSearchParams({ query: query, limit: "20" });
+
+    switch (discoverMode) {
+      case "sound":
+        resp = await fetch("/search/text?" + params, { method: "POST" });
+        break;
+      case "lyrics":
+        resp = await fetch("/search/lyrics?" + params);
+        break;
+      case "artists":
+        resp = await fetch("/search/artists?" + params);
+        break;
+      case "albums":
+        resp = await fetch("/search/albums?" + params);
+        break;
+      case "genres":
+        resp = await fetch("/search/genres?" + params);
+        break;
+    }
+
+    const data = await resp.json();
+
+    if (data.error) {
+      resultsDiv.innerHTML = '<div class="empty-state">' + esc(data.error) + '</div>';
+    } else if (!data.results || data.results.length === 0) {
+      resultsDiv.innerHTML = '<div class="empty-state">No results found</div>';
+    } else if (discoverMode === "artists") {
+      renderDiscoverArtists(resultsDiv, data.results);
+    } else if (discoverMode === "albums") {
+      renderDiscoverAlbums(resultsDiv, data.results);
+    } else if (discoverMode === "genres") {
+      renderDiscoverGenres(resultsDiv, data.results);
+    } else {
+      renderDiscoverTracks(resultsDiv, data.results);
+    }
+  } catch (err) {
+    resultsDiv.innerHTML = '<div class="empty-state">Error: ' + esc(err.message) + '</div>';
+  }
+
+  btn.disabled = false;
+}
+
+// Feature chip toggle (radio within group)
+document.addEventListener("click", (e) => {
+  const chip = e.target.closest(".feature-chip");
+  if (!chip) return;
+  const group = chip.dataset.group;
+  chip.closest(".feature-chips").querySelectorAll(".feature-chip").forEach(c => {
+    c.classList.toggle("active", c === chip);
+  });
+});
+
+function _getFeatureChipValue(group) {
+  const active = document.querySelector('.feature-chip.active[data-group="' + group + '"]');
+  return active ? active.dataset.val : "";
+}
+
+async function searchByFeatures() {
+  const params = new URLSearchParams();
+
+  const bpmMin = document.getElementById("bpmMin").value;
+  const bpmMax = document.getElementById("bpmMax").value;
+  if (bpmMin) params.set("bpm_min", bpmMin);
+  if (bpmMax) params.set("bpm_max", bpmMax);
+
+  const key = document.getElementById("featureKey").value;
+  if (key) params.set("key", key);
+
+  const mode = _getFeatureChipValue("mode");
+  if (mode) params.set("mode", mode);
+
+  const vocalist = _getFeatureChipValue("vocalist");
+  if (vocalist) params.set("vocalist", vocalist);
+
+  const gender = _getFeatureChipValue("gender");
+  if (gender) params.set("gender", gender);
+
+  const danceable = _getFeatureChipValue("danceable");
+  if (danceable) params.set("danceable", danceable);
+
+  const energy = _getFeatureChipValue("energy");
+  if (energy === "low") { params.set("energy_max", "-22"); }
+  else if (energy === "mid") { params.set("energy_min", "-22"); params.set("energy_max", "-12"); }
+  else if (energy === "high") { params.set("energy_min", "-12"); }
+
+  params.set("limit", "30");
+
+  // At least one filter required
+  if (params.toString() === "limit=30") {
+    return;
+  }
+
+  const resultsDiv = document.getElementById("discoverResults");
+  resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span>Searching...</div>';
+
+  try {
+    const resp = await fetch("/search/features?" + params);
+    const data = await resp.json();
+
+    if (!data.results || data.results.length === 0) {
+      resultsDiv.innerHTML = '<div class="empty-state">No results found</div>';
+    } else {
+      renderDiscoverTracks(resultsDiv, data.results);
+    }
+  } catch (err) {
+    resultsDiv.innerHTML = '<div class="empty-state">Error: ' + esc(err.message) + '</div>';
+  }
+}
+
+// -- Radio Mode ---------------------------------------------------------------
+
+function toggleRadio() {
+  radioMode = !radioMode;
+  const btn = document.getElementById("radioBtn");
+  if (btn) btn.classList.toggle("active", radioMode);
+
+  if (radioMode) {
+    // If something is playing, start radio immediately
+    const trackId = _getCurrentMediaFileId();
+    if (trackId) _radioCheck();
+  }
+}
+
+function _radioCheck() {
+  if (!radioMode || _radioQueuing) return;
+
+  const status = _latest_status_cache;
+  if (!status || status.state === "disconnected" || status.state === "stopped") return;
+
+  const idx = status.track_index; // 1-based
+  if (!idx || currentPlaylist.length === 0) return;
+
+  // Queue more when playing the last or second-to-last track
+  if (idx < currentPlaylist.length - 1) return;
+
+  const currentTrack = currentPlaylist[idx - 1];
+  if (!currentTrack || !currentTrack.id) return;
+
+  _radioQueuing = true;
+
+  // Exclude all tracks already in the playlist
+  const excludeIds = currentPlaylist.map(t => t.id);
+
+  fetch("/api/player/queue-next", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ track_id: currentTrack.id, limit: 5, exclude_ids: excludeIds }),
+  })
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok && data.count > 0) {
+        setTimeout(fetchPlaylist, 500);
+      }
+    })
+    .catch(e => console.error("Radio queue-next failed:", e))
+    .finally(() => { _radioQueuing = false; });
+}
+
+// -- Mood presets -------------------------------------------------------------
+
+const MOOD_PRESETS = {
+  chill: { bpm_max: 100, energy: "low", vocalist: "instrumental", label: "Chill Evening" },
+  workout: { bpm_min: 135, energy: "high", danceable: "yes", label: "Workout" },
+  focus: { energy: "mid", vocalist: "instrumental", label: "Focus" },
+  party: { bpm_min: 115, energy: "high", danceable: "yes", vocalist: "vocal", label: "Party" },
+  melancholy: { bpm_max: 100, mode: "minor", vocalist: "vocal", energy: "low", label: "Melancholy" },
+};
+
+function applyPreset(name) {
+  const preset = MOOD_PRESETS[name];
+  if (!preset) return;
+
+  // Build params directly from preset
+  const params = new URLSearchParams();
+  if (preset.bpm_min) params.set("bpm_min", preset.bpm_min);
+  if (preset.bpm_max) params.set("bpm_max", preset.bpm_max);
+  if (preset.mode) params.set("mode", preset.mode);
+  if (preset.vocalist) params.set("vocalist", preset.vocalist);
+  if (preset.danceable) params.set("danceable", preset.danceable);
+  if (preset.energy === "low") { params.set("energy_max", "-22"); }
+  else if (preset.energy === "mid") { params.set("energy_min", "-22"); params.set("energy_max", "-12"); }
+  else if (preset.energy === "high") { params.set("energy_min", "-12"); }
+  params.set("limit", "30");
+
+  const resultsDiv = document.getElementById("discoverResults");
+  resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span>Searching ' + esc(preset.label) + '...</div>';
+
+  fetch("/search/features?" + params)
+    .then(r => r.json())
+    .then(data => {
+      if (!data.results || data.results.length === 0) {
+        resultsDiv.innerHTML = '<div class="empty-state">No results for ' + esc(preset.label) + '</div>';
+      } else {
+        renderDiscoverTracks(resultsDiv, data.results);
+      }
+    })
+    .catch(err => {
+      resultsDiv.innerHTML = '<div class="empty-state">Error: ' + esc(err.message) + '</div>';
+    });
+}
+
+// -- Discover results rendering -----------------------------------------------
+
+function renderDiscoverTracks(container, tracks) {
+  if (tracks.length === 0) {
+    container.innerHTML = '<div class="empty-state">No results found</div>';
+    return;
+  }
+
+  // Play All button
+  let html = '<button class="discover-play-all" id="discoverPlayAll">' +
+    '\u25b6 Play All (' + tracks.length + ' tracks)</button>';
+
+  // Group by album and reuse existing renderer
+  const albums = groupTracksByAlbum(tracks);
+  const tmpDiv = document.createElement("div");
+  renderAlbumList(tmpDiv, albums);
+
+  container.innerHTML = html;
+  container.appendChild(tmpDiv.firstChild); // results-count
+  container.appendChild(tmpDiv.lastChild);  // album-list
+
+  document.getElementById("discoverPlayAll").onclick = () => playRecommendations(tracks);
+}
+
+function renderDiscoverArtists(container, results) {
+  let html = '<div class="results-count">' + results.length + ' artists</div>';
+
+  for (const r of results) {
+    const meta = [
+      r.track_count + " tracks",
+      r.gender,
+      r.is_vocalist === true ? "vocal" : r.is_vocalist === false ? "instrumental" : null,
+    ].filter(Boolean).join(" \u00B7 ");
+
+    html +=
+      '<div class="discover-card" data-artist="' + escAttr(r.artist) + '">' +
+        '<div class="discover-card-body">' +
+          '<div class="discover-card-title">' + esc(r.artist) + '</div>' +
+          '<div class="discover-card-meta">' + esc(meta) + '</div>' +
+          (r.sample_tracks ? '<div class="discover-card-meta">' + esc(r.sample_tracks) + '</div>' : '') +
+        '</div>' +
+        '<div class="discover-card-similarity">' + Math.round(r.similarity * 100) + '%</div>' +
+      '</div>';
+  }
+
+  container.innerHTML = html;
+
+  // Click artist card → search for their tracks in Search tab
+  container.querySelectorAll(".discover-card[data-artist]").forEach(card => {
+    card.addEventListener("click", () => {
+      const artist = card.dataset.artist;
+      searchInput.value = artist;
+      switchTab("search");
+      doSearch(new Event("submit"));
+    });
+  });
+}
+
+function renderDiscoverAlbums(container, results) {
+  let html = '<div class="results-count">' + results.length + ' albums</div>';
+
+  for (const r of results) {
+    const meta = [
+      r.year,
+      r.track_count + " tracks",
+    ].filter(Boolean).join(" \u00B7 ");
+
+    html +=
+      '<div class="discover-card" data-album="' + escAttr(r.album) + '" data-artist="' + escAttr(r.artist) + '">' +
+        '<div class="discover-card-body">' +
+          '<div class="discover-card-title">' + esc(r.artist) + ' \u2014 ' + esc(r.album) + '</div>' +
+          '<div class="discover-card-meta">' + esc(meta) + '</div>' +
+        '</div>' +
+        '<div class="discover-card-similarity">' + Math.round(r.similarity * 100) + '%</div>' +
+        '<button class="album-play-btn discover-album-play" title="Play album">&#9654;</button>' +
+      '</div>';
+  }
+
+  container.innerHTML = html;
+
+  // Click play button → play album
+  container.querySelectorAll(".discover-album-play").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const card = btn.closest(".discover-card");
+      playAlbum(card.dataset.album, card.dataset.artist);
+    });
+  });
+
+  // Click card body → search in Search tab
+  container.querySelectorAll(".discover-card[data-album]").forEach(card => {
+    card.addEventListener("click", (e) => {
+      if (e.target.closest(".discover-album-play")) return;
+      searchInput.value = card.dataset.artist + " " + card.dataset.album;
+      switchTab("search");
+      doSearch(new Event("submit"));
+    });
+  });
+}
+
+function renderDiscoverGenres(container, results) {
+  let html = '<div class="results-count">' + results.length + ' genres</div>';
+
+  for (const r of results) {
+    const meta = [
+      r.track_count + " tracks",
+      r.sample_artists,
+    ].filter(Boolean).join(" \u00B7 ");
+
+    html +=
+      '<div class="discover-card" data-genre="' + escAttr(r.genre) + '">' +
+        '<div class="discover-card-body">' +
+          '<div class="discover-card-title">' + esc(r.genre) + '</div>' +
+          '<div class="discover-card-meta">' + esc(meta) + '</div>' +
+        '</div>' +
+        '<div class="discover-card-similarity">' + Math.round(r.similarity * 100) + '%</div>' +
+      '</div>';
+  }
+
+  container.innerHTML = html;
+
+  // Click genre card → search for tracks in that genre
+  container.querySelectorAll(".discover-card[data-genre]").forEach(card => {
+    card.addEventListener("click", () => {
+      const genre = card.dataset.genre;
+      searchInput.value = genre;
+      switchTab("search");
+      doSearch(new Event("submit"));
+    });
+  });
 }
 
 // -- Init --------------------------------------------------------------------

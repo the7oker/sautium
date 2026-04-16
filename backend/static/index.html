@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#0f0f23">
   <title>Sautium</title>
-  <link rel="stylesheet" href="/static/style.css?v=8">
+  <link rel="stylesheet" href="/static/style.css?v=9">
 </head>
 <body>
   <!-- Slide-out menu overlay -->
@@ -80,6 +80,7 @@
       <!-- Tabs -->
       <div class="tabs">
         <button class="tab-btn active" data-tab="search" onclick="switchTab('search')">Search</button>
+        <button class="tab-btn" data-tab="discover" onclick="switchTab('discover')">Discover</button>
         <button class="tab-btn" data-tab="chat" onclick="switchTab('chat')">AI DJ</button>
         <button class="tab-btn" data-tab="queue" onclick="switchTab('queue')">Queue</button>
       </div>
@@ -92,6 +93,121 @@
         </form>
         <div id="searchResults">
           <div class="empty-state">Search your music library</div>
+        </div>
+      </div>
+
+      <!-- Discover Tab -->
+      <div class="tab-content" id="tab-discover">
+
+        <!-- Zone 1: Similar to now playing + Radio Mode -->
+        <div class="discover-similar" id="discoverSimilar" style="display:none">
+          <div class="discover-section-label">Similar to now playing</div>
+          <div class="discover-similar-row">
+            <div class="discover-similar-info" id="discoverNowPlaying"></div>
+            <button class="discover-similar-btn" onclick="findSimilar()">Find similar</button>
+            <button class="discover-radio-btn" id="radioBtn" onclick="toggleRadio()">Radio</button>
+          </div>
+        </div>
+
+        <!-- Zone 2: Search by description -->
+        <div class="discover-search">
+          <div class="discover-section-label">Search by description</div>
+          <div class="discover-modes">
+            <button class="discover-mode active" data-mode="sound" onclick="setDiscoverMode('sound')">Sound</button>
+            <button class="discover-mode" data-mode="lyrics" onclick="setDiscoverMode('lyrics')">Lyrics</button>
+            <button class="discover-mode" data-mode="artists" onclick="setDiscoverMode('artists')">Artists</button>
+            <button class="discover-mode" data-mode="albums" onclick="setDiscoverMode('albums')">Albums</button>
+            <button class="discover-mode" data-mode="genres" onclick="setDiscoverMode('genres')">Genres</button>
+          </div>
+          <form class="search-form" onsubmit="discoverSearch(event)">
+            <input type="text" class="search-input" id="discoverInput"
+                   placeholder="energetic rock with heavy drums" autocomplete="off">
+            <button type="submit" class="submit-btn" id="discoverSearchBtn">Go</button>
+          </form>
+        </div>
+
+        <!-- Mood presets -->
+        <div class="discover-presets">
+          <div class="discover-section-label">Mood presets</div>
+          <div class="discover-preset-chips">
+            <button class="discover-preset" onclick="applyPreset('chill')">Chill Evening</button>
+            <button class="discover-preset" onclick="applyPreset('workout')">Workout</button>
+            <button class="discover-preset" onclick="applyPreset('focus')">Focus</button>
+            <button class="discover-preset" onclick="applyPreset('party')">Party</button>
+            <button class="discover-preset" onclick="applyPreset('melancholy')">Melancholy</button>
+          </div>
+        </div>
+
+        <!-- Zone 3: Audio features filter -->
+        <details class="discover-features">
+          <summary class="discover-section-label discover-features-summary">Audio features filter</summary>
+          <div class="discover-features-content">
+            <div class="feature-row">
+              <label class="feature-label">BPM</label>
+              <div class="feature-input-pair">
+                <input type="number" class="feature-num" id="bpmMin" min="40" max="240" placeholder="40">
+                <span class="feature-dash">&ndash;</span>
+                <input type="number" class="feature-num" id="bpmMax" min="40" max="240" placeholder="240">
+              </div>
+            </div>
+            <div class="feature-row">
+              <label class="feature-label">Key</label>
+              <select class="feature-select" id="featureKey">
+                <option value="">Any</option>
+                <option>C</option><option>C#</option><option>D</option><option>D#</option>
+                <option>E</option><option>F</option><option>F#</option><option>G</option>
+                <option>G#</option><option>A</option><option>A#</option><option>B</option>
+              </select>
+            </div>
+            <div class="feature-row">
+              <label class="feature-label">Mode</label>
+              <div class="feature-chips">
+                <button type="button" class="feature-chip active" data-group="mode" data-val="">Any</button>
+                <button type="button" class="feature-chip" data-group="mode" data-val="major">Major</button>
+                <button type="button" class="feature-chip" data-group="mode" data-val="minor">Minor</button>
+              </div>
+            </div>
+            <div class="feature-row">
+              <label class="feature-label">Vocalist</label>
+              <div class="feature-chips">
+                <button type="button" class="feature-chip active" data-group="vocalist" data-val="">Any</button>
+                <button type="button" class="feature-chip" data-group="vocalist" data-val="vocal">Vocal</button>
+                <button type="button" class="feature-chip" data-group="vocalist" data-val="instrumental">Instrumental</button>
+              </div>
+            </div>
+            <div class="feature-row">
+              <label class="feature-label">Gender</label>
+              <div class="feature-chips">
+                <button type="button" class="feature-chip active" data-group="gender" data-val="">Any</button>
+                <button type="button" class="feature-chip" data-group="gender" data-val="female">Female</button>
+                <button type="button" class="feature-chip" data-group="gender" data-val="male">Male</button>
+                <button type="button" class="feature-chip" data-group="gender" data-val="mixed">Mixed</button>
+              </div>
+            </div>
+            <div class="feature-row">
+              <label class="feature-label">Danceable</label>
+              <div class="feature-chips">
+                <button type="button" class="feature-chip active" data-group="danceable" data-val="">Any</button>
+                <button type="button" class="feature-chip" data-group="danceable" data-val="yes">Yes</button>
+                <button type="button" class="feature-chip" data-group="danceable" data-val="no">No</button>
+              </div>
+            </div>
+            <div class="feature-row">
+              <label class="feature-label">Energy</label>
+              <div class="feature-chips">
+                <button type="button" class="feature-chip active" data-group="energy" data-val="">Any</button>
+                <button type="button" class="feature-chip" data-group="energy" data-val="low">Low</button>
+                <button type="button" class="feature-chip" data-group="energy" data-val="mid">Mid</button>
+                <button type="button" class="feature-chip" data-group="energy" data-val="high">High</button>
+              </div>
+            </div>
+            <button class="discover-features-btn" onclick="searchByFeatures()">Search by features</button>
+          </div>
+        </details>
+
+        <!-- Results -->
+        <div id="discoverResults">
+          <div class="empty-state">Discover music in your library</div>
         </div>
       </div>
 
@@ -268,6 +384,6 @@
 
   </div>
 
-  <script src="/static/app.js?v=12"></script>
+  <script src="/static/app.js?v=13"></script>
 </body>
 </html>

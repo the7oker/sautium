@@ -1089,6 +1089,65 @@ async def search_metadata(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/search/features")
+async def search_features(
+    bpm_min: Optional[float] = None,
+    bpm_max: Optional[float] = None,
+    key: Optional[str] = None,
+    mode: Optional[str] = None,
+    instrument: Optional[str] = None,
+    vocalist: Optional[str] = None,
+    gender: Optional[str] = None,
+    danceable: Optional[str] = None,
+    energy_min: Optional[float] = None,
+    energy_max: Optional[float] = None,
+    artist: Optional[str] = None,
+    genre: Optional[str] = None,
+    is_lossless: Optional[bool] = None,
+    limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Search tracks by audio features (BPM, key, instruments, vocal, danceability)."""
+    from database import get_db_context
+    from search import search_by_features
+
+    filters = {}
+    if bpm_min is not None:
+        filters["bpm_min"] = bpm_min
+    if bpm_max is not None:
+        filters["bpm_max"] = bpm_max
+    if key:
+        filters["key"] = key
+    if mode:
+        filters["mode"] = mode
+    if instrument:
+        filters["instrument"] = instrument
+    if vocalist:
+        filters["vocalist"] = vocalist
+    if gender:
+        filters["gender"] = gender
+    if danceable == "yes":
+        filters["danceable"] = True
+    elif danceable == "no":
+        filters["not_danceable"] = True
+    if energy_min is not None:
+        filters["energy_min"] = energy_min
+    if energy_max is not None:
+        filters["energy_max"] = energy_max
+    if artist:
+        filters["artist"] = artist
+    if genre:
+        filters["genre"] = genre
+    if is_lossless is not None:
+        filters["is_lossless"] = is_lossless
+
+    try:
+        with get_db_context() as db:
+            return search_by_features(db, filters=filters, limit=limit)
+    except Exception as e:
+        logger.error(f"Features search failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # -- Last.fm Auth -------------------------------------------------------------
 
 # Temporary storage for auth URL (one per server instance)

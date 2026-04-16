@@ -44,7 +44,7 @@ def _apply_filters(filters: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
     Build SQL WHERE clauses and params from filter dict.
 
     Supported keys: artist, album, genre, is_lossless, year_from, year_to,
-                    bpm_min, bpm_max, key, mode, instrument, vocal, danceable, energy_min.
+                    bpm_min, bpm_max, key, mode, instrument, vocalist, gender, danceable, energy_min.
     Returns (sql_fragment, params_dict).
     """
     clauses = []
@@ -103,16 +103,27 @@ def _apply_filters(filters: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
         clauses.append("af.instruments ? :f_instrument")
         params["f_instrument"] = filters["instrument"]
 
-    if filters.get("vocal"):
-        clauses.append("af.vocal_instrumental = :f_vocal")
-        params["f_vocal"] = filters["vocal"]
+    if filters.get("vocalist"):
+        clauses.append("a.is_vocalist = :f_vocalist")
+        params["f_vocalist"] = filters["vocalist"]
+
+    if filters.get("gender"):
+        clauses.append("a.gender = :f_gender")
+        params["f_gender"] = filters["gender"]
 
     if filters.get("danceable"):
         clauses.append("af.danceability >= 0.5")
 
+    if filters.get("not_danceable"):
+        clauses.append("af.danceability < 0.5")
+
     if filters.get("energy_min"):
         clauses.append("af.energy_db >= :f_energy_min")
         params["f_energy_min"] = filters["energy_min"]
+
+    if filters.get("energy_max"):
+        clauses.append("af.energy_db <= :f_energy_max")
+        params["f_energy_max"] = filters["energy_max"]
 
     sql = (" AND " + " AND ".join(clauses)) if clauses else ""
     return sql, params
@@ -120,7 +131,7 @@ def _apply_filters(filters: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
 
 def _needs_audio_features_join(filters: Dict[str, Any]) -> bool:
     """Check if any audio feature filters are present."""
-    af_keys = {"bpm_min", "bpm_max", "key", "mode", "instrument", "vocal", "danceable", "energy_min"}
+    af_keys = {"bpm_min", "bpm_max", "key", "mode", "instrument", "danceable", "not_danceable", "energy_min", "energy_max"}
     return bool(af_keys & set(filters.keys()))
 
 
@@ -261,12 +272,12 @@ def search_by_text(
 
     similarity_sql = text(f"""
         {EMBEDDING_SIMILARITY_SELECT},
-               1 - (e.vector <=> :qvec::vector) as similarity
+               1 - (e.vector <=> CAST(:qvec AS vector)) as similarity
         {EMBEDDING_SIMILARITY_FROM}
         {af_join}
-        WHERE 1 - (e.vector <=> :qvec::vector) >= :min_similarity
+        WHERE 1 - (e.vector <=> CAST(:qvec AS vector)) >= :min_similarity
           {filter_sql}
-        ORDER BY e.vector <=> :qvec::vector
+        ORDER BY e.vector <=> CAST(:qvec AS vector)
         LIMIT :limit
     """)
 
@@ -473,11 +484,11 @@ def search_by_lyrics(
                    matches.similarity
             FROM (
                 SELECT le.track_id,
-                       MAX(1 - (le.vector <=> :qvec::vector)) as similarity
+                       MAX(1 - (le.vector <=> CAST(:qvec AS vector))) as similarity
                 FROM lyrics_embeddings le
                 WHERE le.model_id = :model_id
                 GROUP BY le.track_id
-                HAVING MAX(1 - (le.vector <=> :qvec::vector)) >= :min_similarity
+                HAVING MAX(1 - (le.vector <=> CAST(:qvec AS vector))) >= :min_similarity
             ) matches
             JOIN tracks t ON matches.track_id = t.id
             JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
@@ -580,11 +591,11 @@ def search_artists_by_bio(
             ) as sample_tracks
         FROM (
             SELECT abe.artist_id,
-                   MAX(1 - (abe.vector <=> :qvec::vector)) as similarity
+                   MAX(1 - (abe.vector <=> CAST(:qvec AS vector))) as similarity
             FROM artist_bio_embeddings abe
             WHERE abe.model_id = :model_id
             GROUP BY abe.artist_id
-            HAVING MAX(1 - (abe.vector <=> :qvec::vector)) >= :min_similarity
+            HAVING MAX(1 - (abe.vector <=> CAST(:qvec AS vector))) >= :min_similarity
         ) matches
         JOIN artists a ON matches.artist_id = a.id
         ORDER BY matches.similarity DESC
@@ -646,11 +657,11 @@ def search_albums_by_info(
              WHERE av2.album_id = al.id) as track_count
         FROM (
             SELECT aie.album_id,
-                   MAX(1 - (aie.vector <=> :qvec::vector)) as similarity
+                   MAX(1 - (aie.vector <=> CAST(:qvec AS vector))) as similarity
             FROM album_info_embeddings aie
             WHERE aie.model_id = :model_id
             GROUP BY aie.album_id
-            HAVING MAX(1 - (aie.vector <=> :qvec::vector)) >= :min_similarity
+            HAVING MAX(1 - (aie.vector <=> CAST(:qvec AS vector))) >= :min_similarity
         ) matches
         JOIN albums al ON matches.album_id = al.id
         -- Get primary artist via first track on this album
@@ -726,11 +737,11 @@ def search_genres_by_description(
             ) as sample_artists
         FROM (
             SELECT gde.genre_id,
-                   MAX(1 - (gde.vector <=> :qvec::vector)) as similarity
+                   MAX(1 - (gde.vector <=> CAST(:qvec AS vector))) as similarity
             FROM genre_desc_embeddings gde
             WHERE gde.model_id = :model_id
             GROUP BY gde.genre_id
-            HAVING MAX(1 - (gde.vector <=> :qvec::vector)) >= :min_similarity
+            HAVING MAX(1 - (gde.vector <=> CAST(:qvec AS vector))) >= :min_similarity
         ) matches
         JOIN genres g ON matches.genre_id = g.id
         ORDER BY matches.similarity DESC

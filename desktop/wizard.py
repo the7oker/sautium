@@ -311,8 +311,8 @@ class SetupWizard(ctk.CTkToplevel):
             self.content_frame,
             text=(
                 "AI-powered music library management.\n"
-                "Search your collection by sound, mood, or description.\n"
-                "Get intelligent recommendations from AI."
+                "Search your collection by sound, mood, lyrics, or description.\n"
+                "Works standalone or with an AI agent for chat recommendations."
             ),
             font=ctk.CTkFont(size=14),
             justify="center",
@@ -543,11 +543,20 @@ class SetupWizard(ctk.CTkToplevel):
         ).pack(pady=5)
 
         self._provider_var = ctk.StringVar(
-            value=self.config.get("provider", "anthropic")
+            value=self.config.get("provider", "none")
         )
 
         providers_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
         providers_frame.pack(fill="x", padx=20, pady=10)
+
+        # No AI — use built-in semantic search
+        ctk.CTkRadioButton(
+            providers_frame,
+            text="No AI agent (built-in semantic search)",
+            variable=self._provider_var,
+            value="none",
+            command=self._update_provider_fields,
+        ).pack(anchor="w", pady=3)
 
         # Claude Code option (only if CLI available)
         if self._claude_available:
@@ -617,7 +626,19 @@ class SetupWizard(ctk.CTkToplevel):
         provider = self._provider_var.get()
         self._provider_error.configure(text="")
 
-        if provider == "claude_code":
+        if provider == "none":
+            ctk.CTkLabel(
+                self._provider_fields_frame,
+                text=(
+                    "Search by sound, lyrics, artist bio, album description,\n"
+                    "genre, and audio features — all powered by local embeddings.\n"
+                    "You can add an AI provider later in Settings."
+                ),
+                text_color="gray",
+                justify="left",
+            ).pack(anchor="w")
+
+        elif provider == "claude_code":
             ctk.CTkLabel(
                 self._provider_fields_frame,
                 text="Uses your Claude Code subscription. No API key needed.",
@@ -850,7 +871,13 @@ class SetupWizard(ctk.CTkToplevel):
         lastfm_user = self.config.get("lastfm", {}).get("username")
         items = [
             ("Identity", account_text),
-            ("AI Provider", self.config.get("provider", "anthropic")),
+            ("AI Provider", {
+                "none": "None (semantic search only)",
+                "claude_code": "Claude Code",
+                "anthropic": "Anthropic API",
+                "openai": "OpenAI API",
+                "openai_compat": "Custom API",
+            }.get(self.config.get("provider", "none"), self.config.get("provider", "none"))),
             (
                 "HQPlayer",
                 f"{self.config['hqplayer']['host']}:{self.config['hqplayer']['port']}"

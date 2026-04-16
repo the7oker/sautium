@@ -1480,3 +1480,386 @@ header h1 {
   word-break: break-all;
   display: block;
 }
+
+/* ============================================================ */
+/* Discover tab                                                  */
+/* ============================================================ */
+
+.discover-section-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+
+/* Zone 1: Similar to now playing */
+.discover-similar {
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+
+.discover-similar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.discover-similar-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.discover-similar-song {
+  font-size: 0.9rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.discover-similar-artist {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+
+.discover-similar-btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.discover-similar-btn:active {
+  background: var(--accent-dim);
+}
+
+.discover-similar-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.discover-radio-btn {
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: none;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.discover-radio-btn:hover {
+  border-color: var(--accent-dim);
+  color: var(--text);
+}
+
+.discover-radio-btn.active {
+  border-color: var(--accent);
+  color: var(--bg);
+  background: var(--accent);
+}
+
+/* Mood presets */
+.discover-presets {
+  margin-bottom: 14px;
+}
+
+.discover-preset-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.discover-preset {
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.discover-preset:hover {
+  border-color: var(--accent-dim);
+  color: var(--text);
+}
+
+.discover-preset:active {
+  background: rgba(0, 212, 170, 0.12);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Zone 2: Search by description */
+.discover-search {
+  margin-bottom: 14px;
+}
+
+.discover-modes {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.discover-mode {
+  padding: 5px 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.discover-mode:hover {
+  border-color: var(--accent-dim);
+  color: var(--text);
+}
+
+.discover-mode.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(0, 212, 170, 0.12);
+}
+
+/* Zone 3: Audio features filter */
+.discover-features {
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  margin-bottom: 14px;
+}
+
+.discover-features-summary {
+  cursor: pointer;
+  padding: 12px 14px;
+  margin-bottom: 0;
+  user-select: none;
+  list-style: none;
+}
+
+.discover-features-summary::-webkit-details-marker {
+  display: none;
+}
+
+.discover-features-summary::after {
+  content: "\25BC";
+  float: right;
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  transition: transform 0.2s;
+}
+
+.discover-features[open] .discover-features-summary::after {
+  transform: rotate(180deg);
+}
+
+.discover-features-content {
+  padding: 0 14px 14px;
+}
+
+.feature-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.feature-label {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  min-width: 70px;
+  flex-shrink: 0;
+}
+
+.feature-input-pair {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+}
+
+.feature-num {
+  width: 70px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 0.85rem;
+  text-align: center;
+  outline: none;
+  -moz-appearance: textfield;
+}
+
+.feature-num::-webkit-inner-spin-button,
+.feature-num::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.feature-num:focus {
+  border-color: var(--accent);
+}
+
+.feature-dash {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.feature-select {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 0.85rem;
+  outline: none;
+  cursor: pointer;
+}
+
+.feature-select:focus {
+  border-color: var(--accent);
+}
+
+.feature-chips {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.feature-chip {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.feature-chip:hover {
+  border-color: var(--accent-dim);
+  color: var(--text);
+}
+
+.feature-chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(0, 212, 170, 0.1);
+}
+
+.discover-features-btn {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  margin-top: 6px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.discover-features-btn:active {
+  background: var(--accent-dim);
+}
+
+/* Discover results: artist/album/genre cards */
+.discover-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.discover-card:active {
+  background: var(--bg-input);
+}
+
+.discover-card-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.discover-card-title {
+  font-size: 0.92rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.discover-card-meta {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 3px;
+}
+
+.discover-card-similarity {
+  font-size: 0.7rem;
+  color: var(--accent);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.discover-play-all {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  margin: 12px 0 4px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.92rem;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.discover-play-all:active {
+  background: var(--accent-dim);
+}

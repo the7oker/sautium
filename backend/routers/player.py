@@ -231,6 +231,11 @@ class PlaySimilarRequest(BaseModel):
 class PlayTracksRequest(BaseModel):
     track_ids: list[int]
 
+class QueueNextRequest(BaseModel):
+    track_id: int
+    limit: int = 5
+    exclude_ids: list[int] = []
+
 
 # -- Search -------------------------------------------------------------------
 
@@ -844,6 +849,75 @@ def play_tracks(req: PlayTracksRequest):
         }
     except Exception as e:
         logger.error(f"play-tracks failed: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@router.post("/queue-next")
+def queue_next(req: QueueNextRequest):
+    """Append similar tracks to the current queue (Radio Mode)."""
+    source = _db_query_one("""
+        SELECT mf.id, t.id as db_track_id
+        FROM media_files mf
+        JOIN tracks t ON mf.track_id = t.id
+        WHERE mf.id = %(track_id)s
+    """, {"track_id": req.track_id})
+
+    if not source:
+        raise HTTPException(status_code=404, detail="Track not found")
+
+    exclude_clause = ""
+    params = {"db_track_id": source["db_track_id"], "limit": req.limit}
+    if req.exclude_ids:
+        exclude_clause = "AND mf_rep.id != ALL(%(exclude_ids)s)"
+        params["exclude_ids"] = req.exclude_ids
+
+    rows = _db_query(f"""
+        WITH target AS (
+            SELECT e.vector
+            FROM embeddings e
+            WHERE e.track_id = %(db_track_id)s
+        )
+        SELECT mf_rep.id, mf_rep.file_path, t.title, a.name as artist,
+               mf_rep.album_title as album
+        FROM tracks t
+        JOIN embeddings e ON e.track_id = t.id
+        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+        JOIN artists a ON ta.artist_id = a.id
+        JOIN LATERAL (
+            SELECT mf.id, mf.file_path, al.title as album_title
+            FROM media_files mf
+            JOIN album_variants av ON mf.album_variant_id = av.id
+            JOIN albums al ON av.album_id = al.id
+            WHERE mf.track_id = t.id
+            ORDER BY mf.is_analysis_source DESC, mf.id
+            LIMIT 1
+        ) mf_rep ON true
+        WHERE t.id != %(db_track_id)s
+          {exclude_clause}
+        ORDER BY e.vector <=> (SELECT vector FROM target)
+        LIMIT %(limit)s
+    """, params)
+
+    if not rows:
+        return {"ok": True, "count": 0, "tracks": []}
+
+    try:
+        with _hqp_lock:
+            hqp = _get_hqp()
+            for row in rows:
+                hqp.playlist_add(file_path_to_uri(row["file_path"]))
+
+        _notify_update()
+
+        return {
+            "ok": True,
+            "count": len(rows),
+            "tracks": [
+                {"id": r["id"], "title": r["title"], "artist": r["artist"], "album": r["album"]}
+                for r in rows
+            ],
+        }
+    except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
 

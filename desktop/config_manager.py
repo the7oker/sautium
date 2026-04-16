@@ -22,7 +22,7 @@ CONFIG_VERSION = 1
 DEFAULT_CONFIG = {
     "version": CONFIG_VERSION,
     "music_path": "",
-    "provider": "anthropic",
+    "provider": "none",
     "api_keys": {
         "anthropic": None,
         "openai": None,
