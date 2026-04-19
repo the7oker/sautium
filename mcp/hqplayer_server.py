@@ -730,7 +730,12 @@ def get_track_info(track_id: int) -> str:
                 lines.append(f"  Type: {af['vocal_instrumental']}")
             if af.get("instruments"):
                 instr = af["instruments"]
-                if isinstance(instr, list):
+                if isinstance(instr, dict):
+                    top = sorted(instr.items(), key=lambda x: -x[1])[:5]
+                    lines.append(
+                        "  Instruments: " + ", ".join(f"{k} ({v:.2f})" for k, v in top)
+                    )
+                elif isinstance(instr, list):
                     lines.append(f"  Instruments: {', '.join(instr)}")
 
         return "\n".join(lines)

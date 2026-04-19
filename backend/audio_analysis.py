@@ -1,9 +1,11 @@
 """
-Audio feature extraction using librosa (DSP) and CLAP zero-shot classification.
+Audio feature extraction using librosa (DSP) + CLAP zero-shot
++ AST/PaSST ensemble.
 
 Extracts:
 - librosa: BPM, key/mode, energy, brightness, dynamic range, ZCR
-- CLAP zero-shot: instruments, moods, vocal/instrumental, danceability
+- CLAP zero-shot: moods, vocal/instrumental, danceability
+- AST + PaSST ensemble: instrument multi-label tags (AudioSet)
 
 Operates on tracks (one analysis per track), using the analysis source media file.
 """
@@ -22,20 +24,13 @@ from transformers import ClapModel, ClapProcessor
 
 from config import settings
 from database import get_db_context
+from ensemble_instruments import InstrumentEnsembleTagger
 from models import AudioFeature, Track, MediaFile
 
 logger = logging.getLogger(__name__)
 
 
-# --- CLAP zero-shot label sets ---
-
-INSTRUMENT_LABELS = [
-    "acoustic guitar", "electric guitar", "bass guitar",
-    "piano", "keyboards and synthesizer", "organ",
-    "drums and percussion", "violin and strings", "cello",
-    "trumpet", "saxophone", "flute", "harmonica",
-    "harp", "clarinet", "trombone", "accordion",
-]
+# --- CLAP zero-shot label sets (instruments moved to ensemble_instruments) ---
 
 MOOD_LABELS = [
     "happy and upbeat", "sad and melancholic",
@@ -87,11 +82,12 @@ class AudioAnalyzer:
         self.model = None
         self.processor = None
         self._text_embeddings_cache = {}
+        self.ensemble = InstrumentEnsembleTagger(device=self.device)
 
     # --- Model management ---
 
     def load_model(self):
-        """Load CLAP model for zero-shot classification."""
+        """Load CLAP model (moods/vocal/dance) + AST+PaSST ensemble (instruments)."""
         if self.model is not None:
             return
 
@@ -104,9 +100,12 @@ class AudioAnalyzer:
         # Pre-encode all text label sets
         self._encode_text_labels()
 
+        # Load instrument ensemble alongside CLAP
+        self.ensemble.load()
+
         if self.device == "cuda":
             mem = torch.cuda.memory_allocated() / 1e9
-            logger.info(f"CLAP model loaded, GPU memory: {mem:.2f} GB")
+            logger.info(f"CLAP + ensemble loaded, GPU memory: {mem:.2f} GB")
 
     def unload_model(self):
         """Free GPU memory."""
@@ -119,11 +118,11 @@ class AudioAnalyzer:
             if self.device == "cuda":
                 torch.cuda.empty_cache()
             logger.info("CLAP model unloaded")
+        self.ensemble.unload()
 
     def _encode_text_labels(self):
-        """Pre-encode all zero-shot label sets. Called once, reused for all tracks."""
+        """Pre-encode CLAP text label sets (moods/vocal/dance). Called once."""
         label_sets = {
-            "instruments": [f"This is a sound of {l}" for l in INSTRUMENT_LABELS],
             "moods": [f"This is {l} music" for l in MOOD_LABELS],
             "vocal": [f"This is {l}" for l in VOCAL_LABELS],
             "dance": [f"This is {l}" for l in DANCE_LABELS],
@@ -262,7 +261,7 @@ class AudioAnalyzer:
         return {label: round(float(prob), 3) for label, prob in zip(labels, probs)}
 
     def _extract_clap_features(self, audio_48k: np.ndarray) -> Dict[str, Any]:
-        """Run CLAP zero-shot classification for instruments, moods, vocal, dance."""
+        """CLAP moods/vocal/dance + AST+PaSST ensemble instruments."""
         # Encode audio
         inputs = self.processor(
             audio=[audio_48k],
@@ -277,12 +276,6 @@ class AudioAnalyzer:
             audio_features = torch.nn.functional.normalize(audio_features, p=2, dim=1)
 
         features = {}
-
-        # Instruments: store all with score > 0.05
-        inst_probs = self._classify_zero_shot(audio_features, "instruments", INSTRUMENT_LABELS)
-        features["instruments"] = {
-            k: v for k, v in sorted(inst_probs.items(), key=lambda x: -x[1]) if v > 0.05
-        }
 
         # Moods
         mood_probs = self._classify_zero_shot(audio_features, "moods", MOOD_LABELS)
@@ -306,6 +299,9 @@ class AudioAnalyzer:
         features["danceability"] = round(
             dance_probs.get("highly danceable music with strong beat", 0.5), 3
         )
+
+        # Instruments via AST + PaSST ensemble (native multi-label)
+        features["instruments"] = self.ensemble.tag(audio_48k)
 
         return features
 
@@ -362,8 +358,15 @@ class AudioAnalyzer:
 
         return features
 
-    def _extract_clap_features_batch(self, audio_arrays: List[np.ndarray]) -> List[Dict[str, Any]]:
-        """Run CLAP zero-shot classification on a batch of audio arrays."""
+    def _extract_clap_features_batch(
+        self, audio_arrays: List[np.ndarray]
+    ) -> List[Dict[str, Any]]:
+        """CLAP moods/vocal/dance for a batch + AST+PaSST per-track ensemble.
+
+        CLAP runs batched (single GPU pass for N tracks); the ensemble is
+        invoked per-track since AST/PaSST are cheap enough (~200 ms each)
+        and keeping the batch loader simple matters more than micro-gains.
+        """
         inputs = self.processor(
             audio=audio_arrays,
             sampling_rate=self.clap_sr,
@@ -377,14 +380,9 @@ class AudioAnalyzer:
             all_audio_features = torch.nn.functional.normalize(all_audio_features, p=2, dim=1)
 
         results = []
-        for i in range(len(audio_arrays)):
+        for i, audio_48k in enumerate(audio_arrays):
             audio_emb = all_audio_features[i:i+1]
             features = {}
-
-            inst_probs = self._classify_zero_shot(audio_emb, "instruments", INSTRUMENT_LABELS)
-            features["instruments"] = {
-                k: v for k, v in sorted(inst_probs.items(), key=lambda x: -x[1]) if v > 0.05
-            }
 
             mood_probs = self._classify_zero_shot(audio_emb, "moods", MOOD_LABELS)
             features["moods"] = {
@@ -405,6 +403,8 @@ class AudioAnalyzer:
             features["danceability"] = round(
                 dance_probs.get("highly danceable music with strong beat", 0.5), 3
             )
+
+            features["instruments"] = self.ensemble.tag(audio_48k)
 
             results.append(features)
 

@@ -25,6 +25,7 @@ torchvision>=0.16.2
 torchaudio>=2.1.2
 transformers>=4.37.2,<5.0
 sentence-transformers>=2.3.1
+hear21passt>=0.0.26
 
 # AI/LLM
 anthropic>=0.79.0

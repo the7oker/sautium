@@ -59,6 +59,17 @@ vocal_instrumental, vocal_score, instruments[jsonb], moods[jsonb])
   - NOTE: vocal_instrumental is unreliable (classifies most vocal tracks as instrumental). \
 For vocal/instrumental queries, use `artists.is_vocalist` column. \
 For female/male vocal queries, combine `artists.gender` with `artists.is_vocalist`.
+  - `instruments`: AudioSet multi-label tags (AST+PaSST ensemble, sigmoid probabilities). \
+Lowercase keys, e.g. `{"piano": 0.62, "drum kit": 0.45, "acoustic guitar": 0.31}`. \
+Common tags: piano, electric piano, organ, synthesizer, drum kit, drum machine, \
+percussion, hi-hat, cymbal, acoustic guitar, electric guitar, bass guitar, \
+violin/fiddle, cello, double bass, string section, trumpet, trombone, saxophone, \
+flute, clarinet, harp, choir, orchestra, accordion, harmonica, sitar, banjo, \
+ukulele, mandolin, tabla, didgeridoo, theremin. \
+Empty dict means no identifiable instruments (common for ambient/drone). \
+Query: `WHERE af.instruments ? 'piano'` (key present) or \
+`WHERE (af.instruments->>'piano')::float > 0.3` (score threshold).
+  - `moods`: CLAP zero-shot, e.g. `{"happy and upbeat": 0.35, "energetic and intense": 0.28}`.
 
 ## Embeddings (CLAP audio, linked to tracks)
 

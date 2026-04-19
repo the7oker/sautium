@@ -136,7 +136,6 @@ class GeniusService:
         import lyricsgenius
         self.genius = lyricsgenius.Genius(
             access_token,
-            verbose=False,
             remove_section_headers=False,  # keep [Chorus] etc.
             skip_non_songs=True,
             retries=2,
