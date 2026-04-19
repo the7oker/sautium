@@ -142,6 +142,14 @@ library**, served visually.
    emotion. Discipline: roughly 90% warm / 10% cool.
 7. **Respect the content.** Don't truncate metadata gratuitously, don't
    crop covers, show full durations.
+8. **Icon conventions follow established mobile idioms (iOS / Material).**
+   Vertical ellipsis (⋮) for kebab / overflow menus, horizontal (⋯) only
+   when it genuinely means "more text" or "truncated". Chevrons for
+   navigation (not arrows), standard transport glyphs (play / pause /
+   skip), hamburger only when the full drawer pattern is warranted.
+   Deviate only when a deliberate subversion serves a product principle
+   — convention-literacy is a free UX win, and breaking it must be paid
+   for with a clear reason.
 
 ---
 
