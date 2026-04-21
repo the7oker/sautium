@@ -150,6 +150,15 @@ library**, served visually.
    Deviate only when a deliberate subversion serves a product principle
    — convention-literacy is a free UX win, and breaking it must be paid
    for with a clear reason.
+9. **Sautium is a remote, not a playback device.** The phone / web UI
+   does not produce audio itself — audio flows through HQPlayer (on a
+   separate machine) → DAC → amplifier → speakers. Therefore no UI
+   affordance may imply device-local control: no system volume slider,
+   no equaliser applied to web-UI output, no "audio output device"
+   picker on the phone, no mute toggle. Controls that have no technical
+   effect on the actual signal chain must not appear at all, even if
+   they are conventional in generic music players — their presence is
+   a UI lie.
 
 ---
 
