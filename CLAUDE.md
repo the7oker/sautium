@@ -175,6 +175,84 @@ See:
 
 ---
 
+## UI / Frontend Conventions
+
+The web UI lives in `backend/static/`, served directly by FastAPI.
+**Vanilla HTML + CSS + JS, no build step, no npm, no framework.** Keep
+it that way — we rejected a React migration in favour of this
+simplicity, and Claude Design's handoff format is plain HTML anyway
+(see `docs/design/reference/now-playing-bundle/README.md`).
+
+### Design tokens
+
+`backend/static/tokens.css` is the canonical design-system source. It
+exposes colours, typography, spacing, radii, shadows, motion, and
+safe-area tokens as CSS custom properties. Load it first on every new
+page: `<link rel="stylesheet" href="/static/tokens.css">`.
+
+The palette and type scale are **locked** per
+`docs/design/POSITIONING.md §"Colour palette (v1)"`. Do not introduce
+new colour tokens — use existing ones, or raise the question first.
+
+### Scaling model — mobile-first fluid proportional
+
+The root font-size is driven by viewport width, with a single `--base`
+knob:
+
+```css
+:root {
+  --base: 13;
+  --design-viewport: 360;
+  font-size: calc(100vw / 360 * 13 * 1px);
+  --px: calc(1rem / var(--base));
+}
+```
+
+On a 360px-wide viewport, `1rem == 13px`. On 720px, `1rem == 26px`.
+Every layout token is expressed in "design-pixels" via the `--px`
+helper, so changing `--base` in one place rescales the entire UI.
+
+**At ≥ 768px the root font-size locks at 15px** and the body is
+centred at ~420px — the design does not inflate on desktop.
+
+### How to write sizes
+
+- **Never write raw `px` for layout.** Use `calc(N * var(--px))` for
+  ad-hoc values or a pre-built `--space-*` / `--text-*` / `--radius-*`
+  token.
+- Raw `px` is acceptable only for true 1px hairlines where crispness
+  matters, or for absolute anchor points (e.g., `max-width: 768px` in
+  a media query — media queries must use `px`).
+- Durations (`--dur-*`) and easing curves (`--ease-*`) are time-based
+  and do not scale.
+- Line-heights are unitless so they multiply with font-size; tracking
+  uses `em` so it follows local font-size.
+
+### Typography
+
+Two font families, loaded via `<link>` in `<head>`:
+
+- **Inter Tight** (sans) — all UI prose, titles, labels.
+- **JetBrains Mono** — numeric readouts only: BPM, sample rate, bit
+  depth, durations, cosine-similarity scores. The mono+blue combo is
+  the signature "technical precision" token — do not use mono for
+  prose.
+
+The cool blue `#4A7FA7` accent is **reserved for technical numeric
+data and focus states**. Never for brand, CTA, or decoration — that's
+amber's job.
+
+### Reference bundle
+
+`docs/design/reference/now-playing-bundle/` preserves the Claude
+Design handoff: the Design System v1 HTML, the final Now Playing v4
+iteration, the full design-conversation transcript, and the cover
+assets used in mockups. Treat it as **reference for visual intent**,
+not source to paste — recreate visual output in our tokens-based
+vanilla stack.
+
+---
+
 ## Key Files
 
 | File | Purpose |
@@ -185,6 +263,10 @@ See:
 | `backend/lastfm.py` | Last.fm enrichment + bio-derived classifiers |
 | `backend/search.py` | Hybrid audio + text semantic search |
 | `backend/claude_dj_prompt.py` | System prompt + schema description for Claude Code + API variants |
+| `backend/ensemble_instruments.py` | AST + PaSST instrument multi-label tagger (replaces CLAP zero-shot) |
+| `backend/static/tokens.css` | Canonical design-system tokens (colours, type, spacing, scaling) |
+| `docs/design/POSITIONING.md` | Product positioning + UI design principles (source of truth) |
+| `docs/design/reference/now-playing-bundle/` | Claude Design handoff bundle — visual-intent reference |
 | `backend/routers/sync.py` | Backend sync endpoints (P2P protocol) |
 | `backend/routers/p2p.py` | Web UI Friends/Chat endpoints |
 | `backend/dht_service.py` | Docker backend libtorrent DHT integration |

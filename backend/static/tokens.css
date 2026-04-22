@@ -5,16 +5,39 @@
  * Reference implementation: docs/design/reference/now-playing-bundle/
  *     project/Design System v1.html
  *
- * Palette is LOCKED — do not add alternative colour tokens.
- * Additions to the scale (space, radius, elevation) are permitted
- * if justified by a screen need; extensions live below the locked section.
+ * ----- SCALING MODEL -------------------------------------------------
+ * Mobile-first fluid proportional scaling with a single knob (--base).
  *
- * Font loading: pages should load Inter Tight + JetBrains Mono via <link>
- * tags in <head> (see Design System v1.html for the preconnect pattern).
- * We do not @import here to avoid a render-blocking CSS dependency chain.
+ *   root font-size = 100vw ÷ design-viewport × --base  (in px)
+ *
+ * On a 360px-wide viewport, 1rem == --base px. On 720px, 1rem == 2×base.
+ * Every size token uses --px (= 1rem / --base) so tokens read as
+ * "design-pixels" and the entire scale reflows when --base changes.
+ *
+ * On tablet and up we lock the root font-size and centre the layout
+ * at a comfortable reading width so the UI does not bloat on wide
+ * monitors. --base itself is unchanged — the proportional language
+ * stays the same.
+ *
+ * ----- USAGE ---------------------------------------------------------
+ * Never write raw `16px` for layout — write `calc(16 * var(--px))` or
+ * use a pre-built --space-* / --text-* / --radius-* token. Raw px is
+ * fine only for 1px hairlines where crispness matters.
+ *
+ * Palette is LOCKED. Do not introduce alternative colour tokens —
+ * extend the spacing / radius / elevation scales if a screen truly
+ * needs more steps.
  * ===================================================================== */
 
 :root {
+  /* --- SCALING KNOBS ---------------------------------------------- */
+  --base:             13;             /* px at design-viewport = 1rem  */
+  --design-viewport: 360;             /* Claude Design mocks at 360px  */
+  --px: calc(1rem / var(--base));     /* helper: 1 "design-pixel"      */
+
+  /* --- Root font-size (mobile-first fluid) ------------------------ */
+  font-size: calc(100vw / var(--design-viewport) * var(--base) * 1px);
+
   /* --- Color · foundation ----------------------------------------- */
   --color-foundation:   #1B1714;
   --color-surface:      #2A2420;
@@ -50,76 +73,89 @@
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo,
                Consolas, monospace;
 
-  /* --- Type scale (5 roles, max) ---------------------------------- */
-  --text-display: 32px;                      /* album title / screen hero */
-  --text-heading: 20px;                      /* section titles            */
-  --text-body:    15px;                      /* UI prose, track titles    */
-  --text-label:   13px;                      /* chips, button labels      */
-  --text-caption: 11px;                      /* timestamps, unit suffixes */
+  /* --- Type scale (5 roles, in design-pixels) --------------------- */
+  --text-display: calc(32 * var(--px));
+  --text-heading: calc(20 * var(--px));
+  --text-body:    calc(15 * var(--px));
+  --text-label:   calc(13 * var(--px));
+  --text-caption: calc(11 * var(--px));
 
-  /* --- Line height ------------------------------------------------ */
-  --lh-tight:  1.15;                         /* display                  */
-  --lh-snug:   1.25;                         /* heading                  */
-  --lh-normal: 1.5;                          /* body / prose             */
-  --lh-mono:   1.4;                          /* numeric readouts         */
+  /* --- Line height (unitless — naturally scales) ------------------ */
+  --lh-tight:  1.15;
+  --lh-snug:   1.25;
+  --lh-normal: 1.5;
+  --lh-mono:   1.4;
 
-  /* --- Tracking --------------------------------------------------- */
+  /* --- Tracking (em — scales with local font-size) ---------------- */
   --tracking-display: -0.02em;
   --tracking-heading: -0.01em;
   --tracking-label:    0.02em;
   --tracking-caption:  0.04em;
 
-  /* --- Spacing · 8px grid (8 steps) ------------------------------- */
-  --space-1:  4px;                           /* icon ↔ label            */
-  --space-2:  8px;                           /* tight stack             */
-  --space-3: 12px;                           /* list item rhythm        */
-  --space-4: 16px;                           /* default card padding    */
-  --space-5: 24px;                           /* section separator       */
-  --space-6: 32px;                           /* major block spacing     */
-  --space-7: 48px;                           /* screen hero margins     */
-  --space-8: 64px;                           /* page gutters / breaks   */
+  /* --- Spacing · 8px grid (in design-pixels) ---------------------- */
+  --space-1: calc(4  * var(--px));
+  --space-2: calc(8  * var(--px));
+  --space-3: calc(12 * var(--px));
+  --space-4: calc(16 * var(--px));
+  --space-5: calc(24 * var(--px));
+  --space-6: calc(32 * var(--px));
+  --space-7: calc(48 * var(--px));
+  --space-8: calc(64 * var(--px));
 
   /* --- Radii ------------------------------------------------------ */
-  --radius-none: 0;                          /* album covers            */
-  --radius-sm:   4px;                        /* chips, pills            */
-  --radius-md:   8px;                        /* cards, inputs, sheets   */
-  --radius-lg:  14px;                        /* modals, full-screen     */
+  --radius-none: 0;
+  --radius-sm: calc(4  * var(--px));
+  --radius-md: calc(8  * var(--px));
+  --radius-lg: calc(14 * var(--px));
 
   /* --- Elevation · warm shadows (never cold gray) ----------------- */
-  /* Base is tinted with #0E0A08 — deeper coffee, not neutral black.   */
+  /* Base tint is #0E0A08 — deeper coffee, not neutral black.         */
   --shadow-0: none;
   --shadow-1:
-    0 1px 0 0 rgba(14, 10, 8, 0.4),
-    0 2px 6px -1px rgba(14, 10, 8, 0.45);
+    0 calc(1 * var(--px)) 0 0 rgba(14, 10, 8, 0.40),
+    0 calc(2 * var(--px)) calc(6 * var(--px)) calc(-1 * var(--px)) rgba(14, 10, 8, 0.45);
   --shadow-2:
-    0 2px 1px 0 rgba(14, 10, 8, 0.35),
-    0 8px 20px -4px rgba(14, 10, 8, 0.55),
-    0 1px 0 0 rgba(237, 226, 212, 0.03) inset;    /* warm rim light    */
+    0 calc(2 * var(--px)) calc(1 * var(--px)) 0 rgba(14, 10, 8, 0.35),
+    0 calc(8 * var(--px)) calc(20 * var(--px)) calc(-4 * var(--px)) rgba(14, 10, 8, 0.55),
+    0 calc(1 * var(--px)) 0 0 rgba(237, 226, 212, 0.03) inset;
   --shadow-3:
-    0 4px 2px 0 rgba(14, 10, 8, 0.3),
-    0 20px 48px -12px rgba(14, 10, 8, 0.7),
-    0 1px 0 0 rgba(237, 226, 212, 0.04) inset;
+    0 calc(4 * var(--px)) calc(2 * var(--px)) 0 rgba(14, 10, 8, 0.30),
+    0 calc(20 * var(--px)) calc(48 * var(--px)) calc(-12 * var(--px)) rgba(14, 10, 8, 0.70),
+    0 calc(1 * var(--px)) 0 0 rgba(237, 226, 212, 0.04) inset;
 
   /* Amber ambient glow — use ONLY for live / active-playback states. */
   --glow-amber:
-    0 0 0 1px rgba(232, 176, 111, 0.25),
-    0 0 24px -4px rgba(232, 176, 111, 0.25);
+    0 0 0 calc(1 * var(--px)) rgba(232, 176, 111, 0.25),
+    0 0 calc(24 * var(--px)) calc(-4 * var(--px)) rgba(232, 176, 111, 0.25);
 
-  /* --- Motion ----------------------------------------------------- */
+  /* --- Motion (time-based, no scaling) ---------------------------- */
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --dur-fast: 120ms;
   --dur-base: 200ms;
   --dur-slow: 320ms;
 
-  /* --- Safe-area hints (mobile; override per screen if needed) ---- */
-  --safe-top:    44px;
-  --safe-bottom: 34px;
+  /* --- Safe area (prefer env() with design-px fallbacks) ---------- */
+  --safe-top:    env(safe-area-inset-top,    calc(44 * var(--px)));
+  --safe-bottom: env(safe-area-inset-bottom, calc(34 * var(--px)));
 }
 
 /* ---------------------------------------------------------------------
- * Minimal base reset — optional.
- * Pages using these tokens may load their own reset; if you want a
- * baseline, apply .sautium-base on <body>.
+ * Tablet and up: lock the root font-size and centre a mobile-width
+ * layout. The scale stops inflating on wide displays while the
+ * proportional language (--px, --space-*, --text-*) remains intact.
+ * ------------------------------------------------------------------- */
+@media (min-width: 768px) {
+  :root { font-size: 15px; }
+
+  body.sautium-base {
+    max-width: calc(var(--design-viewport) * 1.3 * 1px);
+    margin: 0 auto;
+    box-shadow: var(--shadow-3);
+  }
+}
+
+/* ---------------------------------------------------------------------
+ * Minimal base reset — opt-in via class on <body>.
  * ------------------------------------------------------------------- */
 .sautium-base,
 .sautium-base * { box-sizing: border-box; }
