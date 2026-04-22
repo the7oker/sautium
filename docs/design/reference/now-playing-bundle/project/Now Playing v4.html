@@ -1,0 +1,1011 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sautium · Now Playing · v4</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --color-foundation:   #1B1714;
+    --color-surface:      #2A2420;
+    --color-surface-lo:   #221D1A;
+    --color-divider:      #3A322C;
+    --color-text:         #EDE2D4;
+    --color-text-muted:   #A69B8E;
+    --color-text-dim:     #6E665C;
+    --color-amber:        #E8B06F;
+    --color-amber-press:  #D29A5B;
+    --color-blue:         #4A7FA7;
+    --color-hires:        #D4AF5A;
+    --font-sans: "Inter Tight", ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, monospace;
+    --safe-top: 44px;
+    --safe-bottom: 34px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: radial-gradient(ellipse at 50% 20%, #221B17 0%, #15110F 70%) no-repeat, #15110F;
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    padding: 32px 24px;
+  }
+
+  .canvas { max-width: 1280px; margin: 0 auto; }
+  .canvas-head {
+    display: flex; justify-content: space-between; align-items: end;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--color-divider);
+    margin-bottom: 32px;
+  }
+  .canvas-head h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+  .canvas-head .meta {
+    font-family: var(--font-mono); font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-text-muted);
+  }
+
+  .frames {
+    display: grid; grid-template-columns: repeat(3, auto);
+    gap: 48px; justify-content: center; align-items: start;
+  }
+  .frame-col { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+  .frame-title {
+    font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--color-text-muted); text-align: center;
+  }
+  .frame-title b {
+    display: block; font-family: var(--font-sans);
+    font-size: 13px; font-weight: 600; color: var(--color-text);
+    letter-spacing: 0; text-transform: none; margin-bottom: 2px;
+  }
+
+  /* ============ PHONE ============ */
+  .phone {
+    width: 360px;
+    background: var(--color-foundation);
+    border-radius: 44px;
+    position: relative;
+    box-shadow: 0 4px 2px 0 rgba(14,10,8,.30), 0 20px 48px -12px rgba(14,10,8,.7);
+    outline: 1px solid rgba(237,226,212,.04);
+    padding: 6px;
+  }
+  .phone.fold { height: 760px; }
+  .phone.extended { height: auto; }
+  .bezel {
+    position: absolute; inset: 0; border-radius: 44px;
+    pointer-events: none;
+    box-shadow: inset 0 0 0 1px rgba(237,226,212,.05);
+  }
+  .screen {
+    position: relative; width: 100%; background: var(--color-foundation);
+    border-radius: 38px; overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .phone.fold .screen { height: 100%; }
+  .phone.extended .screen { height: auto; min-height: 100%; }
+
+  /* ============ SAFE ZONES ============ */
+  .safe-top {
+    height: var(--safe-top);
+    padding: 0 24px;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 14px; font-weight: 600; letter-spacing: -0.01em;
+    flex-shrink: 0; position: relative;
+    z-index: 3;
+  }
+  .safe-top .time { padding-top: 14px; }
+  .safe-top .indicators { display: flex; gap: 6px; padding-top: 14px; }
+  .island {
+    position: absolute; top: 10px; left: 50%;
+    transform: translateX(-50%);
+    width: 108px; height: 28px;
+    background: #0A0807; border-radius: 18px;
+  }
+  .safe-bottom-zone {
+    height: var(--safe-bottom);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .home-ind {
+    width: 128px; height: 5px;
+    background: var(--color-text);
+    opacity: 0.85; border-radius: 3px;
+  }
+
+  /* ============ DRAG HANDLE ============ */
+  /* Handle sits over the cover — needs z-index + white on dark artwork */
+  .handle-wrap {
+    padding: 6px 0 2px;
+    display: grid; place-items: center;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 3;
+  }
+  .handle {
+    width: 36px; height: 4px;
+    background: rgba(237,226,212,.55);
+    border-radius: 2px;
+    box-shadow: 0 0 4px rgba(0,0,0,.4);
+  }
+
+  /* ============ CONTROL BAR over cover ============ */
+  .control-bar {
+    padding: 2px 16px 6px;
+    display: grid; grid-template-columns: 44px 1fr 44px;
+    align-items: center;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 3;
+  }
+  .icon-btn {
+    width: 44px; height: 44px;
+    display: grid; place-items: center;
+    color: var(--color-text);
+    background: transparent; border: none; padding: 0; cursor: pointer;
+    /* Two-layer shadow keeps icons legible on ANY cover:
+       close-range black halo for contrast + wider soft shadow for depth */
+    filter:
+      drop-shadow(0 0 1px rgba(0,0,0,.9))
+      drop-shadow(0 1px 3px rgba(0,0,0,.6));
+  }
+  .icon-btn:active { color: var(--color-amber); }
+
+  /* Lyrics affordance on the cover (bottom-right) —
+     no chip, same drop-shadow strategy as chevron/kebab for contrast */
+  .lyrics-btn {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    width: 44px; height: 44px;
+    display: grid; place-items: center;
+    background: transparent;
+    border: none;
+    color: var(--color-text);
+    padding: 0; cursor: pointer;
+    z-index: 3;
+    filter:
+      drop-shadow(0 0 1px rgba(0,0,0,.9))
+      drop-shadow(0 1px 3px rgba(0,0,0,.6));
+  }
+  .lyrics-btn:active { color: var(--color-amber); }
+
+  /* ============ COVER (full-bleed, edge-to-edge) ============ */
+  .cover-block { position: relative; flex-shrink: 0; }
+  .cover-wrap {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    background: #1A1613;
+    overflow: hidden;
+  }
+  .cover-wrap img {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    display: block;
+    position: relative; z-index: 1;
+  }
+  /* Gradient scrim sits INSIDE cover-wrap, above the image,
+     below the handle/control-bar overlay. Tuned for worst-case (white) covers. */
+  .cover-scrim {
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 96px;
+    background: linear-gradient(180deg,
+      rgba(27,23,20,0.70) 0%,
+      rgba(27,23,20,0.45) 40%,
+      rgba(27,23,20,0.15) 80%,
+      rgba(27,23,20,0.00) 100%);
+    pointer-events: none;
+    z-index: 2;
+  }
+  /* Overlay with handle + chevron/menu, absolutely positioned at top of cover */
+  .cover-overlay {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    z-index: 3;
+    pointer-events: none;
+  }
+  .cover-overlay > * { pointer-events: auto; }
+
+  /* ============ LYRICS PANEL (replaces cover in 1:1 area) ============ */
+  .lyrics-panel {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    background: linear-gradient(180deg, #1F1A17 0%, #17130F 100%);
+    overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  /* Top scrim so chevron/kebab stay readable, same behaviour as cover */
+  .lyrics-panel .cover-scrim { background: linear-gradient(180deg,
+      rgba(27,23,20,0.85) 0%,
+      rgba(27,23,20,0.60) 40%,
+      rgba(27,23,20,0.15) 80%,
+      rgba(27,23,20,0.00) 100%); }
+  .lyrics-sync {
+    position: absolute;
+    top: 62px; right: 16px;
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--color-blue);
+    z-index: 2;
+  }
+  .lyrics-sync svg { display: block; color: var(--color-blue); }
+  .lyrics-lines {
+    flex: 1;
+    display: flex; flex-direction: column;
+    justify-content: center;
+    padding: 72px 28px 40px;
+    gap: 14px;
+    position: relative;
+    z-index: 1;
+    /* fade top + bottom so scrolling lyrics feel windowed */
+    -webkit-mask-image: linear-gradient(180deg,
+      transparent 0%,
+      black 18%,
+      black 82%,
+      transparent 100%);
+            mask-image: linear-gradient(180deg,
+      transparent 0%,
+      black 18%,
+      black 82%,
+      transparent 100%);
+  }
+  .lyric-line {
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.7;
+    color: var(--color-text-muted);
+    font-weight: 500;
+    letter-spacing: -0.005em;
+    text-wrap: pretty;
+    transition: color 200ms, font-weight 200ms;
+  }
+  .lyric-line.past {
+    color: var(--color-text-dim);
+  }
+  .lyric-line.active {
+    color: var(--color-blue);
+    font-weight: 700;
+    font-size: 17px;
+    line-height: 1.5;
+  }
+  /* Lyrics toggle on the panel bottom-right mirrors the one on cover,
+     but tinted blue to indicate active state — still no chip */
+  .lyrics-panel .lyrics-btn {
+    color: var(--color-blue);
+  }
+
+  /* ============ TRACK META BELOW COVER ============ */
+  .below-cover {
+    padding: 16px 16px 0;
+    display: flex; flex-direction: column;
+    flex-shrink: 0;
+  }
+
+  .track-title {
+    font-size: 19px; font-weight: 600;
+    letter-spacing: -0.015em; line-height: 1.25;
+    margin: 0 0 4px;
+    text-wrap: pretty;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .track-artist {
+    font-size: 15px; font-weight: 500;
+    color: var(--color-text);
+    margin: 0 0 2px;
+  }
+  .track-album {
+    font-size: 13px; color: var(--color-text-muted);
+    margin: 0;
+  }
+  .track-album .year { color: var(--color-text-dim); margin-left: 6px; }
+
+  /* ============ META ROW ============ */
+  .meta-row {
+    display: flex; align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--color-divider);
+    flex-wrap: nowrap;
+  }
+  .q-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 9px 4px 7px;
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+    background: transparent;
+    border: 1px solid transparent;
+    flex-shrink: 0;
+  }
+  .q-badge.hires {
+    color: var(--color-hires);
+    border-color: rgba(212,175,90,.35);
+    background: rgba(212,175,90,.06);
+  }
+  .q-badge.lossless {
+    color: var(--color-text-muted);
+    border-color: var(--color-divider);
+    background: rgba(237,226,212,.02);
+  }
+  .q-badge.lossy {
+    color: var(--color-amber);
+    border-color: rgba(232,176,111,.35);
+    background: rgba(232,176,111,.06);
+  }
+  .q-badge svg { display: block; }
+  .q-badge .tap-hint {
+    width: 4px; height: 4px;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: 0.4;
+    margin-left: 2px;
+  }
+
+  .key-pill {
+    padding: 4px 8px;
+    background: var(--color-surface-lo);
+    border: 1px solid var(--color-divider);
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    color: var(--color-blue);
+    text-transform: uppercase;
+    flex-shrink: 0;
+  }
+  .key-pill .mode { color: var(--color-text-muted); font-weight: 500; margin-left: 2px; }
+
+  .bpm {
+    display: inline-flex; align-items: baseline;
+    gap: 3px;
+    flex-shrink: 0;
+    line-height: 1;
+  }
+  .bpm .num {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-blue);
+    letter-spacing: 0.02em;
+  }
+  .bpm .label {
+    font-family: var(--font-sans);
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .energy {
+    display: flex; align-items: center; gap: 4px;
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+  .energy-dots { display: inline-flex; gap: 3px; margin-left: 4px; }
+  .energy-dot {
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: var(--color-divider);
+  }
+  .energy-dot.on { background: var(--color-blue); }
+
+  /* ============ PROGRESS + REPEAT ============ */
+  .progress-wrap {
+    margin-top: 14px;
+    flex-shrink: 0;
+  }
+  .progress-track {
+    position: relative;
+    height: 3px;
+    background: rgba(237,226,212,.14);
+    border-radius: 4px;
+  }
+  .progress-fill {
+    position: absolute; top: 0; left: 0; height: 100%;
+    width: 57%;                         /* 1:56 / 3:24 = 116/204 ≈ 0.569 */
+    background: var(--color-blue);
+    border-radius: 4px 0 0 4px;
+  }
+  .progress-head {
+    position: absolute;
+    left: 57%;
+    top: 50%;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--color-blue);
+    transform: translate(-50%, -50%);
+    box-shadow: 0 0 0 4px rgba(74,127,167,.18);
+  }
+  .progress-meta {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-top: 8px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--color-blue);
+    letter-spacing: 0.04em;
+  }
+  .progress-right {
+    display: flex; align-items: center; gap: 10px;
+  }
+  .progress-right .total { color: var(--color-text-muted); }
+  .repeat-btn {
+    width: 24px; height: 24px;
+    display: grid; place-items: center;
+    background: transparent; border: none; padding: 0; cursor: pointer;
+    color: var(--color-text-dim);
+    position: relative;
+  }
+  .repeat-btn[data-state="one"],
+  .repeat-btn[data-state="all"] { color: var(--color-amber); }
+
+  /* ============ TRANSPORT (prev · play · next only — no volume) ============ */
+  .transport {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 8px;
+    margin-top: 18px;
+    flex-shrink: 0;
+  }
+  .transport-side { display: flex; justify-content: center; }
+  .tbtn {
+    width: 56px; height: 56px;
+    display: grid; place-items: center;
+    background: transparent; border: none;
+    color: var(--color-text); padding: 0; cursor: pointer;
+  }
+  .play {
+    width: 68px; height: 68px;
+    border-radius: 50%;
+    background: var(--color-amber);
+    color: #1B1714;
+    display: grid; place-items: center;
+    border: none; padding: 0; cursor: pointer;
+  }
+  .play:active { background: var(--color-amber-press); }
+
+  /* ============ SIMILAR ============ */
+  .similar {
+    margin-top: 24px;
+    flex-shrink: 0;
+  }
+  .similar-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--color-divider);
+  }
+  .similar-title {
+    margin: 0;
+    font-size: 13px; font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--color-text);
+  }
+  .similar-sub {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .similar-sub svg {
+    display: inline-block; vertical-align: -1px;
+    margin-right: 2px; color: var(--color-blue);
+  }
+  .similar-list { display: flex; flex-direction: column; }
+  .sim-row {
+    display: grid;
+    grid-template-columns: 44px 1fr 44px;
+    gap: 12px;
+    align-items: center;
+    padding: 8px 0;
+    cursor: pointer;
+  }
+  .sim-row + .sim-row { border-top: 1px solid var(--color-divider); }
+  .sim-art {
+    width: 44px; height: 44px;
+    overflow: hidden;
+    background: var(--color-surface);
+    flex-shrink: 0;
+  }
+  .sim-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .sim-info { min-width: 0; }
+  .sim-info-row {
+    display: flex; align-items: baseline;
+    gap: 6px;
+    justify-content: space-between;
+  }
+  .sim-info-left { min-width: 0; flex: 1; }
+  .sim-track {
+    font-size: 13px; font-weight: 500;
+    color: var(--color-text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    line-height: 1.3;
+  }
+  .sim-artist {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    line-height: 1.3;
+    margin-top: 2px;
+  }
+  .sim-score {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-blue);
+    letter-spacing: 0.04em;
+    flex-shrink: 0;
+  }
+  .sim-add {
+    width: 44px; height: 44px;
+    display: grid; place-items: center;
+    background: transparent; border: none;
+    color: var(--color-text-muted); padding: 0; cursor: pointer;
+  }
+  .sim-add:active { color: var(--color-amber); }
+
+  /* ============ FOLD MARKER ============ */
+  .fold-marker {
+    position: absolute;
+    left: -28px; right: -28px;
+    top: calc(760px - 6px);
+    height: 1px;
+    background: repeating-linear-gradient(90deg, var(--color-amber) 0 6px, transparent 6px 12px);
+    pointer-events: none;
+    z-index: 5;
+  }
+  .fold-label {
+    position: absolute;
+    left: -28px;
+    top: calc(760px - 16px);
+    transform: translateX(-100%);
+    padding-right: 8px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--color-amber);
+    white-space: nowrap;
+    z-index: 5;
+  }
+
+  /* ============ NOTES ============ */
+  .notes {
+    max-width: 1280px; margin: 32px auto 0;
+    padding-top: 16px;
+    border-top: 1px solid var(--color-divider);
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+  .note-card {
+    background: var(--color-surface);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .note-card h4 {
+    margin: 0 0 8px;
+    font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }
+  .note-card p {
+    margin: 0;
+    font-size: 13px; color: var(--color-text);
+    line-height: 1.5;
+  }
+  .note-card code {
+    font-family: var(--font-mono);
+    color: var(--color-amber);
+    font-size: 12px;
+  }
+  .note-card .cool { color: var(--color-blue); }
+
+  /* tuck the bottom padding under the content before the safe-bottom-zone */
+  .main-spacer { height: 16px; flex-shrink: 0; }
+</style>
+</head>
+<body>
+
+<!-- ============ SHARED SCREEN TEMPLATE ============ -->
+<template id="screen-tpl">
+  <div class="screen">
+
+    <div class="safe-top">
+      <div class="island"></div>
+      <span class="time">9:41</span>
+      <div class="indicators">
+        <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor">
+          <rect x="0" y="7" width="3" height="4" rx="0.5"/>
+          <rect x="4.5" y="5" width="3" height="6" rx="0.5"/>
+          <rect x="9" y="3" width="3" height="8" rx="0.5"/>
+          <rect x="13.5" y="0" width="3" height="11" rx="0.5"/>
+        </svg>
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">
+          <path d="M7.5 10a.8.8 0 100-1.6.8.8 0 000 1.6zM2.5 5.5a7 7 0 0110 0M4.5 7.5a4 4 0 016 0"/>
+        </svg>
+        <svg width="25" height="11" viewBox="0 0 25 11" fill="none">
+          <rect x="0.5" y="0.5" width="21" height="10" rx="2" stroke="currentColor"/>
+          <rect x="22.5" y="3.5" width="1.5" height="4" rx="0.5" fill="currentColor"/>
+          <rect x="2" y="2" width="17" height="7" rx="1" fill="currentColor"/>
+        </svg>
+      </div>
+    </div>
+
+    <!-- Cover block: full-bleed, extends up under handle + control bar -->
+    <div class="cover-block">
+      <div class="cover-overlay">
+        <div class="handle-wrap"><div class="handle"></div></div>
+        <div class="control-bar">
+          <button class="icon-btn" aria-label="collapse">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M6 9l6 6 6-6"/>
+            </svg>
+          </button>
+          <div></div>
+          <button class="icon-btn" aria-label="more">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="12" cy="5"  r="1.6"/>
+              <circle cx="12" cy="12" r="1.6"/>
+              <circle cx="12" cy="19" r="1.6"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="cover-wrap">
+        <img src="assets/cover-hidden-orchestra.jpg" alt="Hidden Orchestra — Wingbeats">
+        <div class="cover-scrim"></div>
+        <button class="lyrics-btn" aria-label="show lyrics">
+          <!-- Lyrics glyph: stacked text lines inside a rounded box (Material "subtitles" / lyrics convention) -->
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+            <rect x="3" y="5" width="18" height="14" rx="2.5"/>
+            <path d="M6 10h8M6 14h12M16 10h2"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="below-cover">
+      <h1 class="track-title">Wingbeats — I. First Light</h1>
+      <div class="track-artist">Hidden Orchestra</div>
+      <div class="track-album">
+        Wingbeats · Tru Thoughts
+        <span class="year">· 2016</span>
+      </div>
+
+      <div class="meta-row">
+        <button class="q-badge hires" aria-label="Hi-Res · tap for details">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1"/>
+            <text x="8" y="8"
+                  font-family="Inter Tight, sans-serif"
+                  font-size="9"
+                  font-weight="700"
+                  fill="currentColor"
+                  stroke="none"
+                  text-anchor="middle"
+                  dominant-baseline="central">H</text>
+          </svg>
+          Hi-Res
+          <span class="tap-hint"></span>
+        </button>
+        <div class="key-pill">F<span class="mode"> min</span></div>
+        <div class="bpm"><span class="num">128</span><span class="label">bpm</span></div>
+        <div class="energy">
+          energy
+          <span class="energy-dots">
+            <span class="energy-dot on"></span>
+            <span class="energy-dot on"></span>
+            <span class="energy-dot on"></span>
+            <span class="energy-dot"></span>
+            <span class="energy-dot"></span>
+          </span>
+        </div>
+      </div>
+
+      <div class="progress-wrap">
+        <div class="progress-track">
+          <div class="progress-fill"></div>
+          <div class="progress-head"></div>
+        </div>
+        <div class="progress-meta">
+          <span>1:56</span>
+          <div class="progress-right">
+            <span class="total">3:24</span>
+            <button class="repeat-btn" data-state="one" aria-label="repeat one">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M17 1l4 4-4 4M3 11V9a4 4 0 014-4h14M7 23l-4-4 4-4M21 13v2a4 4 0 01-4 4H3"/>
+                <text x="12" y="15.5" font-family="JetBrains Mono" font-size="7" font-weight="600" text-anchor="middle" fill="currentColor" stroke="none">1</text>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="transport">
+        <div class="transport-side">
+          <button class="tbtn" aria-label="previous">
+            <svg width="28" height="28" viewBox="0 0 28 28" fill="currentColor">
+              <path d="M7 5v18H5V5h2zm16 1.2v15.6c0 1-1.1 1.6-1.9 1.1L9 15.1a1.3 1.3 0 010-2.2L21.1 5.1a1.3 1.3 0 011.9 1.1z"/>
+            </svg>
+          </button>
+        </div>
+        <button class="play" aria-label="pause">
+          <svg width="28" height="28" viewBox="0 0 30 30" fill="currentColor">
+            <rect x="8" y="6" width="5" height="18" rx="1"/>
+            <rect x="17" y="6" width="5" height="18" rx="1"/>
+          </svg>
+        </button>
+        <div class="transport-side">
+          <button class="tbtn" aria-label="next">
+            <svg width="28" height="28" viewBox="0 0 28 28" fill="currentColor">
+              <path d="M21 5v18h2V5h-2zM5 6.2v15.6c0 1 1.1 1.6 1.9 1.1L19 15.1a1.3 1.3 0 000-2.2L6.9 5.1A1.3 1.3 0 005 6.2z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="similar">
+        <div class="similar-head">
+          <h3 class="similar-title">Similar from your library</h3>
+          <span class="similar-sub">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>CLAP · 7 matches
+          </span>
+        </div>
+
+        <div class="similar-list">
+          <div class="sim-row">
+            <div class="sim-art"><img src="assets/cover-four-seasons.jpg" alt=""></div>
+            <div class="sim-info">
+              <div class="sim-info-row">
+                <div class="sim-info-left">
+                  <div class="sim-track">“Winter” — II. Largo</div>
+                  <div class="sim-artist">Anne Akiko Meyers · 2014</div>
+                </div>
+                <span class="sim-score">0.94</span>
+              </div>
+            </div>
+            <button class="sim-add" aria-label="add to queue">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
+          </div>
+
+          <div class="sim-row">
+            <div class="sim-art"><img src="assets/cover-hidden-orchestra.jpg" alt=""></div>
+            <div class="sim-info">
+              <div class="sim-info-row">
+                <div class="sim-info-left">
+                  <div class="sim-track">Recomposed — Spring 1</div>
+                  <div class="sim-artist">Max Richter</div>
+                </div>
+                <span class="sim-score">0.89</span>
+              </div>
+            </div>
+            <button class="sim-add" aria-label="add to queue">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
+          </div>
+
+          <div class="sim-row">
+            <div class="sim-art"><img src="assets/cover-sade.jpg" alt=""></div>
+            <div class="sim-info">
+              <div class="sim-info-row">
+                <div class="sim-info-left">
+                  <div class="sim-track">Adagio for Strings</div>
+                  <div class="sim-artist">Kronos Quartet</div>
+                </div>
+                <span class="sim-score">0.86</span>
+              </div>
+            </div>
+            <button class="sim-add" aria-label="add to queue">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
+          </div>
+
+          <div class="sim-row">
+            <div class="sim-art"><img src="assets/cover-four-seasons.jpg" alt=""></div>
+            <div class="sim-info">
+              <div class="sim-info-row">
+                <div class="sim-info-left">
+                  <div class="sim-track">Violin Partita No. 2 — Chaconne</div>
+                  <div class="sim-artist">Hilary Hahn</div>
+                </div>
+                <span class="sim-score">0.84</span>
+              </div>
+            </div>
+            <button class="sim-add" aria-label="add to queue">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
+          </div>
+
+          <div class="sim-row">
+            <div class="sim-art"><img src="assets/cover-hidden-orchestra.jpg" alt=""></div>
+            <div class="sim-info">
+              <div class="sim-info-row">
+                <div class="sim-info-left">
+                  <div class="sim-track">Cello Suite No. 1 — Prélude</div>
+                  <div class="sim-artist">Yo-Yo Ma</div>
+                </div>
+                <span class="sim-score">0.81</span>
+              </div>
+            </div>
+            <button class="sim-add" aria-label="add to queue">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
+          </div>
+
+          <div class="sim-row">
+            <div class="sim-art"><img src="assets/cover-sade.jpg" alt=""></div>
+            <div class="sim-info">
+              <div class="sim-info-row">
+                <div class="sim-info-left">
+                  <div class="sim-track">Spiegel im Spiegel</div>
+                  <div class="sim-artist">Arvo Pärt</div>
+                </div>
+                <span class="sim-score">0.79</span>
+              </div>
+            </div>
+            <button class="sim-add" aria-label="add to queue">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
+          </div>
+
+          <div class="sim-row">
+            <div class="sim-art"><img src="assets/cover-four-seasons.jpg" alt=""></div>
+            <div class="sim-info">
+              <div class="sim-info-row">
+                <div class="sim-info-left">
+                  <div class="sim-track">“Autumn” — III. Allegro</div>
+                  <div class="sim-artist">Anne Akiko Meyers</div>
+                </div>
+                <span class="sim-score">0.77</span>
+              </div>
+            </div>
+            <button class="sim-add" aria-label="add to queue">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="main-spacer"></div>
+    </div>
+
+    <div class="safe-bottom-zone"><div class="home-ind"></div></div>
+  </div>
+</template>
+
+<div class="canvas">
+  <div class="canvas-head">
+    <h1>Now Playing · v4</h1>
+    <div class="meta">Full-bleed cover · no volume · identical fold/extended composition</div>
+  </div>
+
+  <div class="frames">
+
+    <div class="frame-col">
+      <div class="frame-title">
+        <b>Fold view</b>
+        360 × 760 · visible without scroll
+      </div>
+      <div class="phone fold" data-slot="fold">
+        <div class="bezel"></div>
+      </div>
+    </div>
+
+    <div class="frame-col">
+      <div class="frame-title">
+        <b>Extended view</b>
+        Identical composition — full scroll revealed
+      </div>
+      <div class="phone extended" data-slot="extended" style="position: relative;">
+        <div class="fold-marker"></div>
+        <div class="fold-label">Fold · 760px</div>
+        <div class="bezel"></div>
+      </div>
+    </div>
+
+    <div class="frame-col">
+      <div class="frame-title">
+        <b>Lyrics state</b>
+        Cover swapped for timed lyrics · everything else unchanged
+      </div>
+      <div class="phone fold" data-slot="lyrics">
+        <div class="bezel"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="notes">
+    <div class="note-card">
+      <h4>Full-bleed cover</h4>
+      <p>Edge-to-edge, top extends under chevron + menu. Gradient scrim (foundation 55% → 0 over 100px) keeps icons legible on any artwork.</p>
+    </div>
+    <div class="note-card">
+      <h4>No volume</h4>
+      <p>Principle #9: Sautium is a remote. Audio flows HQPlayer → DAC → amp. A slider here would be a UI lie. Fine attenuation lives on the Signal Chain screen.</p>
+    </div>
+    <div class="note-card">
+      <h4>Lyrics affordance</h4>
+      <p>Bottom-right icon on the cover — <span class="cool">musical-note glyph</span>, dark blurred chip for contrast on any artwork. Tap toggles cover ↔ lyrics; vertical swipe as alt. Untimed = auto-scroll by track-time ratio.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+  // Clone the shared screen template into every slot
+  const tpl = document.getElementById('screen-tpl');
+  document.querySelectorAll('[data-slot]').forEach(slot => {
+    slot.appendChild(tpl.content.cloneNode(true));
+  });
+
+  // In the lyrics slot, replace the cover-wrap (image) with a lyrics panel.
+  // Everything else (meta, progress, transport, similar) stays identical.
+  const lyricsSlot = document.querySelector('[data-slot="lyrics"]');
+  if (lyricsSlot) {
+    const coverWrap = lyricsSlot.querySelector('.cover-wrap');
+    const LINES = [
+      { t: 'past',   text: 'Silence before the kindling —' },
+      { t: 'past',   text: 'a room that listens first.' },
+      { t: 'past',   text: 'Pencil on snare, slow breath' },
+      { t: 'active', text: 'held between two unlit strings.' },
+      { t: '',       text: 'Somewhere, the wingbeats answer' },
+      { t: '',       text: 'a question nobody asked' },
+      { t: '',       text: 'and the room becomes a sky.' }
+    ];
+    const panel = document.createElement('div');
+    panel.className = 'lyrics-panel';
+    panel.innerHTML = `
+      <div class="cover-scrim"></div>
+      <span class="lyrics-sync" aria-label="timed lyrics available">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"/>
+          <path d="M12 7v5l3 2"/>
+        </svg>
+        Synced
+      </span>
+      <div class="lyrics-lines">
+        ${LINES.map(l => `<div class="lyric-line ${l.t}">${l.text}</div>`).join('')}
+      </div>
+      <button class="lyrics-btn" aria-label="hide lyrics">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+          <rect x="3" y="5" width="18" height="14" rx="2.5"/>
+          <path d="M6 10h8M6 14h12M16 10h2"/>
+        </svg>
+      </button>
+    `;
+    coverWrap.replaceWith(panel);
+  }
+</script>
+
+</body>
+</html>

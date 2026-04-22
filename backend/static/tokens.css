@@ -1,0 +1,137 @@
+/* =====================================================================
+ * Sautium Design System v1 — Canonical tokens.
+ *
+ * Source of truth: docs/design/POSITIONING.md §"Colour palette (v1)"
+ * Reference implementation: docs/design/reference/now-playing-bundle/
+ *     project/Design System v1.html
+ *
+ * Palette is LOCKED — do not add alternative colour tokens.
+ * Additions to the scale (space, radius, elevation) are permitted
+ * if justified by a screen need; extensions live below the locked section.
+ *
+ * Font loading: pages should load Inter Tight + JetBrains Mono via <link>
+ * tags in <head> (see Design System v1.html for the preconnect pattern).
+ * We do not @import here to avoid a render-blocking CSS dependency chain.
+ * ===================================================================== */
+
+:root {
+  /* --- Color · foundation ----------------------------------------- */
+  --color-foundation:   #1B1714;
+  --color-surface:      #2A2420;
+  --color-surface-hi:   #342D28;            /* hover / pressed raise    */
+  --color-surface-lo:   #221D1A;            /* recessed inputs          */
+  --color-divider:      #3A322C;            /* 1px hairlines            */
+
+  /* --- Color · text ----------------------------------------------- */
+  --color-text:         #EDE2D4;
+  --color-text-muted:   #A69B8E;
+  --color-text-dim:     #6E665C;            /* disabled / tertiary      */
+
+  /* --- Color · accents (LOCKED per POSITIONING.md) ---------------- */
+  --color-amber:        #E8B06F;            /* brand / CTA / emotion    */
+  --color-amber-hover:  #EFBE83;
+  --color-amber-press:  #D29A5B;
+  --color-amber-weak:   rgba(232, 176, 111, 0.14);
+
+  --color-blue:         #4A7FA7;            /* technical data ONLY      */
+  --color-blue-hover:   #5D91B8;
+  --color-blue-weak:    rgba(74, 127, 167, 0.14);
+
+  /* --- Color · semantic ------------------------------------------- */
+  --color-positive:     #8DA77B;            /* sage moss — success      */
+  --color-negative:     #C1564E;            /* terracotta — error       */
+
+  /* --- Color · quality badge -------------------------------------- */
+  --color-hires:        #D4AF5A;            /* Hi-Res badge gold        */
+
+  /* --- Type family ------------------------------------------------ */
+  --font-sans: "Inter Tight", ui-sans-serif, system-ui, -apple-system,
+               "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo,
+               Consolas, monospace;
+
+  /* --- Type scale (5 roles, max) ---------------------------------- */
+  --text-display: 32px;                      /* album title / screen hero */
+  --text-heading: 20px;                      /* section titles            */
+  --text-body:    15px;                      /* UI prose, track titles    */
+  --text-label:   13px;                      /* chips, button labels      */
+  --text-caption: 11px;                      /* timestamps, unit suffixes */
+
+  /* --- Line height ------------------------------------------------ */
+  --lh-tight:  1.15;                         /* display                  */
+  --lh-snug:   1.25;                         /* heading                  */
+  --lh-normal: 1.5;                          /* body / prose             */
+  --lh-mono:   1.4;                          /* numeric readouts         */
+
+  /* --- Tracking --------------------------------------------------- */
+  --tracking-display: -0.02em;
+  --tracking-heading: -0.01em;
+  --tracking-label:    0.02em;
+  --tracking-caption:  0.04em;
+
+  /* --- Spacing · 8px grid (8 steps) ------------------------------- */
+  --space-1:  4px;                           /* icon ↔ label            */
+  --space-2:  8px;                           /* tight stack             */
+  --space-3: 12px;                           /* list item rhythm        */
+  --space-4: 16px;                           /* default card padding    */
+  --space-5: 24px;                           /* section separator       */
+  --space-6: 32px;                           /* major block spacing     */
+  --space-7: 48px;                           /* screen hero margins     */
+  --space-8: 64px;                           /* page gutters / breaks   */
+
+  /* --- Radii ------------------------------------------------------ */
+  --radius-none: 0;                          /* album covers            */
+  --radius-sm:   4px;                        /* chips, pills            */
+  --radius-md:   8px;                        /* cards, inputs, sheets   */
+  --radius-lg:  14px;                        /* modals, full-screen     */
+
+  /* --- Elevation · warm shadows (never cold gray) ----------------- */
+  /* Base is tinted with #0E0A08 — deeper coffee, not neutral black.   */
+  --shadow-0: none;
+  --shadow-1:
+    0 1px 0 0 rgba(14, 10, 8, 0.4),
+    0 2px 6px -1px rgba(14, 10, 8, 0.45);
+  --shadow-2:
+    0 2px 1px 0 rgba(14, 10, 8, 0.35),
+    0 8px 20px -4px rgba(14, 10, 8, 0.55),
+    0 1px 0 0 rgba(237, 226, 212, 0.03) inset;    /* warm rim light    */
+  --shadow-3:
+    0 4px 2px 0 rgba(14, 10, 8, 0.3),
+    0 20px 48px -12px rgba(14, 10, 8, 0.7),
+    0 1px 0 0 rgba(237, 226, 212, 0.04) inset;
+
+  /* Amber ambient glow — use ONLY for live / active-playback states. */
+  --glow-amber:
+    0 0 0 1px rgba(232, 176, 111, 0.25),
+    0 0 24px -4px rgba(232, 176, 111, 0.25);
+
+  /* --- Motion ----------------------------------------------------- */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 320ms;
+
+  /* --- Safe-area hints (mobile; override per screen if needed) ---- */
+  --safe-top:    44px;
+  --safe-bottom: 34px;
+}
+
+/* ---------------------------------------------------------------------
+ * Minimal base reset — optional.
+ * Pages using these tokens may load their own reset; if you want a
+ * baseline, apply .sautium-base on <body>.
+ * ------------------------------------------------------------------- */
+.sautium-base,
+.sautium-base * { box-sizing: border-box; }
+.sautium-base {
+  margin: 0;
+  padding: 0;
+  background: var(--color-foundation);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: var(--lh-normal);
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}

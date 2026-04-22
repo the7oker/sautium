@@ -1,0 +1,1173 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sautium · Design System v1</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* ============================================================
+     SAUTIUM · DESIGN SYSTEM v1 · TOKENS
+     Palette is LOCKED (POSITIONING.md · Colour palette v1).
+     ============================================================ */
+  :root {
+    /* --- Color · foundation ------------------------------- */
+    --color-foundation:       #1B1714;
+    --color-surface:          #2A2420;
+    --color-surface-hi:       #342D28;   /* derived: hover / pressed raise */
+    --color-surface-lo:       #221D1A;   /* derived: recessed inputs       */
+    --color-divider:          #3A322C;   /* derived: 1px hairlines         */
+
+    /* --- Color · text ------------------------------------- */
+    --color-text:             #EDE2D4;
+    --color-text-muted:       #A69B8E;
+    --color-text-dim:         #6E665C;   /* derived: disabled / tertiary   */
+
+    /* --- Color · accents (locked) ------------------------- */
+    --color-amber:            #E8B06F;   /* warm — brand / CTA / emotion   */
+    --color-amber-hover:      #EFBE83;
+    --color-amber-press:      #D29A5B;
+    --color-amber-weak:       rgba(232, 176, 111, 0.14);
+
+    --color-blue:             #4A7FA7;   /* cool — technical data only     */
+    --color-blue-hover:       #5D91B8;
+    --color-blue-weak:        rgba(74, 127, 167, 0.14);
+
+    /* --- Color · semantic -------------------------------- */
+    --color-positive:         #8DA77B;
+    --color-negative:         #C1564E;
+
+    /* --- Type family ------------------------------------- */
+    --font-sans: "Inter Tight", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+    /* --- Type scale (5 roles) ---------------------------- */
+    --text-display:  32px;   /* album title / screen hero                    */
+    --text-heading:  20px;   /* section titles, dialog headers               */
+    --text-body:     15px;   /* UI prose, track titles, primary copy         */
+    --text-label:    13px;   /* chips, button labels, secondary metadata     */
+    --text-caption:  11px;   /* timestamps, hints, unit suffixes             */
+
+    /* --- Line height ------------------------------------- */
+    --lh-tight:   1.15;      /* display                                      */
+    --lh-snug:    1.25;      /* heading                                      */
+    --lh-normal:  1.5;       /* body / prose                                 */
+    --lh-mono:    1.4;       /* numeric readouts                             */
+
+    /* --- Tracking ---------------------------------------- */
+    --tracking-display: -0.02em;
+    --tracking-heading: -0.01em;
+    --tracking-label:    0.02em;
+    --tracking-caption:  0.04em;
+
+    /* --- Spacing · 8px grid (8 steps) -------------------- */
+    --space-1:   4px;        /* icon ↔ label, chip padding-y                 */
+    --space-2:   8px;        /* tight stack, inline gaps                     */
+    --space-3:  12px;        /* list item vertical rhythm                    */
+    --space-4:  16px;        /* default card padding                         */
+    --space-5:  24px;        /* section separator, comfortable card padding  */
+    --space-6:  32px;        /* major block spacing                          */
+    --space-7:  48px;        /* screen hero margins                          */
+    --space-8:  64px;        /* page gutters (desktop), screen-level breaks  */
+
+    /* --- Radii ------------------------------------------- */
+    --radius-none:  0px;     /* album covers — never rounded                 */
+    --radius-sm:    4px;     /* chips, pills, small buttons                  */
+    --radius-md:    8px;     /* cards, inputs, sheets                        */
+    --radius-lg:   14px;     /* modals, bottom sheets, full-screen panels    */
+
+    /* --- Elevation · warm shadows (never cold gray) ----- */
+    /* Base is tinted with #0E0A08 — a deeper coffee, not neutral black.     */
+    --shadow-0: none;
+    --shadow-1:
+      0 1px 0 0 rgba(14, 10, 8, 0.4),
+      0 2px 6px -1px rgba(14, 10, 8, 0.45);
+    --shadow-2:
+      0 2px 1px 0 rgba(14, 10, 8, 0.35),
+      0 8px 20px -4px rgba(14, 10, 8, 0.55),
+      0 1px 0 0 rgba(237, 226, 212, 0.03) inset;    /* warm rim light        */
+    --shadow-3:
+      0 4px 2px 0 rgba(14, 10, 8, 0.3),
+      0 20px 48px -12px rgba(14, 10, 8, 0.7),
+      0 1px 0 0 rgba(237, 226, 212, 0.04) inset;
+
+    /* Optional: amber ambient glow — use ONLY for live/active states.       */
+    --glow-amber: 0 0 0 1px rgba(232, 176, 111, 0.25),
+                  0 0 24px -4px rgba(232, 176, 111, 0.25);
+
+    /* --- Motion ------------------------------------------ */
+    --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+    --dur-fast:   120ms;
+    --dur-base:   200ms;
+    --dur-slow:   320ms;
+  }
+
+  /* ============================================================
+     PAGE FRAME
+     ============================================================ */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--color-foundation);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    font-size: var(--text-body);
+    line-height: var(--lh-normal);
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  .page {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: var(--space-8) var(--space-5) var(--space-8);
+  }
+
+  /* ============================================================
+     HEADER
+     ============================================================ */
+  .masthead {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: var(--space-5);
+    align-items: end;
+    padding-bottom: var(--space-6);
+    border-bottom: 1px solid var(--color-divider);
+    margin-bottom: var(--space-7);
+  }
+  .wordmark {
+    font-family: var(--font-sans);
+    font-weight: 600;
+    font-size: 26px;
+    letter-spacing: -0.02em;
+    color: var(--color-text);
+  }
+  .wordmark .dot {
+    color: var(--color-amber);
+  }
+  .mastmeta {
+    font-family: var(--font-mono);
+    font-size: var(--text-caption);
+    color: var(--color-text-muted);
+    text-align: right;
+    line-height: var(--lh-mono);
+    letter-spacing: var(--tracking-caption);
+    text-transform: uppercase;
+  }
+  .masttitle {
+    font-family: var(--font-mono);
+    font-size: var(--text-caption);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-caption);
+  }
+
+  /* ============================================================
+     SECTION SCAFFOLD
+     ============================================================ */
+  section { margin-bottom: var(--space-8); }
+  .sec-head {
+    display: grid;
+    grid-template-columns: 48px 1fr auto;
+    gap: var(--space-4);
+    align-items: baseline;
+    margin-bottom: var(--space-5);
+  }
+  .sec-num {
+    font-family: var(--font-mono);
+    font-size: var(--text-label);
+    color: var(--color-blue);                 /* cool = indexical metadata */
+    letter-spacing: var(--tracking-label);
+  }
+  .sec-title {
+    font-size: var(--text-heading);
+    font-weight: 600;
+    letter-spacing: var(--tracking-heading);
+    margin: 0;
+  }
+  .sec-sub {
+    font-size: var(--text-label);
+    color: var(--color-text-muted);
+  }
+  .sec-rule {
+    font-family: var(--font-mono);
+    font-size: var(--text-caption);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-caption);
+  }
+  .sec-rule em {
+    font-style: normal;
+    color: var(--color-amber);
+  }
+
+  /* ============================================================
+     SECTION 1 · PALETTE
+     ============================================================ */
+  .palette {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--space-3);
+  }
+  .swatch {
+    background: var(--color-surface);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    border: 1px solid var(--color-divider);
+  }
+  .swatch-chip {
+    aspect-ratio: 16 / 10;
+    border-bottom: 1px solid var(--color-divider);
+  }
+  .swatch-body { padding: var(--space-3) var(--space-4) var(--space-4); }
+  .swatch-name {
+    font-size: var(--text-body);
+    font-weight: 500;
+    margin-bottom: 2px;
+  }
+  .swatch-role {
+    font-size: var(--text-caption);
+    color: var(--color-text-muted);
+    letter-spacing: var(--tracking-caption);
+    text-transform: uppercase;
+    margin-bottom: var(--space-2);
+  }
+  .swatch-hex {
+    font-family: var(--font-mono);
+    font-size: var(--text-label);
+    color: var(--color-text);
+    letter-spacing: 0.02em;
+  }
+  .swatch-token {
+    font-family: var(--font-mono);
+    font-size: var(--text-caption);
+    color: var(--color-text-muted);
+    margin-top: 2px;
+  }
+  .swatch[data-tier="accent"] { outline: 1px solid var(--color-amber-weak); }
+  .swatch[data-tier="tech"]   { outline: 1px solid var(--color-blue-weak); }
+
+  /* Palette discipline callout */
+  .discipline {
+    margin-top: var(--space-5);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-3);
+    font-size: var(--text-label);
+  }
+  .discipline-card {
+    background: var(--color-surface);
+    border-radius: var(--radius-md);
+    padding: var(--space-4) var(--space-4) var(--space-4) var(--space-5);
+    border-left: 2px solid var(--color-amber);
+  }
+  .discipline-card.cool {
+    border-left-color: var(--color-blue);
+  }
+  .discipline-card h4 {
+    margin: 0 0 var(--space-1);
+    font-size: var(--text-label);
+    font-weight: 600;
+    letter-spacing: var(--tracking-label);
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+  .discipline-card p { margin: 0; color: var(--color-text); }
+
+  /* 90 / 10 ratio bar */
+  .ratio {
+    margin-top: var(--space-4);
+    display: flex;
+    height: 10px;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+  .ratio-warm { flex: 90; background: var(--color-amber); }
+  .ratio-cool { flex: 10; background: var(--color-blue); }
+  .ratio-legend {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: var(--text-caption);
+    color: var(--color-text-muted);
+    margin-top: 6px;
+    letter-spacing: var(--tracking-caption);
+    text-transform: uppercase;
+  }
+
+  /* ============================================================
+     SECTION 2 · TYPOGRAPHY
+     ============================================================ */
+  .type-spec {
+    background: var(--color-surface);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+  .type-row {
+    display: grid;
+    grid-template-columns: 140px 1fr 220px;
+    gap: var(--space-5);
+    padding: var(--space-5);
+    align-items: baseline;
+    border-bottom: 1px solid var(--color-divider);
+  }
+  .type-row:last-child { border-bottom: 0; }
+  .type-label {
+    font-family: var(--font-mono);
+    font-size: var(--text-caption);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-caption);
+  }
+  .type-label .role {
+    display: block;
+    color: var(--color-text);
+    font-size: var(--text-label);
+    letter-spacing: 0;
+    text-transform: none;
+    margin-top: 2px;
+  }
+  .type-sample { color: var(--color-text); }
+  .type-sample.display  { font-size: var(--text-display);  line-height: var(--lh-tight); letter-spacing: var(--tracking-display); font-weight: 600; }
+  .type-sample.heading  { font-size: var(--text-heading);  line-height: var(--lh-snug);  letter-spacing: var(--tracking-heading); font-weight: 600; }
+  .type-sample.body     { font-size: var(--text-body);     line-height: var(--lh-normal); }
+  .type-sample.label    { font-size: var(--text-label);    line-height: var(--lh-normal); letter-spacing: var(--tracking-label); font-weight: 500; }
+  .type-sample.caption  { font-size: var(--text-caption);  line-height: var(--lh-normal); letter-spacing: var(--tracking-caption); text-transform: uppercase; color: var(--color-text-muted); }
+  .type-meta {
+    font-family: var(--font-mono);
+    font-size: var(--text-caption);
+    color: var(--color-text-muted);
+    line-height: var(--lh-mono);
+  }
+  .type-meta b { color: var(--color-text); font-weight: 500; }
+
+  /* Families block */
+  .families {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-3);
+    margin-bottom: var(--space-5);
+  }
+  .family-card {
+    background: var(--color-surface);
+    border-radius: var(--radius-md);
+    padding: var(--space-5);
+  }
+  .family-role {
+    font-family: var(--font-mono);
+    font-size: var(--text-caption);
+    color: var(--color-text-muted);
+    letter-spacing: var(--tracking-caption);
+    text-transform: uppercase;
+    margin-bottom: var(--space-2);
+  }
+  .family-name {
+    font-family: var(--font-sans);
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin: 0;
+  }
+  .family-card.mono .family-name { font-family: var(--font-mono); font-weight: 500; letter-spacing: 0; }
+  .family-specimen {
+    margin-top: var(--space-4);
+    font-size: 15px;
+    color: var(--color-text-muted);
+    line-height: var(--lh-normal);
+  }
+  .family-card.mono .family-specimen {
+    font-family: var(--font-mono);
+    color: var(--color-text);
+    font-size: 14px;
+    line-height: var(--lh-mono);
+  }
+  .family-specimen .tech { color: var(--color-blue); }
+
+  /* Numeric stress-test */
+  .numeric-strip {
+    margin-top: var(--space-4);
+    background: var(--color-surface-lo);
+    border-radius: var(--radius-sm);
+    padding: var(--space-3) var(--space-4);
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-5);
+    font-family: var(--font-mono);
+    font-size: var(--text-label);
+    color: var(--color-blue);
+    letter-spacing: 0.02em;
+  }
+  .numeric-strip .k { color: var(--color-text-muted); margin-right: 6px; text-transform: uppercase; font-size: var(--text-caption); letter-spacing: var(--tracking-caption); }
+
+  /* ============================================================
+     SECTION 3 · SPACING
+     ============================================================ */
+  .spacing-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-5);
+  }
+  .spacing-rows {
+    background: var(--color-surface);
+    border-radius: var(--radius-md);
+    padding: var(--space-5);
+  }
+  .spacing-row {
+    display: grid;
+    grid-template-columns: 80px 1fr 80px;
+    gap: var(--space-4);
+    align-items: center;
+    padding: var(--space-2) 0;
+  }
+  .spacing-row + .spacing-row { border-top: 1px dashed var(--color-divider); }
+  .spacing-token {
+    font-family: var(--font-mono);
+    font-size: var(--text-label);
+    color: var(--color-text-muted);
+  }
+  .spacing-bar {
+    background: var(--color-amber);
+    height: 6px;
+    border-radius: 2px;
+  }
+  .spacing-px {
+    font-family: var(--font-mono);
+    font-size: var(--text-label);
+    color: var(--color-blue);
+    text-align: right;
+  }
+  .spacing-use {
+    background: var(--color-surface);
+    border-radius: var(--radius-md);
+    padding: var(--space-5);
+  }
+  .spacing-use h4 {
+    font-family: var(--font-mono);
+    font-size: var(--text-caption);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-caption);
+    margin: 0 0 var(--space-3);
+  }
+  .spacing-use ul {
+    margin: 0; padding: 0; list-style: none;
+    font-size: var(--text-label);
+    color: var(--color-text);
+  }
+  .spacing-use li {
+    padding: var(--space-2) 0;
+    border-bottom: 1px solid var(--color-divider);
+    display: grid;
+    grid-template-columns: 72px 1fr;
+    gap: var(--space-3);
+  }
+  .spacing-use li:last-child { border-bottom: 0; }
+  .spacing-use li code {
+    font-family: var(--font-mono);
+    font-size: var(--text-label);
+    color: var(--color-amber);
+  }
+
+  /* ============================================================
+     SECTION 4 · RADII
+     ============================================================ */
+  .radii {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--space-3);
+  }
+  .radius-card {
+    background: var(--color-surface);
+    padding: var(--space-5);
+    text-align: center;
+  }
+  .radius-card.none { border-radius: var(--radius-none); }
+  .radius-card.sm   { border-radius: var(--radius-sm); }
+  .radius-card.md   { border-radius: var(--radius-md); }
+  .radius-card.lg   { border-radius: var(--radius-lg); }
+
+  .radius-shape {
+    aspect-ratio: 1;
+    width: 64%;
+    margin: 0 auto var(--space-3);
+    background:
+      repeating-linear-gradient(
+        135deg,
+        var(--color-amber) 0 2px,
+        transparent 2px 10px
+      ),
+      var(--color-surface-hi);
+    outline: 1px solid var(--color-divider);
+  }
+  .radius-card.none .radius-shape { border-radius: 0; }
+  .radius-card.sm   .radius-shape { border-radius: var(--radius-sm); }
+  .radius-card.md   .radius-shape { border-radius: var(--radius-md); }
+  .radius-card.lg   .radius-shape { border-radius: var(--radius-lg); }
+
+  .radius-name { font-size: var(--text-body); font-weight: 500; margin-bottom: 2px; }
+  .radius-px   { font-family: var(--font-mono); font-size: var(--text-label); color: var(--color-blue); margin-bottom: var(--space-2); }
+  .radius-use  { font-size: var(--text-caption); color: var(--color-text-muted); line-height: var(--lh-normal); }
+
+  /* ============================================================
+     SECTION 5 · ELEVATION
+     ============================================================ */
+  .elev-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-4);
+  }
+  .elev-stage {
+    background: var(--color-foundation);
+    border-radius: var(--radius-md);
+    padding: var(--space-7) var(--space-5) var(--space-5);
+    border: 1px solid var(--color-divider);
+  }
+  .elev-surface {
+    background: var(--color-surface);
+    border-radius: var(--radius-md);
+    padding: var(--space-5);
+    margin-bottom: var(--space-4);
+  }
+  .elev-stage[data-level="0"] .elev-surface { box-shadow: var(--shadow-0); }
+  .elev-stage[data-level="1"] .elev-surface { box-shadow: var(--shadow-1); }
+  .elev-stage[data-level="2"] .elev-surface { box-shadow: var(--shadow-2); }
+  .elev-stage[data-level="3"] .elev-surface { box-shadow: var(--shadow-3); }
+
+  .elev-label {
+    font-family: var(--font-mono);
+    font-size: var(--text-caption);
+    color: var(--color-text-muted);
+    letter-spacing: var(--tracking-caption);
+    text-transform: uppercase;
+    margin-bottom: var(--space-1);
+  }
+  .elev-name { font-size: var(--text-body); font-weight: 500; }
+  .elev-desc { font-size: var(--text-caption); color: var(--color-text-muted); margin-top: var(--space-1); line-height: var(--lh-normal); }
+  .elev-inner {
+    margin-top: var(--space-3);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-text-dim);
+    line-height: var(--lh-mono);
+    word-break: break-all;
+  }
+
+  /* Amber glow card */
+  .glow-note {
+    margin-top: var(--space-4);
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: var(--space-4);
+    background: var(--color-surface);
+    border-radius: var(--radius-md);
+    padding: var(--space-5);
+    align-items: center;
+  }
+  .glow-sample {
+    aspect-ratio: 1;
+    background: var(--color-surface-hi);
+    border-radius: var(--radius-md);
+    box-shadow: var(--glow-amber);
+    display: grid; place-items: center;
+    color: var(--color-amber);
+    font-family: var(--font-mono);
+    font-size: var(--text-caption);
+    letter-spacing: var(--tracking-caption);
+    text-transform: uppercase;
+  }
+  .glow-note h4 {
+    margin: 0 0 var(--space-1);
+    font-size: var(--text-label);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-label);
+    color: var(--color-text-muted);
+  }
+  .glow-note p { margin: 0; font-size: var(--text-label); }
+
+  /* ============================================================
+     EXPORT BLOCK (copy-paste friendly)
+     ============================================================ */
+  .export-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-4);
+  }
+  .code-card {
+    background: var(--color-surface-lo);
+    border: 1px solid var(--color-divider);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+  .code-head {
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--color-divider);
+    display: flex; justify-content: space-between; align-items: center;
+    font-family: var(--font-mono);
+    font-size: var(--text-caption);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-caption);
+    color: var(--color-text-muted);
+  }
+  .code-head .lang { color: var(--color-amber); }
+  pre.code {
+    margin: 0;
+    padding: var(--space-4);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--color-text);
+    white-space: pre;
+    overflow-x: auto;
+    max-height: 480px;
+  }
+  pre.code .k  { color: var(--color-blue); }
+  pre.code .v  { color: var(--color-amber); }
+  pre.code .c  { color: var(--color-text-dim); }
+
+  /* Footer */
+  footer {
+    margin-top: var(--space-8);
+    padding-top: var(--space-5);
+    border-top: 1px solid var(--color-divider);
+    display: flex; justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: var(--text-caption);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-caption);
+  }
+
+  @media (max-width: 880px) {
+    .palette, .radii { grid-template-columns: repeat(2, 1fr); }
+    .elev-grid { grid-template-columns: 1fr; }
+    .type-row { grid-template-columns: 1fr; gap: var(--space-2); }
+    .spacing-grid, .families, .export-grid, .discipline { grid-template-columns: 1fr; }
+    .sec-head { grid-template-columns: 40px 1fr; }
+    .sec-head .sec-rule { grid-column: 1 / -1; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ============================================================
+       MASTHEAD
+       ============================================================ -->
+  <div class="masthead">
+    <div class="wordmark">Sautium<span class="dot">.</span></div>
+    <div class="masttitle">Design System · v1 · Tokens</div>
+    <div class="mastmeta">
+      2026-04-19<br>
+      SOURCE · POSITIONING.md
+    </div>
+  </div>
+
+  <!-- ============================================================
+       01 · PALETTE
+       ============================================================ -->
+  <section id="palette">
+    <div class="sec-head">
+      <div class="sec-num">01</div>
+      <div>
+        <h2 class="sec-title">Colour</h2>
+        <div class="sec-sub">Locked. Values copied verbatim from POSITIONING.md.</div>
+      </div>
+      <div class="sec-rule">Discipline · <em>90% warm / 10% cool</em></div>
+    </div>
+
+    <div class="palette">
+      <!-- Foundation -->
+      <div class="swatch">
+        <div class="swatch-chip" style="background:#1B1714"></div>
+        <div class="swatch-body">
+          <div class="swatch-name">Foundation</div>
+          <div class="swatch-role">Page bg · warm undertone</div>
+          <div class="swatch-hex">#1B1714</div>
+          <div class="swatch-token">--color-foundation</div>
+        </div>
+      </div>
+      <div class="swatch">
+        <div class="swatch-chip" style="background:#2A2420"></div>
+        <div class="swatch-body">
+          <div class="swatch-name">Surface</div>
+          <div class="swatch-role">Cards · modals · raised</div>
+          <div class="swatch-hex">#2A2420</div>
+          <div class="swatch-token">--color-surface</div>
+        </div>
+      </div>
+      <div class="swatch">
+        <div class="swatch-chip" style="background:#EDE2D4"></div>
+        <div class="swatch-body">
+          <div class="swatch-name">Text</div>
+          <div class="swatch-role">Primary · parchment</div>
+          <div class="swatch-hex">#EDE2D4</div>
+          <div class="swatch-token">--color-text</div>
+        </div>
+      </div>
+      <div class="swatch">
+        <div class="swatch-chip" style="background:#A69B8E"></div>
+        <div class="swatch-body">
+          <div class="swatch-name">Text muted</div>
+          <div class="swatch-role">Metadata · captions</div>
+          <div class="swatch-hex">#A69B8E</div>
+          <div class="swatch-token">--color-text-muted</div>
+        </div>
+      </div>
+
+      <!-- Accent amber -->
+      <div class="swatch" data-tier="accent">
+        <div class="swatch-chip" style="background:#E8B06F"></div>
+        <div class="swatch-body">
+          <div class="swatch-name">Accent · amber</div>
+          <div class="swatch-role">Brand · CTA · emotion</div>
+          <div class="swatch-hex">#E8B06F</div>
+          <div class="swatch-token">--color-amber</div>
+        </div>
+      </div>
+
+      <!-- Accent blue -->
+      <div class="swatch" data-tier="tech">
+        <div class="swatch-chip" style="background:#4A7FA7"></div>
+        <div class="swatch-body">
+          <div class="swatch-name">Accent · cool blue</div>
+          <div class="swatch-role">Technical readouts only</div>
+          <div class="swatch-hex">#4A7FA7</div>
+          <div class="swatch-token">--color-blue</div>
+        </div>
+      </div>
+
+      <!-- Positive -->
+      <div class="swatch">
+        <div class="swatch-chip" style="background:#8DA77B"></div>
+        <div class="swatch-body">
+          <div class="swatch-name">Positive</div>
+          <div class="swatch-role">New · success · sage moss</div>
+          <div class="swatch-hex">#8DA77B</div>
+          <div class="swatch-token">--color-positive</div>
+        </div>
+      </div>
+
+      <!-- Negative -->
+      <div class="swatch">
+        <div class="swatch-chip" style="background:#C1564E"></div>
+        <div class="swatch-body">
+          <div class="swatch-name">Negative</div>
+          <div class="swatch-role">Error · destructive · terracotta</div>
+          <div class="swatch-hex">#C1564E</div>
+          <div class="swatch-token">--color-negative</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="discipline">
+      <div class="discipline-card">
+        <h4>Warm rule</h4>
+        <p>Amber carries brand, CTAs, active track, nav highlight, like/favourite states. It is the evening lamp.</p>
+      </div>
+      <div class="discipline-card cool">
+        <h4>Cool rule</h4>
+        <p>Blue appears <b>only</b> on data: BPM, sample rate, bit depth, DSP chain, focus rings, waveform. Never brand, never CTA, never decoration.</p>
+      </div>
+    </div>
+
+    <div style="margin-top: var(--space-4);">
+      <div class="ratio">
+        <div class="ratio-warm"></div>
+        <div class="ratio-cool"></div>
+      </div>
+      <div class="ratio-legend">
+        <span>Warm · ~90%</span>
+        <span>Cool · ~10%</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       02 · TYPOGRAPHY
+       ============================================================ -->
+  <section id="type">
+    <div class="sec-head">
+      <div class="sec-num">02</div>
+      <div>
+        <h2 class="sec-title">Typography</h2>
+        <div class="sec-sub">Bi-family system. Sans for prose, mono for numbers. 5 roles, no more.</div>
+      </div>
+      <div class="sec-rule">Open-source · Google Fonts</div>
+    </div>
+
+    <div class="families">
+      <div class="family-card">
+        <div class="family-role">UI · Sans</div>
+        <h3 class="family-name">Inter Tight</h3>
+        <div class="family-specimen">
+          The quiet professional instrument. Warm humanist sans, tuned for UI prose at small sizes. Used for track titles, artist names, body copy, buttons, headings.
+        </div>
+      </div>
+      <div class="family-card mono">
+        <div class="family-role">Numeric · Mono</div>
+        <h3 class="family-name">JetBrains Mono</h3>
+        <div class="family-specimen">
+          <span class="tech">128.00 BPM · 96 kHz / 24-bit · 4:37 · FLAC · A♭ min</span><br>
+          Clear zeros, distinct 1/l/I, calibrated tick-mark feel — reads like a VU meter, not a code editor.
+        </div>
+        <div class="numeric-strip">
+          <span><span class="k">bpm</span>128.00</span>
+          <span><span class="k">sr</span>96.0 kHz</span>
+          <span><span class="k">bits</span>24</span>
+          <span><span class="k">fmt</span>FLAC</span>
+          <span><span class="k">key</span>A♭ min</span>
+          <span><span class="k">dur</span>4:37.213</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="type-spec">
+      <div class="type-row">
+        <div class="type-label">Display <span class="role">Album title · hero</span></div>
+        <div class="type-sample display">In the Aeroplane Over the Sea</div>
+        <div class="type-meta"><b>Inter Tight</b> 600<br>32 / 1.15 · -0.02em</div>
+      </div>
+      <div class="type-row">
+        <div class="type-label">Heading <span class="role">Section · dialog</span></div>
+        <div class="type-sample heading">Recently played · 4 albums</div>
+        <div class="type-meta"><b>Inter Tight</b> 600<br>20 / 1.25 · -0.01em</div>
+      </div>
+      <div class="type-row">
+        <div class="type-label">Body <span class="role">Prose · track titles</span></div>
+        <div class="type-sample body">Warm dark foundation, album art first, metadata precise — the stillness of an evening listening session.</div>
+        <div class="type-meta"><b>Inter Tight</b> 400 / 500<br>15 / 1.5 · 0</div>
+      </div>
+      <div class="type-row">
+        <div class="type-label">Label <span class="role">Chip · button · nav</span></div>
+        <div class="type-sample label">LOSSLESS · FLAC · INSTRUMENTAL</div>
+        <div class="type-meta"><b>Inter Tight</b> 500<br>13 / 1.5 · +0.02em</div>
+      </div>
+      <div class="type-row">
+        <div class="type-label">Caption <span class="role">Timestamp · hint · unit</span></div>
+        <div class="type-sample caption">Updated 12 min ago · 5,284 tracks indexed</div>
+        <div class="type-meta"><b>Inter Tight</b> 500<br>11 / 1.5 · +0.04em · uppercase</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       03 · SPACING
+       ============================================================ -->
+  <section id="spacing">
+    <div class="sec-head">
+      <div class="sec-num">03</div>
+      <div>
+        <h2 class="sec-title">Spacing</h2>
+        <div class="sec-sub">8px grid · 8 steps · breathing, not packed.</div>
+      </div>
+      <div class="sec-rule">Base · <em>8px</em></div>
+    </div>
+
+    <div class="spacing-grid">
+      <div class="spacing-rows">
+        <div class="spacing-row">
+          <span class="spacing-token">--space-1</span>
+          <div class="spacing-bar" style="width: 4px;"></div>
+          <span class="spacing-px">4 px</span>
+        </div>
+        <div class="spacing-row">
+          <span class="spacing-token">--space-2</span>
+          <div class="spacing-bar" style="width: 8px;"></div>
+          <span class="spacing-px">8 px</span>
+        </div>
+        <div class="spacing-row">
+          <span class="spacing-token">--space-3</span>
+          <div class="spacing-bar" style="width: 12px;"></div>
+          <span class="spacing-px">12 px</span>
+        </div>
+        <div class="spacing-row">
+          <span class="spacing-token">--space-4</span>
+          <div class="spacing-bar" style="width: 16px;"></div>
+          <span class="spacing-px">16 px</span>
+        </div>
+        <div class="spacing-row">
+          <span class="spacing-token">--space-5</span>
+          <div class="spacing-bar" style="width: 24px;"></div>
+          <span class="spacing-px">24 px</span>
+        </div>
+        <div class="spacing-row">
+          <span class="spacing-token">--space-6</span>
+          <div class="spacing-bar" style="width: 32px;"></div>
+          <span class="spacing-px">32 px</span>
+        </div>
+        <div class="spacing-row">
+          <span class="spacing-token">--space-7</span>
+          <div class="spacing-bar" style="width: 48px;"></div>
+          <span class="spacing-px">48 px</span>
+        </div>
+        <div class="spacing-row">
+          <span class="spacing-token">--space-8</span>
+          <div class="spacing-bar" style="width: 64px;"></div>
+          <span class="spacing-px">64 px</span>
+        </div>
+      </div>
+
+      <div class="spacing-use">
+        <h4>Role map</h4>
+        <ul>
+          <li><code>space-1</code><span>Icon ↔ label · chip padding-y · hairline insets</span></li>
+          <li><code>space-2</code><span>Tight vertical stacks · inline metadata gaps</span></li>
+          <li><code>space-3</code><span>Track-row vertical rhythm · list padding</span></li>
+          <li><code>space-4</code><span>Default card padding · form field spacing</span></li>
+          <li><code>space-5</code><span>Section separators · comfortable card padding</span></li>
+          <li><code>space-6</code><span>Major block spacing within a screen</span></li>
+          <li><code>space-7</code><span>Screen hero margins · bottom-sheet top inset</span></li>
+          <li><code>space-8</code><span>Desktop gutters · screen-level breaks</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       04 · RADII
+       ============================================================ -->
+  <section id="radii">
+    <div class="sec-head">
+      <div class="sec-num">04</div>
+      <div>
+        <h2 class="sec-title">Radii</h2>
+        <div class="sec-sub">Four values. Respectful, not bubbly.</div>
+      </div>
+      <div class="sec-rule">Album covers · <em>never rounded</em></div>
+    </div>
+
+    <div class="radii">
+      <div class="radius-card none">
+        <div class="radius-shape"></div>
+        <div class="radius-name">None</div>
+        <div class="radius-px">0 px</div>
+        <div class="radius-use">Album covers · track art · full-bleed imagery. The image is the artefact, never softened.</div>
+      </div>
+      <div class="radius-card sm">
+        <div class="radius-shape"></div>
+        <div class="radius-name">Small</div>
+        <div class="radius-px">4 px</div>
+        <div class="radius-use">Chips · pills · metadata tags · small buttons · progress bars.</div>
+      </div>
+      <div class="radius-card md">
+        <div class="radius-shape"></div>
+        <div class="radius-name">Medium</div>
+        <div class="radius-px">8 px</div>
+        <div class="radius-use">Default card · input · dropdown · list container · toast.</div>
+      </div>
+      <div class="radius-card lg">
+        <div class="radius-shape"></div>
+        <div class="radius-name">Large</div>
+        <div class="radius-px">14 px</div>
+        <div class="radius-use">Bottom sheets · modals · full-screen panels. Slightly off 16 — more "object", less "app".</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       05 · ELEVATION
+       ============================================================ -->
+  <section id="elevation">
+    <div class="sec-head">
+      <div class="sec-num">05</div>
+      <div>
+        <h2 class="sec-title">Elevation</h2>
+        <div class="sec-sub">Three levels. Shadows tinted coffee (#0E0A08) — never neutral gray.</div>
+      </div>
+      <div class="sec-rule">Warmth persists · <em>in shadow</em></div>
+    </div>
+
+    <div class="elev-grid">
+      <div class="elev-stage" data-level="1">
+        <div class="elev-surface">
+          <div class="elev-label">shadow-1</div>
+          <div class="elev-name">Resting card</div>
+          <div class="elev-desc">Track rows, album tiles, chip clusters. A soft hint of weight, no drama.</div>
+          <div class="elev-inner">0 1px 0 0 rgba(14,10,8,.40), 0 2px 6px -1px rgba(14,10,8,.45)</div>
+        </div>
+      </div>
+      <div class="elev-stage" data-level="2">
+        <div class="elev-surface">
+          <div class="elev-label">shadow-2</div>
+          <div class="elev-name">Lifted surface</div>
+          <div class="elev-desc">Popovers, menus, hovered album. Includes a 3% inner rim light — warm, not white.</div>
+          <div class="elev-inner">0 2px 1px 0 rgba(14,10,8,.35), 0 8px 20px -4px rgba(14,10,8,.55), inset 0 1px 0 rgba(237,226,212,.03)</div>
+        </div>
+      </div>
+      <div class="elev-stage" data-level="3">
+        <div class="elev-surface">
+          <div class="elev-label">shadow-3</div>
+          <div class="elev-name">Modal · sheet</div>
+          <div class="elev-desc">Full-screen panels, HQPlayer settings sheet, dialogs. Anchors the whole screen below it.</div>
+          <div class="elev-inner">0 4px 2px 0 rgba(14,10,8,.30), 0 20px 48px -12px rgba(14,10,8,.70), inset 0 1px 0 rgba(237,226,212,.04)</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="glow-note">
+      <div class="glow-sample">NOW PLAYING</div>
+      <div>
+        <h4>Amber ambient · live state</h4>
+        <p style="color: var(--color-text-muted);">Separate token, <code style="font-family:var(--font-mono);color:var(--color-amber);">--glow-amber</code>. Use <b style="color:var(--color-text);">only</b> on currently-playing indicators, active track row, live waveform frame. Not a general elevation level.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       06 · EXPORT
+       ============================================================ -->
+  <section id="export">
+    <div class="sec-head">
+      <div class="sec-num">06</div>
+      <div>
+        <h2 class="sec-title">Export</h2>
+        <div class="sec-sub">CSS custom properties and Tailwind config — drop-in ready.</div>
+      </div>
+      <div class="sec-rule">Machine-readable</div>
+    </div>
+
+    <div class="export-grid">
+      <div class="code-card">
+        <div class="code-head"><span>tokens.css</span><span class="lang">CSS</span></div>
+<pre class="code">:root {
+  <span class="c">/* color · foundation */</span>
+  <span class="k">--color-foundation</span>:     <span class="v">#1B1714</span>;
+  <span class="k">--color-surface</span>:        <span class="v">#2A2420</span>;
+  <span class="k">--color-surface-hi</span>:     <span class="v">#342D28</span>;
+  <span class="k">--color-surface-lo</span>:     <span class="v">#221D1A</span>;
+  <span class="k">--color-divider</span>:        <span class="v">#3A322C</span>;
+
+  <span class="c">/* color · text */</span>
+  <span class="k">--color-text</span>:           <span class="v">#EDE2D4</span>;
+  <span class="k">--color-text-muted</span>:     <span class="v">#A69B8E</span>;
+  <span class="k">--color-text-dim</span>:       <span class="v">#6E665C</span>;
+
+  <span class="c">/* color · accent (locked) */</span>
+  <span class="k">--color-amber</span>:          <span class="v">#E8B06F</span>;
+  <span class="k">--color-amber-hover</span>:    <span class="v">#EFBE83</span>;
+  <span class="k">--color-amber-press</span>:    <span class="v">#D29A5B</span>;
+  <span class="k">--color-blue</span>:           <span class="v">#4A7FA7</span>;
+  <span class="k">--color-blue-hover</span>:     <span class="v">#5D91B8</span>;
+
+  <span class="c">/* color · semantic */</span>
+  <span class="k">--color-positive</span>:       <span class="v">#8DA77B</span>;
+  <span class="k">--color-negative</span>:       <span class="v">#C1564E</span>;
+
+  <span class="c">/* type */</span>
+  <span class="k">--font-sans</span>: <span class="v">"Inter Tight", system-ui, sans-serif</span>;
+  <span class="k">--font-mono</span>: <span class="v">"JetBrains Mono", ui-monospace, monospace</span>;
+  <span class="k">--text-display</span>:  <span class="v">32px</span>;
+  <span class="k">--text-heading</span>:  <span class="v">20px</span>;
+  <span class="k">--text-body</span>:     <span class="v">15px</span>;
+  <span class="k">--text-label</span>:    <span class="v">13px</span>;
+  <span class="k">--text-caption</span>:  <span class="v">11px</span>;
+
+  <span class="c">/* spacing · 8px grid */</span>
+  <span class="k">--space-1</span>: <span class="v">4px</span>;
+  <span class="k">--space-2</span>: <span class="v">8px</span>;
+  <span class="k">--space-3</span>: <span class="v">12px</span>;
+  <span class="k">--space-4</span>: <span class="v">16px</span>;
+  <span class="k">--space-5</span>: <span class="v">24px</span>;
+  <span class="k">--space-6</span>: <span class="v">32px</span>;
+  <span class="k">--space-7</span>: <span class="v">48px</span>;
+  <span class="k">--space-8</span>: <span class="v">64px</span>;
+
+  <span class="c">/* radii */</span>
+  <span class="k">--radius-none</span>: <span class="v">0</span>;
+  <span class="k">--radius-sm</span>:   <span class="v">4px</span>;
+  <span class="k">--radius-md</span>:   <span class="v">8px</span>;
+  <span class="k">--radius-lg</span>:   <span class="v">14px</span>;
+
+  <span class="c">/* elevation · warm (tinted #0E0A08) */</span>
+  <span class="k">--shadow-1</span>: <span class="v">0 1px 0 0 rgba(14,10,8,.4),
+              0 2px 6px -1px rgba(14,10,8,.45)</span>;
+  <span class="k">--shadow-2</span>: <span class="v">0 2px 1px 0 rgba(14,10,8,.35),
+              0 8px 20px -4px rgba(14,10,8,.55),
+              inset 0 1px 0 rgba(237,226,212,.03)</span>;
+  <span class="k">--shadow-3</span>: <span class="v">0 4px 2px 0 rgba(14,10,8,.30),
+              0 20px 48px -12px rgba(14,10,8,.7),
+              inset 0 1px 0 rgba(237,226,212,.04)</span>;
+
+  <span class="c">/* live state · use sparingly */</span>
+  <span class="k">--glow-amber</span>: <span class="v">0 0 0 1px rgba(232,176,111,.25),
+                0 0 24px -4px rgba(232,176,111,.25)</span>;
+}</pre>
+      </div>
+
+      <div class="code-card">
+        <div class="code-head"><span>tailwind.config.js</span><span class="lang">JS</span></div>
+<pre class="code"><span class="k">module.exports</span> = {
+  theme: {
+    extend: {
+      colors: {
+        foundation: <span class="v">"#1B1714"</span>,
+        surface: {
+          DEFAULT: <span class="v">"#2A2420"</span>,
+          hi:      <span class="v">"#342D28"</span>,
+          lo:      <span class="v">"#221D1A"</span>,
+        },
+        divider: <span class="v">"#3A322C"</span>,
+        text: {
+          DEFAULT: <span class="v">"#EDE2D4"</span>,
+          muted:   <span class="v">"#A69B8E"</span>,
+          dim:     <span class="v">"#6E665C"</span>,
+        },
+        amber: {
+          DEFAULT: <span class="v">"#E8B06F"</span>,
+          hover:   <span class="v">"#EFBE83"</span>,
+          press:   <span class="v">"#D29A5B"</span>,
+        },
+        blue: {
+          DEFAULT: <span class="v">"#4A7FA7"</span>,
+          hover:   <span class="v">"#5D91B8"</span>,
+        },
+        positive: <span class="v">"#8DA77B"</span>,
+        negative: <span class="v">"#C1564E"</span>,
+      },
+      fontFamily: {
+        sans: [<span class="v">"Inter Tight"</span>, <span class="v">"system-ui"</span>, <span class="v">"sans-serif"</span>],
+        mono: [<span class="v">"JetBrains Mono"</span>, <span class="v">"ui-monospace"</span>, <span class="v">"monospace"</span>],
+      },
+      fontSize: {
+        display: [<span class="v">"32px"</span>, { lineHeight: <span class="v">"1.15"</span>, letterSpacing: <span class="v">"-0.02em"</span> }],
+        heading: [<span class="v">"20px"</span>, { lineHeight: <span class="v">"1.25"</span>, letterSpacing: <span class="v">"-0.01em"</span> }],
+        body:    [<span class="v">"15px"</span>, { lineHeight: <span class="v">"1.5"</span>  }],
+        label:   [<span class="v">"13px"</span>, { lineHeight: <span class="v">"1.5"</span>,  letterSpacing: <span class="v">"0.02em"</span>  }],
+        caption: [<span class="v">"11px"</span>, { lineHeight: <span class="v">"1.5"</span>,  letterSpacing: <span class="v">"0.04em"</span>  }],
+      },
+      spacing: {
+        <span class="v">"1"</span>: <span class="v">"4px"</span>,  <span class="v">"2"</span>: <span class="v">"8px"</span>,
+        <span class="v">"3"</span>: <span class="v">"12px"</span>, <span class="v">"4"</span>: <span class="v">"16px"</span>,
+        <span class="v">"5"</span>: <span class="v">"24px"</span>, <span class="v">"6"</span>: <span class="v">"32px"</span>,
+        <span class="v">"7"</span>: <span class="v">"48px"</span>, <span class="v">"8"</span>: <span class="v">"64px"</span>,
+      },
+      borderRadius: {
+        none: <span class="v">"0"</span>,
+        sm:   <span class="v">"4px"</span>,
+        md:   <span class="v">"8px"</span>,
+        lg:   <span class="v">"14px"</span>,
+      },
+      boxShadow: {
+        <span class="v">"1"</span>: <span class="v">"0 1px 0 0 rgba(14,10,8,.4), 0 2px 6px -1px rgba(14,10,8,.45)"</span>,
+        <span class="v">"2"</span>: <span class="v">"0 2px 1px 0 rgba(14,10,8,.35), 0 8px 20px -4px rgba(14,10,8,.55), inset 0 1px 0 rgba(237,226,212,.03)"</span>,
+        <span class="v">"3"</span>: <span class="v">"0 4px 2px 0 rgba(14,10,8,.3), 0 20px 48px -12px rgba(14,10,8,.7), inset 0 1px 0 rgba(237,226,212,.04)"</span>,
+        <span class="v">"glow"</span>: <span class="v">"0 0 0 1px rgba(232,176,111,.25), 0 0 24px -4px rgba(232,176,111,.25)"</span>,
+      },
+    },
+  },
+};</pre>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Sautium · DS v1</span>
+    <span>Next · Now Playing stress-test</span>
+  </footer>
+
+</div>
+</body>
+</html>
