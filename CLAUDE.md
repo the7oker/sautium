@@ -251,6 +251,25 @@ assets used in mockups. Treat it as **reference for visual intent**,
 not source to paste — recreate visual output in our tokens-based
 vanilla stack.
 
+### Navigation and screen architecture
+
+`docs/design/INFORMATION-ARCHITECTURE.md` is the source of truth for
+how the UI is laid out: the 4-tab bottom nav (Home · Discovery ·
+Friends · More), the AI FAB overlay, the mini-player bar, the Now
+Playing sheet state machine, URL hash routing, per-screen contents,
+Play-vs-Queue action semantics, and the queue-history concept. Read
+it before touching UI routing or screen layout.
+
+### View-layer migration strategy
+
+The UI is being rebuilt top-down from the old prototype
+`index.html`. Per the migration plan: **`app.js` business logic is
+preserved** (API calls, HQPlayer commands, P2P, chat). Only the
+view layer (`index.html` + `style.css`) is rewritten to match the
+new design system and information architecture. Function contracts
+in `app.js` (playerCmd, doSearch, sendChat, addFriend, etc.) stay
+stable; their DOM targets change.
+
 ---
 
 ## Key Files
@@ -266,6 +285,7 @@ vanilla stack.
 | `backend/ensemble_instruments.py` | AST + PaSST instrument multi-label tagger (replaces CLAP zero-shot) |
 | `backend/static/tokens.css` | Canonical design-system tokens (colours, type, spacing, scaling) |
 | `docs/design/POSITIONING.md` | Product positioning + UI design principles (source of truth) |
+| `docs/design/INFORMATION-ARCHITECTURE.md` | Navigation model, screen inventory, state flows (source of truth for UI layout) |
 | `docs/design/reference/now-playing-bundle/` | Claude Design handoff bundle — visual-intent reference |
 | `backend/routers/sync.py` | Backend sync endpoints (P2P protocol) |
 | `backend/routers/p2p.py` | Web UI Friends/Chat endpoints |
