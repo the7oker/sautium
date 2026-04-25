@@ -457,7 +457,5 @@ def get_system_prompt(provider: str, player_context: str | None = None) -> str:
     """
     pc_block = f"\n\nCurrently playing:\n{player_context}" if player_context else ""
 
-    if provider == "claude_code":
-        return CLAUDE_DJ_SYSTEM_PROMPT.format(player_context=pc_block)
-    else:
-        return API_DJ_SYSTEM_PROMPT.format(player_context=pc_block)
+    template = CLAUDE_DJ_SYSTEM_PROMPT if provider == "claude_code" else API_DJ_SYSTEM_PROMPT
+    return template.replace("{player_context}", pc_block)
