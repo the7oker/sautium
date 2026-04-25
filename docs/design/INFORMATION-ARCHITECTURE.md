@@ -357,10 +357,16 @@ minimalist 🤖 / music-note hybrid.
 
 ### Visibility rules
 
-- Visible on: Home, Discovery, Friends, More root, Artist detail,
-  Album detail.
+- Visible on: Home, Discovery, Friends root, Artist detail, Album
+  detail, Genre detail, Profile, Settings, HQPlayer.
 - Hidden on: Now Playing expanded sheet, Queue sheet, AI chat sheet
-  itself, any full-screen modal.
+  itself, More drawer (it is a sheet), and **friend chat threads**
+  (social conversation context — AI assistance is not relevant
+  there).
+- General rule: any bottom-sheet or full-screen modal hides the FAB.
+  Pushed detail screens keep the FAB unless the screen represents
+  a context where AI is not semantically relevant (chat thread is
+  the canonical example).
 
 ### Interaction
 

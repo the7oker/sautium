@@ -244,12 +244,16 @@ amber's job.
 
 ### Reference bundle
 
-`docs/design/reference/now-playing-bundle/` preserves the Claude
-Design handoff: the Design System v1 HTML, the final Now Playing v4
-iteration, the full design-conversation transcript, and the cover
-assets used in mockups. Treat it as **reference for visual intent**,
-not source to paste — recreate visual output in our tokens-based
-vanilla stack.
+`docs/design/reference/now-playing-bundle/` preserves the latest
+Claude Design handoff covering the full MVP screen set: Design
+System v1 HTML, all four Session HTML files (Session 1: shell +
+Home + Now Playing mini/expanded · Session 2 v3: Discovery + Artist
++ Album + Queue + Genre · Session 3 v2: AI sheet + More + Profile +
+Settings + HQPlayer · Session 4: Friends + chat thread), plus the
+canonical Now Playing v4 iteration and the cover/artist assets used
+across mockups. Treat it as **reference for visual intent**, not
+source to paste — recreate visual output in our tokens-based vanilla
+stack.
 
 ### Navigation and screen architecture
 

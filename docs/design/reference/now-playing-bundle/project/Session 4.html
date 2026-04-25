@@ -1,0 +1,728 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sautium · Session 4</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --color-foundation:    #1B1714;
+    --color-surface:       #2A2420;
+    --color-surface-hi:    #332C26;
+    --color-surface-lo:    #221D1A;
+    --color-divider:       #3A322C;
+    --color-text:          #EDE2D4;
+    --color-text-muted:    #A69B8E;
+    --color-text-dim:      #6E665C;
+    --color-amber:         #E8B06F;
+    --color-amber-weak:    rgba(232,176,111,.10);
+    --color-amber-pill:    rgba(232,176,111,.16);
+    --color-blue:          #4A7FA7;
+    --color-positive:      #8DA77B;
+
+    --font-sans: "Inter Tight", ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+    --safe-top: 44px;
+    --safe-bottom: 34px;
+    --tab-bar-h: 64px;
+    --mini-h: 60px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: radial-gradient(ellipse at 50% 15%, #221B17 0%, #15110F 70%) no-repeat, #15110F;
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    padding: 40px 24px 80px;
+  }
+
+  .canvas { max-width: 900px; margin: 0 auto; }
+  .frames {
+    display: grid;
+    grid-template-columns: repeat(2, 360px);
+    gap: 56px;
+    justify-content: center;
+    align-items: start;
+  }
+
+  .viewport {
+    width: 360px;
+    background: var(--color-foundation);
+    position: relative;
+    overflow: hidden;
+    outline: 1px solid rgba(237,226,212,.06);
+    display: flex;
+    flex-direction: column;
+    min-height: 820px;
+  }
+
+  /* ============ STATUS ============ */
+  .status-bar {
+    height: var(--safe-top);
+    padding: 0 24px;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 14px; font-weight: 600; letter-spacing: -0.01em;
+    position: relative;
+    color: var(--color-text);
+    flex-shrink: 0;
+    z-index: 10;
+  }
+  .status-bar .time { padding-top: 14px; }
+  .status-bar .indicators { display: flex; gap: 6px; padding-top: 14px; }
+  .status-bar .island {
+    position: absolute; top: 10px; left: 50%;
+    transform: translateX(-50%);
+    width: 108px; height: 28px;
+    background: #0A0807; border-radius: 18px;
+  }
+
+  /* ============ SHELL BOTTOM ============ */
+  .shell-bottom {
+    margin-top: auto;
+    background: var(--color-foundation);
+    z-index: 5;
+    position: relative;
+  }
+  .mini {
+    height: var(--mini-h);
+    background: var(--color-surface);
+    border-top: 1px solid var(--color-divider);
+    display: grid;
+    grid-template-columns: 44px 1fr 44px 44px;
+    gap: 12px;
+    align-items: center;
+    padding: 0 12px;
+  }
+  .mini-art {
+    width: 44px; height: 44px;
+    overflow: hidden;
+    background: var(--color-surface-lo);
+  }
+  .mini-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .mini-title {
+    font-size: 13px; font-weight: 600; color: var(--color-text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    line-height: 1.3;
+  }
+  .mini-artist {
+    font-size: 11.5px; color: var(--color-text-muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    line-height: 1.3; margin-top: 2px;
+  }
+  .mini-btn {
+    width: 44px; height: 44px;
+    display: grid; place-items: center;
+    background: transparent; border: none; padding: 0; cursor: pointer;
+    color: var(--color-text);
+  }
+  .mini-btn.accent { color: var(--color-amber); }
+  .tab-bar {
+    height: var(--tab-bar-h);
+    background: var(--color-foundation);
+    border-top: 1px solid var(--color-divider);
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+  }
+  .tab {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 4px;
+    color: var(--color-text-muted);
+    font-family: var(--font-sans);
+    font-size: 10.5px; font-weight: 500;
+    background: transparent; border: none; cursor: pointer;
+    padding: 8px 0;
+  }
+  .tab.active { color: var(--color-amber); }
+  .home-indicator-wrap {
+    height: var(--safe-bottom);
+    display: flex; align-items: center; justify-content: center;
+    background: var(--color-foundation);
+  }
+  .home-indicator {
+    width: 128px; height: 5px;
+    background: var(--color-text);
+    opacity: 0.85; border-radius: 3px;
+  }
+
+  /* ============ AI FAB ============ */
+  .fab {
+    position: absolute;
+    right: 16px;
+    bottom: calc(var(--tab-bar-h) + var(--mini-h) + 16px + var(--safe-bottom));
+    width: 56px; height: 56px;
+    border-radius: 50%;
+    background: var(--color-amber);
+    color: #FFFFFF;
+    display: grid; place-items: center;
+    border: none; padding: 0; cursor: pointer;
+    font-family: var(--font-sans);
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    box-shadow:
+      0 6px 18px rgba(14,10,8,0.6),
+      0 1px 0 rgba(255,255,255,0.08) inset;
+    z-index: 6;
+  }
+
+  /* ============ COMMON ============ */
+  .scroll-area {
+    flex: 1;
+    min-height: 0;
+    padding-bottom: calc(var(--mini-h) + var(--tab-bar-h) + var(--safe-bottom));
+    overflow: hidden;
+  }
+  .header-bar {
+    padding: 6px 8px 6px;
+    display: grid;
+    grid-template-columns: 44px 1fr 44px;
+    align-items: center;
+  }
+  .icon-btn {
+    width: 44px; height: 44px;
+    display: grid; place-items: center;
+    background: transparent; border: none; padding: 0; cursor: pointer;
+    color: var(--color-text);
+  }
+  .h-title-center {
+    flex: 1; text-align: center;
+    margin: 0; font-size: 17px; font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--color-text);
+  }
+  .h-title-large {
+    margin: 4px 20px 8px;
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    color: var(--color-text);
+  }
+  .group-label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    padding: 18px 20px 8px;
+  }
+
+  /* ============ FRIENDS ROOT ============ */
+  .identity-card {
+    margin: 0 16px;
+    padding: 14px 16px;
+    background: var(--color-surface);
+    border-radius: 10px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 12px;
+  }
+  .identity-card .label {
+    font-size: 12px;
+    color: var(--color-text-muted);
+    margin-bottom: 4px;
+    letter-spacing: 0.01em;
+  }
+  .identity-card .code {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    color: var(--color-blue);
+    letter-spacing: 0.04em;
+    font-weight: 500;
+  }
+  .copy-btn {
+    width: 36px; height: 36px;
+    display: grid; place-items: center;
+    color: var(--color-text-muted);
+    background: transparent;
+    border: 1px solid var(--color-divider);
+    border-radius: 8px;
+    flex-shrink: 0;
+  }
+
+  .invite-form {
+    margin: 0 16px;
+    padding: 4px 0 0;
+    display: flex; flex-direction: column;
+    gap: 10px;
+  }
+  .input-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+  }
+  .text-field {
+    height: 44px;
+    padding: 0 14px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-divider);
+    border-radius: 8px;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    color: var(--color-text-dim);
+    display: flex; align-items: center;
+    min-width: 0;
+  }
+  .text-field.code {
+    font-family: var(--font-mono);
+    color: var(--color-blue);
+    letter-spacing: 0.03em;
+    font-size: 13px;
+  }
+  .btn {
+    height: 44px;
+    padding: 0 18px;
+    border-radius: 8px;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0;
+    border: 1px solid transparent;
+    cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .btn-primary {
+    background: var(--color-amber);
+    color: #1B1714;
+  }
+  .btn-secondary {
+    background: transparent;
+    color: var(--color-text);
+    border-color: var(--color-divider);
+  }
+  .hint {
+    margin: 8px 16px 0;
+    font-size: 12px;
+    color: var(--color-text-muted);
+    text-wrap: pretty;
+  }
+
+  .friends-list {
+    margin: 0 16px;
+    background: var(--color-surface);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .friend-row {
+    display: grid;
+    grid-template-columns: 40px 1fr 44px;
+    gap: 12px;
+    align-items: center;
+    min-height: 60px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--color-divider);
+  }
+  .friend-row:last-child { border-bottom: none; }
+  .avatar {
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    background: var(--color-surface-hi);
+    display: grid; place-items: center;
+    color: var(--color-text);
+    font-weight: 600;
+    font-size: 14px;
+    overflow: hidden;
+    position: relative;
+  }
+  .avatar.a1 { background: linear-gradient(135deg, #5b6e8a, #324154); }
+  .avatar.a2 { background: linear-gradient(135deg, #8a6e5b, #543d2e); }
+  .avatar.a3 { background: linear-gradient(135deg, #6e8a5b, #3d542e); }
+  .avatar.a4 { background: linear-gradient(135deg, #8a5b6e, #543242); }
+  .avatar.a5 { background: linear-gradient(135deg, #5b8a8a, #2e5454); }
+  .friend-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-text);
+    line-height: 1.3;
+  }
+  .friend-status {
+    font-size: 11.5px;
+    color: var(--color-text-muted);
+    line-height: 1.3;
+    margin-top: 2px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .friend-status.online { color: var(--color-positive); }
+  .status-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--color-positive);
+    display: inline-block;
+  }
+  .chat-icon-btn {
+    width: 44px; height: 44px;
+    display: grid; place-items: center;
+    background: transparent;
+    border: none;
+    color: var(--color-amber);
+    position: relative;
+    cursor: pointer;
+  }
+  .unread-badge {
+    position: absolute;
+    top: 6px; right: 6px;
+    min-width: 16px; height: 16px;
+    padding: 0 4px;
+    border-radius: 8px;
+    background: var(--color-amber);
+    color: #1B1714;
+    font-size: 10px;
+    font-weight: 700;
+    display: grid; place-items: center;
+    line-height: 1;
+    font-family: var(--font-sans);
+    border: 2px solid var(--color-surface);
+    box-sizing: content-box;
+  }
+
+  /* ============ CHAT THREAD ============ */
+  .chat-header {
+    height: 64px;
+    padding: 0 4px 0 4px;
+    display: grid;
+    grid-template-columns: 44px 36px 1fr 44px;
+    gap: 8px;
+    align-items: center;
+    border-bottom: 1px solid var(--color-divider);
+    flex-shrink: 0;
+  }
+  .chat-header .avatar-32 {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+  }
+  .chat-header-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--color-text);
+    line-height: 1.2;
+  }
+  .chat-header-status {
+    font-size: 11px;
+    color: var(--color-positive);
+    line-height: 1.2;
+    margin-top: 2px;
+    display: inline-flex; align-items: center; gap: 5px;
+  }
+
+  .thread {
+    flex: 1;
+    min-height: 0;
+    padding: 12px 16px 16px;
+    display: flex; flex-direction: column;
+    gap: 8px;
+    overflow: hidden;
+  }
+  .e2ee-banner {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px;
+    background: rgba(74,127,167,.08);
+    border: 1px solid rgba(74,127,167,.16);
+    border-radius: 8px;
+    color: var(--color-text-muted);
+    font-size: 11px;
+    text-wrap: pretty;
+    margin-bottom: 6px;
+  }
+  .e2ee-banner svg { color: var(--color-blue); flex-shrink: 0; }
+  .e2ee-banner .e2ee-tag {
+    font-family: var(--font-mono);
+    color: var(--color-blue);
+    letter-spacing: 0.02em;
+  }
+  .ts-stamp {
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    color: var(--color-text-dim);
+    margin: 8px 0 4px;
+  }
+  .msg-row { display: flex; }
+  .msg-row.me { justify-content: flex-end; }
+  .msg-row.them { justify-content: flex-start; }
+  .bubble {
+    max-width: 78%;
+    padding: 9px 13px;
+    border-radius: 14px;
+    font-size: 14px;
+    line-height: 1.4;
+    color: var(--color-text);
+    text-wrap: pretty;
+  }
+  .bubble.me {
+    background: var(--color-amber-pill);
+    border-bottom-right-radius: 4px;
+  }
+  .bubble.them {
+    background: var(--color-surface-hi);
+    border-bottom-left-radius: 4px;
+  }
+
+  .chat-input-row {
+    padding: 10px 12px;
+    display: flex; align-items: center; gap: 10px;
+    border-top: 1px solid var(--color-divider);
+    background: var(--color-foundation);
+    flex-shrink: 0;
+  }
+  .chat-input {
+    flex: 1;
+    height: 44px;
+    padding: 0 16px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-divider);
+    border-radius: 22px;
+    font-size: 14px;
+    color: var(--color-text-dim);
+    display: flex; align-items: center;
+  }
+  .send-btn {
+    width: 44px; height: 44px;
+    border-radius: 22px;
+    background: var(--color-amber);
+    color: #1B1714;
+    border: none; padding: 0; cursor: pointer;
+    display: grid; place-items: center;
+  }
+
+  .chat-body-wrap {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+</style>
+</head>
+<body>
+
+<div class="canvas">
+  <div class="frames">
+
+<!-- ============================================================ -->
+<!-- 1 · FRIENDS ROOT                                              -->
+<!-- ============================================================ -->
+<section class="frame">
+  <div class="viewport">
+    <div class="status-bar">
+      <div class="island"></div>
+      <span class="time">9:41</span>
+      <div class="indicators">
+        <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4.5" y="5" width="3" height="6" rx="0.5"/><rect x="9" y="3" width="3" height="8" rx="0.5"/><rect x="13.5" y="0" width="3" height="11" rx="0.5"/></svg>
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M7.5 10a.8.8 0 100-1.6.8.8 0 000 1.6zM2.5 5.5a7 7 0 0110 0M4.5 7.5a4 4 0 016 0"/></svg>
+        <svg width="25" height="11" viewBox="0 0 25 11" fill="none"><rect x="0.5" y="0.5" width="21" height="10" rx="2" stroke="currentColor"/><rect x="22.5" y="3.5" width="1.5" height="4" rx="0.5" fill="currentColor"/><rect x="2" y="2" width="17" height="7" rx="1" fill="currentColor"/></svg>
+      </div>
+    </div>
+
+    <div class="scroll-area">
+      <h1 class="h-title-large">Friends</h1>
+
+      <div class="group-label">My identity</div>
+      <div class="identity-card">
+        <div>
+          <div class="label">My invite code</div>
+          <div class="code">valery#7K9-M2X-4F1</div>
+        </div>
+        <button class="copy-btn" aria-label="copy invite code">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="1.5"/><path d="M5 15V5a1 1 0 011-1h10"/></svg>
+        </button>
+      </div>
+
+      <div class="group-label">Add a friend</div>
+      <div class="invite-form">
+        <div class="input-row">
+          <span class="text-field code">Paste invite code</span>
+          <button class="btn btn-primary">Add</button>
+        </div>
+        <div class="input-row">
+          <span class="text-field">Or invite by email</span>
+          <button class="btn btn-secondary">Send</button>
+        </div>
+      </div>
+      <div class="hint">Send invite — they get a verified email with a link.</div>
+
+      <div class="group-label">Friends</div>
+      <div class="friends-list">
+        <div class="friend-row">
+          <div class="avatar a1">M</div>
+          <div>
+            <div class="friend-name">marko</div>
+            <div class="friend-status online"><span class="status-dot"></span>online</div>
+          </div>
+          <button class="chat-icon-btn" aria-label="chat">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 01-11.7 7.1L4 21l1.9-5.3A8 8 0 1121 12z"/></svg>
+            <span class="unread-badge">1</span>
+          </button>
+        </div>
+        <div class="friend-row">
+          <div class="avatar a2">A</div>
+          <div>
+            <div class="friend-name">anna_k</div>
+            <div class="friend-status online"><span class="status-dot"></span>online</div>
+          </div>
+          <button class="chat-icon-btn" aria-label="chat">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 01-11.7 7.1L4 21l1.9-5.3A8 8 0 1121 12z"/></svg>
+          </button>
+        </div>
+        <div class="friend-row">
+          <div class="avatar a3">D</div>
+          <div>
+            <div class="friend-name">dmytro</div>
+            <div class="friend-status">last seen 2h ago</div>
+          </div>
+          <button class="chat-icon-btn" aria-label="chat">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 01-11.7 7.1L4 21l1.9-5.3A8 8 0 1121 12z"/></svg>
+          </button>
+        </div>
+        <div class="friend-row">
+          <div class="avatar a4">L</div>
+          <div>
+            <div class="friend-name">lesya.h</div>
+            <div class="friend-status">last seen yesterday</div>
+          </div>
+          <button class="chat-icon-btn" aria-label="chat">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 01-11.7 7.1L4 21l1.9-5.3A8 8 0 1121 12z"/></svg>
+          </button>
+        </div>
+        <div class="friend-row">
+          <div class="avatar a5">T</div>
+          <div>
+            <div class="friend-name">taras_v</div>
+            <div class="friend-status">last seen 4d ago</div>
+          </div>
+          <button class="chat-icon-btn" aria-label="chat">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 01-11.7 7.1L4 21l1.9-5.3A8 8 0 1121 12z"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <button class="fab" aria-label="ask Sautium AI">AI</button>
+    <div class="shell-bottom">
+      <div class="mini">
+        <div class="mini-art"><img src="assets/cover-hidden-orchestra.jpg" alt=""></div>
+        <div>
+          <div class="mini-title">Wingbeats — First Light</div>
+          <div class="mini-artist">Hidden Orchestra</div>
+        </div>
+        <button class="mini-btn accent"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="5" width="4" height="14" rx="1"/><rect x="13" y="5" width="4" height="14" rx="1"/></svg></button>
+        <button class="mini-btn"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M18 5v14h-2V5h2zM5 6.2v11.6c0 .8.9 1.3 1.6.9l9.5-5.8a1 1 0 000-1.7L6.6 5.3A1 1 0 005 6.2z"/></svg></button>
+      </div>
+      <div class="tab-bar">
+        <button class="tab"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l9-7 9 7v10a2 2 0 01-2 2h-4v-6h-6v6H5a2 2 0 01-2-2V10z"/></svg>Home</button>
+        <button class="tab"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>Discovery</button>
+        <button class="tab active"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><circle cx="17" cy="9" r="2.5"/><path d="M3 19c0-3 2.7-5.5 6-5.5s6 2.5 6 5.5M15 19c0-2 1.8-3.8 4-3.8s3 1.8 3 3.8"/></svg>Friends</button>
+        <button class="tab"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>More</button>
+      </div>
+      <div class="home-indicator-wrap"><div class="home-indicator"></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- 2 · CHAT THREAD                                               -->
+<!-- ============================================================ -->
+<section class="frame">
+  <div class="viewport">
+    <div class="status-bar">
+      <div class="island"></div>
+      <span class="time">9:41</span>
+      <div class="indicators">
+        <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4.5" y="5" width="3" height="6" rx="0.5"/><rect x="9" y="3" width="3" height="8" rx="0.5"/><rect x="13.5" y="0" width="3" height="11" rx="0.5"/></svg>
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M7.5 10a.8.8 0 100-1.6.8.8 0 000 1.6zM2.5 5.5a7 7 0 0110 0M4.5 7.5a4 4 0 016 0"/></svg>
+        <svg width="25" height="11" viewBox="0 0 25 11" fill="none"><rect x="0.5" y="0.5" width="21" height="10" rx="2" stroke="currentColor"/><rect x="22.5" y="3.5" width="1.5" height="4" rx="0.5" fill="currentColor"/><rect x="2" y="2" width="17" height="7" rx="1" fill="currentColor"/></svg>
+      </div>
+    </div>
+
+    <div class="chat-header">
+      <button class="icon-btn" aria-label="back">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+      </button>
+      <div class="avatar avatar-32 a1">M</div>
+      <div>
+        <div class="chat-header-name">marko</div>
+        <div class="chat-header-status"><span class="status-dot"></span>online</div>
+      </div>
+      <button class="icon-btn" aria-label="more">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg>
+      </button>
+    </div>
+
+    <div class="chat-body-wrap">
+      <div class="thread">
+        <div class="e2ee-banner">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>
+          <span>messages are end-to-end encrypted via <span class="e2ee-tag">NaCl</span></span>
+        </div>
+
+        <div class="ts-stamp">YESTERDAY · 22:14</div>
+
+        <div class="msg-row them">
+          <div class="bubble them">слухаєш зараз hidden orchestra?</div>
+        </div>
+        <div class="msg-row me">
+          <div class="bubble me">так, wingbeats. зайшов після твого допису</div>
+        </div>
+        <div class="msg-row them">
+          <div class="bubble them">альбом цілком сильний. четвертий трек — окрема історія</div>
+        </div>
+
+        <div class="ts-stamp">TODAY · 09:38</div>
+
+        <div class="msg-row me">
+          <div class="bubble me">переслухав вночі. ти правий</div>
+        </div>
+        <div class="msg-row them">
+          <div class="bubble them">спробуй ще nils frahm — all melody. схожий настрій, спокійніше</div>
+        </div>
+        <div class="msg-row me">
+          <div class="bubble me">додаю в чергу 👌</div>
+        </div>
+      </div>
+
+      <div class="chat-input-row">
+        <div class="chat-input">Message…</div>
+        <button class="send-btn" aria-label="send">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M3 11.5L21 3l-8 8 5 10-3-7-3 4 0-4z"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <button class="fab" aria-label="ask Sautium AI">AI</button>
+    <div class="shell-bottom">
+      <div class="mini">
+        <div class="mini-art"><img src="assets/cover-hidden-orchestra.jpg" alt=""></div>
+        <div>
+          <div class="mini-title">Wingbeats — First Light</div>
+          <div class="mini-artist">Hidden Orchestra</div>
+        </div>
+        <button class="mini-btn accent"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="5" width="4" height="14" rx="1"/><rect x="13" y="5" width="4" height="14" rx="1"/></svg></button>
+        <button class="mini-btn"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M18 5v14h-2V5h2zM5 6.2v11.6c0 .8.9 1.3 1.6.9l9.5-5.8a1 1 0 000-1.7L6.6 5.3A1 1 0 005 6.2z"/></svg></button>
+      </div>
+      <div class="tab-bar">
+        <button class="tab"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l9-7 9 7v10a2 2 0 01-2 2h-4v-6h-6v6H5a2 2 0 01-2-2V10z"/></svg>Home</button>
+        <button class="tab"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>Discovery</button>
+        <button class="tab active"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><circle cx="17" cy="9" r="2.5"/><path d="M3 19c0-3 2.7-5.5 6-5.5s6 2.5 6 5.5M15 19c0-2 1.8-3.8 4-3.8s3 1.8 3 3.8"/></svg>Friends</button>
+        <button class="tab"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>More</button>
+      </div>
+      <div class="home-indicator-wrap"><div class="home-indicator"></div></div>
+    </div>
+  </div>
+</section>
+
+  </div>
+</div>
+
+</body>
+</html>
