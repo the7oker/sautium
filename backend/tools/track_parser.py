@@ -12,11 +12,25 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+_TRACKS_RE_CLOSED = re.compile(r'\s*\[DJ_TRACKS\]\s*(\[.*\])\s*\[/DJ_TRACKS\]\s*', re.DOTALL)
+_TRACKS_RE_OPEN = re.compile(r'\s*\[DJ_TRACKS\]\s*(\[.*\])\s*\Z', re.DOTALL)
+
+
+def _find_tracks_block(text: str) -> re.Match | None:
+    """Match [DJ_TRACKS][...][/DJ_TRACKS] greedily.
+
+    Greedy match is required because track titles can themselves contain
+    `]` (e.g. "Bon Voyage [Live Hamburg 1981]"); a non-greedy `.*?` would
+    truncate the JSON at the first inner bracket.
+    """
+    return _TRACKS_RE_CLOSED.search(text) or _TRACKS_RE_OPEN.search(text)
+
+
 def extract_tracks(text: str) -> list[dict[str, Any]]:
     """Extract track list from [DJ_TRACKS][...][/DJ_TRACKS] marker.
     Closing tag [/DJ_TRACKS] is optional for robustness.
     """
-    match = re.search(r'\[DJ_TRACKS\]\s*(\[.*?\])\s*(?:\[/DJ_TRACKS\])?', text, re.DOTALL)
+    match = _find_tracks_block(text)
     if not match:
         return []
 
@@ -43,5 +57,7 @@ def strip_tracks_marker(text: str) -> str:
     """Remove [DJ_TRACKS]...[/DJ_TRACKS] block from answer text.
     Closing tag [/DJ_TRACKS] is optional for robustness.
     """
-    cleaned = re.sub(r'\s*\[DJ_TRACKS\]\s*\[.*?\]\s*(?:\[/DJ_TRACKS\])?\s*', '', text, flags=re.DOTALL)
-    return cleaned.strip()
+    match = _find_tracks_block(text)
+    if not match:
+        return text.strip()
+    return (text[:match.start()] + text[match.end():]).strip()
