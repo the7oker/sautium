@@ -181,7 +181,7 @@ The web UI lives in `backend/static/`, served directly by FastAPI.
 **Vanilla HTML + CSS + JS, no build step, no npm, no framework.** Keep
 it that way — we rejected a React migration in favour of this
 simplicity, and Claude Design's handoff format is plain HTML anyway
-(see `docs/design/reference/now-playing-bundle/README.md`).
+(see `docs/design/reference/claude-design-bundle/README.md`).
 
 ### Design tokens
 
@@ -244,7 +244,7 @@ amber's job.
 
 ### Reference bundle
 
-`docs/design/reference/now-playing-bundle/` preserves the latest
+`docs/design/reference/claude-design-bundle/` preserves the latest
 Claude Design handoff covering the full MVP screen set: Design
 System v1 HTML, all four Session HTML files (Session 1: shell +
 Home + Now Playing mini/expanded · Session 2 v3: Discovery + Artist
@@ -290,7 +290,7 @@ stable; their DOM targets change.
 | `backend/static/tokens.css` | Canonical design-system tokens (colours, type, spacing, scaling) |
 | `docs/design/POSITIONING.md` | Product positioning + UI design principles (source of truth) |
 | `docs/design/INFORMATION-ARCHITECTURE.md` | Navigation model, screen inventory, state flows (source of truth for UI layout) |
-| `docs/design/reference/now-playing-bundle/` | Claude Design handoff bundle — visual-intent reference |
+| `docs/design/reference/claude-design-bundle/` | Claude Design handoff bundle — visual-intent reference |
 | `backend/routers/sync.py` | Backend sync endpoints (P2P protocol) |
 | `backend/routers/p2p.py` | Web UI Friends/Chat endpoints |
 | `backend/dht_service.py` | Docker backend libtorrent DHT integration |

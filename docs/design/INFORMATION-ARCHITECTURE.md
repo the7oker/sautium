@@ -93,7 +93,7 @@ Tap play/pause icon → toggles without expanding.
 ### Now Playing sheet (modal overlay)
 
 Full-screen modal that slides up from the mini-player. Designed per
-the `docs/design/reference/now-playing-bundle/project/Now Playing
+the `docs/design/reference/claude-design-bundle/project/Now Playing
 v4.html` reference. Contains: album art, metadata row (Hi-Res badge,
 key, BPM, energy), transport, progress bar, lyrics toggle, similar
 tracks, queue button, HQPlayer quick-access.
