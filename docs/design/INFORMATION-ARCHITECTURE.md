@@ -130,9 +130,11 @@ back/forward and refresh work natively:
 #home                        → Home root
 #home/artist/<uuid>          → Artist detail, pushed from Home
 #home/artist/<uuid>/album/<uuid> → Album detail, pushed from Artist
+#home/album/<uuid>/genre/<id>    → Genre detail, pushed from Album
 #discovery                   → Discovery root
 #discovery/search?q=piano    → Search results, query param
 #discovery/album/<uuid>      → Album detail, pushed from Discovery
+#discovery/genre/<id>        → Genre detail, pushed from Discovery
 #friends                     → Friends list
 #friends/chat/<peer>         → Friend chat thread
 #more                        → More drawer open
@@ -184,14 +186,14 @@ current tab stack (changes hash).
 | Screen | Pushed by | Contents |
 |--------|-----------|----------|
 | **Artist** | Tap on artist name (anywhere) | Hero (name, photo if available), bio (Last.fm), tags, albums grid, popular tracks, similar artists |
-| **Album** | Tap on album cover / title | Cover hero, tracklist, year/label/genre, format badge (Hi-Res/Lossless/Lossy), total duration, **Play all** + **+ Queue** actions |
-| **Queue** (current playlist) | Queue button on Now Playing sheet, or `#queue` direct | Current queue with playing-track highlighted, drag-reorder, swipe-remove, Clear queue, Shuffle queue (future), summary "N tracks · HH:MM" |
+| **Album** | Tap on album cover / title | Cover hero, metadata row (year · duration · format badge), genre chips on a separate row (up to 3), tracklist, **Play all** + **+ Queue** actions |
+| **Genre** | Tap on a genre chip (from Album / Artist / Discovery) | Hero banner with genre name, description prose, top artists / albums / tracks in genre, related-genre chip strip |
+| **Queue** (current playlist) | Queue button on Now Playing sheet, or `#queue` direct | Current queue with playing-track highlighted, drag-reorder, swipe-remove, Clear queue, Shuffle queue (future), summary "N tracks · HH:MM". The full list is rendered — no "and N more" truncation. |
 | **Queue history item** | Tap on "Recent queues" row | Snapshot preview + Restore action (loads queue, does not auto-play) |
 | **HQPlayer config** | From More | Status, host, port, filter / matrix / dither selector — read/write HQP state |
 | **DSP / Signal Chain** | From More or Now Playing "→ HQPlayer" icon | Deep HQP DSP controls: filter, oversampling, dither, digital attenuation stepper, matrix profile |
 | **Settings** | From More | Account tab (username, invite code, email verify), Last.fm auth |
 | **Friend profile / chat thread** | Tap on friend in list | Chat messages, send-message input, identity info |
-| **Genre** *(optional, Phase 2)* | Tap on genre chip | Top artists, top albums, all tracks, related genres |
 
 ### Modal / overlay
 
@@ -443,6 +445,141 @@ Do not architect Phase-2 UI concerns into Phase-1 code.
 
 ---
 
+## Data sources per screen (annex)
+
+Concrete mapping of each visible block on each screen to a data
+source: existing DB tables, existing endpoints, external APIs, or
+new endpoints to be built. Implementation blueprint — minimal
+additional research needed when wiring the UI to the data layer.
+
+Conventions: `(new endpoint)` = backend work required; `(LFM)` =
+Last.fm API call; otherwise the source already exists in the DB
+or is a thin query over existing data.
+
+### Home
+
+| Block | MVP source | Evolution |
+|-------|------------|-----------|
+| Favourite artists | `local_play_stats` aggregated by artist | + listening recency weight |
+| New in library | `media_files.file_modified_at DESC`, grouped to album | + scanner-assigned "fresh" tag |
+| Recommendations | CLAP audio similarity to top-played tracks, filter to artists not yet heard much | + AI DJ contextual blends |
+| Recent queues *(if populated)* | `queue_history` table **(new)** + `(new endpoint)` GET `/queue/history` | + cross-device sync via P2P |
+
+### Discovery
+
+| Block | MVP source | Evolution |
+|-------|------------|-----------|
+| Search input | existing `/search/tracks`, `/search/artists`, `/search/albums`, `/search/genres` | unified `/search?q=&type=` if simpler |
+| Mode chips | switches which existing endpoint is called | — |
+| Advanced filters | existing `/search/features` (extend to multi-instrument + AND/OR + quality tier) **(endpoint extension)** | saved filter presets |
+| Shuffle mosaic | random sample from `albums` (filter to lossless? or all) | bias to under-played, diverse genres |
+
+### Now Playing (mini + expanded)
+
+| Block | MVP source | Evolution |
+|-------|------------|-----------|
+| Track title / artist / album | `tracks` + `track_artists` + `albums` joins | — |
+| Progress / duration | HQPlayer state poll (existing in app.js) | — |
+| Quality badge | `media_files.is_lossless` + `bit_depth` + `sample_rate` (Hi-Res = ≥ 96k/24bit lossless) | — |
+| Key pill, BPM, energy | `audio_features.key`, `bpm`, `energy` | — |
+| Lyrics panel | `track_lyrics` table | + timed-LRC support already partly present |
+| Similar tracks | existing `/search/similar?track_id=` (CLAP embedding cosine) | + AI-rerank for diversity |
+| Save replaced queue | `queue_history` table **(new)** + `(new endpoint)` POST `/queue/history` | — |
+
+### Artist
+
+| Block | MVP source | Evolution |
+|-------|------------|-----------|
+| Hero photo | uploaded artist photo (manual curation step), or fallback gradient | + auto-fetch from Last.fm `artist.getInfo` images |
+| Bio prose | `artist_bios.bio` (Last.fm imported) | — |
+| Tag chips | `artist_tags` (Last.fm) ranked by weight, top 4 | — |
+| Albums | albums where this artist appears in `track_artists`, sorted by year | — |
+| Popular tracks | `local_play_stats` filtered to this artist's tracks | + Last.fm `artist.getTopTracks` for global popularity |
+| Similar artists | `similar_artists` (Last.fm imported) | + BGE-M3 vector similarity on bios |
+
+### Album
+
+| Block | MVP source | Evolution |
+|-------|------------|-----------|
+| Cover hero | `media_files` cover, embedded or via `cover_id` | — |
+| Metadata row | `albums.release_year`, sum of `media_files.duration_seconds`, `media_files.is_lossless` + `bit_depth` for badge | — |
+| Genre chips | `track_genres` + `genres.name` aggregated, top 3 by occurrence count | — |
+| Tracklist | `tracks` ordered by `track_number` | — |
+| Play all / + Queue | existing transport calls in app.js | + queue history snapshot before replace |
+
+### Genre
+
+| Block | MVP source | Evolution |
+|-------|------------|-----------|
+| Hero banner | most-played album cover in this genre (from `local_play_stats` × `track_genres`); fallback to typography-only with gradient | + pre-curated stock per genre, or AI-generated cached |
+| Description | `genres.description` if present, otherwise Last.fm `tag.getInfo` (cached) | + curated wiki-style content |
+| Top artists | local play count aggregated per artist within genre | + Last.fm `tag.getTopArtists` for global discovery |
+| Top albums | local plays aggregated per album within genre | + `tag.getTopAlbums` (LFM) |
+| Top tracks | local plays per track within genre | + `tag.getTopTracks` (LFM) |
+| Related genres | **co-occurrence** in library: genres sharing tracks with this one, ranked by shared-track count | + BGE-M3 cosine on `genre_desc_embeddings` (already exist) |
+
+All Genre blocks roll up into a single `(new endpoint)` GET
+`/genres/:id` that returns aggregated payload — saves the UI from
+3-5 roundtrips per screen open.
+
+### Queue
+
+| Block | MVP source | Evolution |
+|-------|------------|-----------|
+| Current queue | client-side state in `app.js` + HQPlayer playlist state | + persist server-side for cross-device |
+| Drag-reorder | client-side, then PUSH new order to HQPlayer | — |
+| Swipe-remove | client-side + HQPlayer remove call | — |
+| Summary counts | aggregated client-side from queue contents | — |
+| "Clear all" | HQPlayer clear playlist call | + warn-if-unsaved-history |
+
+### Friends (MVP — minimal)
+
+| Block | MVP source | Evolution |
+|-------|------------|-----------|
+| Identity card | `desktop/node_identity` (existing) | — |
+| Friends list | `friends` table | — |
+| Add by invite | existing P2P add-friend flow | — |
+| Email invite | existing email-verify flow + worker | — |
+| Chat thread | `p2p_messages` table + NaCl Box decrypt | — |
+
+### More (drawer + sub-screens)
+
+| Block | MVP source | Evolution |
+|-------|------------|-----------|
+| HQPlayer status | existing HQP state poll | — |
+| HQPlayer config (host/port) | existing settings persistence | + save profiles per location |
+| DSP / Signal Chain | existing HQP filter / matrix / dither endpoints | + per-genre auto-profile |
+| Account / Last.fm auth | existing flows | — |
+
+### AI FAB (chat overlay)
+
+| Block | MVP source | Evolution |
+|-------|------------|-----------|
+| Chat sessions | existing chat persistence in `app.js` | + named sessions, search history |
+| Message stream | existing AI provider (Claude / OpenAI) | — |
+| Invisible context payload | client-side: `{screen, entity_type, entity_id, route_hash}` injected into prompt | + recent listening, current queue summary |
+| Provider selector | existing | — |
+
+### Backend work required (summary)
+
+For Phase-1 implementation:
+
+1. `queue_history` table — `(id UUID, tracks JSONB, context TEXT, created_at TIMESTAMPTZ)`
+2. `GET /queue/history` — list last 5 replaced queues
+3. `POST /queue/history` — save current queue snapshot before replace
+4. `POST /queue/history/<id>/restore` — populate current queue (no auto-play)
+5. `GET /genres/:id` — aggregated genre detail payload (description, top
+   artists/albums/tracks, related genres)
+6. Extend `/search/features` for multi-instrument filter (`instruments=piano,drums&op=AND`)
+7. Optional: cache layer for Last.fm `tag.getTopArtists/Albums/Tracks` if Evolution
+   tier work begins (not Phase-1 critical)
+
+No new ML pipelines required — existing CLAP + BGE-M3 + AST/PaSST
+embeddings cover everything. New backend work is database +
+aggregation queries, not model training.
+
+---
+
 ## Open design decisions (to resolve before implementation)
 
 These are small but merit explicit resolution during first Claude
@@ -471,6 +608,7 @@ Design session or implementation:
    Material)? User chose **bottom-left** (jivochat-style). Keep
    consistent.
 
-7. **Genre screen** — Phase-1 or Phase-2? Leave as Phase-2 unless
-   requested explicitly; genre metadata can be displayed as chips on
-   Artist / Album pages without a dedicated screen in MVP.
+7. _(resolved)_ Genre screen is in **Phase 1**. Promoted from
+   optional after the realisation that tappable genre chips logically
+   require a destination — leaving them dangling would make them
+   decorative, which violates the "respect the content" principle.
