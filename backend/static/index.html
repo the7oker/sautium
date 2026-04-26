@@ -5,385 +5,167 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="theme-color" content="#0f0f23">
-  <title>Sautium</title>
-  <link rel="stylesheet" href="/static/style.css?v=9">
-</head>
-<body>
-  <!-- Slide-out menu overlay -->
-  <div class="menu-overlay" id="menuOverlay" onclick="closeMenu()"></div>
+  <meta name="theme-color" content="#1B1714">
+  <title>Sautium.</title>
 
-  <!-- Slide-out menu -->
-  <nav class="slide-menu" id="slideMenu">
-    <div class="menu-header">Sautium</div>
-    <button class="menu-item active" data-section="music" onclick="switchSection('music')">
-      <span class="menu-icon">&#9835;</span> Music
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="/static/tokens.css?v=2">
+  <link rel="stylesheet" href="/static/style.css?v=11">
+</head>
+<body class="sautium-base">
+
+  <main id="app" role="main"></main>
+
+  <button id="aiFab" class="ai-fab" type="button" aria-label="Open AI assistant" hidden>AI</button>
+
+  <div id="miniPlayer" class="mini-player" role="region" aria-label="Now playing" hidden>
+    <div class="mp-cover" id="mpCover" aria-hidden="true"></div>
+    <div class="mp-info">
+      <div class="mp-title" id="mpTitle">—</div>
+      <div class="mp-artist" id="mpArtist"></div>
+    </div>
+    <button class="mp-action" id="mpPlayPause" type="button" aria-label="Play or pause">
+      <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+        <path id="mpPlayPauseIcon" d="M8 5v14l11-7z" fill="currentColor"/>
+      </svg>
     </button>
-    <button class="menu-item" data-section="friends" onclick="switchSection('friends')">
-      <span class="menu-icon">&#9787;</span> Friends
-      <span class="menu-badge" id="friendsBadge" style="display:none">0</span>
+    <button class="mp-action" id="mpNext" type="button" aria-label="Next track">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <path d="M6 18l8.5-6L6 6v12zm10-12v12h2V6h-2z" fill="currentColor"/>
+      </svg>
     </button>
-    <button class="menu-item disabled">
-      <span class="menu-icon">&#9654;</span> HQPlayer
-      <span class="menu-soon">soon</span>
+  </div>
+
+  <nav id="bottomNav" class="bottom-nav" role="navigation" aria-label="Primary">
+    <button class="nav-tab" type="button" data-route="home" aria-label="Home">
+      <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M3 11l9-8 9 8v10a1 1 0 0 1-1 1h-5v-7H10v7H4a1 1 0 0 1-1-1V11z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+      </svg>
+      <span class="nav-label">Home</span>
     </button>
-    <button class="menu-item" data-section="settings" onclick="switchSection('settings')">
-      <span class="menu-icon">&#9881;</span> Settings
+    <button class="nav-tab" type="button" data-route="discovery" aria-label="Discovery">
+      <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="2"/>
+        <line x1="16" y1="16" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <span class="nav-label">Discovery</span>
+    </button>
+    <button class="nav-tab" type="button" data-route="friends" aria-label="Friends">
+      <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="9" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/>
+        <path d="M3 20c0-3 2.5-5 6-5s6 2 6 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="17" cy="9" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/>
+        <path d="M14 17c0-2 1.7-3.5 4-3.5s4 1.5 4 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <span class="nav-label">Friends</span>
+    </button>
+    <button class="nav-tab" type="button" data-route="more" aria-label="More">
+      <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="6" r="1.6" fill="currentColor"/>
+        <circle cx="12" cy="12" r="1.6" fill="currentColor"/>
+        <circle cx="12" cy="18" r="1.6" fill="currentColor"/>
+      </svg>
+      <span class="nav-label">More</span>
     </button>
   </nav>
 
-  <div class="container">
+  <!--
+    Compatibility stubs — invisible elements with the IDs that the legacy
+    app.js expects to write to (npSong, progressFill, searchInput, etc).
+    They let app.js continue polling status / fetching playlist / etc
+    without throwing null-ref errors while individual screens are still
+    being migrated to the new shell. As each screen is rewritten, its
+    stubs migrate out of this block into the live screen markup.
+  -->
+  <div id="legacy-stubs" hidden aria-hidden="true">
+    <div id="connDot"></div>
+    <div id="sectionTitle"></div>
+    <div id="slideMenu"></div>
+    <div id="menuOverlay"></div>
+    <button id="hamburgerBtn" type="button"></button>
+    <span id="friendsBadge"></span>
 
-    <!-- Header -->
-    <header>
-      <button class="hamburger-btn" id="hamburgerBtn" onclick="toggleMenu()" aria-label="Menu">&#9776;</button>
-      <h1 id="sectionTitle">Music</h1>
-      <div class="connection-dot" id="connDot" title="HQPlayer connection"></div>
-    </header>
+    <!-- Now Playing legacy widget -->
+    <div id="npSong"></div>
+    <div id="npArtist"></div>
+    <div id="progressFill"></div>
+    <div id="progressTime"></div>
+    <button id="playPauseBtn" type="button"></button>
+    <span id="volLabel"></span>
 
-    <!-- ============================================================ -->
-    <!-- SECTION: Music -->
-    <!-- ============================================================ -->
-    <section class="app-section active" id="section-music">
+    <!-- Lyrics -->
+    <div id="lyricsPanel" style="display:none"></div>
+    <div id="lyricsContent"></div>
+    <button id="lyricsToggleBtn" type="button"></button>
 
-      <!-- Now Playing -->
-      <section class="now-playing" id="nowPlaying" aria-live="polite">
-        <div class="np-song np-idle" id="npSong">Not connected</div>
-        <div class="np-artist" id="npArtist"></div>
-        <div class="progress-row">
-          <div class="progress-bar">
-            <div class="progress-fill" id="progressFill"></div>
-          </div>
-          <span class="progress-time" id="progressTime">00:00 / 00:00</span>
-        </div>
-        <div class="controls">
-          <button class="ctrl-btn" onclick="playerCmd('previous')" title="Previous" aria-label="Previous track">&#9198;</button>
-          <button class="ctrl-btn play-btn" id="playPauseBtn" onclick="togglePlayPause()" title="Play/Pause" aria-label="Play or pause">&#9654;</button>
-          <button class="ctrl-btn" onclick="playerCmd('next')" title="Next" aria-label="Next track">&#9197;</button>
-          <button class="ctrl-btn" onclick="playerCmd('stop')" title="Stop" aria-label="Stop playback">&#9632;</button>
-        </div>
-        <div class="volume-row">
-          <button class="vol-btn" onclick="playerCmd('volume/down')" aria-label="Volume down">&#128265;</button>
-          <span class="vol-label" id="volLabel">-- dB</span>
-          <button class="vol-btn" onclick="playerCmd('volume/up')" aria-label="Volume up">&#128266;</button>
-        </div>
-        <div class="lyrics-toggle-row">
-          <button class="lyrics-toggle-btn" id="lyricsToggleBtn" onclick="toggleLyrics()">Lyrics</button>
-        </div>
-        <div class="lyrics-panel" id="lyricsPanel" style="display:none">
-          <div class="lyrics-content" id="lyricsContent">
-            <div class="lyrics-placeholder">Click "Lyrics" to load</div>
-          </div>
-        </div>
-      </section>
+    <!-- Search tab -->
+    <input id="searchInput" type="text">
+    <div id="searchResults"></div>
 
-      <!-- Tabs -->
-      <div class="tabs">
-        <button class="tab-btn active" data-tab="search" onclick="switchTab('search')">Search</button>
-        <button class="tab-btn" data-tab="discover" onclick="switchTab('discover')">Discover</button>
-        <button class="tab-btn" data-tab="chat" onclick="switchTab('chat')">AI DJ</button>
-        <button class="tab-btn" data-tab="queue" onclick="switchTab('queue')">Queue</button>
-      </div>
+    <!-- Discover tab -->
+    <input id="discoverInput" type="text">
+    <button id="discoverSearchBtn" type="button"></button>
+    <button id="radioBtn" type="button"></button>
+    <div id="discoverNowPlaying"></div>
+    <div id="discoverSimilar"></div>
+    <div id="discoverResults"></div>
+    <input id="bpmMin" type="number">
+    <input id="bpmMax" type="number">
+    <select id="featureKey"></select>
 
-      <!-- Search Tab -->
-      <div class="tab-content active" id="tab-search">
-        <form class="search-form" onsubmit="doSearch(event)">
-          <input type="text" class="search-input" id="searchInput" placeholder="Artist, album, or track..." autocomplete="off">
-          <button type="submit" class="submit-btn">Go</button>
-        </form>
-        <div id="searchResults">
-          <div class="empty-state">Search your music library</div>
-        </div>
-      </div>
+    <!-- AI DJ tab -->
+    <div id="chatMessages"></div>
+    <input id="chatInput" type="text">
+    <button id="chatSendBtn" type="submit"></button>
+    <div id="sessionList"></div>
+    <div id="providerSelector"></div>
 
-      <!-- Discover Tab -->
-      <div class="tab-content" id="tab-discover">
+    <!-- Queue tab -->
+    <div id="queueContent"></div>
 
-        <!-- Zone 1: Similar to now playing + Radio Mode -->
-        <div class="discover-similar" id="discoverSimilar" style="display:none">
-          <div class="discover-section-label">Similar to now playing</div>
-          <div class="discover-similar-row">
-            <div class="discover-similar-info" id="discoverNowPlaying"></div>
-            <button class="discover-similar-btn" onclick="findSimilar()">Find similar</button>
-            <button class="discover-radio-btn" id="radioBtn" onclick="toggleRadio()">Radio</button>
-          </div>
-        </div>
+    <!-- Friends section -->
+    <div id="myInviteCode"></div>
+    <input id="addFriendInput" type="text">
+    <input id="inviteEmailInput" type="email">
+    <button id="inviteEmailBtn" type="submit"></button>
+    <div id="inviteEmailStatus"></div>
+    <div id="friendList"></div>
+    <div id="chatFriendName"></div>
+    <div id="p2pMessages"></div>
+    <input id="p2pChatInput" type="text">
+    <form id="p2pChatForm"></form>
 
-        <!-- Zone 2: Search by description -->
-        <div class="discover-search">
-          <div class="discover-section-label">Search by description</div>
-          <div class="discover-modes">
-            <button class="discover-mode active" data-mode="sound" onclick="setDiscoverMode('sound')">Sound</button>
-            <button class="discover-mode" data-mode="lyrics" onclick="setDiscoverMode('lyrics')">Lyrics</button>
-            <button class="discover-mode" data-mode="artists" onclick="setDiscoverMode('artists')">Artists</button>
-            <button class="discover-mode" data-mode="albums" onclick="setDiscoverMode('albums')">Albums</button>
-            <button class="discover-mode" data-mode="genres" onclick="setDiscoverMode('genres')">Genres</button>
-          </div>
-          <form class="search-form" onsubmit="discoverSearch(event)">
-            <input type="text" class="search-input" id="discoverInput"
-                   placeholder="energetic rock with heavy drums" autocomplete="off">
-            <button type="submit" class="submit-btn" id="discoverSearchBtn">Go</button>
-          </form>
-        </div>
+    <!-- Settings: Account -->
+    <div id="settingsUsername"></div>
+    <div id="settingsInviteCode"></div>
+    <span id="settingsEmailBadge"></span>
+    <div id="settingsEmail"></div>
+    <div id="settingsEmailGroup" style="display:none"></div>
+    <div id="emailVerifySection" style="display:none"></div>
+    <div id="emailCodeSection" style="display:none"></div>
+    <button id="sendVerifyBtn" type="button"></button>
+    <input id="emailVerifyCodeInput" type="text">
+    <button id="verifyCodeBtn" type="submit"></button>
+    <div id="emailVerifyStatus"></div>
 
-        <!-- Mood presets -->
-        <div class="discover-presets">
-          <div class="discover-section-label">Mood presets</div>
-          <div class="discover-preset-chips">
-            <button class="discover-preset" onclick="applyPreset('chill')">Chill Evening</button>
-            <button class="discover-preset" onclick="applyPreset('workout')">Workout</button>
-            <button class="discover-preset" onclick="applyPreset('focus')">Focus</button>
-            <button class="discover-preset" onclick="applyPreset('party')">Party</button>
-            <button class="discover-preset" onclick="applyPreset('melancholy')">Melancholy</button>
-          </div>
-        </div>
+    <!-- Settings: HQPlayer -->
+    <div id="settingsHqpStatus"></div>
+    <div id="settingsHqpHost"></div>
+    <div id="settingsHqpPort"></div>
 
-        <!-- Zone 3: Audio features filter -->
-        <details class="discover-features">
-          <summary class="discover-section-label discover-features-summary">Audio features filter</summary>
-          <div class="discover-features-content">
-            <div class="feature-row">
-              <label class="feature-label">BPM</label>
-              <div class="feature-input-pair">
-                <input type="number" class="feature-num" id="bpmMin" min="40" max="240" placeholder="40">
-                <span class="feature-dash">&ndash;</span>
-                <input type="number" class="feature-num" id="bpmMax" min="40" max="240" placeholder="240">
-              </div>
-            </div>
-            <div class="feature-row">
-              <label class="feature-label">Key</label>
-              <select class="feature-select" id="featureKey">
-                <option value="">Any</option>
-                <option>C</option><option>C#</option><option>D</option><option>D#</option>
-                <option>E</option><option>F</option><option>F#</option><option>G</option>
-                <option>G#</option><option>A</option><option>A#</option><option>B</option>
-              </select>
-            </div>
-            <div class="feature-row">
-              <label class="feature-label">Mode</label>
-              <div class="feature-chips">
-                <button type="button" class="feature-chip active" data-group="mode" data-val="">Any</button>
-                <button type="button" class="feature-chip" data-group="mode" data-val="major">Major</button>
-                <button type="button" class="feature-chip" data-group="mode" data-val="minor">Minor</button>
-              </div>
-            </div>
-            <div class="feature-row">
-              <label class="feature-label">Vocalist</label>
-              <div class="feature-chips">
-                <button type="button" class="feature-chip active" data-group="vocalist" data-val="">Any</button>
-                <button type="button" class="feature-chip" data-group="vocalist" data-val="vocal">Vocal</button>
-                <button type="button" class="feature-chip" data-group="vocalist" data-val="instrumental">Instrumental</button>
-              </div>
-            </div>
-            <div class="feature-row">
-              <label class="feature-label">Gender</label>
-              <div class="feature-chips">
-                <button type="button" class="feature-chip active" data-group="gender" data-val="">Any</button>
-                <button type="button" class="feature-chip" data-group="gender" data-val="female">Female</button>
-                <button type="button" class="feature-chip" data-group="gender" data-val="male">Male</button>
-                <button type="button" class="feature-chip" data-group="gender" data-val="mixed">Mixed</button>
-              </div>
-            </div>
-            <div class="feature-row">
-              <label class="feature-label">Danceable</label>
-              <div class="feature-chips">
-                <button type="button" class="feature-chip active" data-group="danceable" data-val="">Any</button>
-                <button type="button" class="feature-chip" data-group="danceable" data-val="yes">Yes</button>
-                <button type="button" class="feature-chip" data-group="danceable" data-val="no">No</button>
-              </div>
-            </div>
-            <div class="feature-row">
-              <label class="feature-label">Energy</label>
-              <div class="feature-chips">
-                <button type="button" class="feature-chip active" data-group="energy" data-val="">Any</button>
-                <button type="button" class="feature-chip" data-group="energy" data-val="low">Low</button>
-                <button type="button" class="feature-chip" data-group="energy" data-val="mid">Mid</button>
-                <button type="button" class="feature-chip" data-group="energy" data-val="high">High</button>
-              </div>
-            </div>
-            <button class="discover-features-btn" onclick="searchByFeatures()">Search by features</button>
-          </div>
-        </details>
-
-        <!-- Results -->
-        <div id="discoverResults">
-          <div class="empty-state">Discover music in your library</div>
-        </div>
-      </div>
-
-      <!-- AI DJ Tab -->
-      <div class="tab-content" id="tab-chat">
-        <div class="session-bar" id="sessionBar">
-          <div class="session-list" id="sessionList"></div>
-          <button class="new-chat-btn" onclick="startNewChat()">+ New</button>
-        </div>
-        <div class="chat-messages" id="chatMessages">
-          <div class="empty-state">Ask the AI DJ for recommendations</div>
-        </div>
-        <div class="chat-bottom">
-          <div class="provider-selector" id="providerSelector"></div>
-          <form class="chat-form" onsubmit="sendChat(event)">
-            <input type="text" class="search-input" id="chatInput" placeholder="What should I play?" autocomplete="off">
-            <button type="submit" class="submit-btn" id="chatSendBtn">&#10148;</button>
-          </form>
-        </div>
-      </div>
-
-      <!-- Queue Tab -->
-      <div class="tab-content" id="tab-queue">
-        <div id="queueContent">
-          <div class="empty-state">No tracks in queue</div>
-        </div>
-      </div>
-
-    </section>
-
-    <!-- ============================================================ -->
-    <!-- SECTION: Friends -->
-    <!-- ============================================================ -->
-    <section class="app-section" id="section-friends">
-
-      <!-- My identity card -->
-      <div class="identity-card" id="identityCard">
-        <div class="identity-row">
-          <span class="identity-label">My invite code</span>
-          <button class="copy-btn" onclick="copyInviteCode()">Copy</button>
-        </div>
-        <div class="invite-code" id="myInviteCode">Loading...</div>
-      </div>
-
-      <!-- Add friend by invite code -->
-      <form class="add-friend-form" onsubmit="addFriend(event)">
-        <input type="text" class="search-input" id="addFriendInput"
-               placeholder="Enter invite code (user#XXXX-XXXX-XXXX)" autocomplete="off">
-        <button type="submit" class="submit-btn">Add</button>
-      </form>
-
-      <!-- Send invite by email -->
-      <form class="add-friend-form" onsubmit="sendInviteByEmail(event)" style="margin-top: 4px;">
-        <input type="email" class="search-input" id="inviteEmailInput"
-               placeholder="Send invite to email" autocomplete="off">
-        <button type="submit" class="submit-btn" id="inviteEmailBtn">Invite</button>
-      </form>
-      <div id="inviteEmailStatus" style="display:none; font-size: 12px; padding: 4px 8px; margin-top: 2px;"></div>
-
-      <!-- Friends tabs -->
-      <div class="tabs">
-        <button class="tab-btn active" data-ftab="friend-list" onclick="switchFriendsTab('friend-list')">Friends</button>
-        <button class="tab-btn" data-ftab="friend-chat" onclick="switchFriendsTab('friend-chat')">Chat</button>
-      </div>
-
-      <!-- Friend list -->
-      <div class="ftab-content active" id="ftab-friend-list">
-        <div id="friendList">
-          <div class="empty-state">No friends yet. Share your invite code!</div>
-        </div>
-      </div>
-
-      <!-- Chat view -->
-      <div class="ftab-content" id="ftab-friend-chat">
-        <div id="chatFriendName" class="chat-friend-header">Select a friend to chat</div>
-        <div class="p2p-messages" id="p2pMessages">
-          <div class="empty-state">Select a friend from the list</div>
-        </div>
-        <form class="chat-form p2p-chat-form" id="p2pChatForm" onsubmit="sendP2PMessage(event)" style="display:none">
-          <input type="text" class="search-input" id="p2pChatInput" placeholder="Type a message..." autocomplete="off">
-          <button type="submit" class="submit-btn">&#10148;</button>
-        </form>
-      </div>
-
-    </section>
-
-    <!-- ============================================================ -->
-    <!-- SECTION: Settings -->
-    <!-- ============================================================ -->
-    <section class="app-section" id="section-settings">
-
-      <!-- Settings tabs -->
-      <div class="tabs">
-        <button class="tab-btn active" data-stab="settings-account" onclick="switchSettingsTab('settings-account')">Account</button>
-        <button class="tab-btn" data-stab="settings-hqplayer" onclick="switchSettingsTab('settings-hqplayer')">HQPlayer</button>
-        <button class="tab-btn" data-stab="settings-lastfm" onclick="switchSettingsTab('settings-lastfm')">Last.fm</button>
-      </div>
-
-      <!-- Account Tab -->
-      <div class="stab-content active" id="stab-settings-account">
-        <div class="settings-group">
-          <div class="settings-label">Username</div>
-          <div class="settings-value" id="settingsUsername">&mdash;</div>
-        </div>
-        <div class="settings-group">
-          <div class="settings-row">
-            <span class="settings-label">Invite code</span>
-            <button class="copy-btn" onclick="copySettingsInviteCode()">Copy</button>
-          </div>
-          <div class="settings-value mono" id="settingsInviteCode">&mdash;</div>
-        </div>
-        <div class="settings-group" id="settingsEmailGroup" style="display:none">
-          <div class="settings-row">
-            <span class="settings-label">Email</span>
-            <span class="settings-badge" id="settingsEmailBadge"></span>
-          </div>
-          <div class="settings-value" id="settingsEmail">&mdash;</div>
-          <div id="emailVerifySection" style="display:none; margin-top: 8px;">
-            <button class="settings-action-btn" id="sendVerifyBtn" onclick="sendEmailVerifyCode()">Send verification code</button>
-          </div>
-          <div id="emailCodeSection" style="display:none; margin-top: 8px;">
-            <div class="settings-hint">Check your inbox and enter the code:</div>
-            <form class="add-friend-form" onsubmit="submitEmailVerifyCode(event)">
-              <input type="text" class="search-input" id="emailVerifyCodeInput"
-                     placeholder="e.g. X7K9M2" autocomplete="off" maxlength="6"
-                     style="font-family: monospace; text-transform: uppercase; letter-spacing: 2px;">
-              <button type="submit" class="submit-btn" id="verifyCodeBtn">Confirm</button>
-            </form>
-            <div id="emailVerifyStatus" style="display:none; font-size: 12px; padding: 4px 0; margin-top: 2px;"></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- HQPlayer Tab -->
-      <div class="stab-content" id="stab-settings-hqplayer">
-        <div class="settings-group">
-          <div class="settings-label">Status</div>
-          <div class="settings-value" id="settingsHqpStatus">&mdash;</div>
-        </div>
-        <div class="settings-group">
-          <div class="settings-label">Host</div>
-          <div class="settings-value mono" id="settingsHqpHost">&mdash;</div>
-        </div>
-        <div class="settings-group">
-          <div class="settings-label">Port</div>
-          <div class="settings-value mono" id="settingsHqpPort">&mdash;</div>
-        </div>
-      </div>
-
-      <!-- Last.fm Tab -->
-      <div class="stab-content" id="stab-settings-lastfm">
-        <div class="settings-group">
-          <div class="settings-label">Username</div>
-          <div class="settings-value" id="settingsLastfmUser">&mdash;</div>
-        </div>
-        <div class="settings-group">
-          <div class="settings-row">
-            <span class="settings-label">Authorization</span>
-            <span class="settings-badge" id="settingsLastfmBadge"></span>
-          </div>
-          <div id="lastfmAuthSection" style="margin-top: 8px;">
-            <button class="settings-action-btn" id="lastfmAuthBtn" onclick="startLastfmAuth()" style="display:none">Authorize scrobbling</button>
-            <div id="lastfmAuthUrl" style="display:none; margin-top: 6px;">
-              <div class="settings-hint">Open this URL in your browser to authorize:</div>
-              <a id="lastfmAuthLink" href="#" target="_blank" class="settings-link"></a>
-              <button class="settings-action-btn" onclick="completeLastfmAuth()" style="margin-top: 8px;">Complete authorization</button>
-            </div>
-            <div id="lastfmAuthStatus" style="display:none; font-size: 12px; padding: 4px 0; margin-top: 2px;"></div>
-          </div>
-        </div>
-      </div>
-
-    </section>
-
+    <!-- Settings: Last.fm -->
+    <div id="settingsLastfmUser"></div>
+    <span id="settingsLastfmBadge"></span>
+    <button id="lastfmAuthBtn" type="button"></button>
+    <a id="lastfmAuthLink" href="#"></a>
+    <div id="lastfmAuthUrl" style="display:none"></div>
+    <div id="lastfmAuthStatus"></div>
   </div>
 
-  <script src="/static/app.js?v=13"></script>
+  <script src="/static/app-shell.js?v=3"></script>
+  <script src="/static/app.js?v=14"></script>
 </body>
 </html>

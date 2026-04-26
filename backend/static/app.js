@@ -170,6 +170,11 @@ function updateNowPlaying(data) {
       item.classList.toggle("playing", idx === data.track_index - 1);
     });
   }
+
+  // Bridge to the new shell's mini-player. Single source of truth (this
+  // function), multiple consumers (legacy hidden stubs above + new
+  // mini-player in app-shell.js listening for np-update).
+  document.dispatchEvent(new CustomEvent("np-update", { detail: data }));
 }
 
 // -- Transport controls ------------------------------------------------------
