@@ -6,13 +6,11 @@ Main entry point for the API server.
 import asyncio
 import logging
 import logging.config
-import select
 import threading
 from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional
 
 import psycopg2
-import psycopg2.extensions
 try:
     import torch
 except ImportError:
@@ -33,10 +31,6 @@ logger = logging.getLogger(__name__)
 _dht_service: DHTService | None = None
 _dht_reannounce_task: asyncio.Task | None = None
 _model_cleanup_task: asyncio.Task | None = None
-_cover_worker_task: asyncio.Task | None = None
-_cover_notify_event: asyncio.Event | None = None
-_cover_listen_thread: threading.Thread | None = None
-_cover_listen_running = False
 
 
 async def _model_cleanup_loop():
@@ -45,133 +39,6 @@ async def _model_cleanup_loop():
     while True:
         await asyncio.sleep(60)
         model_cache.cleanup_idle()
-
-
-# -- Cover worker ------------------------------------------------------------
-
-_COVER_BATCH_SIZE = 20
-_COVER_IDLE_TIMEOUT = 60  # seconds between wake-ups when queue is empty
-
-
-def _cover_sweep_once() -> int:
-    """Process up to _COVER_BATCH_SIZE pending media_files. Returns count processed.
-
-    Runs in a worker thread (blocking DB + CPU work). Errors on individual
-    rows are caught and the row is marked processed to avoid a retry loop.
-    """
-    from sqlalchemy import text as _text
-    from database import get_db_context
-    from covers import process_pending
-
-    try:
-        with get_db_context() as db:
-            rows = db.execute(_text(
-                "SELECT id FROM media_files "
-                "WHERE cover_processed_at IS NULL "
-                "ORDER BY id LIMIT :lim"
-            ), {"lim": _COVER_BATCH_SIZE}).all()
-    except Exception as e:
-        logger.error(f"cover worker: batch query failed: {e}")
-        return 0
-
-    if not rows:
-        return 0
-
-    processed = 0
-    for (mid,) in rows:
-        try:
-            with get_db_context() as db:
-                process_pending(db, mid)
-            processed += 1
-        except Exception as e:
-            logger.warning(f"cover worker: media_file {mid} failed: {e}")
-            try:
-                with get_db_context() as db:
-                    db.execute(_text(
-                        "UPDATE media_files SET cover_processed_at = now() "
-                        "WHERE id = :mid"
-                    ), {"mid": mid})
-            except Exception as e2:
-                logger.error(f"cover worker: failed to mark {mid} processed: {e2}")
-    return processed
-
-
-def _cover_listen_loop(event: asyncio.Event, loop: asyncio.AbstractEventLoop):
-    """Background thread: LISTEN cover_pending, wake the worker task on NOTIFY."""
-    global _cover_listen_running
-    while _cover_listen_running:
-        conn = None
-        try:
-            conn = psycopg2.connect(settings.database_url)
-            conn.set_isolation_level(
-                psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT
-            )
-            with conn.cursor() as cur:
-                cur.execute("LISTEN cover_pending")
-            while _cover_listen_running:
-                ready = select.select([conn], [], [], 5)
-                if ready[0]:
-                    conn.poll()
-                    if conn.notifies:
-                        conn.notifies.clear()
-                        loop.call_soon_threadsafe(event.set)
-        except Exception as e:
-            logger.debug(f"cover LISTEN error: {e}")
-            if _cover_listen_running:
-                import time
-                time.sleep(1)
-        finally:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-
-
-async def _cover_worker_loop():
-    """Drain pending covers, then react to LISTEN cover_pending notifications."""
-    global _cover_notify_event, _cover_listen_thread, _cover_listen_running
-    _cover_notify_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-
-    _cover_listen_running = True
-    _cover_listen_thread = threading.Thread(
-        target=_cover_listen_loop,
-        args=(_cover_notify_event, loop),
-        daemon=True,
-        name="cover-listen",
-    )
-    _cover_listen_thread.start()
-
-    initial_total = 0
-    initial_sweep = True
-    try:
-        while True:
-            count = await asyncio.to_thread(_cover_sweep_once)
-            if count > 0:
-                initial_total += count
-                if initial_sweep and initial_total % (10 * _COVER_BATCH_SIZE) == 0:
-                    logger.info(
-                        f"cover worker: processed {initial_total} media_files..."
-                    )
-                continue
-
-            if initial_sweep:
-                logger.info(
-                    f"cover worker: initial sweep complete ({initial_total} processed)"
-                )
-                initial_sweep = False
-
-            _cover_notify_event.clear()
-            try:
-                await asyncio.wait_for(
-                    _cover_notify_event.wait(),
-                    timeout=_COVER_IDLE_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                pass
-    except asyncio.CancelledError:
-        raise
 
 
 @asynccontextmanager
@@ -287,24 +154,9 @@ async def lifespan(app: FastAPI):
     global _model_cleanup_task
     _model_cleanup_task = asyncio.create_task(_model_cleanup_loop())
 
-    # Start cover art worker (initial sweep + LISTEN cover_pending)
-    global _cover_worker_task
-    _cover_worker_task = asyncio.create_task(_cover_worker_loop())
-
     yield
 
     # Shutdown
-    global _cover_listen_running
-    _cover_listen_running = False
-    if _cover_worker_task:
-        _cover_worker_task.cancel()
-        try:
-            await _cover_worker_task
-        except asyncio.CancelledError:
-            pass
-    if _cover_listen_thread:
-        _cover_listen_thread.join(timeout=3)
-
     if _model_cleanup_task:
         _model_cleanup_task.cancel()
         try:
@@ -1210,6 +1062,12 @@ app.include_router(covers_router)
 
 from routers.home import router as home_router
 app.include_router(home_router)
+
+from routers.artists import router as artists_router
+app.include_router(artists_router)
+
+from routers.albums import router as albums_router
+app.include_router(albums_router)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

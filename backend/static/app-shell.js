@@ -49,6 +49,23 @@
       .replace(/'/g, '&#39;');
   }
 
+  /* ---------- Cover URL builder ----------
+     Two cover sources, picked in priority order:
+       1) cover_id (UUID, already resolved)  → /api/covers/<uuid>
+       2) media_file_id (int, lazy resolution) → /api/covers/by-media/<int>
+     The lazy endpoint extracts from disk / Last.fm on first request and
+     caches the result in covers.id. Returns "" when neither is available
+     so callers fall back to a gradient placeholder. */
+
+  function coverUrl(item) {
+    if (!item) return '';
+    if (item.cover_id) return '/api/covers/' + encodeURIComponent(item.cover_id);
+    if (item.media_file_id != null) {
+      return '/api/covers/by-media/' + encodeURIComponent(item.media_file_id);
+    }
+    return '';
+  }
+
   /* ---------- Router ---------- */
 
   const routes = {};
@@ -71,14 +88,42 @@
     }
   }
 
+  function navigateToEntity(kind, id) {
+    if (!id) return;
+    const tab = currentRoute || 'home';
+    navigate(`${tab}/${kind}/${id}`);
+  }
+
   function render() {
     const hash = parseHash();
-    const route = hash.split('/')[0] || 'home';
+    const segments = hash.split('/').filter(Boolean);
+    const route = segments[0] || 'home';
     currentRoute = route;
     const app = document.getElementById('app');
     if (!app) return;
-    const renderer = routes[route] || routes.home;
     app.innerHTML = '';
+
+    // Nested entity routes — #<tab>/artist/<uuid>, #<tab>/album/<uuid>
+    if (segments.length >= 3) {
+      const kind = segments[1];
+      const id = segments.slice(2).join('/');
+      if (kind === 'artist') {
+        renderArtist(app, id);
+        updateNavActive(route);
+        updateFabVisibility(route);
+        window.scrollTo(0, 0);
+        return;
+      }
+      if (kind === 'album') {
+        renderAlbum(app, id);
+        updateNavActive(route);
+        updateFabVisibility(route);
+        window.scrollTo(0, 0);
+        return;
+      }
+    }
+
+    const renderer = routes[route] || routes.home;
     if (renderer) renderer(app, hash);
     updateNavActive(route);
     updateFabVisibility(route);
@@ -299,6 +344,9 @@
         this.lastDetailFetchedKey = trackKey;
         this.renderDetail(detail);
         this.fetchSimilar(mfId);
+        // Share detail with other surfaces (mini-player needs cover_id
+        // which is not in the SSE status payload).
+        document.dispatchEvent(new CustomEvent('np-detail', { detail }));
       } catch (err) {
         console.warn('now-playing-detail failed:', err);
       } finally {
@@ -323,9 +371,11 @@
     renderDetail(d) {
       if (!d) return;
 
-      // Cover
-      if (d.cover_id && this.coverImg) {
-        this.coverImg.src = '/api/covers/' + d.cover_id;
+      // Cover — prefer resolved cover_id; fall back to lazy by-media URL.
+      const url = coverUrl(d);
+      if (url && this.coverImg) {
+        this.coverImg.src = url;
+        this.coverImg.onerror = () => { this.coverImg.hidden = true; };
         this.coverImg.hidden = false;
       } else if (this.coverImg) {
         this.coverImg.hidden = true;
@@ -403,8 +453,10 @@
       }
       this.similarCount.textContent = String(tracks.length);
       this.similarList.innerHTML = tracks.map(t => {
-        const cover = t.cover_id
-          ? `<img src="/api/covers/${t.cover_id}" alt="">`
+        // /search/similar returns mf_rep.id as t.id — that's media_file_id.
+        const url = coverUrl({cover_id: t.cover_id, media_file_id: t.id});
+        const cover = url
+          ? `<img src="${url}" alt="" loading="lazy" onerror="this.style.display='none'">`
           : `<div class="np-sim-art-fallback"></div>`;
         const score = (t.similarity != null)
           ? Number(t.similarity).toFixed(2)
@@ -439,6 +491,7 @@
   const mp = {
     el: null, cover: null, title: null, artist: null,
     playPauseIcon: null, playPause: null, next: null,
+    lastSongKey: null,
 
     init() {
       this.el = document.getElementById('miniPlayer');
@@ -499,9 +552,31 @@
             : 'M8 5v14l11-7z');                  // play triangle
       }
 
-      const c = coverPlaceholderColors(data.song || data.album || '');
-      this.cover.style.backgroundImage =
-        `linear-gradient(135deg, ${c.bg1}, ${c.bg2})`;
+      // Reset cover to gradient placeholder only when the track changes.
+      // The np-detail listener will swap to the real cover image once
+      // the sheet's tryFetchDetail completes. CSS already declares
+      // background-size:cover + background-position:center on .mp-cover,
+      // so the gradient and the image both render correctly without
+      // per-call inline overrides.
+      const songKey = (data.song || '') + '|' + (data.album || '');
+      if (songKey !== this.lastSongKey) {
+        this.lastSongKey = songKey;
+        const c = coverPlaceholderColors(data.song || data.album || '');
+        this.cover.style.backgroundImage =
+          `linear-gradient(135deg, ${c.bg1}, ${c.bg2})`;
+      }
+    },
+
+    setCover(detail) {
+      if (!this.cover) return;
+      const url = coverUrl(detail);
+      if (!url) return;
+      // mp-cover is a <div> with background-image. Preloading via Image()
+      // lets us silently keep the gradient placeholder when the URL 404s
+      // (sentinel cover) instead of replacing it with a broken image.
+      const probe = new Image();
+      probe.onload = () => { this.cover.style.backgroundImage = `url(${url})`; };
+      probe.src = url;
     },
   };
 
@@ -525,7 +600,8 @@
 
   /* ---------- Home (placeholder data; real wiring in Step 1.2) ---------- */
 
-  function renderArtistTile(name) {
+  function renderArtistTile(item) {
+    const name = item.name || '';
     const tile = document.createElement('button');
     tile.type = 'button';
     tile.className = 'artist-tile';
@@ -534,25 +610,39 @@
       <div class="artist-avatar" style="background: ${ph.bg};">${escapeHtml(ph.initials)}</div>
       <div class="artist-name">${escapeHtml(name)}</div>
     `;
+    if (item.id) {
+      tile.addEventListener('click', () => navigateToEntity('artist', item.id));
+    }
     return tile;
   }
 
-  function renderAlbumTile({ title, artist, similarity }) {
+  function renderAlbumTile(item) {
+    const { id, title, artist, similarity } = item;
     const tile = document.createElement('button');
     tile.type = 'button';
     tile.className = 'album-tile';
     const c = coverPlaceholderColors(title || artist || 'x');
+    const url = coverUrl(item);
+    // onerror hides the <img>, revealing the parent's gradient + label.
+    const cover = url
+      ? `<img src="${url}" alt="" loading="lazy"
+              onerror="this.style.display='none'"
+              style="width:100%;height:100%;object-fit:cover;display:block;">`
+      : `<div class="placeholder-badge">${escapeHtml(title || '')}</div>`;
     const sim = (similarity != null)
       ? `<div class="album-similarity">${similarity.toFixed(2)}</div>`
       : '';
     tile.innerHTML = `
       <div class="album-cover" style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">
-        <div class="placeholder-badge">${escapeHtml(title || '')}</div>
+        ${cover}
       </div>
       <div class="album-title">${escapeHtml(title || '')}</div>
       <div class="album-artist">${escapeHtml(artist || '')}</div>
       ${sim}
     `;
+    if (id) {
+      tile.addEventListener('click', () => navigateToEntity('album', id));
+    }
     return tile;
   }
 
@@ -576,12 +666,8 @@
       row.appendChild(empty);
     } else {
       for (const item of items) {
-        if (kind === 'artist') row.appendChild(renderArtistTile(item.name));
-        else row.appendChild(renderAlbumTile({
-          title: item.title,
-          artist: item.artist,
-          similarity: item.similarity,
-        }));
+        if (kind === 'artist') row.appendChild(renderArtistTile(item));
+        else row.appendChild(renderAlbumTile(item));
       }
     }
     sec.appendChild(row);
@@ -621,6 +707,396 @@
       feed.recommendations, 'album');
   }
 
+  /* ---------- Artist + Album detail screens (Step 1.4) ----------
+     Rendered when the hash matches #<tab>/artist/<uuid> or
+     #<tab>/album/<uuid>. Markup mirrors docs/design/reference/
+     claude-design-bundle/project/Session 2 v3.html — sections
+     "Artist Detail" and "Album Detail". */
+
+  function fmtDuration(seconds) {
+    const s = Math.max(0, Math.floor(Number(seconds || 0)));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${r.toString().padStart(2, '0')}`;
+  }
+
+  function fmtDurationLong(seconds) {
+    const s = Math.max(0, Math.floor(Number(seconds || 0)));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${r.toString().padStart(2, '0')}`;
+    return `${m}:${r.toString().padStart(2, '0')}`;
+  }
+
+  function modeShort(m) {
+    if (m === 'minor') return 'min';
+    if (m === 'major') return 'maj';
+    return '';
+  }
+
+  function stripHtml(html) {
+    if (!html) return '';
+    return String(html)
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/p\s*>/gi, '\n')
+      .replace(/<[^>]+>/g, '')          // strip remaining tags
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/[ \t]+/g, ' ')          // collapse spaces/tabs but keep newlines
+      .replace(/\n[ \t]+/g, '\n')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')       // cap blank lines
+      .trim();
+  }
+
+  /** Trim Last.fm boilerplate after the user-facing prose. */
+  function trimLastFmTail(text) {
+    if (!text) return '';
+    // Cut at common Last.fm tail markers.
+    const markers = [
+      'Read more on Last.fm',
+      'User-contributed text is available',
+      'This article uses material from the Wikipedia article',
+    ];
+    for (const m of markers) {
+      const idx = text.indexOf(m);
+      if (idx > 0) return text.slice(0, idx).trim();
+    }
+    return text.trim();
+  }
+
+  const SVG_BACK = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>';
+  const SVG_KEBAB = '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>';
+  const SVG_PLUS = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
+  const SVG_PLAY = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.2v13.6a1 1 0 001.5.87l11-6.8a1 1 0 000-1.74l-11-6.8A1 1 0 008 5.2z"/></svg>';
+
+  async function renderArtist(root, artistId) {
+    root.innerHTML = '';
+    const screen = document.createElement('div');
+    screen.className = 'detail-screen';
+    root.appendChild(screen);
+
+    let d;
+    try {
+      const resp = await fetch('/api/artists/' + encodeURIComponent(artistId));
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      d = await resp.json();
+    } catch (err) {
+      screen.innerHTML = `<div class="placeholder-screen">
+        <p class="placeholder-body">Artist not found.</p>
+        <button class="legacy-link" onclick="history.back()">← Back</button>
+      </div>`;
+      return;
+    }
+
+    const ph = avatarPlaceholder(d.name || '?');
+    const heroImg = d.photo_url
+      ? `<img src="${escapeHtml(d.photo_url)}" alt="">`
+      : `<div class="artist-hero-fallback"
+            style="--cover-bg-1: ${ph.bg}; --cover-bg-2: var(--color-foundation);">${
+              escapeHtml(ph.initials)}</div>`;
+
+    const tagsHtml = (d.tags || [])
+      .map(t => `<span class="tag-chip">${escapeHtml(t.name)}</span>`)
+      .join('');
+
+    const albumsHtml = (d.albums || []).map(a => {
+      const c = coverPlaceholderColors(a.title || a.id);
+      const url = coverUrl(a);
+      const inner = url
+        ? `<img src="${url}" alt="" loading="lazy"
+                onerror="this.style.display='none'">`
+        : `<div class="placeholder-badge"
+              style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${
+                escapeHtml(a.title || '')}</div>`;
+      return `
+        <button class="album-tile" type="button" data-album-id="${escapeHtml(a.id)}">
+          <div class="album-cover"
+               style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${inner}</div>
+          <div class="album-tile-title">${escapeHtml(a.title || '')}</div>
+          <div class="album-tile-year">${a.year || ''}</div>
+        </button>`;
+    }).join('');
+
+    const tracksHtml = (d.popular_tracks || []).map((t, i) => `
+      <button class="track-row" type="button"
+              data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}">
+        <span class="track-rank">${i + 1}</span>
+        <div class="track-info">
+          <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+          <div class="track-artist-line">${escapeHtml(t.album || '')}</div>
+        </div>
+        <span class="track-dur">${fmtDuration(t.duration)}</span>
+        <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
+      </button>
+    `).join('');
+
+    const similarHtml = (d.similar_artists || []).map(s => {
+      const sph = avatarPlaceholder(s.name || '?');
+      const url = coverUrl(s);
+      const inner = url
+        ? `<img src="${url}" alt="" loading="lazy"
+                onerror="this.style.display='none'">`
+        : `<div class="similar-avatar-fallback"
+              style="--cover-bg-1: ${sph.bg}; --cover-bg-2: var(--color-foundation);">${
+                escapeHtml(sph.initials)}</div>`;
+      return `
+        <button class="similar-artist" type="button" data-artist-id="${escapeHtml(s.id)}">
+          <div class="similar-avatar">${inner}</div>
+          <div class="similar-name">${escapeHtml(s.name || '')}</div>
+        </button>`;
+    }).join('');
+
+    const bioSummary = trimLastFmTail(stripHtml(d.bio_summary || ''));
+    const bioFull = trimLastFmTail(stripHtml(d.bio || ''));
+    const initialBio = bioSummary || bioFull;
+    const hasMoreBio = bioFull && bioSummary && bioFull.length > bioSummary.length;
+    const bioHtml = initialBio
+      ? `<p class="bio"><span class="bio-text">${escapeHtml(initialBio)}</span>${
+          hasMoreBio ? '<span class="see-more"> See more&nbsp;▾</span>' : ''
+        }</p>`
+      : '';
+
+    screen.innerHTML = `
+      <div class="artist-hero">
+        ${heroImg}
+        <div class="artist-hero-scrim-top"></div>
+        <div class="artist-hero-scrim-bottom"></div>
+        <div class="artist-hero-controls">
+          <button class="icon-btn" type="button" data-action="back" aria-label="Back">${SVG_BACK}</button>
+          <button class="icon-btn" type="button" aria-label="More">${SVG_KEBAB}</button>
+        </div>
+        <h1 class="artist-hero-name">${escapeHtml(d.name || '')}</h1>
+      </div>
+      <div style="height: calc(14 * var(--px));"></div>
+      ${tagsHtml ? `<div class="tag-row">${tagsHtml}</div>` : ''}
+      ${bioHtml}
+      ${albumsHtml ? `
+        <div class="section-sep"></div>
+        <div class="section-head">
+          <h3>Albums</h3>
+          <button class="see-all" type="button">See all ›</button>
+        </div>
+        <div class="h-scroll">${albumsHtml}</div>
+      ` : ''}
+      ${tracksHtml ? `
+        <div class="section-sep"></div>
+        <div class="section-head"><h3>Popular tracks</h3></div>
+        <div class="track-list">${tracksHtml}</div>
+      ` : ''}
+      ${similarHtml ? `
+        <div class="section-sep"></div>
+        <div class="section-head">
+          <h3>Similar artists</h3>
+          <button class="see-all" type="button">See all ›</button>
+        </div>
+        <div class="similar-row">${similarHtml}</div>
+      ` : ''}
+      <div style="height: calc(24 * var(--px));"></div>
+    `;
+
+    if (hasMoreBio) {
+      const bioP = screen.querySelector('.bio');
+      const textSpan = bioP && bioP.querySelector('.bio-text');
+      const seeMore = bioP && bioP.querySelector('.see-more');
+      if (textSpan && seeMore) {
+        let expanded = false;
+        seeMore.addEventListener('click', e => {
+          e.stopPropagation();
+          expanded = !expanded;
+          textSpan.textContent = expanded ? bioFull : bioSummary;
+          seeMore.innerHTML = expanded
+            ? ' See less&nbsp;▴'
+            : ' See more&nbsp;▾';
+        });
+      }
+    }
+
+    wireDetailHandlers(screen);
+  }
+
+  async function renderAlbum(root, albumId) {
+    root.innerHTML = '';
+    const screen = document.createElement('div');
+    screen.className = 'detail-screen';
+    root.appendChild(screen);
+
+    let d;
+    try {
+      const resp = await fetch('/api/albums/' + encodeURIComponent(albumId));
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      d = await resp.json();
+    } catch (err) {
+      screen.innerHTML = `<div class="placeholder-screen">
+        <p class="placeholder-body">Album not found.</p>
+        <button class="legacy-link" onclick="history.back()">← Back</button>
+      </div>`;
+      return;
+    }
+
+    const c = coverPlaceholderColors(d.title || d.id);
+    const heroUrl = coverUrl(d);
+    const heroImg = heroUrl
+      ? `<img src="${heroUrl}" alt="" onerror="this.style.display='none'">`
+      : `<div class="album-hero-fallback"
+            style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};"></div>`;
+
+    const qual = d.quality || 'lossy';
+    const qualLabel = qual === 'hi-res' ? 'Hi-Res'
+      : qual === 'lossless' ? 'Lossless' : 'Lossy';
+    const qualClass = qual === 'hi-res' ? 'is-hires'
+      : qual === 'lossless' ? 'is-lossless' : 'is-lossy';
+
+    const genresHtml = (d.genres || [])
+      .map(g => `<button class="tag-chip" type="button"
+                         data-genre-id="${escapeHtml(g.id)}">${escapeHtml(g.name)}</button>`)
+      .join('');
+
+    const tracksHtml = (d.tracks || []).map(t => {
+      const sub = [
+        t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
+        t.bpm ? Math.round(t.bpm) + ' bpm' : null,
+      ].filter(Boolean).join(' · ');
+      return `
+        <button class="track-row" type="button"
+                data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}">
+          <span class="track-rank">${t.track_number || ''}</span>
+          <div class="track-info">
+            <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+            ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
+          </div>
+          <span class="track-dur">${fmtDuration(t.duration)}</span>
+          <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
+        </button>
+      `;
+    }).join('');
+
+    const artistName = d.primary_artist ? d.primary_artist.name : '';
+    const artistId = d.primary_artist ? d.primary_artist.id : '';
+    const totalDuration = fmtDurationLong(d.total_duration);
+
+    screen.innerHTML = `
+      <div class="album-hero">
+        ${heroImg}
+        <div class="album-hero-scrim"></div>
+        <div class="album-hero-controls">
+          <button class="icon-btn" type="button" data-action="back" aria-label="Back">${SVG_BACK}</button>
+          <button class="icon-btn" type="button" aria-label="More">${SVG_KEBAB}</button>
+        </div>
+      </div>
+      <div class="album-meta-block">
+        <h1 class="album-title-line">${escapeHtml(d.title || '')}</h1>
+        ${artistName ? `<button class="album-artist-line"
+                                style="background:none;border:0;padding:0;cursor:pointer;text-align:left;"
+                                data-artist-id="${escapeHtml(artistId)}">${escapeHtml(artistName)}</button>` : ''}
+        <div class="album-meta-row">
+          ${d.year ? `<span class="am-year">${d.year}</span><span class="am-dot"></span>` : ''}
+          <span class="am-dur" style="margin-left: 0;">${totalDuration}</span>
+          <span class="am-hires ${qualClass}" style="margin-left: auto;">${qualLabel}</span>
+        </div>
+        ${genresHtml ? `<div class="tag-row" style="padding: calc(12 * var(--px)) 0 0;">${genresHtml}</div>` : ''}
+      </div>
+      <div class="album-actions">
+        <button class="btn-primary" type="button" data-action="play-all">${SVG_PLAY} Play all</button>
+        <button class="btn-secondary" type="button" data-action="queue-album">${SVG_PLUS} Queue</button>
+      </div>
+      <div class="album-tracklist">${tracksHtml}</div>
+      <div style="height: calc(24 * var(--px));"></div>
+    `;
+
+    wireDetailHandlers(screen, { albumId, tracks: d.tracks });
+  }
+
+  function wireDetailHandlers(screen, ctx = {}) {
+    // Back chevron
+    screen.querySelectorAll('[data-action="back"]').forEach(btn => {
+      btn.addEventListener('click', () => history.back());
+    });
+    // Artist tile / similar artist / album-artist link
+    screen.querySelectorAll('[data-artist-id]').forEach(el => {
+      el.addEventListener('click', e => {
+        e.stopPropagation();
+        const id = el.getAttribute('data-artist-id');
+        if (id) navigateToEntity('artist', id);
+      });
+    });
+    // Album tile
+    screen.querySelectorAll('[data-album-id]').forEach(el => {
+      el.addEventListener('click', e => {
+        e.stopPropagation();
+        const id = el.getAttribute('data-album-id');
+        if (id) navigateToEntity('album', id);
+      });
+    });
+    // Track row → play track
+    screen.querySelectorAll('[data-media-file-id]').forEach(el => {
+      el.addEventListener('click', e => {
+        if (e.target.closest('.track-add')) return;
+        e.stopPropagation();
+        const mfId = el.getAttribute('data-media-file-id');
+        if (mfId && typeof window.playTrack === 'function') {
+          window.playTrack(parseInt(mfId, 10));
+        }
+      });
+    });
+    // Track-add button → queue-next
+    // No client-side fetchPlaylist refresh — backend bumps
+    // playlist_version, the SSE handler in app.js awaits a fresh
+    // fetchPlaylist() before notifying subscribers.
+    screen.querySelectorAll('.track-add').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const row = btn.closest('[data-media-file-id]');
+        if (!row) return;
+        const mfId = row.getAttribute('data-media-file-id');
+        if (!mfId) return;
+        try {
+          await fetch('/api/player/queue-next', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ track_id: parseInt(mfId, 10) }),
+          });
+        } catch (err) { console.warn('queue-next failed', err); }
+      });
+    });
+    // Play all (album) — replaces queue with full album
+    screen.querySelectorAll('[data-action="play-all"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!ctx.tracks || !ctx.tracks.length) return;
+        const ids = ctx.tracks.map(t => t.media_file_id).filter(Boolean);
+        try {
+          await fetch('/api/player/play-tracks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ track_ids: ids }),
+          });
+        } catch (err) { console.warn('play-tracks failed', err); }
+      });
+    });
+    // Queue album — append all tracks
+    screen.querySelectorAll('[data-action="queue-album"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!ctx.tracks || !ctx.tracks.length) return;
+        for (const t of ctx.tracks) {
+          if (!t.media_file_id) continue;
+          try {
+            await fetch('/api/player/queue-next', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ track_id: t.media_file_id }),
+            });
+          } catch (err) { /* ignore single failures */ }
+        }
+        // No client-side refetch — see comment on .track-add above.
+      });
+    });
+  }
+
   /* ---------- Wire it up ---------- */
 
   registerScreen('home', renderHome);
@@ -644,6 +1120,9 @@
     document.addEventListener('np-update', e => {
       mp.update(e.detail);
       sheet.onStatus(e.detail);
+    });
+    document.addEventListener('np-detail', e => {
+      mp.setCover(e.detail);
     });
     // When the legacy playlist load resolves, kick a detail fetch in
     // case SSE already fired before playlist was ready (in which case

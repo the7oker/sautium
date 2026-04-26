@@ -932,6 +932,42 @@ class LastFmService:
             logger.error(f"Error fetching Last.fm data for {artist_name} - {album_title}: {e}")
             raise
 
+    def get_album_cover_url(
+        self,
+        artist_name: str,
+        album_title: str,
+        size: int = pylast.SIZE_MEGA,
+    ) -> Optional[str]:
+        """Resolve a direct Last.fm cover-art URL for an album, or None.
+
+        Last.fm's `album.getInfo` returns image URLs at sizes
+        small/medium/large/extralarge/mega — pylast addresses them by
+        integer index (pylast.SIZE_*). We default to SIZE_MEGA so the
+        downstream WebP encoder (1024px max) gets the highest-detail
+        source available. Returns None when the album is unknown or
+        has no cover registered on Last.fm.
+        """
+        try:
+            album = self.network.get_album(artist_name, album_title)
+            url = album.get_cover_image(size=size)
+            if not url:
+                return None
+            url = str(url).strip()
+            return url or None
+        except pylast.WSError as e:
+            err = str(e).lower()
+            if "not found" in err or "could not be found" in err:
+                return None
+            logger.warning(
+                f"Last.fm cover lookup error for {artist_name} - {album_title}: {e}"
+            )
+            return None
+        except Exception as e:
+            logger.warning(
+                f"Last.fm cover lookup failed for {artist_name} - {album_title}: {e}"
+            )
+            return None
+
     def enrich_album(self, db: Session, album_id: int, artist_name: str, album_title: str) -> Dict[str, Any]:
         """
         Fetch Last.fm data for an album and store in database.

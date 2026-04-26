@@ -7,6 +7,13 @@ let currentSessionId = null;
 let sessions = [];
 let sessionsLoaded = false;
 let currentPlaylist = [];
+// Last `playlist_version` we've seen on the SSE stream. Whenever the
+// backend bumps this (after any queue mutation, ours or external), the
+// SSE handler awaits a fresh fetchPlaylist() before letting subscribers
+// see the new status payload — guarantees `currentPlaylist` is always
+// in sync with the song reported by HQPlayer. See backend
+// _refresh_playlist_cache for the bump rule.
+let lastPlaylistVersion = null;
 let providersData = [];  // [{id, name, models}, ...]
 let selectedProvider = localStorage.getItem("djProvider") || "";
 let selectedModel = localStorage.getItem("djModel") || "";
@@ -47,13 +54,14 @@ function connectStatusSSE() {
 
   _sseSource.onmessage = (event) => {
     _sseRetryDelay = 1000; // reset backoff on success
+    let data;
     try {
-      const data = JSON.parse(event.data);
-      currentState = data.state;
-      updateNowPlaying(data);
+      data = JSON.parse(event.data);
     } catch (e) {
       console.error("SSE parse error:", e);
+      return;
     }
+    handleStatusEvent(data);
   };
 
   _sseSource.onerror = () => {
@@ -65,6 +73,40 @@ function connectStatusSSE() {
     setTimeout(connectStatusSSE, _sseRetryDelay);
     _sseRetryDelay = Math.min(_sseRetryDelay * 1.5, 10000);
   };
+}
+
+// Process a single SSE status payload. If the backend bumped
+// `playlist_version`, await a fresh `fetchPlaylist()` BEFORE notifying
+// subscribers — that way `currentPlaylist` is always consistent with
+// the song the status payload describes (no setTimeout/race patches).
+async function processStatusEvent(data) {
+  currentState = data.state;
+  if (data.playlist_version !== undefined &&
+      data.playlist_version !== lastPlaylistVersion) {
+    // Update marker first so a duplicate event doesn't trigger a second
+    // refetch while this one is in flight.
+    lastPlaylistVersion = data.playlist_version;
+    try {
+      await fetchPlaylist();
+    } catch (e) {
+      console.warn("fetchPlaylist failed during SSE handling:", e);
+    }
+  }
+  updateNowPlaying(data);
+}
+
+// SSE delivers events sequentially. If we make onmessage async directly,
+// JS dispatches each callback on its own microtask without awaiting the
+// previous one — two rapid playlist mutations would launch two
+// fetchPlaylist() calls in parallel and race over `currentPlaylist`.
+// We restore strict serial processing by chaining each event onto a
+// promise. `.catch()` keeps the chain alive after a failed handler.
+let _sseChain = Promise.resolve();
+
+function handleStatusEvent(data) {
+  _sseChain = _sseChain
+    .then(() => processStatusEvent(data))
+    .catch((e) => console.error("SSE handler error:", e));
 }
 
 // -- Chat SSE stream ----------------------------------------------------------
@@ -199,15 +241,13 @@ function togglePlayPause() {
 
 async function playTrack(trackId) {
   try {
-    const resp = await fetch("/api/player/play-track", {
+    await fetch("/api/player/play-track", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ track_id: trackId }),
     });
-    const data = await resp.json();
-    if (data.ok) {
-      setTimeout(fetchPlaylist, 500);
-    }
+    // No client-side refetch — backend bumps playlist_version, SSE
+    // handler awaits fetchPlaylist() before notifying the UI.
   } catch (e) {
     console.error("Play track failed:", e);
   }
@@ -221,13 +261,11 @@ async function playAlbum(albumName, artistName) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ album_name: albumName, artist_name: artistName }),
     });
-    const result = await resp.json();
-    console.log("Play album result:", result);
     if (!resp.ok) {
+      const result = await resp.json();
       console.error("Play album error:", result);
-    } else if (result.ok) {
-      setTimeout(fetchPlaylist, 500);
     }
+    // No client-side refetch — see playTrack().
   } catch (e) {
     console.error("Play album failed:", e);
   }
@@ -243,15 +281,12 @@ function toggleAlbumTracks(albumId) {
 async function playRecommendations(tracks) {
   try {
     const trackIds = tracks.map(t => t.id);
-    const resp = await fetch("/api/player/play-tracks", {
+    await fetch("/api/player/play-tracks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ track_ids: trackIds }),
     });
-    const data = await resp.json();
-    if (data.ok) {
-      setTimeout(fetchPlaylist, 500);
-    }
+    // No client-side refetch — see playTrack().
   } catch (e) {
     console.error("Play recommendations failed:", e);
   }
@@ -1768,14 +1803,9 @@ function _radioCheck() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ track_id: currentTrack.id, limit: 5, exclude_ids: excludeIds }),
   })
-    .then(r => r.json())
-    .then(data => {
-      if (data.ok && data.count > 0) {
-        setTimeout(fetchPlaylist, 500);
-      }
-    })
     .catch(e => console.error("Radio queue-next failed:", e))
     .finally(() => { _radioQueuing = false; });
+  // No client-side refetch — backend bumps playlist_version on queue-next.
 }
 
 // -- Mood presets -------------------------------------------------------------

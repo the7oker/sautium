@@ -50,7 +50,18 @@ def get_home_feed(limit: int = Query(6, ge=1, le=24)) -> dict[str, list[dict[str
                 WHERE av2.album_id = al.id
                 GROUP BY a.id, a.name
                 ORDER BY COUNT(*) DESC
-                LIMIT 1) AS artist
+                LIMIT 1) AS artist,
+               (SELECT mf3.cover_id::text
+                FROM media_files mf3
+                JOIN album_variants av3 ON av3.id = mf3.album_variant_id
+                WHERE av3.album_id = al.id AND mf3.cover_id IS NOT NULL
+                LIMIT 1) AS cover_id,
+               (SELECT mf4.id
+                FROM media_files mf4
+                JOIN album_variants av4 ON av4.id = mf4.album_variant_id
+                WHERE av4.album_id = al.id
+                ORDER BY mf4.disc_number, mf4.track_number
+                LIMIT 1) AS media_file_id
         FROM albums al
         JOIN album_variants av ON av.album_id = al.id
         JOIN media_files mf ON mf.album_variant_id = av.id
@@ -82,7 +93,18 @@ def get_home_feed(limit: int = Query(6, ge=1, le=24)) -> dict[str, list[dict[str
                 WHERE av2.album_id = al.id
                 GROUP BY a.id, a.name
                 ORDER BY COUNT(*) DESC
-                LIMIT 1) AS artist
+                LIMIT 1) AS artist,
+               (SELECT mf3.cover_id::text
+                FROM media_files mf3
+                JOIN album_variants av3 ON av3.id = mf3.album_variant_id
+                WHERE av3.album_id = al.id AND mf3.cover_id IS NOT NULL
+                LIMIT 1) AS cover_id,
+               (SELECT mf4.id
+                FROM media_files mf4
+                JOIN album_variants av4 ON av4.id = mf4.album_variant_id
+                WHERE av4.album_id = al.id
+                ORDER BY mf4.disc_number, mf4.track_number
+                LIMIT 1) AS media_file_id
         FROM albums al
         LEFT JOIN album_plays ap ON ap.album_id = al.id
         WHERE COALESCE(ap.total_plays, 0) = 0

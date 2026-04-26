@@ -150,8 +150,25 @@ CREATE TABLE IF NOT EXISTS covers (
     bytes INTEGER NOT NULL,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_covers_source_type CHECK (source_type IN ('external', 'embedded'))
+    CONSTRAINT chk_covers_source_type CHECK (source_type IN ('external', 'embedded', 'sentinel'))
 );
+
+-- Sentinel cover row. Referenced by media_files.cover_id when lazy
+-- resolution has been attempted but no cover was found anywhere
+-- (embedded → external file → Last.fm). Required for FK integrity.
+INSERT INTO covers (
+    id, content_hash, source_type, source_path,
+    width, height, data, bytes
+) VALUES (
+    '00000000-0000-0000-0000-000000000000'::uuid,
+    decode(repeat('00', 32), 'hex'),
+    'sentinel',
+    '',
+    0, 0,
+    decode('', 'hex'),
+    0
+)
+ON CONFLICT (id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS media_files (
     id SERIAL PRIMARY KEY,
@@ -637,20 +654,8 @@ DO $$ BEGIN CREATE TRIGGER trg_covers_updated_at BEFORE UPDATE ON covers
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
--- Notify background worker when a media_file needs cover resolution.
-CREATE OR REPLACE FUNCTION notify_cover_pending() RETURNS TRIGGER AS $$
-BEGIN
-    IF NEW.cover_processed_at IS NULL THEN
-        PERFORM pg_notify('cover_pending', NEW.id::text);
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DO $$ BEGIN CREATE TRIGGER trg_cover_pending
-    AFTER INSERT OR UPDATE OF cover_processed_at ON media_files
-    FOR EACH ROW EXECUTE FUNCTION notify_cover_pending();
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- Cover resolution is lazy (on /api/covers/by-media/<id> request) — no
+-- background worker, no LISTEN/NOTIFY plumbing.
 
 DO $$ BEGIN CREATE TRIGGER update_embeddings_updated_at BEFORE UPDATE ON embeddings
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

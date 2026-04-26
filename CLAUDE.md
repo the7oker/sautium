@@ -44,6 +44,26 @@ See:
 - **Event-driven over polling.** Prefer SSE, `LISTEN/NOTIFY`, WebSocket or
   direct HTTP push. Polling is banned in new code — the chat rewrite proved
   the ~8s latency cost is never acceptable.
+- **No quick patches — fix the architecture, not the symptom.** Before
+  writing code, run a critical professional review of the proposed
+  approach: "is this fixing the cause, or hiding a symptom?". If hiding a
+  symptom, escalate to the architectural fix. Forbidden anti-patterns:
+  - `setTimeout`/`sleep` to "wait for state to settle" — that's polling
+    with a hardcoded latency guess. The right fix is an event from the
+    party that mutated the state.
+  - Defensive guards (`if (a !== b) skip and retry`) used as the primary
+    fix for a race — they let the race leak into structural noise. Make
+    the race impossible at the source. Defensive guards are acceptable
+    only as a secondary safety net, never as the only fix.
+  - Two parallel patch sites for the same problem (e.g., `fetchPlaylist`
+    retried from both `app.js` and `app-shell.js`). One source of truth.
+  - Catch-and-ignore (`except Exception: pass`, swallowing fetch errors)
+    — that's not a fix, that's hiding the bug from logs.
+  
+  If the proper fix feels too large, **stop and ask Valerii** before
+  falling back to a smaller patch. Do not silently downgrade. The cost
+  of asking is one round-trip; the cost of a hidden race-condition bug
+  found weeks later is hours of debugging without context.
 - **Idempotent enrichment.** Every enrichment/sync task must be safe to re-run.
   "Skip if already done" is a **correctness property, not an optimization** —
   partial failures and resumes are normal operating conditions.

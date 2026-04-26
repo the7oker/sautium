@@ -40,7 +40,16 @@ _poller_running = False
 # ticks (and immediately when a write command marks it stale via
 # _invalidate_playlist). Served instantly by /api/player/playlist so the UI
 # never waits on HQPlayer for the queue panel.
+#
+# `_playlist_version` is monotonically bumped only when the cached payload
+# actually changes (deep-equality on the serialized track list). The value
+# is embedded in every status payload so SSE clients can detect playlist
+# mutations and refetch deterministically — no setTimeout/polling on the
+# client side. Covers both our own write endpoints and external mutations
+# (HQPDesktop UI, MCP, other clients) that the poller picks up on its
+# periodic full refresh.
 _latest_playlist: dict = {"tracks": [], "count": 0}
+_playlist_version: int = 0
 _playlist_dirty: bool = True   # force refresh on first poll
 PLAYLIST_REFRESH_EVERY = 5      # otherwise refresh every N status polls
 
@@ -95,6 +104,7 @@ def _status_poller():
                     "progress_percent": round(status.progress_percent, 1),
                     "position_formatted": format_time(status.position),
                     "length_formatted": format_time(status.length),
+                    "playlist_version": _playlist_version,
                 }
 
             if new_data != _latest_status:
@@ -487,12 +497,17 @@ def _build_playlist_payload(hqp_tracks: list) -> dict:
 
 def _refresh_playlist_cache():
     """Pull current playlist from HQPlayer (status socket) and update cache.
-    Caller must hold _hqp_status_lock."""
-    global _latest_playlist, _playlist_dirty
+    Caller must hold _hqp_status_lock. Bumps `_playlist_version` only when
+    the new payload differs from the cached one — clients use the version
+    bump as a deterministic signal to refetch."""
+    global _latest_playlist, _playlist_dirty, _playlist_version
     try:
         hqp = _get_hqp_status()
         hqp_tracks = hqp.get_playlist()
-        _latest_playlist = _build_playlist_payload(hqp_tracks)
+        new_payload = _build_playlist_payload(hqp_tracks)
+        if new_payload != _latest_playlist:
+            _latest_playlist = new_payload
+            _playlist_version += 1
         _playlist_dirty = False
     except (BrokenPipeError, ConnectionError, OSError) as e:
         logger.debug(f"Playlist refresh failed ({e})")
@@ -1082,7 +1097,7 @@ def queue_next(req: QueueNextRequest):
             for row in rows:
                 hqp.playlist_add(file_path_to_uri(row["file_path"]))
 
-        _notify_update()
+        _invalidate_playlist()
 
         return {
             "ok": True,

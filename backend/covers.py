@@ -1,16 +1,28 @@
 """
-Cover art ingestion.
+Cover art ingestion (lazy on-demand).
 
-Scan flow (per media_file):
+Resolution order for a single media_file:
   1. embedded FLAC PICTURE type 3 (front cover) — preferred source
   2. external file in album directory (priority: cover > folder > front > ...)
+  3. Last.fm cover URL (size=mega) for the album
 
 Each source is hashed (BLAKE2b-256) for dedup, resized to 1024px WebP q=85 and
 stored as a blob. Perceptual hash (imagehash.phash) is computed for future
 near-duplicate detection (different encodings / re-rips of same art).
 
+When a folder is being resolved and yields a cover, all media_files in that
+folder get the same cover_id assigned in one pass — visiting one track of an
+album warms covers for the whole album.
+
+When all sources fail, every media_file in the folder is pinned to
+SENTINEL_COVER_ID — a singleton row in `covers` whose UUID is
+`00000000-0000-0000-0000-000000000000`. The HTTP endpoint sees the sentinel
+and returns a 404 with a short Cache-Control, blocking further extraction
+attempts but allowing manual retry after a re-scan / metadata fix.
+
 Public entry points:
   resolve_cover_for_media_file(db, media_file_id) -> Optional[UUID]
+  resolve_cover_for_folder(db, media_file_id) -> Optional[UUID]
   process_pending(db, media_file_id) -> Optional[UUID]   # + marks row processed
 """
 
@@ -22,6 +34,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Optional, Tuple
 
+import httpx
 import imagehash
 from mutagen.flac import FLAC
 from PIL import Image, UnidentifiedImageError
@@ -30,6 +43,9 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from uuid_utils import NAMESPACE
+
+
+SENTINEL_COVER_ID = uuid.UUID("00000000-0000-0000-0000-000000000000")
 
 logger = logging.getLogger(__name__)
 
@@ -278,3 +294,161 @@ def process_pending(db: Session, media_file_id: int) -> Optional[uuid.UUID]:
         {"cid": cover_id, "mid": media_file_id},
     )
     return cover_id
+
+
+# -- Lazy on-demand resolution -----------------------------------------------
+
+def _split_folder(file_path: str) -> tuple[str, str]:
+    """Split a path into (parent_with_separator, basename), separator-agnostic.
+
+    `os.path.dirname` is platform-bound: it can't parse Windows paths on a
+    Linux container. We rfind both separators ourselves so a Windows-style
+    file_path (`E:\\Music\\Album\\track.flac`) parses correctly inside the
+    Linux backend. Returns the folder prefix WITH trailing separator.
+    """
+    idx = max(file_path.rfind('/'), file_path.rfind('\\'))
+    if idx < 0:
+        return ('', file_path)
+    return (file_path[:idx + 1], file_path[idx + 1:])
+
+
+def _siblings_in_folder(db: Session, file_path: str) -> list[tuple[int, str]]:
+    """All media_files whose file_path is a direct child of the same folder."""
+    folder_prefix, _ = _split_folder(file_path)
+    if not folder_prefix:
+        return []
+    rows = db.execute(
+        text("SELECT id, file_path FROM media_files WHERE file_path LIKE :p"),
+        {"p": folder_prefix + "%"},
+    ).all()
+    out: list[tuple[int, str]] = []
+    for mid, fp in rows:
+        rest = fp[len(folder_prefix):]
+        if '/' in rest or '\\' in rest:
+            continue  # nested subfolder, not a direct sibling
+        out.append((mid, fp))
+    return out
+
+
+def ingest_cover_from_url(
+    db: Session,
+    url: str,
+    source_path: str = "",
+) -> Optional[uuid.UUID]:
+    """Fetch image bytes from URL and ingest. Returns cover_id or None."""
+    try:
+        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            data = resp.content
+    except Exception as e:
+        logger.warning(f"cover URL fetch failed {url}: {e}")
+        return None
+    if not data:
+        return None
+    return ingest_cover(
+        db,
+        data,
+        source_type="external",
+        source_path=source_path or url,
+        source_mtime=None,
+    )
+
+
+def _lookup_album_artist(db: Session, media_file_id: int) -> Optional[tuple[str, str]]:
+    """Return (artist_name, album_title) for a media_file, or None."""
+    row = db.execute(
+        text("""
+            SELECT a.name, al.title
+            FROM media_files mf
+            JOIN tracks t ON t.id = mf.track_id
+            JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+            JOIN artists a ON a.id = ta.artist_id
+            JOIN album_variants av ON av.id = mf.album_variant_id
+            JOIN albums al ON al.id = av.album_id
+            WHERE mf.id = :id
+            LIMIT 1
+        """),
+        {"id": media_file_id},
+    ).first()
+    if not row:
+        return None
+    return (row[0], row[1])
+
+
+def resolve_cover_for_folder(db: Session, media_file_id: int) -> Optional[uuid.UUID]:
+    """Resolve cover for a media_file's whole folder.
+
+    Strategy:
+      1. For every media_file in the same directory: run the standard
+         per-file resolution (embedded → external) and persist cover_id.
+      2. For files still without a cover, fall back to Last.fm
+         (album.getInfo image at size=mega). One Last.fm call covers the
+         whole folder — same album, same image.
+      3. For files that still have nothing, pin SENTINEL_COVER_ID so we
+         never re-scan them. The /api/covers endpoint maps the sentinel
+         to a 404 with short Cache-Control so a manual rescan can clear
+         the marker.
+
+    Returns the resolved cover_id for the requested media_file (may be
+    SENTINEL_COVER_ID).
+    """
+    src_row = db.execute(
+        text("SELECT file_path FROM media_files WHERE id = :id"),
+        {"id": media_file_id},
+    ).first()
+    if not src_row:
+        return None
+
+    siblings = _siblings_in_folder(db, src_row[0]) or [(media_file_id, src_row[0])]
+
+    requested_cover: Optional[uuid.UUID] = None
+    still_unresolved: list[int] = []
+
+    for mid, _fp in siblings:
+        cid = resolve_cover_for_media_file(db, mid)
+        if cid is not None:
+            db.execute(
+                text("UPDATE media_files SET cover_id = :c WHERE id = :m"),
+                {"c": cid, "m": mid},
+            )
+            if mid == media_file_id:
+                requested_cover = cid
+        else:
+            still_unresolved.append(mid)
+
+    # Fallback: Last.fm cover for the album (one fetch shared by siblings).
+    if still_unresolved:
+        meta = _lookup_album_artist(db, media_file_id)
+        lastfm_cover_id: Optional[uuid.UUID] = None
+        if meta and settings.lastfm_api_key:
+            try:
+                from lastfm import LastFmService
+                svc = LastFmService()
+                url = svc.get_album_cover_url(meta[0], meta[1])
+            except Exception as e:
+                logger.warning(f"Last.fm cover lookup raised: {e}")
+                url = None
+            if url:
+                lastfm_cover_id = ingest_cover_from_url(
+                    db, url, source_path=f"lastfm:{meta[0]}/{meta[1]}",
+                )
+
+        if lastfm_cover_id is not None:
+            for mid in still_unresolved:
+                db.execute(
+                    text("UPDATE media_files SET cover_id = :c WHERE id = :m"),
+                    {"c": lastfm_cover_id, "m": mid},
+                )
+                if mid == media_file_id:
+                    requested_cover = lastfm_cover_id
+        else:
+            for mid in still_unresolved:
+                db.execute(
+                    text("UPDATE media_files SET cover_id = :c WHERE id = :m"),
+                    {"c": SENTINEL_COVER_ID, "m": mid},
+                )
+                if mid == media_file_id:
+                    requested_cover = SENTINEL_COVER_ID
+
+    return requested_cover
