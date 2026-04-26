@@ -103,6 +103,337 @@
     fab.hidden = false;
   }
 
+  /* ---------- Now Playing sheet ----------
+     Markup mirrors docs/design/reference/claude-design-bundle/project/
+     Now Playing v4.html. Class names and DOM IDs map 1:1 to the
+     reference's structure. Energy uses energy_db (dB scale) for a
+     calibrated 5-dot mapping.
+  */
+
+  function qualityBadgeHTML(quality) {
+    return quality === 'hi-res' ? 'Hi-Res'
+      : quality === 'lossless' ? 'Lossless'
+      : 'Lossy';
+  }
+
+  function energyLevelFromDb(db) {
+    if (db == null) return 0;
+    // Map -35dB..-5dB to 1..5 dots. Below -35 → 1, above -5 → 5.
+    const lvl = Math.round((db + 35) / 6);
+    return Math.max(1, Math.min(5, lvl));
+  }
+
+  function energyLevelFromRaw(rms) {
+    if (rms == null) return 0;
+    // Fallback when energy_db is missing. Approx log scale.
+    const db = 20 * Math.log10(Math.max(rms, 1e-5));
+    return energyLevelFromDb(db);
+  }
+
+  const sheet = {
+    el: null,
+    coverImg: null, coverFallback: null,
+    title: null, artist: null, albumText: null, year: null,
+    qBadge: null, keyPill: null, bpm: null, bpmNum: null,
+    energy: null, energyDots: null,
+    progressFill: null, progressHead: null,
+    timeCurrent: null, timeTotal: null, repeatBtn: null,
+    playPause: null, playPauseIcon: null,
+    prev: null, next: null, close: null, lyricsBtn: null,
+    similar: null, similarList: null, similarCount: null,
+    isOpen: false,
+    lastTrackKey: null,
+    lastDetailFetchedKey: null,
+    inflightKey: null,
+    lastDetail: null,
+
+    init() {
+      this.el = document.getElementById('npSheet');
+      if (!this.el) return;
+      this.coverImg = document.getElementById('npCoverImg');
+      this.coverFallback = document.getElementById('npCoverFallback');
+      this.title = document.getElementById('npTitleLine');
+      this.artist = document.getElementById('npArtistLine');
+      this.albumText = document.getElementById('npAlbumText');
+      this.year = document.getElementById('npYearText');
+      this.qBadge = document.getElementById('npQBadge');
+      this.keyPill = document.getElementById('npKeyPill');
+      this.bpm = document.getElementById('npBpm');
+      this.bpmNum = document.getElementById('npBpmNum');
+      this.energy = document.getElementById('npEnergy');
+      this.energyDots = document.getElementById('npEnergyDots');
+      this.progressFill = document.getElementById('npProgressFill');
+      this.progressHead = document.getElementById('npProgressHead');
+      this.timeCurrent = document.getElementById('npTimeCurrent');
+      this.timeTotal = document.getElementById('npTimeTotal');
+      this.repeatBtn = document.getElementById('npRepeatBtn');
+      this.playPause = document.getElementById('npPlayPauseBtn');
+      this.playPauseIcon = document.getElementById('npPlayPauseIcon');
+      this.prev = document.getElementById('npPrev');
+      this.next = document.getElementById('npNextBtn');
+      this.close = document.getElementById('npClose');
+      this.lyricsBtn = document.getElementById('npLyricsBtn');
+      this.similar = document.getElementById('npSimilar');
+      this.similarList = document.getElementById('npSimilarList');
+      this.similarCount = document.getElementById('npSimilarCount');
+
+      this.close.addEventListener('click', () => this.hide());
+      this.playPause.addEventListener('click', e => {
+        e.stopPropagation();
+        if (typeof window.togglePlayPause === 'function') window.togglePlayPause();
+      });
+      this.prev.addEventListener('click', e => {
+        e.stopPropagation();
+        if (typeof window.playerCmd === 'function') window.playerCmd('previous');
+      });
+      this.next.addEventListener('click', e => {
+        e.stopPropagation();
+        if (typeof window.playerCmd === 'function') window.playerCmd('next');
+      });
+      document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && this.isOpen) this.hide();
+      });
+    },
+
+    show() {
+      if (!this.el) return;
+      this.el.hidden = false;
+      this.isOpen = true;
+      if (this.lastDetail) this.renderDetail(this.lastDetail);
+      const fab = document.getElementById('aiFab');
+      if (fab) fab.hidden = true;
+    },
+
+    hide() {
+      if (!this.el) return;
+      this.el.hidden = true;
+      this.isOpen = false;
+      updateFabVisibility(currentRoute);
+    },
+
+    onStatus(data) {
+      if (!data) return;
+
+      const pct = data.progress_percent || 0;
+      if (this.progressFill) {
+        this.progressFill.style.width = pct + '%';
+        // .progress-fill border-radius right corners flatten when not 100%
+        this.progressFill.style.borderRadius = pct >= 99
+          ? 'calc(4 * var(--px))'
+          : 'calc(4 * var(--px)) 0 0 calc(4 * var(--px))';
+      }
+      if (this.progressHead) {
+        this.progressHead.style.left = pct + '%';
+      }
+      if (this.timeCurrent) this.timeCurrent.textContent = data.position_formatted || '0:00';
+      if (this.timeTotal) this.timeTotal.textContent = data.length_formatted || '0:00';
+      if (this.playPauseIcon) {
+        const playing = data.state === 'playing';
+        this.playPauseIcon.setAttribute('d',
+          playing
+            ? 'M9 5h4v20H9V5zm8 0h4v20h-4V5z'   // pause bars
+            : 'M9 5v20l16-10z');                 // play triangle
+      }
+
+      if (!data.song) return;
+
+      const trackKey = (data.song || '') + '|' + (data.artist || '');
+      if (trackKey !== this.lastTrackKey) {
+        // Track changed — reset ALL visible state and require fresh detail.
+        // Anything that doesn't get re-set by a subsequent renderDetail
+        // would otherwise keep showing the previous track's values.
+        this.lastTrackKey = trackKey;
+        this.lastDetailFetchedKey = null;
+        this.lastDetail = null;
+        if (this.title) this.title.textContent = data.song || '—';
+        if (this.artist) this.artist.textContent = data.artist || '';
+        if (this.albumText) this.albumText.textContent = data.album || '';
+        if (this.year) this.year.textContent = '';
+        if (this.coverImg) {
+          this.coverImg.hidden = true;
+          this.coverImg.removeAttribute('src');
+        }
+        if (this.coverFallback) {
+          const c = coverPlaceholderColors(data.song || data.album || '');
+          this.coverFallback.style.setProperty('--cover-bg-1', c.bg1);
+          this.coverFallback.style.setProperty('--cover-bg-2', c.bg2);
+        }
+        // Hide all detail-derived feature elements so prior track values
+        // never linger if the next renderDetail is delayed or fails.
+        if (this.qBadge) {
+          this.qBadge.className = 'np-q-badge';
+          this.qBadge.innerHTML = '';
+        }
+        if (this.keyPill) { this.keyPill.hidden = true; this.keyPill.innerHTML = ''; }
+        if (this.bpm) { this.bpm.hidden = true; }
+        if (this.bpmNum) this.bpmNum.textContent = '';
+        if (this.energy) { this.energy.hidden = true; }
+        if (this.energyDots) this.energyDots.innerHTML = '';
+        if (this.similar) { this.similar.hidden = true; }
+        if (this.similarList) this.similarList.innerHTML = '';
+      }
+
+      // Retry detail fetch on every status update until we successfully
+      // pull it. _getCurrentMediaFileId depends on currentPlaylist which
+      // app.js loads asynchronously, so the first attempt typically
+      // fails right after page load.
+      if (this.lastDetailFetchedKey !== trackKey) {
+        this.tryFetchDetail(trackKey);
+      }
+    },
+
+    async tryFetchDetail(trackKey) {
+      if (this.inflightKey === trackKey) return; // already fetching
+      const mfId = (typeof window._getCurrentMediaFileId === 'function')
+        ? window._getCurrentMediaFileId()
+        : null;
+      if (!mfId) return;  // playlist not yet loaded — retry on next status
+      this.inflightKey = trackKey;
+      try {
+        const resp = await fetch('/api/player/now-playing-detail?media_file_id=' + mfId);
+        if (!resp.ok) return;
+        const detail = await resp.json();
+        // If track changed during fetch, drop this stale result.
+        if (this.lastTrackKey !== trackKey) return;
+        this.lastDetail = detail;
+        this.lastDetailFetchedKey = trackKey;
+        this.renderDetail(detail);
+        this.fetchSimilar(mfId);
+      } catch (err) {
+        console.warn('now-playing-detail failed:', err);
+      } finally {
+        if (this.inflightKey === trackKey) this.inflightKey = null;
+      }
+    },
+
+    async fetchSimilar(mfId) {
+      try {
+        const params = new URLSearchParams({ track_id: String(mfId), limit: '7' });
+        const resp = await fetch('/search/similar?' + params, { method: 'POST' });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        // /search/similar returns `results` (the legacy contract); keep
+        // the `tracks` fallback in case the endpoint shape evolves.
+        this.renderSimilar(data.results || data.tracks || []);
+      } catch (err) {
+        console.warn('similar fetch failed:', err);
+      }
+    },
+
+    renderDetail(d) {
+      if (!d) return;
+
+      // Cover
+      if (d.cover_id && this.coverImg) {
+        this.coverImg.src = '/api/covers/' + d.cover_id;
+        this.coverImg.hidden = false;
+      } else if (this.coverImg) {
+        this.coverImg.hidden = true;
+      }
+      if (this.coverFallback) {
+        const c = coverPlaceholderColors(d.title || d.album_title || '');
+        this.coverFallback.style.setProperty('--cover-bg-1', c.bg1);
+        this.coverFallback.style.setProperty('--cover-bg-2', c.bg2);
+      }
+
+      if (this.title) this.title.textContent = d.title || '—';
+      if (this.artist) {
+        this.artist.textContent = d.primary_artist ? d.primary_artist.name : '';
+      }
+      if (this.albumText) this.albumText.textContent = d.album_title || '';
+      if (this.year) this.year.textContent = d.year ? '· ' + d.year : '';
+
+      // Quality badge
+      if (this.qBadge) {
+        this.qBadge.className = 'np-q-badge';
+        const qual = d.quality || 'lossy';
+        const cls = qual === 'hi-res' ? 'is-hires'
+          : qual === 'lossless' ? 'is-lossless'
+          : 'is-lossy';
+        this.qBadge.classList.add(cls);
+        this.qBadge.innerHTML = qualityBadgeHTML(qual);
+      }
+
+      // Key pill: "F min" / "C maj"
+      if (this.keyPill) {
+        if (d.key) {
+          const modeShort = d.mode === 'minor' ? 'min'
+            : d.mode === 'major' ? 'maj' : '';
+          this.keyPill.innerHTML = escapeHtml(d.key)
+            + (modeShort ? ' <span class="np-key-mode">' + modeShort + '</span>' : '');
+          this.keyPill.hidden = false;
+        } else {
+          this.keyPill.hidden = true;
+        }
+      }
+
+      // BPM
+      if (this.bpm) {
+        if (d.bpm) {
+          if (this.bpmNum) this.bpmNum.textContent = String(Math.round(d.bpm));
+          this.bpm.hidden = false;
+        } else {
+          this.bpm.hidden = true;
+        }
+      }
+
+      // Energy dots — prefer energy_db (dB), fallback to raw RMS
+      if (this.energy && this.energyDots) {
+        const lvl = (d.energy_db != null)
+          ? energyLevelFromDb(Number(d.energy_db))
+          : energyLevelFromRaw(Number(d.energy));
+        if (lvl > 0) {
+          let dots = '';
+          for (let i = 0; i < 5; i++) {
+            dots += `<span class="np-energy-dot${i < lvl ? ' on' : ''}"></span>`;
+          }
+          this.energyDots.innerHTML = dots;
+          this.energy.hidden = false;
+        } else {
+          this.energy.hidden = true;
+        }
+      }
+    },
+
+    renderSimilar(tracks) {
+      if (!this.similar || !this.similarList || !this.similarCount) return;
+      if (!tracks || tracks.length === 0) {
+        this.similar.hidden = true;
+        return;
+      }
+      this.similarCount.textContent = String(tracks.length);
+      this.similarList.innerHTML = tracks.map(t => {
+        const cover = t.cover_id
+          ? `<img src="/api/covers/${t.cover_id}" alt="">`
+          : `<div class="np-sim-art-fallback"></div>`;
+        const score = (t.similarity != null)
+          ? Number(t.similarity).toFixed(2)
+          : '';
+        const yearStr = t.year ? ' · ' + t.year : '';
+        return `
+          <div class="np-sim-row" data-track-id="${escapeHtml(String(t.id || ''))}">
+            <div class="np-sim-art">${cover}</div>
+            <div class="np-sim-info">
+              <div class="np-sim-info-row">
+                <div class="np-sim-info-left">
+                  <div class="np-sim-track">${escapeHtml(t.title || t.song || '')}</div>
+                  <div class="np-sim-artist">${escapeHtml((t.artist || '') + yearStr)}</div>
+                </div>
+                <span class="np-sim-score">${score}</span>
+              </div>
+            </div>
+            <button class="np-sim-add" type="button" aria-label="Add to queue">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+                <path d="M12 5v14M5 12h14"/>
+              </svg>
+            </button>
+          </div>`;
+      }).join('');
+      this.similar.hidden = false;
+    },
+  };
+
   /* ---------- Mini-player adapter ---------- */
 
   const mp = {
@@ -132,8 +463,10 @@
           window.playerCmd('next');
         }
       });
-      this.el.addEventListener('click', () => {
-        // Future: expand to Now Playing sheet. For now, no-op.
+      this.el.addEventListener('click', e => {
+        // Tap on the bar (excluding inner buttons) → expand sheet.
+        if (e.target.closest('.mp-action')) return;
+        sheet.show();
       });
     },
 
@@ -307,7 +640,19 @@
   function init() {
     attachNavListeners();
     mp.init();
-    document.addEventListener('np-update', e => mp.update(e.detail));
+    sheet.init();
+    document.addEventListener('np-update', e => {
+      mp.update(e.detail);
+      sheet.onStatus(e.detail);
+    });
+    // When the legacy playlist load resolves, kick a detail fetch in
+    // case SSE already fired before playlist was ready (in which case
+    // the previous tryFetchDetail bailed because mfId was null).
+    document.addEventListener('playlist-loaded', () => {
+      if (sheet.lastTrackKey && sheet.lastDetailFetchedKey !== sheet.lastTrackKey) {
+        sheet.tryFetchDetail(sheet.lastTrackKey);
+      }
+    });
     window.addEventListener('hashchange', render);
 
     if (!location.hash) {

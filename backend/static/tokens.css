@@ -35,7 +35,16 @@
   --design-viewport: 360;             /* Claude Design mocks at 360px  */
   --px: calc(1rem / var(--base));     /* helper: 1 "design-pixel"      */
 
-  /* --- Root font-size (mobile-first fluid) ------------------------ */
+  /* --- Root font-size ---------------------------------------------
+     Below the 360 design baseline we scale fluidly so a tiny screen
+     gets a proportionally smaller copy of the design. At and above
+     360 we LOCK the root size at the design baseline so text and
+     control sizes stay exactly at their design-pixel specs (e.g.,
+     19px stays 19px) regardless of phone width. Containers expand
+     freely with the viewport — only typography and padding stay
+     anchored to the design grid. The 768+ override below keeps the
+     same lock plus centres the body at a comfortable reading width.
+     ---------------------------------------------------------------- */
   font-size: calc(100vw / var(--design-viewport) * var(--base) * 1px);
 
   /* --- Color · foundation ----------------------------------------- */
@@ -140,13 +149,21 @@
 }
 
 /* ---------------------------------------------------------------------
- * Tablet and up: lock the root font-size and centre a mobile-width
- * layout. The scale stops inflating on wide displays while the
- * proportional language (--px, --space-*, --text-*) remains intact.
+ * Phone-size and up: lock the root font-size at the design baseline
+ * (13px → 1rem). All --px-derived tokens render at exactly their
+ * design-pixel specs on real devices (375/390/412/430 phones) — no
+ * proportional inflation. Container widths still flow with the
+ * viewport (cover-wrap is width:100%, etc.), so wider phones get
+ * more breathing room around the same-sized typography and chrome.
  * ------------------------------------------------------------------- */
-@media (min-width: 768px) {
-  :root { font-size: 15px; }
+@media (min-width: 360px) {
+  :root { font-size: calc(var(--base) * 1px); }
+}
 
+/* Tablet and up: still locked at design baseline, but centre the
+ * layout at a comfortable mobile-ish reading width so the design
+ * does not get lost in a sea of empty desktop background. */
+@media (min-width: 768px) {
   body.sautium-base {
     max-width: calc(var(--design-viewport) * 1.3 * 1px);
     margin: 0 auto;

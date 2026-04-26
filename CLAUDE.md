@@ -194,7 +194,7 @@ The palette and type scale are **locked** per
 `docs/design/POSITIONING.md §"Colour palette (v1)"`. Do not introduce
 new colour tokens — use existing ones, or raise the question first.
 
-### Scaling model — mobile-first fluid proportional
+### Scaling model — locked design-pixels at and above baseline
 
 The root font-size is driven by viewport width, with a single `--base`
 knob:
@@ -203,17 +203,33 @@ knob:
 :root {
   --base: 13;
   --design-viewport: 360;
-  font-size: calc(100vw / 360 * 13 * 1px);
   --px: calc(1rem / var(--base));
+  font-size: calc(100vw / 360 * 13 * 1px);   /* fluid below 360 */
+}
+@media (min-width: 360px) {
+  :root { font-size: calc(var(--base) * 1px); }   /* locked at 13px */
 }
 ```
 
-On a 360px-wide viewport, `1rem == 13px`. On 720px, `1rem == 26px`.
-Every layout token is expressed in "design-pixels" via the `--px`
-helper, so changing `--base` in one place rescales the entire UI.
+Below 360px the root size scales fluidly so a tiny screen gets a
+proportionally smaller copy of the design. **At and above 360px the
+root size locks at 13px**, so design-pixel tokens (`19 * --px`,
+`16 * --px`, etc.) render at exactly the same actual-pixel values on
+any phone width — a 19px design title is 19px on a 360 device, on a
+390 device, on a 430 device, and on a 768+ desktop. Containers
+(`width: 100%`, `aspect-ratio: 1/1`, etc.) still expand naturally
+with the viewport, so wider phones get more breathing room around the
+same-sized typography and controls.
 
-**At ≥ 768px the root font-size locks at 15px** and the body is
-centred at ~420px — the design does not inflate on desktop.
+At ≥ 768px the body is centred at ~468px (`360 × 1.3`) so the design
+does not float in a sea of empty desktop background.
+
+**Why not pure fluid scaling?** Fluid scaling at all widths inflates
+the design on phones wider than the 360 baseline (a 19px reference
+title becomes ~23px on a 443px viewport), which contradicts pixel-
+perfect parity with the reference HTML and pushes meta-row content
+past the screen edge. Locking the size keeps both the typography
+spec and horizontal layout predictable.
 
 ### How to write sizes
 
@@ -241,6 +257,46 @@ Two font families, loaded via `<link>` in `<head>`:
 The cool blue `#4A7FA7` accent is **reserved for technical numeric
 data and focus states**. Never for brand, CTA, or decoration — that's
 amber's job.
+
+### Implementing a screen — reference-first workflow
+
+**Mandatory** before writing any screen markup or styles:
+
+1. **Open the reference HTML** for that screen under
+   `docs/design/reference/claude-design-bundle/project/`. For Now
+   Playing it's `Now Playing v4.html`; sessions cover the rest.
+   Read the file **top to bottom** — DOM structure, every CSS class,
+   every dimension, every colour. Do not implement from memory of
+   what the design "felt like". The reference is pixel-perfect
+   ground truth; producing anything looser is a process failure.
+2. **Translate, do not paraphrase.** Each reference rule maps to our
+   DS as: raw `px` → `calc(N * var(--px))`; `--color-*` and `--text-*`
+   tokens stay; sizes that match an existing token use that token,
+   sizes that don't get the explicit `calc()` form. Class names should
+   stay close to the reference for grep-back-to-source.
+3. **Inventory expected elements** before claiming "done". A list
+   like "drag handle · chevron · menu · scrim · cover · lyrics btn ·
+   title · artist · album+year (dim) · meta-row with divider above ·
+   q-badge svg+H · key pill F + min · BPM num+label · energy +
+   dots · progress 3px + circle head + halo · times mono blue ·
+   total muted · repeat icon · transport prev 56 · play 68 · next 56
+   · similar block with header divider · sim-rows with cover 44 +
+   meta + score 0.94 + add btn" — every item must be present and
+   styled, not paraphrased away.
+4. **Cross-check tokens vs reference values.** When the reference
+   uses `15px` and our DS has `--text-body: calc(15 * var(--px))`,
+   prefer the token. When the reference uses `19px` (no token),
+   write `calc(19 * var(--px))` explicitly — do not silently snap
+   to the nearest token.
+5. **Visual verify before declaring done.** Open both screens in
+   browser at 360px viewport, compare side by side. The user
+   expects pixel-perfect parity; "approximately right" is a bug.
+
+This rule exists because building from memory produced a Now
+Playing screen that missed eight visible elements (lyrics btn,
+divider line, scrim, repeat icon, similar block, etc.) and got
+proportions wrong on most of the others. Reference HTML is
+non-negotiable input.
 
 ### Reference bundle
 

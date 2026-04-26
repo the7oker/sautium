@@ -818,6 +818,11 @@ async function fetchPlaylist() {
     if (data.tracks) {
       currentPlaylist = data.tracks;
       updateQueueDisplay();
+      // Notify the new shell that mediaFileId resolution may now succeed.
+      // Sheet's tryFetchDetail is gated on _getCurrentMediaFileId() which
+      // depends on currentPlaylist being populated; firing this event
+      // closes the race between SSE arriving before playlist load.
+      document.dispatchEvent(new CustomEvent("playlist-loaded", { detail: data }));
     }
   } catch (e) {
     console.warn("Failed to fetch playlist:", e);

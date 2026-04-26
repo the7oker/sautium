@@ -36,6 +36,14 @@ _sse_clients_lock = threading.Lock()
 _poller_thread: Optional[threading.Thread] = None
 _poller_running = False
 
+# Playlist cache. Refreshed by the status poller every PLAYLIST_REFRESH_EVERY
+# ticks (and immediately when a write command marks it stale via
+# _invalidate_playlist). Served instantly by /api/player/playlist so the UI
+# never waits on HQPlayer for the queue panel.
+_latest_playlist: dict = {"tracks": [], "count": 0}
+_playlist_dirty: bool = True   # force refresh on first poll
+PLAYLIST_REFRESH_EVERY = 5      # otherwise refresh every N status polls
+
 
 def _wake_sse_clients():
     """Thread-safe: signal all SSE async generators to send new data."""
@@ -45,13 +53,25 @@ def _wake_sse_clients():
 
 
 def _status_poller():
-    """Background thread: poll HQPlayer every ~1s, update cache, wake SSE clients."""
+    """Background thread: poll HQPlayer every ~1s, update cache, wake SSE clients.
+    Also refreshes the playlist cache every PLAYLIST_REFRESH_EVERY ticks (or
+    immediately when _playlist_dirty was set by a write endpoint)."""
     global _latest_status, _status_version
+    tick = 0
     while _poller_running:
         try:
-            with _hqp_lock:
-                hqp = _get_hqp()
-                status = hqp.get_status()
+            with _hqp_status_lock:
+                try:
+                    hqp = _get_hqp_status()
+                    status = hqp.get_status()
+                except (BrokenPipeError, ConnectionError, OSError):
+                    _reset_hqp_status()
+                    hqp = _get_hqp_status()
+                    status = hqp.get_status()
+
+                # Playlist cache refresh — share the status socket
+                if _playlist_dirty or (tick % PLAYLIST_REFRESH_EVERY == 0):
+                    _refresh_playlist_cache()
 
             if status is None:
                 new_data = {"state": "unknown"}
@@ -92,6 +112,7 @@ def _status_poller():
         poll_interval = 5.0 if _latest_status.get("state") == "disconnected" else 1.0
         _status_changed.wait(timeout=poll_interval)
         _status_changed.clear()
+        tick += 1
 
 
 def _notify_update():
@@ -121,52 +142,92 @@ def stop_status_poller():
 
 
 # -- Lazy singletons ----------------------------------------------------------
+#
+# Two independent HQPlayer connections so the background status poller and
+# user-initiated commands never contend for the same socket / lock:
+#
+#   * `_hqp_status_client` + `_hqp_status_lock`
+#       Owned exclusively by `_status_poller`. Fast 2 s socket timeout so a
+#       lagging HQPlayer is detected quickly without freezing the rest of
+#       the request flow.
+#
+#   * `_hqp_client` + `_hqp_lock`
+#       Owned by all command endpoints (play / pause / next / play-track /
+#       /api/player/playlist etc). 5 s timeout for write operations that
+#       may take longer to acknowledge (e.g. play-album loads many URIs).
+#
+# HQPlayer's control API accepts multiple concurrent TCP clients, so the
+# two sockets co-exist cleanly on the HQP side.
 
 _hqp_client: Optional[HQPlayerClient] = None
-_hqp_lock = threading.Lock()  # Prevent concurrent HQPlayer TCP commands
+_hqp_lock = threading.Lock()  # cmd commands
+
+_hqp_status_client: Optional[HQPlayerClient] = None
+_hqp_status_lock = threading.Lock()  # status poller
 
 
-def _get_hqp() -> HQPlayerClient:
-    """Get or create HQPlayer client (lazy, auto-reconnect). Must be called inside _hqp_lock."""
-    global _hqp_client
-    need_reconnect = _hqp_client is None or not _hqp_client.is_connected()
+def _make_client(timeout: float) -> HQPlayerClient:
+    return HQPlayerClient(
+        host=settings.hqplayer_host,
+        port=settings.hqplayer_port,
+        timeout=timeout,
+    )
 
-    # Detect stale connection (broken pipe) by checking socket health
-    if not need_reconnect and _hqp_client and _hqp_client.socket:
+
+def _ensure_connected(client: Optional[HQPlayerClient], timeout: float, label: str
+                      ) -> HQPlayerClient:
+    """Return a healthy HQPlayer client; reconnect if the cached one is stale.
+
+    Caller must hold the appropriate lock. `client` is the previous instance
+    (may be None). Returns the (possibly new) instance. Raises ConnectionError
+    if the connection cannot be established.
+    """
+    need_reconnect = client is None or not client.is_connected()
+
+    # Detect remote-side close by peeking the socket.
+    if not need_reconnect and client and client.socket:
         import select
         try:
-            ready = select.select([_hqp_client.socket], [], [], 0)
+            ready = select.select([client.socket], [], [], 0)
             if ready[0]:
-                # Data available on socket without request = connection closed by remote
-                peek = _hqp_client.socket.recv(1, 0x02)  # MSG_PEEK
+                peek = client.socket.recv(1, 0x02)  # MSG_PEEK
                 if not peek:
-                    logger.info("HQPlayer connection closed by remote, reconnecting...")
+                    logger.info(f"HQPlayer ({label}) closed by remote, reconnecting...")
                     need_reconnect = True
         except Exception:
             need_reconnect = True
 
     if need_reconnect:
-        if _hqp_client:
+        if client:
             try:
-                _hqp_client.disconnect()
+                client.disconnect()
             except Exception:
                 pass
-        _hqp_client = HQPlayerClient(
-            host=settings.hqplayer_host,
-            port=settings.hqplayer_port,
-            timeout=10.0,
-        )
-        if not _hqp_client.connect():
-            _hqp_client = None
+        client = _make_client(timeout=timeout)
+        if not client.connect():
             raise ConnectionError(
                 f"Cannot connect to HQPlayer at {settings.hqplayer_host}:{settings.hqplayer_port}"
             )
-        logger.info("Reconnected to HQPlayer")
+        logger.info(f"HQPlayer ({label}) connected")
+    return client
+
+
+def _get_hqp() -> HQPlayerClient:
+    """Get or create HQPlayer command client. Must be called inside _hqp_lock."""
+    global _hqp_client
+    _hqp_client = _ensure_connected(_hqp_client, timeout=5.0, label="cmd")
     return _hqp_client
 
 
+def _get_hqp_status() -> HQPlayerClient:
+    """Get or create HQPlayer status-poller client. Must be called inside _hqp_status_lock."""
+    global _hqp_status_client
+    _hqp_status_client = _ensure_connected(_hqp_status_client, timeout=2.0, label="status")
+    return _hqp_status_client
+
+
 def _reset_hqp():
-    """Force-close HQPlayer client so next _get_hqp() reconnects."""
+    """Force-close HQPlayer command client so next _get_hqp() reconnects."""
     global _hqp_client
     if _hqp_client:
         try:
@@ -174,6 +235,17 @@ def _reset_hqp():
         except Exception:
             pass
         _hqp_client = None
+
+
+def _reset_hqp_status():
+    """Force-close HQPlayer status client so next _get_hqp_status() reconnects."""
+    global _hqp_status_client
+    if _hqp_status_client:
+        try:
+            _hqp_status_client.disconnect()
+        except Exception:
+            pass
+        _hqp_status_client = None
 
 
 def _hqp_cmd(func):
@@ -343,89 +415,105 @@ async def search_tracks(q: str = "", limit: int = 20):
 
 # -- Transport controls -------------------------------------------------------
 
+def _build_playlist_payload(hqp_tracks: list) -> dict:
+    """Convert HQPlayer raw playlist into the JSON shape served to the UI.
+    Pure transform — no HQPlayer or socket I/O."""
+    if not hqp_tracks:
+        return {"tracks": [], "count": 0}
+
+    # Convert URIs to DB paths in bulk
+    path_to_idx: dict[str, list[int]] = {}
+    idx_to_hqp: dict[int, dict] = {}
+    for idx, hqp_track in enumerate(hqp_tracks):
+        uri = hqp_track["uri"]
+        idx_to_hqp[idx] = hqp_track
+
+        if uri.startswith("file:///"):
+            db_path = uri[8:]
+        elif uri.startswith("file://"):
+            db_path = uri[7:]
+        else:
+            continue
+
+        db_path = db_path.replace("\\", "/")
+        db_path = db_path.replace("%5B", "[").replace("%5D", "]")
+        path_to_idx.setdefault(db_path, []).append(idx)
+
+    all_paths = list(path_to_idx.keys())
+    db_rows_by_path: dict[str, dict] = {}
+    if all_paths:
+        rows_batch = _db_query("""
+            SELECT mf.id, mf.file_path, t.title, mf.track_number, a.name as artist
+            FROM media_files mf
+            JOIN tracks t ON mf.track_id = t.id
+            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+            JOIN artists a ON ta.artist_id = a.id
+            WHERE mf.file_path = ANY(%(paths)s)
+        """, {"paths": all_paths})
+        for r in rows_batch:
+            db_rows_by_path[r["file_path"]] = r
+
+    tracks_with_info = []
+    for idx in range(len(hqp_tracks)):
+        hqp_track = idx_to_hqp.get(idx)
+        if hqp_track is None:
+            continue
+
+        row = None
+        for path, indices in path_to_idx.items():
+            if idx in indices:
+                row = db_rows_by_path.get(path)
+                break
+
+        if row:
+            tracks_with_info.append({
+                "id": row["id"],
+                "title": row["title"],
+                "track_number": row["track_number"],
+                "artist": row["artist"],
+                "index": idx,
+            })
+        else:
+            tracks_with_info.append({
+                "id": None,
+                "title": hqp_track["song"] or "Unknown",
+                "track_number": None,
+                "artist": hqp_track["artist"] or "Unknown",
+                "index": idx,
+            })
+
+    return {"tracks": tracks_with_info, "count": len(tracks_with_info)}
+
+
+def _refresh_playlist_cache():
+    """Pull current playlist from HQPlayer (status socket) and update cache.
+    Caller must hold _hqp_status_lock."""
+    global _latest_playlist, _playlist_dirty
+    try:
+        hqp = _get_hqp_status()
+        hqp_tracks = hqp.get_playlist()
+        _latest_playlist = _build_playlist_payload(hqp_tracks)
+        _playlist_dirty = False
+    except (BrokenPipeError, ConnectionError, OSError) as e:
+        logger.debug(f"Playlist refresh failed ({e})")
+        _reset_hqp_status()
+
+
+def _invalidate_playlist():
+    """Mark playlist cache stale; the poller will pull a fresh copy on its
+    next tick. Called from write endpoints (play_track / play_album / etc)
+    after the user mutates the queue."""
+    global _playlist_dirty
+    _playlist_dirty = True
+    _status_changed.set()  # wake poller immediately
+
+
 @router.get("/playlist")
 def get_playlist():
-    """Get current playlist from HQPlayer with track details from DB."""
-    try:
-        with _hqp_lock:
-            hqp = _get_hqp()
-            hqp_tracks = hqp.get_playlist()
-        logger.info(f"HQPlayer returned {len(hqp_tracks)} tracks")
-
-        if not hqp_tracks:
-            logger.info("Playlist is empty")
-            return {"tracks": [], "count": 0}
-
-        # Convert URIs to DB paths in bulk
-        path_to_idx: dict[str, list[int]] = {}
-        idx_to_hqp: dict[int, dict] = {}
-        for idx, hqp_track in enumerate(hqp_tracks):
-            uri = hqp_track["uri"]
-            idx_to_hqp[idx] = hqp_track
-
-            if uri.startswith("file:///"):
-                db_path = uri[8:]
-            elif uri.startswith("file://"):
-                db_path = uri[7:]
-            else:
-                continue
-
-            db_path = db_path.replace("\\", "/")
-            db_path = db_path.replace("%5B", "[").replace("%5D", "]")
-            path_to_idx.setdefault(db_path, []).append(idx)
-
-        # Single batch query for all paths
-        all_paths = list(path_to_idx.keys())
-        db_rows_by_path: dict[str, dict] = {}
-        if all_paths:
-            rows_batch = _db_query("""
-                SELECT mf.id, mf.file_path, t.title, mf.track_number, a.name as artist
-                FROM media_files mf
-                JOIN tracks t ON mf.track_id = t.id
-                JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-                JOIN artists a ON ta.artist_id = a.id
-                WHERE mf.file_path = ANY(%(paths)s)
-            """, {"paths": all_paths})
-            for r in rows_batch:
-                db_rows_by_path[r["file_path"]] = r
-
-        # Build result preserving original order
-        tracks_with_info = []
-        for idx in range(len(hqp_tracks)):
-            hqp_track = idx_to_hqp.get(idx)
-            if hqp_track is None:
-                continue
-
-            # Find the DB row for this index
-            row = None
-            for path, indices in path_to_idx.items():
-                if idx in indices:
-                    row = db_rows_by_path.get(path)
-                    break
-
-            if row:
-                tracks_with_info.append({
-                    "id": row["id"],
-                    "title": row["title"],
-                    "track_number": row["track_number"],
-                    "artist": row["artist"],
-                    "index": idx,
-                })
-            else:
-                tracks_with_info.append({
-                    "id": None,
-                    "title": hqp_track["song"] or "Unknown",
-                    "track_number": None,
-                    "artist": hqp_track["artist"] or "Unknown",
-                    "index": idx,
-                })
-
-        logger.info(f"Returning {len(tracks_with_info)} tracks to client")
-        return {"tracks": tracks_with_info, "count": len(tracks_with_info)}
-
-    except Exception as e:
-        logger.error(f"Get playlist failed: {e}")
-        return {"tracks": [], "count": 0}
+    """Return last cached playlist. Refreshed by the status poller every
+    PLAYLIST_REFRESH_EVERY ticks and immediately on write-command-driven
+    invalidation. Always instant — never blocks on HQPlayer."""
+    return _latest_playlist
 
 
 @router.get("/status/stream")
@@ -475,7 +563,20 @@ async def status_stream():
 
 @router.get("/status")
 def get_status():
-    """Get current HQPlayer status. Returns {state: 'disconnected'} on connection failure."""
+    """Return last cached HQPlayer status. Cache is maintained by the
+    background _status_poller (1 s tick) on its own dedicated socket so
+    this endpoint never hits HQPlayer in the request path — it's always
+    instant regardless of HQPlayer responsiveness."""
+    return _latest_status
+
+
+# Legacy synchronous status (rarely needed; UI uses cached /status above
+# and SSE for live updates). Kept for tools that explicitly want a fresh
+# read direct from HQPlayer.
+@router.get("/status/fresh")
+def get_status_fresh():
+    """Force a fresh HQPlayer status read. Slower (may hang up to socket
+    timeout if HQPlayer is unresponsive)."""
     try:
         with _hqp_lock:
             hqp = _get_hqp()
@@ -506,6 +607,76 @@ def get_status():
         }
     except Exception:
         return {"state": "disconnected"}
+
+
+@router.get("/now-playing-detail")
+def now_playing_detail(media_file_id: int):
+    """Aggregated rich payload for the Now Playing screen.
+
+    Combines media-file metadata (format, sample rate, bit depth, cover),
+    track-level audio features (BPM, key, mode, energy, instruments),
+    album info, and the top genres into one roundtrip. Called by the
+    frontend whenever the playing track changes.
+    """
+    row = _db_query_one("""
+        SELECT mf.id AS media_file_id,
+               mf.track_id::text AS track_id,
+               mf.cover_id::text AS cover_id,
+               mf.file_format,
+               mf.is_lossless,
+               mf.sample_rate,
+               mf.bit_depth,
+               mf.duration_seconds,
+               t.title,
+               af.bpm,
+               af.key,
+               af.mode,
+               af.energy,
+               af.energy_db,
+               af.danceability,
+               af.instruments,
+               af.moods,
+               av.album_id::text AS album_id,
+               al.title AS album_title,
+               al.release_year AS year
+        FROM media_files mf
+        JOIN tracks t ON t.id = mf.track_id
+        LEFT JOIN audio_features af ON af.track_id = t.id
+        JOIN album_variants av ON av.id = mf.album_variant_id
+        JOIN albums al ON al.id = av.album_id
+        WHERE mf.id = %(id)s
+    """, {"id": media_file_id})
+
+    if not row:
+        raise HTTPException(status_code=404, detail="media_file not found")
+
+    row["genres"] = _db_query("""
+        SELECT g.id::text, g.name
+        FROM track_genres tg
+        JOIN genres g ON g.id = tg.genre_id
+        WHERE tg.track_id = %(t)s::uuid
+        ORDER BY g.name
+        LIMIT 3
+    """, {"t": row["track_id"]})
+
+    row["primary_artist"] = _db_query_one("""
+        SELECT a.id::text, a.name
+        FROM artists a
+        JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
+        WHERE ta.track_id = %(t)s::uuid
+        LIMIT 1
+    """, {"t": row["track_id"]})
+
+    sr = row.get("sample_rate") or 0
+    bd = row.get("bit_depth") or 0
+    if row.get("is_lossless") and sr >= 48000 and bd >= 24:
+        row["quality"] = "hi-res"
+    elif row.get("is_lossless"):
+        row["quality"] = "lossless"
+    else:
+        row["quality"] = "lossy"
+
+    return row
 
 
 @router.post("/play")
@@ -615,6 +786,7 @@ def play_track(req: PlayTrackRequest):
             hqp.playlist_add(uri, clear=True)
             hqp.play()
         _register_playlist([req.track_id])
+        _invalidate_playlist()
         _notify_update()
 
         return {
@@ -691,6 +863,7 @@ def play_album(req: PlayAlbumRequest):
 
         track_ids = [r["id"] for r in rows]
         _register_playlist(track_ids)
+        _invalidate_playlist()
         _notify_update()
 
         return {
@@ -764,6 +937,7 @@ def play_similar(req: PlaySimilarRequest):
 
         track_ids = [r["id"] for r in rows]
         _register_playlist(track_ids)
+        _invalidate_playlist()
         _notify_update()
 
         return {
@@ -837,6 +1011,7 @@ def play_tracks(req: PlayTracksRequest):
 
         track_ids = [r["id"] for r in rows]
         _register_playlist(track_ids)
+        _invalidate_playlist()
         _notify_update()
 
         return {
