@@ -154,6 +154,43 @@ async def lifespan(app: FastAPI):
     global _model_cleanup_task
     _model_cleanup_task = asyncio.create_task(_model_cleanup_loop())
 
+    # Pre-warm search models so Discovery's first query doesn't hit a
+    # ~30-60s cold-load. Fired as background tasks; uvicorn reports
+    # "startup complete" immediately and model_cache.get_model is
+    # single-flight so a request landing mid-warmup queues on the same
+    # load, not a duplicate one. Each model is independent — Discovery
+    # endpoints check `model_cache.is_loaded` per block and serve
+    # `status: "loading"` for any block whose model is still warming.
+    async def _prewarm(label: str, key: str, factory):
+        try:
+            import model_cache
+            await asyncio.to_thread(model_cache.get_model, key, factory)
+            logger.info(f"{label} pre-warm complete")
+        except Exception as e:
+            logger.warning(f"{label} pre-warm failed: {e}")
+
+    def _clap_factory():
+        from embeddings import AudioEmbeddingGenerator
+        gen = AudioEmbeddingGenerator()
+        gen.load_model()
+        return gen
+
+    def _enrichment_factory():
+        from enrichment_embeddings import _BaseEnrichmentGenerator
+        gen = _BaseEnrichmentGenerator()
+        gen.load_model()
+        return gen
+
+    def _lyrics_factory():
+        from lyrics_embeddings import LyricsEmbeddingGenerator
+        gen = LyricsEmbeddingGenerator()
+        gen.load_model()
+        return gen
+
+    asyncio.create_task(_prewarm("CLAP",       "clap",       _clap_factory))
+    asyncio.create_task(_prewarm("BGE-M3",     "enrichment", _enrichment_factory))
+    asyncio.create_task(_prewarm("Lyrics-BGE", "lyrics",     _lyrics_factory))
+
     yield
 
     # Shutdown
@@ -1068,6 +1105,9 @@ app.include_router(artists_router)
 
 from routers.albums import router as albums_router
 app.include_router(albums_router)
+
+from routers.discovery import router as discovery_router
+app.include_router(discovery_router)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

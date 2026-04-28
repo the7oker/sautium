@@ -49,6 +49,25 @@
       .replace(/'/g, '&#39;');
   }
 
+  /* ---------- Now-playing track highlight ----------
+     Toggles `is-playing` on detail-screen track rows whose
+     data-media-file-id matches the currently playing track.
+     Wired to the `np-update` SSE event so highlight follows
+     playback across detail-screen renders. */
+
+  function updatePlayingHighlight() {
+    const mfId = (typeof window._getCurrentMediaFileId === 'function')
+      ? window._getCurrentMediaFileId()
+      : null;
+    const target = mfId != null ? String(mfId) : null;
+    document.querySelectorAll('.detail-screen .track-row[data-media-file-id]')
+      .forEach(row => {
+        const match = target !== null
+          && row.getAttribute('data-media-file-id') === target;
+        row.classList.toggle('is-playing', match);
+      });
+  }
+
   /* ---------- Cover URL builder ----------
      Two cover sources, picked in priority order:
        1) cover_id (UUID, already resolved)  → /api/covers/<uuid>
@@ -235,6 +254,33 @@
         e.stopPropagation();
         if (typeof window.playerCmd === 'function') window.playerCmd('next');
       });
+      // Tap artist / album text → open the corresponding detail screen.
+      // IDs come from now-playing-detail (lastDetail.primary_artist.id,
+      // lastDetail.album_id). Sheet is hidden after navigation so the
+      // user lands on the destination cleanly.
+      if (this.artist) {
+        this.artist.addEventListener('click', e => {
+          e.stopPropagation();
+          const id = this.lastDetail
+            && this.lastDetail.primary_artist
+            && this.lastDetail.primary_artist.id;
+          if (id) {
+            this.hide();
+            navigateToEntity('artist', id);
+          }
+        });
+      }
+      const albumLine = this.albumText && this.albumText.parentElement;
+      if (albumLine) {
+        albumLine.addEventListener('click', e => {
+          e.stopPropagation();
+          const id = this.lastDetail && this.lastDetail.album_id;
+          if (id) {
+            this.hide();
+            navigateToEntity('album', id);
+          }
+        });
+      }
       document.addEventListener('keydown', e => {
         if (e.key === 'Escape' && this.isOpen) this.hide();
       });
@@ -707,6 +753,631 @@
       feed.recommendations, 'album');
   }
 
+  /* ---------- Discovery screen (Step 1.5b) ----------
+     Universal search: typing fires 5 independent endpoints in
+     parallel, each renders its block as soon as it resolves so
+     fast signals (trigram) are not blocked by slow ones (CLAP /
+     BGE-M3 cold start). Reference markup is preserved for the
+     search input + shuffle mosaic; mode chips and advanced-filters
+     toggle are removed (advanced filters move to a dedicated
+     surface in 1.5c). */
+
+  const SVG_SEARCH = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>';
+  const SVG_ADV_CHEVRON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>';
+
+  // Per-block descriptors — endpoint, frontend block id, rendered title.
+  const DISCOVERY_BLOCKS = [
+    { id: 'artists', title: 'Artists',           endpoint: '/api/discovery/artists',  layout: 'artists' },
+    { id: 'albums',  title: 'Albums',            endpoint: '/api/discovery/albums',   layout: 'albums'  },
+    { id: 'titles',  title: 'Title matches',     endpoint: '/api/discovery/titles',   layout: 'tracks'  },
+    { id: 'sound',   title: 'Closest in sound',  endpoint: '/api/discovery/sound',    layout: 'tracks'  },
+    { id: 'lyrics',  title: 'Closest in lyrics', endpoint: '/api/discovery/lyrics',   layout: 'tracks'  },
+  ];
+
+  // Filter rows for the advanced panel (Step 1.5c-a).
+  // Each row has a label and a chip set; selected value lives in the
+  // shared `discoveryFilters` state. Chip values map 1:1 to the
+  // /search/features query params we'll wire in 1.5c-b.
+  const DISCOVERY_FILTER_ROWS = [
+    { key: 'mode',      label: 'Mode',
+      chips: [['any','Any'], ['major','Major'], ['minor','Minor']] },
+    { key: 'vocalist',  label: 'Vocalist',
+      chips: [['any','Any'], ['vocal','Vocal'], ['instrumental','Instrumental']] },
+    { key: 'gender',    label: 'Gender',
+      chips: [['any','Any'], ['female','Female'], ['male','Male'], ['mixed','Mixed']] },
+    { key: 'danceable', label: 'Danceable',
+      chips: [['any','Any'], ['yes','Yes'], ['no','No']] },
+    { key: 'energy',    label: 'Energy',
+      chips: [['any','Any'], ['low','Low'], ['mid','Mid'], ['high','High']] },
+  ];
+
+  // Multi-select chip rows. Empty array = no filter; tapping any
+  // chip adds/removes it from the set. No explicit "Any" chip — the
+  // absence of selection IS "any".
+  const DISCOVERY_QUALITY_OPTIONS = [
+    ['lossy',    'Lossy'],
+    ['lossless', 'Lossless'],
+    ['hi-res',   'Hi-Res'],
+  ];
+
+  // Broad instrument chips. Each label is a category that 1.5c-b will
+  // map to a set of underlying AST/PaSST tags in SQL — e.g. "Drums"
+  // → ('drum', 'drum kit', 'drum machine', 'percussion', 'bass drum',
+  // 'snare drum', 'cymbal', 'hi-hat'). Curated here to cover common
+  // user intent without exposing the raw 25+ tag taxonomy. Vocals
+  // intentionally excluded — Vocalist filter handles that signal.
+  const DISCOVERY_INSTRUMENTS = [
+    'Piano', 'Guitar', 'Electric guitar', 'Bass', 'Drums',
+    'Strings', 'Orchestra', 'Synth', 'Brass', 'Saxophone',
+  ];
+
+  // 12 chromatic keys; matches `audio_features.key` storage.
+  const DISCOVERY_KEYS = [
+    'C', 'C#', 'D', 'D#', 'E', 'F',
+    'F#', 'G', 'G#', 'A', 'A#', 'B',
+  ];
+
+  function defaultDiscoveryFilters() {
+    return {
+      bpm_min: null, bpm_max: null,
+      key: '',
+      mode: 'any', vocalist: 'any', gender: 'any',
+      danceable: 'any', energy: 'any',
+      quality: [],       // multi-select: ['lossy','lossless','hi-res']
+      instruments: [],   // multi-select
+    };
+  }
+
+  // True iff at least one filter dimension is set to a non-default
+  // value. Used to decide whether the Apply button (with empty
+  // search box) should browse the filtered library or do nothing.
+  function hasActiveFilters(f) {
+    if (!f) return false;
+    if (f.bpm_min != null || f.bpm_max != null) return true;
+    if (f.key) return true;
+    if (f.mode && f.mode !== 'any') return true;
+    if (f.vocalist && f.vocalist !== 'any') return true;
+    if (f.gender && f.gender !== 'any') return true;
+    if (f.danceable && f.danceable !== 'any') return true;
+    if (f.energy && f.energy !== 'any') return true;
+    if (f.instruments && f.instruments.length) return true;
+    if (f.quality && f.quality.length) return true;
+    return false;
+  }
+
+  // Translate the screen-local filter object into URLSearchParams the
+  // backend endpoints understand. Drops "any" / null / empty values
+  // so the server sees only filters the user actually set; multi-
+  // selects (instruments, quality) become repeated query params.
+  function appendFilterParams(params, f) {
+    if (!f) return;
+    if (f.bpm_min != null) params.set('bpm_min', f.bpm_min);
+    if (f.bpm_max != null) params.set('bpm_max', f.bpm_max);
+    if (f.key) params.set('key', f.key);
+    if (f.mode && f.mode !== 'any') params.set('mode', f.mode);
+    if (f.vocalist && f.vocalist !== 'any') params.set('vocalist', f.vocalist);
+    if (f.gender && f.gender !== 'any') params.set('gender', f.gender);
+    if (f.danceable && f.danceable !== 'any') params.set('danceable', f.danceable);
+    if (f.energy && f.energy !== 'any') params.set('energy', f.energy);
+    (f.instruments || []).forEach(v => params.append('instruments', v));
+    (f.quality || []).forEach(v => params.append('quality', v));
+  }
+
+  async function renderDiscovery(root) {
+    const screen = document.createElement('div');
+    screen.className = 'discovery-screen';
+    // Filter state is owned by the screen element so it survives
+    // re-renders of children but resets when the screen is rebuilt.
+    screen._filters = defaultDiscoveryFilters();
+
+    screen.innerHTML = `
+      <header class="screen-head">
+        <h1 class="screen-title">Discovery</h1>
+      </header>
+
+      <div class="search-wrap">
+        ${SVG_SEARCH}
+        <input type="search" id="discoverySearchInput"
+               placeholder="Artist, album, track, lyrics, or a mood…"
+               autocomplete="off" autocapitalize="off" spellcheck="false">
+      </div>
+
+      <button class="adv-row" type="button" id="discoveryAdvToggle"
+              aria-expanded="false">
+        ${SVG_ADV_CHEVRON}
+        Advanced filters
+      </button>
+
+      <div class="filters-panel" id="discoveryFiltersPanel" hidden>
+        <div class="filter-row">
+          <span class="filter-label">BPM range</span>
+          <div class="bpm-inputs">
+            <input type="number" inputmode="numeric" min="40" max="240"
+                   class="bpm-field" id="discoveryFilterBpmMin"
+                   placeholder="40">
+            <span class="bpm-dash">—</span>
+            <input type="number" inputmode="numeric" min="40" max="240"
+                   class="bpm-field" id="discoveryFilterBpmMax"
+                   placeholder="240">
+            <span class="bpm-unit">bpm</span>
+          </div>
+        </div>
+
+        <div class="filter-row">
+          <span class="filter-label">Key</span>
+          <div class="filter-chips" data-filter-key="key">
+            <span class="f-chip is-active" data-value="">Any</span>
+            ${DISCOVERY_KEYS.map(k =>
+              `<span class="f-chip" data-value="${escapeHtml(k)}">${escapeHtml(k)}</span>`
+            ).join('')}
+          </div>
+        </div>
+
+        ${DISCOVERY_FILTER_ROWS.map(row => `
+          <div class="filter-row">
+            <span class="filter-label">${escapeHtml(row.label)}</span>
+            <div class="filter-chips" data-filter-key="${escapeHtml(row.key)}">
+              ${row.chips.map(([v, label], i) =>
+                `<span class="f-chip${i === 0 ? ' is-active' : ''}"
+                       data-value="${escapeHtml(v)}">${escapeHtml(label)}</span>`
+              ).join('')}
+            </div>
+          </div>
+        `).join('')}
+
+        <div class="filter-row">
+          <span class="filter-label">Quality</span>
+          <div class="filter-chips" data-filter-multi="quality">
+            ${DISCOVERY_QUALITY_OPTIONS.map(([v, label]) =>
+              `<span class="f-chip" data-value="${escapeHtml(v)}">${escapeHtml(label)}</span>`
+            ).join('')}
+          </div>
+        </div>
+
+        <div class="filter-row">
+          <span class="filter-label">Instruments</span>
+          <div class="filter-chips" data-filter-multi="instruments">
+            ${DISCOVERY_INSTRUMENTS.map(name =>
+              `<span class="f-chip" data-value="${escapeHtml(name.toLowerCase())}">${escapeHtml(name)}</span>`
+            ).join('')}
+          </div>
+        </div>
+
+        <div class="filter-actions">
+          <button class="filter-reset" type="button"
+                  id="discoveryFilterReset">Reset</button>
+          <button class="filter-apply" type="button"
+                  id="discoveryFilterApply">Apply filters</button>
+        </div>
+      </div>
+
+      <section class="discovery-shuffle" id="discoveryShuffle">
+        <div class="discovery-section-head"><h3>Shuffle your library</h3></div>
+        <p class="section-sub">Recall forgotten favourites</p>
+        <div class="shuffle-mosaic">
+          <div class="shuffle-row" id="discoveryShuffleRow"></div>
+          <div class="edge-fade"></div>
+        </div>
+      </section>
+
+      <section class="discovery-results" id="discoveryResults" hidden>
+        <div class="d-searching" id="dSearching" hidden>
+          <p class="placeholder-body" style="padding: var(--space-4);">Searching…</p>
+        </div>
+        ${DISCOVERY_BLOCKS.map(b => `
+          <div class="d-block" id="dBlock-${b.id}" hidden>
+            <div class="discovery-section-head"><h3>${escapeHtml(b.title)}</h3></div>
+            <div class="d-block-body" id="dBody-${b.id}"></div>
+          </div>
+        `).join('')}
+        <div class="d-empty" id="dEmpty" hidden>
+          <p class="placeholder-body" style="padding: var(--space-4);">No matches.</p>
+        </div>
+      </section>
+    `;
+    root.appendChild(screen);
+
+    fetchShuffle(screen);
+    wireDiscoverySearch(screen);
+    wireDiscoveryFilters(screen);
+  }
+
+  // Minimum query length before fanning out the 5-block search.
+  // Single-character queries are pure noise: trigram similarity is
+  // ~0 against any real word and BGE-M3 has no semantic context to
+  // work with. Below the floor we keep the shuffle mosaic visible.
+  const DISCOVERY_MIN_QUERY_LEN = 2;
+
+  function wireDiscoveryFilters(screen) {
+    // Toggle: adv-row open/close → flip aria-expanded + chevron + panel.
+    const toggle = screen.querySelector('#discoveryAdvToggle');
+    const panel = screen.querySelector('#discoveryFiltersPanel');
+    if (toggle && panel) {
+      toggle.addEventListener('click', () => {
+        const open = panel.hidden;
+        panel.hidden = !open;
+        toggle.setAttribute('aria-expanded', String(open));
+        toggle.classList.toggle('is-open', open);
+      });
+    }
+
+    // Single-select chip rows (Key, Mode, Vocalist, Gender, etc.):
+    // tapping a chip activates it and updates screen._filters[key].
+    panel.querySelectorAll('.filter-chips[data-filter-key]').forEach(group => {
+      const key = group.getAttribute('data-filter-key');
+      group.querySelectorAll('.f-chip').forEach(chip => {
+        chip.addEventListener('click', () => {
+          group.querySelectorAll('.f-chip')
+            .forEach(c => c.classList.remove('is-active'));
+          chip.classList.add('is-active');
+          screen._filters[key] = chip.getAttribute('data-value');
+        });
+      });
+    });
+
+    // Multi-select chip rows (Instruments): chips toggle independently
+    // and the array of selected values lives in screen._filters[key].
+    panel.querySelectorAll('.filter-chips[data-filter-multi]').forEach(group => {
+      const key = group.getAttribute('data-filter-multi');
+      group.querySelectorAll('.f-chip').forEach(chip => {
+        chip.addEventListener('click', () => {
+          chip.classList.toggle('is-active');
+          const v = chip.getAttribute('data-value');
+          const current = screen._filters[key] || [];
+          if (chip.classList.contains('is-active')) {
+            if (!current.includes(v)) current.push(v);
+          } else {
+            const i = current.indexOf(v);
+            if (i >= 0) current.splice(i, 1);
+          }
+          screen._filters[key] = current;
+        });
+      });
+    });
+
+    // Numeric BPM bounds — clear-on-empty is OK, the filter is "any".
+    const bpmMin = panel.querySelector('#discoveryFilterBpmMin');
+    const bpmMax = panel.querySelector('#discoveryFilterBpmMax');
+    if (bpmMin) bpmMin.addEventListener('input', e => {
+      const v = e.target.value.trim();
+      screen._filters.bpm_min = v ? Number(v) : null;
+    });
+    if (bpmMax) bpmMax.addEventListener('input', e => {
+      const v = e.target.value.trim();
+      screen._filters.bpm_max = v ? Number(v) : null;
+    });
+
+    // Reset returns every chip / input to its default.
+    const resetBtn = panel.querySelector('#discoveryFilterReset');
+    if (resetBtn) resetBtn.addEventListener('click', () => {
+      screen._filters = defaultDiscoveryFilters();
+      panel.querySelectorAll('.filter-chips[data-filter-key]').forEach(g => {
+        g.querySelectorAll('.f-chip').forEach(
+          (c, i) => c.classList.toggle('is-active', i === 0));
+      });
+      panel.querySelectorAll('.filter-chips[data-filter-multi] .f-chip')
+        .forEach(c => c.classList.remove('is-active'));
+      if (bpmMin) bpmMin.value = '';
+      if (bpmMax) bpmMax.value = '';
+    });
+
+    // Apply: 1.5c-a is UI-only — re-running the search with active
+    // filters lands in 1.5c-b. For now just collapse the panel and
+    // re-trigger any current query so the user gets feedback. (No
+    // wiring yet means results are unaffected.)
+    const applyBtn = panel.querySelector('#discoveryFilterApply');
+    if (applyBtn) applyBtn.addEventListener('click', () => {
+      panel.hidden = true;
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.classList.remove('is-open');
+      triggerDiscoverySearch(screen);
+    });
+  }
+
+  function wireDiscoverySearch(screen) {
+    const input = screen.querySelector('#discoverySearchInput');
+    if (!input) return;
+    screen._activeQueryId = 0;
+    screen._debounceTimer = null;
+
+    input.addEventListener('input', () => {
+      clearTimeout(screen._debounceTimer);
+      screen._debounceTimer = setTimeout(() =>
+        triggerDiscoverySearch(screen), 250);
+    });
+  }
+
+  // Single entry point for "do a search now" — invoked by the
+  // input-debounce timer (typing) and by Apply (filter commit).
+  // Decides between three states based on what the user has set:
+  //   query >= MIN_QUERY_LEN          → unified 5-block search
+  //   no query, but filters active    → filter-only browse via /titles
+  //   neither                         → fall back to the shuffle mosaic
+  function triggerDiscoverySearch(screen) {
+    const input = screen.querySelector('#discoverySearchInput');
+    const q = ((input && input.value) || '').trim();
+    const filters = screen._filters || {};
+    screen._activeQueryId = (screen._activeQueryId || 0) + 1;
+    const id = screen._activeQueryId;
+    const getActive = () => screen._activeQueryId;
+
+    if (q.length >= DISCOVERY_MIN_QUERY_LEN) {
+      runUnifiedSearch(screen, q, id, getActive);
+    } else if (hasActiveFilters(filters)) {
+      runFilterOnlyBrowse(screen, id, getActive);
+    } else {
+      showShuffle(screen);
+    }
+  }
+
+  // Browse mode: no text query, only filters. Fires /api/discovery/titles
+  // with an empty `q` so the backend returns tracks ordered by play
+  // count desc that satisfy the active filters. Renders into a
+  // single results block — artists/albums/sound/lyrics blocks
+  // require text to be meaningful and are skipped.
+  function runFilterOnlyBrowse(screen, queryId, getActiveId) {
+    const shuffle = screen.querySelector('#discoveryShuffle');
+    const results = screen.querySelector('#discoveryResults');
+    const empty = screen.querySelector('#dEmpty');
+    const searching = screen.querySelector('#dSearching');
+    if (!shuffle || !results || !empty || !searching) return;
+
+    shuffle.hidden = true;
+    results.hidden = false;
+    empty.hidden = true;
+    searching.hidden = false;
+
+    DISCOVERY_BLOCKS.forEach(b => {
+      const blk = screen.querySelector('#dBlock-' + b.id);
+      const body = screen.querySelector('#dBody-' + b.id);
+      if (blk) blk.hidden = true;
+      if (body) body.innerHTML = '';
+    });
+
+    const params = new URLSearchParams({ limit: '20' });
+    appendFilterParams(params, screen._filters);
+    fetch('/api/discovery/titles?' + params)
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(data => {
+        if (queryId !== getActiveId()) return;
+        searching.hidden = true;
+        const titlesBlock = DISCOVERY_BLOCKS.find(b => b.id === 'titles');
+        // Override the block header to reflect browse semantics.
+        const blk = screen.querySelector('#dBlock-titles');
+        const head = blk && blk.querySelector('.discovery-section-head h3');
+        if (head) head.textContent = 'Tracks matching filters';
+        renderDiscoveryBlock(screen, titlesBlock, data);
+        if ((data.results || []).length === 0) empty.hidden = false;
+      })
+      .catch(err => {
+        if (queryId !== getActiveId()) return;
+        searching.hidden = true;
+        console.warn('filter-only browse failed:', err);
+        empty.hidden = false;
+      });
+  }
+
+  function showShuffle(screen) {
+    const results = screen.querySelector('#discoveryResults');
+    const shuffle = screen.querySelector('#discoveryShuffle');
+    if (results) {
+      results.hidden = true;
+      DISCOVERY_BLOCKS.forEach(b => {
+        const blk = screen.querySelector('#dBlock-' + b.id);
+        const body = screen.querySelector('#dBody-' + b.id);
+        if (blk) blk.hidden = true;
+        if (body) body.innerHTML = '';
+      });
+      const empty = screen.querySelector('#dEmpty');
+      if (empty) empty.hidden = true;
+    }
+    if (shuffle) shuffle.hidden = false;
+  }
+
+  function runUnifiedSearch(screen, query, queryId, getActiveId) {
+    const shuffle = screen.querySelector('#discoveryShuffle');
+    const results = screen.querySelector('#discoveryResults');
+    const empty = screen.querySelector('#dEmpty');
+    const searching = screen.querySelector('#dSearching');
+    if (!shuffle || !results || !empty || !searching) return;
+    shuffle.hidden = true;
+    results.hidden = false;
+    empty.hidden = true;
+    searching.hidden = false;
+
+    DISCOVERY_BLOCKS.forEach(b => {
+      const blk = screen.querySelector('#dBlock-' + b.id);
+      const body = screen.querySelector('#dBody-' + b.id);
+      if (!blk || !body) return;
+      blk.hidden = true;
+      body.innerHTML = '';
+      // Restore default header — browse mode rewrites titles' header
+      // to "Tracks matching filters", reset before each new search.
+      const head = blk.querySelector('.discovery-section-head h3');
+      if (head) head.textContent = b.title;
+    });
+
+    const completion = { remaining: DISCOVERY_BLOCKS.length, hadAnyResults: false };
+
+    const filters = screen._filters || {};
+    DISCOVERY_BLOCKS.forEach(b => {
+      const params = new URLSearchParams({ q: query, limit: '10' });
+      // Filters apply only to track-level blocks (titles/sound/lyrics);
+      // artists/albums are entity-level signals that don't carry the
+      // filter dimensions (BPM, key, instruments, etc.).
+      if (b.layout === 'tracks') appendFilterParams(params, filters);
+      fetch(b.endpoint + '?' + params)
+        .then(r => r.ok ? r.json() : Promise.reject(r.status))
+        .then(data => {
+          if (queryId !== getActiveId()) return;  // stale; user typed again
+          searching.hidden = true;
+          renderDiscoveryBlock(screen, b, data);
+          if ((data.results || []).length > 0) completion.hadAnyResults = true;
+        })
+        .catch(err => {
+          if (queryId !== getActiveId()) return;
+          console.warn('discovery block failed:', b.id, err);
+        })
+        .finally(() => {
+          if (queryId !== getActiveId()) return;
+          completion.remaining -= 1;
+          if (completion.remaining === 0) {
+            searching.hidden = true;
+            if (!completion.hadAnyResults) empty.hidden = false;
+          }
+        });
+    });
+  }
+
+  function renderDiscoveryBlock(screen, descriptor, data) {
+    const blk = screen.querySelector('#dBlock-' + descriptor.id);
+    const body = screen.querySelector('#dBody-' + descriptor.id);
+    if (!blk || !body) return;
+
+    if (data.status === 'loading') {
+      blk.hidden = false;
+      body.innerHTML = `
+        <p class="d-loading-notice">
+          ${descriptor.id === 'sound'
+            ? 'Audio model warming up — this takes ~20-30s on a fresh start. Try again shortly.'
+            : 'Search model warming up — try again in a moment.'}
+        </p>`;
+      return;
+    }
+
+    const items = data.results || [];
+    if (items.length === 0) {
+      blk.hidden = true;
+      body.innerHTML = '';
+      return;
+    }
+
+    if (descriptor.layout === 'artists') {
+      body.innerHTML = renderArtistRow(items);
+      body.querySelectorAll('[data-artist-id]').forEach(el => {
+        el.addEventListener('click', () =>
+          navigateToEntity('artist', el.getAttribute('data-artist-id')));
+      });
+    } else if (descriptor.layout === 'albums') {
+      body.innerHTML = renderAlbumRow(items);
+      body.querySelectorAll('[data-album-id]').forEach(el => {
+        el.addEventListener('click', () =>
+          navigateToEntity('album', el.getAttribute('data-album-id')));
+      });
+    } else {
+      body.innerHTML = renderTrackList(items);
+      wireDetailHandlers(body);
+      updatePlayingHighlight();
+    }
+
+    blk.hidden = false;
+  }
+
+  function renderArtistRow(items) {
+    return `<div class="shuffle-row d-artist-row">${
+      items.map(a => {
+        const ph = avatarPlaceholder(a.artist || a.name || '?');
+        const url = coverUrl({cover_id: a.cover_id, media_file_id: a.media_file_id});
+        const inner = url
+          ? `<img src="${url}" alt="" loading="lazy" onerror="this.style.display='none'">`
+          : `<span class="d-artist-initials">${escapeHtml(ph.initials)}</span>`;
+        return `
+          <button class="d-artist-tile" type="button"
+                  data-artist-id="${escapeHtml(a.artist_id || '')}">
+            <div class="d-artist-avatar"
+                 style="background: ${ph.bg};">${inner}</div>
+            <div class="d-artist-name">${escapeHtml(a.artist || a.name || '')}</div>
+          </button>`;
+      }).join('')
+    }</div>`;
+  }
+
+  function renderAlbumRow(items) {
+    return `<div class="shuffle-row d-album-row">${
+      items.map(a => {
+        const c = coverPlaceholderColors(a.album || a.title || a.album_id || '');
+        const url = coverUrl({cover_id: a.cover_id, media_file_id: a.media_file_id});
+        const cover = url
+          ? `<img src="${url}" alt="" loading="lazy" onerror="this.style.display='none'">`
+          : '';
+        return `
+          <button class="mosaic-tile" type="button"
+                  data-album-id="${escapeHtml(a.album_id || '')}">
+            <div class="mosaic-cover"
+                 style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}</div>
+            <div class="mosaic-title">${escapeHtml(a.album || a.title || '')}</div>
+            <div class="mosaic-artist">${escapeHtml(a.artist || '')}</div>
+          </button>`;
+      }).join('')
+    }</div>`;
+  }
+
+  function renderTrackList(items) {
+    return `<div class="track-list">${
+      items.map(t => {
+        const c = coverPlaceholderColors(t.title || t.album || '');
+        const url = coverUrl({cover_id: t.cover_id, media_file_id: t.id});
+        const inner = url
+          ? `<img src="${url}" alt="" loading="lazy" onerror="this.style.display='none'">`
+          : '';
+        const sub = [(t.artist || ''), (t.album || '')].filter(Boolean).join(' — ');
+        const sim = (t.similarity != null)
+          ? Number(t.similarity).toFixed(2) : '';
+        return `
+          <button class="track-row result-row" type="button"
+                  data-media-file-id="${escapeHtml(String(t.id || ''))}">
+            <div class="result-art"
+                 style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${inner}</div>
+            <div class="track-info">
+              <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+              <div class="track-artist-line">${escapeHtml(sub)}</div>
+            </div>
+            <span class="result-similarity">${sim}</span>
+            <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
+          </button>`;
+      }).join('')
+    }</div>`;
+  }
+
+  async function fetchShuffle(screen) {
+    const row = screen.querySelector('#discoveryShuffleRow');
+    try {
+      const resp = await fetch('/api/discovery/shuffle?limit=14');
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const data = await resp.json();
+      const albums = data.albums || [];
+      if (albums.length === 0) {
+        row.innerHTML = '<p class="placeholder-body">No albums in library yet.</p>';
+        return;
+      }
+      row.innerHTML = albums.map(a => {
+        const c = coverPlaceholderColors(a.title || a.id || '');
+        const url = coverUrl(a);
+        const cover = url
+          ? `<img src="${url}" alt="" loading="lazy"
+                  onerror="this.style.display='none'">`
+          : '';
+        return `
+          <button class="mosaic-tile" type="button"
+                  data-album-id="${escapeHtml(a.id || '')}">
+            <div class="mosaic-cover"
+                 style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}</div>
+            <div class="mosaic-title">${escapeHtml(a.title || '')}</div>
+            <div class="mosaic-artist">${escapeHtml(a.artist || '')}</div>
+          </button>`;
+      }).join('');
+      row.querySelectorAll('[data-album-id]').forEach(el => {
+        el.addEventListener('click', () => {
+          const id = el.getAttribute('data-album-id');
+          if (id) navigateToEntity('album', id);
+        });
+      });
+    } catch (err) {
+      console.warn('shuffle failed:', err);
+      row.innerHTML = '<p class="placeholder-body">Could not load shuffle.</p>';
+    }
+  }
+
   /* ---------- Artist + Album detail screens (Step 1.4) ----------
      Rendered when the hash matches #<tab>/artist/<uuid> or
      #<tab>/album/<uuid>. Markup mirrors docs/design/reference/
@@ -918,6 +1589,7 @@
     }
 
     wireDetailHandlers(screen);
+    updatePlayingHighlight();
   }
 
   async function renderAlbum(root, albumId) {
@@ -1010,6 +1682,7 @@
     `;
 
     wireDetailHandlers(screen, { albumId, tracks: d.tracks });
+    updatePlayingHighlight();
   }
 
   function wireDetailHandlers(screen, ctx = {}) {
@@ -1100,7 +1773,7 @@
   /* ---------- Wire it up ---------- */
 
   registerScreen('home', renderHome);
-  registerScreen('discovery', placeholderScreen('Discovery'));
+  registerScreen('discovery', renderDiscovery);
   registerScreen('friends', placeholderScreen('Friends'));
   registerScreen('more', placeholderScreen('More'));
 
@@ -1120,10 +1793,14 @@
     document.addEventListener('np-update', e => {
       mp.update(e.detail);
       sheet.onStatus(e.detail);
+      updatePlayingHighlight();
     });
     document.addEventListener('np-detail', e => {
       mp.setCover(e.detail);
     });
+    // currentPlaylist resolves async; once it lands, the previous
+    // np-update events that bailed (no mfId yet) need a re-run.
+    document.addEventListener('playlist-loaded', updatePlayingHighlight);
     // When the legacy playlist load resolves, kick a detail fetch in
     // case SSE already fired before playlist was ready (in which case
     // the previous tryFetchDetail bailed because mfId was null).

@@ -41,6 +41,7 @@ a { color: inherit; text-decoration: none; }
      and #app padding stay consistent. */
   --nav-h: calc(56 * var(--px));   /* bottom-nav button-row height */
   --mp-h:  calc(60 * var(--px));   /* mini-player height (cover + padding) */
+  --fab-clear: calc(72 * var(--px)); /* AI FAB height (56) + breathing (16) */
 }
 
 body.sautium-base {
@@ -48,10 +49,20 @@ body.sautium-base {
   min-height: 100dvh;
 }
 
+/* `#app` reserves bottom padding for: bottom-nav, optional mini-player,
+   AND the AI FAB (which floats above both). Without the FAB clearance,
+   the bottom-right "+" / icon button on the last list row sits behind
+   the FAB and can't be tapped. The FAB is always 56px tall plus a
+   16px breathing buffer = 72px. Mini-player adds its own 60px when
+   visible. See .ai-fab and body.has-miniplayer .ai-fab for the
+   matching positioning rules. */
 #app {
-  padding-bottom: calc(var(--nav-h) + var(--mp-h) + var(--safe-bottom));
+  padding-bottom: calc(var(--nav-h) + var(--fab-clear) + var(--safe-bottom));
   min-height: 100vh;
   min-height: 100dvh;
+}
+body.has-miniplayer #app {
+  padding-bottom: calc(var(--nav-h) + var(--mp-h) + var(--fab-clear) + var(--safe-bottom));
 }
 
 /* =====================================================================
@@ -552,12 +563,18 @@ body.has-miniplayer .ai-fab {
   font-weight: 500;
   color: var(--color-text);
   margin: 0 0 calc(2 * var(--px));
+  cursor: pointer;
+  user-select: none;
 }
 .np-album {
   font-size: var(--text-label);  /* 13 */
   color: var(--color-text-muted);
   margin: 0;
+  cursor: pointer;
+  user-select: none;
 }
+.np-artist:active,
+.np-album:active { opacity: 0.7; }
 .np-album .np-year {
   color: var(--color-text-dim);
   margin-left: calc(6 * var(--px));
@@ -583,7 +600,6 @@ body.has-miniplayer .ai-fab {
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  cursor: pointer;
   background: transparent;
   border: 1px solid transparent;
   flex-shrink: 0;
@@ -1159,6 +1175,28 @@ body.has-miniplayer .ai-fab {
   background: transparent;
   border: 0; padding: 0; cursor: pointer;
 }
+
+/* Currently-playing track highlight (album / artist tracklists). The
+   class is toggled by app-shell.js on every SSE np-update tick when
+   the row's data-media-file-id matches _getCurrentMediaFileId(). */
+.track-row.is-playing .track-title-line {
+  color: var(--color-amber);
+}
+.track-row.is-playing .track-rank {
+  color: transparent;
+  position: relative;
+}
+.track-row.is-playing .track-rank::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  width: calc(7 * var(--px));
+  height: calc(7 * var(--px));
+  border-radius: 50%;
+  background: var(--color-amber);
+}
 .track-add:active { color: var(--color-amber); }
 
 /* ---- Similar artists row ---- */
@@ -1381,7 +1419,386 @@ body.has-miniplayer .ai-fab {
 }
 
 /* =====================================================================
- * Placeholder screen (Discovery / Friends / More — not yet rebuilt)
+ * Discovery screen (Step 1.5a)
+ * Reference: docs/design/reference/claude-design-bundle/project/
+ *            Session 2 v3.html lines 266-368 (CSS), 1013-1093 (markup).
+ * Scoped under .discovery-screen so .section-head, .chip etc. stay
+ * insulated from the detail-screen variants.
+ * ===================================================================== */
+
+/* Header — overrides Home's display-sized .screen-title (Home is the
+   brand logo case). Discovery / Friends / Settings etc. follow the
+   reference's 22px h-title size. */
+.discovery-screen .screen-head {
+  padding: calc(12 * var(--px)) calc(20 * var(--px)) calc(14 * var(--px));
+}
+.discovery-screen .screen-title {
+  font-size: calc(22 * var(--px));
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: var(--lh-tight);
+}
+
+.discovery-screen .search-wrap {
+  margin: calc(2 * var(--px)) calc(20 * var(--px)) calc(14 * var(--px));
+  height: calc(46 * var(--px));
+  background: var(--color-surface-lo);
+  border: 1px solid var(--color-divider);
+  border-radius: calc(8 * var(--px));
+  display: grid;
+  grid-template-columns: calc(40 * var(--px)) 1fr;
+  align-items: center;
+}
+.discovery-screen .search-wrap svg {
+  margin-left: calc(12 * var(--px));
+  color: var(--color-text-muted);
+}
+.discovery-screen .search-wrap input {
+  border: 0;
+  background: transparent;
+  outline: none;
+  font-family: inherit;
+  font-size: calc(14 * var(--px));
+  color: var(--color-text);
+  padding-right: calc(12 * var(--px));
+  height: 100%;
+}
+.discovery-screen .search-wrap input::placeholder {
+  color: var(--color-text-dim);
+}
+.discovery-screen .search-wrap input::-webkit-search-cancel-button { display: none; }
+
+.discovery-screen .discovery-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 0 calc(20 * var(--px)) calc(8 * var(--px));
+  margin-top: calc(4 * var(--px));
+}
+.discovery-screen .discovery-section-head h3 {
+  margin: 0;
+  font-size: calc(15 * var(--px));
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+}
+.discovery-screen .section-sub {
+  padding: calc(2 * var(--px)) calc(20 * var(--px)) calc(10 * var(--px));
+  margin: 0;
+  font-size: calc(11.5 * var(--px));
+  color: var(--color-text-muted);
+  line-height: 1.4;
+}
+
+.discovery-screen .shuffle-mosaic {
+  position: relative;
+  padding: calc(2 * var(--px)) 0 calc(20 * var(--px));
+}
+.discovery-screen .shuffle-row {
+  display: flex;
+  gap: calc(10 * var(--px));
+  padding: 0 calc(20 * var(--px));
+  overflow-x: auto;
+  scrollbar-width: none;
+  scroll-padding-inline-start: calc(20 * var(--px));
+}
+.discovery-screen .shuffle-row::-webkit-scrollbar { display: none; }
+.discovery-screen .mosaic-tile {
+  flex: 0 0 calc(120 * var(--px));
+  display: flex;
+  flex-direction: column;
+  gap: calc(8 * var(--px));
+  background: none;
+  border: 0;
+  padding: 0;
+  text-align: left;
+  font-family: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.discovery-screen .mosaic-cover {
+  width: calc(120 * var(--px));
+  height: calc(120 * var(--px));
+  background:
+    linear-gradient(135deg,
+      var(--cover-bg-1, var(--color-surface-hi)),
+      var(--cover-bg-2, var(--color-surface-lo)));
+  overflow: hidden;
+  border-radius: calc(2 * var(--px));
+}
+.discovery-screen .mosaic-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.discovery-screen .mosaic-title {
+  font-size: calc(12 * var(--px));
+  font-weight: 500;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: calc(120 * var(--px));
+}
+.discovery-screen .mosaic-artist {
+  font-size: calc(11 * var(--px));
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: calc(120 * var(--px));
+}
+.discovery-screen .edge-fade {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: calc(20 * var(--px));
+  width: calc(40 * var(--px));
+  background: linear-gradient(90deg,
+    rgba(27, 23, 20, 0) 0%,
+    var(--color-foundation) 80%);
+  pointer-events: none;
+}
+/* ---- Search results (track rows with cover thumbnail) ---- */
+.discovery-screen .discovery-results .track-list {
+  padding: 0 calc(20 * var(--px));
+}
+.discovery-screen .result-row {
+  grid-template-columns:
+    calc(44 * var(--px)) 1fr auto calc(44 * var(--px));
+}
+.discovery-screen .result-art {
+  width: calc(44 * var(--px));
+  height: calc(44 * var(--px));
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background:
+    linear-gradient(135deg,
+      var(--cover-bg-1, var(--color-surface-hi)),
+      var(--cover-bg-2, var(--color-surface-lo)));
+}
+.discovery-screen .result-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.discovery-screen .result-similarity {
+  font-family: var(--font-mono);
+  font-size: calc(11.5 * var(--px));
+  color: var(--color-blue);
+  letter-spacing: 0.02em;
+  margin-right: calc(4 * var(--px));
+}
+
+/* ---- Advanced filters (Step 1.5c-a) ---- */
+.discovery-screen .adv-row {
+  width: 100%;
+  text-align: left;
+  padding: calc(4 * var(--px)) calc(20 * var(--px)) calc(14 * var(--px));
+  display: flex;
+  align-items: center;
+  gap: calc(6 * var(--px));
+  font-family: inherit;
+  font-size: calc(13 * var(--px));
+  font-weight: 500;
+  color: var(--color-text-muted);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.discovery-screen .adv-row svg {
+  transition: transform var(--dur-fast) var(--ease-standard);
+}
+.discovery-screen .adv-row.is-open svg { transform: rotate(90deg); }
+
+.discovery-screen .filters-panel {
+  margin: 0 calc(20 * var(--px)) calc(16 * var(--px));
+  padding: calc(14 * var(--px)) calc(14 * var(--px)) calc(12 * var(--px));
+  background: var(--color-surface-lo);
+  border: 1px solid var(--color-divider);
+  border-radius: calc(8 * var(--px));
+  display: flex;
+  flex-direction: column;
+  gap: calc(14 * var(--px));
+}
+.discovery-screen .filter-row {
+  display: flex;
+  flex-direction: column;
+  gap: calc(8 * var(--px));
+}
+.discovery-screen .filter-label {
+  font-size: calc(10.5 * var(--px));
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+.discovery-screen .filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(6 * var(--px));
+}
+.discovery-screen .f-chip {
+  height: calc(28 * var(--px));
+  padding: 0 calc(10 * var(--px));
+  display: inline-flex;
+  align-items: center;
+  font-size: calc(12 * var(--px));
+  font-weight: 500;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-divider);
+  border-radius: calc(14 * var(--px));
+  cursor: pointer;
+  user-select: none;
+}
+.discovery-screen .f-chip.is-active {
+  background: var(--color-amber);
+  border-color: var(--color-amber);
+  color: var(--color-foundation);
+  font-weight: 600;
+}
+
+.discovery-screen .bpm-inputs {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--px));
+}
+.discovery-screen .bpm-field {
+  flex: 1;
+  width: 100%;
+  height: calc(36 * var(--px));
+  padding: 0 calc(10 * var(--px));
+  background: var(--color-surface);
+  border: 1px solid var(--color-divider);
+  border-radius: calc(6 * var(--px));
+  font-family: var(--font-mono);
+  font-size: calc(13 * var(--px));
+  color: var(--color-blue);
+  letter-spacing: 0.02em;
+  outline: none;
+}
+.discovery-screen .bpm-field::placeholder { color: var(--color-text-dim); }
+.discovery-screen .bpm-field::-webkit-outer-spin-button,
+.discovery-screen .bpm-field::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.discovery-screen .bpm-field { -moz-appearance: textfield; }
+.discovery-screen .bpm-dash {
+  font-family: var(--font-mono);
+  color: var(--color-text-dim);
+  font-size: calc(13 * var(--px));
+}
+.discovery-screen .bpm-unit {
+  font-family: var(--font-sans);
+  font-size: calc(10 * var(--px));
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+  margin-left: calc(4 * var(--px));
+}
+
+.discovery-screen .filter-actions {
+  display: flex;
+  gap: calc(8 * var(--px));
+  margin-top: calc(4 * var(--px));
+}
+.discovery-screen .filter-reset {
+  height: calc(44 * var(--px));
+  padding: 0 calc(16 * var(--px));
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-divider);
+  border-radius: calc(8 * var(--px));
+  font-family: inherit;
+  font-size: calc(13 * var(--px));
+  font-weight: 500;
+  cursor: pointer;
+}
+.discovery-screen .filter-apply {
+  flex: 1;
+  height: calc(44 * var(--px));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-amber);
+  color: var(--color-foundation);
+  border: 0;
+  border-radius: calc(8 * var(--px));
+  font-family: inherit;
+  font-size: calc(13.5 * var(--px));
+  font-weight: 600;
+  cursor: pointer;
+}
+.discovery-screen .filter-apply:active { background: var(--color-amber-press); }
+
+/* ---- Universal-search blocks (Step 1.5b) ---- */
+.discovery-screen .d-block {
+  margin-top: calc(12 * var(--px));
+}
+.discovery-screen .d-loading-notice {
+  padding: calc(8 * var(--px)) calc(20 * var(--px)) calc(16 * var(--px));
+  margin: 0;
+  font-size: calc(12.5 * var(--px));
+  color: var(--color-text-muted);
+  line-height: 1.4;
+}
+
+/* Artist row — circular avatar tiles, mosaic-style horizontal scroll. */
+.discovery-screen .d-artist-row {
+  /* Inherits .shuffle-row layout (flex h-scroll with 20px padding). */
+}
+.discovery-screen .d-artist-tile {
+  flex: 0 0 calc(96 * var(--px));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(8 * var(--px));
+  background: none;
+  border: 0;
+  padding: 0;
+  text-align: center;
+  font-family: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.discovery-screen .d-artist-avatar {
+  width: calc(96 * var(--px));
+  height: calc(96 * var(--px));
+  border-radius: 50%;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  color: var(--color-text);
+  font-weight: 600;
+  font-size: calc(20 * var(--px));
+  letter-spacing: 0.02em;
+}
+.discovery-screen .d-artist-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.discovery-screen .d-artist-initials {
+  font-family: var(--font-sans);
+}
+.discovery-screen .d-artist-name {
+  font-size: calc(12 * var(--px));
+  font-weight: 500;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: calc(96 * var(--px));
+}
+
+/* =====================================================================
+ * Placeholder screen (Friends / More — not yet rebuilt)
  * ===================================================================== */
 
 .placeholder-screen {

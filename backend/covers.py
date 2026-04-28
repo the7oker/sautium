@@ -36,7 +36,7 @@ from typing import Optional, Tuple
 
 import httpx
 import imagehash
-from mutagen.flac import FLAC
+from mutagen import File as MutagenFile
 from PIL import Image, UnidentifiedImageError
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -117,16 +117,62 @@ def find_external_cover(album_dir: Path) -> Optional[Path]:
     return best
 
 
-def extract_embedded_cover(flac_path: Path) -> Optional[bytes]:
-    """Return raw bytes of the front-cover PICTURE (type 3), or None."""
+def extract_embedded_cover(audio_path: Path) -> Optional[bytes]:
+    """Return raw bytes of an embedded front-cover image, or None.
+
+    Format-agnostic via mutagen.File auto-detection. Supports:
+      - FLAC PICTURE blocks       (type 3 preferred, else first)
+      - MP3 ID3v2 APIC frames     (type 3 preferred, else first)
+      - MP4 / M4A 'covr' atom     (first cover)
+
+    Returns None when the file is unreadable, has no tags, or stores
+    no embedded picture. Picture type 3 is "Cover (front)" per the
+    ID3v2/FLAC spec; we fall back to whatever picture exists when the
+    encoder didn't tag a type, which is common in older rips.
+    """
     try:
-        flac = FLAC(str(flac_path))
+        audio = MutagenFile(str(audio_path))
     except Exception as e:
-        logger.debug(f"FLAC read failed {flac_path}: {e}")
+        logger.debug(f"audio read failed {audio_path}: {e}")
         return None
-    for pic in flac.pictures:
-        if pic.type == 3:  # 3 = Cover (front)
-            return bytes(pic.data)
+    if audio is None:
+        return None
+
+    # FLAC (and any format exposing .pictures: also Vorbis comments
+    # in Ogg containers when mutagen surfaces them this way).
+    pics = getattr(audio, "pictures", None)
+    if pics:
+        for pic in pics:
+            if getattr(pic, "type", None) == 3:
+                return bytes(pic.data)
+        return bytes(pics[0].data)
+
+    tags = getattr(audio, "tags", None)
+    if tags is None:
+        return None
+
+    # ID3v2 APIC frames (MP3, also WAV/AIFF when ID3-tagged).
+    apic_frames = []
+    try:
+        for key in tags.keys():
+            if isinstance(key, str) and key.startswith("APIC"):
+                apic_frames.append(tags[key])
+    except Exception:
+        pass
+    if apic_frames:
+        for frame in apic_frames:
+            if getattr(frame, "type", None) == 3:
+                return bytes(frame.data)
+        return bytes(apic_frames[0].data)
+
+    # MP4 / M4A 'covr' atom.
+    try:
+        covers = tags.get("covr")
+        if covers:
+            return bytes(covers[0])
+    except Exception:
+        pass
+
     return None
 
 
@@ -247,17 +293,19 @@ def resolve_cover_for_media_file(db: Session, media_file_id: int) -> Optional[uu
         logger.debug(f"media_file {media_file_id}: path missing {local_path}")
         return None
 
-    # 1. Embedded front cover (FLAC only — other lossless formats can be added later)
-    if local_path.suffix.lower() == ".flac":
-        data = extract_embedded_cover(local_path)
-        if data:
-            return ingest_cover(
-                db,
-                data,
-                source_type="embedded",
-                source_path=f"flac:{db_path}#0",
-                source_mtime=local_path.stat().st_mtime,
-            )
+    # 1. Embedded front cover — format-agnostic (FLAC PICTURE, ID3v2
+    #    APIC, MP4 'covr'). extract_embedded_cover returns None on
+    #    formats without embedded art so we silently fall through.
+    data = extract_embedded_cover(local_path)
+    if data:
+        suffix = local_path.suffix.lower().lstrip('.') or 'audio'
+        return ingest_cover(
+            db,
+            data,
+            source_type="embedded",
+            source_path=f"{suffix}:{db_path}#0",
+            source_mtime=local_path.stat().st_mtime,
+        )
 
     # 2. External file in the album directory
     ext = find_external_cover(local_path.parent)

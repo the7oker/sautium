@@ -125,6 +125,16 @@ def _apply_filters(filters: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
         clauses.append("af.energy_db <= :f_energy_max")
         params["f_energy_max"] = filters["energy_max"]
 
+    # Pre-filtered track_ids — used by Discovery to scope embedding
+    # searches to a fuzzy-filtered candidate set computed in a fast
+    # first-stage SQL. List elements are stringified UUIDs; the
+    # `::text` cast on `t.id` avoids needing array-element type
+    # binding on the param. The list is bounded by the caller
+    # (Discovery caps at a few thousand rows).
+    if filters.get("track_ids"):
+        clauses.append("t.id::text = ANY(:f_track_ids)")
+        params["f_track_ids"] = [str(x) for x in filters["track_ids"]]
+
     sql = (" AND " + " AND ".join(clauses)) if clauses else ""
     return sql, params
 
