@@ -162,9 +162,12 @@
   function updateFabVisibility(/* route */) {
     const fab = document.getElementById('aiFab');
     if (!fab) return;
-    // Phase 1.1: visible on every root surface. AI sheet / overlays
-    // not implemented yet — when they are, hide the FAB while open.
-    fab.hidden = false;
+    // Hide while overlay sheets are open (Now Playing or AI assistant)
+    // — they have their own dismiss controls and the FAB on top
+    // would obscure them.
+    const npOpen = sheet && sheet.isOpen;
+    const aiOpen = ai && ai.isOpen;
+    fab.hidden = !!(npOpen || aiOpen);
   }
 
   /* ---------- Now Playing sheet ----------
@@ -623,6 +626,347 @@
       const probe = new Image();
       probe.onload = () => { this.cover.style.backgroundImage = `url(${url})`; };
       probe.src = url;
+    },
+  };
+
+  /* ---------- AI assistant sheet ----------
+     Wires the FAB to the /api/chat backend (sessions, messages, track
+     picks). Provider/model selection lives in Settings — here we use
+     whatever the backend's `default_provider` returns. */
+
+  const ai = {
+    el: null, thread: null, input: null, form: null,
+    closeBtn: null, sendBtn: null,
+    pills: null, newPill: null,
+    sessions: [],            // cached metadata for pill rendering
+    isOpen: false,
+    activeSessionId: null,
+    sending: false,
+    pressTimer: null,
+
+    init() {
+      this.el = document.getElementById('aiSheet');
+      if (!this.el) return;
+      this.thread = document.getElementById('aiThread');
+      this.input = document.getElementById('aiInput');
+      this.form = document.getElementById('aiInputForm');
+      this.closeBtn = document.getElementById('aiCloseBtn');
+      this.sendBtn = document.getElementById('aiSendBtn');
+      this.pills = document.getElementById('aiPills');
+      this.newPill = document.getElementById('aiNewPill');
+
+      this.closeBtn.addEventListener('click', () => this.hide());
+      this.newPill.addEventListener('click', () => this.newSession());
+      this.form.addEventListener('submit', e => {
+        e.preventDefault();
+        this.send();
+      });
+
+      // FAB → open
+      const fab = document.getElementById('aiFab');
+      if (fab) fab.addEventListener('click', () => this.show());
+
+      document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && this.isOpen) this.hide();
+      });
+    },
+
+    async show() {
+      if (!this.el) return;
+      this.el.hidden = false;
+      this.isOpen = true;
+      const fab = document.getElementById('aiFab');
+      if (fab) fab.hidden = true;
+      if (this.activeSessionId === null) {
+        await this.bootstrap();
+      } else {
+        await this.refreshPills();
+        setTimeout(() => this.input && this.input.focus(), 50);
+      }
+    },
+
+    hide() {
+      if (!this.el) return;
+      this.el.hidden = true;
+      this.isOpen = false;
+      updateFabVisibility(currentRoute);
+    },
+
+    async bootstrap() {
+      try {
+        await this.refreshPills();
+        if (this.sessions.length > 0) {
+          const top = this.sessions[0];
+          await this.switchToSession(top.id);
+        } else {
+          await this.newSession();
+        }
+      } catch (err) {
+        console.warn('AI bootstrap failed:', err);
+        this.renderEmpty('Could not load chats. Try refreshing.');
+      }
+    },
+
+    async refreshPills() {
+      try {
+        const resp = await fetch('/api/chat/sessions?limit=50');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        this.sessions = await resp.json() || [];
+      } catch (err) {
+        console.warn('sessions load failed:', err);
+        this.sessions = [];
+      }
+      this.renderPills();
+    },
+
+    renderPills() {
+      // Keep "+ New" pill (always first), append session pills after.
+      // Existing session pills are removed and rebuilt — cheap for
+      // up to ~50 entries.
+      const existing = this.pills.querySelectorAll('.ai-pill:not(.ai-pill-new)');
+      existing.forEach(el => el.remove());
+      for (const s of this.sessions) {
+        const pill = document.createElement('button');
+        pill.type = 'button';
+        pill.className = 'ai-pill';
+        if (s.id === this.activeSessionId) pill.classList.add('is-active');
+        const label = (s.title || 'New chat').trim() || 'New chat';
+        pill.innerHTML = '<span></span>';
+        pill.querySelector('span').textContent = label;
+        pill.addEventListener('click', () => this.switchToSession(s.id));
+        this.attachLongPress(pill, s);
+        this.pills.appendChild(pill);
+      }
+    },
+
+    // Long-press (700ms) prompts to delete the session. Works on
+    // mouse + touch. Cleared on pointerup / leave so a quick tap
+    // falls through to the normal click handler (switch session).
+    attachLongPress(pill, session) {
+      const start = () => {
+        clearTimeout(this.pressTimer);
+        this.pressTimer = setTimeout(() => {
+          this.pressTimer = null;
+          if (confirm(`Delete chat "${session.title || 'New chat'}"?`)) {
+            this.deleteSession(session.id);
+          }
+        }, 700);
+      };
+      const cancel = () => {
+        if (this.pressTimer) {
+          clearTimeout(this.pressTimer);
+          this.pressTimer = null;
+        }
+      };
+      pill.addEventListener('pointerdown', start);
+      pill.addEventListener('pointerup', cancel);
+      pill.addEventListener('pointerleave', cancel);
+      pill.addEventListener('pointercancel', cancel);
+    },
+
+    async newSession() {
+      try {
+        const resp = await fetch('/api/chat/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const session = await resp.json();
+        this.activeSessionId = session.id;
+        this.thread.innerHTML = '';
+        this.renderEmpty('Ask the AI for recommendations, analysis or context.');
+        await this.refreshPills();
+        setTimeout(() => this.input && this.input.focus(), 50);
+      } catch (err) {
+        console.warn('new session failed:', err);
+      }
+    },
+
+    async switchToSession(id) {
+      this.activeSessionId = id;
+      this.thread.innerHTML = '<p class="ai-empty">Loading…</p>';
+      this.renderPills();  // update active highlight immediately
+      try {
+        const resp = await fetch('/api/chat/sessions/' + id + '/messages');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const messages = await resp.json();
+        this.thread.innerHTML = '';
+        if (!messages || messages.length === 0) {
+          this.renderEmpty('Ask the AI for recommendations, analysis or context.');
+        } else {
+          for (const m of messages) this.appendMessage(m);
+          this.scrollToBottom();
+        }
+        setTimeout(() => this.input && this.input.focus(), 50);
+      } catch (err) {
+        console.warn('load messages failed:', err);
+        this.renderEmpty('Could not load this chat.');
+      }
+    },
+
+    renderEmpty(text) {
+      this.thread.innerHTML =
+        '<p class="ai-empty">' + escapeHtml(text) + '</p>';
+    },
+
+    appendMessage(m) {
+      // Drop any "empty" placeholder before adding real content.
+      const empty = this.thread.querySelector('.ai-empty');
+      if (empty) empty.remove();
+
+      const row = document.createElement('div');
+      row.className = 'ai-msg-row' + (m.role === 'user' ? ' is-user' : '');
+      if (m.role === 'user') {
+        const bubble = document.createElement('div');
+        bubble.className = 'ai-msg-user';
+        bubble.textContent = m.content || '';
+        row.appendChild(bubble);
+      } else {
+        const body = document.createElement('div');
+        body.className = 'ai-msg-ai';
+        if (m.model) {
+          const tag = document.createElement('span');
+          tag.className = 'ai-model-tag';
+          tag.textContent = String(m.model).split(':').pop() || m.model;
+          body.appendChild(tag);
+        }
+        const text = document.createElement('span');
+        text.textContent = m.content || '';
+        body.appendChild(text);
+        // Track picks
+        const tracks = m.tracks_data || m.tracks || [];
+        for (const t of tracks) body.appendChild(this.renderPick(t));
+        row.appendChild(body);
+      }
+      this.thread.appendChild(row);
+    },
+
+    renderPick(t) {
+      // Track picks come back from /api/chat as DB media_file rows; fall
+      // back to lazy /by-media URL when no cover_id is attached.
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ai-pick';
+      const c = coverPlaceholderColors(t.title || t.album || '');
+      btn.style.setProperty('--cover-bg-1', c.bg1);
+      btn.style.setProperty('--cover-bg-2', c.bg2);
+      const url = coverUrl({cover_id: t.cover_id, media_file_id: t.id});
+      const inner = url
+        ? `<img src="${url}" alt="" loading="lazy"
+                onerror="this.style.display='none'">`
+        : '';
+      const sub = [t.artist, t.album].filter(Boolean).join(' · ');
+      const meta = (t.similarity != null)
+        ? `<span class="ai-pick-meta">${Number(t.similarity).toFixed(2)}</span>`
+        : '';
+      btn.innerHTML = `
+        <div class="ai-pick-art">${inner}</div>
+        <div class="ai-pick-info">
+          <div class="ai-pick-title">${escapeHtml(t.title || '—')}</div>
+          <div class="ai-pick-sub">${escapeHtml(sub)}</div>
+        </div>
+        ${meta}
+      `;
+      btn.addEventListener('click', () => {
+        if (t.id && typeof window.playTrack === 'function') {
+          window.playTrack(parseInt(t.id, 10));
+        }
+      });
+      return btn;
+    },
+
+    scrollToBottom() {
+      this.thread.scrollTop = this.thread.scrollHeight;
+    },
+
+    typingIndicator() {
+      const row = document.createElement('div');
+      row.className = 'ai-msg-row';
+      row.id = 'aiTyping';
+      row.innerHTML = `
+        <div class="ai-msg-ai"><span class="ai-typing">
+          <span class="ai-typing-dot"></span>
+          <span class="ai-typing-dot"></span>
+          <span class="ai-typing-dot"></span>
+        </span></div>`;
+      return row;
+    },
+
+    async send() {
+      const text = (this.input.value || '').trim();
+      if (!text || this.sending) return;
+      if (this.activeSessionId === null) {
+        await this.newSession();
+        if (this.activeSessionId === null) return;
+      }
+      this.sending = true;
+      this.sendBtn.disabled = true;
+      this.input.value = '';
+
+      // Optimistic user bubble + typing indicator.
+      this.appendMessage({ role: 'user', content: text });
+      const typing = this.typingIndicator();
+      this.thread.appendChild(typing);
+      this.scrollToBottom();
+
+      try {
+        const resp = await fetch(
+          '/api/chat/sessions/' + this.activeSessionId + '/messages',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: text }),
+          });
+        const data = await resp.json();
+        if (typing.parentNode) typing.remove();
+        if (!resp.ok) throw new Error(data.detail || 'send failed');
+        const am = data.assistant_msg || {};
+        // Backend returns simplified tracks_data on the message and a
+        // richer `tracks` array at the response root — prefer the
+        // richer one for cover_id / similarity.
+        am.tracks = data.tracks || am.tracks_data || [];
+        am.model = data.provider
+          ? `${data.provider}:${data.model}`
+          : (am.model || data.model || '');
+        this.appendMessage(am);
+        // Backend may have just auto-set a title from the first
+        // message — refresh the pill row so the active pill picks
+        // it up. Also bumps it to the front by `updated_at`.
+        await this.refreshPills();
+        this.scrollToBottom();
+      } catch (err) {
+        if (typing.parentNode) typing.remove();
+        console.warn('send failed:', err);
+        const errRow = document.createElement('div');
+        errRow.className = 'ai-msg-row';
+        errRow.innerHTML =
+          '<div class="ai-msg-ai" style="color:var(--color-text-muted);">' +
+          escapeHtml(String(err.message || err)) + '</div>';
+        this.thread.appendChild(errRow);
+        this.scrollToBottom();
+      } finally {
+        this.sending = false;
+        this.sendBtn.disabled = false;
+        this.input.focus();
+      }
+    },
+
+    async deleteSession(id) {
+      try {
+        await fetch('/api/chat/sessions/' + id, { method: 'DELETE' });
+      } catch (err) { console.warn('delete failed:', err); }
+      // Drop locally first so the pill disappears even if the next
+      // refresh hiccups; then re-bootstrap if we killed the active
+      // session, else just refresh the pill row.
+      this.sessions = this.sessions.filter(s => s.id !== id);
+      if (id === this.activeSessionId) {
+        this.activeSessionId = null;
+        this.thread.innerHTML = '';
+        await this.bootstrap();
+      } else {
+        this.renderPills();
+      }
     },
   };
 
@@ -1790,6 +2134,7 @@
     attachNavListeners();
     mp.init();
     sheet.init();
+    ai.init();
     document.addEventListener('np-update', e => {
       mp.update(e.detail);
       sheet.onStatus(e.detail);

@@ -13,7 +13,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 
   <link rel="stylesheet" href="/static/tokens.css?v=3">
-  <link rel="stylesheet" href="/static/style.css?v=29">
+  <link rel="stylesheet" href="/static/style.css?v=32">
 </head>
 <body class="sautium-base">
 
@@ -50,7 +50,6 @@
 
       <div class="np-cover-block">
         <div class="np-cover-overlay">
-          <div class="np-handle-wrap"><div class="np-handle"></div></div>
           <div class="np-control-bar">
             <button class="np-icon-btn" id="npClose" type="button" aria-label="Collapse">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
@@ -168,6 +167,49 @@
       </div>
 
     </div>
+  </div>
+
+  <!-- AI assistant sheet (full-screen overlay opened by the FAB).
+       Title row + always-visible pill row of recent chats; the
+       composer is pinned to the bottom safe-area. -->
+  <div id="aiSheet" class="ai-sheet" role="dialog" aria-label="AI assistant" hidden>
+    <div class="ai-title-row">
+      <h1 class="ai-title-text">AI</h1>
+      <button class="icon-btn" type="button" id="aiCloseBtn"
+              aria-label="Close">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <path d="M6 9l6 6 6-6"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="ai-pills" id="aiPills">
+      <button class="ai-pill ai-pill-new" type="button" id="aiNewPill"
+              aria-label="New chat">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+             aria-hidden="true">
+          <path d="M12 5v14M5 12h14"/>
+        </svg>
+        <span>New</span>
+      </button>
+    </div>
+
+    <div class="ai-thread" id="aiThread" role="log" aria-live="polite"></div>
+
+    <form class="ai-input-row" id="aiInputForm">
+      <input type="text" class="ai-input" id="aiInput"
+             placeholder="Ask me…" autocomplete="off" autocapitalize="off">
+      <button class="ai-send-btn" type="submit" id="aiSendBtn"
+              aria-label="Send">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"
+             aria-hidden="true">
+          <path d="M3 11.5L21 3l-8 8 5 10-3-7-3 4 0-4z"/>
+        </svg>
+      </button>
+    </form>
   </div>
 
   <nav id="bottomNav" class="bottom-nav" role="navigation" aria-label="Primary">
@@ -296,7 +338,7 @@
     <div id="lastfmAuthStatus"></div>
   </div>
 
-  <script src="/static/app-shell.js?v=36"></script>
+  <script src="/static/app-shell.js?v=38"></script>
   <script src="/static/app.js?v=16"></script>
 </body>
 </html>

@@ -428,6 +428,285 @@ body.has-miniplayer .ai-fab {
 }
 .np-sheet[hidden] { display: none !important; }
 
+/* =====================================================================
+ * AI assistant sheet
+ * Reference: docs/design/reference/claude-design-bundle/project/
+ *            Session 3 v2.html lines 277-386.
+ * Full-screen overlay opened from the FAB. Layout: title row +
+ * close button, recent-chat pill row, scrollable thread, composer
+ * pinned to the bottom safe-area.
+ * ===================================================================== */
+.ai-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: var(--color-surface-lo);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.ai-sheet[hidden] { display: none !important; }
+
+.ai-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(2 * var(--px)) calc(8 * var(--px))
+           calc(8 * var(--px)) calc(20 * var(--px));
+  flex-shrink: 0;
+}
+.ai-title-text {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: calc(22 * var(--px));
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--color-text);
+}
+.ai-title-row .icon-btn {
+  width: calc(44 * var(--px));
+  height: calc(44 * var(--px));
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: var(--color-text);
+}
+
+/* Pill row — recent chats + "+ New" CTA. Wraps to multiple rows
+   capped at ~3 (vertical scroll inside if many sessions). */
+.ai-pills {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(6 * var(--px));
+  padding: 0 calc(20 * var(--px)) calc(12 * var(--px));
+  max-height: calc(120 * var(--px));
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.ai-pills::-webkit-scrollbar { display: none; }
+
+.ai-pill {
+  flex-shrink: 0;
+  height: calc(28 * var(--px));
+  max-width: calc(180 * var(--px));
+  padding: 0 calc(12 * var(--px));
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--px));
+  font-family: inherit;
+  font-size: calc(12.5 * var(--px));
+  font-weight: 500;
+  color: var(--color-text);
+  background: var(--color-surface-hi);
+  border: 1px solid var(--color-divider);
+  border-radius: calc(14 * var(--px));
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.ai-pill > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ai-pill.is-active {
+  background: var(--color-amber);
+  border-color: var(--color-amber);
+  color: var(--color-foundation);
+  font-weight: 600;
+}
+.ai-pill-new {
+  background: transparent;
+  border-color: var(--color-amber);
+  color: var(--color-amber);
+}
+.ai-pill-new:active { background: var(--color-amber-weak); }
+.ai-pill:active:not(.ai-pill-new):not(.is-active) {
+  background: var(--color-surface);
+}
+
+.ai-thread {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: calc(4 * var(--px)) calc(20 * var(--px)) calc(16 * var(--px));
+  display: flex;
+  flex-direction: column;
+  gap: calc(18 * var(--px));
+}
+
+.ai-msg-row { display: flex; }
+.ai-msg-row.is-user { justify-content: flex-end; }
+.ai-msg-user {
+  max-width: 82%;
+  padding: calc(10 * var(--px)) calc(14 * var(--px));
+  background: var(--color-surface-hi);
+  border: 1px solid var(--color-divider);
+  border-radius: calc(14 * var(--px)) calc(14 * var(--px))
+                 calc(4 * var(--px)) calc(14 * var(--px));
+  font-size: calc(14 * var(--px));
+  color: var(--color-text);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.ai-msg-ai {
+  max-width: 92%;
+  font-size: calc(14 * var(--px));
+  line-height: 1.55;
+  color: var(--color-text);
+  text-wrap: pretty;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.ai-msg-ai .ai-model-tag {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: calc(10.5 * var(--px));
+  color: var(--color-blue);
+  letter-spacing: 0.04em;
+  margin-bottom: calc(6 * var(--px));
+}
+
+.ai-pick {
+  margin-top: calc(8 * var(--px));
+  padding: calc(10 * var(--px)) calc(12 * var(--px));
+  background: var(--color-surface);
+  border: 1px solid var(--color-divider);
+  border-radius: calc(8 * var(--px));
+  display: flex;
+  gap: calc(10 * var(--px));
+  align-items: center;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  color: inherit;
+  width: 100%;
+}
+.ai-pick:active { background: var(--color-surface-hi); }
+.ai-pick-art {
+  width: calc(42 * var(--px));
+  height: calc(42 * var(--px));
+  background:
+    linear-gradient(135deg,
+      var(--cover-bg-1, var(--color-surface-hi)),
+      var(--cover-bg-2, var(--color-surface-lo)));
+  border-radius: calc(2 * var(--px));
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.ai-pick-art img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+.ai-pick-info { min-width: 0; flex: 1; }
+.ai-pick-title {
+  font-size: calc(13 * var(--px));
+  font-weight: 600;
+  color: var(--color-text);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ai-pick-sub {
+  font-size: calc(11 * var(--px));
+  color: var(--color-text-muted);
+  margin-top: calc(2 * var(--px));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ai-pick-meta {
+  font-family: var(--font-mono);
+  color: var(--color-blue);
+  font-size: calc(10.5 * var(--px));
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ai-typing {
+  display: inline-flex;
+  gap: calc(4 * var(--px));
+  align-items: center;
+  color: var(--color-text-muted);
+  font-size: calc(13 * var(--px));
+}
+.ai-typing-dot {
+  width: calc(6 * var(--px));
+  height: calc(6 * var(--px));
+  border-radius: 50%;
+  background: var(--color-text-muted);
+  animation: ai-typing-pulse 1.2s infinite ease-in-out;
+}
+.ai-typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.ai-typing-dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes ai-typing-pulse {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.85); }
+  40%           { opacity: 1;   transform: scale(1); }
+}
+
+.ai-empty {
+  margin: auto;
+  padding: calc(40 * var(--px)) calc(32 * var(--px));
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: calc(14 * var(--px));
+  line-height: 1.5;
+  text-wrap: balance;
+}
+
+.ai-input-row {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--px));
+  padding: calc(10 * var(--px)) calc(12 * var(--px))
+           calc(10 * var(--px));
+  border-top: 1px solid var(--color-divider);
+  background: var(--color-foundation);
+  padding-bottom: calc(10 * var(--px) + var(--safe-bottom));
+}
+.ai-input {
+  flex: 1;
+  height: calc(44 * var(--px));
+  padding: 0 calc(16 * var(--px));
+  background: var(--color-surface);
+  border: 1px solid var(--color-divider);
+  border-radius: calc(22 * var(--px));
+  font-size: calc(14 * var(--px));
+  color: var(--color-text);
+  font-family: inherit;
+  outline: none;
+}
+.ai-input::placeholder { color: var(--color-text-dim); }
+.ai-send-btn {
+  width: calc(44 * var(--px));
+  height: calc(44 * var(--px));
+  border-radius: 50%;
+  background: var(--color-amber);
+  color: var(--color-foundation);
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+.ai-send-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.ai-send-btn:active { background: var(--color-amber-press); }
+
+
 .np-screen {
   position: relative;
   width: 100%;
@@ -482,22 +761,6 @@ body.has-miniplayer .ai-fab {
   pointer-events: none;
 }
 .np-cover-overlay > * { pointer-events: auto; }
-
-.np-handle-wrap {
-  padding: calc(6 * var(--px)) 0 calc(2 * var(--px));
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-  position: relative;
-  z-index: 3;
-}
-.np-handle {
-  width: calc(36 * var(--px));
-  height: calc(4 * var(--px));
-  background: rgba(237, 226, 212, 0.55);
-  border-radius: calc(2 * var(--px));
-  box-shadow: 0 0 calc(4 * var(--px)) rgba(0, 0, 0, 0.4);
-}
 
 .np-control-bar {
   padding: calc(2 * var(--px)) calc(16 * var(--px)) calc(6 * var(--px));
