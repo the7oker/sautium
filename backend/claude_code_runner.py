@@ -19,6 +19,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
@@ -244,6 +245,44 @@ def call_claude_code_stream(
     seen_tool_ids: set[str] = set()
     error_msg: Optional[str] = None
 
+    # Watchdog: kill the subprocess after TIMEOUT_SECONDS regardless of
+    # whether it's currently producing output. `proc.wait(timeout=...)`
+    # only catches a wedged exit; a subprocess that loops over tool
+    # calls forever would otherwise sit on `for line in proc.stdout:`
+    # indefinitely.
+    timed_out = threading.Event()
+
+    def _watchdog():
+        if proc.poll() is None:
+            timed_out.set()
+            logger.warning(
+                f"Claude Code wallclock timeout ({TIMEOUT_SECONDS}s); killing subprocess"
+            )
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    watchdog = threading.Timer(TIMEOUT_SECONDS, _watchdog)
+    watchdog.daemon = True
+    watchdog.start()
+
+    # Drain stderr in a background thread so it doesn't block on a
+    # full pipe and so the message is available on failures.
+    stderr_chunks: list[str] = []
+
+    def _drain_stderr():
+        if proc.stderr is None:
+            return
+        try:
+            for line in proc.stderr:
+                stderr_chunks.append(line)
+        except Exception:
+            pass
+
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
+
     def _yield_block_event(block: dict) -> Iterator[StreamEvent]:
         """Translate a single content block (text or tool_use) into
         events. Used when we receive whole assistant messages without
@@ -320,12 +359,13 @@ def call_claude_code_stream(
 
         rc = proc.wait(timeout=TIMEOUT_SECONDS)
         if rc != 0 and not error_msg:
-            stderr = proc.stderr.read() if proc.stderr else ""
-            error_msg = (stderr or "").strip() or f"Claude Code exited with code {rc}"
+            stderr_thread.join(timeout=2)
+            stderr = "".join(stderr_chunks).strip()
+            error_msg = stderr or f"Claude Code exited with code {rc}"
             logger.error(f"Claude Code stream failed (rc={rc}): {error_msg}")
 
     except subprocess.TimeoutExpired:
-        logger.error("Claude Code stream timed out")
+        logger.error("Claude Code stream wait() timed out")
         error_msg = error_msg or "Claude Code timed out"
     except GeneratorExit:
         # Client disconnected — terminate the subprocess so we don't
@@ -337,6 +377,9 @@ def call_claude_code_stream(
         logger.error(f"Claude Code stream error: {e}", exc_info=True)
         error_msg = error_msg or str(e)
     finally:
+        watchdog.cancel()
+        if timed_out.is_set() and not error_msg:
+            error_msg = f"Claude Code timed out after {TIMEOUT_SECONDS}s"
         if proc.poll() is None:
             try:
                 proc.terminate()

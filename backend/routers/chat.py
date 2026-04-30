@@ -15,6 +15,8 @@ payload is redirected into a separate event.
 
 import json
 import logging
+import queue
+import threading
 from typing import Iterator, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -418,17 +420,25 @@ async def send_message(session_id: int, req: ChatMessageRequest):
         logger.error(f"Failed to build provider stream: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to start AI request")
 
-    def event_generator() -> Iterator[str]:
-        yield _format_sse("meta", {"user_msg": user_row})
+    # Sentinel marking end of producer output.
+    _PRODUCER_DONE = object()
+    KEEPALIVE_INTERVAL_SEC = 15.0
 
+    def producer(out_q: "queue.Queue"):
+        """Run the full provider stream → filter → persist pipeline on
+        a worker thread, pushing rendered SSE strings into a queue.
+
+        The pipeline is fundamentally synchronous (subprocess Popen,
+        Anthropic context manager, etc.) and can sit on a blocking
+        read for many seconds at a time. Decoupling it from the main
+        SSE consumer lets us inject keepalive comments while the model
+        is mid-tool-call without rewriting every provider as async.
+        """
         blocks_filter = BlocksFilter()
         blocks: list[dict] = []
         final: Optional[StreamDone] = None
 
-        def emit_filter_output(items):
-            """Translate filter output into SSE events. Returns the
-            (possibly updated) blocks list so the closure can keep it
-            in sync without globals."""
+        def feed_filter(items) -> Iterator[str]:
             nonlocal blocks
             for kind, val in items:
                 if kind == "text" and val:
@@ -443,59 +453,51 @@ async def send_message(session_id: int, req: ChatMessageRequest):
         try:
             for ev in provider_stream:
                 if isinstance(ev, TextDelta):
-                    yield from emit_filter_output(blocks_filter.feed(ev.text))
+                    for sse in feed_filter(blocks_filter.feed(ev.text)):
+                        out_q.put(sse)
                 elif isinstance(ev, ToolStart):
-                    yield _format_sse("tool", {"name": ev.name})
+                    out_q.put(_format_sse("tool", {"name": ev.name}))
                 elif isinstance(ev, StreamDone):
                     final = ev
-        except Exception as e:
-            logger.error(f"Provider stream error: {e}", exc_info=True)
-            yield _format_sse("error", {"message": str(e)})
-            return
 
-        # Drain any text held back by the filter or recover an unclosed
-        # marker. Then fall back to the existing extract_blocks regex
-        # for the legacy `[DJ_TRACKS]` shape — the streaming filter only
-        # tracks `[DJ_BLOCKS]`, but old models occasionally still emit
-        # the flat tracks marker.
-        yield from emit_filter_output(blocks_filter.flush())
+            for sse in feed_filter(blocks_filter.flush()):
+                out_q.put(sse)
 
-        if not blocks:
-            raw_blocks, _ = extract_blocks_with_fallback(blocks_filter.full_text)
-            if raw_blocks:
-                hydrated = _hydrate_blocks(raw_blocks)
-                if hydrated:
-                    blocks = hydrated
-                    yield _format_sse("blocks", {"blocks": hydrated})
+            if not blocks:
+                raw_blocks, _ = extract_blocks_with_fallback(blocks_filter.full_text)
+                if raw_blocks:
+                    hydrated = _hydrate_blocks(raw_blocks)
+                    if hydrated:
+                        blocks = hydrated
+                        out_q.put(_format_sse("blocks", {"blocks": hydrated}))
 
-        clean_text = strip_tracks_marker(strip_blocks_marker(blocks_filter.full_text))
-        tracks = _tracks_from_blocks(blocks)
-        tracks_data = [
-            {
-                "id": t.get("id"),
-                "title": t.get("title"),
-                "artist": t.get("artist"),
-                "album": t.get("album"),
-                "cover_id": t.get("cover_id"),
-            }
-            for t in tracks
-        ] if tracks else None
+            clean_text = strip_tracks_marker(strip_blocks_marker(blocks_filter.full_text))
+            tracks = _tracks_from_blocks(blocks)
+            tracks_data = [
+                {
+                    "id": t.get("id"),
+                    "title": t.get("title"),
+                    "artist": t.get("artist"),
+                    "album": t.get("album"),
+                    "cover_id": t.get("cover_id"),
+                }
+                for t in tracks
+            ] if tracks else None
 
-        model_name = final.model if final else ""
-        provider_used = final.provider if final else provider_name
-        tool_calls_count = final.tool_calls_count if final else 0
-        retrieval_log = (
-            [{"source": "tools", "description": f"{tool_calls_count} tool calls"}]
-            if tool_calls_count else []
-        )
+            model_name = final.model if final else ""
+            provider_used = final.provider if final else provider_name
+            tool_calls_count = final.tool_calls_count if final else 0
+            retrieval_log = (
+                [{"source": "tools", "description": f"{tool_calls_count} tool calls"}]
+                if tool_calls_count else []
+            )
 
-        if final and final.claude_session_id:
-            try:
-                _save_claude_session_id(session_id, final.claude_session_id)
-            except Exception as e:
-                logger.warning(f"Failed to save Claude session id: {e}")
+            if final and final.claude_session_id:
+                try:
+                    _save_claude_session_id(session_id, final.claude_session_id)
+                except Exception as e:
+                    logger.warning(f"Failed to save Claude session id: {e}")
 
-        try:
             assistant_row = _db_execute("""
                 INSERT INTO chat_messages
                     (session_id, role, content, tracks_data, blocks_data, model,
@@ -514,23 +516,52 @@ async def send_message(session_id: int, req: ChatMessageRequest):
                 "rlog": json.dumps(retrieval_log) if retrieval_log else None,
                 "tr": len(tracks),
             })
-        except Exception as e:
-            logger.error(f"Failed to persist assistant message: {e}", exc_info=True)
-            yield _format_sse("error", {"message": "Failed to save response"})
-            return
 
-        done_payload = {
-            "assistant_msg": assistant_row,
-            "blocks": blocks,
-            "tracks": tracks,
-            "model": model_name,
-            "provider": provider_used,
-            "tracks_retrieved": len(tracks),
-            "retrieval_log": retrieval_log,
-        }
-        if final and final.error:
-            done_payload["provider_error"] = final.error
-        yield _format_sse("done", done_payload)
+            done_payload = {
+                "assistant_msg": assistant_row,
+                "blocks": blocks,
+                "tracks": tracks,
+                "model": model_name,
+                "provider": provider_used,
+                "tracks_retrieved": len(tracks),
+                "retrieval_log": retrieval_log,
+            }
+            if final and final.error:
+                done_payload["provider_error"] = final.error
+            out_q.put(_format_sse("done", done_payload))
+        except Exception as e:
+            logger.error(f"Provider stream error: {e}", exc_info=True)
+            out_q.put(_format_sse("error", {"message": str(e)}))
+        finally:
+            out_q.put(_PRODUCER_DONE)
+
+    def event_generator() -> Iterator[str]:
+        yield _format_sse("meta", {"user_msg": user_row})
+
+        out_q: "queue.Queue" = queue.Queue()
+        worker = threading.Thread(
+            target=producer, args=(out_q,), daemon=True, name="chat-stream-worker",
+        )
+        worker.start()
+
+        try:
+            while True:
+                try:
+                    item = out_q.get(timeout=KEEPALIVE_INTERVAL_SEC)
+                except queue.Empty:
+                    # SSE comment line — proxies and browsers see traffic
+                    # so the connection stays open while the model is in
+                    # a long tool-call or extended-thinking block.
+                    yield ": keepalive\n\n"
+                    continue
+                if item is _PRODUCER_DONE:
+                    break
+                yield item
+        finally:
+            # Producer is daemon, but provider_stream owns the cleanup
+            # (subprocess kill, SDK close). The worker thread exits when
+            # provider_stream raises GeneratorExit on its own iteration.
+            worker.join(timeout=1.0)
 
     return StreamingResponse(
         event_generator(),
