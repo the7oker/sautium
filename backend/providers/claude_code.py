@@ -25,10 +25,12 @@ class ClaudeCodeProvider(BaseProvider):
         player_context: Optional[str] = None,
         model: Optional[str] = None,
     ) -> ProviderResult:
-        # This provider is special — it delegates to _call_claude_code_dj in chat.py
-        # which manages Claude Code sessions. So this class is mainly for the
-        # providers registry; actual call happens in the router.
+        # Sentinel: this provider is registered for `available_providers()`
+        # but the chat router routes its work through the subprocess
+        # streamer (`call_claude_code_stream`) directly — Claude Code
+        # tracks its own session id, which the registry has no way to
+        # carry. The router special-cases `claude_code` for this reason.
         raise NotImplementedError(
-            "ClaudeCodeProvider.chat() should not be called directly. "
-            "Use the existing _call_claude_code_dj() path in routers/chat.py."
+            "ClaudeCodeProvider.chat() is not used. The chat router "
+            "dispatches Claude Code via call_claude_code_stream()."
         )

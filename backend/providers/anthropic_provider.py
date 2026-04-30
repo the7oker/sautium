@@ -3,9 +3,17 @@
 import json
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
-from providers.base import BaseProvider, ProviderMessage, ProviderResult
+from providers.base import (
+    BaseProvider,
+    ProviderMessage,
+    ProviderResult,
+    StreamDone,
+    StreamEvent,
+    TextDelta,
+    ToolStart,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,4 +153,133 @@ class AnthropicProvider(BaseProvider):
             provider=self.name,
             model=use_model,
             tool_calls_count=tool_calls_count,
+        )
+
+    def chat_stream(
+        self,
+        message: str,
+        history: Optional[list[ProviderMessage]] = None,
+        system_prompt: str = "",
+        player_context: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> Iterator[StreamEvent]:
+        """Streaming variant of `chat`. Yields `TextDelta`s as the model
+        produces tokens, `ToolStart` whenever the model invokes a tool,
+        and ends with `StreamDone`. Tool execution still happens
+        synchronously between iterations — only token generation is
+        streamed."""
+        from tools.converters import to_anthropic_tools
+        from tools.executor import execute_tool
+        from tools import REGISTRY
+
+        client = self._get_client()
+        use_model = model if model in self.models() else self.models()[0]
+        tools = to_anthropic_tools(REGISTRY)
+
+        messages: list[dict[str, Any]] = []
+        if history:
+            for m in history:
+                messages.append({"role": m.role, "content": m.content})
+        messages.append({"role": "user", "content": message})
+
+        tool_calls_count = 0
+        start_time = time.time()
+
+        for iteration in range(MAX_ITERATIONS):
+            if time.time() - start_time > TIMEOUT_SECONDS:
+                logger.warning("Anthropic provider timeout reached")
+                yield StreamDone(
+                    model=use_model, provider=self.name,
+                    tool_calls_count=tool_calls_count,
+                    error="timeout",
+                )
+                return
+
+            try:
+                stream_ctx = client.messages.stream(
+                    model=use_model,
+                    max_tokens=4096,
+                    system=system_prompt,
+                    tools=tools,
+                    messages=messages,
+                )
+            except Exception as e:
+                logger.error(f"Anthropic API error: {e}")
+                yield StreamDone(
+                    model=use_model, provider=self.name,
+                    tool_calls_count=tool_calls_count,
+                    error=str(e),
+                )
+                return
+
+            try:
+                with stream_ctx as stream:
+                    for event in stream:
+                        et = getattr(event, "type", None)
+                        if et == "content_block_start":
+                            cb = getattr(event, "content_block", None)
+                            if cb is not None and getattr(cb, "type", None) == "tool_use":
+                                tool_calls_count += 1
+                                yield ToolStart(name=getattr(cb, "name", "tool"))
+                        elif et == "content_block_delta":
+                            delta = getattr(event, "delta", None)
+                            if delta is not None and getattr(delta, "type", None) == "text_delta":
+                                text = getattr(delta, "text", "")
+                                if text:
+                                    yield TextDelta(text=text)
+                        # input_json_delta / message_delta / message_stop are
+                        # not surfaced to the UI — we wait for the final
+                        # message via `get_final_message()` below.
+
+                    final_msg = stream.get_final_message()
+            except Exception as e:
+                logger.error(f"Anthropic streaming error: {e}")
+                yield StreamDone(
+                    model=use_model, provider=self.name,
+                    tool_calls_count=tool_calls_count,
+                    error=str(e),
+                )
+                return
+
+            if final_msg.stop_reason != "tool_use":
+                yield StreamDone(
+                    model=use_model, provider=self.name,
+                    tool_calls_count=tool_calls_count,
+                )
+                return
+
+            # Round-trip tool calls. Same logic as `chat()` but split out
+            # so streaming and non-streaming paths share neither
+            # transient state nor a buffered "last_text".
+            content_dicts = []
+            for block in final_msg.content:
+                if block.type == "text":
+                    content_dicts.append({"type": "text", "text": block.text})
+                elif block.type == "tool_use":
+                    content_dicts.append({
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    })
+            messages.append({"role": "assistant", "content": content_dicts})
+
+            tool_results = []
+            for block in final_msg.content:
+                if block.type == "tool_use":
+                    logger.info(
+                        f"Tool call [{iteration+1}]: {block.name}({json.dumps(block.input)[:200]})"
+                    )
+                    result = execute_tool(block.name, block.input)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    })
+            messages.append({"role": "user", "content": tool_results})
+
+        yield StreamDone(
+            model=use_model, provider=self.name,
+            tool_calls_count=tool_calls_count,
+            error="max_iterations",
         )

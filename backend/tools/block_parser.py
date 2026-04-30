@@ -95,15 +95,13 @@ def _normalize_block(b: Any) -> dict | None:
     return {"kind": kind, "items": items}
 
 
-def extract_blocks(text: str) -> list[dict]:
-    """Extract the `[DJ_BLOCKS]` payload. Returns empty list if absent
-    or unparseable.
-    """
-    match = _find_blocks_match(text)
-    if not match:
-        return []
+def parse_blocks_payload(json_str: str) -> list[dict]:
+    """Parse a raw JSON array (the inside of the `[DJ_BLOCKS]...
+    [/DJ_BLOCKS]` markers) into normalized block dicts. Used by the
+    streaming filter, which gives us the payload directly without
+    surrounding markers."""
     try:
-        raw = json.loads(match.group(1))
+        raw = json.loads(json_str)
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning(f"Failed to parse DJ_BLOCKS JSON: {e}")
         return []
@@ -115,6 +113,16 @@ def extract_blocks(text: str) -> list[dict]:
         if norm:
             out.append(norm)
     return out
+
+
+def extract_blocks(text: str) -> list[dict]:
+    """Extract the `[DJ_BLOCKS]` payload. Returns empty list if absent
+    or unparseable.
+    """
+    match = _find_blocks_match(text)
+    if not match:
+        return []
+    return parse_blocks_payload(match.group(1))
 
 
 def strip_blocks_marker(text: str) -> str:
@@ -150,3 +158,102 @@ def extract_blocks_with_fallback(text: str) -> tuple[list[dict], str]:
         if ids:
             return [{"kind": "tracks", "items": ids}], clean
     return [], clean
+
+
+# ---------------------------------------------------------------------------
+# Streaming filter
+# ---------------------------------------------------------------------------
+
+class BlocksFilter:
+    """Stateful filter for streamed assistant text.
+
+    Sees a sequence of text deltas and produces:
+      - clean text deltas with the `[DJ_BLOCKS]...[/DJ_BLOCKS]` marker
+        elided, safe to forward live to the UI.
+      - one JSON payload string when the closing marker is reached,
+        ready to feed into `json.loads` + `_normalize_block`.
+
+    Why not just buffer everything and run the regex at the end?
+    Because the prose is the bulk of the response (often 100-500
+    tokens) and we want to stream it as it generates. The marker is
+    a short trailer; we just have to make sure the few characters
+    leading up to it don't leak into the visible bubble.
+
+    State machine:
+      `before` — accumulating prose, watching for `[DJ_BLOCKS]`.
+                 Emits everything except the trailing few chars (which
+                 might be the start of the marker we haven't seen yet).
+      `in`     — between markers, accumulating the JSON payload.
+      `after`  — past `[/DJ_BLOCKS]`. Anything more is unexpected; we
+                 still emit it as text so nothing silently disappears.
+    """
+
+    OPEN = "[DJ_BLOCKS]"
+    CLOSE = "[/DJ_BLOCKS]"
+    HOLD = len(OPEN) - 1  # chars to hold back so we never split a marker
+
+    def __init__(self):
+        self._before = ""
+        self._payload = ""
+        self._state = "before"
+        self.full_text = ""  # complete unfiltered text, for fallback parsing
+
+    def feed(self, delta: str) -> list[tuple[str, str]]:
+        """Process one text delta. Returns a list of `(kind, value)`
+        tuples where kind is `"text"` (forward to UI) or
+        `"blocks_json"` (parse + hydrate, then emit a `blocks` event).
+        """
+        self.full_text += delta
+        out: list[tuple[str, str]] = []
+        if not delta:
+            return out
+
+        if self._state == "after":
+            out.append(("text", delta))
+            return out
+
+        if self._state == "before":
+            self._before += delta
+            idx = self._before.find(self.OPEN)
+            if idx >= 0:
+                pre = self._before[:idx]
+                if pre:
+                    out.append(("text", pre))
+                self._payload = self._before[idx + len(self.OPEN):]
+                self._before = ""
+                self._state = "in"
+                # Fall through to process payload below.
+            else:
+                if len(self._before) > self.HOLD:
+                    safe = self._before[:-self.HOLD]
+                    self._before = self._before[-self.HOLD:]
+                    out.append(("text", safe))
+                return out
+        else:  # state == "in" before this call
+            self._payload += delta
+
+        # State == "in"; look for closing marker.
+        idx = self._payload.find(self.CLOSE)
+        if idx >= 0:
+            out.append(("blocks_json", self._payload[:idx]))
+            tail = self._payload[idx + len(self.CLOSE):]
+            self._payload = ""
+            self._state = "after"
+            if tail:
+                out.append(("text", tail))
+        return out
+
+    def flush(self) -> list[tuple[str, str]]:
+        """End of stream — emit anything still buffered. Held-back
+        chars in `before` are real text. An unterminated `in` payload
+        is forwarded as JSON so the parser can try to recover the
+        list (matches the existing `_BLOCKS_RE_OPEN` fallback).
+        """
+        out: list[tuple[str, str]] = []
+        if self._state == "before" and self._before:
+            out.append(("text", self._before))
+            self._before = ""
+        elif self._state == "in" and self._payload.strip():
+            out.append(("blocks_json", self._payload))
+            self._payload = ""
+        return out

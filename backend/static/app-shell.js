@@ -104,6 +104,32 @@
     return paragraphs.join('');
   }
 
+  /* ---------- SSE parser ----------
+     The chat send endpoint streams text/event-stream over a fetch
+     ReadableStream (EventSource doesn't support POST). One SSE
+     message is "event: <name>\ndata: <json>\n\n"; multiple `data:`
+     lines on the same message concatenate per the spec. */
+
+  function parseSseMessage(raw) {
+    let event = 'message';
+    const dataLines = [];
+    for (const line of raw.split('\n')) {
+      if (line.startsWith('event:')) {
+        event = line.slice(6).trim();
+      } else if (line.startsWith('data:')) {
+        // Spec: strip exactly one leading space if present.
+        dataLines.push(line.slice(5).replace(/^ /, ''));
+      }
+    }
+    if (dataLines.length === 0) return null;
+    try {
+      return { event, data: JSON.parse(dataLines.join('\n')) };
+    } catch (e) {
+      console.warn('parseSseMessage failed:', e, raw);
+      return null;
+    }
+  }
+
   /* ---------- AI block helpers ----------
      Reuses the Discovery row/list renderers (renderArtistRow, etc.)
      so AI replies and search results share the same visual contract.
@@ -949,33 +975,131 @@
       this.sendBtn.disabled = true;
       this.input.value = '';
 
-      // Optimistic user bubble + typing indicator.
+      // Optimistic user bubble + typing indicator. The indicator
+      // disappears as soon as the first text delta arrives, so the
+      // typing dots feel like the model "thinking" before any prose.
       this.appendMessage({ role: 'user', content: text });
       const typing = this.typingIndicator();
       this.thread.appendChild(typing);
       this.scrollToBottom();
+
+      // Lazily-built scaffolding for the assistant bubble. We only
+      // mount it on the first event from the server (delta or blocks)
+      // so that an early error keeps the typing indicator out of the
+      // way and the error row mounts cleanly.
+      let aiRow = null, aiBody = null, proseDiv = null, blocksDiv = null;
+      let modelTag = null, proseText = '';
+
+      const ensureAiRow = () => {
+        if (aiRow) return;
+        if (typing.parentNode) typing.remove();
+        aiRow = document.createElement('div');
+        aiRow.className = 'ai-msg-row';
+        aiBody = document.createElement('div');
+        aiBody.className = 'ai-msg-ai';
+        proseDiv = document.createElement('div');
+        proseDiv.className = 'ai-msg-prose';
+        aiBody.appendChild(proseDiv);
+        aiRow.appendChild(aiBody);
+        this.thread.appendChild(aiRow);
+      };
+
+      const onDelta = (chunk) => {
+        if (!chunk) return;
+        ensureAiRow();
+        proseText += chunk;
+        // Re-render the whole prose on each delta. Cheap for normal
+        // response sizes (a few hundred tokens) and lets in-flight
+        // markdown — `**bold` mid-stream — settle visually as soon
+        // as the closing `**` arrives.
+        proseDiv.innerHTML = mdToHtml(proseText);
+        this.scrollToBottom();
+      };
+
+      const onBlocks = (blocks) => {
+        if (!Array.isArray(blocks) || blocks.length === 0) return;
+        ensureAiRow();
+        if (!blocksDiv) {
+          blocksDiv = document.createElement('div');
+          blocksDiv.className = 'ai-blocks';
+          aiRow.appendChild(blocksDiv);
+        } else {
+          blocksDiv.innerHTML = '';
+        }
+        for (const b of blocks) {
+          const el = renderAiBlock(b);
+          if (el) blocksDiv.appendChild(el);
+        }
+        wireDetailHandlers(blocksDiv);
+        this.scrollToBottom();
+      };
+
+      const onModel = (modelStr) => {
+        if (!modelStr) return;
+        ensureAiRow();
+        if (!modelTag) {
+          modelTag = document.createElement('span');
+          modelTag.className = 'ai-model-tag';
+          aiBody.insertBefore(modelTag, proseDiv);
+        }
+        modelTag.textContent = modelStr.split(':').pop() || modelStr;
+      };
 
       try {
         const resp = await fetch(
           '/api/chat/sessions/' + this.activeSessionId + '/messages',
           {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'text/event-stream',
+            },
             body: JSON.stringify({ message: text }),
           });
-        const data = await resp.json();
+        if (!resp.ok) {
+          // Pre-stream validation failure (no provider, missing
+          // session). Body is plain JSON, not SSE.
+          let detail = 'send failed';
+          try { detail = (await resp.json()).detail || detail; } catch (_) {}
+          throw new Error(detail);
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          // SSE messages are separated by a blank line (\n\n).
+          let sep;
+          while ((sep = buffer.indexOf('\n\n')) >= 0) {
+            const raw = buffer.slice(0, sep);
+            buffer = buffer.slice(sep + 2);
+            const evt = parseSseMessage(raw);
+            if (!evt) continue;
+
+            if (evt.event === 'delta') {
+              onDelta(evt.data.text || '');
+            } else if (evt.event === 'blocks') {
+              onBlocks(evt.data.blocks || []);
+            } else if (evt.event === 'tool') {
+              // Tool starts are informational. Future: show a small
+              // inline "searching tracks…" pip; for now, no-op.
+            } else if (evt.event === 'done') {
+              const modelStr = evt.data.provider
+                ? `${evt.data.provider}:${evt.data.model || ''}`
+                : (evt.data.model || '');
+              onModel(modelStr);
+            } else if (evt.event === 'error') {
+              throw new Error(evt.data.message || 'AI error');
+            }
+            // 'meta' carries the saved user_msg row — no UI side-effect.
+          }
+        }
+
         if (typing.parentNode) typing.remove();
-        if (!resp.ok) throw new Error(data.detail || 'send failed');
-        const am = data.assistant_msg || {};
-        // Backend returns hydrated blocks at the response root and
-        // assistant_msg.blocks_data mirrors them — prefer the root
-        // version because it is the canonical, richer payload.
-        am.blocks_data = data.blocks || am.blocks_data || [];
-        am.tracks_data = data.tracks || am.tracks_data || [];
-        am.model = data.provider
-          ? `${data.provider}:${data.model}`
-          : (am.model || data.model || '');
-        this.appendMessage(am);
         // Backend may have just auto-set a title from the first
         // message — refresh the pill row so the active pill picks
         // it up. Also bumps it to the front by `updated_at`.
@@ -984,12 +1108,21 @@
       } catch (err) {
         if (typing.parentNode) typing.remove();
         console.warn('send failed:', err);
-        const errRow = document.createElement('div');
-        errRow.className = 'ai-msg-row';
-        errRow.innerHTML =
-          '<div class="ai-msg-ai" style="color:var(--color-text-muted);">' +
-          escapeHtml(String(err.message || err)) + '</div>';
-        this.thread.appendChild(errRow);
+        if (aiRow && proseDiv) {
+          // Stream started before failure — append the error inline
+          // so partial output stays visible.
+          const errP = document.createElement('p');
+          errP.style.color = 'var(--color-text-muted)';
+          errP.textContent = '— ' + String(err.message || err);
+          proseDiv.appendChild(errP);
+        } else {
+          const errRow = document.createElement('div');
+          errRow.className = 'ai-msg-row';
+          errRow.innerHTML =
+            '<div class="ai-msg-ai" style="color:var(--color-text-muted);">' +
+            escapeHtml(String(err.message || err)) + '</div>';
+          this.thread.appendChild(errRow);
+        }
         this.scrollToBottom();
       } finally {
         this.sending = false;

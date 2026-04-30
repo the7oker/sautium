@@ -5,6 +5,13 @@ Calls `claude -p` in headless mode with MCP tools (PostgreSQL + HQPlayer).
 Returns the raw model answer (including any DJ_BLOCKS marker) — the chat
 router parses + hydrates the marker centrally so this wrapper stays
 format-agnostic.
+
+Two flavours:
+- `call_claude_code` — synchronous, `--output-format json`, returns the
+  full answer in one go.
+- `call_claude_code_stream` — streaming, `--output-format stream-json
+  --include-partial-messages`, yields text deltas / tool starts / a
+  final done event so the chat router can pipe them into SSE.
 """
 
 import json
@@ -13,10 +20,12 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 if sys.platform != "win32":
     import pwd
+
+from providers.base import StreamDone, StreamEvent, TextDelta, ToolStart
 
 logger = logging.getLogger(__name__)
 
@@ -147,3 +156,199 @@ def call_claude_code(
             "claude_session_id": None,
             "model": use_model,
         }
+
+
+def _spawn_claude(cmd: list[str], stdout=subprocess.PIPE, stderr=subprocess.PIPE):
+    """Common subprocess setup — non-root user on Linux/Docker, no
+    flashing console window on Windows. Returns the Popen handle."""
+    env = os.environ.copy()
+    kwargs: dict[str, Any] = {
+        "stdout": stdout,
+        "stderr": stderr,
+        "env": env,
+        "text": True,
+    }
+
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    else:
+        pw = pwd.getpwnam(CLAUDE_USER)
+
+        def demote():
+            os.setgid(pw.pw_gid)
+            os.setuid(pw.pw_uid)
+
+        kwargs["preexec_fn"] = demote
+        env["HOME"] = pw.pw_dir
+
+    return subprocess.Popen(cmd, **kwargs)
+
+
+def call_claude_code_stream(
+    message: str,
+    system_prompt: str,
+    session_id: Optional[str] = None,
+    resume: bool = False,
+    model: Optional[str] = None,
+) -> Iterator[StreamEvent]:
+    """Stream variant of `call_claude_code`. Spawns `claude
+    --output-format stream-json --include-partial-messages` and turns
+    its NDJSON output into provider stream events.
+
+    The partial-messages flag delivers token-level Anthropic stream
+    events (`content_block_delta` / `text_delta`) inside a
+    `stream_event` wrapper; we forward those as `TextDelta`s. Tool
+    invocations show up as either `content_block_start` (tool_use)
+    inside `stream_event`, or as fully-formed `assistant` messages
+    when the SDK couldn't stream the tool partial — both paths emit
+    a single `ToolStart` per call.
+    """
+    use_model = model if model in ALLOWED_MODELS else DEFAULT_MODEL
+
+    cmd = [
+        "claude",
+        "-p", message,
+        "--output-format", "stream-json",
+        "--include-partial-messages",
+        "--verbose",  # required for stream-json
+        "--mcp-config", MCP_CONFIG_PATH,
+        "--model", use_model,
+        "--system-prompt", system_prompt,
+        "--dangerously-skip-permissions",
+    ]
+    if resume and session_id:
+        cmd.extend(["--resume", session_id])
+
+    logger.info(
+        f"Claude Code stream call: message={message[:80]!r}, resume={resume}, session={session_id}"
+    )
+
+    try:
+        proc = _spawn_claude(cmd)
+    except FileNotFoundError:
+        logger.error("Claude Code CLI not found")
+        yield StreamDone(
+            model=use_model, provider="claude_code",
+            error="Claude Code CLI is not installed",
+        )
+        return
+    except Exception as e:
+        logger.error(f"Failed to spawn Claude Code: {e}")
+        yield StreamDone(
+            model=use_model, provider="claude_code", error=str(e),
+        )
+        return
+
+    claude_sid: Optional[str] = None
+    tool_calls_count = 0
+    seen_tool_ids: set[str] = set()
+    error_msg: Optional[str] = None
+
+    def _yield_block_event(block: dict) -> Iterator[StreamEvent]:
+        """Translate a single content block (text or tool_use) into
+        events. Used when we receive whole assistant messages without
+        partial deltas, so we don't drop content."""
+        nonlocal tool_calls_count
+        bt = block.get("type")
+        if bt == "text":
+            text = block.get("text", "")
+            if text:
+                yield TextDelta(text=text)
+        elif bt == "tool_use":
+            tu_id = block.get("id") or ""
+            if tu_id and tu_id in seen_tool_ids:
+                return
+            if tu_id:
+                seen_tool_ids.add(tu_id)
+            tool_calls_count += 1
+            yield ToolStart(name=block.get("name", "tool"))
+
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                evt = json.loads(line)
+            except json.JSONDecodeError:
+                logger.debug(f"Claude stream: skipping non-JSON line: {line[:120]}")
+                continue
+
+            t = evt.get("type")
+
+            if t == "system":
+                if evt.get("session_id"):
+                    claude_sid = evt["session_id"]
+
+            elif t == "stream_event":
+                inner = evt.get("event") or {}
+                inner_type = inner.get("type")
+                if inner_type == "content_block_delta":
+                    delta = inner.get("delta") or {}
+                    if delta.get("type") == "text_delta":
+                        text = delta.get("text", "")
+                        if text:
+                            yield TextDelta(text=text)
+                elif inner_type == "content_block_start":
+                    cb = inner.get("content_block") or {}
+                    if cb.get("type") == "tool_use":
+                        tu_id = cb.get("id") or ""
+                        if tu_id and tu_id not in seen_tool_ids:
+                            seen_tool_ids.add(tu_id)
+                            tool_calls_count += 1
+                            yield ToolStart(name=cb.get("name", "tool"))
+
+            elif t == "assistant":
+                # Whole assistant message — only mine it for content
+                # we haven't already streamed via stream_event. Tool
+                # blocks get deduped by `seen_tool_ids`; text blocks
+                # are tricky because partial deltas already covered
+                # them. Skip text here to avoid double-rendering.
+                msg = evt.get("message") or {}
+                for block in msg.get("content", []) or []:
+                    if block.get("type") == "tool_use":
+                        yield from _yield_block_event(block)
+
+            elif t == "result":
+                if evt.get("session_id"):
+                    claude_sid = evt["session_id"]
+                if evt.get("is_error"):
+                    error_msg = evt.get("result") or "Claude Code error"
+
+            # 'user' (tool_result) events are internal — ignore.
+
+        rc = proc.wait(timeout=TIMEOUT_SECONDS)
+        if rc != 0 and not error_msg:
+            stderr = proc.stderr.read() if proc.stderr else ""
+            error_msg = (stderr or "").strip() or f"Claude Code exited with code {rc}"
+            logger.error(f"Claude Code stream failed (rc={rc}): {error_msg}")
+
+    except subprocess.TimeoutExpired:
+        logger.error("Claude Code stream timed out")
+        error_msg = error_msg or "Claude Code timed out"
+    except GeneratorExit:
+        # Client disconnected — terminate the subprocess so we don't
+        # leak a Claude Code instance and its API tokens. Re-raise so
+        # the caller's StreamingResponse cleanly unwinds.
+        logger.info("Claude Code stream cancelled by client")
+        raise
+    except Exception as e:
+        logger.error(f"Claude Code stream error: {e}", exc_info=True)
+        error_msg = error_msg or str(e)
+    finally:
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            except Exception:
+                pass
+
+    yield StreamDone(
+        model=use_model, provider="claude_code",
+        tool_calls_count=tool_calls_count,
+        claude_session_id=claude_sid,
+        error=error_msg,
+    )

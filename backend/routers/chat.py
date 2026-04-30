@@ -4,23 +4,34 @@ AI DJ chat with persistent history and feedback.
 Sessions, messages stored in PostgreSQL. Feedback endpoint for debugging
 recommendation quality. Supports multiple LLM providers.
 
-Provider responses are returned as raw text (including any DJ_BLOCKS
-marker the model emits at the end). This router owns the marker
-contract: parses it, hydrates each block's items into Discovery-shaped
-tiles, and persists the result. Providers stay format-agnostic.
+The send-message endpoint streams the response as Server-Sent Events:
+text deltas as the model generates, an optional `blocks` event after
+the trailing `[DJ_BLOCKS]` marker is parsed and hydrated, and a final
+`done` event with metadata. The router owns the marker contract:
+providers emit raw `TextDelta`s, the router runs them through
+`BlocksFilter` so prose flows live to the UI while the structured
+payload is redirected into a separate event.
 """
 
 import json
 import logging
-from typing import Optional
+from typing import Iterator, Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from config import settings
 from db_pool import db_query as _db_query, db_query_one as _db_query_one, db_execute as _db_execute
 from entity_hydration import hydrate_artists, hydrate_albums, hydrate_tracks
-from tools.block_parser import extract_blocks_with_fallback
+from providers.base import StreamDone, StreamEvent, TextDelta, ToolStart
+from tools.block_parser import (
+    BlocksFilter,
+    extract_blocks_with_fallback,
+    parse_blocks_payload,
+    strip_blocks_marker,
+)
+from tools.track_parser import strip_tracks_marker
 
 logger = logging.getLogger(__name__)
 
@@ -106,80 +117,6 @@ def _save_claude_session_id(session_id: int, claude_sid: str):
         "UPDATE chat_sessions SET claude_session_id = %(csid)s WHERE id = %(id)s",
         {"csid": claude_sid, "id": session_id},
     )
-
-
-def _call_claude_code_dj(session_id: int, message: str, player_context: Optional[str], model: Optional[str] = None) -> dict:
-    """Call Claude Code as AI DJ backend. Returns raw answer + meta —
-    block parsing happens in the caller.
-    """
-    from claude_code_runner import call_claude_code
-    from claude_dj_prompt import get_system_prompt
-
-    claude_sid = _get_claude_session_id(session_id)
-    prompt = get_system_prompt("claude_code", player_context)
-
-    result = call_claude_code(
-        message=message,
-        system_prompt=prompt,
-        session_id=claude_sid,
-        resume=bool(claude_sid),
-        model=model,
-    )
-
-    if result.get("claude_session_id"):
-        _save_claude_session_id(session_id, result["claude_session_id"])
-
-    return {
-        "raw_answer": result.get("answer", ""),
-        "model": result.get("model", "claude-code"),
-        "provider": "claude_code",
-        "tool_calls_count": 0,
-    }
-
-
-# ---------------------------------------------------------------------------
-# API provider DJ integration
-# ---------------------------------------------------------------------------
-
-def _call_api_provider_dj(
-    provider_name: str,
-    session_id: int,
-    message: str,
-    player_context: Optional[str],
-    model: Optional[str] = None,
-    history: Optional[list[dict]] = None,
-) -> dict:
-    """Call an API-based LLM provider as AI DJ backend. Returns raw
-    answer + meta — block parsing happens in the caller.
-    """
-    from providers import get_provider
-    from providers.base import ProviderMessage
-    from claude_dj_prompt import get_system_prompt
-
-    provider = get_provider(provider_name)
-    if provider is None:
-        raise ValueError(f"Provider '{provider_name}' is not available")
-
-    prompt = get_system_prompt(provider_name, player_context)
-
-    pm_history = None
-    if history:
-        pm_history = [ProviderMessage(role=h["role"], content=h["content"]) for h in history]
-
-    result = provider.chat(
-        message=message,
-        history=pm_history,
-        system_prompt=prompt,
-        player_context=player_context,
-        model=model,
-    )
-
-    return {
-        "raw_answer": result.answer,
-        "model": result.model,
-        "provider": result.provider,
-        "tool_calls_count": result.tool_calls_count,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -330,22 +267,20 @@ async def get_messages(session_id: int):
 
 
 # ---------------------------------------------------------------------------
-# Send message (main chat endpoint)
+# Send message (streaming chat endpoint)
 # ---------------------------------------------------------------------------
 
-@router.post("/sessions/{session_id}/messages")
-async def send_message(session_id: int, req: ChatMessageRequest):
-    """
-    Send a user message -> get AI response. Both are persisted.
+def _format_sse(event: str, data: dict) -> str:
+    """Encode one SSE message. `default=str` lets us pass datetimes
+    straight through without extra serialization."""
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
-    1. Save user message
-    2. Load last 10 messages as history
-    3. Dispatch to provider (Claude Code or API provider)
-    4. Save assistant response (content, tracks_data, model, filters, retrieval_log)
-    5. Return both messages with DB IDs
-    """
-    # Check that at least one provider is available
-    from providers import available_providers
+
+def _resolve_provider(req_provider: Optional[str]) -> str:
+    """Pick a provider name, validating availability. Raises
+    HTTPException on no usable provider."""
+    from providers import available_providers, get_provider
+
     providers = available_providers()
     if not providers:
         raise HTTPException(
@@ -353,134 +288,258 @@ async def send_message(session_id: int, req: ChatMessageRequest):
             detail="No LLM providers configured. Set CLAUDE_CODE_ENABLED, ANTHROPIC_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY.",
         )
 
-    # Determine which provider to use
-    provider_name = req.provider or settings.default_provider
-
-    # Validate provider exists
-    from providers import get_provider
-    if provider_name != "claude_code" and get_provider(provider_name) is None:
-        # Fallback to first available provider
-        provider_name = providers[0]["id"]
-
-    # For claude_code, verify it's enabled
-    if provider_name == "claude_code" and not settings.claude_code_enabled:
-        # Fallback to first non-claude_code provider
+    name = req_provider or settings.default_provider
+    if name != "claude_code" and get_provider(name) is None:
+        name = providers[0]["id"]
+    if name == "claude_code" and not settings.claude_code_enabled:
         non_cc = [p for p in providers if p["id"] != "claude_code"]
         if non_cc:
-            provider_name = non_cc[0]["id"]
+            name = non_cc[0]["id"]
         else:
-            raise HTTPException(status_code=503, detail="Claude Code is not enabled and no other providers available.")
+            raise HTTPException(
+                status_code=503,
+                detail="Claude Code is not enabled and no other providers available.",
+            )
+    return name
 
-    # Verify session exists
+
+def _build_provider_stream(
+    provider_name: str,
+    session_id: int,
+    message: str,
+    history: list[dict],
+    player_context: Optional[str],
+    model: Optional[str],
+) -> Iterator[StreamEvent]:
+    """Pick the right streaming source for the provider name. For
+    `claude_code` we go through the subprocess runner; for API
+    providers we use `BaseProvider.chat_stream`."""
+    from claude_dj_prompt import get_system_prompt
+
+    if provider_name == "claude_code":
+        from claude_code_runner import call_claude_code_stream
+
+        claude_sid = _get_claude_session_id(session_id)
+        prompt = get_system_prompt("claude_code", player_context)
+        return call_claude_code_stream(
+            message=message,
+            system_prompt=prompt,
+            session_id=claude_sid,
+            resume=bool(claude_sid),
+            model=model,
+        )
+
+    from providers import get_provider
+    from providers.base import ProviderMessage
+
+    provider = get_provider(provider_name)
+    if provider is None:
+        raise HTTPException(status_code=503, detail=f"Provider '{provider_name}' is not available")
+
+    pm_history = [ProviderMessage(role=h["role"], content=h["content"]) for h in (history or [])]
+    prompt = get_system_prompt(provider_name, player_context)
+    return provider.chat_stream(
+        message=message,
+        history=pm_history,
+        system_prompt=prompt,
+        player_context=player_context,
+        model=model,
+    )
+
+
+@router.post("/sessions/{session_id}/messages")
+async def send_message(session_id: int, req: ChatMessageRequest):
+    """Stream the assistant's reply as Server-Sent Events.
+
+    Pre-stream (synchronous): pick provider, save user message,
+    update session metadata, gather history + player context.
+
+    Stream events:
+      - `meta`   — once at the start; carries the persisted user_msg.
+      - `tool`   — every time the model invokes a tool.
+      - `delta`  — text fragments with the `[DJ_BLOCKS]` marker elided.
+      - `blocks` — hydrated block list, emitted once when the model
+                   closes the marker. May not arrive at all when the
+                   reply has no structured payload.
+      - `done`   — final event with the persisted assistant message
+                   and run metadata (model, provider, tool count).
+      - `error`  — sent in place of `done` on a fatal failure.
+    """
+    provider_name = _resolve_provider(req.provider)
+
     session = _db_query_one(
         "SELECT id, title FROM chat_sessions WHERE id = %(id)s", {"id": session_id}
     )
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # 1. Save user message
+    # Persist the user message and bump session metadata before we
+    # start the model — that way reload-during-stream still shows the
+    # user's prompt, and we have a stable id to put on the meta event.
     user_row = _db_execute("""
         INSERT INTO chat_messages (session_id, role, content)
         VALUES (%(sid)s, 'user', %(content)s)
         RETURNING id, role, content, created_at
     """, {"sid": session_id, "content": req.message})
 
-    # Auto-set session title from first message
     if not session["title"]:
         title = req.message[:80].strip()
         _db_execute(
             "UPDATE chat_sessions SET title = %(t)s WHERE id = %(id)s",
             {"t": title, "id": session_id},
         )
-
-    # Update session timestamp
     _db_execute(
         "UPDATE chat_sessions SET updated_at = NOW() WHERE id = %(id)s",
         {"id": session_id},
     )
 
-    # 2. Load history (last 10 messages before the one we just inserted)
     history_rows = _db_query("""
         SELECT role, content FROM chat_messages
         WHERE session_id = %(sid)s AND id < %(uid)s
         ORDER BY id DESC LIMIT 10
     """, {"sid": session_id, "uid": user_row["id"]})
-    history_rows.reverse()  # chronological order
+    history_rows.reverse()
+    history = [{"role": r["role"], "content": r["content"]} for r in history_rows]
 
-    history = [{"role": r["role"], "content": r["content"]} for r in history_rows] if history_rows else None
-
-    # 3. Gather player context (non-blocking, best-effort)
     player_context = _get_player_context()
 
-    # 4. Dispatch to provider
     try:
-        if provider_name == "claude_code":
-            result = _call_claude_code_dj(session_id, req.message, player_context, model=req.model)
-        else:
-            result = _call_api_provider_dj(
-                provider_name, session_id, req.message,
-                player_context, model=req.model, history=history,
-            )
+        provider_stream = _build_provider_stream(
+            provider_name=provider_name,
+            session_id=session_id,
+            message=req.message,
+            history=history,
+            player_context=player_context,
+            model=req.model,
+        )
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Provider '{provider_name}' failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="AI provider request failed")
+        logger.error(f"Failed to build provider stream: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to start AI request")
 
-    raw_answer = result.get("raw_answer", "")
-    model = result.get("model", "")
-    provider_used = result.get("provider", provider_name)
-    tool_calls_count = result.get("tool_calls_count", 0)
+    def event_generator() -> Iterator[str]:
+        yield _format_sse("meta", {"user_msg": user_row})
 
-    # Parse the marker, hydrate items, derive legacy `tracks` payload.
-    raw_blocks, clean_answer = extract_blocks_with_fallback(raw_answer)
-    blocks = _hydrate_blocks(raw_blocks)
-    tracks = _tracks_from_blocks(blocks)
+        blocks_filter = BlocksFilter()
+        blocks: list[dict] = []
+        final: Optional[StreamDone] = None
 
-    retrieval_log = (
-        [{"source": "tools", "description": f"{tool_calls_count} tool calls"}]
-        if tool_calls_count else []
-    )
+        def emit_filter_output(items):
+            """Translate filter output into SSE events. Returns the
+            (possibly updated) blocks list so the closure can keep it
+            in sync without globals."""
+            nonlocal blocks
+            for kind, val in items:
+                if kind == "text" and val:
+                    yield _format_sse("delta", {"text": val})
+                elif kind == "blocks_json":
+                    raw = parse_blocks_payload(val)
+                    hydrated = _hydrate_blocks(raw)
+                    if hydrated:
+                        blocks = hydrated
+                        yield _format_sse("blocks", {"blocks": hydrated})
 
-    tracks_data = [
-        {
-            "id": t.get("id"),
-            "title": t.get("title"),
-            "artist": t.get("artist"),
-            "album": t.get("album"),
-            "cover_id": t.get("cover_id"),
+        try:
+            for ev in provider_stream:
+                if isinstance(ev, TextDelta):
+                    yield from emit_filter_output(blocks_filter.feed(ev.text))
+                elif isinstance(ev, ToolStart):
+                    yield _format_sse("tool", {"name": ev.name})
+                elif isinstance(ev, StreamDone):
+                    final = ev
+        except Exception as e:
+            logger.error(f"Provider stream error: {e}", exc_info=True)
+            yield _format_sse("error", {"message": str(e)})
+            return
+
+        # Drain any text held back by the filter or recover an unclosed
+        # marker. Then fall back to the existing extract_blocks regex
+        # for the legacy `[DJ_TRACKS]` shape — the streaming filter only
+        # tracks `[DJ_BLOCKS]`, but old models occasionally still emit
+        # the flat tracks marker.
+        yield from emit_filter_output(blocks_filter.flush())
+
+        if not blocks:
+            raw_blocks, _ = extract_blocks_with_fallback(blocks_filter.full_text)
+            if raw_blocks:
+                hydrated = _hydrate_blocks(raw_blocks)
+                if hydrated:
+                    blocks = hydrated
+                    yield _format_sse("blocks", {"blocks": hydrated})
+
+        clean_text = strip_tracks_marker(strip_blocks_marker(blocks_filter.full_text))
+        tracks = _tracks_from_blocks(blocks)
+        tracks_data = [
+            {
+                "id": t.get("id"),
+                "title": t.get("title"),
+                "artist": t.get("artist"),
+                "album": t.get("album"),
+                "cover_id": t.get("cover_id"),
+            }
+            for t in tracks
+        ] if tracks else None
+
+        model_name = final.model if final else ""
+        provider_used = final.provider if final else provider_name
+        tool_calls_count = final.tool_calls_count if final else 0
+        retrieval_log = (
+            [{"source": "tools", "description": f"{tool_calls_count} tool calls"}]
+            if tool_calls_count else []
+        )
+
+        if final and final.claude_session_id:
+            try:
+                _save_claude_session_id(session_id, final.claude_session_id)
+            except Exception as e:
+                logger.warning(f"Failed to save Claude session id: {e}")
+
+        try:
+            assistant_row = _db_execute("""
+                INSERT INTO chat_messages
+                    (session_id, role, content, tracks_data, blocks_data, model,
+                     filters_detected, retrieval_log, tracks_retrieved)
+                VALUES
+                    (%(sid)s, 'assistant', %(content)s, %(tracks_data)s, %(blocks_data)s,
+                     %(model)s, %(filters)s, %(rlog)s, %(tr)s)
+                RETURNING id, role, content, tracks_data, blocks_data, model, created_at
+            """, {
+                "sid": session_id,
+                "content": clean_text,
+                "tracks_data": json.dumps(tracks_data) if tracks_data else None,
+                "blocks_data": json.dumps(blocks) if blocks else None,
+                "model": f"{provider_used}:{model_name}" if provider_used else model_name,
+                "filters": None,
+                "rlog": json.dumps(retrieval_log) if retrieval_log else None,
+                "tr": len(tracks),
+            })
+        except Exception as e:
+            logger.error(f"Failed to persist assistant message: {e}", exc_info=True)
+            yield _format_sse("error", {"message": "Failed to save response"})
+            return
+
+        done_payload = {
+            "assistant_msg": assistant_row,
+            "blocks": blocks,
+            "tracks": tracks,
+            "model": model_name,
+            "provider": provider_used,
+            "tracks_retrieved": len(tracks),
+            "retrieval_log": retrieval_log,
         }
-        for t in tracks
-    ] if tracks else None
+        if final and final.error:
+            done_payload["provider_error"] = final.error
+        yield _format_sse("done", done_payload)
 
-    assistant_row = _db_execute("""
-        INSERT INTO chat_messages
-            (session_id, role, content, tracks_data, blocks_data, model,
-             filters_detected, retrieval_log, tracks_retrieved)
-        VALUES
-            (%(sid)s, 'assistant', %(content)s, %(tracks_data)s, %(blocks_data)s,
-             %(model)s, %(filters)s, %(rlog)s, %(tr)s)
-        RETURNING id, role, content, tracks_data, blocks_data, created_at
-    """, {
-        "sid": session_id,
-        "content": clean_answer,
-        "tracks_data": json.dumps(tracks_data) if tracks_data else None,
-        "blocks_data": json.dumps(blocks) if blocks else None,
-        "model": f"{provider_used}:{model}" if provider_used else model,
-        "filters": None,
-        "rlog": json.dumps(retrieval_log) if retrieval_log else None,
-        "tr": len(tracks),
-    })
-
-    return {
-        "user_msg": user_row,
-        "assistant_msg": assistant_row,
-        "blocks": blocks,
-        "tracks": tracks,
-        "filters_detected": {},
-        "retrieval_log": retrieval_log,
-        "model": model,
-        "provider": provider_used,
-        "tracks_retrieved": len(tracks),
-    }
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
