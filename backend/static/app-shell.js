@@ -1113,11 +1113,12 @@
       this.scrollToBottom();
 
       // Lazily-built scaffolding for the assistant bubble. We only
-      // mount it on the first event from the server (delta or blocks)
-      // so that an early error keeps the typing indicator out of the
-      // way and the error row mounts cleanly.
+      // mount it on the first event from the server (meta with model,
+      // first delta, etc.) so that an early validation error keeps
+      // the typing indicator clean.
       let aiRow = null, aiBody = null, proseDiv = null, blocksDiv = null;
       let modelTag = null, proseText = '';
+      let pendingModelLabel = '';   // remembered between meta and bubble creation
 
       const ensureAiRow = () => {
         if (aiRow) return;
@@ -1131,6 +1132,18 @@
         aiBody.appendChild(proseDiv);
         aiRow.appendChild(aiBody);
         this.thread.appendChild(aiRow);
+        if (pendingModelLabel) applyModelLabel();
+      };
+
+      const applyModelLabel = () => {
+        if (!aiBody || !pendingModelLabel) return;
+        if (!modelTag) {
+          modelTag = document.createElement('span');
+          modelTag.className = 'ai-model-tag';
+          aiBody.insertBefore(modelTag, proseDiv);
+        }
+        modelTag.textContent =
+          pendingModelLabel.split(':').pop() || pendingModelLabel;
       };
 
       const onDelta = (chunk) => {
@@ -1165,13 +1178,22 @@
 
       const onModel = (modelStr) => {
         if (!modelStr) return;
-        ensureAiRow();
-        if (!modelTag) {
-          modelTag = document.createElement('span');
-          modelTag.className = 'ai-model-tag';
-          aiBody.insertBefore(modelTag, proseDiv);
+        pendingModelLabel = modelStr;
+        const label = modelStr.split(':').pop() || modelStr;
+        // Place the tag in the typing indicator so the user sees which
+        // model is "thinking" before any prose lands; once the first
+        // delta arrives, ensureAiRow() will re-apply pendingModelLabel
+        // to the real bubble.
+        if (typing && typing.parentNode) {
+          const wrap = typing.querySelector('.ai-msg-ai');
+          if (wrap && !wrap.querySelector('.ai-model-tag')) {
+            const tag = document.createElement('span');
+            tag.className = 'ai-model-tag';
+            tag.textContent = label;
+            wrap.insertBefore(tag, wrap.firstChild);
+          }
         }
-        modelTag.textContent = modelStr.split(':').pop() || modelStr;
+        if (aiRow) applyModelLabel();
       };
 
       try {
@@ -1209,7 +1231,12 @@
             const evt = parseSseMessage(raw);
             if (!evt) continue;
 
-            if (evt.event === 'delta') {
+            if (evt.event === 'meta') {
+              const modelStr = evt.data.provider
+                ? `${evt.data.provider}:${evt.data.model || ''}`
+                : (evt.data.model || '');
+              if (modelStr) onModel(modelStr);
+            } else if (evt.event === 'delta') {
               onDelta(evt.data.text || '');
             } else if (evt.event === 'blocks') {
               onBlocks(evt.data.blocks || []);
@@ -1217,6 +1244,9 @@
               // Tool starts are informational. Future: show a small
               // inline "searching tracks…" pip; for now, no-op.
             } else if (evt.event === 'done') {
+              // Authoritative model name from the provider — overrides
+              // the optimistic one we set on `meta`. Both usually agree
+              // but `done` is canonical (matches what's persisted).
               const modelStr = evt.data.provider
                 ? `${evt.data.provider}:${evt.data.model || ''}`
                 : (evt.data.model || '');
@@ -1224,7 +1254,6 @@
             } else if (evt.event === 'error') {
               throw new Error(evt.data.message || 'AI error');
             }
-            // 'meta' carries the saved user_msg row — no UI side-effect.
           }
         }
 

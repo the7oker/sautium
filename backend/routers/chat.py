@@ -305,6 +305,27 @@ def _resolve_provider(req_provider: Optional[str]) -> str:
     return name
 
 
+def _resolve_model(provider_name: str, req_model: Optional[str]) -> str:
+    """Pick the model identifier the request will actually run against.
+    Mirrors the per-provider validation done deep inside `chat_stream()`
+    so the streaming `meta` event can carry an authoritative model
+    name before any provider tokens arrive — the chat bubble shows
+    the model tag immediately, not just after `done`."""
+    if provider_name == "claude_code":
+        from claude_code_runner import ALLOWED_MODELS, DEFAULT_MODEL
+        return req_model if req_model in ALLOWED_MODELS else DEFAULT_MODEL
+
+    from providers import get_provider
+
+    provider = get_provider(provider_name)
+    if provider is None:
+        return req_model or ""
+    models = provider.models()
+    if req_model and req_model in models:
+        return req_model
+    return models[0] if models else ""
+
+
 def _build_provider_stream(
     provider_name: str,
     session_id: int,
@@ -368,6 +389,7 @@ async def send_message(session_id: int, req: ChatMessageRequest):
       - `error`  — sent in place of `done` on a fatal failure.
     """
     provider_name = _resolve_provider(req.provider)
+    model_resolved = _resolve_model(provider_name, req.model)
 
     session = _db_query_one(
         "SELECT id, title FROM chat_sessions WHERE id = %(id)s", {"id": session_id}
@@ -536,7 +558,11 @@ async def send_message(session_id: int, req: ChatMessageRequest):
             out_q.put(_PRODUCER_DONE)
 
     def event_generator() -> Iterator[str]:
-        yield _format_sse("meta", {"user_msg": user_row})
+        yield _format_sse("meta", {
+            "user_msg": user_row,
+            "model": model_resolved,
+            "provider": provider_name,
+        })
 
         out_q: "queue.Queue" = queue.Queue()
         worker = threading.Thread(
