@@ -85,6 +85,61 @@
     return '';
   }
 
+  /* ---------- Lightweight markdown ----------
+     Just enough to render the prose tone the AI emits without a
+     library: **bold**, *italic* and paragraph/line breaks. Anything
+     else (links, lists, code) renders as plain text — we add it only
+     if a real chat message starts using it.
+     escapeHtml runs first so injected angle-brackets stay inert. */
+
+  function mdToHtml(text) {
+    const escaped = escapeHtml(text);
+    let html = escaped
+      .replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[^*])\*(?!\s)([^*\n]+?)\*(?!\*)/g,
+               (_, pre, body) => `${pre}<em>${body}</em>`);
+    // Paragraph splits on blank lines; soft <br> for single newlines.
+    const paragraphs = html.split(/\n{2,}/).map(p =>
+      `<p>${p.replace(/\n/g, '<br>')}</p>`);
+    return paragraphs.join('');
+  }
+
+  /* ---------- AI block helpers ----------
+     Reuses the Discovery row/list renderers (renderArtistRow, etc.)
+     so AI replies and search results share the same visual contract.
+     Adding a chevron, divider or filter to Discovery automatically
+     reflects in the chat without a second implementation. */
+
+  function aiBlocksFromMessage(m) {
+    if (Array.isArray(m.blocks_data) && m.blocks_data.length) {
+      return m.blocks_data;
+    }
+    // Fallback for messages persisted before blocks_data existed: a
+    // flat tracks_data list maps to one tracks block.
+    const flat = m.tracks_data || m.tracks;
+    if (Array.isArray(flat) && flat.length) {
+      return [{ kind: 'tracks', items: flat }];
+    }
+    return [];
+  }
+
+  function renderAiBlock(b) {
+    const items = b && b.items;
+    if (!items || items.length === 0) return null;
+    const wrap = document.createElement('div');
+    wrap.className = 'ai-block ai-block-' + (b.kind || 'unknown');
+    if (b.kind === 'artist') {
+      wrap.innerHTML = renderArtistRow(items);
+    } else if (b.kind === 'album') {
+      wrap.innerHTML = renderAlbumRow(items);
+    } else if (b.kind === 'tracks') {
+      wrap.innerHTML = renderTrackList(items);
+    } else {
+      return null;
+    }
+    return wrap;
+  }
+
   /* ---------- Router ---------- */
 
   const routes = {};
@@ -109,6 +164,12 @@
 
   function navigateToEntity(kind, id) {
     if (!id) return;
+    // Any open overlay sheet would obscure the destination screen, so
+    // close them before changing the route. The user's intent on tapping
+    // an artist/album tile is to *see* that page, not to keep the
+    // overlay covering it.
+    if (typeof ai !== 'undefined' && ai && ai.isOpen) ai.hide();
+    if (typeof sheet !== 'undefined' && sheet && sheet.isOpen) sheet.hide();
     const tab = currentRoute || 'home';
     navigate(`${tab}/${kind}/${id}`);
   }
@@ -831,49 +892,33 @@
           tag.textContent = String(m.model).split(':').pop() || m.model;
           body.appendChild(tag);
         }
-        const text = document.createElement('span');
-        text.textContent = m.content || '';
-        body.appendChild(text);
-        // Track picks
-        const tracks = m.tracks_data || m.tracks || [];
-        for (const t of tracks) body.appendChild(this.renderPick(t));
+        const prose = document.createElement('div');
+        prose.className = 'ai-msg-prose';
+        prose.innerHTML = mdToHtml(m.content || '');
+        body.appendChild(prose);
         row.appendChild(body);
+
+        // Structured blocks render as a sibling of the prose bubble so
+        // they span the full thread width — matching Discovery exactly,
+        // where shuffle-row / track-list use their own 20px padding
+        // against the screen edges. Wrapping them inside the 92%-capped
+        // .ai-msg-ai bubble would force them ~26px narrower than
+        // Discovery's identical markup.
+        const blocks = aiBlocksFromMessage(m);
+        if (blocks.length > 0) {
+          const blocksEl = document.createElement('div');
+          blocksEl.className = 'ai-blocks';
+          for (const b of blocks) {
+            const blockEl = renderAiBlock(b);
+            if (blockEl) blocksEl.appendChild(blockEl);
+          }
+          row.appendChild(blocksEl);
+          // Click + queue handlers come from the same helper that wires
+          // Discovery and detail screens.
+          wireDetailHandlers(blocksEl);
+        }
       }
       this.thread.appendChild(row);
-    },
-
-    renderPick(t) {
-      // Track picks come back from /api/chat as DB media_file rows; fall
-      // back to lazy /by-media URL when no cover_id is attached.
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'ai-pick';
-      const c = coverPlaceholderColors(t.title || t.album || '');
-      btn.style.setProperty('--cover-bg-1', c.bg1);
-      btn.style.setProperty('--cover-bg-2', c.bg2);
-      const url = coverUrl({cover_id: t.cover_id, media_file_id: t.id});
-      const inner = url
-        ? `<img src="${url}" alt="" loading="lazy"
-                onerror="this.style.display='none'">`
-        : '';
-      const sub = [t.artist, t.album].filter(Boolean).join(' · ');
-      const meta = (t.similarity != null)
-        ? `<span class="ai-pick-meta">${Number(t.similarity).toFixed(2)}</span>`
-        : '';
-      btn.innerHTML = `
-        <div class="ai-pick-art">${inner}</div>
-        <div class="ai-pick-info">
-          <div class="ai-pick-title">${escapeHtml(t.title || '—')}</div>
-          <div class="ai-pick-sub">${escapeHtml(sub)}</div>
-        </div>
-        ${meta}
-      `;
-      btn.addEventListener('click', () => {
-        if (t.id && typeof window.playTrack === 'function') {
-          window.playTrack(parseInt(t.id, 10));
-        }
-      });
-      return btn;
     },
 
     scrollToBottom() {
@@ -922,10 +967,11 @@
         if (typing.parentNode) typing.remove();
         if (!resp.ok) throw new Error(data.detail || 'send failed');
         const am = data.assistant_msg || {};
-        // Backend returns simplified tracks_data on the message and a
-        // richer `tracks` array at the response root — prefer the
-        // richer one for cover_id / similarity.
-        am.tracks = data.tracks || am.tracks_data || [];
+        // Backend returns hydrated blocks at the response root and
+        // assistant_msg.blocks_data mirrors them — prefer the root
+        // version because it is the canonical, richer payload.
+        am.blocks_data = data.blocks || am.blocks_data || [];
+        am.tracks_data = data.tracks || am.tracks_data || [];
         am.model = data.provider
           ? `${data.provider}:${data.model}`
           : (am.model || data.model || '');
@@ -2061,10 +2107,11 @@
         }
       });
     });
-    // Track-add button → queue-next
-    // No client-side fetchPlaylist refresh — backend bumps
-    // playlist_version, the SSE handler in app.js awaits a fresh
-    // fetchPlaylist() before notifying subscribers.
+    // Track-add button → append exactly this track to the queue.
+    // /queue-next is Radio Mode (similar tracks); /queue-tracks is
+    // literal append. No client-side fetchPlaylist refresh — backend
+    // bumps playlist_version, the SSE handler in app.js awaits a
+    // fresh fetchPlaylist() before notifying subscribers.
     screen.querySelectorAll('.track-add').forEach(btn => {
       btn.addEventListener('click', async (e) => {
         e.stopPropagation();
@@ -2073,12 +2120,12 @@
         const mfId = row.getAttribute('data-media-file-id');
         if (!mfId) return;
         try {
-          await fetch('/api/player/queue-next', {
+          await fetch('/api/player/queue-tracks', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ track_id: parseInt(mfId, 10) }),
+            body: JSON.stringify({ track_ids: [parseInt(mfId, 10)] }),
           });
-        } catch (err) { console.warn('queue-next failed', err); }
+        } catch (err) { console.warn('queue-tracks failed', err); }
       });
     });
     // Play all (album) — replaces queue with full album
@@ -2095,20 +2142,19 @@
         } catch (err) { console.warn('play-tracks failed', err); }
       });
     });
-    // Queue album — append all tracks
+    // Queue album — append all tracks in one request.
     screen.querySelectorAll('[data-action="queue-album"]').forEach(btn => {
       btn.addEventListener('click', async () => {
         if (!ctx.tracks || !ctx.tracks.length) return;
-        for (const t of ctx.tracks) {
-          if (!t.media_file_id) continue;
-          try {
-            await fetch('/api/player/queue-next', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ track_id: t.media_file_id }),
-            });
-          } catch (err) { /* ignore single failures */ }
-        }
+        const ids = ctx.tracks.map(t => t.media_file_id).filter(Boolean);
+        if (!ids.length) return;
+        try {
+          await fetch('/api/player/queue-tracks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ track_ids: ids }),
+          });
+        } catch (err) { console.warn('queue-tracks failed', err); }
         // No client-side refetch — see comment on .track-add above.
       });
     });

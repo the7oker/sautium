@@ -2,17 +2,18 @@
 Claude Code subprocess wrapper for AI DJ.
 
 Calls `claude -p` in headless mode with MCP tools (PostgreSQL + HQPlayer).
-Parses JSON output, extracts track recommendations from [DJ_TRACKS] marker.
+Returns the raw model answer (including any DJ_BLOCKS marker) — the chat
+router parses + hydrates the marker centrally so this wrapper stays
+format-agnostic.
 """
 
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 if sys.platform != "win32":
     import pwd
@@ -97,7 +98,6 @@ def call_claude_code(
             logger.error(f"Claude Code failed (rc={result.returncode}): {stderr}")
             return {
                 "answer": f"Claude Code error: {stderr or 'unknown error'}",
-                "tracks": [],
                 "claude_session_id": None,
                 "model": use_model,
             }
@@ -109,7 +109,6 @@ def call_claude_code(
             logger.error(f"Failed to parse Claude Code JSON: {e}\nstdout: {result.stdout[:500]}")
             return {
                 "answer": result.stdout.strip() or "Failed to parse Claude Code response",
-                "tracks": [],
                 "claude_session_id": None,
                 "model": use_model,
             }
@@ -117,20 +116,12 @@ def call_claude_code(
         raw_answer = output.get("result", "")
         claude_sid = output.get("session_id")
 
-        # Extract tracks from [DJ_TRACKS]...[/DJ_TRACKS] marker
-        tracks = _extract_tracks(raw_answer)
-
-        # Remove the marker from displayed answer
-        clean_answer = _strip_tracks_marker(raw_answer)
-
         logger.info(
-            f"Claude Code response: {len(clean_answer)} chars, "
-            f"{len(tracks)} tracks, session={claude_sid}"
+            f"Claude Code response: {len(raw_answer)} chars, session={claude_sid}"
         )
 
         return {
-            "answer": clean_answer,
-            "tracks": tracks,
+            "answer": raw_answer,
             "claude_session_id": claude_sid,
             "model": use_model,
         }
@@ -139,7 +130,6 @@ def call_claude_code(
         logger.error(f"Claude Code timed out after {TIMEOUT_SECONDS}s")
         return {
             "answer": "Request timed out. Please try a simpler query.",
-            "tracks": [],
             "claude_session_id": None,
             "model": use_model,
         }
@@ -147,7 +137,6 @@ def call_claude_code(
         logger.error("Claude Code CLI not found. Is it installed?")
         return {
             "answer": "Claude Code CLI is not installed in this environment.",
-            "tracks": [],
             "claude_session_id": None,
             "model": use_model,
         }
@@ -155,41 +144,6 @@ def call_claude_code(
         logger.error(f"Unexpected error calling Claude Code: {e}")
         return {
             "answer": f"Error: {e}",
-            "tracks": [],
             "claude_session_id": None,
             "model": use_model,
         }
-
-
-try:
-    from tools.track_parser import extract_tracks as _extract_tracks
-    from tools.track_parser import strip_tracks_marker as _strip_tracks_marker
-except ImportError:
-    # Fallback if tools package not available
-    def _extract_tracks(text: str) -> List[Dict[str, Any]]:
-        """Extract track list from [DJ_TRACKS][...][/DJ_TRACKS] marker."""
-        match = re.search(r'\[DJ_TRACKS\]\s*(\[.*?\])\s*\[/DJ_TRACKS\]', text, re.DOTALL)
-        if not match:
-            return []
-        try:
-            tracks = json.loads(match.group(1))
-            if not isinstance(tracks, list):
-                return []
-            valid = []
-            for t in tracks:
-                if isinstance(t, dict) and t.get("id") and t.get("title"):
-                    valid.append({
-                        "id": t["id"],
-                        "title": t.get("title", ""),
-                        "artist": t.get("artist", "Unknown"),
-                        "album": t.get("album", ""),
-                    })
-            return valid
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning(f"Failed to parse DJ_TRACKS JSON: {e}")
-            return []
-
-    def _strip_tracks_marker(text: str) -> str:
-        """Remove [DJ_TRACKS]...[/DJ_TRACKS] block from answer text."""
-        cleaned = re.sub(r'\s*\[DJ_TRACKS\].*?\[/DJ_TRACKS\]\s*', '', text, flags=re.DOTALL)
-        return cleaned.strip()

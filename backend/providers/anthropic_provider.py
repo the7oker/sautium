@@ -6,7 +6,6 @@ import time
 from typing import Any, Optional
 
 from providers.base import BaseProvider, ProviderMessage, ProviderResult
-from tools.track_parser import extract_tracks, strip_tracks_marker
 
 logger = logging.getLogger(__name__)
 
@@ -93,12 +92,11 @@ class AnthropicProvider(BaseProvider):
             # stop_reason == "tool_use" means: process tools and call me again
             # stop_reason == "end_turn" means: I'm done
             if response.stop_reason != "tool_use":
-                # Model is done — return accumulated text
-                tracks = extract_tracks(last_text)
-                clean = strip_tracks_marker(last_text)
+                # Model is done — return raw text including any DJ_BLOCKS
+                # marker. The chat router parses + hydrates the marker
+                # centrally so providers stay format-agnostic.
                 return ProviderResult(
-                    answer=clean,
-                    tracks=tracks,
+                    answer=last_text,
                     model=use_model,
                     provider=self.name,
                     tool_calls_count=tool_calls_count,
@@ -135,11 +133,8 @@ class AnthropicProvider(BaseProvider):
 
         # Exceeded iterations — return whatever text we collected
         if last_text:
-            tracks = extract_tracks(last_text)
-            clean = strip_tracks_marker(last_text)
             return ProviderResult(
-                answer=clean,
-                tracks=tracks,
+                answer=last_text,
                 model=use_model,
                 provider=self.name,
                 tool_calls_count=tool_calls_count,

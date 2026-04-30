@@ -266,21 +266,38 @@ LIMIT 20
 ```"""
 
 _TRACK_OUTPUT_FORMAT = """\
-# Track Recommendations Output
+# Structured Recommendations Output
 
-CRITICAL: When your response includes track recommendations (whether you searched for them,
-recommend them, or they were played), you MUST include a structured block at the very end
-of your response in this exact format:
+CRITICAL: When your prose mentions or recommends specific entities (artists, albums,
+or tracks that exist in the database), you MUST end your response with a single
+`[DJ_BLOCKS]...[/DJ_BLOCKS]` marker that lists them in a structured form. The frontend
+renders the marker as artist tiles, album cards and track rows below your text — same
+visual contract as the Discovery screen.
 
-[DJ_TRACKS][{{"id": 123, "title": "Track Title", "artist": "Artist Name", "album": "Album Title"}}, ...][/DJ_TRACKS]
+Format:
 
-This block is parsed by the frontend to display track cards with play buttons.
-Include ALL tracks you mention or recommend in this block.
-If you played an album, include all tracks from that album.
-If no tracks are relevant to your response, omit this block entirely.
+[DJ_BLOCKS][
+  {{"kind": "artist", "items": [{{"artist_id": "<uuid>"}}, ...]}},
+  {{"kind": "album",  "items": [{{"album_id":  "<uuid>"}}, ...]}},
+  {{"kind": "tracks", "items": [{{"id": <media_file_id:int>}}, ...]}}
+][/DJ_BLOCKS]
 
-The JSON must be valid. Use double quotes for strings. Escape special characters.
-The `id` field is media_files.id (integer) — this is what playback tools use."""
+Rules for the block list:
+- Include only the blocks that are actually relevant to your reply. If your answer is
+  about a single artist, return only the `artist` block. If you recommend three tracks,
+  return only the `tracks` block. If you discuss an album with two highlight tracks,
+  include both an `album` block and a `tracks` block. The user expects no padding —
+  empty or speculative blocks hurt the response.
+- `artist_id` and `album_id` are UUIDs from the `artists.id` / `albums.id` columns.
+  `id` inside the `tracks` block is `media_files.id` (integer) — the same value used
+  for playback. Use real IDs you obtained from SQL or search tools; never invent them.
+- Keep each block compact: at most ~10 items per block. Quality over quantity.
+- The frontend hydrates each entity's name, year and cover from the IDs you provide,
+  so do not duplicate that data inside the marker.
+- If your answer does not reference any concrete library entities (e.g. a generic
+  question about audio quality), omit the marker entirely.
+- The marker MUST be the very last thing in your message. Put any prose context
+  before it, never after."""
 
 # ---------------------------------------------------------------------------
 # Claude Code prompt (MCP-based)
@@ -347,7 +364,7 @@ You are a knowledgeable, passionate music expert who loves sharing insights.
 and verify candidates. Do NOT recommend artists outside the requested genre based only on audio similarity.
 - Prefer using similar_artists table as the primary source for "similar artist" recommendations — it contains \
 curated Last.fm data that respects genre boundaries.
-- After finding tracks, ALWAYS write a textual explanation of your recommendation. Never respond with ONLY a DJ_TRACKS block.
+- After finding tracks, ALWAYS write a textual explanation of your recommendation. Never respond with ONLY a DJ_BLOCKS marker.
 {{player_context}}
 
 # Available Tools
@@ -422,7 +439,7 @@ style, and related artists. This is CRITICAL when the user mentions a specific g
 genre/style. For example, if user asks for "berlin school", verify the artist has that tag in artist_tags.
 6. Compare audio features between original and recommendation
 7. Write a rich, informative response explaining your choice
-8. Include the DJ_TRACKS block at the end
+8. End the response with the DJ_BLOCKS marker (artist / album / tracks blocks as relevant)
 
 **IMPORTANT**: When the user mentions a specific genre, style, or scene (e.g. "berlin school", "krautrock", \
 "jazz fusion"), ALWAYS verify your recommendations against artist_tags and similar_artists data. \

@@ -542,8 +542,13 @@ body.has-miniplayer .ai-fab {
   gap: calc(18 * var(--px));
 }
 
-.ai-msg-row { display: flex; }
-.ai-msg-row.is-user { justify-content: flex-end; }
+.ai-msg-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: calc(10 * var(--px));
+}
+.ai-msg-row.is-user { align-items: flex-end; }
 .ai-msg-user {
   max-width: 82%;
   padding: calc(10 * var(--px)) calc(14 * var(--px));
@@ -575,61 +580,32 @@ body.has-miniplayer .ai-fab {
   margin-bottom: calc(6 * var(--px));
 }
 
-.ai-pick {
+/* Prose paragraphs from the model — markdown-rendered. */
+.ai-msg-prose p {
+  margin: 0;
+}
+.ai-msg-prose p + p {
   margin-top: calc(8 * var(--px));
-  padding: calc(10 * var(--px)) calc(12 * var(--px));
-  background: var(--color-surface);
-  border: 1px solid var(--color-divider);
-  border-radius: calc(8 * var(--px));
-  display: flex;
-  gap: calc(10 * var(--px));
-  align-items: center;
-  cursor: pointer;
-  text-align: left;
-  font-family: inherit;
-  color: inherit;
-  width: 100%;
 }
-.ai-pick:active { background: var(--color-surface-hi); }
-.ai-pick-art {
-  width: calc(42 * var(--px));
-  height: calc(42 * var(--px));
-  background:
-    linear-gradient(135deg,
-      var(--cover-bg-1, var(--color-surface-hi)),
-      var(--cover-bg-2, var(--color-surface-lo)));
-  border-radius: calc(2 * var(--px));
-  overflow: hidden;
-  flex-shrink: 0;
-}
-.ai-pick-art img {
-  width: 100%; height: 100%; object-fit: cover; display: block;
-}
-.ai-pick-info { min-width: 0; flex: 1; }
-.ai-pick-title {
-  font-size: calc(13 * var(--px));
+.ai-msg-prose strong {
   font-weight: 600;
   color: var(--color-text);
-  line-height: 1.3;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
-.ai-pick-sub {
-  font-size: calc(11 * var(--px));
-  color: var(--color-text-muted);
-  margin-top: calc(2 * var(--px));
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.ai-msg-prose em {
+  font-style: italic;
 }
-.ai-pick-meta {
-  font-family: var(--font-mono);
-  color: var(--color-blue);
-  font-size: calc(10.5 * var(--px));
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-  flex-shrink: 0;
+
+/* Structured-recommendations container, sibling of the prose bubble.
+   Negative side margins cancel `.ai-thread`'s 20px padding so blocks
+   span the full screen width — identical to Discovery's layout. The
+   inner markup (shuffle-row, track-list) keeps its own 20px padding
+   against screen edges, no per-block overrides needed. */
+.ai-blocks {
+  margin: 0 calc(-20 * var(--px));
+  width: calc(100% + 40 * var(--px));
+  display: flex;
+  flex-direction: column;
+  gap: calc(16 * var(--px));
 }
 
 .ai-typing {
@@ -1757,7 +1733,13 @@ body.has-miniplayer .ai-fab {
   position: relative;
   padding: calc(2 * var(--px)) 0 calc(20 * var(--px));
 }
-.discovery-screen .shuffle-row {
+/* Horizontal scroll row + album/artist tiles — kept outside the
+   `.discovery-screen` scope so `renderArtistRow` / `renderAlbumRow`
+   look identical in the AI chat thread (`.ai-block-*`) and in any
+   future surface that reuses these renderers. The default 20px
+   side padding is the Discovery layout; chat overrides it via
+   `.ai-block-* .shuffle-row`. */
+.shuffle-row {
   display: flex;
   gap: calc(10 * var(--px));
   padding: 0 calc(20 * var(--px));
@@ -1765,8 +1747,8 @@ body.has-miniplayer .ai-fab {
   scrollbar-width: none;
   scroll-padding-inline-start: calc(20 * var(--px));
 }
-.discovery-screen .shuffle-row::-webkit-scrollbar { display: none; }
-.discovery-screen .mosaic-tile {
+.shuffle-row::-webkit-scrollbar { display: none; }
+.mosaic-tile {
   flex: 0 0 calc(120 * var(--px));
   display: flex;
   flex-direction: column;
@@ -1779,7 +1761,7 @@ body.has-miniplayer .ai-fab {
   color: inherit;
   cursor: pointer;
 }
-.discovery-screen .mosaic-cover {
+.mosaic-cover {
   width: calc(120 * var(--px));
   height: calc(120 * var(--px));
   background:
@@ -1789,13 +1771,13 @@ body.has-miniplayer .ai-fab {
   overflow: hidden;
   border-radius: calc(2 * var(--px));
 }
-.discovery-screen .mosaic-cover img {
+.mosaic-cover img {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
 }
-.discovery-screen .mosaic-title {
+.mosaic-title {
   font-size: calc(12 * var(--px));
   font-weight: 500;
   color: var(--color-text);
@@ -1804,7 +1786,7 @@ body.has-miniplayer .ai-fab {
   text-overflow: ellipsis;
   max-width: calc(120 * var(--px));
 }
-.discovery-screen .mosaic-artist {
+.mosaic-artist {
   font-size: calc(11 * var(--px));
   color: var(--color-text-muted);
   white-space: nowrap;
@@ -1827,11 +1809,14 @@ body.has-miniplayer .ai-fab {
 .discovery-screen .discovery-results .track-list {
   padding: 0 calc(20 * var(--px));
 }
-.discovery-screen .result-row {
+/* Shared track-row appearance — used by Discovery results and the
+   AI chat tracks block. Kept outside `.discovery-screen` scope so
+   `renderTrackList` markup looks identical wherever it appears. */
+.result-row {
   grid-template-columns:
     calc(44 * var(--px)) 1fr auto calc(44 * var(--px));
 }
-.discovery-screen .result-art {
+.result-art {
   width: calc(44 * var(--px));
   height: calc(44 * var(--px));
   border-radius: var(--radius-sm);
@@ -1841,13 +1826,13 @@ body.has-miniplayer .ai-fab {
       var(--cover-bg-1, var(--color-surface-hi)),
       var(--cover-bg-2, var(--color-surface-lo)));
 }
-.discovery-screen .result-art img {
+.result-art img {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
 }
-.discovery-screen .result-similarity {
+.result-similarity {
   font-family: var(--font-mono);
   font-size: calc(11.5 * var(--px));
   color: var(--color-blue);
@@ -2011,11 +1996,10 @@ body.has-miniplayer .ai-fab {
   line-height: 1.4;
 }
 
-/* Artist row — circular avatar tiles, mosaic-style horizontal scroll. */
-.discovery-screen .d-artist-row {
-  /* Inherits .shuffle-row layout (flex h-scroll with 20px padding). */
-}
-.discovery-screen .d-artist-tile {
+/* Artist row — circular avatar tiles, mosaic-style horizontal scroll.
+   Shared between Discovery results and the AI chat artist block;
+   inherits `.shuffle-row` flex/h-scroll/padding from the same scope. */
+.d-artist-tile {
   flex: 0 0 calc(96 * var(--px));
   display: flex;
   flex-direction: column;
@@ -2029,7 +2013,7 @@ body.has-miniplayer .ai-fab {
   color: inherit;
   cursor: pointer;
 }
-.discovery-screen .d-artist-avatar {
+.d-artist-avatar {
   width: calc(96 * var(--px));
   height: calc(96 * var(--px));
   border-radius: 50%;
@@ -2041,16 +2025,16 @@ body.has-miniplayer .ai-fab {
   font-size: calc(20 * var(--px));
   letter-spacing: 0.02em;
 }
-.discovery-screen .d-artist-avatar img {
+.d-artist-avatar img {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
 }
-.discovery-screen .d-artist-initials {
+.d-artist-initials {
   font-family: var(--font-sans);
 }
-.discovery-screen .d-artist-name {
+.d-artist-name {
   font-size: calc(12 * var(--px));
   font-weight: 500;
   color: var(--color-text);

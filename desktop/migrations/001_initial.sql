@@ -382,6 +382,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     role VARCHAR(20) NOT NULL,
     content TEXT NOT NULL,
     tracks_data JSONB,
+    blocks_data JSONB,
     model VARCHAR(100),
     filters_detected JSONB,
     retrieval_log JSONB,
@@ -391,6 +392,10 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     feedback_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT now()
 );
+
+-- Idempotent column-add for existing installs that pre-date blocks_data.
+ALTER TABLE chat_messages
+    ADD COLUMN IF NOT EXISTS blocks_data JSONB;
 
 -- ============================================================
 -- Listening history

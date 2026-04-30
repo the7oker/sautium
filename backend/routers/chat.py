@@ -3,6 +3,11 @@ AI DJ chat with persistent history and feedback.
 
 Sessions, messages stored in PostgreSQL. Feedback endpoint for debugging
 recommendation quality. Supports multiple LLM providers.
+
+Provider responses are returned as raw text (including any DJ_BLOCKS
+marker the model emits at the end). This router owns the marker
+contract: parses it, hydrates each block's items into Discovery-shaped
+tiles, and persists the result. Providers stay format-agnostic.
 """
 
 import json
@@ -14,6 +19,8 @@ from pydantic import BaseModel
 
 from config import settings
 from db_pool import db_query as _db_query, db_query_one as _db_query_one, db_execute as _db_execute
+from entity_hydration import hydrate_artists, hydrate_albums, hydrate_tracks
+from tools.block_parser import extract_blocks_with_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +109,9 @@ def _save_claude_session_id(session_id: int, claude_sid: str):
 
 
 def _call_claude_code_dj(session_id: int, message: str, player_context: Optional[str], model: Optional[str] = None) -> dict:
-    """Call Claude Code as AI DJ backend."""
+    """Call Claude Code as AI DJ backend. Returns raw answer + meta —
+    block parsing happens in the caller.
+    """
     from claude_code_runner import call_claude_code
     from claude_dj_prompt import get_system_prompt
 
@@ -117,18 +126,14 @@ def _call_claude_code_dj(session_id: int, message: str, player_context: Optional
         model=model,
     )
 
-    # Save Claude session ID for future messages
     if result.get("claude_session_id"):
         _save_claude_session_id(session_id, result["claude_session_id"])
 
     return {
-        "answer": result.get("answer", ""),
-        "tracks": result.get("tracks", []),
+        "raw_answer": result.get("answer", ""),
         "model": result.get("model", "claude-code"),
         "provider": "claude_code",
-        "filters_detected": {},
-        "retrieval_log": [],
-        "tracks_retrieved": len(result.get("tracks", [])),
+        "tool_calls_count": 0,
     }
 
 
@@ -144,7 +149,9 @@ def _call_api_provider_dj(
     model: Optional[str] = None,
     history: Optional[list[dict]] = None,
 ) -> dict:
-    """Call an API-based LLM provider as AI DJ backend."""
+    """Call an API-based LLM provider as AI DJ backend. Returns raw
+    answer + meta — block parsing happens in the caller.
+    """
     from providers import get_provider
     from providers.base import ProviderMessage
     from claude_dj_prompt import get_system_prompt
@@ -155,7 +162,6 @@ def _call_api_provider_dj(
 
     prompt = get_system_prompt(provider_name, player_context)
 
-    # Convert history dicts to ProviderMessage objects
     pm_history = None
     if history:
         pm_history = [ProviderMessage(role=h["role"], content=h["content"]) for h in history]
@@ -169,70 +175,67 @@ def _call_api_provider_dj(
     )
 
     return {
-        "answer": result.answer,
-        "tracks": result.tracks,
+        "raw_answer": result.answer,
         "model": result.model,
         "provider": result.provider,
-        "filters_detected": {},
-        "retrieval_log": [{"source": "tools", "description": f"{result.tool_calls_count} tool calls"}] if result.tool_calls_count else [],
-        "tracks_retrieved": len(result.tracks),
+        "tool_calls_count": result.tool_calls_count,
     }
 
 
 # ---------------------------------------------------------------------------
-# Track ID post-validation
+# Block hydration
 # ---------------------------------------------------------------------------
 
-def _validate_tracks(tracks: list[dict]) -> list[dict]:
-    """Validate track IDs against the database.
+def _hydrate_blocks(blocks: list[dict]) -> list[dict]:
+    """Resolve each block's items to full tiles (cover_id, names,
+    year, track_count) using the shared `entity_hydration` module —
+    same data shape Discovery's renderers expect, so the chat UI can
+    use the same `renderArtistRow` / `renderAlbumRow` /
+    `renderTrackList` helpers.
 
-    LLMs (especially smaller ones like Llama) may hallucinate track IDs.
-    This function checks each ID exists and replaces title/artist/album
-    with real data from the DB. Invalid IDs are removed.
+    Items with IDs the database doesn't recognize are dropped. Empty
+    blocks are dropped from the output entirely.
     """
-    if not tracks:
-        return tracks
+    out: list[dict] = []
+    for b in blocks:
+        kind = b.get("kind")
+        items = b.get("items") or []
+        if not items:
+            continue
+        if kind == "artist":
+            ids = [it.get("artist_id") for it in items if it.get("artist_id")]
+            hydrated = hydrate_artists(ids)
+        elif kind == "album":
+            ids = [it.get("album_id") for it in items if it.get("album_id")]
+            hydrated = hydrate_albums(ids)
+        elif kind == "tracks":
+            ids = [it.get("id") for it in items if it.get("id")]
+            hydrated = hydrate_tracks(ids)
+        else:
+            continue
+        if not hydrated:
+            logger.info(
+                f"Block kind={kind}: all {len(items)} items dropped during hydration "
+                f"(unknown IDs?)"
+            )
+            continue
+        if len(hydrated) < len(items):
+            logger.info(
+                f"Block kind={kind}: {len(items)} → {len(hydrated)} items after hydration"
+            )
+        out.append({"kind": kind, "items": hydrated})
+    return out
 
-    ids = [t.get("id") for t in tracks if t.get("id") is not None]
-    if not ids:
-        return tracks
 
-    try:
-        rows = _db_query("""
-            SELECT mf.id, t.title, a.name as artist, al.title as album
-            FROM media_files mf
-            JOIN tracks t ON mf.track_id = t.id
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            JOIN album_variants av ON mf.album_variant_id = av.id
-            JOIN albums al ON av.album_id = al.id
-            WHERE mf.id = ANY(%(ids)s)
-        """, {"ids": ids})
-
-        db_map = {r["id"]: r for r in rows}
-
-        validated = []
-        for t in tracks:
-            tid = t.get("id")
-            if tid in db_map:
-                real = db_map[tid]
-                validated.append({
-                    "id": tid,
-                    "title": real["title"],
-                    "artist": real["artist"],
-                    "album": real["album"],
-                    "similarity": t.get("similarity"),
-                })
-            else:
-                logger.warning(f"Track ID {tid} not found in DB — removed from results")
-
-        if len(validated) < len(tracks):
-            logger.info(f"Track validation: {len(tracks)} → {len(validated)} (removed {len(tracks) - len(validated)} invalid)")
-
-        return validated
-    except Exception as e:
-        logger.error(f"Track validation failed: {e}")
-        return tracks  # return original on error
+def _tracks_from_blocks(blocks: list[dict]) -> list[dict]:
+    """Pull the hydrated tracks out of a block list — kept for
+    backward compatibility with the existing /api/chat response shape
+    and with old `tracks_data` rendering on cached messages.
+    """
+    for b in blocks:
+        if b.get("kind") == "tracks":
+            return list(b.get("items") or [])
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -317,8 +320,8 @@ async def get_messages(session_id: int):
     if not existing:
         raise HTTPException(status_code=404, detail="Session not found")
     rows = _db_query("""
-        SELECT id, role, content, tracks_data, is_not_relevant,
-               feedback_comment, created_at
+        SELECT id, role, content, tracks_data, blocks_data,
+               is_not_relevant, feedback_comment, created_at
         FROM chat_messages
         WHERE session_id = %(sid)s
         ORDER BY id
@@ -422,55 +425,61 @@ async def send_message(session_id: int, req: ChatMessageRequest):
         logger.error(f"Provider '{provider_name}' failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="AI provider request failed")
 
-    answer = result.get("answer", "")
-    tracks = _validate_tracks(result.get("tracks", []))
+    raw_answer = result.get("raw_answer", "")
     model = result.get("model", "")
     provider_used = result.get("provider", provider_name)
-    filters_detected = result.get("filters_detected", {})
-    retrieval_log = result.get("retrieval_log", [])
-    tracks_retrieved = result.get("tracks_retrieved", 0)
+    tool_calls_count = result.get("tool_calls_count", 0)
 
-    # Prepare tracks_data for JSONB (list of dicts with key info)
+    # Parse the marker, hydrate items, derive legacy `tracks` payload.
+    raw_blocks, clean_answer = extract_blocks_with_fallback(raw_answer)
+    blocks = _hydrate_blocks(raw_blocks)
+    tracks = _tracks_from_blocks(blocks)
+
+    retrieval_log = (
+        [{"source": "tools", "description": f"{tool_calls_count} tool calls"}]
+        if tool_calls_count else []
+    )
+
     tracks_data = [
         {
             "id": t.get("id"),
             "title": t.get("title"),
             "artist": t.get("artist"),
             "album": t.get("album"),
-            "similarity": t.get("similarity"),
+            "cover_id": t.get("cover_id"),
         }
         for t in tracks
     ] if tracks else None
 
-    # 4. Save assistant message
     assistant_row = _db_execute("""
         INSERT INTO chat_messages
-            (session_id, role, content, tracks_data, model,
+            (session_id, role, content, tracks_data, blocks_data, model,
              filters_detected, retrieval_log, tracks_retrieved)
         VALUES
-            (%(sid)s, 'assistant', %(content)s, %(tracks_data)s, %(model)s,
-             %(filters)s, %(rlog)s, %(tr)s)
-        RETURNING id, role, content, tracks_data, created_at
+            (%(sid)s, 'assistant', %(content)s, %(tracks_data)s, %(blocks_data)s,
+             %(model)s, %(filters)s, %(rlog)s, %(tr)s)
+        RETURNING id, role, content, tracks_data, blocks_data, created_at
     """, {
         "sid": session_id,
-        "content": answer,
+        "content": clean_answer,
         "tracks_data": json.dumps(tracks_data) if tracks_data else None,
+        "blocks_data": json.dumps(blocks) if blocks else None,
         "model": f"{provider_used}:{model}" if provider_used else model,
-        "filters": json.dumps(filters_detected) if filters_detected else None,
+        "filters": None,
         "rlog": json.dumps(retrieval_log) if retrieval_log else None,
-        "tr": tracks_retrieved,
+        "tr": len(tracks),
     })
 
-    # 5. Return both messages + full tracks for the UI player
     return {
         "user_msg": user_row,
         "assistant_msg": assistant_row,
+        "blocks": blocks,
         "tracks": tracks,
-        "filters_detected": filters_detected,
+        "filters_detected": {},
         "retrieval_log": retrieval_log,
         "model": model,
         "provider": provider_used,
-        "tracks_retrieved": tracks_retrieved,
+        "tracks_retrieved": len(tracks),
     }
 
 
@@ -564,13 +573,17 @@ async def legacy_chat(req: LegacyChatRequest):
             message=req.message,
             system_prompt=prompt,
         )
+        raw_blocks, clean_answer = extract_blocks_with_fallback(result.get("answer", ""))
+        blocks = _hydrate_blocks(raw_blocks)
+        tracks = _tracks_from_blocks(blocks)
         return {
-            "answer": result.get("answer", ""),
-            "tracks": result.get("tracks", []),
+            "answer": clean_answer,
+            "blocks": blocks,
+            "tracks": tracks,
             "filters_detected": {},
             "retrieval_log": [],
             "model": result.get("model", "claude-code"),
-            "tracks_retrieved": len(result.get("tracks", [])),
+            "tracks_retrieved": len(tracks),
         }
     except Exception as e:
         logger.error(f"Claude Code chat failed: {e}")

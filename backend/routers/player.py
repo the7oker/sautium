@@ -318,6 +318,9 @@ class QueueNextRequest(BaseModel):
     limit: int = 5
     exclude_ids: list[int] = []
 
+class QueueTracksRequest(BaseModel):
+    track_ids: list[int]
+
 
 # -- Search -------------------------------------------------------------------
 
@@ -1039,6 +1042,48 @@ def play_tracks(req: PlayTracksRequest):
         }
     except Exception as e:
         logger.error(f"play-tracks failed: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@router.post("/queue-tracks")
+def queue_tracks(req: QueueTracksRequest):
+    """Append the given tracks to the current queue, in order, without
+    clearing. Used by the per-track "+" button and the "Queue album"
+    action — these expect "add exactly these tracks", not the
+    similarity-driven Radio Mode that `/queue-next` provides."""
+    if not req.track_ids:
+        raise HTTPException(status_code=400, detail="No track IDs provided")
+
+    rows = _db_query("""
+        SELECT mf.id, mf.file_path, t.title, a.name as artist, al.title as album
+        FROM media_files mf
+        JOIN tracks t ON mf.track_id = t.id
+        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+        JOIN artists a ON ta.artist_id = a.id
+        JOIN album_variants av ON mf.album_variant_id = av.id
+        JOIN albums al ON av.album_id = al.id
+        WHERE mf.id = ANY(%(ids)s)
+        ORDER BY array_position(%(ids)s, mf.id)
+    """, {"ids": req.track_ids})
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="No tracks found")
+
+    try:
+        with _hqp_lock:
+            hqp = _get_hqp()
+            for row in rows:
+                hqp.playlist_add(file_path_to_uri(row["file_path"]))
+        _invalidate_playlist()
+        return {
+            "ok": True,
+            "count": len(rows),
+            "tracks": [
+                {"id": r["id"], "title": r["title"], "artist": r["artist"], "album": r["album"]}
+                for r in rows
+            ],
+        }
+    except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
 

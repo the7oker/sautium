@@ -4,7 +4,6 @@ import logging
 from typing import Optional
 
 from providers.base import BaseProvider, ProviderMessage, ProviderResult
-from tools.track_parser import extract_tracks, strip_tracks_marker
 
 logger = logging.getLogger(__name__)
 
