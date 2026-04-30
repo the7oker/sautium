@@ -259,7 +259,7 @@ async def get_messages(session_id: int):
     if not existing:
         raise HTTPException(status_code=404, detail="Session not found")
     rows = _db_query("""
-        SELECT id, role, content, tracks_data, blocks_data,
+        SELECT id, role, content, tracks_data, blocks_data, model,
                is_not_relevant, feedback_comment, created_at
         FROM chat_messages
         WHERE session_id = %(sid)s
