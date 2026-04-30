@@ -86,22 +86,151 @@
   }
 
   /* ---------- Lightweight markdown ----------
-     Just enough to render the prose tone the AI emits without a
-     library: **bold**, *italic* and paragraph/line breaks. Anything
-     else (links, lists, code) renders as plain text — we add it only
-     if a real chat message starts using it.
-     escapeHtml runs first so injected angle-brackets stay inert. */
+     Line-oriented parser sized for the prose the AI DJ emits in
+     practice: headings, horizontal rules, bullet/numbered lists,
+     pipe tables, inline code, **bold**, *italic*. No external
+     library; escapeHtml runs first so angle brackets in the input
+     can't break out of our generated HTML. Streaming-friendly —
+     gets re-run on every delta, so partial markup like an
+     unclosed `**` settles visually as soon as the closer arrives. */
 
-  function mdToHtml(text) {
-    const escaped = escapeHtml(text);
-    let html = escaped
+  function applyInlineMd(s) {
+    return s
+      .replace(/`([^`\n]+)`/g, '<code>$1</code>')
       .replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>')
       .replace(/(^|[^*])\*(?!\s)([^*\n]+?)\*(?!\*)/g,
                (_, pre, body) => `${pre}<em>${body}</em>`);
-    // Paragraph splits on blank lines; soft <br> for single newlines.
-    const paragraphs = html.split(/\n{2,}/).map(p =>
-      `<p>${p.replace(/\n/g, '<br>')}</p>`);
-    return paragraphs.join('');
+  }
+
+  function mdToHtml(text) {
+    const lines = escapeHtml(text).split('\n');
+    const out = [];
+    let listMode = null;          // 'ol' | 'ul' | null
+    let paragraphLines = [];      // raw lines, joined with <br>
+    let tableLines = [];          // raw "| ... |" rows pending flush
+
+    const flushParagraph = () => {
+      if (paragraphLines.length) {
+        out.push('<p>' + paragraphLines.join('<br>') + '</p>');
+        paragraphLines = [];
+      }
+    };
+    const closeList = () => {
+      if (listMode) {
+        out.push('</' + listMode + '>');
+        listMode = null;
+      }
+    };
+
+    const splitRow = (row) => {
+      let r = row.trim();
+      if (r.startsWith('|')) r = r.slice(1);
+      if (r.endsWith('|')) r = r.slice(0, -1);
+      return r.split('|').map(c => applyInlineMd(c.trim()));
+    };
+    const flushTable = () => {
+      if (tableLines.length === 0) return;
+      // A real markdown table needs a header, a `|---|---|` separator,
+      // and at least one data row; otherwise treat the buffered lines
+      // as plain prose (paragraph) so partial input mid-stream doesn't
+      // collapse into a malformed `<table>`.
+      const sep = (tableLines[1] || '').trim();
+      const looksLikeTable =
+        tableLines.length >= 2 &&
+        /^\|?\s*:?[-]+:?(?:\s*\|\s*:?[-]+:?)*\s*\|?$/.test(sep);
+      if (!looksLikeTable) {
+        for (const tl of tableLines) {
+          paragraphLines.push(applyInlineMd(tl));
+        }
+        tableLines = [];
+        return;
+      }
+      const head = splitRow(tableLines[0]);
+      const body = tableLines.slice(2).map(splitRow);
+      let html = '<table><thead><tr>';
+      for (const h of head) html += '<th>' + h + '</th>';
+      html += '</tr></thead><tbody>';
+      for (const row of body) {
+        html += '<tr>';
+        for (const c of row) html += '<td>' + c + '</td>';
+        html += '</tr>';
+      }
+      html += '</tbody></table>';
+      out.push(html);
+      tableLines = [];
+    };
+
+    for (const rawLine of lines) {
+      const line = rawLine;
+      const trimmed = line.trim();
+
+      // Table row — buffer until the run breaks. We don't flush mid-
+      // table, so a freshly-arriving header + separator + first row
+      // emit as one well-formed `<table>`.
+      if (trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.length > 2) {
+        flushParagraph();
+        closeList();
+        tableLines.push(trimmed);
+        continue;
+      }
+      if (tableLines.length > 0) flushTable();
+
+      if (!trimmed) {
+        flushParagraph();
+        closeList();
+        continue;
+      }
+
+      if (/^(?:-{3,}|_{3,}|\*{3,})$/.test(trimmed)) {
+        flushParagraph();
+        closeList();
+        out.push('<hr>');
+        continue;
+      }
+
+      const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
+      if (heading) {
+        flushParagraph();
+        closeList();
+        const level = Math.min(heading[1].length, 6);
+        out.push('<h' + level + '>' + applyInlineMd(heading[2]) + '</h' + level + '>');
+        continue;
+      }
+
+      const olMatch = trimmed.match(/^\d+\.\s+(.*)$/);
+      if (olMatch) {
+        flushParagraph();
+        if (listMode !== 'ol') {
+          closeList();
+          out.push('<ol>');
+          listMode = 'ol';
+        }
+        out.push('<li>' + applyInlineMd(olMatch[1]) + '</li>');
+        continue;
+      }
+
+      const ulMatch = trimmed.match(/^[-*+]\s+(.*)$/);
+      if (ulMatch) {
+        flushParagraph();
+        if (listMode !== 'ul') {
+          closeList();
+          out.push('<ul>');
+          listMode = 'ul';
+        }
+        out.push('<li>' + applyInlineMd(ulMatch[1]) + '</li>');
+        continue;
+      }
+
+      closeList();
+      paragraphLines.push(applyInlineMd(line));
+    }
+
+    flushParagraph();
+    closeList();
+    if (tableLines.length > 0) flushTable();
+    flushParagraph();
+
+    return out.join('');
   }
 
   /* ---------- SSE parser ----------

@@ -595,6 +595,84 @@ body.has-miniplayer .ai-fab {
   font-style: italic;
 }
 
+/* Headings — compact scale tuned for the chat bubble; the document-
+   level Home/Discovery headings keep their own larger sizes. */
+.ai-msg-prose h1,
+.ai-msg-prose h2,
+.ai-msg-prose h3,
+.ai-msg-prose h4,
+.ai-msg-prose h5,
+.ai-msg-prose h6 {
+  margin: calc(10 * var(--px)) 0 calc(4 * var(--px));
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+}
+.ai-msg-prose h1 { font-size: calc(17 * var(--px)); }
+.ai-msg-prose h2 { font-size: calc(15 * var(--px)); }
+.ai-msg-prose h3 { font-size: calc(13.5 * var(--px)); }
+.ai-msg-prose h4,
+.ai-msg-prose h5,
+.ai-msg-prose h6 {
+  font-size: calc(13 * var(--px));
+  margin-top: calc(8 * var(--px));
+}
+.ai-msg-prose > :first-child { margin-top: 0; }
+.ai-msg-prose hr {
+  border: 0;
+  border-top: 1px solid var(--color-divider);
+  margin: calc(10 * var(--px)) 0;
+}
+
+/* Lists. `padding-left: 20px` is enough for the marker without
+   breaking the bubble's 92% width on narrow screens. */
+.ai-msg-prose ul,
+.ai-msg-prose ol {
+  margin: calc(6 * var(--px)) 0;
+  padding-left: calc(20 * var(--px));
+}
+.ai-msg-prose li { margin: calc(2 * var(--px)) 0; }
+.ai-msg-prose li + li { margin-top: calc(2 * var(--px)); }
+
+/* Inline code — `monospace + cool blue` is the same technical-readout
+   token used by track BPM/sample-rate readouts elsewhere in the UI. */
+.ai-msg-prose code {
+  font-family: var(--font-mono);
+  font-size: calc(12 * var(--px));
+  color: var(--color-blue);
+  background: var(--color-surface-lo);
+  padding: calc(1 * var(--px)) calc(5 * var(--px));
+  border-radius: calc(3 * var(--px));
+}
+
+/* Tables — small, dense, scrollable horizontally on narrow widths so
+   wide tag/criterion tables don't blow out the bubble. */
+.ai-msg-prose table {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  margin: calc(8 * var(--px)) 0;
+  border-collapse: collapse;
+  font-size: calc(12.5 * var(--px));
+  line-height: 1.4;
+}
+.ai-msg-prose th,
+.ai-msg-prose td {
+  text-align: left;
+  padding: calc(5 * var(--px)) calc(10 * var(--px));
+  border-bottom: 1px solid var(--color-divider);
+  vertical-align: top;
+}
+.ai-msg-prose th {
+  font-weight: 600;
+  color: var(--color-text);
+  border-bottom-color: var(--color-text-muted);
+}
+.ai-msg-prose td {
+  color: var(--color-text-muted);
+}
+.ai-msg-prose tr:last-child td { border-bottom: 0; }
+
 /* Structured-recommendations container, sibling of the prose bubble.
    Negative side margins cancel `.ai-thread`'s 20px padding so blocks
    span the full screen width — identical to Discovery's layout. The
