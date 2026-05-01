@@ -90,8 +90,13 @@ services:
       # Mount music library as read-only
       # Windows path: E:\Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro
-      # Claude Code auth (OAuth tokens) — mounted to non-root user home
-      - ${HOME}/.claude/.credentials.json:/home/claudeuser/.claude/.credentials.json:ro
+      # Claude Code auth (OAuth tokens) — mounted to non-root user home.
+      # USERPROFILE is set by Windows shells (cmd / PowerShell), HOME by
+      # Unix shells. The bare ${HOME} form silently degraded on Win
+      # PowerShell to /.claude/... and Docker quietly mounted an empty
+      # directory in place of the missing file, so Claude Code started
+      # without credentials and returned "Claude Code error".
+      - ${USERPROFILE:-${HOME}}/.claude/.credentials.json:/home/claudeuser/.claude/.credentials.json:ro
     ports:
       # Backend on 0.0.0.0 by design — LAN access (phone, tablet) is the
       # primary workflow. Internet exposure is blocked at the UPnP layer

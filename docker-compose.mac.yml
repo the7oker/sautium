@@ -93,8 +93,9 @@ services:
       # Mount music library as read-only
       # Mac path example: /Users/username/Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/Users/Shared/Music}:/music:ro
-      # Claude Code auth (OAuth tokens)
-      - ${HOME}/.claude/.credentials.json:/home/claudeuser/.claude/.credentials.json:ro
+      # Claude Code auth (OAuth tokens). USERPROFILE on Windows shells,
+      # HOME everywhere else — see the matching note in docker-compose.yml.
+      - ${USERPROFILE:-${HOME}}/.claude/.credentials.json:/home/claudeuser/.claude/.credentials.json:ro
     ports:
       # Backend on 0.0.0.0 by design — LAN access (phone, tablet) is the
       # primary workflow. Internet exposure is blocked at the UPnP layer
