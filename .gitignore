@@ -74,6 +74,7 @@ htmlcov/
 .mcp.json
 backend/mcp-windows.json
 backend/mcp-docker.json
+backend/mcp-wsl.json
 
 # Claude Code local settings (contain permissions with passwords)
 .claude/settings.local.json

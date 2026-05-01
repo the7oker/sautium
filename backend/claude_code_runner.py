@@ -17,6 +17,7 @@ Two flavours:
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -39,6 +40,111 @@ DEFAULT_MODEL = "sonnet"
 ALLOWED_MODELS = {"sonnet", "haiku"}
 TIMEOUT_SECONDS = 180
 CLAUDE_USER = "claudeuser"  # non-root user (--dangerously-skip-permissions requires non-root)
+
+# -- WSL fallback --------------------------------------------------------
+# When the launcher runs natively on Windows but `claude` is only
+# installed inside a WSL distro (very common: people put the CLI where
+# their Linux dev tools live, not in npm-on-Windows), we transparently
+# proxy every CLI invocation through `wsl claude ...`. Path arguments
+# get converted from D:\foo\bar to /mnt/d/foo/bar; the MCP config gets
+# regenerated with WSL-friendly paths and `host.docker.internal` for
+# host-side services. OAuth credentials are read from ~/.claude in the
+# WSL home, which is exactly where the user already authenticated.
+
+_VIA_WSL: Optional[bool] = None
+
+
+def _claude_via_wsl() -> bool:
+    """Return True iff Windows host has no native claude but WSL does.
+    Cached on first call — restart backend to re-detect."""
+    global _VIA_WSL
+    if _VIA_WSL is not None:
+        return _VIA_WSL
+    if sys.platform != "win32" or shutil.which("claude") is not None:
+        _VIA_WSL = False
+        return False
+    try:
+        r = subprocess.run(
+            ["wsl", "claude", "--version"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        _VIA_WSL = (r.returncode == 0 and "claude" in r.stdout.lower())
+    except Exception:
+        _VIA_WSL = False
+    if _VIA_WSL:
+        logger.info("Claude Code: using WSL fallback (no native CLI on PATH)")
+    return _VIA_WSL
+
+
+def _to_wsl_path(p: str) -> str:
+    """Convert Windows path to WSL form. D:\\foo\\bar -> /mnt/d/foo/bar.
+    Pass-through for paths that don't carry a drive letter."""
+    if len(p) >= 2 and p[1] == ":":
+        rest = p[2:].replace("\\", "/")
+        if not rest.startswith("/"):
+            rest = "/" + rest
+        return f"/mnt/{p[0].lower()}{rest}"
+    return p.replace("\\", "/")
+
+
+def _ensure_mcp_wsl_config() -> str:
+    """Translate mcp-windows.json into a WSL-compatible mcp-wsl.json
+    next to it. Returns the WSL form of the destination path (ready to
+    pass to `wsl claude --mcp-config`).
+
+    Transforms:
+      • argv items that look like Windows paths → WSL paths
+      • `command: python` → `python3` (WSL distros usually only ship
+        the latter; Anaconda installs etc. provide both)
+      • env values containing 'localhost' → 'host.docker.internal'
+        (WSL2 resolves this to the Windows host IP automatically)
+    """
+    src = Path(__file__).parent / "mcp-windows.json"
+    dst = Path(__file__).parent / "mcp-wsl.json"
+    cfg = json.loads(src.read_text(encoding="utf-8"))
+    for srv in (cfg.get("mcpServers") or {}).values():
+        srv["args"] = [
+            _to_wsl_path(a) if isinstance(a, str) and len(a) >= 2 and a[1] == ":" else a
+            for a in srv.get("args", [])
+        ]
+        if srv.get("command") == "python":
+            srv["command"] = "python3"
+        env = srv.get("env") or {}
+        for k, v in list(env.items()):
+            if isinstance(v, str):
+                env[k] = v.replace("localhost", "host.docker.internal")
+        srv["env"] = env
+    dst.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    return _to_wsl_path(str(dst))
+
+
+def _build_cmd_for_runtime(cmd: list[str]) -> list[str]:
+    """If we're proxying through WSL, prefix with `wsl` and rewrite
+    path-bearing argv items. Currently the only path flag we emit
+    is --mcp-config; if more are added in future, extend PATH_FLAGS."""
+    if not _claude_via_wsl():
+        return cmd
+    PATH_FLAGS = {"--mcp-config"}
+    out = ["wsl"]
+    for i, a in enumerate(cmd):
+        if i > 0 and cmd[i - 1] in PATH_FLAGS:
+            # Caller may have already given us a WSL path (when invoked
+            # via _resolve_mcp_config_path()); _to_wsl_path is idempotent
+            # for already-translated paths since they have no drive letter.
+            out.append(_to_wsl_path(a))
+        else:
+            out.append(a)
+    return out
+
+
+def _resolve_mcp_config_path() -> str:
+    """Return the path to pass with --mcp-config. Regenerates the WSL
+    variant on each call so the launcher's latest port/credentials
+    edits to mcp-windows.json are picked up."""
+    if _claude_via_wsl():
+        return _ensure_mcp_wsl_config()
+    return MCP_CONFIG_PATH
 
 
 def call_claude_code(
@@ -67,7 +173,7 @@ def call_claude_code(
         "claude",
         "-p", message,
         "--output-format", "json",
-        "--mcp-config", MCP_CONFIG_PATH,
+        "--mcp-config", _resolve_mcp_config_path(),
         "--model", use_model,
         "--system-prompt", system_prompt,
         "--dangerously-skip-permissions",
@@ -162,6 +268,10 @@ def call_claude_code(
 def _spawn_claude(cmd: list[str], stdout=subprocess.PIPE, stderr=subprocess.PIPE):
     """Common subprocess setup — non-root user on Linux/Docker, no
     flashing console window on Windows. Returns the Popen handle."""
+    # Wrap with `wsl ...` and rewrite path-bearing args if the CLI lives
+    # in a WSL distro instead of natively on Windows.
+    cmd = _build_cmd_for_runtime(cmd)
+
     env = os.environ.copy()
     # Force the CLI onto OAuth credentials (Claude subscription) rather
     # than the pay-as-you-go API key. When ANTHROPIC_API_KEY is set in
@@ -169,7 +279,10 @@ def _spawn_claude(cmd: list[str], stdout=subprocess.PIPE, stderr=subprocess.PIPE
     # — which on this deployment was exhausted. The Python Anthropic
     # SDK (used by the separate "anthropic_api" provider) keeps its
     # env access via os.environ; only the Claude Code subprocess gets
-    # the variable stripped.
+    # the variable stripped. On the WSL fallback path, env vars from
+    # this Windows process don't reach the Linux side unless WSLENV
+    # is set, so the CLI inside WSL just doesn't see ANTHROPIC_API_KEY
+    # and naturally falls back to the OAuth credentials in WSL home.
     env.pop("ANTHROPIC_API_KEY", None)
     kwargs: dict[str, Any] = {
         "stdout": stdout,
@@ -220,7 +333,7 @@ def call_claude_code_stream(
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",  # required for stream-json
-        "--mcp-config", MCP_CONFIG_PATH,
+        "--mcp-config", _resolve_mcp_config_path(),
         "--model", use_model,
         "--system-prompt", system_prompt,
         "--dangerously-skip-permissions",
