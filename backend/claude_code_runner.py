@@ -163,6 +163,14 @@ def _spawn_claude(cmd: list[str], stdout=subprocess.PIPE, stderr=subprocess.PIPE
     """Common subprocess setup — non-root user on Linux/Docker, no
     flashing console window on Windows. Returns the Popen handle."""
     env = os.environ.copy()
+    # Force the CLI onto OAuth credentials (Claude subscription) rather
+    # than the pay-as-you-go API key. When ANTHROPIC_API_KEY is set in
+    # the env, the CLI silently uses it and bills against that account
+    # — which on this deployment was exhausted. The Python Anthropic
+    # SDK (used by the separate "anthropic_api" provider) keeps its
+    # env access via os.environ; only the Claude Code subprocess gets
+    # the variable stripped.
+    env.pop("ANTHROPIC_API_KEY", None)
     kwargs: dict[str, Any] = {
         "stdout": stdout,
         "stderr": stderr,
