@@ -17,12 +17,13 @@ Two flavours:
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 if sys.platform != "win32":
     import pwd
@@ -51,30 +52,68 @@ CLAUDE_USER = "claudeuser"  # non-root user (--dangerously-skip-permissions requ
 # host-side services. OAuth credentials are read from ~/.claude in the
 # WSL home, which is exactly where the user already authenticated.
 
-_VIA_WSL: Optional[bool] = None
+# Standard locations where the user might have installed claude inside
+# their WSL distro. We probe in order and pick the binary with the
+# highest semver, since `wsl <cmd>` (non-login shell) and `wsl bash -lc`
+# both routinely miss user-local paths set in .bashrc — early-return
+# guards in default Ubuntu .bashrc make sourcing unreliable.
+_WSL_CLAUDE_CANDIDATES = (
+    "$HOME/.npm-global/bin/claude",  # npm install -g (without sudo)
+    "$HOME/.local/bin/claude",       # pipx / deno / similar user-local
+    "/usr/local/bin/claude",         # npm install -g (with sudo)
+    "/usr/bin/claude",               # distro / apt; often the oldest
+)
+
+_VIA_WSL_DETECTED = False
+_VIA_WSL_PATH: Optional[str] = None
 
 
-def _claude_via_wsl() -> bool:
-    """Return True iff Windows host has no native claude but WSL does.
-    Cached on first call — restart backend to re-detect."""
-    global _VIA_WSL
-    if _VIA_WSL is not None:
-        return _VIA_WSL
+def _detect_wsl_claude() -> Optional[str]:
+    """Probe each candidate path and return the absolute WSL path of
+    the newest working `claude` binary, or None if WSL has none."""
     if sys.platform != "win32" or shutil.which("claude") is not None:
-        _VIA_WSL = False
-        return False
-    try:
-        r = subprocess.run(
-            ["wsl", "claude", "--version"],
-            capture_output=True, text=True, timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+        return None
+    best_path: Optional[str] = None
+    best_ver: Tuple[int, int, int] = (0, 0, 0)
+    for cand in _WSL_CLAUDE_CANDIDATES:
+        try:
+            r = subprocess.run(
+                ["wsl", "--exec", "/bin/bash", "-c",
+                 f'p={cand}; [ -x "$p" ] && {{ echo "$p"; "$p" --version 2>/dev/null; }}'],
+                capture_output=True, text=True, timeout=8,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception:
+            continue
+        if r.returncode != 0 or not r.stdout.strip():
+            continue
+        lines = r.stdout.strip().splitlines()
+        if len(lines) < 2:
+            continue
+        path_line, ver_line = lines[0].strip(), lines[1].strip()
+        m = re.match(r"(\d+)\.(\d+)\.(\d+)", ver_line)
+        if not m:
+            continue
+        ver = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        if ver > best_ver:
+            best_ver = ver
+            best_path = path_line
+    if best_path:
+        logger.info(
+            f"Claude Code: WSL fallback using {best_path} "
+            f"(v{best_ver[0]}.{best_ver[1]}.{best_ver[2]})"
         )
-        _VIA_WSL = (r.returncode == 0 and "claude" in r.stdout.lower())
-    except Exception:
-        _VIA_WSL = False
-    if _VIA_WSL:
-        logger.info("Claude Code: using WSL fallback (no native CLI on PATH)")
-    return _VIA_WSL
+    return best_path
+
+
+def _claude_via_wsl() -> Optional[str]:
+    """Cached: return WSL-side path to claude if we should proxy via
+    `wsl --exec`, else None. Restart backend to re-detect."""
+    global _VIA_WSL_DETECTED, _VIA_WSL_PATH
+    if not _VIA_WSL_DETECTED:
+        _VIA_WSL_PATH = _detect_wsl_claude()
+        _VIA_WSL_DETECTED = True
+    return _VIA_WSL_PATH
 
 
 def _to_wsl_path(p: str) -> str:
@@ -120,18 +159,27 @@ def _ensure_mcp_wsl_config() -> str:
 
 
 def _build_cmd_for_runtime(cmd: list[str]) -> list[str]:
-    """If we're proxying through WSL, prefix with `wsl` and rewrite
-    path-bearing argv items. Currently the only path flag we emit
-    is --mcp-config; if more are added in future, extend PATH_FLAGS."""
-    if not _claude_via_wsl():
+    """If we're proxying through WSL, swap the `claude` placeholder for
+    the absolute path of the newest binary we found, prefix with
+    `wsl --exec` (so args reach the binary directly without bash
+    interpreting backticks / $vars / quotes inside system_prompt), and
+    rewrite path-bearing argv items.
+
+    `--exec` is critical: a plain `wsl claude --system-prompt "...SQL
+    examples with \\`backticks\\`..."` runs through the default shell,
+    which dutifully treats those backticks as command substitution
+    and shreds the prompt. With `--exec` the binary is exec'd directly,
+    no shell parsing happens, and the args pass through verbatim."""
+    wsl_path = _claude_via_wsl()
+    if not wsl_path:
         return cmd
     PATH_FLAGS = {"--mcp-config"}
-    out = ["wsl"]
-    for i, a in enumerate(cmd):
-        if i > 0 and cmd[i - 1] in PATH_FLAGS:
-            # Caller may have already given us a WSL path (when invoked
-            # via _resolve_mcp_config_path()); _to_wsl_path is idempotent
-            # for already-translated paths since they have no drive letter.
+    # Drop the leading literal "claude" — the caller assembled it as a
+    # placeholder, but `--exec` needs the resolved binary path.
+    args = cmd[1:] if cmd and cmd[0] == "claude" else cmd
+    out = ["wsl", "--exec", wsl_path]
+    for i, a in enumerate(args):
+        if i > 0 and args[i - 1] in PATH_FLAGS:
             out.append(_to_wsl_path(a))
         else:
             out.append(a)
