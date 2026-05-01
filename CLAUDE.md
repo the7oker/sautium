@@ -256,6 +256,27 @@ to the public internet**.
    would silently break phone access at the worst moment. The
    bind-address layer is enough.
 
+**Known consequence — internet sync to Docker requires a native
+launcher running on the same host.** Docker has no UPnP code and
+libtorrent is not installed inside the image (`backend.log` says
+"P2P enabled but libtorrent not installed — DHT disabled"), so on
+its own the Docker backend is invisible to the public internet —
+which is exactly what rule #2 wants. The native launcher is the
+component that owns UPnP mapping (`desktop/p2p/upnp_service.py`)
+and DHT announce; when it's running it maps its own random sync
+port for launcher↔launcher P2P, but **not** the Docker backend
+port 8800. Empirically verified 2026-05-01: a remote Sautium
+(e.g. Mac on a different LAN) cannot reach the Docker master
+directly. Cross-internet sync between distant nodes is therefore
+mediated through each side's native launcher (which acts as a P2P
+gateway in front of its local Docker, syncing first to its own
+embedded postgres, then serving that to remote peers). This is an
+accepted trade-off — exposing 8800 via UPnP would defeat the
+entire defence layer. The proper fix is the "P2P standalone
+service" refactor (split `p2p_manager` out of the launcher GUI
+process so Docker-only deployments can serve remote peers
+directly), tracked as future work.
+
 **Before any public release, multi-user deployment, remote-access
 feature** (Tailscale exposure, "headless mode", reverse proxy), or
 **any decision to defend against hostile LAN devices**, the rules
