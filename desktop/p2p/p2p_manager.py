@@ -112,9 +112,11 @@ class P2PManager:
             invite_code=invite_code,
             localhost_probe_ports=docker_ports,
         )
-        # UPnP: map sync port + any docker ports found on localhost
-        upnp_ports = [http_port] + docker_ports
-        self._upnp = UPnPService(ports=upnp_ports)
+        # UPnP: map ONLY the P2P sync port. Never include backend / docker
+        # ports here — the backend has no app-level auth (see CLAUDE.md
+        # "Security Posture"). docker_ports above is for LAN-discovery
+        # probing of localhost only.
+        self._upnp = UPnPService(ports=[http_port])
 
         # Initialize chat service if account exists
         if account_info:

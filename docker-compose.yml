@@ -10,7 +10,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./desktop/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     networks:
       - sautium-network
     healthcheck:
@@ -19,6 +19,8 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    # Loopback-only: postgres is never accessed from outside the host.
+    # Inter-container traffic uses the docker network, not this port.
 
   backend:
     build:
@@ -91,7 +93,12 @@ services:
       # Claude Code auth (OAuth tokens) — mounted to non-root user home
       - ${HOME}/.claude/.credentials.json:/home/claudeuser/.claude/.credentials.json:ro
     ports:
+      # Backend on 0.0.0.0 by design — LAN access (phone, tablet) is the
+      # primary workflow. Internet exposure is blocked at the UPnP layer
+      # (p2p_manager.py never maps this port). See CLAUDE.md
+      # "Security Posture" before changing this.
       - "8800:8000"
+      # P2P DHT MUST stay on 0.0.0.0 — that's the public peer surface.
       - "${P2P_DHT_PORT:-19001}:${P2P_DHT_PORT:-19001}/udp"
     networks:
       - sautium-network
@@ -135,7 +142,7 @@ services:
     volumes:
       - ./backend:/app
     ports:
-      - "8765:8765"  # HTTP API for playlist registration
+      - "127.0.0.1:8765:8765"  # HTTP API for playlist registration (loopback only)
     networks:
       - sautium-network
     depends_on:
