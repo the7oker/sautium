@@ -41,38 +41,38 @@ const chatInput = document.getElementById("chatInput");
 const chatSendBtn = document.getElementById("chatSendBtn");
 
 // -- SSE status stream -------------------------------------------------------
+//
+// `sseStream` (auth.js) is the EventSource replacement that signs the
+// request and reconnects with backoff internally. We pass callbacks
+// instead of attaching .onmessage / .onerror.
 
 let _sseSource = null;
-let _sseRetryDelay = 1000;
 
 function connectStatusSSE() {
   if (_sseSource) {
-    _sseSource.close();
+    _sseSource.abort();
   }
 
-  _sseSource = new EventSource("/api/player/status/stream");
-
-  _sseSource.onmessage = (event) => {
-    _sseRetryDelay = 1000; // reset backoff on success
-    let data;
-    try {
-      data = JSON.parse(event.data);
-    } catch (e) {
-      console.error("SSE parse error:", e);
-      return;
+  _sseSource = window.sseStream(
+    "/api/player/status/stream",
+    (event) => {
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch (e) {
+        console.error("SSE parse error:", e);
+        return;
+      }
+      handleStatusEvent(data);
+    },
+    () => {
+      // Each disconnect (transport-level) flips us to "disconnected"
+      // until the next message arrives. sseStream reconnects on its
+      // own — no manual setTimeout needed.
+      currentState = "disconnected";
+      updateNowPlaying({ state: "disconnected" });
     }
-    handleStatusEvent(data);
-  };
-
-  _sseSource.onerror = () => {
-    _sseSource.close();
-    _sseSource = null;
-    currentState = "disconnected";
-    updateNowPlaying({ state: "disconnected" });
-    // Reconnect with exponential backoff (max 10s)
-    setTimeout(connectStatusSSE, _sseRetryDelay);
-    _sseRetryDelay = Math.min(_sseRetryDelay * 1.5, 10000);
-  };
+  );
 }
 
 // Process a single SSE status payload. If the backend bumped
@@ -114,22 +114,20 @@ function handleStatusEvent(data) {
 function connectChatSSE() {
   if (_chatSSE) return; // already connected
 
-  _chatSSE = new EventSource("/api/p2p/chat/stream");
-
-  _chatSSE.onmessage = (event) => {
-    _chatSSERetryDelay = 1000;
-    loadFriends();
-    if (_selectedFriendId) {
-      loadP2PMessages(_selectedFriendId);
+  _chatSSE = window.sseStream(
+    "/api/p2p/chat/stream",
+    (event) => {
+      loadFriends();
+      if (_selectedFriendId) {
+        loadP2PMessages(_selectedFriendId);
+      }
+    },
+    () => {
+      // sseStream handles reconnect internally. No-op here, but keep
+      // the callback so a future hook can mark chat-disconnected
+      // state in the UI if needed.
     }
-  };
-
-  _chatSSE.onerror = () => {
-    _chatSSE.close();
-    _chatSSE = null;
-    setTimeout(connectChatSSE, _chatSSERetryDelay);
-    _chatSSERetryDelay = Math.min(_chatSSERetryDelay * 1.5, 10000);
-  };
+  );
 }
 
 async function pollStatus() {
@@ -1062,7 +1060,7 @@ function switchSection(name) {
 
   // Close chat SSE when leaving friends section (prevent memory leak)
   if (name !== "friends" && _chatSSE) {
-    _chatSSE.close();
+    _chatSSE.abort();
     _chatSSE = null;
   }
 
@@ -1106,7 +1104,6 @@ let _friendsLoaded = false;
 let _friends = [];
 let _selectedFriendId = null;
 let _chatSSE = null;
-let _chatSSERetryDelay = 1000;
 
 function switchFriendsTab(name) {
   document.querySelectorAll("[data-ftab]").forEach(btn => {
@@ -1999,6 +1996,6 @@ checkPendingAccepts();
 
 // Cleanup SSE connections on page unload
 window.addEventListener("beforeunload", () => {
-  if (_sseSource) _sseSource.close();
-  if (_chatSSE) _chatSSE.close();
+  if (_sseSource) _sseSource.abort();
+  if (_chatSSE) _chatSSE.abort();
 });

@@ -1,0 +1,168 @@
+"""
+HMAC request signing middleware for the Sautium FastAPI backend.
+
+Each privileged request must carry two headers:
+
+    X-Sautium-Ts:  unix seconds (int as string)
+    X-Sautium-Sig: hex(HMAC-SHA256(secret, canonical))
+
+where:
+
+    canonical = METHOD + "\n" + PATH_AND_QUERY + "\n" + TS + "\n" + sha256_hex(body)
+
+The shared secret lives in ``data/.api_secret`` (32 bytes, mode 0600);
+the file is created on first startup if missing. Native launcher
+clients and the JS frontend read the same file (frontend gets it
+inlined into the HTML at GET / so it never travels through a
+separate fetch).
+
+Whitelisted paths (no signature required):
+
+    /health              (Docker healthcheck)
+    /                    (HTML root — must be unauthenticated so the
+                          page can load and read the inlined secret)
+    /static/*            (CSS, JS, fonts)
+    /api/sync/*          (P2P sync from remote launchers — has its
+                          own Ed25519 auth in sync_server.py)
+    /sync/*              (legacy P2P sync)
+    /api/p2p/chat/wake   (loopback-only "ping" from sync_server)
+
+Replay window: ±60 seconds. A request older than 60s or 60s in the
+future is rejected even with a valid signature.
+
+The middleware reads request body once and stashes it in
+``request._body`` so downstream handlers see the same bytes.
+"""
+
+import hashlib
+import hmac
+import logging
+import os
+import secrets
+import time
+from pathlib import Path
+from typing import Optional
+
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+
+logger = logging.getLogger(__name__)
+
+REPLAY_WINDOW_SECONDS = 60
+
+WHITELIST_EXACT = {
+    "/health",
+    "/",
+    "/api/p2p/chat/wake",
+}
+
+WHITELIST_PREFIX = (
+    "/static/",
+    "/api/sync/",
+    "/sync/",
+)
+
+
+def _is_whitelisted(path: str) -> bool:
+    if path in WHITELIST_EXACT:
+        return True
+    return any(path.startswith(p) for p in WHITELIST_PREFIX)
+
+
+def ensure_secret(secret_path: Path) -> bytes:
+    """Return the secret bytes; generate the file if missing.
+
+    The file holds urlsafe base64 of 32 random bytes (43 chars). We
+    use the printable form so it can be inlined into HTML/headers
+    without escaping. The HMAC key is the printable string itself
+    (utf-8 bytes), not the decoded random bytes — keeps the JS side
+    simple (no base64 decode in WebCrypto importKey).
+    """
+    if secret_path.exists():
+        data = secret_path.read_text(encoding="ascii").strip()
+        if data:
+            # Re-apply readable mode every startup: Docker writes as
+            # root, native launcher needs to read it. See note below
+            # about why 0644 is acceptable here.
+            try:
+                os.chmod(secret_path, 0o644)
+            except OSError:
+                pass
+            return data.encode("ascii")
+
+    secret_path.parent.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_urlsafe(32)
+    secret_path.write_text(token, encoding="ascii")
+    # 0644 (not 0600): Docker container writes the file as root, the
+    # native launcher reads it as the host user. Cross-UID readability
+    # matters more here than guarding against other host users —
+    # hostile local users are explicitly out of scope (see CLAUDE.md
+    # "Security Posture", threat model).
+    try:
+        os.chmod(secret_path, 0o644)
+    except OSError:
+        pass  # Windows ACLs handled separately; not fatal here
+    logger.info(f"Generated new API secret at {secret_path}")
+    return token.encode("ascii")
+
+
+def sign(secret: bytes, method: str, path_and_query: str, ts: str, body: bytes) -> str:
+    """Compute the hex HMAC for a request. Used by sync_server's
+    loopback callbacks and by tests."""
+    body_hash = hashlib.sha256(body).hexdigest()
+    canonical = f"{method}\n{path_and_query}\n{ts}\n{body_hash}"
+    return hmac.new(secret, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+class HMACAuthMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, secret_path: Path):
+        super().__init__(app)
+        self._secret_path = secret_path
+        self._secret: Optional[bytes] = None
+
+    def _get_secret(self) -> bytes:
+        if self._secret is None:
+            self._secret = ensure_secret(self._secret_path)
+        return self._secret
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+
+        if _is_whitelisted(path):
+            return await call_next(request)
+
+        ts_raw = request.headers.get("x-sautium-ts")
+        sig = request.headers.get("x-sautium-sig")
+        if not ts_raw or not sig:
+            return JSONResponse(
+                {"detail": "missing signature headers"}, status_code=401
+            )
+
+        try:
+            ts_int = int(ts_raw)
+        except ValueError:
+            return JSONResponse({"detail": "bad timestamp"}, status_code=401)
+
+        skew = abs(time.time() - ts_int)
+        if skew > REPLAY_WINDOW_SECONDS:
+            return JSONResponse({"detail": "stale timestamp"}, status_code=401)
+
+        body = await request.body()
+        # Restore body for downstream handlers — Starlette consumes the
+        # underlying stream when we await request.body() here.
+        # Setting _body on the Request object makes subsequent body()
+        # calls hit the cached value.
+        request._body = body  # noqa: SLF001 — documented Starlette workaround
+
+        path_and_query = path
+        if request.url.query:
+            path_and_query = f"{path}?{request.url.query}"
+
+        expected = sign(
+            self._get_secret(), request.method, path_and_query, ts_raw, body
+        )
+        if not hmac.compare_digest(sig, expected):
+            return JSONResponse({"detail": "bad signature"}, status_code=401)
+
+        return await call_next(request)

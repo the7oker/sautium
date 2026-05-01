@@ -3,20 +3,73 @@ Minimal HTTP/HTTPS client for communicating with the Sautium backend.
 
 Uses only urllib (no extra dependencies) to fetch stats and health info.
 Supports HTTPS with self-signed certificates for P2P connections.
+
+Every request is signed with HMAC-SHA256 over
+``METHOD\\nPATH_AND_QUERY\\nTS\\nsha256_hex(body)`` using the secret
+shared with the backend (lives in ``backend/data/.api_secret``).
+Signature headers: ``X-Sautium-Ts``, ``X-Sautium-Sig``. Endpoints
+that the backend whitelists (e.g. ``/api/sync/*``) tolerate
+unsigned requests — see backend/auth_hmac.py.
 """
 
+import hashlib
+import hmac
 import json
 import logging
 import ssl
+import time
 import urllib.parse
 import urllib.request
 import urllib.error
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Secret file is written by the backend on first startup. We share the
+# same file because launcher and backend run on the same host (Docker
+# bind-mounts ./backend into the container, so /app/data/.api_secret
+# inside the container is the same inode as backend/data/.api_secret
+# on the host).
+_SECRET_PATH = Path(__file__).parent.parent / "backend" / "data" / ".api_secret"
+_cached_secret: Optional[bytes] = None
+
 # SSL context for self-signed P2P certificates
 _p2p_ssl_ctx: Optional[ssl.SSLContext] = None
+
+
+def _load_secret() -> Optional[bytes]:
+    """Read the HMAC secret, retrying briefly if the backend hasn't
+    written it yet (startup race window)."""
+    global _cached_secret
+    if _cached_secret is not None:
+        return _cached_secret
+    for _ in range(10):
+        try:
+            data = _SECRET_PATH.read_text(encoding="ascii").strip()
+            if data:
+                _cached_secret = data.encode("ascii")
+                return _cached_secret
+        except FileNotFoundError:
+            pass
+        time.sleep(0.5)
+    logger.warning(
+        f"API secret file not found at {_SECRET_PATH}; requests will be unsigned"
+    )
+    return None
+
+
+def _sign_headers(method: str, path_and_query: str, body: bytes) -> dict:
+    """Build X-Sautium-Ts/X-Sautium-Sig headers for the request, or
+    {} if the secret isn't available yet."""
+    secret = _load_secret()
+    if not secret:
+        return {}
+    ts = str(int(time.time()))
+    body_hash = hashlib.sha256(body or b"").hexdigest()
+    canonical = f"{method}\n{path_and_query}\n{ts}\n{body_hash}"
+    sig = hmac.new(secret, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    return {"X-Sautium-Ts": ts, "X-Sautium-Sig": sig}
 
 
 def _get_ssl_context() -> ssl.SSLContext:
@@ -48,8 +101,11 @@ class BackendAPIClient:
         """GET request returning parsed JSON, or None on failure."""
         url = f"{self.base_url}{path}"
         try:
+            req = urllib.request.Request(url, method="GET")
+            for k, v in _sign_headers("GET", path, b"").items():
+                req.add_header(k, v)
             resp = urllib.request.urlopen(
-                url, timeout=timeout, context=self._ssl_ctx
+                req, timeout=timeout, context=self._ssl_ctx
             )
             return json.loads(resp.read().decode("utf-8"))
         except Exception as e:
@@ -67,7 +123,10 @@ class BackendAPIClient:
                     headers={"Content-Type": "application/json"},
                 )
             else:
-                req = urllib.request.Request(url, method="POST", data=b"")
+                data = b""
+                req = urllib.request.Request(url, method="POST", data=data)
+            for k, v in _sign_headers("POST", path, data).items():
+                req.add_header(k, v)
             resp = urllib.request.urlopen(
                 req, timeout=timeout, context=self._ssl_ctx
             )

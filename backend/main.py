@@ -17,11 +17,16 @@ except ImportError:
     torch = None
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pathlib import Path as _Path
 
+from auth_hmac import HMACAuthMiddleware, ensure_secret
 from config import settings, get_settings, LOGGING_CONFIG
 from dht_service import DHTService, HAS_LIBTORRENT
+
+_API_SECRET_PATH = _Path(__file__).parent / "data" / ".api_secret"
+_INDEX_HTML_PATH = _Path(__file__).parent / "static" / "index.html"
 
 # Configure logging
 logging.config.dictConfig(LOGGING_CONFIG)
@@ -46,6 +51,12 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler for startup and shutdown events."""
     # Startup
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
+
+    # Materialize the API secret on disk so launcher / sync_server can
+    # read the same value. ensure_secret() is also called by the
+    # middleware on first request, but doing it here surfaces filesystem
+    # errors at startup rather than on first 401.
+    ensure_secret(_API_SECRET_PATH)
 
     # Validate configuration
     missing_settings = settings.validate_required_settings()
@@ -232,6 +243,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# HMAC signature check on every privileged request. Whitelist for
+# /health, /, /static/*, /api/sync/*, /sync/*, /api/p2p/chat/wake
+# is hardcoded inside the middleware. See backend/auth_hmac.py.
+app.add_middleware(HMACAuthMiddleware, secret_path=_API_SECRET_PATH)
+
 # Enable gzip compression for sync API responses
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
@@ -267,9 +283,25 @@ def _get_enriched_artist_uuids() -> list[str]:
 
 
 @app.get("/")
-async def root():
-    """Redirect to Web UI."""
-    return RedirectResponse(url="/static/index.html")
+async def root() -> HTMLResponse:
+    """Serve the Web UI shell with the HMAC secret inlined.
+
+    The frontend reads ``window.__SAUTIUM_SECRET`` to sign every
+    request. Inlining it into HTML at the same origin keeps the
+    secret unreachable from cross-origin scripts (browsers refuse to
+    expose response bodies cross-origin without explicit CORS), and
+    avoids a separate auth-less endpoint.
+    """
+    secret = ensure_secret(_API_SECRET_PATH).decode("ascii")
+    html = _INDEX_HTML_PATH.read_text(encoding="utf-8")
+    inject = f'<script>window.__SAUTIUM_SECRET="{secret}";</script>'
+    if "</head>" in html:
+        html = html.replace("</head>", f"  {inject}\n</head>", 1)
+    else:
+        html = inject + html
+    return HTMLResponse(
+        content=html, headers={"Cache-Control": "no-store"}
+    )
 
 
 @app.get("/health")
