@@ -19,7 +19,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./desktop/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql
     ports:
-      - "127.0.0.1:5432:5432"
+      - "5432:5432"
     networks:
       - sautium-network
     healthcheck:
@@ -96,12 +96,7 @@ services:
       # Claude Code auth (OAuth tokens)
       - ${HOME}/.claude/.credentials.json:/home/claudeuser/.claude/.credentials.json:ro
     ports:
-      # Backend on 0.0.0.0 by design — LAN access (phone, tablet) is the
-      # primary workflow. Internet exposure is blocked at the UPnP layer
-      # (p2p_manager.py never maps this port). See CLAUDE.md
-      # "Security Posture" before changing this.
       - "8800:8000"
-      # P2P DHT MUST stay on 0.0.0.0 — that's the public peer surface.
       - "${P2P_DHT_PORT:-19001}:${P2P_DHT_PORT:-19001}/udp"
     networks:
       - sautium-network
@@ -139,7 +134,7 @@ services:
     volumes:
       - ./backend:/app
     ports:
-      - "127.0.0.1:8765:8765"
+      - "8765:8765"
     networks:
       - sautium-network
     depends_on:
