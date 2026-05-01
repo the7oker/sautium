@@ -751,7 +751,7 @@ class SyncClient:
                           AND LENGTH(ab.content) > 200
                     )
                     UPDATE artists a
-                    SET gender = CASE
+                    SET gender = (CASE
                         WHEN pa.female_score >= 2 AND pa.female_score > pa.male_score * 2
                              AND (pa.male_score = 0 OR (pa.female_score - pa.male_score) >= 4)
                             THEN 'female'
@@ -762,7 +762,7 @@ class SyncClient:
                              AND pa.group_score >= 3
                             THEN 'mixed'
                         ELSE 'unknown'
-                    END,
+                    END)::artist_gender,
                     updated_at = NOW()
                     FROM pronoun_analysis pa
                     WHERE a.id = pa.artist_id""",
@@ -820,11 +820,11 @@ class SyncClient:
                           AND LENGTH(ab.content) > 200
                     )
                     UPDATE artists a
-                    SET is_vocalist = CASE
+                    SET is_vocalist = (CASE
                         WHEN va.vocal_hits >= 1 THEN 'vocal'
                         WHEN va.instr_hits >= 1 THEN 'instrumental'
                         ELSE 'unknown'
-                    END,
+                    END)::artist_vocalist,
                     updated_at = NOW()
                     FROM vocal_analysis va
                     WHERE a.id = va.artist_id""",
