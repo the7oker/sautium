@@ -42,6 +42,12 @@ class LauncherApp(ctk.CTk):
         self.service_manager = ServiceManager(self.config)
         self.api_client = BackendAPIClient()
         self.p2p_manager = None
+        # Set while _start_p2p_if_enabled's background thread is between
+        # "thread launched" and "self.p2p_manager assigned". Prevents a
+        # second _on_services_ready call (from a Scan-driven backend
+        # restart) from launching a parallel P2PManager that races on the
+        # same listen port.
+        self._p2p_starting = False
         self.tray = None
         self._update_thread = None
         self._stats_timer = None
@@ -299,16 +305,17 @@ class LauncherApp(ctk.CTk):
         # Silently generate node identity if not present
         self._ensure_node_identity()
 
-        # Stop previous P2P manager if running (e.g., after restart)
-        if self.p2p_manager:
-            try:
-                self.p2p_manager.stop()
-            except Exception as e:
-                logger.debug(f"P2P stop (pre-restart): {e}")
-            self.p2p_manager = None
-
-        # Start P2P services
-        self._start_p2p_if_enabled()
+        # Start P2P services only if not already running. _on_services_ready
+        # is also called from the Scan flow's `restart_backend_and_tracker`,
+        # but P2P is independent of the backend process — its only DB-side
+        # dependency (postgres password / port) doesn't change on a backend
+        # restart, so there's nothing to rebuild. Re-running stop+start here
+        # used to race with the still-mounting first P2PManager (its
+        # background thread hadn't yet assigned self.p2p_manager) and bound
+        # two managers to the same port. Update path explicitly nulls
+        # p2p_manager itself before calling _on_services_ready.
+        if self.p2p_manager is None and not self._p2p_starting:
+            self._start_p2p_if_enabled()
 
         # Auto-trigger Last.fm auth if pending from wizard
         self._check_lastfm_pending_auth()
@@ -469,6 +476,10 @@ class LauncherApp(ctk.CTk):
         When p2p.enabled=False, DHT still starts in discovery-only mode
         so "Sync Library" can find peers automatically.
         """
+        if self._p2p_starting or self.p2p_manager is not None:
+            return
+        self._p2p_starting = True
+
         def _start():
             try:
                 def progress(msg):
@@ -508,6 +519,8 @@ class LauncherApp(ctk.CTk):
                 # Enable Sync anyway — it will show a clear error
                 self.after(0, lambda: self._btn_sync.configure(
                     state="normal"))
+            finally:
+                self._p2p_starting = False
 
         threading.Thread(target=_start, daemon=True).start()
 
