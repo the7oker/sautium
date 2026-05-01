@@ -41,6 +41,9 @@ data/postgres/*
 data/cache/*
 !data/cache/.gitkeep
 
+# HMAC API secret — generated per-instance at backend startup
+backend/data/
+
 # Logs
 *.log
 logs/
