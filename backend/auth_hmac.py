@@ -22,6 +22,8 @@ Whitelisted paths (no signature required):
     /                    (HTML root — must be unauthenticated so the
                           page can load and read the inlined secret)
     /static/*            (CSS, JS, fonts)
+    /api/covers/*        (album cover art — loaded via <img src>,
+                          which cannot attach custom headers)
     /api/sync/*          (P2P sync from remote launchers — has its
                           own Ed25519 auth in sync_server.py)
     /sync/*              (legacy P2P sync)
@@ -59,6 +61,7 @@ WHITELIST_EXACT = {
 
 WHITELIST_PREFIX = (
     "/static/",
+    "/api/covers/",
     "/api/sync/",
     "/sync/",
 )
