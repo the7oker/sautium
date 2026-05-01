@@ -173,6 +173,25 @@ class P2PManager:
             logger.error(f"P2P event loop error: {e}")
         finally:
             self._running = False
+            # Cancel any tasks still pending (defensive — _cleanup() should
+            # have got them all, but better than leaking on close).
+            try:
+                pending = [
+                    t for t in asyncio.all_tasks(self._loop)
+                    if not t.done()
+                ]
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    self._loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+            except Exception as e:
+                logger.debug(f"Pending task drain failed: {e}")
+            try:
+                self._loop.close()
+            except Exception as e:
+                logger.debug(f"Event loop close failed: {e}")
 
     async def _async_main(self, node_id: str, progress_cb: Callable = None):
         """Main async routine: start services, announce, wait."""
@@ -361,13 +380,16 @@ class P2PManager:
     async def _cleanup(self):
         """Clean shutdown of all services."""
         for task in (self._reannounce_task, self._pending_retry_task,
-                     self._resolve_friends_task, self._db_listen_task):
+                     self._resolve_friends_task, self._db_listen_task,
+                     self._pending_accepts_task, self._lan_discovery_task):
             if task:
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+                except Exception as e:
+                    logger.debug(f"Background task error during cleanup: {e}")
 
         if self._lan_discovery:
             await self._lan_discovery.stop()
@@ -379,94 +401,84 @@ class P2PManager:
             await self._sync_server.stop()
 
     def stop(self):
-        """Stop all P2P services."""
+        """Stop all P2P services.
+
+        Called from the launcher thread — must NOT touch the event loop
+        directly (`run_until_complete`, `close`, etc.). Anything async
+        is scheduled inside the loop thread via `run_coroutine_threadsafe`,
+        so `_async_main`'s `finally` block runs `_cleanup()` to completion
+        and the aiohttp socket is fully released before this returns.
+        """
         if not self._running and not self._loop:
             return
 
         logger.info("Stopping P2P manager...")
 
-        # Signal DHT to stop waiting (breaks _wait_for_dht_ready)
+        # Break out of DHT bootstrap wait (sync flag, safe from any thread)
         if self._dht_service:
             self._dht_service._running = False
 
-        # Signal the event loop to exit
+        # Signal _async_main to exit its wait loop. The loop thread itself
+        # awaits the event and runs `_cleanup()` in its `finally` block.
         if self._loop and not self._loop.is_closed():
-            if self._stop_event:
-                self._loop.call_soon_threadsafe(self._stop_event.set)
-            if self._chat_notify:
-                self._loop.call_soon_threadsafe(self._chat_notify.set)
+            async def _signal():
+                if self._stop_event:
+                    self._stop_event.set()
+                if self._chat_notify:
+                    self._chat_notify.set()
 
-        if self._thread:
-            self._thread.join(timeout=5)
-            if self._thread.is_alive():
-                logger.warning("P2P thread did not stop in 5s, "
-                               "forcing cleanup...")
-                # Force-close the loop to unblock everything
-                if self._loop and not self._loop.is_closed():
-                    self._loop.call_soon_threadsafe(self._loop.stop)
-                self._thread.join(timeout=5)
-
-        # Ensure sync server socket is released even after forced stop
-        if self._sync_server:
             try:
-                if self._sync_server._site:
-                    self._sync_server._site._server = None
-                if self._sync_server._runner:
-                    # Synchronously close the runner if loop is still open
-                    if self._loop and not self._loop.is_closed():
-                        self._loop.run_until_complete(
-                            self._sync_server._runner.cleanup()
-                        )
+                fut = asyncio.run_coroutine_threadsafe(_signal(), self._loop)
+                fut.result(timeout=2)
             except Exception as e:
-                logger.debug(f"Sync server force cleanup: {e}")
+                logger.warning(f"P2P stop signal failed: {e}")
 
-        # Cancel all remaining asyncio tasks to suppress
-        # "Task was destroyed but it is pending" warnings
-        if self._loop and not self._loop.is_closed():
-            try:
-                pending = asyncio.all_tasks(self._loop)
-                for task in pending:
-                    task.cancel()
-                if pending:
-                    self._loop.run_until_complete(
-                        asyncio.gather(*pending, return_exceptions=True)
-                    )
-            except Exception:
-                pass
-            self._loop.close()
+        # Wait for the event-loop thread to actually exit. _async_main runs
+        # `_cleanup()` (which awaits sync_server.stop / dht.stop / lan.stop)
+        # before returning, so by the time the thread is dead, all sockets
+        # are released.
+        if self._thread:
+            self._thread.join(timeout=15)
+            if self._thread.is_alive():
+                logger.error(
+                    "P2P loop thread did not exit within 15s — "
+                    "sync server socket may leak"
+                )
 
         self._running = False
         self._loop = None
         self._thread = None
         logger.info("P2P manager stopped")
 
+    # psycopg2.connect() is a sync C-call: invoking it directly from a
+    # coroutine blocks the event loop until the TCP/auth handshake returns
+    # (seconds, especially during a backend restart). While blocked, every
+    # `loop.call_soon_threadsafe(...)` from another thread is queued but
+    # never runs — `stop()` then times out and force-cleanup leaks the
+    # aiohttp socket. Always do the full connect+query+close inside the
+    # executor.
+
     async def _get_enriched_artists(self) -> list[str]:
         """Query local DB for enriched artist UUIDs."""
-        loop = asyncio.get_event_loop()
-        conn = psycopg2.connect(self.db_dsn)
-        conn.autocommit = True
-        try:
-            return await loop.run_in_executor(
-                None,
-                sync_queries.get_enriched_artist_uuids,
-                conn,
-            )
-        finally:
-            conn.close()
+        def _blocking() -> list[str]:
+            conn = psycopg2.connect(self.db_dsn)
+            conn.autocommit = True
+            try:
+                return sync_queries.get_enriched_artist_uuids(conn)
+            finally:
+                conn.close()
+        return await asyncio.get_event_loop().run_in_executor(None, _blocking)
 
     async def _get_unenriched_artists(self) -> list[str]:
         """Query local DB for artists needing enrichment."""
-        loop = asyncio.get_event_loop()
-        conn = psycopg2.connect(self.db_dsn)
-        conn.autocommit = True
-        try:
-            return await loop.run_in_executor(
-                None,
-                sync_queries.get_unenriched_artist_uuids,
-                conn,
-            )
-        finally:
-            conn.close()
+        def _blocking() -> list[str]:
+            conn = psycopg2.connect(self.db_dsn)
+            conn.autocommit = True
+            try:
+                return sync_queries.get_unenriched_artist_uuids(conn)
+            finally:
+                conn.close()
+        return await asyncio.get_event_loop().run_in_executor(None, _blocking)
 
     async def _get_tracks_for_artists(
         self, artist_uuids: list[str]
@@ -474,38 +486,36 @@ class P2PManager:
         """Get all track UUIDs for a list of artists (single query)."""
         if not artist_uuids:
             return []
-        loop = asyncio.get_event_loop()
-        conn = psycopg2.connect(self.db_dsn)
-        conn.autocommit = True
-        try:
-            def _query(c):
-                with c.cursor() as cur:
+
+        def _blocking() -> list[str]:
+            conn = psycopg2.connect(self.db_dsn)
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
                     cur.execute(
                         "SELECT DISTINCT track_id::text FROM track_artists "
                         "WHERE artist_id = ANY(%s::uuid[])",
                         [artist_uuids],
                     )
                     return [r[0] for r in cur.fetchall()]
-            return await loop.run_in_executor(None, _query, conn)
-        finally:
-            conn.close()
+            finally:
+                conn.close()
+        return await asyncio.get_event_loop().run_in_executor(None, _blocking)
 
     async def _get_track_uuids_for_artist(
         self, artist_uuid: str
     ) -> list[str]:
         """Get track UUIDs for a specific artist."""
-        loop = asyncio.get_event_loop()
-        conn = psycopg2.connect(self.db_dsn)
-        conn.autocommit = True
-        try:
-            return await loop.run_in_executor(
-                None,
-                sync_queries.get_track_uuids_for_artist,
-                conn,
-                artist_uuid,
-            )
-        finally:
-            conn.close()
+        def _blocking() -> list[str]:
+            conn = psycopg2.connect(self.db_dsn)
+            conn.autocommit = True
+            try:
+                return sync_queries.get_track_uuids_for_artist(
+                    conn, artist_uuid
+                )
+            finally:
+                conn.close()
+        return await asyncio.get_event_loop().run_in_executor(None, _blocking)
 
     # -------------------------------------------------------------------
     # P2P Sync (called from launcher thread)
