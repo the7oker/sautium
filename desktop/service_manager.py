@@ -144,7 +144,15 @@ class ServiceManager:
         return download_embedded_python(progress_cb)
 
     def _ensure_backend_deps(self, progress_cb: Optional[Callable] = None) -> bool:
-        """Install backend dependencies if missing."""
+        """Install backend dependencies if missing or out-of-date.
+
+        Skip-fast condition: marker file at <data_dir>/.backend_deps_hash holds
+        the SHA-256 of requirements.txt from the last successful install. If it
+        matches the current file, the venv is up to date and we return immediately.
+        Any change to requirements.txt (added/removed/version-bumped package)
+        invalidates the marker and forces a `pip install -r requirements.txt`,
+        which top-ups whatever is missing.
+        """
         # Ensure embedded Python 3.12 is available
         if not self._ensure_backend_python(progress_cb):
             return False
@@ -152,81 +160,80 @@ class ServiceManager:
         python = self._get_backend_python()
         logger.info(f"Backend Python for deps: {python}")
 
-        _cflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-
-        # Check if uvicorn already installed in backend Python
-        check = subprocess.run(
-            [python, "-c", "import uvicorn"],
-            capture_output=True, text=True, timeout=30,
-            creationflags=_cflags,
-        )
-        if check.returncode == 0:
-            logger.info("Backend dependencies already installed")
-            return True
-
         req_file = self._backend_dir / "requirements.txt"
         if not req_file.exists():
             logger.error(f"requirements.txt not found: {req_file}")
             return False
 
-        if progress_cb:
-            progress_cb("Installing backend dependencies (first run)...")
+        import hashlib
+        from desktop.config_manager import get_data_dir
+        req_hash = hashlib.sha256(req_file.read_bytes()).hexdigest()
+        marker = get_data_dir() / ".backend_deps_hash"
+        if marker.exists() and marker.read_text().strip() == req_hash:
+            logger.info("Backend dependencies already up to date")
+            return True
 
-        logger.info("Installing backend dependencies...")
-
-        # Install PyTorch (CUDA on Windows, CPU/MPS on macOS)
+        _cflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         is_macos = sys.platform == "darwin"
-        if is_macos:
-            if progress_cb:
-                progress_cb("Installing PyTorch (CPU/MPS)...")
-            torch_cmd = [
-                python, "-m", "pip", "install",
-                "torch", "torchvision", "torchaudio",
-                "--quiet",
-            ]
-        else:
-            if progress_cb:
-                progress_cb("Installing PyTorch with CUDA (may take a few minutes)...")
-            torch_cmd = [
-                python, "-m", "pip", "install",
-                "torch", "torchvision", "torchaudio",
-                "--index-url", "https://download.pytorch.org/whl/cu124",
-                "--quiet",
-            ]
 
-        torch_env = os.environ.copy()
-        torch_kwargs = {"capture_output": True, "text": True, "timeout": 600, "env": torch_env}
-        if sys.platform == "win32":
-            torch_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        torch_result = subprocess.run(torch_cmd, **torch_kwargs)
-        if torch_result.returncode != 0:
-            logger.warning(f"PyTorch install failed, falling back to default: {torch_result.stderr[:200]}")
+        # Install PyTorch only if absent — once it's in the venv, we leave it
+        # alone (re-installing on every requirements.txt edit would cost minutes
+        # and re-download multi-GB wheels for no reason).
+        torch_check = subprocess.run(
+            [python, "-c", "import torch"],
+            capture_output=True, text=True, timeout=30,
+            creationflags=_cflags,
+        )
+        if torch_check.returncode != 0:
             if progress_cb:
-                progress_cb("PyTorch install failed, using CPU fallback...")
+                progress_cb("Installing PyTorch (first run, may take a few minutes)...")
+            logger.info("PyTorch not found, installing...")
 
-        # Verify torch
-        if is_macos:
-            verify_code = (
-                "import torch; mps = torch.backends.mps.is_available() if hasattr(torch.backends, 'mps') else False; "
-                "print(f'torch {torch.__version__}, MPS: {mps}')"
-            )
-        else:
-            verify_code = (
-                "import torch; print(f'torch {torch.__version__}, CUDA: {torch.cuda.is_available()}',"
-                "f'GPU: {torch.cuda.get_device_name(0)}' if torch.cuda.is_available() else '')"
-            )
-        verify_cmd = [python, "-c", verify_code]
-        verify_kwargs = {"capture_output": True, "text": True, "timeout": 30}
-        if sys.platform == "win32":
-            verify_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        verify = subprocess.run(verify_cmd, **verify_kwargs)
-        torch_info = verify.stdout.strip() if verify.returncode == 0 else "torch not available"
-        logger.info(f"PyTorch status: {torch_info}")
+            if is_macos:
+                torch_cmd = [
+                    python, "-m", "pip", "install",
+                    "torch", "torchvision", "torchaudio",
+                    "--quiet",
+                ]
+            else:
+                torch_cmd = [
+                    python, "-m", "pip", "install",
+                    "torch", "torchvision", "torchaudio",
+                    "--index-url", "https://download.pytorch.org/whl/cu124",
+                    "--quiet",
+                ]
+
+            torch_kwargs = {"capture_output": True, "text": True, "timeout": 600, "env": os.environ.copy()}
+            if sys.platform == "win32":
+                torch_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            torch_result = subprocess.run(torch_cmd, **torch_kwargs)
+            if torch_result.returncode != 0:
+                logger.warning(f"PyTorch install failed: {torch_result.stderr[:200]}")
+                if progress_cb:
+                    progress_cb("PyTorch install failed, continuing anyway...")
+
+            if is_macos:
+                verify_code = (
+                    "import torch; mps = torch.backends.mps.is_available() if hasattr(torch.backends, 'mps') else False; "
+                    "print(f'torch {torch.__version__}, MPS: {mps}')"
+                )
+            else:
+                verify_code = (
+                    "import torch; print(f'torch {torch.__version__}, CUDA: {torch.cuda.is_available()}',"
+                    "f'GPU: {torch.cuda.get_device_name(0)}' if torch.cuda.is_available() else '')"
+                )
+            verify_kwargs = {"capture_output": True, "text": True, "timeout": 30}
+            if sys.platform == "win32":
+                verify_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            verify = subprocess.run([python, "-c", verify_code], **verify_kwargs)
+            torch_info = verify.stdout.strip() if verify.returncode == 0 else "torch not available"
+            logger.info(f"PyTorch status: {torch_info}")
+            if progress_cb:
+                progress_cb(f"PyTorch: {torch_info}")
+
         if progress_cb:
-            progress_cb(f"PyTorch: {torch_info}")
-
-        if progress_cb:
-            progress_cb("Installing backend dependencies...")
+            progress_cb("Installing/updating backend dependencies...")
+        logger.info("Installing backend dependencies from requirements.txt")
 
         cmd = [
             python, "-m", "pip", "install",
@@ -265,6 +272,7 @@ class ServiceManager:
                 progress_cb(f"Failed to install dependencies: {result.stderr[:200]}")
             return False
 
+        marker.write_text(req_hash)
         logger.info("Backend dependencies installed")
         return True
 
