@@ -43,7 +43,7 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "supervisor")
 DB_NAME = os.getenv("DB_NAME", "music_ai")
 HQPLAYER_HOST = os.getenv("HQPLAYER_HOST", "172.26.80.1")
 HQPLAYER_PORT = int(os.getenv("HQPLAYER_PORT", "4321"))
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+BACKEND_URL = os.getenv("BACKEND_URL", "https://localhost:8000")
 TRACKER_URL = os.getenv("TRACKER_URL", "http://localhost:8765")  # playback tracker daemon
 
 # -- MCP Server ---------------------------------------------------------------
@@ -479,7 +479,7 @@ def search_semantic(query: str, limit: int = 15) -> str:
         limit: Maximum number of results (default 15)
     """
     try:
-        with httpx.Client(base_url=BACKEND_URL, timeout=30.0) as client:
+        with httpx.Client(base_url=BACKEND_URL, timeout=30.0, verify=False) as client:
             resp = client.post(
                 "/search/text",
                 params={"query": query, "limit": limit},
@@ -510,7 +510,7 @@ def search_lyrics(query: str, limit: int = 15) -> str:
         limit: Maximum number of results (default 15)
     """
     try:
-        with httpx.Client(base_url=BACKEND_URL, timeout=30.0) as client:
+        with httpx.Client(base_url=BACKEND_URL, timeout=30.0, verify=False) as client:
             resp = client.post(
                 "/search/lyrics",
                 params={"query": query, "limit": limit},
@@ -538,7 +538,7 @@ def search_artists(query: str, limit: int = 10) -> str:
         limit: Maximum number of artists (default 10)
     """
     try:
-        with httpx.Client(base_url=BACKEND_URL, timeout=30.0) as client:
+        with httpx.Client(base_url=BACKEND_URL, timeout=30.0, verify=False) as client:
             resp = client.get("/search/artists", params={"query": query, "limit": limit})
             resp.raise_for_status()
             data = resp.json()
@@ -575,7 +575,7 @@ def search_albums(query: str, limit: int = 10) -> str:
         limit: Maximum number of albums (default 10)
     """
     try:
-        with httpx.Client(base_url=BACKEND_URL, timeout=30.0) as client:
+        with httpx.Client(base_url=BACKEND_URL, timeout=30.0, verify=False) as client:
             resp = client.get("/search/albums", params={"query": query, "limit": limit})
             resp.raise_for_status()
             data = resp.json()
@@ -605,7 +605,7 @@ def search_genres(query: str, limit: int = 10) -> str:
         limit: Maximum number of genres (default 10)
     """
     try:
-        with httpx.Client(base_url=BACKEND_URL, timeout=30.0) as client:
+        with httpx.Client(base_url=BACKEND_URL, timeout=30.0, verify=False) as client:
             resp = client.get("/search/genres", params={"query": query, "limit": limit})
             resp.raise_for_status()
             data = resp.json()

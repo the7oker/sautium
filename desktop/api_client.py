@@ -86,7 +86,7 @@ def _get_ssl_context() -> ssl.SSLContext:
 class BackendAPIClient:
     """HTTP/HTTPS client for the backend API."""
 
-    def __init__(self, base_url: str = "http://127.0.0.1:8000"):
+    def __init__(self, base_url: str = "https://127.0.0.1:8000"):
         self.base_url = base_url.rstrip("/")
         self._ssl_ctx = (
             _get_ssl_context() if self.base_url.startswith("https://") else None
@@ -94,8 +94,8 @@ class BackendAPIClient:
 
     def set_port(self, port: int):
         """Update the backend port."""
-        self.base_url = f"http://127.0.0.1:{port}"
-        self._ssl_ctx = None
+        self.base_url = f"https://127.0.0.1:{port}"
+        self._ssl_ctx = _get_ssl_context()
 
     def _get_json(self, path: str, timeout: int = 5) -> Optional[dict]:
         """GET request returning parsed JSON, or None on failure."""

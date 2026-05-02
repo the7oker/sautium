@@ -1154,10 +1154,16 @@ async def no_cache_static(request, call_next):
 
 if __name__ == "__main__":
     import uvicorn
+
+    from tls_gen import ensure_cert
+
+    cert_path, key_path = ensure_cert(_Path(__file__).parent / "data" / "tls")
     uvicorn.run(
         "main:app",
         host="127.0.0.1",
         port=8000,
         reload=True,
-        log_config=LOGGING_CONFIG
+        log_config=LOGGING_CONFIG,
+        ssl_keyfile=str(key_path),
+        ssl_certfile=str(cert_path),
     )

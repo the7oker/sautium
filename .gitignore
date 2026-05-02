@@ -40,6 +40,8 @@ data/postgres/*
 !data/postgres/.gitkeep
 data/cache/*
 !data/cache/.gitkeep
+# TLS cert + key — generated per-host on first backend start
+data/tls/
 
 # HMAC API secret — generated per-instance at backend startup
 backend/data/

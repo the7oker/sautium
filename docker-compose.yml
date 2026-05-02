@@ -79,6 +79,16 @@ services:
       OPENAI_COMPAT_MODEL: ${OPENAI_COMPAT_MODEL:-}
       OPENAI_COMPAT_NAME: ${OPENAI_COMPAT_NAME:-}
       DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-claude_code}
+
+      # TLS — backend serves HTTPS only. Browsers block crypto.subtle (used
+      # for HMAC request signing) outside secure contexts, so HTTP from a
+      # phone over LAN does not work; HTTPS does.
+      # SAUTIUM_HOST_IPS lists extra private IPs to add to the cert SAN
+      # (the host's LAN address — Docker can't auto-detect this from inside
+      # the container). Set in .env, e.g.: SAUTIUM_HOST_IPS=192.168.1.188
+      SAUTIUM_HOST_IPS: ${SAUTIUM_HOST_IPS:-}
+      # Intra-container backend self-calls (Claude Code tools, MCP server).
+      BACKEND_URL: https://localhost:8000
     extra_hosts:
       # Allow container to access Windows host services (like HQPlayer)
       - "host.docker.internal:host-gateway"
@@ -87,6 +97,9 @@ services:
       - ./mcp:/app/mcp
       - ./data/cache:/root/.cache
       - ./data/generated_eq:/app/generated_eq
+      # Self-signed TLS cert (generated on first start by entrypoint.py).
+      # Persists across rebuilds so the phone doesn't need to re-accept it.
+      - ./data/tls:/app/data/tls
       # Mount music library as read-only
       # Windows path: E:\Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro
@@ -118,7 +131,7 @@ services:
               count: 1
               capabilities: [gpu]
     restart: unless-stopped
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    command: python entrypoint.py
 
   playback-tracker:
     build:

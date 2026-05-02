@@ -308,11 +308,37 @@ class ServiceManager:
 
         backend_python = self._get_backend_python()
         logger.info(f"Backend Python: {backend_python}")
+
+        # Generate (or reuse) self-signed TLS cert. Browsers gate
+        # crypto.subtle behind a secure context, so HMAC request signing
+        # in the Web UI doesn't work over plain HTTP from a phone on LAN.
+        # Backend listens HTTPS-only.
+        from desktop.config_manager import get_data_dir
+        tls_dir = get_data_dir() / "tls"
+        tls_dir.mkdir(parents=True, exist_ok=True)
+        cert_path = tls_dir / "cert.pem"
+        key_path = tls_dir / "key.pem"
+        try:
+            subprocess.run(
+                [backend_python, str(self._backend_dir / "tls_gen.py"),
+                 "--data-dir", str(tls_dir)],
+                cwd=str(self._backend_dir),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            logger.info(f"TLS cert ready at {cert_path}")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"TLS cert generation failed: {e.stderr or e.stdout}")
+            return False
+
         cmd = [
             backend_python, "-m", "uvicorn",
             "main:app",
             "--host", "0.0.0.0",
             "--port", str(port),
+            "--ssl-keyfile", str(key_path),
+            "--ssl-certfile", str(cert_path),
             "--timeout-graceful-shutdown", "5",
         ]
 
@@ -359,10 +385,15 @@ class ServiceManager:
 
     def _wait_for_backend(self, port: int, timeout: int = 120) -> bool:
         """Wait for the backend /health endpoint to respond."""
+        import ssl
         import urllib.request
         import urllib.error
 
-        url = f"http://127.0.0.1:{port}/health"
+        # Backend serves HTTPS with a self-signed cert (see start_backend).
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+        url = f"https://127.0.0.1:{port}/health"
         for i in range(timeout):
             # Check if process died
             if self.backend_proc and self.backend_proc.poll() is not None:
@@ -370,7 +401,7 @@ class ServiceManager:
                 logger.error(f"Backend exited early: {err_msg}")
                 return False
             try:
-                req = urllib.request.urlopen(url, timeout=5)
+                req = urllib.request.urlopen(url, timeout=5, context=ssl_ctx)
                 if req.status == 200:
                     logger.info("Backend is ready")
                     return True

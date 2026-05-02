@@ -265,8 +265,8 @@ def _h_search_similar(track_id: int, limit: int = 15) -> str:
 
 def _h_search_semantic(query: str, limit: int = 15) -> str:
     try:
-        backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
-        with httpx.Client(base_url=backend_url, timeout=30.0) as client:
+        backend_url = os.getenv("BACKEND_URL", "https://localhost:8000")
+        with httpx.Client(base_url=backend_url, timeout=30.0, verify=False) as client:
             resp = client.post("/search/text", params={"query": query, "limit": limit})
             resp.raise_for_status()
             data = resp.json()
@@ -281,8 +281,8 @@ def _h_search_semantic(query: str, limit: int = 15) -> str:
 def _h_search_lyrics(query: str, limit: int = 15) -> str:
     try:
         import os
-        backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
-        with httpx.Client(base_url=backend_url, timeout=30.0) as client:
+        backend_url = os.getenv("BACKEND_URL", "https://localhost:8000")
+        with httpx.Client(base_url=backend_url, timeout=30.0, verify=False) as client:
             resp = client.get("/search/lyrics", params={"query": query, "limit": limit})
             resp.raise_for_status()
             data = resp.json()
@@ -296,8 +296,8 @@ def _h_search_lyrics(query: str, limit: int = 15) -> str:
 
 def _h_search_artists(query: str, limit: int = 10) -> str:
     try:
-        backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
-        with httpx.Client(base_url=backend_url, timeout=30.0) as client:
+        backend_url = os.getenv("BACKEND_URL", "https://localhost:8000")
+        with httpx.Client(base_url=backend_url, timeout=30.0, verify=False) as client:
             resp = client.get("/search/artists", params={"query": query, "limit": limit})
             resp.raise_for_status()
             data = resp.json()
@@ -318,8 +318,8 @@ def _h_search_artists(query: str, limit: int = 10) -> str:
 
 def _h_search_albums(query: str, limit: int = 10) -> str:
     try:
-        backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
-        with httpx.Client(base_url=backend_url, timeout=30.0) as client:
+        backend_url = os.getenv("BACKEND_URL", "https://localhost:8000")
+        with httpx.Client(base_url=backend_url, timeout=30.0, verify=False) as client:
             resp = client.get("/search/albums", params={"query": query, "limit": limit})
             resp.raise_for_status()
             data = resp.json()
@@ -338,8 +338,8 @@ def _h_search_albums(query: str, limit: int = 10) -> str:
 
 def _h_search_genres(query: str, limit: int = 10) -> str:
     try:
-        backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
-        with httpx.Client(base_url=backend_url, timeout=30.0) as client:
+        backend_url = os.getenv("BACKEND_URL", "https://localhost:8000")
+        with httpx.Client(base_url=backend_url, timeout=30.0, verify=False) as client:
             resp = client.get("/search/genres", params={"query": query, "limit": limit})
             resp.raise_for_status()
             data = resp.json()

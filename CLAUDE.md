@@ -197,25 +197,39 @@ See:
 
 ## Security Posture (read before touching network/auth)
 
-The FastAPI backend on port 8800 has **zero application-level
-authentication** — no API key, no token, no `Depends(...)` guard on
-routes. This is an explicit, accepted trade-off. Any endpoint
-reachable over the network is fully open: AI chat (which spends
-Anthropic / OpenAI quota), `/embeddings/generate` and `/scan` (which
-monopolise the RTX 4090), `/search/*` and `/api/artists` etc. (full
-library data exfiltration), `/lastfm/auth/*` (OAuth state hijack),
-and so on. The defence layer is the network: backend is reachable on
-the LAN (so phones/tablets can use the Web UI), but **never exposed
-to the public internet**.
+**Current state (as of 2026-05-02):** the backend on port 8800 has
+**HMAC-SHA256 request signing** (`backend/auth_hmac.py`) and serves
+**HTTPS only** with a self-signed cert (`backend/tls_gen.py`). The
+secret is inlined into the HTML at `/` as `window.__SAUTIUM_SECRET`
+and `backend/static/auth.js` monkey-patches `window.fetch` to sign
+every request as `hex(HMAC-SHA256(secret, METHOD\nPATH\nTS\nsha256(body)))`
+with a 60s replay window. `/`, `/static/*`, `/health`, OAuth callback
+endpoints, and a few other public routes are whitelisted (see
+`WHITELIST_EXACT`/`WHITELIST_PREFIX` in `auth_hmac.py`). HTTPS is
+required because browsers gate `crypto.subtle` (the API auth.js
+needs to compute HMAC) behind secure contexts — over plain HTTP from
+a phone on LAN nothing can sign and the Web UI dies silently with
+401s. **HTTPS is the only listening protocol** — uvicorn binds with
+`--ssl-keyfile`/`--ssl-certfile`, no HTTP fallback.
+
+The defence layer is still the network: backend is reachable on the
+LAN (so phones/tablets can use the Web UI), but **never exposed to
+the public internet**. HMAC raises the bar for hostile LAN devices
+but is not a substitute for network isolation — the secret leaks to
+anyone who can fetch `/` (every same-origin browser load) and the
+self-signed cert protects only transport, not the secret-in-HTML
+distribution model.
 
 **The threat model we defend against right now:**
 
 - ✅ Random internet scanners / "young hackers" probing the public
   IP — blocked because nothing forwards 8800 outside the router.
-- ❌ Other devices on the same LAN — *not* defended. A compromised
-  IoT device, a guest's phone, or an open Wi-Fi network would have
-  full access. Accepted: this is a single-user home appliance, a
-  hostile LAN device is out of scope until HMAC lands.
+- ⚠️ Other devices on the same LAN — defended by HMAC, but the
+  shared secret is served inline in the HTML at `/` to anyone who
+  can `GET /`. So a hostile LAN device that can read the page can
+  also sign requests. Accepted: this is a single-user home
+  appliance, the bar is "no random scanner", not "no targeted LAN
+  attacker".
 - ❌ Malicious browser extensions / processes on the host machine —
   also out of scope.
 
@@ -245,16 +259,28 @@ to the public internet**.
    loopback checks silently allow everything. If app-level auth
    ever lands, do it with a shared secret (HMAC or signed token),
    not source-IP filtering.
-5. **Web UI lives at the same origin as the API.** Any future auth
-   scheme must survive browser CSRF (a malicious site doing
-   `fetch("http://<host>:8800/...")`). `SameSite=Strict` cookies
-   or `Authorization` headers with secrets the foreign origin
-   cannot read are the two known-good answers.
+5. **Web UI lives at the same origin as the API.** CSRF is blocked
+   today by HMAC: a foreign origin cannot read `window.__SAUTIUM_SECRET`
+   (cross-origin HTML reads are forbidden by the browser), so it
+   cannot forge `X-Sautium-Sig`. Don't replace HMAC with cookies
+   without thinking through `SameSite=Strict` and the inline-secret
+   distribution model.
 6. **Don't add Windows Firewall rules for 8800.** Windows mis-
    classifies networks as Public surprisingly often (Wi-Fi hand-off
    bugs, user clicks "Public" by mistake) — a profile-locked rule
    would silently break phone access at the worst moment. The
    bind-address layer is enough.
+7. **TLS cert SAN — only private IPs.** `backend/tls_gen.py`
+   filters auto-detected and explicit (`SAUTIUM_HOST_IPS` env)
+   addresses through `ipaddress.ip_address().is_private`. Never
+   add a public IP or DNS name to the SAN — a valid cert for a
+   public hostname would make accidental internet exposure feel
+   "safe" when it isn't (HMAC + LAN bind are still the actual
+   defence). Static SAN entries: `localhost`, `host.docker.internal`,
+   `127.0.0.1`, `::1`. Cert lives in `data/tls/` (Docker bind-mount)
+   or `<launcher data_dir>/tls/` (launcher mode); the two runtimes
+   are isolated and have separate certs — phone accepts one warning
+   per mode, then both stick.
 
 **Known consequence — internet sync to Docker requires a native
 launcher running on the same host.** Docker has no UPnP code and
@@ -277,15 +303,14 @@ service" refactor (split `p2p_manager` out of the launcher GUI
 process so Docker-only deployments can serve remote peers
 directly), tracked as future work.
 
-**Before any public release, multi-user deployment, remote-access
-feature** (Tailscale exposure, "headless mode", reverse proxy), or
-**any decision to defend against hostile LAN devices**, the rules
-above are no longer sufficient — application-level auth becomes
-mandatory. The discussed-but-not-yet-implemented design is
-HMAC-SHA256 over `METHOD\nPATH\nTS\nsha256(body)` with a 60s window,
-shared secret in `data/.api_secret` (0600). With HMAC in place the
-LAN-vs-loopback bind decision becomes irrelevant. Revisit this
-section then.
+**Before any public release, multi-user deployment, or remote-access
+feature** (Tailscale exposure, "headless mode", reverse proxy), the
+rules above are no longer sufficient. HMAC + HTTPS as currently
+deployed are LAN-only by design — the secret-in-HTML distribution
+model assumes a trusted origin, and the cert is self-signed. Public
+exposure needs: per-user credentials (not a shared inline secret), a
+real CA-signed cert (Let's Encrypt or similar), and CSRF-aware
+session handling. Revisit this section then.
 
 ---
 
