@@ -1,0 +1,159 @@
+# Compose variant for hosts where the active Claude Code lives in WSL.
+#
+# WHY THIS EXISTS
+# Sautium relies on Claude Code as its AI provider. Claude Code stores
+# its OAuth refresh tokens in the home directory of whatever user
+# actually runs the CLI. If you `claude /login` from Windows, tokens
+# refresh in %USERPROFILE%\.claude\. If you do it from a WSL distro,
+# they refresh in /home/<user>/.claude/ and the Windows-side file (if
+# any, from an old install) goes stale.
+#
+# docker-compose.yml mounts the Windows-side .credentials.json — fine
+# when Claude is installed natively on Windows. For WSL-installed
+# Claude, that mount delivers a stale token and the backend chats
+# with Anthropic and gets 401.
+#
+# This file mounts the WSL-side file directly. Run with:
+#   docker compose -f docker-compose.wsl.yml up -d
+# from a WSL bash shell, NOT from PowerShell — Docker Desktop only
+# bind-mounts native Linux paths cleanly when the compose process is
+# itself in a WSL context. (UNC paths like //wsl.localhost/<distro>/...
+# silently mount as empty directories from PowerShell.)
+#
+# Everything else is identical to docker-compose.yml. Keep them in sync.
+
+services:
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: sautium-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-music_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-musicai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./desktop/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql
+    ports:
+      - "127.0.0.1:5432:5432"
+    networks:
+      - sautium-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-musicai} -d ${POSTGRES_DB:-music_ai}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sautium-backend
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-music_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-musicai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      MUSIC_LIBRARY_PATH: /music
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LASTFM_API_KEY: ${LASTFM_API_KEY}
+      LASTFM_USERNAME: ${LASTFM_USERNAME:-}
+      LASTFM_SESSION_KEY: ${LASTFM_SESSION_KEY:-}
+      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      HQPLAYER_HOST: ${HQPLAYER_HOST:-host.docker.internal}
+      HQPLAYER_PORT: ${HQPLAYER_PORT:-4321}
+      HQPLAYER_ENABLED: ${HQPLAYER_ENABLED:-false}
+      MUSIC_HOST_PATH: ${MUSIC_HOST_PATH:-}
+      TRACKER_URL: http://playback-tracker:8765
+      CLAUDE_CODE_ENABLED: ${CLAUDE_CODE_ENABLED:-true}
+      P2P_ENABLED: ${P2P_ENABLED:-true}
+      P2P_DHT_PORT: ${P2P_DHT_PORT:-19001}
+      P2P_ANNOUNCE_PORT: ${P2P_ANNOUNCE_PORT:-8800}
+      P2P_USERNAME: ${P2P_USERNAME:-}
+      P2P_PASSWORD: ${P2P_PASSWORD:-}
+      P2P_EMAIL: ${P2P_EMAIL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OPENAI_COMPAT_BASE_URL: ${OPENAI_COMPAT_BASE_URL:-}
+      OPENAI_COMPAT_API_KEY: ${OPENAI_COMPAT_API_KEY:-}
+      OPENAI_COMPAT_MODEL: ${OPENAI_COMPAT_MODEL:-}
+      OPENAI_COMPAT_NAME: ${OPENAI_COMPAT_NAME:-}
+      DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-claude_code}
+      SAUTIUM_HOST_IPS: ${SAUTIUM_HOST_IPS:-}
+      BACKEND_URL: https://localhost:8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backend:/app
+      - ./mcp:/app/mcp
+      - ./data/cache:/root/.cache
+      - ./data/generated_eq:/app/generated_eq
+      - ./data/tls:/app/data/tls
+      - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro
+      # Claude Code OAuth credentials from WSL home — refreshed by `claude`
+      # running inside WSL. We can't use ${HOME} here: when compose is
+      # invoked via docker.exe from a WSL shell, the WSL HOME variable
+      # doesn't cross the WSL→Windows boundary (only WSLENV-listed vars
+      # do), and Docker substitutes empty → mounts /.credentials.json
+      # (an empty dir) and Claude logs out. SAUTIUM_WSL_HOME in .env
+      # is an explicit, shell-independent path. Required, not optional.
+      - ${SAUTIUM_WSL_HOME:?Set SAUTIUM_WSL_HOME=/home/<user> in .env}/.claude/.credentials.json:/home/claudeuser/.claude/.credentials.json:ro
+      - ./data/claude_sessions:/home/claudeuser/.claude/projects
+    ports:
+      - "8800:8000"
+      - "${P2P_DHT_PORT:-19001}:${P2P_DHT_PORT:-19001}/udp"
+    networks:
+      - sautium-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    command: python entrypoint.py
+
+  playback-tracker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.tracker
+    container_name: sautium-playback-tracker
+    environment:
+      HQPLAYER_HOST: ${HQPLAYER_HOST:-host.docker.internal}
+      HQPLAYER_PORT: ${HQPLAYER_PORT:-4321}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-music_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-musicai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      LASTFM_API_KEY: ${LASTFM_API_KEY}
+      LASTFM_API_SECRET: ${LASTFM_API_SECRET}
+      LASTFM_USERNAME: ${LASTFM_USERNAME}
+      LASTFM_SESSION_KEY: ${LASTFM_SESSION_KEY}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backend:/app
+    ports:
+      - "127.0.0.1:8765:8765"
+    networks:
+      - sautium-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    command: python playback_tracker.py --hqplayer-host ${HQPLAYER_HOST:-host.docker.internal} --db-host postgres
+
+networks:
+  sautium-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+    driver: local

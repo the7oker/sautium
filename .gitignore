@@ -42,6 +42,8 @@ data/cache/*
 !data/cache/.gitkeep
 # TLS cert + key — generated per-host on first backend start
 data/tls/
+# Claude Code session storage — bind-mounted so chat history survives rebuilds
+data/claude_sessions/
 
 # HMAC API secret — generated per-instance at backend startup
 backend/data/
