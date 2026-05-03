@@ -64,6 +64,7 @@
   --color-amber-hover:  #EFBE83;
   --color-amber-press:  #D29A5B;
   --color-amber-weak:   rgba(232, 176, 111, 0.14);
+  --color-amber-stripe: rgba(232, 176, 111, 0.06);  /* active-row tint */
 
   --color-blue:         #4A7FA7;            /* technical data ONLY      */
   --color-blue-hover:   #5D91B8;

@@ -97,9 +97,20 @@
   function applyInlineMd(s) {
     return s
       .replace(/`([^`\n]+)`/g, '<code>$1</code>')
-      .replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>')
-      .replace(/(^|[^*])\*(?!\s)([^*\n]+?)\*(?!\*)/g,
-               (_, pre, body) => `${pre}<em>${body}</em>`);
+      // 1. Triple `***X***` → bold-italic. Run first so the inner
+      //    italic stars can't be stolen by the lazy bold pass below.
+      .replace(/\*\*\*([^*\n]+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+      // 2. Italic before bold. The closing `*` has NO `(?!\*)` lookahead
+      //    so it can sit immediately before the closing `**` of an
+      //    enclosing bold — handles `**Peter — *Machines of Desire***`
+      //    where the inner italic and outer bold share the trailing
+      //    star run. Once italic has wrapped the inner span as <em>...</em>,
+      //    the outer bold's content has no leftover stars and matches
+      //    cleanly in step 3.
+      .replace(/(^|[^*])\*(?!\s)([^*\n]+?)\*/g,
+               (_, pre, body) => `${pre}<em>${body}</em>`)
+      // 3. Bold last. By now any nested italic is already <em>…</em>.
+      .replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>');
   }
 
   function mdToHtml(text) {
@@ -851,39 +862,59 @@
      whatever the backend's `default_provider` returns. */
 
   const ai = {
-    el: null, thread: null, input: null, form: null,
-    closeBtn: null, sendBtn: null,
-    pills: null, newPill: null,
-    sessions: [],            // cached metadata for pill rendering
+    el: null, thread: null, input: null, form: null, sendBtn: null,
+    viewChat: null, viewList: null,
+    chatList: null, emptyWrap: null,
+    chatTitle: null,
+    backBtn: null, newBtn: null, emptyNewBtn: null,
+    closeBtnChat: null, closeBtnList: null,
+    sessions: [],
     isOpen: false,
+    view: 'chat',            // 'chat' | 'list'
     activeSessionId: null,
     sending: false,
-    pressTimer: null,
 
     init() {
       this.el = document.getElementById('aiSheet');
       if (!this.el) return;
+      this.viewChat = document.getElementById('aiViewChat');
+      this.viewList = document.getElementById('aiViewList');
       this.thread = document.getElementById('aiThread');
       this.input = document.getElementById('aiInput');
       this.form = document.getElementById('aiInputForm');
-      this.closeBtn = document.getElementById('aiCloseBtn');
       this.sendBtn = document.getElementById('aiSendBtn');
-      this.pills = document.getElementById('aiPills');
-      this.newPill = document.getElementById('aiNewPill');
+      this.chatList = document.getElementById('aiChatList');
+      this.emptyWrap = document.getElementById('aiEmpty');
+      this.chatTitle = document.getElementById('aiChatTitle');
+      this.backBtn = document.getElementById('aiBackBtn');
+      this.newBtn = document.getElementById('aiNewBtn');
+      this.emptyNewBtn = document.getElementById('aiEmptyNewBtn');
+      this.closeBtnChat = document.getElementById('aiCloseBtnChat');
+      this.closeBtnList = document.getElementById('aiCloseBtnList');
 
-      this.closeBtn.addEventListener('click', () => this.hide());
-      this.newPill.addEventListener('click', () => this.newSession());
+      this.backBtn.addEventListener('click', () => this.openListView());
+      this.newBtn.addEventListener('click', () => this.newSession());
+      this.emptyNewBtn.addEventListener('click', () => this.newSession());
+      this.closeBtnChat.addEventListener('click', () => this.hide());
+      this.closeBtnList.addEventListener('click', () => this.hide());
       this.form.addEventListener('submit', e => {
         e.preventDefault();
         this.send();
       });
 
-      // FAB → open
       const fab = document.getElementById('aiFab');
       if (fab) fab.addEventListener('click', () => this.show());
 
       document.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && this.isOpen) this.hide();
+        if (e.key !== 'Escape' || !this.isOpen) return;
+        // Inside the sheet: list → chat (so users with an active
+        // session can get back without losing context). Then chat
+        // → close. Plain × in either view exits the sheet entirely.
+        if (this.view === 'list' && this.activeSessionId !== null) {
+          this.openChatView();
+        } else {
+          this.hide();
+        }
       });
     },
 
@@ -896,7 +927,8 @@
       if (this.activeSessionId === null) {
         await this.bootstrap();
       } else {
-        await this.refreshPills();
+        await this.loadSessions();
+        this.renderChatList();
         setTimeout(() => this.input && this.input.focus(), 50);
       }
     },
@@ -910,20 +942,38 @@
 
     async bootstrap() {
       try {
-        await this.refreshPills();
+        await this.loadSessions();
         if (this.sessions.length > 0) {
-          const top = this.sessions[0];
-          await this.switchToSession(top.id);
+          await this.switchToSession(this.sessions[0].id);
         } else {
-          await this.newSession();
+          // Brand-new install / all chats deleted: drop into the
+          // empty list view so the user sees the explicit "+ New"
+          // CTA instead of a half-built chat scaffold.
+          this.openListView();
         }
       } catch (err) {
         console.warn('AI bootstrap failed:', err);
-        this.renderEmpty('Could not load chats. Try refreshing.');
+        this.openListView();
       }
     },
 
-    async refreshPills() {
+    setView(view) {
+      this.view = view;
+      this.viewChat.hidden = view !== 'chat';
+      this.viewList.hidden = view !== 'list';
+    },
+
+    openChatView() {
+      this.setView('chat');
+      setTimeout(() => this.input && this.input.focus(), 50);
+    },
+
+    openListView() {
+      this.setView('list');
+      this.renderChatList();
+    },
+
+    async loadSessions() {
       try {
         const resp = await fetch('/api/chat/sessions?limit=50');
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -932,52 +982,130 @@
         console.warn('sessions load failed:', err);
         this.sessions = [];
       }
-      this.renderPills();
     },
 
-    renderPills() {
-      // Keep "+ New" pill (always first), append session pills after.
-      // Existing session pills are removed and rebuilt — cheap for
-      // up to ~50 entries.
-      const existing = this.pills.querySelectorAll('.ai-pill:not(.ai-pill-new)');
-      existing.forEach(el => el.remove());
+    renderChatList() {
+      this.chatList.innerHTML = '';
+      if (this.sessions.length === 0) {
+        this.chatList.hidden = true;
+        this.emptyWrap.hidden = false;
+        return;
+      }
+      this.chatList.hidden = false;
+      this.emptyWrap.hidden = true;
       for (const s of this.sessions) {
-        const pill = document.createElement('button');
-        pill.type = 'button';
-        pill.className = 'ai-pill';
-        if (s.id === this.activeSessionId) pill.classList.add('is-active');
-        const label = (s.title || 'New chat').trim() || 'New chat';
-        pill.innerHTML = '<span></span>';
-        pill.querySelector('span').textContent = label;
-        pill.addEventListener('click', () => this.switchToSession(s.id));
-        this.attachLongPress(pill, s);
-        this.pills.appendChild(pill);
+        this.chatList.appendChild(this.buildChatRow(s));
       }
     },
 
-    // Long-press (700ms) prompts to delete the session. Works on
-    // mouse + touch. Cleared on pointerup / leave so a quick tap
-    // falls through to the normal click handler (switch session).
-    attachLongPress(pill, session) {
-      const start = () => {
-        clearTimeout(this.pressTimer);
-        this.pressTimer = setTimeout(() => {
-          this.pressTimer = null;
-          if (confirm(`Delete chat "${session.title || 'New chat'}"?`)) {
-            this.deleteSession(session.id);
-          }
-        }, 700);
+    buildChatRow(session) {
+      const row = document.createElement('div');
+      row.className = 'ai-chat-row';
+      if (session.id === this.activeSessionId) row.classList.add('is-active');
+      row.dataset.sessionId = String(session.id);
+
+      const title = (session.title || 'New chat').trim() || 'New chat';
+      const preview = (session.preview || '').trim();
+      const ts = formatRelativeTime(session.updated_at || session.created_at);
+      const modelLabel = session.last_model
+        ? String(session.last_model).split(':').pop() : '';
+
+      const main = document.createElement('div');
+      main.className = 'ai-chat-row-main';
+      const titleEl = document.createElement('div');
+      titleEl.className = 'ai-chat-row-title';
+      titleEl.textContent = title;
+      main.appendChild(titleEl);
+      if (preview) {
+        const prevEl = document.createElement('div');
+        prevEl.className = 'ai-chat-row-preview';
+        prevEl.textContent = preview;
+        main.appendChild(prevEl);
+      }
+
+      const meta = document.createElement('div');
+      meta.className = 'ai-chat-row-meta';
+      if (ts) {
+        const tsEl = document.createElement('span');
+        tsEl.className = 'ai-chat-row-ts';
+        tsEl.textContent = ts;
+        meta.appendChild(tsEl);
+      }
+      if (modelLabel) {
+        const mdl = document.createElement('span');
+        mdl.className = 'ai-chat-row-model';
+        mdl.textContent = modelLabel;
+        meta.appendChild(mdl);
+      }
+
+      const trash = document.createElement('button');
+      trash.type = 'button';
+      trash.className = 'ai-trash-btn';
+      trash.setAttribute('aria-label', 'Delete chat');
+      trash.innerHTML = `
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.6"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M4 7h16M9 7V4h6v3M6 7l1 13a2 2 0 002 2h6a2 2 0 002-2l1-13M10 11v7M14 11v7"/>
+        </svg>`;
+
+      // Tap row body → open chat. Tap trash → swap row contents
+      // for an inline confirm bar (Cancel restores the row, Delete
+      // commits). Click on trash MUST stop propagation so it
+      // doesn't also fire the row's open-chat handler.
+      row.addEventListener('click', () => this.switchToSession(session.id));
+      trash.addEventListener('click', e => {
+        e.stopPropagation();
+        this.confirmDeleteRow(row, session);
+      });
+
+      main.style.gridColumn = '1';
+      meta.style.gridColumn = '2';
+      trash.style.gridColumn = '3';
+      row.appendChild(main);
+      row.appendChild(meta);
+      row.appendChild(trash);
+      return row;
+    },
+
+    confirmDeleteRow(row, session) {
+      // Snapshot the original markup so Cancel can restore it.
+      const original = row.innerHTML;
+      const wasActive = row.classList.contains('is-active');
+      row.classList.remove('is-active');
+      row.classList.add('is-confirming');
+      row.innerHTML = `
+        <div class="ai-confirm-bar">
+          <span class="ai-confirm-ask">Delete this chat?</span>
+          <button type="button" class="ai-confirm-btn"
+                  data-action="cancel">Cancel</button>
+          <button type="button" class="ai-confirm-btn is-danger"
+                  data-action="delete">Delete</button>
+        </div>
+      `;
+      const restore = () => {
+        row.classList.remove('is-confirming');
+        if (wasActive) row.classList.add('is-active');
+        row.innerHTML = original;
+        // Re-bind row + trash handlers (they were destroyed by
+        // innerHTML replacement). Cheaper than rebuilding from
+        // scratch since the visible markup is identical.
+        row.addEventListener('click',
+          () => this.switchToSession(session.id));
+        const trash = row.querySelector('.ai-trash-btn');
+        if (trash) trash.addEventListener('click', e => {
+          e.stopPropagation();
+          this.confirmDeleteRow(row, session);
+        });
       };
-      const cancel = () => {
-        if (this.pressTimer) {
-          clearTimeout(this.pressTimer);
-          this.pressTimer = null;
-        }
-      };
-      pill.addEventListener('pointerdown', start);
-      pill.addEventListener('pointerup', cancel);
-      pill.addEventListener('pointerleave', cancel);
-      pill.addEventListener('pointercancel', cancel);
+      row.querySelector('[data-action="cancel"]').addEventListener('click', e => {
+        e.stopPropagation();
+        restore();
+      });
+      row.querySelector('[data-action="delete"]').addEventListener('click', e => {
+        e.stopPropagation();
+        this.deleteSession(session.id);
+      });
     },
 
     async newSession() {
@@ -990,10 +1118,17 @@
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const session = await resp.json();
         this.activeSessionId = session.id;
+        this.chatTitle.textContent = 'New chat';
         this.thread.innerHTML = '';
         this.renderEmpty('Ask the AI for recommendations, analysis or context.');
-        await this.refreshPills();
-        setTimeout(() => this.input && this.input.focus(), 50);
+        // Sessions list cache is now stale; refresh on next list-view
+        // open. Don't refetch eagerly — the user is in chat-view and
+        // doesn't need the list rebuilt right now.
+        this.sessions.unshift({
+          id: session.id, title: null, updated_at: session.created_at,
+          preview: null, last_model: null,
+        });
+        this.openChatView();
       } catch (err) {
         console.warn('new session failed:', err);
       }
@@ -1001,8 +1136,13 @@
 
     async switchToSession(id) {
       this.activeSessionId = id;
+      this.openChatView();
       this.thread.innerHTML = '<p class="ai-empty">Loading…</p>';
-      this.renderPills();  // update active highlight immediately
+      // Title from cached metadata; updates after messages load if
+      // backend just auto-derived a title.
+      const cached = this.sessions.find(s => s.id === id);
+      this.chatTitle.textContent =
+        (cached && cached.title) || 'New chat';
       try {
         const resp = await fetch('/api/chat/sessions/' + id + '/messages');
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -1259,9 +1399,11 @@
 
         if (typing.parentNode) typing.remove();
         // Backend may have just auto-set a title from the first
-        // message — refresh the pill row so the active pill picks
-        // it up. Also bumps it to the front by `updated_at`.
-        await this.refreshPills();
+        // message — refresh sessions metadata so the chat list
+        // and the title bar both pick it up.
+        await this.loadSessions();
+        const cur = this.sessions.find(s => s.id === this.activeSessionId);
+        if (cur && cur.title) this.chatTitle.textContent = cur.title;
         this.scrollToBottom();
       } catch (err) {
         if (typing.parentNode) typing.remove();
@@ -1293,19 +1435,40 @@
       try {
         await fetch('/api/chat/sessions/' + id, { method: 'DELETE' });
       } catch (err) { console.warn('delete failed:', err); }
-      // Drop locally first so the pill disappears even if the next
-      // refresh hiccups; then re-bootstrap if we killed the active
-      // session, else just refresh the pill row.
+      // Drop locally first so the row disappears even if the next
+      // fetch hiccups. Stay in whatever view the user is currently
+      // in — deleting from the list shouldn't yank them into a
+      // different chat. If the active chat is the one deleted, just
+      // forget it; next time the user picks a chat (or hits "+New")
+      // we'll mount a new thread.
       this.sessions = this.sessions.filter(s => s.id !== id);
       if (id === this.activeSessionId) {
         this.activeSessionId = null;
         this.thread.innerHTML = '';
-        await this.bootstrap();
-      } else {
-        this.renderPills();
+        this.chatTitle.textContent = 'AI';
       }
+      this.renderChatList();
     },
   };
+
+  // Compact relative time for chat-list rows. "now" / "5m" / "2h" /
+  // "yesterday" / "apr 26" / locale date for older entries.
+  function formatRelativeTime(ts) {
+    if (!ts) return '';
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return '';
+    const sec = Math.max(0, (Date.now() - d.getTime()) / 1000);
+    if (sec < 45) return 'now';
+    if (sec < 3600) return Math.round(sec / 60) + 'm';
+    if (sec < 86400) return Math.round(sec / 3600) + 'h';
+    if (sec < 172800) return 'yesterday';
+    if (sec < 604800) return Math.round(sec / 86400) + 'd';
+    if (sec < 31536000) {
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+        .toLowerCase();
+    }
+    return d.toLocaleDateString();
+  }
 
   /* ---------- Screen renderers ---------- */
 

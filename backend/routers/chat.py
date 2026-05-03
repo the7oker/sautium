@@ -213,11 +213,29 @@ async def list_providers():
 
 @router.get("/sessions")
 async def list_sessions(limit: int = 50):
-    """List chat sessions, newest first."""
+    """List chat sessions, newest first.
+
+    Each row includes a `preview` (first user message, truncated)
+    and `last_model` (provider:model of the most recent assistant
+    reply) — surfaced in the chat-list view so users can recognise
+    a session by content + the model that answered, not just title.
+    """
     limit = min(limit, 200)
     rows = _db_query("""
         SELECT s.id, s.title, s.created_at, s.updated_at,
-               COUNT(m.id) as message_count
+               COUNT(m.id) as message_count,
+               (SELECT LEFT(cm.content, 160)
+                FROM chat_messages cm
+                WHERE cm.session_id = s.id AND cm.role = 'user'
+                ORDER BY cm.id ASC
+                LIMIT 1) AS preview,
+               (SELECT cm.model
+                FROM chat_messages cm
+                WHERE cm.session_id = s.id
+                  AND cm.role = 'assistant'
+                  AND cm.model IS NOT NULL
+                ORDER BY cm.id DESC
+                LIMIT 1) AS last_model
         FROM chat_sessions s
         LEFT JOIN chat_messages m ON m.session_id = s.id
         GROUP BY s.id
