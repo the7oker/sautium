@@ -35,7 +35,7 @@ class LauncherApp(ctk.CTk):
         super().__init__()
 
         self.title("Sautium")
-        self.geometry("480x870")
+        self.geometry("480x900")
         self.resizable(False, False)
 
         self.config = load_config()
@@ -77,7 +77,7 @@ class LauncherApp(ctk.CTk):
             if sys.platform == "darwin":
                 self.overrideredirect(False)
             self.deiconify()
-            self.geometry("480x870")
+            self.geometry("480x900")
             self._build_ui()
             self.lift()
             self.focus_force()
