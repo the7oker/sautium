@@ -461,6 +461,7 @@
       this.timeCurrent = document.getElementById('npTimeCurrent');
       this.timeTotal = document.getElementById('npTimeTotal');
       this.repeatBtn = document.getElementById('npRepeatBtn');
+      this.queueBtn = document.getElementById('npQueueBtn');
       this.playPause = document.getElementById('npPlayPauseBtn');
       this.playPauseIcon = document.getElementById('npPlayPauseIcon');
       this.prev = document.getElementById('npPrev');
@@ -484,6 +485,12 @@
         e.stopPropagation();
         if (typeof window.playerCmd === 'function') window.playerCmd('next');
       });
+      if (this.queueBtn) {
+        this.queueBtn.addEventListener('click', e => {
+          e.stopPropagation();
+          queue.show();
+        });
+      }
       // Tap artist / album text → open the corresponding detail screen.
       // IDs come from now-playing-detail (lastDetail.primary_artist.id,
       // lastDetail.album_id). Sheet is hidden after navigation so the
@@ -855,6 +862,382 @@
       probe.src = url;
     },
   };
+
+  /* ---------- Queue sheet ----------
+     Full-screen overlay that lists the current HQPlayer playlist.
+     Opened by the queue button on Now Playing's transport row;
+     stacks above the Now Playing sheet (z-index: 110 > 100).
+     Reference: docs/design/reference/claude-design-bundle/project/
+     Session 2 v3.html — Queue section. */
+
+  const queue = {
+    el: null, list: null, summary: null, empty: null, closeBtn: null,
+    isOpen: false,
+    // Queue keeps its own cache because `currentPlaylist` and
+    // `_latest_status_cache` are module-level `let` bindings in
+    // app.js — they are NOT on `window`, so we can't read them from
+    // here. We mirror them via events: `playlist-loaded.detail.tracks`
+    // and `np-update.detail.track_index`. Show() also refetches the
+    // playlist directly to guarantee fresh data even if no event
+    // has fired yet in this session.
+    tracks: [],
+    trackIndex: 0,
+
+    init() {
+      this.el = document.getElementById('queueSheet');
+      if (!this.el) return;
+      this.list = document.getElementById('queueList');
+      this.summary = document.getElementById('queueSummary');
+      this.empty = document.getElementById('queueEmpty');
+      this.closeBtn = document.getElementById('queueCloseBtn');
+
+      this.closeBtn.addEventListener('click', () => this.hide());
+      document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && this.isOpen) this.hide();
+      });
+
+      // Track which row is currently playing — `np-update` carries
+      // track_index in its detail. Re-render only when the index
+      // actually changes so we don't repaint on every position tick.
+      document.addEventListener('np-update', e => {
+        const idx = (e.detail && e.detail.track_index) || 0;
+        if (idx !== this.trackIndex) {
+          this.trackIndex = idx;
+          if (this.isOpen) this.render();
+        }
+      });
+      // Mirror the playlist whenever app.js refetches it.
+      document.addEventListener('playlist-loaded', e => {
+        this.tracks = (e.detail && e.detail.tracks) || [];
+        if (this.isOpen) this.render();
+      });
+    },
+
+    async show() {
+      if (!this.el) return;
+      this.el.hidden = false;
+      this.isOpen = true;
+      // Direct fetch for two reasons: (1) the user may open the
+      // sheet before any SSE / playlist-loaded event has fired in
+      // this tab session, and (2) reflects any queue mutation not
+      // yet seen by the SSE poller. Fast — backend serves a cached
+      // playlist payload with no HQPlayer round-trip.
+      try {
+        const resp = await fetch('/api/player/playlist');
+        if (resp.ok) {
+          const data = await resp.json();
+          this.tracks = data.tracks || [];
+        }
+      } catch (err) {
+        console.warn('queue load failed', err);
+      }
+      this.render();
+    },
+
+    hide() {
+      if (!this.el) return;
+      this.el.hidden = true;
+      this.isOpen = false;
+    },
+
+    render() {
+      const tracks = this.tracks;
+      const currentIdx = this.trackIndex;            // 1-based
+
+      if (tracks.length === 0) {
+        this.list.innerHTML = '';
+        this.summary.innerHTML = '';
+        this.empty.hidden = false;
+        return;
+      }
+      this.empty.hidden = true;
+
+      const totalDur = tracks.reduce(
+        (s, t) => s + (Number(t.duration_seconds) || 0), 0);
+      const albumCount = new Set(
+        tracks.map(t => t.album).filter(Boolean)).size;
+      const parts = [
+        `${tracks.length} tracks`,
+        formatDurationSummary(totalDur),
+        albumCount > 0 ? `${albumCount} ${albumCount === 1 ? 'album' : 'albums'}` : null,
+      ].filter(Boolean);
+      this.summary.innerHTML = parts
+        .map((p, i) => i === 0
+          ? `<span>${escapeHtml(p)}</span>`
+          : `<span class="qs-sep">·</span><span>${escapeHtml(p)}</span>`)
+        .join('');
+
+      const dragHandleSvg = `
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"
+             aria-hidden="true">
+          <circle cx="9" cy="6" r="1.3"/><circle cx="15" cy="6" r="1.3"/>
+          <circle cx="9" cy="12" r="1.3"/><circle cx="15" cy="12" r="1.3"/>
+          <circle cx="9" cy="18" r="1.3"/><circle cx="15" cy="18" r="1.3"/>
+        </svg>`;
+      const removeSvg = `
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+             aria-hidden="true">
+          <circle cx="12" cy="12" r="9"/>
+          <path d="M8 8l8 8M16 8l-8 8"/>
+        </svg>`;
+
+      this.list.innerHTML = tracks.map((t, idx) => {
+        const oneIdx = idx + 1;          // HQPlayer is 1-based
+        const isCurrent = oneIdx === currentIdx;
+        // Every track is draggable, including the current one —
+        // moving the current row is equivalent to "shift before-
+        // tracks across to after-current". Backend rebuilds and
+        // re-anchors playback to the current track's new slot.
+        const isLocked = false;
+        const c = coverPlaceholderColors(t.title || t.album || '');
+        const url = coverUrl({cover_id: t.cover_id, media_file_id: t.id});
+        const cover = url
+          ? `<img src="${url}" alt="" loading="lazy" onerror="this.style.display='none'">`
+          : '';
+        const dur = t.duration_seconds
+          ? fmtDuration(t.duration_seconds) : '';
+        const right = isCurrent
+          ? `<div class="q-right">
+               <span class="q-playing-glyph" aria-label="Now playing">
+                 <span></span><span></span><span></span>
+               </span>
+               <span class="q-dur">${escapeHtml(dur)}</span>
+             </div>`
+          : `<span class="q-dur">${escapeHtml(dur)}</span>`;
+        // Remove + drag are omitted only on the current row (race
+        // with playback). All non-current rows get a working remove
+        // button and an enabled drag handle.
+        const removeBtn = isCurrent ? '<span></span>' : `
+          <button class="q-remove" type="button" aria-label="Remove"
+                  data-action="remove" data-index="${oneIdx}">
+            ${removeSvg}
+          </button>`;
+        return `
+          <div class="q-row${isCurrent ? ' is-current' : ''}"
+               data-index="${oneIdx}" data-mfid="${t.id || ''}">
+            <span class="q-drag" ${isLocked ? '' : 'data-drag="1"'}>
+              ${dragHandleSvg}
+            </span>
+            <div class="q-cover" style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}</div>
+            <div class="q-info">
+              <div class="q-title">${escapeHtml(t.title || '')}</div>
+              <div class="q-artist">${escapeHtml(t.artist || '')}</div>
+            </div>
+            ${right}
+            ${removeBtn}
+          </div>`;
+      }).join('');
+
+      // Tap row body → jump (via row click handler — drag handle and
+      // remove button stop propagation to prevent accidental jumps).
+      this.list.querySelectorAll('.q-row').forEach(row => {
+        row.addEventListener('click', () => {
+          const idx = parseInt(row.dataset.index, 10);
+          if (idx) this.jumpTo(idx);
+        });
+      });
+      this.list.querySelectorAll('[data-action="remove"]').forEach(btn => {
+        btn.addEventListener('click', e => {
+          e.stopPropagation();
+          const idx = parseInt(btn.dataset.index, 10);
+          if (idx) this.removeAt(idx);
+        });
+      });
+      // Drag handles → reorder. See attachDrag for the gesture
+      // contract; only non-locked rows carry [data-drag].
+      this.list.querySelectorAll('[data-drag="1"]').forEach(handle => {
+        this.attachDrag(handle);
+      });
+    },
+
+    async jumpTo(index) {
+      try {
+        await fetch('/api/player/jump', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({index}),
+        });
+        // The queue sheet stays open — user typically wants to keep
+        // browsing. Status SSE will repaint the active row.
+      } catch (err) {
+        console.warn('jump failed', err);
+      }
+    },
+
+    // Pointer-events drag — works on desktop + mobile.
+    //
+    // Gesture: pointerdown on a handle captures the pointer to that
+    // handle (so subsequent moves keep firing on it even when the
+    // pointer leaves the original element); pointermove offsets the
+    // row via `top: <deltaY>px` (the row already has position:
+    // relative, no transform-collapse worries); pointerup figures
+    // out which row the dragged row's mid-point overlaps and asks
+    // the backend to reorder. The current row never becomes a drop
+    // target, and a drag never crosses the current row — backend
+    // would reject either case and the visual hint would be wrong.
+    attachDrag(handle) {
+      const row = handle.closest('.q-row');
+      if (!row) return;
+      // Read anchor lazily on each pointerdown (not at attach time)
+      // so a drag started after np-update fires sees the latest
+      // current track index. attach time can predate the first SSE.
+      handle.addEventListener('pointerdown', e => {
+        if (e.button !== undefined && e.button !== 0) return;
+        e.preventDefault();
+        try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+
+        const anchor = this.trackIndex;
+        const startY = e.clientY;
+        const originOneIdx = parseInt(row.dataset.index, 10);
+        const originIdx = originOneIdx - 1;
+        // Origin segment relative to the currently playing track.
+        // The drop-target filter below mirrors backend's seamless-
+        // reorder conditions so the UI never offers a target that
+        // would interrupt audio — drag visibly snaps back instead.
+        //   origin = current → only drops in `before` allowed
+        //                      (current shifts left via removes).
+        //   origin = before  → only drops in `after`  allowed
+        //                      (boundary-cross out of before).
+        //   origin = after   → only drops in `after`  allowed
+        //                      (pure tail reorder).
+        const originSeg = anchor < 1 ? 'after'
+          : originOneIdx < anchor ? 'before'
+          : originOneIdx > anchor ? 'after'
+          : 'current';
+        let dragging = false;
+
+        let hoverIdx = -1;       // 0-based of row under pointer (or -1)
+        let hoverSide = 'above'; // 'above' | 'below' midpoint of hoverIdx
+
+        const onMove = ev => {
+          const dy = ev.clientY - startY;
+          if (!dragging) {
+            if (Math.abs(dy) < 4) return;
+            dragging = true;
+            row.classList.add('is-dragging');
+          }
+          row.style.top = dy + 'px';
+
+          const candidates = this.list.querySelectorAll('.q-row');
+          candidates.forEach(r => {
+            r.classList.remove('is-drop-above', 'is-drop-below');
+          });
+          hoverIdx = -1;
+          for (const r of candidates) {
+            if (r === row) continue;
+            const rIdx = parseInt(r.dataset.index, 10);
+            const rSeg = anchor < 1 ? 'after'
+              : rIdx < anchor ? 'before'
+              : rIdx > anchor ? 'after'
+              : 'current';
+            const allowed =
+              (originSeg === 'current' && rSeg === 'before') ||
+              (originSeg === 'before'  && rSeg === 'after')  ||
+              (originSeg === 'after'   && rSeg === 'after');
+            if (!allowed) continue;
+            const rect = r.getBoundingClientRect();
+            if (ev.clientY >= rect.top && ev.clientY <= rect.bottom) {
+              const mid = (rect.top + rect.bottom) / 2;
+              hoverIdx = rIdx - 1;
+              hoverSide = ev.clientY < mid ? 'above' : 'below';
+              r.classList.add(
+                hoverSide === 'above' ? 'is-drop-above' : 'is-drop-below');
+              break;
+            }
+          }
+        };
+
+        const onUp = () => {
+          handle.removeEventListener('pointermove', onMove);
+          handle.removeEventListener('pointerup', onUp);
+          handle.removeEventListener('pointercancel', onUp);
+          try { handle.releasePointerCapture(e.pointerId); } catch (_) {}
+          row.style.top = '';
+          row.classList.remove('is-dragging');
+          this.list.querySelectorAll('.is-drop-above, .is-drop-below')
+            .forEach(r => r.classList.remove('is-drop-above', 'is-drop-below'));
+          if (!dragging || hoverIdx < 0) return;
+          // Insert-at-position: drop position relative to hoverIdx.
+          // Above midpoint → insert before hoverIdx; below → after.
+          // After removal, indices > originIdx shift down by 1.
+          let insertIdx = hoverIdx + (hoverSide === 'below' ? 1 : 0);
+          if (insertIdx > originIdx) insertIdx -= 1;
+          if (insertIdx === originIdx) return;
+          this.commitReorder(originIdx, insertIdx);
+        };
+
+        handle.addEventListener('pointermove', onMove);
+        handle.addEventListener('pointerup', onUp);
+        handle.addEventListener('pointercancel', onUp);
+      });
+    },
+
+    async commitReorder(fromIdx, insertIdx) {
+      // Plain splice: remove at fromIdx, insert at insertIdx (which
+      // attachDrag already adjusted for the post-removal shift).
+      // The current track may shift to a new slot — backend looks
+      // it up in req.order and re-anchors via select_track + seek.
+      const newTracks = this.tracks.slice();
+      const [moved] = newTracks.splice(fromIdx, 1);
+      newTracks.splice(insertIdx, 0, moved);
+      this.tracks = newTracks;
+      this.render();
+
+      const order = newTracks.map(t => t.id).filter(Boolean);
+      try {
+        const resp = await fetch('/api/player/reorder', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({order}),
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          console.warn('reorder rejected:', err.detail || resp.status);
+        }
+      } catch (err) {
+        console.warn('reorder failed', err);
+      }
+      // Either way, sync with HQP so any drift between optimistic
+      // local state and authoritative playlist is corrected.
+      if (typeof window.fetchPlaylist === 'function') window.fetchPlaylist();
+    },
+
+    async removeAt(index) {
+      // Optimistic local update: drop the row + re-render so the
+      // tap feels instant. Backend invalidates its playlist cache;
+      // the next playlist-loaded event from the SSE poller will
+      // overwrite our optimistic copy with the authoritative HQP
+      // state.
+      const optimistic = this.tracks.slice(0, index - 1)
+        .concat(this.tracks.slice(index));
+      this.tracks = optimistic;
+      this.render();
+      try {
+        await fetch('/api/player/remove', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({index}),
+        });
+        // Force a refresh — the SSE poller picks up the change
+        // within ~1s but tapping refresh removes the visible delay.
+        if (typeof window.fetchPlaylist === 'function') window.fetchPlaylist();
+      } catch (err) {
+        console.warn('remove failed', err);
+        // Revert optimistic change on failure.
+        if (typeof window.fetchPlaylist === 'function') window.fetchPlaylist();
+      }
+    },
+  };
+
+  function formatDurationSummary(sec) {
+    const s = Math.max(0, Math.floor(sec || 0));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${r.toString().padStart(2, '0')}`;
+    return `${m}:${r.toString().padStart(2, '0')}`;
+  }
 
   /* ---------- AI assistant sheet ----------
      Wires the FAB to the /api/chat backend (sessions, messages, track
@@ -2645,6 +3028,7 @@
     mp.init();
     sheet.init();
     ai.init();
+    queue.init();
     document.addEventListener('np-update', e => {
       mp.update(e.detail);
       sheet.onStatus(e.detail);

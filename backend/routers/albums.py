@@ -53,16 +53,28 @@ def get_album(album_id: str) -> dict:
     """, {"id": album_id})
     album["primary_artist"] = primary
 
-    # Quality + total duration
+    # Quality + total duration. Same DISTINCT ON pattern as the
+    # tracklist below — pick one media_file per track (analysis-
+    # source preferred, lowest id as fallback) so multi-variant
+    # albums don't double-count duration and tracks without an
+    # analysis-source flag still contribute.
     qrow = db_query_one("""
-        SELECT BOOL_OR(mf.is_lossless) AS lossless,
-               MAX(mf.sample_rate) AS sr_max,
-               MAX(mf.bit_depth)   AS bd_max,
-               SUM(mf.duration_seconds) AS total_duration
-        FROM media_files mf
-        JOIN album_variants av ON av.id = mf.album_variant_id
-        WHERE av.album_id = %(id)s::uuid
-          AND mf.is_analysis_source = true
+        SELECT BOOL_OR(is_lossless)          AS lossless,
+               MAX(sample_rate)              AS sr_max,
+               MAX(bit_depth)                AS bd_max,
+               SUM(duration_seconds)         AS total_duration
+        FROM (
+            SELECT DISTINCT ON (mf.track_id)
+                   mf.track_id,
+                   mf.is_lossless,
+                   mf.sample_rate,
+                   mf.bit_depth,
+                   mf.duration_seconds
+            FROM media_files mf
+            JOIN album_variants av ON av.id = mf.album_variant_id
+            WHERE av.album_id = %(id)s::uuid
+            ORDER BY mf.track_id, mf.is_analysis_source DESC, mf.id
+        ) per_track
     """, {"id": album_id})
     sr = qrow["sr_max"] or 0
     bd = qrow["bd_max"] or 0
@@ -88,9 +100,18 @@ def get_album(album_id: str) -> dict:
         LIMIT 3
     """, {"id": album_id})
 
-    # Tracklist ordered by disc / track number
+    # Tracklist ordered by disc / track number. `is_analysis_source`
+    # is a *preference* — it marks the media_file we chose for audio
+    # analysis when a track has multiple variants — not a "show this
+    # in the UI" flag. Filtering on it strictly hides tracks whose
+    # variants weren't picked yet (newly imported files, edge cases
+    # like Wingbeats where two media_files share disc/track and
+    # neither is flagged). Use DISTINCT ON instead: one row per
+    # track, picking analysis-source first and the lowest media_file
+    # id as the deterministic fallback.
     album["tracks"] = db_query("""
-        SELECT t.id::text AS track_id,
+        SELECT DISTINCT ON (t.id)
+               t.id::text AS track_id,
                mf.id AS media_file_id,
                t.title,
                mf.disc_number,
@@ -104,10 +125,14 @@ def get_album(album_id: str) -> dict:
         JOIN album_variants av ON av.id = mf.album_variant_id
         LEFT JOIN audio_features af ON af.track_id = t.id
         WHERE av.album_id = %(id)s::uuid
-          AND mf.is_analysis_source = true
-        ORDER BY mf.disc_number NULLS FIRST,
-                 mf.track_number NULLS FIRST,
-                 t.title
+        ORDER BY t.id,
+                 mf.is_analysis_source DESC,
+                 mf.id
     """, {"id": album_id})
+    album["tracks"].sort(key=lambda r: (
+        r.get("disc_number") if r.get("disc_number") is not None else 99,
+        r.get("track_number") if r.get("track_number") is not None else 999,
+        r.get("title") or "",
+    ))
 
     return album

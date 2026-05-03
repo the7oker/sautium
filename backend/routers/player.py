@@ -321,6 +321,15 @@ class QueueNextRequest(BaseModel):
 class QueueTracksRequest(BaseModel):
     track_ids: list[int]
 
+class JumpRequest(BaseModel):
+    index: int  # 1-based, matches HQPlayer's select_track convention
+
+class RemoveRequest(BaseModel):
+    index: int  # 1-based — HQPlayer's PlaylistRemove convention
+
+class ReorderRequest(BaseModel):
+    order: list[int]  # full new order of media_file_ids, current track included at its original position
+
 
 # -- Search -------------------------------------------------------------------
 
@@ -524,6 +533,23 @@ def _invalidate_playlist():
     global _playlist_dirty
     _playlist_dirty = True
     _status_changed.set()  # wake poller immediately
+
+
+def _force_refresh_playlist_after_write():
+    """Synchronously refresh the playlist cache after a write so the
+    response carries the new state. The async invalidate-and-wake-poller
+    pattern races with optimistic UI: the frontend issues fetchPlaylist
+    immediately on response, hits the still-stale cache, and overwrites
+    the optimistic update with old data — a visible revert. Doing the
+    refresh here on the status socket (different lock + connection from
+    the cmd path) blocks the response by ~50–150ms but guarantees that
+    any cache reader after this point sees the post-mutation state."""
+    try:
+        with _hqp_status_lock:
+            _refresh_playlist_cache()
+    except Exception as e:
+        logger.warning(f"force playlist refresh failed: {e}")
+    _status_changed.set()  # propagate the bumped playlist_version via SSE
 
 
 @router.get("/playlist")
@@ -778,6 +804,246 @@ def set_volume(req: VolumeRequest):
 
 
 # -- Smart play ----------------------------------------------------------------
+
+@router.post("/remove")
+def remove(req: RemoveRequest):
+    """Remove a track from the current HQPlayer playlist by index.
+
+    `index` is 1-based to match HQPlayer's `PlaylistRemove`. After
+    removal the playlist cache is invalidated so the next status
+    poll refreshes it; the playback-tracker mapping naturally
+    becomes stale (indices shift) but is rebuilt by the next
+    play-track / play-album call. The play_count for the removed
+    slot is unaffected — tracker records past plays, not pending
+    queue contents.
+
+    Reorder is intentionally not implemented. HQPlayer's Control
+    API exposes add (append-only), clear and remove — there is no
+    insert-at-index or move primitive. Implementing reorder would
+    require a clear+rebuild round-trip that interrupts the
+    currently playing track. If the protocol gains a move
+    operation, expose it here.
+    """
+    if req.index < 1:
+        raise HTTPException(status_code=400, detail="index must be >= 1")
+    try:
+        ok = _hqp_cmd(lambda h: h.playlist_remove(req.index))
+        _invalidate_playlist()
+        return {"ok": ok, "index": req.index}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@router.post("/reorder")
+def reorder(req: ReorderRequest):
+    """Reorder the playlist around the currently playing track.
+
+    HQPlayer's Control API only exposes append (PlaylistAdd) and
+    remove (PlaylistRemove) — no insert, no move. The trick is to
+    never touch the slot HQPlayer is reading from: as long as we
+    only append to the end and remove non-current slots, audio
+    plays through the rebuild without a glitch.
+
+    Effects of each primitive on the current slot's index K:
+      append(uri)         — playlist grows; K unchanged.
+      remove(i), i  < K   — playlist shrinks before K; K -= 1.
+      remove(i), i == K   — current slot deleted; AUDIO CUTS OFF.
+      remove(i), i  > K   — playlist shrinks after K; K unchanged.
+
+    So K can shift LEFT (via removes before it) or stay; it cannot
+    shift RIGHT, and tracks cannot be inserted before it. That
+    constrains what reorders can be done seamlessly:
+
+      new_before must be a subsequence of old_before (we can only
+      drop tracks from the front; we cannot insert or permute) AND
+      new_after must equal (old_after ∪ tracks dropped from before),
+      with arbitrary ordering.
+
+    When the request fits these constraints we run the zero-
+    interrupt path. Anything else (swapping tracks inside before,
+    pulling a track from after into before, shifting current right)
+    is impossible without an insert primitive, so we fall back to
+    a full clear+rebuild + select_track + seek (~300 ms gap).
+    """
+    if not req.order:
+        raise HTTPException(status_code=400, detail="order is empty")
+
+    try:
+        with _hqp_status_lock:
+            _refresh_playlist_cache()
+        current_payload = _latest_playlist
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"playlist read failed: {e}")
+    current_tracks = current_payload.get("tracks") or []
+    current_ids = [t.get("id") for t in current_tracks]
+
+    status_idx = _latest_status.get("track_index") or 0
+    if status_idx < 1 or status_idx > len(current_ids):
+        raise HTTPException(
+            status_code=409,
+            detail="reorder requires a currently playing track; use /play-tracks",
+        )
+
+    if len(req.order) != len(current_ids):
+        raise HTTPException(
+            status_code=400,
+            detail="order length must match current playlist length",
+        )
+
+    from collections import Counter
+    if Counter(req.order) != Counter(current_ids):
+        raise HTTPException(
+            status_code=400,
+            detail="order must be a permutation of the current playlist",
+        )
+
+    current_id = current_ids[status_idx - 1]
+    new_status_idx = req.order.index(current_id) + 1
+
+    old_before = current_ids[:status_idx - 1]
+    old_after = current_ids[status_idx:]
+    new_before = req.order[:new_status_idx - 1]
+    new_after = req.order[new_status_idx:]
+
+    if old_before == new_before and old_after == new_after:
+        return {
+            "ok": True, "removed": 0, "added": 0,
+            "anchor_index": status_idx, "interrupted": False,
+        }
+
+    # Zero-interrupt feasibility: new_before must be a subsequence
+    # of old_before (we can only drop tracks, never reorder or
+    # add to before), and new_after's multiset must match what we
+    # have available — original after-segment plus any tracks the
+    # before-shrink drops out.
+    def is_subsequence(needle: list, haystack: list) -> bool:
+        j = 0
+        for h in haystack:
+            if j < len(needle) and needle[j] == h:
+                j += 1
+        return j == len(needle)
+
+    expected_after = Counter(old_after) + Counter(old_before) - Counter(new_before)
+    seamless = (
+        is_subsequence(new_before, old_before)
+        and Counter(new_after) == expected_after
+    )
+
+    # Resolve file paths for tracks we may need to append. Seamless
+    # path only appends new_after; interrupt path rebuilds everything.
+    ids_needing_paths = new_after if seamless else req.order
+    rows = _db_query("""
+        SELECT mf.id, mf.file_path
+        FROM media_files mf
+        WHERE mf.id = ANY(%(ids)s)
+    """, {"ids": ids_needing_paths})
+    path_by_id = {r["id"]: r["file_path"] for r in rows}
+    missing = [mid for mid in ids_needing_paths if mid not in path_by_id]
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown media_file_ids: {missing[:5]}",
+        )
+
+    if seamless:
+        # Sequence (current at slot K = status_idx throughout, then
+        # shifts left as we shrink the before-segment in step 3):
+        #
+        # 1. Empty the after-segment by repeatedly removing slot K+1.
+        #    K never changes: every remove targets a slot above K.
+        # 2. Append new_after in target order. All appends land at the
+        #    very end, after the current slot, so K stays put.
+        # 3. Walk old_before slot by slot. Tracks present in new_before
+        #    (matched in subsequence order) stay; the rest are removed
+        #    by remove(slot). Each kept track advances our cursor;
+        #    each removal keeps the cursor where it is (since slots
+        #    above shift down to take its place). When the last
+        #    "drop" track is removed, K has shifted down by exactly
+        #    (len(old_before) - len(new_before)), landing on
+        #    new_status_idx as required.
+        try:
+            with _hqp_lock:
+                hqp = _get_hqp()
+                for _ in range(len(old_after)):
+                    hqp.playlist_remove(status_idx + 1)
+                for mid in new_after:
+                    hqp.playlist_add(file_path_to_uri(path_by_id[mid]))
+                cursor = 1
+                new_before_remaining = list(new_before)
+                for old_track in old_before:
+                    if (new_before_remaining
+                            and new_before_remaining[0] == old_track):
+                        new_before_remaining.pop(0)
+                        cursor += 1
+                    else:
+                        hqp.playlist_remove(cursor)
+            _register_playlist(req.order)
+            _force_refresh_playlist_after_write()
+            return {
+                "ok": True,
+                "removed": len(old_after) + (len(old_before) - len(new_before)),
+                "added": len(new_after),
+                "anchor_index": new_status_idx,
+                "interrupted": False,
+            }
+        except Exception as e:
+            logger.error(f"reorder (seamless) failed: {e}", exc_info=True)
+            raise HTTPException(status_code=503, detail=str(e))
+
+    # Fallback: clear+rebuild. Required for cases that need an
+    # insert (swap inside before, after→before crossing, current
+    # right-shift). hqp.stop() is mandatory — HQPlayer ignores
+    # PlaylistAdd(clear=True) while playing, silently appending
+    # instead, which would double every track and land
+    # select_track on the wrong slot.
+    position = int(_latest_status.get("position") or 0)
+    prev_state = _latest_status.get("state")
+    should_resume = prev_state in ("playing", "paused")
+    try:
+        with _hqp_lock:
+            hqp = _get_hqp()
+            hqp.stop()
+            hqp.playlist_add(
+                file_path_to_uri(path_by_id[req.order[0]]), clear=True)
+            for mid in req.order[1:]:
+                hqp.playlist_add(file_path_to_uri(path_by_id[mid]))
+            hqp.select_track(new_status_idx)
+            if position > 0:
+                hqp.seek(position)
+            if should_resume:
+                hqp.play()
+        _register_playlist(req.order)
+        _force_refresh_playlist_after_write()
+        return {
+            "ok": True,
+            "removed": len(current_ids),
+            "added": len(req.order),
+            "anchor_index": new_status_idx,
+            "interrupted": True,
+        }
+    except Exception as e:
+        logger.error(f"reorder (rebuild) failed: {e}", exc_info=True)
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@router.post("/jump")
+def jump(req: JumpRequest):
+    """Jump to a specific position in the current HQPlayer playlist.
+
+    `index` is 1-based to match HQPlayer's own `select_track` API and
+    the SSE `track_index` field. Used by the Queue sheet to play a
+    specific track without rebuilding the playlist."""
+    if req.index < 1:
+        raise HTTPException(status_code=400, detail="index must be >= 1")
+    try:
+        ok = _hqp_cmd(lambda h: h.select_track(req.index))
+        if ok:
+            _hqp_cmd(lambda h: h.play())
+        _notify_update()
+        return {"ok": ok, "index": req.index}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
 
 @router.post("/play-track")
 def play_track(req: PlayTrackRequest):
