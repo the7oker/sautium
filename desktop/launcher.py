@@ -124,7 +124,15 @@ class LauncherApp(ctk.CTk):
             self, text="", text_color="gray",
             font=ctk.CTkFont(size=12),
         )
-        self._url_label.pack(pady=(0, 5))
+        self._url_label.pack(pady=(0, 2))
+
+        # First-visit hint about self-signed certificate. Hidden until
+        # services are running — see _on_services_ready.
+        self._url_hint_label = ctk.CTkLabel(
+            self, text="", text_color="gray",
+            font=ctk.CTkFont(size=10),
+        )
+        self._url_hint_label.pack(pady=(0, 5))
 
         # Library stats section
         stats_outer = ctk.CTkFrame(self)
@@ -282,6 +290,9 @@ class LauncherApp(ctk.CTk):
 
         self._set_status("running", "All services running")
         self._url_label.configure(text=f"Local: {local_url}  |  LAN: {lan_url}")
+        self._url_hint_label.configure(
+            text="First visit shows a browser security warning — accept it to continue (self-signed cert)."
+        )
         self._btn_open.configure(state="normal")
         self._btn_scan.configure(state="normal")
         self._btn_enrich.configure(state="normal")
