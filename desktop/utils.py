@@ -142,7 +142,32 @@ def detect_claude_cli() -> bool:
 
 
 def claude_authenticated() -> bool:
-    """True iff `~/.claude/.credentials.json` exists and parses as JSON."""
+    """True iff Claude Code has stored OAuth credentials.
+
+    Storage is platform-dependent:
+      - macOS: a generic password entry in the user's login Keychain
+        named "Claude Code-credentials". (~/.claude/.credentials.json
+        on macOS is a *directory* placeholder created by the CLI, so a
+        file-based check is wrong here.)
+      - Windows / Linux: a JSON file at ~/.claude/.credentials.json.
+    """
+    if sys.platform == "darwin":
+        try:
+            kwargs = {"capture_output": True, "timeout": 5}
+            # The plain `find-generic-password` (without `-w`) only checks
+            # for existence — it doesn't try to read the password and so
+            # doesn't trigger a Keychain-unlock prompt. Exit 0 = present,
+            # 44 (errSecItemNotFound) = absent.
+            result = subprocess.run(
+                ["security", "find-generic-password",
+                 "-s", "Claude Code-credentials"],
+                **kwargs,
+            )
+            return result.returncode == 0
+        except Exception as e:
+            logger.debug(f"Keychain probe failed: {e}")
+            return False
+
     creds = Path.home() / ".claude" / ".credentials.json"
     if not creds.is_file():
         return False
