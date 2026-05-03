@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from tkinter import filedialog
 from typing import Optional
@@ -21,7 +22,16 @@ from typing import Optional
 import customtkinter as ctk
 
 from desktop.config_manager import load_config, save_config
-from desktop.utils import detect_claude_cli, detect_gpu, detect_git
+from desktop.utils import (
+    claude_authenticated,
+    detect_claude_cli,
+    detect_git,
+    detect_gpu,
+    detect_node_version,
+    get_claude_executable,
+    install_claude_runtime,
+    launch_claude_setup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +43,7 @@ class SetupWizard(ctk.CTkToplevel):
         super().__init__(parent)
 
         self.title("Sautium - Setup")
-        self.geometry("600x560")
+        self.geometry("640x680")
         self.resizable(False, False)
         if sys.platform != "darwin":
             self.transient(parent)
@@ -54,9 +64,13 @@ class SetupWizard(ctk.CTkToplevel):
         ]
 
         # Detection results
-        self._claude_available = detect_claude_cli()
         self._gpu_available, self._gpu_name, self._gpu_vram = detect_gpu()
         self._git_available = detect_git()
+        # Claude Code state is computed on-demand via _claude_state()
+        # because it can change during the wizard (install, sign-in).
+        self._claude_install_thread: Optional[threading.Thread] = None
+        self._claude_poll_after_id: Optional[str] = None
+        self._claude_poll_deadline: float = 0.0
 
         # Main container
         self.container = ctk.CTkFrame(self, fg_color="transparent")
@@ -99,6 +113,7 @@ class SetupWizard(ctk.CTkToplevel):
             widget.destroy()
 
     def _show_step(self):
+        self._cancel_claude_poll()
         self._clear_content()
         self.steps[self.current_step]()
         self.step_label.configure(
@@ -268,6 +283,11 @@ class SetupWizard(ctk.CTkToplevel):
                     "name": self._compat_name_var.get().strip() or None,
                 }
             elif provider == "claude_code":
+                if self._claude_state() != "ready":
+                    self._provider_error.configure(
+                        text="Finish Claude setup above (or pick another provider).",
+                    )
+                    return False
                 self.config["claude_code_available"] = True
 
             return True
@@ -322,10 +342,16 @@ class SetupWizard(ctk.CTkToplevel):
         info_frame = ctk.CTkFrame(self.content_frame)
         info_frame.pack(fill="x", pady=20, padx=40)
 
+        claude_status = {
+            "ready": "Signed in",
+            "not_authed": "Installed (sign in required)",
+            "claude_missing": "Not installed",
+            "node_missing": "Node.js not found",
+        }[self._claude_state()]
         items = [
             ("Accelerator", f"{self._gpu_name} ({self._gpu_vram}GB)" if self._gpu_available and self._gpu_vram else
                             self._gpu_name if self._gpu_available else "Not detected"),
-            ("Claude CLI", "Available" if self._claude_available else "Not found"),
+            ("Claude Code", claude_status),
             ("Git", "Available" if self._git_available else "Not found"),
         ]
         for label, value in items:
@@ -558,15 +584,15 @@ class SetupWizard(ctk.CTkToplevel):
             command=self._update_provider_fields,
         ).pack(anchor="w", pady=3)
 
-        # Claude Code option (only if CLI available)
-        if self._claude_available:
-            ctk.CTkRadioButton(
-                providers_frame,
-                text="Claude Code (subscription — recommended)",
-                variable=self._provider_var,
-                value="claude_code",
-                command=self._update_provider_fields,
-            ).pack(anchor="w", pady=3)
+        # Claude Code (subscription) — wizard installs and signs in
+        # if not already set up.
+        ctk.CTkRadioButton(
+            providers_frame,
+            text="Claude Code (subscription — recommended)",
+            variable=self._provider_var,
+            value="claude_code",
+            command=self._update_provider_fields,
+        ).pack(anchor="w", pady=3)
 
         # Anthropic
         ctk.CTkRadioButton(
@@ -639,11 +665,7 @@ class SetupWizard(ctk.CTkToplevel):
             ).pack(anchor="w")
 
         elif provider == "claude_code":
-            ctk.CTkLabel(
-                self._provider_fields_frame,
-                text="Uses your Claude Code subscription. No API key needed.",
-                text_color="gray",
-            ).pack(anchor="w")
+            self._render_claude_state_ui()
 
         elif provider == "anthropic":
             ctk.CTkLabel(
@@ -701,6 +723,316 @@ class SetupWizard(ctk.CTkToplevel):
                 textvariable=self._compat_name_var,
                 width=400, placeholder_text="My Local LLM",
             ).pack(fill="x")
+
+    # ================================================================
+    # Claude Code provider — install + sign-in state machine
+    # ================================================================
+
+    def _claude_state(self) -> str:
+        """Return one of 'node_missing' | 'claude_missing' | 'not_authed' | 'ready'."""
+        node_ver = detect_node_version()
+        if node_ver is None or node_ver[0] < 18:
+            return "node_missing"
+        if get_claude_executable() is None:
+            return "claude_missing"
+        if not claude_authenticated():
+            return "not_authed"
+        return "ready"
+
+    def _render_claude_state_ui(self):
+        """Draw the action UI for whatever stage of Claude setup we're in.
+        Called from `_update_provider_fields` and after each state change."""
+        for widget in self._provider_fields_frame.winfo_children():
+            widget.destroy()
+        # Stale validation error from a previous state is no longer relevant.
+        self._provider_error.configure(text="")
+
+        state = self._claude_state()
+
+        if state == "ready":
+            ctk.CTkLabel(
+                self._provider_fields_frame,
+                text="✓ Claude Code is ready",
+                text_color="#4CAF50",
+                font=ctk.CTkFont(size=14, weight="bold"),
+            ).pack(anchor="w")
+            ctk.CTkLabel(
+                self._provider_fields_frame,
+                text="Signed in via subscription. No API key needed.",
+                text_color="gray",
+            ).pack(anchor="w", pady=(2, 0))
+            return
+
+        if state == "node_missing":
+            ctk.CTkLabel(
+                self._provider_fields_frame,
+                text="Node.js 18+ is required.",
+                text_color="orange",
+                font=ctk.CTkFont(size=13, weight="bold"),
+            ).pack(anchor="w")
+            if sys.platform == "darwin":
+                ctk.CTkLabel(
+                    self._provider_fields_frame,
+                    text="Install Node.js via Homebrew, then click Refresh.",
+                    text_color="gray",
+                ).pack(anchor="w", pady=(2, 5))
+                ctk.CTkButton(
+                    self._provider_fields_frame,
+                    text="Show install command",
+                    width=200,
+                    command=self._show_node_macos_dialog,
+                ).pack(anchor="w", pady=(0, 5))
+            else:
+                ctk.CTkLabel(
+                    self._provider_fields_frame,
+                    text=(
+                        "The installer should have placed Node next to Sautium.\n"
+                        "Re-run the Sautium installer to repair, then click Refresh."
+                    ),
+                    text_color="gray",
+                    justify="left",
+                ).pack(anchor="w", pady=(2, 5))
+            ctk.CTkButton(
+                self._provider_fields_frame,
+                text="Refresh",
+                width=120,
+                command=self._render_claude_state_ui,
+            ).pack(anchor="w")
+            return
+
+        if state == "claude_missing":
+            ctk.CTkLabel(
+                self._provider_fields_frame,
+                text="Claude Code is not installed yet.",
+                text_color="gray",
+                font=ctk.CTkFont(size=13),
+            ).pack(anchor="w")
+            ctk.CTkLabel(
+                self._provider_fields_frame,
+                text="Downloads ~5 MB via npm. Internet connection required.",
+                text_color="gray",
+                font=ctk.CTkFont(size=12),
+            ).pack(anchor="w", pady=(2, 8))
+
+            self._claude_install_status = ctk.CTkLabel(
+                self._provider_fields_frame, text="", text_color="gray",
+                wraplength=420, justify="left",
+            )
+            self._claude_install_status.pack(anchor="w", pady=(0, 5))
+
+            self._claude_install_btn = ctk.CTkButton(
+                self._provider_fields_frame,
+                text="Install Claude Code",
+                width=200,
+                command=self._install_claude_clicked,
+            )
+            self._claude_install_btn.pack(anchor="w")
+            return
+
+        # state == "not_authed"
+        ctk.CTkLabel(
+            self._provider_fields_frame,
+            text="Claude Code installed.",
+            text_color="gray",
+            font=ctk.CTkFont(size=13),
+        ).pack(anchor="w")
+
+        instr_frame = ctk.CTkFrame(
+            self._provider_fields_frame,
+            fg_color=("#F0F0F0", "#2B2B2B"),
+        )
+        instr_frame.pack(fill="x", pady=(4, 4))
+
+        ctk.CTkLabel(
+            instr_frame,
+            text="In the new terminal window:",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(anchor="w", padx=12, pady=(6, 2))
+
+        ctk.CTkLabel(
+            instr_frame,
+            text="1. Pick a theme (first run only)",
+            font=ctk.CTkFont(size=12),
+        ).pack(anchor="w", padx=20)
+
+        step2 = ctk.CTkFrame(instr_frame, fg_color="transparent")
+        step2.pack(anchor="w", padx=20, fill="x")
+        ctk.CTkLabel(
+            step2, text="2. Type the command:",
+            font=ctk.CTkFont(size=12),
+        ).pack(side="left")
+        ctk.CTkLabel(
+            step2, text="  /login",
+            font=ctk.CTkFont(size=14, family="Consolas", weight="bold"),
+            text_color="#4A7FA7",
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            instr_frame,
+            text="3. Choose 'Claude account with subscription'",
+            font=ctk.CTkFont(size=12),
+        ).pack(anchor="w", padx=20)
+        ctk.CTkLabel(
+            instr_frame,
+            text="4. Authorize in the browser tab that opens",
+            font=ctk.CTkFont(size=12),
+        ).pack(anchor="w", padx=20, pady=(0, 6))
+
+        ctk.CTkLabel(
+            self._provider_fields_frame,
+            text="Sautium will detect the sign-in automatically.",
+            text_color="gray",
+            font=ctk.CTkFont(size=12),
+        ).pack(anchor="w", pady=(0, 4))
+
+        self._claude_signin_status = ctk.CTkLabel(
+            self._provider_fields_frame, text="", text_color="gray",
+        )
+        self._claude_signin_status.pack(anchor="w", pady=(0, 5))
+
+        btn_frame = ctk.CTkFrame(
+            self._provider_fields_frame, fg_color="transparent"
+        )
+        btn_frame.pack(anchor="w")
+        ctk.CTkButton(
+            btn_frame,
+            text="Sign in to Claude",
+            width=180,
+            command=self._signin_claude_clicked,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_frame,
+            text="Refresh",
+            width=100,
+            command=self._render_claude_state_ui,
+            fg_color="transparent", border_width=1,
+        ).pack(side="left")
+
+    def _show_node_macos_dialog(self):
+        """Mirrors `_show_homebrew_dialog` but for `brew install node`."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Install Node.js")
+        dialog.geometry("520x260")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ctk.CTkLabel(
+            dialog,
+            text="Install Node.js",
+            font=ctk.CTkFont(size=20, weight="bold"),
+        ).pack(pady=(20, 5))
+
+        ctk.CTkLabel(
+            dialog,
+            text="Open Terminal and paste this command:",
+            text_color="gray",
+        ).pack(pady=(10, 3))
+
+        node_cmd = "brew install node"
+        cmd_frame = ctk.CTkFrame(dialog)
+        cmd_frame.pack(fill="x", padx=30, pady=5)
+
+        cmd_entry = ctk.CTkEntry(
+            cmd_frame, width=380,
+            font=ctk.CTkFont(size=13, family="Courier"),
+        )
+        cmd_entry.insert(0, node_cmd)
+        cmd_entry.configure(state="readonly")
+        cmd_entry.pack(side="left", padx=(10, 5), pady=8)
+
+        def _copy():
+            dialog.clipboard_clear()
+            dialog.clipboard_append(node_cmd)
+            copy_btn.configure(text="Copied!")
+            dialog.after(1500, lambda: copy_btn.configure(text="Copy"))
+
+        copy_btn = ctk.CTkButton(
+            cmd_frame, text="Copy", width=70, command=_copy,
+        )
+        copy_btn.pack(side="right", padx=(0, 10), pady=8)
+
+        ctk.CTkLabel(
+            dialog,
+            text="After install completes, close this dialog and click Refresh.",
+            text_color="gray",
+            font=ctk.CTkFont(size=12),
+            justify="center",
+        ).pack(pady=10)
+
+        ctk.CTkButton(
+            dialog, text="Done", width=100, command=dialog.destroy,
+        ).pack(pady=10)
+
+    def _install_claude_clicked(self):
+        """Run npm install in a worker thread and re-render on completion."""
+        if self._claude_install_thread and self._claude_install_thread.is_alive():
+            return
+        self._claude_install_btn.configure(state="disabled", text="Installing...")
+        self._claude_install_status.configure(
+            text="Running npm install (may take a minute)...",
+            text_color="gray",
+        )
+
+        def _worker():
+            ok, msg = install_claude_runtime()
+            self.after(0, lambda: self._on_claude_install_done(ok, msg))
+
+        self._claude_install_thread = threading.Thread(
+            target=_worker, daemon=True
+        )
+        self._claude_install_thread.start()
+
+    def _on_claude_install_done(self, ok: bool, msg: str):
+        if ok:
+            self._render_claude_state_ui()  # transitions to not_authed UI
+        else:
+            self._claude_install_btn.configure(
+                state="normal", text="Install Claude Code"
+            )
+            self._claude_install_status.configure(
+                text=f"Install failed: {msg}", text_color="red",
+            )
+
+    def _signin_claude_clicked(self):
+        """Open `claude` in a new terminal and start polling for credentials."""
+        try:
+            launch_claude_setup()
+        except Exception as e:
+            self._claude_signin_status.configure(
+                text=f"Could not launch claude: {e}", text_color="red",
+            )
+            return
+
+        self._claude_signin_status.configure(
+            text="Waiting for sign-in (poll every 2s for 5 min)...",
+            text_color="gray",
+        )
+        self._claude_poll_deadline = time.monotonic() + 300
+        self._poll_claude_auth()
+
+    def _poll_claude_auth(self):
+        """Self-rescheduling timer that checks for credentials."""
+        if claude_authenticated():
+            self._claude_poll_after_id = None
+            self._render_claude_state_ui()  # transitions to ready UI
+            return
+        if time.monotonic() >= self._claude_poll_deadline:
+            self._claude_poll_after_id = None
+            self._claude_signin_status.configure(
+                text="Sign-in not detected. Click Refresh after authorizing.",
+                text_color="orange",
+            )
+            return
+        self._claude_poll_after_id = self.after(2000, self._poll_claude_auth)
+
+    def _cancel_claude_poll(self):
+        if self._claude_poll_after_id is not None:
+            try:
+                self.after_cancel(self._claude_poll_after_id)
+            except Exception:
+                pass
+            self._claude_poll_after_id = None
 
     def _step_hqplayer(self):
         ctk.CTkLabel(
@@ -1152,6 +1484,7 @@ class SetupWizard(ctk.CTkToplevel):
         """Handle window close — quit the whole app if wizard not completed."""
         if self.current_step == len(self.steps) - 1:
             return  # Don't close during init
+        self._cancel_claude_poll()
         self.destroy()
         # Quit the parent app since setup was not completed
         if self.master:

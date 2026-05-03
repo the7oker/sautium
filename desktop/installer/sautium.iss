@@ -25,6 +25,10 @@ Source: "pgsql\*"; DestDir: "{app}\pgsql"; Flags: ignoreversion recursesubdirs
 ; Embedded Python 3.12 (pre-downloaded, or auto-downloaded on first launch)
 Source: "python312\*"; DestDir: "{app}\python312"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
 
+; Portable Node.js — populated by prepare_node.ps1 before compiling.
+; Used by the wizard to install @anthropic-ai/claude-code into a per-user prefix.
+Source: "node-portable\*"; DestDir: "{app}\node"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
+
 ; Assets
 Source: "..\assets\*"; DestDir: "{app}\desktop\assets"; Flags: ignoreversion
 

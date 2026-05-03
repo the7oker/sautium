@@ -2,7 +2,9 @@
 Utility functions for Sautium desktop launcher.
 """
 
+import json
 import logging
+import os
 import platform
 import shutil
 import socket
@@ -24,25 +26,211 @@ def get_project_root() -> Path:
         return Path(__file__).parent.parent
 
 
-def detect_claude_cli() -> bool:
-    """Check if Claude Code CLI is available in PATH or via WSL."""
-    if shutil.which("claude") is not None:
-        return True
+def get_bundled_node_dir() -> Optional[Path]:
+    """Return path to the portable Node directory bundled by the installer
+    (Windows only). None if not present or not on Windows."""
+    if sys.platform != "win32":
+        return None
+    candidate = get_project_root() / "node"
+    if (candidate / "node.exe").is_file():
+        return candidate
+    return None
 
-    # On Windows, check if claude is available inside WSL
+
+def get_node_executable() -> Optional[Path]:
+    """Find a usable Node binary: bundled (Win) → PATH."""
+    bundled = get_bundled_node_dir()
+    if bundled is not None:
+        return bundled / "node.exe"
+    found = shutil.which("node")
+    return Path(found) if found else None
+
+
+def get_npm_executable() -> Optional[Path]:
+    """Find npm alongside Node. Win: npm.cmd; Mac/Linux: npm."""
+    bundled = get_bundled_node_dir()
+    if bundled is not None:
+        cand = bundled / "npm.cmd"
+        if cand.is_file():
+            return cand
+    found = shutil.which("npm")
+    if found:
+        return Path(found)
+    # Fallback: look next to node binary (some setups don't expose npm in PATH)
+    node = get_node_executable()
+    if node is not None:
+        for name in ("npm.cmd", "npm"):
+            cand = node.parent / name
+            if cand.is_file():
+                return cand
+    return None
+
+
+def detect_node_version() -> Optional[Tuple[int, int, int]]:
+    """Return (major, minor, patch) from `node --version`, or None."""
+    node = get_node_executable()
+    if node is None:
+        return None
+    try:
+        kwargs = {
+            "capture_output": True, "text": True, "timeout": 10,
+            "encoding": "utf-8", "errors": "replace",
+        }
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        result = subprocess.run([str(node), "--version"], **kwargs)
+    except Exception as e:
+        logger.debug(f"node --version failed: {e}")
+        return None
+    if result.returncode != 0:
+        return None
+    raw = result.stdout.strip().lstrip("v")
+    parts = raw.split(".")
+    if len(parts) < 3:
+        return None
+    try:
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except ValueError:
+        return None
+
+
+def get_claude_prefix() -> Path:
+    """Per-user prefix where `npm install` puts Claude Code so we don't
+    pollute the user's global node_modules."""
     if sys.platform == "win32":
-        try:
-            result = subprocess.run(
-                ["wsl", "claude", "--version"],
-                capture_output=True, text=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            if result.returncode == 0 and "claude" in result.stdout.lower():
-                return True
-        except Exception:
-            pass
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return base / "Sautium" / "claude-prefix"
 
-    return False
+
+def get_claude_executable() -> Optional[Path]:
+    """Path to the native Claude Code binary, bypassing npm's shim.
+
+    The .cmd shim on Windows runs through cmd.exe (8191-char arg limit),
+    which truncates our ~13k system_prompt. The native binary
+    (`bin/claude.exe`, same name on every platform — postinstall copies
+    the platform-matched binary over the placeholder) takes the same args
+    via CreateProcessW (32k limit). Lookup order: bundled prefix → npm
+    shim in PATH redirected to its sibling .exe → raw shim as last resort."""
+    bin_rel = (
+        Path("node_modules") / "@anthropic-ai" / "claude-code"
+        / "bin" / "claude.exe"
+    )
+    bundled = get_claude_prefix() / bin_rel
+    if bundled.is_file():
+        return bundled
+
+    shim = shutil.which("claude")
+    if shim:
+        shim_dir = Path(shim).parent
+        for cand in (
+            shim_dir.parent / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe",
+            shim_dir / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe",
+        ):
+            if cand.is_file():
+                return cand
+        return Path(shim)
+    return None
+
+
+def detect_claude_cli() -> bool:
+    """Check if Claude Code CLI is available (bundled prefix or PATH)."""
+    return get_claude_executable() is not None
+
+
+def claude_authenticated() -> bool:
+    """True iff `~/.claude/.credentials.json` exists and parses as JSON."""
+    creds = Path.home() / ".claude" / ".credentials.json"
+    if not creds.is_file():
+        return False
+    try:
+        json.loads(creds.read_text(encoding="utf-8"))
+        return True
+    except (json.JSONDecodeError, OSError) as e:
+        logger.debug(f"Claude credentials unreadable: {e}")
+        return False
+
+
+def install_claude_runtime(progress_cb=None) -> Tuple[bool, str]:
+    """`npm install --prefix <claude_prefix> @anthropic-ai/claude-code`.
+
+    Long-running and network-dependent — call from a worker thread. The
+    caller is responsible for verifying Node is present (use
+    `detect_node_version()` first) and surfacing the returned message
+    to the user on failure."""
+    npm = get_npm_executable()
+    if npm is None:
+        return False, "Node.js not found. Install Node 18+ first."
+
+    prefix = get_claude_prefix()
+    prefix.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        str(npm), "install",
+        "--prefix", str(prefix),
+        "--no-audit", "--no-fund",
+        "@anthropic-ai/claude-code",
+    ]
+    if progress_cb:
+        progress_cb("Installing Claude Code via npm...")
+
+    kwargs = {
+        "capture_output": True, "text": True,
+        "encoding": "utf-8", "errors": "replace",
+        "timeout": 600,  # generous for slow networks
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    try:
+        result = subprocess.run(cmd, **kwargs)
+    except subprocess.TimeoutExpired:
+        return False, "Install timed out after 10 minutes. Check internet connection."
+    except Exception as e:
+        return False, f"Install failed: {e}"
+
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        # npm errors are verbose — keep the tail which usually has the cause.
+        return False, err[-600:] if err else f"npm exited with code {result.returncode}"
+
+    if get_claude_executable() is None:
+        return False, "Install reported success but claude binary not found in prefix"
+
+    return True, "Claude Code installed"
+
+
+def launch_claude_setup() -> "subprocess.Popen":
+    """Open `claude` in a new console/terminal window so the user can
+    pick a theme and complete the OAuth login flow. Returns the Popen
+    handle. Polls `claude_authenticated()` to know when the user is done."""
+    claude = get_claude_executable()
+    if claude is None:
+        raise RuntimeError("Claude Code CLI not installed")
+
+    if sys.platform == "win32":
+        # `start` spins up a fresh console; `cmd /k` keeps it open after
+        # claude exits so the user sees the final "logged in" message.
+        return subprocess.Popen(
+            ["cmd.exe", "/c", "start", "Claude Setup",
+             "cmd.exe", "/k", str(claude)],
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+    if sys.platform == "darwin":
+        # AppleScript opens Terminal.app with the command. Quoting: claude
+        # path is absolute and doesn't contain double quotes by convention,
+        # so embedding it directly is safe.
+        script = (
+            f'tell application "Terminal"\n'
+            f'  do script "{claude}"\n'
+            f'  activate\n'
+            f'end tell'
+        )
+        return subprocess.Popen(["osascript", "-e", script])
+    raise RuntimeError("Interactive Claude setup not supported on this platform")
 
 
 def detect_git() -> bool:
