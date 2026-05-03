@@ -475,8 +475,11 @@ def _h_play_track(track_id: int) -> str:
         hqp.stop()
         hqp.playlist_add(uri, clear=True)
         hqp.select_track(0)
-        hqp.play()
+        # Register BEFORE play() so the tracker has the index→track_id
+        # map by the time HQPlayer emits its first status update —
+        # otherwise the now-playing scrobble is silently dropped.
         _register_playlist([track_id])
+        hqp.play()
         return f"Now playing: {row['artist']} - {row['title']}\nAlbum: {row['album']}"
     except Exception as e:
         return f"Error playing track: {e}"
@@ -541,10 +544,9 @@ def _h_play_album(album_name: str, artist_name: str = "") -> str:
             uri = file_path_to_uri(row["file_path"])
             hqp.playlist_add(uri)
         hqp.select_track(0)
-        hqp.play()
-
         track_ids = [row["id"] for row in rows]
         _register_playlist(track_ids)
+        hqp.play()
 
         album_title = rows[0]["album"]
         artist = rows[0]["artist"]
@@ -610,10 +612,9 @@ def _h_play_similar(track_id: int, limit: int = 10) -> str:
             uri = file_path_to_uri(row["file_path"])
             hqp.playlist_add(uri)
         hqp.select_track(0)
-        hqp.play()
-
         track_ids = [row["id"] for row in rows]
         _register_playlist(track_ids)
+        hqp.play()
 
         source = _db_query_one("""
             SELECT t.title, a.name as artist

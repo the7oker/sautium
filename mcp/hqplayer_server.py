@@ -772,14 +772,14 @@ def play_track(track_id: int) -> str:
         uri = file_path_to_uri(row["file_path"])
         hqp = _get_hqp()
 
-        # Stop, clear playlist, add track, select first, play
+        # Register BEFORE play() so the tracker has the index→track_id
+        # map by the time HQPlayer emits its first status update — otherwise
+        # the now-playing scrobble for track 0 is silently dropped.
         hqp.stop()
         hqp.playlist_add(uri, clear=True)
         hqp.select_track(0)
-        hqp.play()
-
-        # Register playlist with tracker
         _register_playlist([track_id])
+        hqp.play()
 
         return f"Now playing: {row['artist']} - {row['title']}\nAlbum: {row['album']}"
     except Exception as e:
@@ -850,7 +850,6 @@ def play_album(album_name: str, artist_name: str = "") -> str:
 
         hqp = _get_hqp()
 
-        # Stop, clear playlist, add all tracks, select first, play
         hqp.stop()
         first_uri = file_path_to_uri(rows[0]["file_path"])
         hqp.playlist_add(first_uri, clear=True)
@@ -860,11 +859,9 @@ def play_album(album_name: str, artist_name: str = "") -> str:
             hqp.playlist_add(uri)
 
         hqp.select_track(0)
-        hqp.play()
-
-        # Register playlist with tracker
         track_ids = [row["id"] for row in rows]
         _register_playlist(track_ids)
+        hqp.play()
 
         album_title = rows[0]["album"]
         artist = rows[0]["artist"]
@@ -937,7 +934,6 @@ def play_similar(track_id: int, limit: int = 10) -> str:
 
         hqp = _get_hqp()
 
-        # Stop, clear playlist, add all tracks, select first, play
         hqp.stop()
         first_uri = file_path_to_uri(rows[0]["file_path"])
         hqp.playlist_add(first_uri, clear=True)
@@ -947,11 +943,9 @@ def play_similar(track_id: int, limit: int = 10) -> str:
             hqp.playlist_add(uri)
 
         hqp.select_track(0)
-        hqp.play()
-
-        # Register playlist with tracker
         track_ids = [row["id"] for row in rows]
         _register_playlist(track_ids)
+        hqp.play()
 
         # Get source track info
         source = _db_query_one("""

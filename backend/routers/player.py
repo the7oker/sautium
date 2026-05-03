@@ -802,8 +802,11 @@ def play_track(req: PlayTrackRequest):
             hqp = _get_hqp()
             hqp.stop()
             hqp.playlist_add(uri, clear=True)
+            # Register BEFORE play() so the tracker has the index→track_id
+            # map by the time HQPlayer emits its first status update —
+            # otherwise the now-playing scrobble is silently dropped.
+            _register_playlist([req.track_id])
             hqp.play()
-        _register_playlist([req.track_id])
         _invalidate_playlist()
         _notify_update()
 
@@ -877,10 +880,10 @@ def play_album(req: PlayAlbumRequest):
             hqp.playlist_add(file_path_to_uri(rows[0]["file_path"]), clear=True)
             for row in rows[1:]:
                 hqp.playlist_add(file_path_to_uri(row["file_path"]))
+            track_ids = [r["id"] for r in rows]
+            _register_playlist(track_ids)
             hqp.play()
 
-        track_ids = [r["id"] for r in rows]
-        _register_playlist(track_ids)
         _invalidate_playlist()
         _notify_update()
 
@@ -951,10 +954,10 @@ def play_similar(req: PlaySimilarRequest):
             hqp.playlist_add(file_path_to_uri(rows[0]["file_path"]), clear=True)
             for row in rows[1:]:
                 hqp.playlist_add(file_path_to_uri(row["file_path"]))
+            track_ids = [r["id"] for r in rows]
+            _register_playlist(track_ids)
             hqp.play()
 
-        track_ids = [r["id"] for r in rows]
-        _register_playlist(track_ids)
         _invalidate_playlist()
         _notify_update()
 
@@ -1010,6 +1013,8 @@ def play_tracks(req: PlayTracksRequest):
                 path = file_path_to_uri(row["file_path"])
                 hqp.playlist_add(path)
             logger.info(f"play-tracks: added {len(rows)} tracks total")
+            track_ids = [r["id"] for r in rows]
+            _register_playlist(track_ids)
             hqp.play()
 
             # Verify playback started; if first track fails (e.g. [Vinyl] path),
@@ -1027,8 +1032,6 @@ def play_tracks(req: PlayTracksRequest):
                         logger.info(f"play-tracks: track {skip_idx} started successfully")
                         break
 
-        track_ids = [r["id"] for r in rows]
-        _register_playlist(track_ids)
         _invalidate_playlist()
         _notify_update()
 
