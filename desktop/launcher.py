@@ -262,8 +262,8 @@ class LauncherApp(ctk.CTk):
         """Called when all services are running."""
         port = self.config.get("ports", {}).get("web", 8000)
         local_ip = get_local_ip()
-        local_url = f"http://localhost:{port}"
-        lan_url = f"http://{local_ip}:{port}"
+        local_url = f"https://localhost:{port}"
+        lan_url = f"https://{local_ip}:{port}"
 
         # Check GPU status via backend Python (torch is in python312, not launcher)
         gpu_text = ""
@@ -689,7 +689,7 @@ class LauncherApp(ctk.CTk):
 
     def _open_web_ui(self):
         port = self.config.get("ports", {}).get("web", 8000)
-        webbrowser.open(f"http://localhost:{port}")
+        webbrowser.open(f"https://localhost:{port}")
 
     def _scan_library(self):
         """Open folder picker and scan selected folder."""
