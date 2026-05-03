@@ -296,6 +296,168 @@ def _format_sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
+# Maximum characters in an AI-generated session title. The chat-list
+# row and the chat-view title bar both ellipsize at ~30-35 chars on
+# the 360px reference; 60 here gives some headroom for languages
+# (e.g. Ukrainian) where fewer words = more characters per word.
+_TITLE_MAX_CHARS = 60
+
+
+_TITLE_PROMPT_TEMPLATE = (
+    "Summarise this chat exchange into a concise chat title — "
+    "ideally 3-5 words, max 8 — in the same language as the user. "
+    "No quotes, no trailing punctuation, no phrases like 'Chat about'. "
+    "Output ONLY the title text.\n\n"
+    "User:\n{u}\n\n"
+    "Assistant:\n{a}"
+)
+
+
+def _clean_title(raw: str) -> Optional[str]:
+    """Trim quotes/punctuation/whitespace; cap to `_TITLE_MAX_CHARS`."""
+    if not raw:
+        return None
+    title = raw.strip().strip('"\'').rstrip('.!?,;:')
+    if not title:
+        return None
+    # Sometimes the model echoes the prompt structure or returns
+    # multiple lines. Take the first non-empty line.
+    line = next((l.strip() for l in title.splitlines() if l.strip()), title)
+    line = line.strip().strip('"\'').rstrip('.!?,;:')
+    if not line:
+        return None
+    if len(line) > _TITLE_MAX_CHARS:
+        line = line[:_TITLE_MAX_CHARS - 1].rstrip() + '…'
+    return line
+
+
+def _title_via_provider(provider_name: str, prompt: str) -> Optional[str]:
+    """Run the title prompt through any SDK-based provider via the
+    shared `BaseProvider.chat()` interface. The DJ tool registry is
+    still passed in the request (provider implementations always
+    attach it), but a pure-summarisation prompt won't trigger tool
+    use — single round-trip, ~500-1500ms depending on provider.
+    Picks the smallest available model so even a slow provider
+    answers quickly."""
+    from providers import get_provider
+    provider = get_provider(provider_name)
+    if provider is None:
+        return None
+    try:
+        models = provider.models()
+        small_model = models[-1] if models else None
+        result = provider.chat(
+            message=prompt,
+            system_prompt=(
+                "You produce short chat titles. Output the title text only "
+                "— no quotes, no preamble, no explanation, no tool calls."
+            ),
+            model=small_model,
+        )
+        return _clean_title(result.answer or "")
+    except NotImplementedError:
+        # ClaudeCodeProvider.chat() is a sentinel — caller has its own
+        # subprocess path.
+        return None
+    except Exception as e:
+        logger.debug(f"Title gen via {provider_name} failed: {e}")
+        return None
+
+
+def _title_via_claude_code(prompt: str) -> Optional[str]:
+    """Fallback: spawn the Claude Code CLI in a bare one-shot mode —
+    no `--mcp-config`, no tool definitions, no resumable session. This
+    is ~10s faster than reusing `call_claude_code` because the CLI
+    skips loading the entire DJ MCP server. Demote to `claudeuser`
+    is preserved (Linux/Docker path) so `--dangerously-skip-permissions`
+    is accepted, and `ANTHROPIC_API_KEY` is stripped from the env so
+    the CLI uses the user's Claude subscription rather than the
+    pay-as-you-go API account. ~3-5s total.
+    """
+    if not settings.claude_code_enabled:
+        return None
+    try:
+        from claude_code_runner import _resolve_claude_executable, CLAUDE_USER
+        import subprocess
+        import sys
+        import os
+
+        claude_exe = _resolve_claude_executable()
+        if claude_exe is None:
+            return None
+
+        env = os.environ.copy()
+        env.pop("ANTHROPIC_API_KEY", None)
+
+        kwargs = dict(
+            capture_output=True, text=True, timeout=20, env=env,
+        )
+        if sys.platform != "win32" and sys.platform != "darwin":
+            # Linux/Docker — same demote path as call_claude_code.
+            import pwd
+
+            pw = pwd.getpwnam(CLAUDE_USER)
+
+            def demote():
+                os.setgid(pw.pw_gid)
+                os.setuid(pw.pw_uid)
+
+            kwargs["preexec_fn"] = demote
+            env["HOME"] = pw.pw_dir
+
+        cmd = [
+            claude_exe,
+            "-p", prompt,
+            "--output-format", "text",
+            "--model", "haiku",
+            "--dangerously-skip-permissions",
+        ]
+        result = subprocess.run(cmd, **kwargs)
+        if result.returncode != 0:
+            logger.debug(
+                f"Claude Code title gen rc={result.returncode}: "
+                f"{(result.stderr or '')[:200]}"
+            )
+            return None
+        return _clean_title(result.stdout or "")
+    except Exception as e:
+        logger.debug(f"Claude Code title gen failed: {e}")
+        return None
+
+
+def _generate_session_title(
+    first_user: str, first_assistant: str, provider_name: str,
+) -> Optional[str]:
+    """Summarise the first exchange into a short chat title via the
+    SAME provider that just answered. ChatGPT user → ChatGPT title;
+    Groq user → Groq title; Claude Code user → Claude Code title
+    (subprocess). This keeps billing/credentials consistent — if the
+    main chat works, title gen works.
+
+    Runs synchronously in the request thread right after the assistant
+    reply is persisted. Returns None if the provider call fails;
+    caller keeps the truncated-message fallback already on the
+    session. Output is hard-trimmed to `_TITLE_MAX_CHARS` because
+    list rows can't fit anything longer.
+    """
+    if not first_user or not first_assistant:
+        return None
+    prompt = _TITLE_PROMPT_TEMPLATE.format(
+        u=first_user[:500], a=first_assistant[:500],
+    )
+    if provider_name == "claude_code":
+        # Subprocess CLI — see _title_via_claude_code for why this
+        # bypasses BaseProvider.chat() and the MCP config.
+        title = _title_via_claude_code(prompt)
+    else:
+        title = _title_via_provider(provider_name, prompt)
+    if not title:
+        logger.warning(
+            f"AI title generation via '{provider_name}' returned nothing"
+        )
+    return title
+
+
 def _resolve_provider(req_provider: Optional[str]) -> str:
     """Pick a provider name, validating availability. Raises
     HTTPException on no usable provider."""
@@ -557,6 +719,28 @@ async def send_message(session_id: int, req: ChatMessageRequest):
                 "tr": len(tracks),
             })
 
+            # First-exchange title refinement: when there was no prior
+            # history at request time, we just persisted the user-msg
+            # truncation as a fallback title (above). Now that we also
+            # have the assistant reply we can ask the SAME provider
+            # for a short summary and overwrite. Skips silently on any
+            # failure — the truncation is still good enough.
+            ai_title: Optional[str] = None
+            if not history_rows:
+                ai_title = _generate_session_title(
+                    req.message, clean_text, provider_used or provider_name,
+                )
+                if ai_title:
+                    try:
+                        _db_execute(
+                            "UPDATE chat_sessions SET title = %(t)s "
+                            "WHERE id = %(id)s",
+                            {"t": ai_title, "id": session_id},
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to save AI title: {e}")
+                        ai_title = None
+
             done_payload = {
                 "assistant_msg": assistant_row,
                 "blocks": blocks,
@@ -566,6 +750,8 @@ async def send_message(session_id: int, req: ChatMessageRequest):
                 "tracks_retrieved": len(tracks),
                 "retrieval_log": retrieval_log,
             }
+            if ai_title:
+                done_payload["title"] = ai_title
             if final and final.error:
                 done_payload["provider_error"] = final.error
             out_q.put(_format_sse("done", done_payload))

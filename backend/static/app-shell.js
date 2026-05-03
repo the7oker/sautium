@@ -1391,6 +1391,17 @@
                 ? `${evt.data.provider}:${evt.data.model || ''}`
                 : (evt.data.model || '');
               onModel(modelStr);
+              // Backend just refined the truncated-message fallback
+              // title via Haiku for the first exchange in this
+              // session. Update both the chat-view title bar and
+              // the cached sessions[] entry so list-view picks it
+              // up without an extra round-trip.
+              if (evt.data.title) {
+                this.chatTitle.textContent = evt.data.title;
+                const cached = this.sessions.find(
+                  s => s.id === this.activeSessionId);
+                if (cached) cached.title = evt.data.title;
+              }
             } else if (evt.event === 'error') {
               throw new Error(evt.data.message || 'AI error');
             }
@@ -1398,12 +1409,11 @@
         }
 
         if (typing.parentNode) typing.remove();
-        // Backend may have just auto-set a title from the first
-        // message — refresh sessions metadata so the chat list
-        // and the title bar both pick it up.
+        // Refresh sessions metadata so list-view picks up the new
+        // preview / last_model. Title is already up-to-date from
+        // the 'done' SSE event so we don't overwrite the title bar
+        // here — re-loading would briefly flash the stale value.
         await this.loadSessions();
-        const cur = this.sessions.find(s => s.id === this.activeSessionId);
-        if (cur && cur.title) this.chatTitle.textContent = cur.title;
         this.scrollToBottom();
       } catch (err) {
         if (typing.parentNode) typing.remove();
