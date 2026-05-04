@@ -896,14 +896,24 @@
         if (e.key === 'Escape' && this.isOpen) this.hide();
       });
 
-      // Track which row is currently playing — `np-update` carries
-      // track_index in its detail. Re-render only when the index
-      // actually changes so we don't repaint on every position tick.
+      // `np-update` carries track_index, position, length on every
+      // status tick (~1s). Re-render only when the index changes;
+      // otherwise just update the current row's countdown so we
+      // don't repaint the whole list every second.
       document.addEventListener('np-update', e => {
-        const idx = (e.detail && e.detail.track_index) || 0;
+        const d = e.detail || {};
+        const idx = d.track_index || 0;
+        this._npPosition = d.position;
+        this._npLength = d.length;
+        const stateChanged = this._npState !== d.state;
+        this._npState = d.state;
         if (idx !== this.trackIndex) {
           this.trackIndex = idx;
           if (this.isOpen) this.render();
+        } else if (this.isOpen) {
+          this.updateCurrentRemaining();
+          this.renderSummary();
+          if (stateChanged) this.updateGlyphState();
         }
       });
       // Mirror the playlist whenever app.js refetches it.
@@ -952,20 +962,7 @@
       }
       this.empty.hidden = true;
 
-      const totalDur = tracks.reduce(
-        (s, t) => s + (Number(t.duration_seconds) || 0), 0);
-      const albumCount = new Set(
-        tracks.map(t => t.album).filter(Boolean)).size;
-      const parts = [
-        `${tracks.length} tracks`,
-        formatDurationSummary(totalDur),
-        albumCount > 0 ? `${albumCount} ${albumCount === 1 ? 'album' : 'albums'}` : null,
-      ].filter(Boolean);
-      this.summary.innerHTML = parts
-        .map((p, i) => i === 0
-          ? `<span>${escapeHtml(p)}</span>`
-          : `<span class="qs-sep">·</span><span>${escapeHtml(p)}</span>`)
-        .join('');
+      this.renderSummary();
 
       const dragHandleSvg = `
         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"
@@ -995,21 +992,27 @@
         const cover = url
           ? `<img src="${url}" alt="" loading="lazy" onerror="this.style.display='none'">`
           : '';
+        // Non-current rows show full duration; the current row gets
+        // a countdown ("-2:14") populated after innerHTML by
+        // updateCurrentRemaining(). Empty fallback for tracks with
+        // unknown duration (non-DB URIs).
         const dur = t.duration_seconds
           ? fmtDuration(t.duration_seconds) : '';
-        const right = isCurrent
-          ? `<div class="q-right">
-               <span class="q-playing-glyph" aria-label="Now playing">
+        const right = `<span class="q-dur">${
+          isCurrent ? '' : escapeHtml(dur)
+        }</span>`;
+        // The current row replaces its remove-slot with the playing
+        // glyph so duration stays aligned with non-current rows and
+        // the now-playing indicator sits in the action column.
+        const glyphCls = this._npState === 'playing'
+          ? 'q-playing-glyph' : 'q-playing-glyph is-paused';
+        const removeBtn = isCurrent
+          ? `<span class="q-now-marker" aria-label="Now playing">
+               <span class="${glyphCls}">
                  <span></span><span></span><span></span>
                </span>
-               <span class="q-dur">${escapeHtml(dur)}</span>
-             </div>`
-          : `<span class="q-dur">${escapeHtml(dur)}</span>`;
-        // Remove + drag are omitted only on the current row (race
-        // with playback). All non-current rows get a working remove
-        // button and an enabled drag handle.
-        const removeBtn = isCurrent ? '<span></span>' : `
-          <button class="q-remove" type="button" aria-label="Remove"
+             </span>`
+          : `<button class="q-remove" type="button" aria-label="Remove"
                   data-action="remove" data-index="${oneIdx}">
             ${removeSvg}
           </button>`;
@@ -1031,11 +1034,40 @@
 
       // Tap row body → jump (via row click handler — drag handle and
       // remove button stop propagation to prevent accidental jumps).
+      // Tap semantics: short tap on current = play/pause toggle; on
+      // any other row = jump to that track. Long press (≥500 ms) on
+      // any row = play it from the beginning. Drag-handle and
+      // remove-button events are filtered out by the closest()
+      // check so they keep their own behaviour.
       this.list.querySelectorAll('.q-row').forEach(row => {
-        row.addEventListener('click', () => {
-          const idx = parseInt(row.dataset.index, 10);
-          if (idx) this.jumpTo(idx);
+        let pressTimer = null;
+        let longFired = false;
+        const cancelPress = () => {
+          if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+        };
+        row.addEventListener('pointerdown', e => {
+          if (e.target.closest('[data-drag], [data-action]')) return;
+          longFired = false;
+          cancelPress();
+          pressTimer = setTimeout(() => {
+            longFired = true;
+            const idx = parseInt(row.dataset.index, 10);
+            if (idx) this.jumpTo(idx);
+          }, 500);
         });
+        row.addEventListener('pointermove', cancelPress);
+        row.addEventListener('pointerleave', cancelPress);
+        row.addEventListener('pointercancel', cancelPress);
+        row.addEventListener('pointerup', e => {
+          if (e.target.closest('[data-drag], [data-action]')) return;
+          cancelPress();
+          if (longFired) return;
+          const idx = parseInt(row.dataset.index, 10);
+          if (!idx) return;
+          if (idx === this.trackIndex) this.togglePlayPause();
+          else this.jumpTo(idx);
+        });
+        row.addEventListener('contextmenu', e => e.preventDefault());
       });
       this.list.querySelectorAll('[data-action="remove"]').forEach(btn => {
         btn.addEventListener('click', e => {
@@ -1049,6 +1081,81 @@
       this.list.querySelectorAll('[data-drag="1"]').forEach(handle => {
         this.attachDrag(handle);
       });
+      this.updateCurrentRemaining();
+    },
+
+    updateCurrentRemaining() {
+      // Live countdown for the playing row, refreshed by np-update
+      // (every ~1s) without a full re-render.
+      if (!this.list) return;
+      const el = this.list.querySelector('.q-row.is-current .q-dur');
+      if (!el) return;
+      const pos = Number(this._npPosition) || 0;
+      const len = Number(this._npLength) || 0;
+      if (len <= 0) { el.textContent = ''; return; }
+      const remaining = Math.max(0, Math.round(len - pos));
+      el.textContent = fmtDuration(remaining);
+    },
+
+    updateGlyphState() {
+      // Hide the equaliser bars when audio is paused / stopped so the
+      // marker matches the actual playback state without redrawing
+      // the row. The .q-now-marker slot stays the same width, so the
+      // duration column doesn't shift.
+      if (!this.list) return;
+      const g = this.list.querySelector('.q-row.is-current .q-playing-glyph');
+      if (!g) return;
+      g.classList.toggle('is-paused', this._npState !== 'playing');
+    },
+
+    async togglePlayPause() {
+      const url = this._npState === 'playing'
+        ? '/api/player/pause' : '/api/player/play';
+      try {
+        await fetch(url, { method: 'POST' });
+      } catch (err) { console.warn('toggle play/pause failed', err); }
+    },
+
+    renderSummary() {
+      // Time field is a queue-wide countdown: remaining seconds of
+      // the current track plus full duration of every track after
+      // it. Falls back to total of the whole list when nothing is
+      // playing. Tracks count and album count don't tick — only
+      // the time string changes between SSE pulses.
+      if (!this.summary) return;
+      const tracks = this.tracks;
+      if (!tracks || tracks.length === 0) {
+        this.summary.innerHTML = '';
+        return;
+      }
+      let remaining;
+      if (this.trackIndex >= 1 && this.trackIndex <= tracks.length) {
+        const cz = this.trackIndex - 1;
+        const curLen = Number(this._npLength) ||
+          Number(tracks[cz] && tracks[cz].duration_seconds) || 0;
+        const curPos = Number(this._npPosition) || 0;
+        remaining = Math.max(0, curLen - curPos);
+        for (let i = cz + 1; i < tracks.length; i++) {
+          remaining += Number(tracks[i].duration_seconds) || 0;
+        }
+      } else {
+        remaining = tracks.reduce(
+          (s, t) => s + (Number(t.duration_seconds) || 0), 0);
+      }
+      const albumCount = new Set(
+        tracks.map(t => t.album).filter(Boolean)).size;
+      const parts = [
+        `${tracks.length} tracks`,
+        formatDurationSummary(remaining),
+        albumCount > 0
+          ? `${albumCount} ${albumCount === 1 ? 'album' : 'albums'}`
+          : null,
+      ].filter(Boolean);
+      this.summary.innerHTML = parts
+        .map((p, i) => i === 0
+          ? `<span>${escapeHtml(p)}</span>`
+          : `<span class="qs-sep">·</span><span>${escapeHtml(p)}</span>`)
+        .join('');
     },
 
     async jumpTo(index) {

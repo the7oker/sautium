@@ -465,7 +465,9 @@ def _build_playlist_payload(hqp_tracks: list) -> dict:
     db_rows_by_path: dict[str, dict] = {}
     if all_paths:
         rows_batch = _db_query("""
-            SELECT mf.id, mf.file_path, t.title, mf.track_number, a.name as artist
+            SELECT mf.id, mf.file_path, t.title, mf.track_number,
+                   mf.duration_seconds, mf.cover_id::text AS cover_id,
+                   a.name as artist
             FROM media_files mf
             JOIN tracks t ON mf.track_id = t.id
             JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
@@ -493,6 +495,11 @@ def _build_playlist_payload(hqp_tracks: list) -> dict:
                 "title": row["title"],
                 "track_number": row["track_number"],
                 "artist": row["artist"],
+                "duration_seconds": (
+                    float(row["duration_seconds"])
+                    if row["duration_seconds"] is not None else None
+                ),
+                "cover_id": row["cover_id"],
                 "index": idx,
             })
         else:
@@ -501,6 +508,8 @@ def _build_playlist_payload(hqp_tracks: list) -> dict:
                 "title": hqp_track["song"] or "Unknown",
                 "track_number": None,
                 "artist": hqp_track["artist"] or "Unknown",
+                "duration_seconds": None,
+                "cover_id": None,
                 "index": idx,
             })
 
