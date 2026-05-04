@@ -410,11 +410,16 @@ def resolve_artist_photo(db: Session, artist_id: str) -> Optional[uuid.UUID]:
     first). This function runs only when no photo has been resolved
     yet. Scrapes the Last.fm public images page, downloads the
     og:image, ingests it through the existing covers pipeline (BLAKE2
-    dedup + WebP encode + max-1024 resize, AR preserved). On any
-    failure (artist missing on Last.fm, network error, decode error)
-    pins SENTINEL_COVER_ID so we don't re-scrape on every request —
-    the user can retry by clearing photo_cover_id manually."""
-    from lastfm_photos import fetch_lastfm_photo_url
+    dedup + WebP encode + max-1024 resize, AR preserved).
+
+    Permanent failures (artist absent from Last.fm, page has no usable
+    image) pin SENTINEL_COVER_ID so we don't re-scrape on every page
+    load. Transient network failures (timeout, 5xx, DNS hiccup) leave
+    photo_cover_id NULL and return None — the next request will
+    retry. Without that distinction one bad network moment would
+    permanently mark a real artist as photo-less.
+    """
+    from lastfm_photos import fetch_lastfm_photo_url, TransientFetchError
 
     row = db.execute(
         text("SELECT id, name, photo_cover_id FROM artists WHERE id = :id"),
@@ -427,7 +432,13 @@ def resolve_artist_photo(db: Session, artist_id: str) -> Optional[uuid.UUID]:
     if existing is not None:
         return existing
 
-    photo_url = fetch_lastfm_photo_url(name)
+    try:
+        photo_url = fetch_lastfm_photo_url(name)
+    except TransientFetchError as e:
+        logger.warning(f"last.fm photo transient error for {name!r}: {e}")
+        # Leave photo_cover_id NULL → next user request retries.
+        return None
+
     cover_id: Optional[uuid.UUID] = None
     if photo_url:
         cover_id = ingest_cover_from_url(

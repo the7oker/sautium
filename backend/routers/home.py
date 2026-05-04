@@ -24,12 +24,18 @@ router = APIRouter(prefix="/api/home", tags=["home"])
 def get_home_feed(limit: int = Query(6, ge=1, le=24)) -> dict[str, list[dict[str, Any]]]:
     """Single payload powering the Home screen sections."""
 
+    # Count plays only against the primary artist of each track —
+    # featured / composer / conductor rows in track_artists would
+    # otherwise hoist soundtrack composers into Favourites for any
+    # film-score listener, but the artist page lists albums only
+    # where they are the primary, so the tile would lead to an
+    # empty detail screen.
     favourite_artists = db_query("""
         SELECT a.id::text AS id,
                a.name,
                SUM(lps.play_count)::int AS plays
         FROM artists a
-        JOIN track_artists ta ON ta.artist_id = a.id
+        JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
         JOIN local_play_stats lps ON lps.track_id = ta.track_id
         GROUP BY a.id, a.name
         HAVING SUM(lps.play_count) > 0

@@ -46,6 +46,11 @@ def get_artist(artist_id: str) -> dict:
         LIMIT 4
     """, {"id": artist_id})
 
+    # Discography: every album where the artist appears in any role.
+    # role_priority sorts the list so genuine solo records lead, true
+    # collabs (multiple primary artists) follow, and featured-only
+    # appearances close out the grid. is_primary feeds a small
+    # "feat." badge on tiles where the artist isn't the headline.
     artist["albums"] = db_query("""
         SELECT al.id::text AS id,
                al.title,
@@ -60,17 +65,32 @@ def get_artist(artist_id: str) -> dict:
                 JOIN album_variants av2 ON av2.id = mf2.album_variant_id
                 WHERE av2.album_id = al.id
                 ORDER BY mf2.disc_number, mf2.track_number
-                LIMIT 1) AS media_file_id
+                LIMIT 1) AS media_file_id,
+               BOOL_OR(ta.role = 'primary' AND ta.artist_id = %(id)s::uuid)
+                   AS is_primary,
+               CASE
+                 WHEN BOOL_OR(ta.role = 'primary' AND ta.artist_id = %(id)s::uuid)
+                      AND NOT BOOL_OR(ta.role = 'primary' AND ta.artist_id <> %(id)s::uuid)
+                   THEN 1
+                 WHEN BOOL_OR(ta.role = 'primary' AND ta.artist_id = %(id)s::uuid)
+                   THEN 2
+                 ELSE 3
+               END AS role_priority
         FROM albums al
+        JOIN album_variants av ON av.album_id = al.id
+        JOIN media_files mf ON mf.album_variant_id = av.id
+        JOIN tracks t ON t.id = mf.track_id
+        JOIN track_artists ta ON ta.track_id = t.id
         WHERE al.id IN (
-            SELECT DISTINCT av.album_id
-            FROM album_variants av
-            JOIN media_files mf ON mf.album_variant_id = av.id
-            JOIN tracks t ON t.id = mf.track_id
-            JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
-            WHERE ta.artist_id = %(id)s::uuid
+            SELECT DISTINCT av2.album_id
+            FROM album_variants av2
+            JOIN media_files mf2 ON mf2.album_variant_id = av2.id
+            JOIN tracks t2 ON t2.id = mf2.track_id
+            JOIN track_artists ta2 ON ta2.track_id = t2.id
+            WHERE ta2.artist_id = %(id)s::uuid
         )
-        ORDER BY al.release_year DESC NULLS LAST, al.title
+        GROUP BY al.id, al.title, al.release_year
+        ORDER BY role_priority, al.release_year DESC NULLS LAST, al.title
         LIMIT 12
     """, {"id": artist_id})
 
@@ -83,7 +103,7 @@ def get_artist(artist_id: str) -> dict:
                mf.duration_seconds AS duration,
                COALESCE(lps.play_count, 0) AS plays
         FROM tracks t
-        JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+        JOIN track_artists ta ON ta.track_id = t.id
         JOIN media_files mf ON mf.track_id = t.id AND mf.is_analysis_source = true
         JOIN album_variants av ON av.id = mf.album_variant_id
         JOIN albums al ON al.id = av.album_id

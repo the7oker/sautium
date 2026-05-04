@@ -2859,10 +2859,15 @@
         : `<div class="placeholder-badge"
               style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${
                 escapeHtml(a.title || '')}</div>`;
+      // is_primary === false = artist appears only as featured /
+      // collaborator on this album; mark with a small "feat." badge
+      // so the discography is honest without splitting into sections.
+      const featBadge = a.is_primary === false
+        ? '<span class="album-tile-feat">feat.</span>' : '';
       return `
         <button class="album-tile" type="button" data-album-id="${escapeHtml(a.id)}">
           <div class="album-cover"
-               style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${inner}</div>
+               style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${inner}${featBadge}</div>
           <div class="album-tile-title">${escapeHtml(a.title || '')}</div>
           <div class="album-tile-year">${a.year || ''}</div>
         </button>`;
