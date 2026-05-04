@@ -181,9 +181,14 @@ body.has-miniplayer #app {
   background: var(--avatar-bg, var(--color-surface-hi));
   box-shadow: var(--shadow-1);
   overflow: hidden;
+  position: relative;
 }
 .artist-avatar img {
+  position: absolute; inset: 0;
   width: 100%; height: 100%; object-fit: cover; display: block;
+}
+.artist-avatar-initials {
+  position: relative; z-index: 0;
 }
 
 .artist-name {
@@ -1618,6 +1623,7 @@ body.has-miniplayer .ai-fab {
   flex-shrink: 0;
 }
 .artist-hero img {
+  position: absolute; inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -1916,8 +1922,10 @@ body.has-miniplayer .ai-fab {
   border-radius: 50%;
   overflow: hidden;
   background: var(--color-surface);
+  position: relative;
 }
 .similar-avatar img {
+  position: absolute; inset: 0;
   width: 100%; height: 100%;
   object-fit: cover; display: block;
 }

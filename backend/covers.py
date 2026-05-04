@@ -403,6 +403,46 @@ def ingest_cover_from_url(
     )
 
 
+def resolve_artist_photo(db: Session, artist_id: str) -> Optional[uuid.UUID]:
+    """Resolve and cache an artist photo, returning the cover_id.
+
+    Fast path is owned by the endpoint (it checks artists.photo_cover_id
+    first). This function runs only when no photo has been resolved
+    yet. Scrapes the Last.fm public images page, downloads the
+    og:image, ingests it through the existing covers pipeline (BLAKE2
+    dedup + WebP encode + max-1024 resize, AR preserved). On any
+    failure (artist missing on Last.fm, network error, decode error)
+    pins SENTINEL_COVER_ID so we don't re-scrape on every request —
+    the user can retry by clearing photo_cover_id manually."""
+    from lastfm_photos import fetch_lastfm_photo_url
+
+    row = db.execute(
+        text("SELECT id, name, photo_cover_id FROM artists WHERE id = :id"),
+        {"id": artist_id},
+    ).first()
+    if not row:
+        return None
+
+    a_id, name, existing = row[0], row[1], row[2]
+    if existing is not None:
+        return existing
+
+    photo_url = fetch_lastfm_photo_url(name)
+    cover_id: Optional[uuid.UUID] = None
+    if photo_url:
+        cover_id = ingest_cover_from_url(
+            db, photo_url,
+            source_path=f"lastfm-artist:{name}",
+        )
+
+    final = cover_id if cover_id is not None else SENTINEL_COVER_ID
+    db.execute(
+        text("UPDATE artists SET photo_cover_id = :c WHERE id = :a"),
+        {"c": final, "a": a_id},
+    )
+    return final
+
+
 def _lookup_album_artist(db: Session, media_file_id: int) -> Optional[tuple[str, str]]:
     """Return (artist_name, album_title) for a media_file, or None."""
     row = db.execute(

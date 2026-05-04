@@ -23,7 +23,12 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from sqlalchemy import text
 
-from covers import SENTINEL_COVER_ID, resolve_cover_for_folder, _split_folder
+from covers import (
+    SENTINEL_COVER_ID,
+    resolve_cover_for_folder,
+    resolve_artist_photo,
+    _split_folder,
+)
 from database import get_db_context
 
 logger = logging.getLogger(__name__)
@@ -37,6 +42,13 @@ router = APIRouter(prefix="/api/covers", tags=["covers"])
 _folder_locks: Dict[str, asyncio.Lock] = {}
 _folder_locks_master = asyncio.Lock()
 
+# Per-artist single-flight: a page rendering 30 artist chips otherwise
+# triggers 30 simultaneous Last.fm scrapes for the same set; the lock
+# collapses concurrent first-time requests for one artist into a
+# single fetch.
+_artist_locks: Dict[str, asyncio.Lock] = {}
+_artist_locks_master = asyncio.Lock()
+
 
 async def _get_folder_lock(folder_key: str) -> asyncio.Lock:
     async with _folder_locks_master:
@@ -44,6 +56,15 @@ async def _get_folder_lock(folder_key: str) -> asyncio.Lock:
         if lock is None:
             lock = asyncio.Lock()
             _folder_locks[folder_key] = lock
+        return lock
+
+
+async def _get_artist_lock(artist_id: str) -> asyncio.Lock:
+    async with _artist_locks_master:
+        lock = _artist_locks.get(artist_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _artist_locks[artist_id] = lock
         return lock
 
 
@@ -146,6 +167,56 @@ async def get_cover_by_media(media_file_id: int):
             headers={"Cache-Control": "public, max-age=60"},
         )
 
+    return _serve_cover_bytes(str(resolved))
+
+
+def _resolve_artist_sync(artist_id: str):
+    with get_db_context() as db:
+        return resolve_artist_photo(db, artist_id)
+
+
+@router.get("/by-artist/{artist_id}")
+async def get_cover_by_artist(artist_id: str = FPath(..., min_length=36, max_length=36)):
+    """Lazy resolution of an artist photo.
+
+    Fast path: artists.photo_cover_id is already set → serve bytes.
+    Slow path: NULL → scrape Last.fm under a per-artist lock; failures
+    pin SENTINEL_COVER_ID so we don't re-scrape on every request."""
+    with get_db_context() as db:
+        row = db.execute(
+            text("SELECT photo_cover_id FROM artists WHERE id = :id"),
+            {"id": artist_id},
+        ).first()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="artist not found")
+
+    cover_id = row[0]
+    if cover_id is not None:
+        return _serve_cover_bytes(str(cover_id))
+
+    lock = await _get_artist_lock(artist_id)
+    async with lock:
+        with get_db_context() as db:
+            row = db.execute(
+                text("SELECT photo_cover_id FROM artists WHERE id = :id"),
+                {"id": artist_id},
+            ).first()
+        if row and row[0] is not None:
+            return _serve_cover_bytes(str(row[0]))
+
+        try:
+            resolved = await run_in_threadpool(_resolve_artist_sync, artist_id)
+        except Exception as e:
+            logger.error(f"artist photo resolution failed for {artist_id}: {e}")
+            raise HTTPException(status_code=500, detail="photo resolution failed")
+
+    if resolved is None:
+        return Response(
+            status_code=404,
+            content=b"",
+            headers={"Cache-Control": "public, max-age=60"},
+        )
     return _serve_cover_bytes(str(resolved))
 
 

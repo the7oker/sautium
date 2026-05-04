@@ -171,6 +171,14 @@ INSERT INTO covers (
 )
 ON CONFLICT (id) DO NOTHING;
 
+-- Artist photo cover. Lazy-resolved on first /api/covers/by-artist/{id}
+-- request: scrape Last.fm artist images page → encode → cache. Failed
+-- resolution lands on the sentinel cover so we don't re-scrape on every
+-- request. ALTER instead of inline column because covers is defined
+-- after artists in this file.
+ALTER TABLE artists ADD COLUMN IF NOT EXISTS photo_cover_id UUID
+    REFERENCES covers(id) ON DELETE SET NULL;
+
 CREATE TABLE IF NOT EXISTS media_files (
     id SERIAL PRIMARY KEY,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,

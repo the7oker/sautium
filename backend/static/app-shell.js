@@ -85,6 +85,28 @@
     return '';
   }
 
+  // Artist avatar layered HTML: an initials backdrop with an <img>
+  // overlay on top. The <img> covers the initials when it loads
+  // (artist photo from Last.fm); on 404/error it removes itself or
+  // falls back to an album cover, revealing the initials beneath.
+  // `initialsHtml` is the already-styled fallback element string.
+  // `albumFallbackUrl` is optional (e.g. coverUrl(item)).
+  function artistAvatarInner(artistId, initialsHtml, albumFallbackUrl) {
+    if (!artistId) {
+      if (albumFallbackUrl) {
+        return `${initialsHtml}<img src="${albumFallbackUrl}" alt=""
+          loading="lazy" onerror="this.remove()">`;
+      }
+      return initialsHtml;
+    }
+    const photoUrl = '/api/covers/by-artist/' + encodeURIComponent(artistId);
+    const onError = albumFallbackUrl
+      ? `this.onerror=null;this.src='${albumFallbackUrl}'`
+      : `this.remove()`;
+    return `${initialsHtml}<img src="${photoUrl}" alt=""
+      loading="lazy" onerror="${onError}">`;
+  }
+
   /* ---------- Lightweight markdown ----------
      Line-oriented parser sized for the prose the AI DJ emits in
      practice: headings, horizontal rules, bullet/numbered lists,
@@ -1996,8 +2018,11 @@
     tile.type = 'button';
     tile.className = 'artist-tile';
     const ph = avatarPlaceholder(name);
+    const initials = `<span class="artist-avatar-initials">${escapeHtml(ph.initials)}</span>`;
     tile.innerHTML = `
-      <div class="artist-avatar" style="background: ${ph.bg};">${escapeHtml(ph.initials)}</div>
+      <div class="artist-avatar" style="background: ${ph.bg};">${
+        artistAvatarInner(item.id, initials)
+      }</div>
       <div class="artist-name">${escapeHtml(name)}</div>
     `;
     if (item.id) {
@@ -2810,11 +2835,16 @@
     }
 
     const ph = avatarPlaceholder(d.name || '?');
-    const heroImg = d.photo_url
-      ? `<img src="${escapeHtml(d.photo_url)}" alt="">`
-      : `<div class="artist-hero-fallback"
-            style="--cover-bg-1: ${ph.bg}; --cover-bg-2: var(--color-foundation);">${
-              escapeHtml(ph.initials)}</div>`;
+    // Initials backdrop is always rendered; the lazy-resolved photo
+    // overlays it when the request succeeds, otherwise <img> removes
+    // itself on error and the initials fallback stays visible.
+    const heroFallback = `<div class="artist-hero-fallback"
+        style="--cover-bg-1: ${ph.bg}; --cover-bg-2: var(--color-foundation);">${
+          escapeHtml(ph.initials)}</div>`;
+    const heroImg = d.id
+      ? `${heroFallback}<img src="/api/covers/by-artist/${
+          encodeURIComponent(d.id)}" alt="" onerror="this.remove()">`
+      : heroFallback;
 
     const tagsHtml = (d.tags || [])
       .map(t => `<span class="tag-chip">${escapeHtml(t.name)}</span>`)
@@ -2853,13 +2883,10 @@
 
     const similarHtml = (d.similar_artists || []).map(s => {
       const sph = avatarPlaceholder(s.name || '?');
-      const url = coverUrl(s);
-      const inner = url
-        ? `<img src="${url}" alt="" loading="lazy"
-                onerror="this.style.display='none'">`
-        : `<div class="similar-avatar-fallback"
+      const initialsBlock = `<div class="similar-avatar-fallback"
               style="--cover-bg-1: ${sph.bg}; --cover-bg-2: var(--color-foundation);">${
                 escapeHtml(sph.initials)}</div>`;
+      const inner = artistAvatarInner(s.id, initialsBlock, coverUrl(s));
       return `
         <button class="similar-artist" type="button" data-artist-id="${escapeHtml(s.id)}">
           <div class="similar-avatar">${inner}</div>
