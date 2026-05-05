@@ -27,6 +27,20 @@ from dht_service import DHTService, HAS_LIBTORRENT
 
 _API_SECRET_PATH = _Path(__file__).parent / "data" / ".api_secret"
 _INDEX_HTML_PATH = _Path(__file__).parent / "static" / "index.html"
+_API_SECRET_CACHE: Optional[bytes] = None
+
+
+def _get_api_secret() -> bytes:
+    """Module-level cache for the HMAC secret bytes.
+
+    The secret is immutable for the process lifetime, so reading the
+    file on every GET / pointlessly re-exposes the request to
+    transient WSL2 drvfs EIO. Cache once, reuse forever.
+    """
+    global _API_SECRET_CACHE
+    if _API_SECRET_CACHE is None:
+        _API_SECRET_CACHE = ensure_secret(_API_SECRET_PATH)
+    return _API_SECRET_CACHE
 
 # Configure logging
 logging.config.dictConfig(LOGGING_CONFIG)
@@ -53,10 +67,10 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
 
     # Materialize the API secret on disk so launcher / sync_server can
-    # read the same value. ensure_secret() is also called by the
-    # middleware on first request, but doing it here surfaces filesystem
-    # errors at startup rather than on first 401.
-    ensure_secret(_API_SECRET_PATH)
+    # read the same value, and warm the module-level cache. Reading at
+    # startup surfaces filesystem errors here rather than on first
+    # 401, and populating the cache means GET / never re-reads drvfs.
+    _get_api_secret()
 
     # Validate configuration
     missing_settings = settings.validate_required_settings()
@@ -292,7 +306,7 @@ async def root() -> HTMLResponse:
     expose response bodies cross-origin without explicit CORS), and
     avoids a separate auth-less endpoint.
     """
-    secret = ensure_secret(_API_SECRET_PATH).decode("ascii")
+    secret = _get_api_secret().decode("ascii")
     html = _INDEX_HTML_PATH.read_text(encoding="utf-8")
     inject = f'<script>window.__SAUTIUM_SECRET="{secret}";</script>'
     if "</head>" in html:

@@ -36,6 +36,7 @@ The middleware reads request body once and stashes it in
 ``request._body`` so downstream handlers see the same bytes.
 """
 
+import errno
 import hashlib
 import hmac
 import logging
@@ -73,6 +74,28 @@ def _is_whitelisted(path: str) -> bool:
     return any(path.startswith(p) for p in WHITELIST_PREFIX)
 
 
+def _read_existing(secret_path: Path) -> Optional[str]:
+    """Return secret contents if the file is present, else None.
+
+    Retries on EIO: WSL2 9p drvfs (the bind-mount that backs
+    ``backend/data/`` from the Windows host) intermittently returns
+    "Input/output error" on reads when the host filesystem is under
+    contention (antivirus scan, sleep/wake, etc). The condition
+    clears within milliseconds, so a short backoff recovers cleanly.
+    Other OSErrors (FileNotFoundError, permission, etc) propagate.
+    """
+    for attempt in range(3):
+        try:
+            if not secret_path.exists():
+                return None
+            return secret_path.read_text(encoding="ascii").strip()
+        except OSError as exc:
+            if exc.errno == errno.EIO and attempt < 2:
+                time.sleep(0.05 * (attempt + 1))
+                continue
+            raise
+
+
 def ensure_secret(secret_path: Path) -> bytes:
     """Return the secret bytes; generate the file if missing.
 
@@ -82,17 +105,16 @@ def ensure_secret(secret_path: Path) -> bytes:
     (utf-8 bytes), not the decoded random bytes — keeps the JS side
     simple (no base64 decode in WebCrypto importKey).
     """
-    if secret_path.exists():
-        data = secret_path.read_text(encoding="ascii").strip()
-        if data:
-            # Re-apply readable mode every startup: Docker writes as
-            # root, native launcher needs to read it. See note below
-            # about why 0644 is acceptable here.
-            try:
-                os.chmod(secret_path, 0o644)
-            except OSError:
-                pass
-            return data.encode("ascii")
+    data = _read_existing(secret_path)
+    if data:
+        # Re-apply readable mode every startup: Docker writes as
+        # root, native launcher needs to read it. See note below
+        # about why 0644 is acceptable here.
+        try:
+            os.chmod(secret_path, 0o644)
+        except OSError:
+            pass
+        return data.encode("ascii")
 
     secret_path.parent.mkdir(parents=True, exist_ok=True)
     token = secrets.token_urlsafe(32)
