@@ -2561,3 +2561,226 @@ body.has-miniplayer .ai-fab {
   font-weight: 500;
 }
 .legacy-link:hover { background: var(--color-amber-weak); }
+
+/* ---- Friends screen ----
+   Reference: docs/design/reference/claude-design-bundle/project/
+   Session 4.html — frame 1. Tokens converted to var(--px) units;
+   colours map onto our existing palette. .screen's default
+   flex/gap/padding don't apply: each block carries its own
+   spacing (group-label padding, identity-card margin, etc.) per
+   reference, and #app already reserves space for the nav-bar /
+   mini-player / FAB / safe-area at the bottom. */
+.friends-screen {
+  display: block;
+  padding: 0;
+  gap: 0;
+}
+.friends-screen .screen-head {
+  display: block;
+  padding: calc(20 * var(--px)) calc(16 * var(--px)) calc(4 * var(--px));
+}
+.friends-screen .screen-title {
+  margin: 0;
+}
+.friends-screen .group-label {
+  font-family: var(--font-mono);
+  font-size: calc(10.5 * var(--px));
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  padding: calc(18 * var(--px)) calc(20 * var(--px)) calc(8 * var(--px));
+}
+.identity-card {
+  margin: 0 calc(16 * var(--px));
+  padding: calc(14 * var(--px)) calc(16 * var(--px));
+  background: var(--color-surface);
+  border-radius: calc(10 * var(--px));
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: calc(12 * var(--px));
+}
+.identity-card .label {
+  font-size: calc(12 * var(--px));
+  color: var(--color-text-muted);
+  margin-bottom: calc(4 * var(--px));
+  letter-spacing: 0.01em;
+}
+.identity-card .code {
+  font-family: var(--font-mono);
+  font-size: calc(14 * var(--px));
+  color: var(--color-blue);
+  letter-spacing: 0.04em;
+  font-weight: 500;
+  word-break: break-all;
+}
+.copy-btn {
+  width: calc(36 * var(--px));
+  height: calc(36 * var(--px));
+  display: grid; place-items: center;
+  color: var(--color-text-muted);
+  background: transparent;
+  border: 1px solid var(--color-divider);
+  border-radius: calc(8 * var(--px));
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.copy-btn:active { color: var(--color-amber); }
+
+.invite-form {
+  margin: 0 calc(16 * var(--px));
+  padding: calc(4 * var(--px)) 0 0;
+  display: flex; flex-direction: column;
+  gap: calc(10 * var(--px));
+}
+.invite-form .input-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: calc(8 * var(--px));
+}
+.invite-form .text-field {
+  height: calc(44 * var(--px));
+  padding: 0 calc(14 * var(--px));
+  background: var(--color-surface);
+  border: 1px solid var(--color-divider);
+  border-radius: calc(8 * var(--px));
+  font-family: var(--font-sans);
+  font-size: calc(14 * var(--px));
+  color: var(--color-text);
+  min-width: 0;
+  outline: none;
+}
+.invite-form .text-field::placeholder { color: var(--color-text-dim); }
+.invite-form .text-field:focus { border-color: var(--color-amber); }
+.invite-form .text-field:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.invite-form .btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.invite-form .text-field.code {
+  font-family: var(--font-mono);
+  color: var(--color-blue);
+  letter-spacing: 0.03em;
+  font-size: calc(13 * var(--px));
+}
+.invite-form .btn {
+  height: calc(44 * var(--px));
+  padding: 0 calc(18 * var(--px));
+  border-radius: calc(8 * var(--px));
+  font-family: var(--font-sans);
+  font-size: calc(14 * var(--px));
+  font-weight: 600;
+  border: 1px solid transparent;
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.invite-form .btn-primary {
+  background: var(--color-amber);
+  color: #1B1714;
+}
+.invite-form .btn-primary:active { background: var(--color-amber-press); }
+.invite-form .btn-secondary {
+  background: transparent;
+  color: var(--color-text);
+  border-color: var(--color-divider);
+}
+.invite-form .btn-secondary:active { background: var(--color-surface-hi); }
+.friends-screen .hint {
+  margin: calc(8 * var(--px)) calc(16 * var(--px)) 0;
+  font-size: calc(12 * var(--px));
+  color: var(--color-text-muted);
+  line-height: var(--lh-normal);
+}
+
+.friends-list {
+  margin: 0 calc(16 * var(--px));
+  background: var(--color-surface);
+  border-radius: calc(10 * var(--px));
+  overflow: hidden;
+}
+.friends-empty {
+  padding: calc(20 * var(--px)) calc(16 * var(--px));
+  font-size: calc(13 * var(--px));
+  color: var(--color-text-muted);
+  text-align: center;
+}
+.friend-row {
+  display: grid;
+  grid-template-columns: calc(40 * var(--px)) 1fr calc(44 * var(--px));
+  gap: calc(12 * var(--px));
+  align-items: center;
+  min-height: calc(60 * var(--px));
+  padding: calc(10 * var(--px)) calc(14 * var(--px));
+  border-bottom: 1px solid var(--color-divider);
+}
+.friend-row:last-child { border-bottom: none; }
+.friend-avatar {
+  width: calc(40 * var(--px));
+  height: calc(40 * var(--px));
+  border-radius: 50%;
+  display: grid; place-items: center;
+  color: var(--color-text);
+  font-weight: 600;
+  font-size: calc(14 * var(--px));
+  overflow: hidden;
+  position: relative;
+}
+.friend-meta { min-width: 0; }
+.friend-name {
+  font-size: calc(14 * var(--px));
+  font-weight: 600;
+  color: var(--color-text);
+  line-height: var(--lh-snug);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.friend-status {
+  font-size: calc(11.5 * var(--px));
+  color: var(--color-text-muted);
+  line-height: var(--lh-snug);
+  margin-top: calc(2 * var(--px));
+  display: inline-flex;
+  align-items: center;
+  gap: calc(5 * var(--px));
+}
+.friend-status.online { color: var(--color-positive); }
+.status-dot {
+  width: calc(6 * var(--px));
+  height: calc(6 * var(--px));
+  border-radius: 50%;
+  background: var(--color-positive);
+  display: inline-block;
+}
+.chat-icon-btn {
+  width: calc(44 * var(--px));
+  height: calc(44 * var(--px));
+  display: grid; place-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--color-amber);
+  position: relative;
+  cursor: pointer;
+  padding: 0;
+}
+.unread-badge {
+  position: absolute;
+  top: calc(6 * var(--px));
+  right: calc(6 * var(--px));
+  min-width: calc(16 * var(--px));
+  height: calc(16 * var(--px));
+  padding: 0 calc(4 * var(--px));
+  border-radius: calc(8 * var(--px));
+  background: var(--color-amber);
+  color: #1B1714;
+  font-size: calc(10 * var(--px));
+  font-weight: 700;
+  display: grid; place-items: center;
+  line-height: 1;
+  font-family: var(--font-sans);
+  border: calc(2 * var(--px)) solid var(--color-surface);
+  box-sizing: content-box;
+}

@@ -408,15 +408,19 @@
 
   /* ---------- FAB visibility ---------- */
 
-  function updateFabVisibility(/* route */) {
+  // Routes where the AI FAB is suppressed even when no overlay is
+  // open. Friends is conceptually about humans you talk to, the
+  // AI assistant has nothing to add there and the floating button
+  // just clutters the chat-icon column.
+  const FAB_HIDDEN_ROUTES = new Set(['friends']);
+
+  function updateFabVisibility(route) {
     const fab = document.getElementById('aiFab');
     if (!fab) return;
-    // Hide while overlay sheets are open (Now Playing or AI assistant)
-    // — they have their own dismiss controls and the FAB on top
-    // would obscure them.
     const npOpen = sheet && sheet.isOpen;
     const aiOpen = ai && ai.isOpen;
-    fab.hidden = !!(npOpen || aiOpen);
+    const r = route || currentRoute;
+    fab.hidden = !!(npOpen || aiOpen || FAB_HIDDEN_ROUTES.has(r));
   }
 
   /* ---------- Now Playing sheet ----------
@@ -3146,11 +3150,264 @@
     });
   }
 
+  /* ---------- Friends screen ----------
+     Rebuild of the legacy Friends section against the new design.
+     Reference: docs/design/reference/claude-design-bundle/project/
+     Session 4.html — frame 1 (Friends root). Backend endpoints
+     (/api/p2p/account, /api/p2p/friends, /api/p2p/friends/add,
+     /api/p2p/invite-by-email) are unchanged from the legacy UI.
+     Chat thread lives in a follow-up increment. */
+
+  const SVG_COPY = `
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+         stroke-linejoin="round" aria-hidden="true">
+      <rect x="9" y="9" width="11" height="11" rx="1.5"/>
+      <path d="M5 15V5a1 1 0 011-1h10"/>
+    </svg>`;
+  const SVG_CHAT = `
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+         stroke-linejoin="round" aria-hidden="true">
+      <path d="M21 12a8 8 0 01-11.7 7.1L4 21l1.9-5.3A8 8 0 1121 12z"/>
+    </svg>`;
+
+  function lastSeenLabel(iso) {
+    if (!iso) return '';
+    const t = new Date(iso).getTime();
+    if (!t) return '';
+    const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (sec < 60) return 'just now';
+    if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+    if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+    if (sec < 86400 * 2) return 'yesterday';
+    if (sec < 86400 * 7) return `${Math.floor(sec / 86400)}d ago`;
+    return new Date(iso).toLocaleDateString();
+  }
+
+  function isOnline(iso) {
+    if (!iso) return false;
+    const t = new Date(iso).getTime();
+    return t && (Date.now() - t) < 5 * 60 * 1000;
+  }
+
+  function renderFriendRow(friend) {
+    const name = friend.display_name || friend.username || friend.invite_code || '?';
+    const online = isOnline(friend.last_seen);
+    const status = online
+      ? `<div class="friend-status online"><span class="status-dot"></span>online</div>`
+      : friend.last_seen
+        ? `<div class="friend-status">last seen ${escapeHtml(lastSeenLabel(friend.last_seen))}</div>`
+        : `<div class="friend-status">offline</div>`;
+    const ph = avatarPlaceholder(name);
+    const unread = Number(friend.unread_count) || 0;
+    const badge = unread > 0
+      ? `<span class="unread-badge">${unread > 99 ? '99+' : unread}</span>` : '';
+    return `
+      <div class="friend-row" data-friend-id="${escapeHtml(String(friend.id))}">
+        <div class="avatar friend-avatar" style="background: ${ph.bg};">${
+          escapeHtml(ph.initials)}</div>
+        <div class="friend-meta">
+          <div class="friend-name">${escapeHtml(name)}</div>
+          ${status}
+        </div>
+        <button class="chat-icon-btn" type="button" aria-label="chat">
+          ${SVG_CHAT}${badge}
+        </button>
+      </div>`;
+  }
+
+  async function renderFriends(root) {
+    const screen = document.createElement('div');
+    screen.className = 'screen friends-screen';
+    screen.innerHTML = `
+      <header class="screen-head">
+        <h1 class="screen-title">Friends</h1>
+      </header>
+      <div class="group-label">My identity</div>
+      <div class="identity-card">
+        <div>
+          <div class="label">My invite code</div>
+          <div class="code" id="myInviteCode">…</div>
+        </div>
+        <button class="copy-btn" type="button"
+                aria-label="copy invite code" data-action="copy-invite">
+          ${SVG_COPY}
+        </button>
+      </div>
+
+      <div class="group-label">Add a friend</div>
+      <div class="invite-form">
+        <form class="input-row" data-action="add-by-code">
+          <input class="text-field code" type="text" autocomplete="off"
+                 placeholder="Paste invite code"
+                 name="code">
+          <button class="btn btn-primary" type="submit">Add</button>
+        </form>
+        <form class="input-row" data-action="add-by-email">
+          <input class="text-field" type="email" autocomplete="off"
+                 placeholder="Or invite by email" name="email">
+          <button class="btn btn-secondary" type="submit">Send</button>
+        </form>
+      </div>
+      <div class="hint" id="friendsHint">
+        Add by invite code or by email.
+      </div>
+
+      <div class="group-label">Friends</div>
+      <div class="friends-list" id="friendsList">
+        <div class="friends-empty">Loading…</div>
+      </div>
+    `;
+    root.appendChild(screen);
+
+    const codeEl = screen.querySelector('#myInviteCode');
+    const listEl = screen.querySelector('#friendsList');
+    const hintEl = screen.querySelector('#friendsHint');
+    const emailRow = screen.querySelector('[data-action="add-by-email"]');
+    const emailInput = emailRow.querySelector('input[name="email"]');
+    const emailBtn = emailRow.querySelector('button');
+
+    // The hint doubles as a transient feedback line ("Adding…",
+    // "Friend added.") and reverts to a steady context-aware text
+    // afterwards. We compute that default once email status is known
+    // so the user sees an honest reason if email invites are off.
+    let defaultHint = 'Add by invite code or by email.';
+    function showHint(text, transient) {
+      hintEl.textContent = text;
+      if (transient) {
+        setTimeout(() => { hintEl.textContent = defaultHint; }, 2500);
+      }
+    }
+
+    // Account + email-verification status in parallel; either failing
+    // shouldn't block the other.
+    const [acctResp, emailResp] = await Promise.all([
+      fetch('/api/p2p/account').catch(() => null),
+      fetch('/api/p2p/email/status').catch(() => null),
+    ]);
+
+    try {
+      const data = acctResp && acctResp.ok ? await acctResp.json() : {};
+      codeEl.textContent = data.invite_code || '— not set —';
+    } catch (_) { codeEl.textContent = 'unavailable'; }
+
+    try {
+      const status = emailResp && emailResp.ok ? await emailResp.json() : {};
+      // Email invites work in both directions: with a verified sender
+      // the recipient sees a ✅ Verified badge, otherwise ⚠️ Unverified.
+      // We never block — the recipient still gets the invite + intro
+      // text either way; verification just buys trust. The hint
+      // explains the difference so the user can decide whether to
+      // set up email first.
+      if (status.verified) {
+        defaultHint =
+          'Send invite — they get a verified email with a link.';
+      } else {
+        defaultHint = status.email
+          ? 'Email not verified — recipients see an ⚠️ unverified badge. Verify in Settings to remove it.'
+          : 'Without your email recipients see an ⚠️ unverified badge. Set a verified email in Settings for trust.';
+      }
+      hintEl.textContent = defaultHint;
+    } catch (_) {
+      // Status check failed; leave the inputs enabled — sending may
+      // still work, the worker is the source of truth for delivery.
+    }
+
+    // Friends list.
+    async function refreshFriends() {
+      try {
+        const r = await fetch('/api/p2p/friends');
+        const friends = await r.json();
+        if (!friends || friends.length === 0) {
+          listEl.innerHTML = `<div class="friends-empty">
+            No friends yet. Share your invite code or send an email.
+          </div>`;
+          return;
+        }
+        listEl.innerHTML = friends.map(renderFriendRow).join('');
+        listEl.querySelectorAll('.chat-icon-btn').forEach(btn => {
+          btn.addEventListener('click', e => {
+            e.stopPropagation();
+            const row = btn.closest('.friend-row');
+            const id = row && row.dataset.friendId;
+            if (id) navigateToEntity('chat', id);
+          });
+        });
+      } catch (err) {
+        listEl.innerHTML = `<div class="friends-empty">
+          Could not load friends.</div>`;
+      }
+    }
+    refreshFriends();
+
+    // Copy invite code.
+    screen.querySelector('[data-action="copy-invite"]').addEventListener('click', async () => {
+      const code = codeEl.textContent;
+      if (!code || code.startsWith('—') || code === 'unavailable') return;
+      try {
+        await navigator.clipboard.writeText(code);
+        showHint('Invite code copied to clipboard.', true);
+      } catch (_) { /* user denied or insecure context — silent */ }
+    });
+
+    // Add by code.
+    screen.querySelector('[data-action="add-by-code"]').addEventListener('submit', async e => {
+      e.preventDefault();
+      const input = e.target.querySelector('input[name="code"]');
+      const code = (input.value || '').trim();
+      if (!code) return;
+      showHint('Adding…', false);
+      try {
+        const resp = await fetch('/api/p2p/friends/add', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({invite_code: code}),
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          showHint(err.detail || 'Could not add friend.', true);
+          return;
+        }
+        input.value = '';
+        showHint('Friend added.', true);
+        refreshFriends();
+      } catch (err) {
+        showHint('Network error.', true);
+      }
+    });
+
+    // Invite by email.
+    emailRow.addEventListener('submit', async e => {
+      e.preventDefault();
+      if (emailInput.disabled) return;
+      const email = (emailInput.value || '').trim();
+      if (!email) return;
+      showHint('Sending…', false);
+      try {
+        const resp = await fetch('/api/p2p/invite-by-email', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({email}),
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          showHint(err.detail || 'Could not send invite.', true);
+          return;
+        }
+        emailInput.value = '';
+        showHint('Invite sent.', true);
+      } catch (err) {
+        showHint('Network error.', true);
+      }
+    });
+  }
+
   /* ---------- Wire it up ---------- */
 
   registerScreen('home', renderHome);
   registerScreen('discovery', renderDiscovery);
-  registerScreen('friends', placeholderScreen('Friends'));
+  registerScreen('friends', renderFriends);
   registerScreen('more', placeholderScreen('More'));
 
   function attachNavListeners() {
