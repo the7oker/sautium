@@ -83,6 +83,9 @@ services:
       DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-claude_code}
       SAUTIUM_HOST_IPS: ${SAUTIUM_HOST_IPS:-}
       BACKEND_URL: https://localhost:8000
+      # Disable uvicorn auto-reload — see docker-compose.yml for rationale
+      # (drvfs inotify EIO crashes watchfiles).
+      UVICORN_RELOAD: "false"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

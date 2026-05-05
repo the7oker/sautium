@@ -89,6 +89,12 @@ services:
       SAUTIUM_HOST_IPS: ${SAUTIUM_HOST_IPS:-}
       # Intra-container backend self-calls (Claude Code tools, MCP server).
       BACKEND_URL: https://localhost:8000
+      # Disable uvicorn auto-reload in Docker. The bind-mounted ./backend
+      # lives on WSL2 drvfs (or macOS osxfs); inotify periodically returns
+      # EIO (errno 5) on those filesystems, which crashes the Rust-based
+      # watchfiles watcher and takes the whole uvicorn process down. Manual
+      # `docker restart sautium-backend` is the documented workflow anyway.
+      UVICORN_RELOAD: "false"
     extra_hosts:
       # Allow container to access Windows host services (like HQPlayer)
       - "host.docker.internal:host-gateway"
