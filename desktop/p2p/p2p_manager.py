@@ -1253,6 +1253,17 @@ class P2PManager:
                                             "username", ""
                                         ),
                                     )
+                                    # Mirror the recipient-side
+                                    # presence bump: a 200 "accepted"
+                                    # is proof the remote launcher is
+                                    # alive. Without this update one
+                                    # side of a freshly-paired duo
+                                    # always shows the other as
+                                    # offline because only the
+                                    # accept-handler bumps last_seen.
+                                    self._chat_service.update_friend_last_seen(
+                                        result["public_key_hex"]
+                                    )
                                     logger.info(
                                         f"Pending friend resolved via "
                                         f"handshake: {invite} "
