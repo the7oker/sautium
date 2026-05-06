@@ -313,44 +313,40 @@ class ServiceManager:
         # crypto.subtle behind a secure context, so HMAC request signing
         # in the Web UI doesn't work over plain HTTP from a phone on LAN.
         # Backend listens HTTPS-only.
-        from desktop.config_manager import get_data_dir
-        tls_dir = get_data_dir() / "tls"
+        #
+        # Cert lives under ~/.sautium/tls/<account-pubkey-prefix>/ rather
+        # than the per-install %APPDATA%\Sautium dir so a typical
+        # reinstall (which scrubs APPDATA + LOCALAPPDATA + the bundled
+        # Python) leaves the cert in place — the browser keeps the
+        # one-time trust decision. The pubkey-prefix subdir keeps
+        # different accounts on the same machine isolated. Path.home()
+        # resolves to %USERPROFILE% on Windows, $HOME on macOS / Linux,
+        # so the layout is identical cross-platform. Falls back to the
+        # legacy data-dir location if no account is set up yet (first
+        # launch of the wizard).
+        tls_dir = None
+        try:
+            from desktop.node_identity import has_account, get_account_info
+            if has_account():
+                acct = get_account_info() or {}
+                pub = (acct.get("public_key_hex") or "").lower()
+                if pub:
+                    tls_dir = Path.home() / ".sautium" / "tls" / pub[:16]
+        except Exception as e:
+            logger.debug(f"Account lookup for TLS dir failed: {e}")
+        if tls_dir is None:
+            from desktop.config_manager import get_data_dir
+            tls_dir = get_data_dir() / "tls"
         tls_dir.mkdir(parents=True, exist_ok=True)
         cert_path = tls_dir / "cert.pem"
         key_path = tls_dir / "key.pem"
-
-        # Derive a deterministic seed from the user's account so the
-        # backend cert ends up the same after every reinstall on this
-        # machine and the browser keeps trusting it. The Ed25519 node
-        # private key is itself derived from username+password via
-        # Argon2id (see node_identity.derive_seed), so the same
-        # credentials produce the same TLS cert. HKDF with a domain-
-        # specific info string is the standard way to fan out a single
-        # secret into purpose-bound subkeys.
-        tls_env = dict(env)
-        try:
-            from desktop.node_identity import has_account, get_private_key_raw
-            if has_account():
-                from cryptography.hazmat.primitives import hashes as _hashes
-                from cryptography.hazmat.primitives.kdf.hkdf import HKDF as _HKDF
-                import base64 as _b64
-                tls_seed = _HKDF(
-                    algorithm=_hashes.SHA256(),
-                    length=32,
-                    salt=None,
-                    info=b"sautium-tls-seed",
-                ).derive(get_private_key_raw())
-                tls_env["SAUTIUM_TLS_SEED"] = _b64.b64encode(tls_seed).decode("ascii")
-                logger.info("TLS cert: deterministic from account seed")
-        except Exception as e:
-            logger.debug(f"Could not derive TLS seed (falling back to random): {e}")
 
         try:
             subprocess.run(
                 [backend_python, str(self._backend_dir / "tls_gen.py"),
                  "--data-dir", str(tls_dir)],
                 cwd=str(self._backend_dir),
-                env=tls_env,
+                env=env,
                 check=True,
                 capture_output=True,
                 text=True,

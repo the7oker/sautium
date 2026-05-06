@@ -14,7 +14,6 @@ CLI:
 """
 
 import argparse
-import base64
 import datetime
 import ipaddress
 import logging
@@ -26,10 +25,6 @@ from pathlib import Path
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-)
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 logger = logging.getLogger(__name__)
@@ -37,34 +32,6 @@ logger = logging.getLogger(__name__)
 CERT_VALIDITY_DAYS = 365 * 10
 CERT_FILENAME = "cert.pem"
 KEY_FILENAME = "key.pem"
-
-# Anchor for the deterministic-cert validity window. Far enough in the
-# past that the cert is always "currently valid" on a freshly-installed
-# device, far enough in the future that we don't have to think about
-# expiry rotation as a separate problem.
-_DETERMINISTIC_NOT_BEFORE = datetime.datetime(2024, 1, 1)
-_DETERMINISTIC_VALIDITY_DAYS = 365 * 100
-
-
-def _hkdf(seed: bytes, info: bytes, length: int = 32) -> bytes:
-    return HKDF(
-        algorithm=hashes.SHA256(),
-        length=length,
-        salt=None,
-        info=info,
-    ).derive(seed)
-
-
-def _read_seed_from_env() -> bytes | None:
-    """Read base64-encoded TLS seed from SAUTIUM_TLS_SEED env, if present."""
-    raw = os.getenv("SAUTIUM_TLS_SEED", "").strip()
-    if not raw:
-        return None
-    try:
-        return base64.b64decode(raw, validate=True)
-    except Exception:
-        logger.warning("SAUTIUM_TLS_SEED is not valid base64 — falling back to random cert")
-        return None
 
 # Static SAN entries always present, regardless of host IPs.
 STATIC_DNS_SAN = ("localhost", "host.docker.internal")
@@ -144,63 +111,32 @@ def _build_san(extra_ips: list[str]) -> x509.SubjectAlternativeName:
     return x509.SubjectAlternativeName(entries)
 
 
-def _generate_cert(
-    extra_ips: list[str],
-    cert_path: Path,
-    key_path: Path,
-    seed: bytes | None = None,
-) -> None:
-    """Render the self-signed cert + key.
+def _generate_cert(extra_ips: list[str], cert_path: Path, key_path: Path) -> None:
+    """Render a self-signed ECDSA P-256 cert + key with random fields.
 
-    Two modes:
-      * seed=None — random ECDSA P-256 key, current time, random serial,
-        SHA-256 signature with a non-deterministic ECDSA k. Each run
-        produces fresh DER bytes.
-      * seed=bytes — Ed25519 key derived deterministically from the seed
-        via HKDF, fixed validity window (2024-01-01 .. +100 years),
-        serial derived from the seed, signature is RFC 8032 Ed25519
-        (deterministic by spec). Same seed + same SAN IPs = same DER
-        bytes, so the browser keeps the trust decision across reinstalls.
+    Browsers refuse to validate Ed25519 server certs (Chrome/Firefox
+    accept Ed25519 in TLS 1.3 protocol but not in cert path validation
+    as of 2026), so we stick with ECDSA. Stability across reinstalls
+    is achieved at the storage layer instead — service_manager keeps
+    cert + key in a per-account user-profile directory that survives
+    the typical reinstall scrub.
     """
-    if seed:
-        # 32 raw bytes are exactly the Ed25519 seed format expected by
-        # from_private_bytes; HKDF lets us reuse the same seed for
-        # multiple cert-related derivations without leaking the parent.
-        key_seed = _hkdf(seed, b"sautium-tls-cert-key", 32)
-        key = Ed25519PrivateKey.from_private_bytes(key_seed)
-        # x509 wants a positive serial less than 2^159 (PKIX). 20 bytes
-        # of HKDF output, top bit cleared, zero bumped to 1.
-        serial_int = int.from_bytes(
-            _hkdf(seed, b"sautium-tls-cert-serial", 20), "big",
-        ) & ((1 << 159) - 1) or 1
-        not_before = _DETERMINISTIC_NOT_BEFORE
-        not_after = _DETERMINISTIC_NOT_BEFORE + datetime.timedelta(
-            days=_DETERMINISTIC_VALIDITY_DAYS,
-        )
-        # Ed25519 cert signing has no separate hash — pass None.
-        sign_hash = None
-    else:
-        key = ec.generate_private_key(ec.SECP256R1())
-        serial_int = x509.random_serial_number()
-        # Naive UTC works on cryptography 41 and 42; tz-aware emits a
-        # deprecation warning on 42 because of the API rename to *_utc().
-        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-        not_before = now - datetime.timedelta(minutes=5)
-        not_after = now + datetime.timedelta(days=CERT_VALIDITY_DAYS)
-        sign_hash = hashes.SHA256()
-
+    key = ec.generate_private_key(ec.SECP256R1())
     subject = issuer = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, "sautium-backend"),
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Sautium"),
     ])
+    # Naive UTC works on cryptography 41 and 42; tz-aware emits a deprecation
+    # warning on 42 because of the API rename to *_utc().
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
         .issuer_name(issuer)
         .public_key(key.public_key())
-        .serial_number(serial_int)
-        .not_valid_before(not_before)
-        .not_valid_after(not_after)
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(days=CERT_VALIDITY_DAYS))
         .add_extension(_build_san(extra_ips), critical=False)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(
@@ -209,9 +145,7 @@ def _generate_cert(
                 content_commitment=False,
                 key_encipherment=False,
                 data_encipherment=False,
-                # Ed25519 doesn't do key agreement; ECDSA P-256 with TLS
-                # does. The flag is informational on browser side.
-                key_agreement=(seed is None),
+                key_agreement=True,
                 key_cert_sign=False,
                 crl_sign=False,
                 encipher_only=False,
@@ -223,7 +157,7 @@ def _generate_cert(
             x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
             critical=False,
         )
-        .sign(key, sign_hash)
+        .sign(key, hashes.SHA256())
     )
 
     cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
@@ -240,42 +174,11 @@ def _generate_cert(
         pass
 
 
-def _existing_pubkey_matches_seed(cert_path: Path, seed: bytes) -> bool:
-    """True if the cert on disk holds the Ed25519 public key our seed derives."""
-    try:
-        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
-        existing_pub = cert.public_key().public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw,
-        )
-    except Exception:
-        return False
-    expected_seed = _hkdf(seed, b"sautium-tls-cert-key", 32)
-    expected_pub = (
-        Ed25519PrivateKey
-        .from_private_bytes(expected_seed)
-        .public_key()
-        .public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw,
-        )
-    )
-    return existing_pub == expected_pub
-
-
 def ensure_cert(
     data_dir: Path | str,
     extra_host_ips: list[str] | None = None,
-    seed: bytes | None = None,
 ) -> tuple[Path, Path]:
     """Ensure a self-signed cert exists in data_dir; regen if SAN is stale.
-
-    When `seed` is provided, the cert is derived deterministically from
-    it (Ed25519 key + fixed validity window + seed-derived serial). The
-    same seed + same SAN IPs always produce identical DER bytes, so a
-    fresh install on the same machine yields the same cert hash and the
-    browser doesn't re-warn. Without a seed, the legacy random-ECDSA
-    path runs.
 
     Returns (cert_path, key_path).
     """
@@ -291,34 +194,41 @@ def ensure_cert(
     if cert_path.exists() and key_path.exists():
         existing = _read_existing_san_ips(cert_path)
         missing = set(needed_ips) - existing
-        san_ok = not missing
-        # Seed mismatch — treat the existing cert as legacy/random and
-        # regenerate so further reinstalls can deduplicate against the
-        # fresh deterministic one.
-        seed_ok = True if seed is None else _existing_pubkey_matches_seed(
-            cert_path, seed,
-        )
-        if san_ok and seed_ok:
+        # Drop any leftover Ed25519 cert from the abandoned
+        # deterministic-cert experiment. Browsers don't validate
+        # Ed25519 server certs (Chrome/Firefox accept the algorithm
+        # in TLS 1.3 but not in cert path validation), so they
+        # silently refuse to load https://localhost:18000 and the
+        # user gets "site can't be reached".
+        is_legacy_ed25519 = False
+        try:
+            cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+            algo_oid = cert.signature_algorithm_oid.dotted_string
+            # 1.3.101.112 = Ed25519, 1.3.101.113 = Ed448
+            if algo_oid in {"1.3.101.112", "1.3.101.113"}:
+                is_legacy_ed25519 = True
+        except Exception:
+            pass
+        if is_legacy_ed25519:
+            logger.info(
+                "Replacing legacy Ed25519 cert at %s with browser-compatible ECDSA",
+                cert_path,
+            )
+        elif not missing:
             logger.debug("Cert %s already covers IPs: %s", cert_path, needed_ips)
             return cert_path, key_path
-        if not san_ok:
+        else:
             logger.info(
                 "Regenerating cert: new private IPs %s not in current SAN %s",
                 sorted(missing), sorted(existing),
             )
-        elif not seed_ok:
-            logger.info(
-                "Regenerating cert: existing public key doesn't match account-derived seed",
-            )
     else:
         logger.info("Generating new cert at %s", cert_path)
 
-    _generate_cert(needed_ips, cert_path, key_path, seed=seed)
+    _generate_cert(needed_ips, cert_path, key_path)
     logger.info(
-        "Cert SAN — DNS: %s, IPs: %s%s",
-        list(STATIC_DNS_SAN),
-        list(STATIC_IP_SAN) + needed_ips,
-        " (deterministic Ed25519)" if seed else "",
+        "Cert SAN — DNS: %s, IPs: %s",
+        list(STATIC_DNS_SAN), list(STATIC_IP_SAN) + needed_ips,
     )
     return cert_path, key_path
 
@@ -340,9 +250,7 @@ def _main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    cert, key = ensure_cert(
-        args.data_dir, _parse_ips(args.host_ips), seed=_read_seed_from_env(),
-    )
+    cert, key = ensure_cert(args.data_dir, _parse_ips(args.host_ips))
     print(f"cert={cert}")
     print(f"key={key}")
     return 0
