@@ -3324,23 +3324,30 @@
     // messages, friend additions, and presence (last_seen) bumps;
     // backend forwards via /api/p2p/chat/stream as periodic
     // heartbeats. We refetch on each event so the list reflects
-    // online/offline transitions without a manual reload. Stream
-    // is closed on hashchange so navigating away doesn't pile up
-    // open EventSources.
-    let sse = null;
-    try {
-      sse = new EventSource('/api/p2p/chat/stream');
-      sse.onmessage = () => {
-        if (!document.contains(listEl)) {
-          if (sse) { sse.close(); sse = null; }
-          return;
-        }
-        refreshFriends();
-      };
-    } catch (_) { /* SSE unavailable — manual refresh on next visit */ }
+    // online/offline transitions without a manual reload.
+    //
+    // window.sseStream (auth.js) — not native EventSource. The
+    // stream endpoint is HMAC-protected and EventSource can't add
+    // a signature header, so the project ships a fetch-based
+    // drop-in that goes through the signed-fetch monkey-patch.
+    // Returns an AbortController; .abort() closes the stream.
+    let sseCtrl = null;
+    if (typeof window.sseStream === 'function') {
+      sseCtrl = window.sseStream(
+        '/api/p2p/chat/stream',
+        () => {
+          if (!document.contains(listEl)) {
+            if (sseCtrl) { sseCtrl.abort(); sseCtrl = null; }
+            return;
+          }
+          refreshFriends();
+        },
+        () => { /* sseStream auto-reconnects; nothing to do here */ },
+      );
+    }
     const onHashChange = () => {
       if (!document.contains(listEl)) {
-        if (sse) { sse.close(); sse = null; }
+        if (sseCtrl) { sseCtrl.abort(); sseCtrl = null; }
         window.removeEventListener('hashchange', onHashChange);
       }
     };
