@@ -318,11 +318,39 @@ class ServiceManager:
         tls_dir.mkdir(parents=True, exist_ok=True)
         cert_path = tls_dir / "cert.pem"
         key_path = tls_dir / "key.pem"
+
+        # Derive a deterministic seed from the user's account so the
+        # backend cert ends up the same after every reinstall on this
+        # machine and the browser keeps trusting it. The Ed25519 node
+        # private key is itself derived from username+password via
+        # Argon2id (see node_identity.derive_seed), so the same
+        # credentials produce the same TLS cert. HKDF with a domain-
+        # specific info string is the standard way to fan out a single
+        # secret into purpose-bound subkeys.
+        tls_env = dict(env)
+        try:
+            from desktop.node_identity import has_account, get_private_key_raw
+            if has_account():
+                from cryptography.hazmat.primitives import hashes as _hashes
+                from cryptography.hazmat.primitives.kdf.hkdf import HKDF as _HKDF
+                import base64 as _b64
+                tls_seed = _HKDF(
+                    algorithm=_hashes.SHA256(),
+                    length=32,
+                    salt=None,
+                    info=b"sautium-tls-seed",
+                ).derive(get_private_key_raw())
+                tls_env["SAUTIUM_TLS_SEED"] = _b64.b64encode(tls_seed).decode("ascii")
+                logger.info("TLS cert: deterministic from account seed")
+        except Exception as e:
+            logger.debug(f"Could not derive TLS seed (falling back to random): {e}")
+
         try:
             subprocess.run(
                 [backend_python, str(self._backend_dir / "tls_gen.py"),
                  "--data-dir", str(tls_dir)],
                 cwd=str(self._backend_dir),
+                env=tls_env,
                 check=True,
                 capture_output=True,
                 text=True,
