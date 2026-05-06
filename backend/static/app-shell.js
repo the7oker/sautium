@@ -3185,10 +3185,16 @@
     return new Date(iso).toLocaleDateString();
   }
 
+  // Window for "online" presence. last_seen is bumped on incoming
+  // chat messages and on handshake (initial add + re-resolve via
+  // LAN/DHT). 15 min is a forgiving middle ground: a peer who's
+  // idle but launcher-running stays online across one missed
+  // re-handshake; a peer whose launcher actually quit drops to
+  // offline within ~15 min instead of looking stuck-online forever.
   function isOnline(iso) {
     if (!iso) return false;
     const t = new Date(iso).getTime();
-    return t && (Date.now() - t) < 5 * 60 * 1000;
+    return t && (Date.now() - t) < 15 * 60 * 1000;
   }
 
   function renderFriendRow(friend) {

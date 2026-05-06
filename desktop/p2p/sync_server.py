@@ -263,6 +263,13 @@ class SyncServer:
                 invite_code=peer_invite,
                 username=peer_username,
             )
+            # A successful handshake means the peer's launcher is up
+            # and reachable right now — it's the cleanest passive
+            # presence signal we have. Without this update the
+            # friend stays "offline" in the UI until they actually
+            # send a chat message, which mismatched the "is the
+            # peer online?" question users actually want answered.
+            self._chat_service.update_friend_last_seen(peer_pubkey)
             logger.info(
                 f"Handshake accepted from {peer_username} "
                 f"({peer_pubkey[:16]}...)"

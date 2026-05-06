@@ -987,6 +987,14 @@ class P2PManager:
                                         invite_code=result["invite_code"],
                                         username=result.get("username", ""),
                                     )
+                                    # Receiving "accepted" means the
+                                    # remote launcher is reachable; mark
+                                    # the friend live so the UI shows
+                                    # them online without waiting for a
+                                    # message exchange.
+                                    self._chat_service.update_friend_last_seen(
+                                        result["public_key_hex"]
+                                    )
                                     # Sync chat history after handshake
                                     friend = (
                                         self._chat_service
