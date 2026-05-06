@@ -3460,7 +3460,7 @@
         const resp = await fetch('/api/p2p/invite-by-email', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({email}),
+          body: JSON.stringify({to_email: email}),
         });
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({}));

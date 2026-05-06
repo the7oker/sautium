@@ -42,6 +42,10 @@ class SendMessageRequest(BaseModel):
 
 class InviteByEmailRequest(BaseModel):
     to_email: str = Field(..., min_length=5)
+    # Optional intro line forwarded to the Worker — recipient sees it
+    # under the invite block. Empty default keeps callers that only
+    # pass `to_email` working unchanged.
+    message: str = Field(default="", max_length=500)
 
 
 class VerifyCodeRequest(BaseModel):
