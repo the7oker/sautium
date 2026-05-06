@@ -3413,6 +3413,16 @@
     }
     refreshFriends();
 
+    // Pull pending email-invite acceptances. The Worker holds a
+    // 30-day record of recipients who clicked our email link; this
+    // endpoint auto-creates a friend entry locally for each one and
+    // wakes the chat SSE on success, so the SSE listener above
+    // surfaces the new row without an extra fetch here. The
+    // endpoint short-circuits cheaply when no sent_invites exist,
+    // so calling it on every mount is safe even for users who never
+    // used email invites.
+    fetch('/api/p2p/pending-accepts').catch(() => {});
+
     // Copy invite code.
     screen.querySelector('[data-action="copy-invite"]').addEventListener('click', async () => {
       const code = codeEl.textContent;

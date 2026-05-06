@@ -526,6 +526,12 @@ async def pending_accepts() -> Dict[str, Any]:
     except Exception:
         pass
 
+    # Wake SSE if anything was actually added so connected Friends
+    # screens refresh without a manual reload — the auto-adds above
+    # bypass NOTIFY sautium_chat (no chat_service involvement).
+    if added:
+        _wake_chat_sse_clients()
+
     return {"accepts": accepts, "added": added}
 
 
