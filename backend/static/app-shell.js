@@ -389,6 +389,13 @@
         window.scrollTo(0, 0);
         return;
       }
+      if (kind === 'chat') {
+        renderChatThread(app, id);
+        updateNavActive(route);
+        updateFabVisibility(route);
+        window.scrollTo(0, 0);
+        return;
+      }
     }
 
     const renderer = routes[route] || routes.home;
@@ -420,7 +427,9 @@
     const npOpen = sheet && sheet.isOpen;
     const aiOpen = ai && ai.isOpen;
     const r = route || currentRoute;
-    fab.hidden = !!(npOpen || aiOpen || FAB_HIDDEN_ROUTES.has(r));
+    const segs = parseHash().split('/').filter(Boolean);
+    const inChat = segs.length >= 3 && segs[1] === 'chat';
+    fab.hidden = !!(npOpen || aiOpen || FAB_HIDDEN_ROUTES.has(r) || inChat);
   }
 
   /* ---------- Now Playing sheet ----------
@@ -3365,11 +3374,12 @@
           return;
         }
         listEl.innerHTML = friends.map(renderFriendRow).join('');
-        listEl.querySelectorAll('.chat-icon-btn').forEach(btn => {
-          btn.addEventListener('click', e => {
-            e.stopPropagation();
-            const row = btn.closest('.friend-row');
-            const id = row && row.dataset.friendId;
+        // Whole row is the tap target — the chat icon is a visual
+        // affordance, not a separate button. A click on the icon
+        // bubbles up to the row, no separate handler needed.
+        listEl.querySelectorAll('.friend-row').forEach(row => {
+          row.addEventListener('click', () => {
+            const id = row.dataset.friendId;
             if (id) navigateToEntity('chat', id);
           });
         });
@@ -3440,6 +3450,232 @@
         showHint('Network error.', true);
       }
     });
+  }
+
+  /* ---------- Chat thread ----------
+     Reference: docs/design/reference/claude-design-bundle/project/
+     Session 4.html — frame 2. Routed as #friends/chat/<friend_id>;
+     reuses existing /api/p2p/friends/{id}/messages and
+     /api/p2p/friends/{id}/send. Live updates via the same
+     window.sseStream channel as the Friends list — incoming
+     messages, send confirmations and presence bumps all wake us. */
+
+  const SVG_BACK_THIN = `
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+         stroke-linejoin="round" aria-hidden="true">
+      <path d="M15 6l-6 6 6 6"/>
+    </svg>`;
+  const SVG_KEBAB_DOT = `
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"
+         aria-hidden="true">
+      <circle cx="12" cy="5"  r="1.7"/>
+      <circle cx="12" cy="12" r="1.7"/>
+      <circle cx="12" cy="19" r="1.7"/>
+    </svg>`;
+  const SVG_LOCK = `
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+         stroke-linejoin="round" aria-hidden="true">
+      <rect x="4" y="11" width="16" height="10" rx="2"/>
+      <path d="M8 11V7a4 4 0 018 0v4"/>
+    </svg>`;
+  const SVG_SEND = `
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"
+         aria-hidden="true">
+      <path d="M3 11.5L21 3l-8 8 5 10-3-7-3 4 0-4z"/>
+    </svg>`;
+
+  function tsStampLabel(d) {
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    const yest = new Date(now); yest.setDate(now.getDate() - 1);
+    const isYesterday = d.toDateString() === yest.toDateString();
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    if (sameDay) return `TODAY · ${hh}:${mm}`;
+    if (isYesterday) return `YESTERDAY · ${hh}:${mm}`;
+    return `${d.toLocaleDateString().toUpperCase()} · ${hh}:${mm}`;
+  }
+
+  function renderThreadHTML(messages) {
+    if (!messages || messages.length === 0) {
+      return `<div class="thread-empty">No messages yet — say hi.</div>`;
+    }
+    const out = [];
+    let lastTs = null;
+    for (const m of messages) {
+      const ts = m.timestamp ? new Date(m.timestamp) : null;
+      // Insert a date stamp on first message and whenever the gap
+      // between consecutive messages crosses ~30 minutes — matches
+      // the reference's day/time grouping.
+      if (ts && (!lastTs || (ts - lastTs) > 30 * 60 * 1000)) {
+        out.push(`<div class="ts-stamp">${escapeHtml(tsStampLabel(ts))}</div>`);
+      }
+      lastTs = ts || lastTs;
+      const side = m.direction === 'in' ? 'them' : 'me';
+      out.push(`<div class="msg-row ${side}">
+        <div class="bubble ${side}">${escapeHtml(m.content || '')}</div>
+      </div>`);
+    }
+    return out.join('');
+  }
+
+  async function renderChatThread(root, friendId) {
+    const fid = parseInt(friendId, 10);
+    if (!fid) {
+      root.innerHTML = `<div class="placeholder-screen">
+        <h2 class="placeholder-title">Chat</h2>
+        <p class="placeholder-body">Unknown friend.</p>
+      </div>`;
+      return;
+    }
+
+    const screen = document.createElement('div');
+    screen.className = 'screen chat-screen';
+    screen.innerHTML = `
+      <div class="chat-header">
+        <button class="icon-btn" type="button" data-action="back" aria-label="back">
+          ${SVG_BACK_THIN}
+        </button>
+        <div class="avatar avatar-32 friend-avatar" id="chatAvatar"></div>
+        <div class="chat-header-meta">
+          <div class="chat-header-name" id="chatName">…</div>
+          <div class="chat-header-status" id="chatStatus"></div>
+        </div>
+        <button class="icon-btn" type="button" aria-label="more">
+          ${SVG_KEBAB_DOT}
+        </button>
+      </div>
+      <div class="chat-body-wrap">
+        <div class="thread" id="chatThread">
+          <div class="e2ee-banner">
+            ${SVG_LOCK}
+            <span>messages are end-to-end encrypted via
+              <span class="e2ee-tag">NaCl</span></span>
+          </div>
+        </div>
+        <form class="chat-input-row" id="chatForm">
+          <input class="chat-input" type="text" autocomplete="off"
+                 placeholder="Message…" name="msg">
+          <button class="send-btn" type="submit" aria-label="send">
+            ${SVG_SEND}
+          </button>
+        </form>
+      </div>
+    `;
+    root.appendChild(screen);
+
+    const threadEl = screen.querySelector('#chatThread');
+    const nameEl = screen.querySelector('#chatName');
+    const statusEl = screen.querySelector('#chatStatus');
+    const avatarEl = screen.querySelector('#chatAvatar');
+    const formEl = screen.querySelector('#chatForm');
+    const inputEl = formEl.querySelector('input[name="msg"]');
+
+    screen.querySelector('[data-action="back"]').addEventListener('click', () => {
+      navigate('friends');
+    });
+
+    // Friend identity (name, avatar, online dot). The friends list
+    // endpoint already returns everything we need; refetch is fine
+    // because the list is small and identity rarely flickers.
+    let friend = null;
+    async function loadFriend() {
+      try {
+        const r = await fetch('/api/p2p/friends');
+        const friends = await r.json();
+        friend = (friends || []).find(f => f.id === fid);
+      } catch (_) { friend = null; }
+      if (!friend) {
+        nameEl.textContent = 'Unknown friend';
+        statusEl.textContent = '';
+        return;
+      }
+      const dn = friend.display_name || friend.username || friend.invite_code;
+      nameEl.textContent = dn;
+      const ph = avatarPlaceholder(dn);
+      avatarEl.style.background = ph.bg;
+      avatarEl.textContent = ph.initials;
+      if (isOnline(friend.last_seen)) {
+        statusEl.innerHTML = `<span class="status-dot"></span>online`;
+        statusEl.style.color = 'var(--color-positive)';
+      } else if (friend.last_seen) {
+        statusEl.textContent =
+          'last seen ' + lastSeenLabel(friend.last_seen);
+        statusEl.style.color = 'var(--color-text-muted)';
+      } else {
+        statusEl.textContent = 'offline';
+        statusEl.style.color = 'var(--color-text-muted)';
+      }
+    }
+
+    async function loadMessages() {
+      try {
+        const r = await fetch(`/api/p2p/friends/${fid}/messages`);
+        const msgs = await r.json();
+        // Preserve the e2ee banner — replace only the message body.
+        const banner = threadEl.querySelector('.e2ee-banner');
+        threadEl.innerHTML = '';
+        if (banner) threadEl.appendChild(banner);
+        threadEl.insertAdjacentHTML('beforeend', renderThreadHTML(msgs));
+        threadEl.scrollTop = threadEl.scrollHeight;
+      } catch (err) {
+        console.warn('Could not load messages', err);
+      }
+    }
+
+    async function markRead() {
+      try {
+        await fetch(`/api/p2p/friends/${fid}/messages/read`, {method: 'POST'});
+      } catch (_) { /* best effort */ }
+    }
+
+    formEl.addEventListener('submit', async e => {
+      e.preventDefault();
+      const text = (inputEl.value || '').trim();
+      if (!text) return;
+      inputEl.value = '';
+      try {
+        await fetch(`/api/p2p/friends/${fid}/send`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({content: text}),
+        });
+        // SSE will refresh; refetch immediately for snappy feel.
+        loadMessages();
+      } catch (err) { console.warn('Send failed', err); }
+    });
+
+    await loadFriend();
+    await loadMessages();
+    markRead();
+
+    // SSE wakes us on incoming messages, send confirmations, and
+    // presence bumps — same channel as the Friends list.
+    let sseCtrl = null;
+    if (typeof window.sseStream === 'function') {
+      sseCtrl = window.sseStream(
+        '/api/p2p/chat/stream',
+        () => {
+          if (!document.contains(threadEl)) {
+            if (sseCtrl) { sseCtrl.abort(); sseCtrl = null; }
+            return;
+          }
+          loadMessages();
+          loadFriend();          // status may have changed
+          markRead();
+        },
+        () => { /* sseStream handles reconnect */ },
+      );
+    }
+    const onHashChange = () => {
+      if (!document.contains(threadEl)) {
+        if (sseCtrl) { sseCtrl.abort(); sseCtrl = null; }
+        window.removeEventListener('hashchange', onHashChange);
+      }
+    };
+    window.addEventListener('hashchange', onHashChange);
   }
 
   /* ---------- Wire it up ---------- */
