@@ -3520,10 +3520,13 @@
       <rect x="4" y="11" width="16" height="10" rx="2"/>
       <path d="M8 11V7a4 4 0 018 0v4"/>
     </svg>`;
+  // Match the AI chat's up-arrow glyph (#aiSendBtn in index.html) so
+  // both chat surfaces share the same send affordance.
   const SVG_SEND = `
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"
-         aria-hidden="true">
-      <path d="M3 11.5L21 3l-8 8 5 10-3-7-3 4 0-4z"/>
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="2.4" stroke-linecap="round"
+         stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 19V5M5 12l7-7 7 7"/>
     </svg>`;
 
   function tsStampLabel(d) {
