@@ -3206,6 +3206,16 @@
     return t && (Date.now() - t) < 15 * 60 * 1000;
   }
 
+  // Stable URL handle — public_key_hex is the same on every device
+  // for the same friend, while friends.id is a per-device SERIAL.
+  // 16 hex chars = 64 bits of identity, comfortably collision-free
+  // within any realistic contact list.
+  function friendUrlKey(friend) {
+    const k = friend && friend.public_key_hex;
+    return (typeof k === 'string' && k && !k.startsWith('pending:'))
+      ? k.slice(0, 16) : '';
+  }
+
   function renderFriendRow(friend) {
     const name = friend.display_name || friend.username || friend.invite_code || '?';
     const online = isOnline(friend.last_seen);
@@ -3218,8 +3228,10 @@
     const unread = Number(friend.unread_count) || 0;
     const badge = unread > 0
       ? `<span class="unread-badge">${unread > 99 ? '99+' : unread}</span>` : '';
+    const key = friendUrlKey(friend);
     return `
-      <div class="friend-row" data-friend-id="${escapeHtml(String(friend.id))}">
+      <div class="friend-row"
+           data-friend-key="${escapeHtml(key)}">
         <div class="avatar friend-avatar" style="background: ${ph.bg};">${
           escapeHtml(ph.initials)}</div>
         <div class="friend-meta">
@@ -3379,8 +3391,19 @@
         // bubbles up to the row, no separate handler needed.
         listEl.querySelectorAll('.friend-row').forEach(row => {
           row.addEventListener('click', () => {
-            const id = row.dataset.friendId;
-            if (id) navigateToEntity('chat', id);
+            const key = row.dataset.friendKey;
+            // Pending invites have no resolved public_key_hex yet —
+            // there's no chat thread to open until the handshake
+            // completes. Surface a hint instead of routing to a
+            // dead URL.
+            if (!key) {
+              showHint(
+                'Waiting for handshake — you can chat once both sides accept.',
+                true,
+              );
+              return;
+            }
+            navigateToEntity('chat', key);
           });
         });
       } catch (err) {
@@ -3521,15 +3544,29 @@
     return out.join('');
   }
 
-  async function renderChatThread(root, friendId) {
-    const fid = parseInt(friendId, 10);
-    if (!fid) {
-      root.innerHTML = `<div class="placeholder-screen">
-        <h2 class="placeholder-title">Chat</h2>
-        <p class="placeholder-body">Unknown friend.</p>
-      </div>`;
+  async function renderChatThread(root, friendKey) {
+    // friendKey is the first 16 hex chars of public_key_hex —
+    // see friendUrlKey(). Resolve to the per-device friends.id at
+    // mount time so backend API calls stay unchanged.
+    const key = String(friendKey || '').toLowerCase();
+    if (!key) { navigate('friends'); return; }
+    let friend = null;
+    try {
+      const r = await fetch('/api/p2p/friends');
+      const friends = await r.json();
+      friend = (friends || []).find(f => {
+        const k = f.public_key_hex || '';
+        return !k.startsWith('pending:')
+          && k.toLowerCase().startsWith(key);
+      });
+    } catch (_) { friend = null; }
+    if (!friend) {
+      // Stale bookmark / wiped DB / unresolved peer — drop back to
+      // the friends list instead of showing an empty chat shell.
+      navigate('friends');
       return;
     }
+    const fid = friend.id;
 
     const screen = document.createElement('div');
     screen.className = 'screen chat-screen';
@@ -3577,16 +3614,15 @@
       navigate('friends');
     });
 
-    // Friend identity (name, avatar, online dot). The friends list
-    // endpoint already returns everything we need; refetch is fine
-    // because the list is small and identity rarely flickers.
-    let friend = null;
+    // Friend identity (name, avatar, online dot). The initial fetch
+    // above already populated `friend`; loadFriend re-pulls on SSE
+    // events so status updates without a full screen rebuild.
     async function loadFriend() {
       try {
         const r = await fetch('/api/p2p/friends');
         const friends = await r.json();
         friend = (friends || []).find(f => f.id === fid);
-      } catch (_) { friend = null; }
+      } catch (_) { /* keep stale friend object on error */ }
       if (!friend) {
         nameEl.textContent = 'Unknown friend';
         statusEl.textContent = '';
