@@ -1330,6 +1330,14 @@ class P2PManager:
                             invite_code=result.get("invite_code", invite),
                             username=result.get("username", ""),
                         )
+                        # Mirror the bump in the regular handshake
+                        # initiator path: a successful nudge proves
+                        # the peer is alive, so record presence now
+                        # — the friend would otherwise read "offline"
+                        # in the UI right after pairing.
+                        self._chat_service.update_friend_last_seen(
+                            result["public_key_hex"]
+                        )
                         logger.info(
                             f"Pending friend resolved via nudge: "
                             f"{invite} ({ip}:{port})"

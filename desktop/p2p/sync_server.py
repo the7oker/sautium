@@ -592,6 +592,12 @@ class SyncServer:
                 invite_code=peer_invite,
                 username=peer_username,
             )
+            # Same passive-presence rule as for ordinary handshake:
+            # a successful nudge means the peer's launcher is up
+            # right now, so mark them online. Without this the
+            # auto-added friend stays offline in the UI until the
+            # next chat message or 15-min handshake refresh.
+            self._chat_service.update_friend_last_seen(peer_pubkey)
             logger.info(
                 f"Invite-accepted nudge: auto-added {peer_username} "
                 f"({peer_pubkey[:16]}...)"
