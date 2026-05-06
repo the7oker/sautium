@@ -206,7 +206,12 @@ class ChatService:
             self._return_db(conn)
 
     def update_friend_last_seen(self, public_key_hex: str):
-        """Update last_seen timestamp for a friend."""
+        """Update last_seen timestamp for a friend.
+
+        Issues NOTIFY sautium_chat on success so the backend's chat
+        SSE wakes its subscribers — the Friends screen otherwise
+        only learns about presence changes on its next manual
+        refresh."""
         conn = self._get_db()
         try:
             with conn.cursor() as cur:
@@ -214,6 +219,8 @@ class ChatService:
                     UPDATE friends SET last_seen = NOW()
                     WHERE public_key_hex = %s
                 """, (public_key_hex,))
+                if cur.rowcount > 0:
+                    cur.execute("NOTIFY sautium_chat")
         finally:
             self._return_db(conn)
 

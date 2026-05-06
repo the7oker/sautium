@@ -3320,6 +3320,32 @@
       // still work, the worker is the source of truth for delivery.
     }
 
+    // SSE live updates: PG NOTIFY sautium_chat fires on incoming
+    // messages, friend additions, and presence (last_seen) bumps;
+    // backend forwards via /api/p2p/chat/stream as periodic
+    // heartbeats. We refetch on each event so the list reflects
+    // online/offline transitions without a manual reload. Stream
+    // is closed on hashchange so navigating away doesn't pile up
+    // open EventSources.
+    let sse = null;
+    try {
+      sse = new EventSource('/api/p2p/chat/stream');
+      sse.onmessage = () => {
+        if (!document.contains(listEl)) {
+          if (sse) { sse.close(); sse = null; }
+          return;
+        }
+        refreshFriends();
+      };
+    } catch (_) { /* SSE unavailable — manual refresh on next visit */ }
+    const onHashChange = () => {
+      if (!document.contains(listEl)) {
+        if (sse) { sse.close(); sse = null; }
+        window.removeEventListener('hashchange', onHashChange);
+      }
+    };
+    window.addEventListener('hashchange', onHashChange);
+
     // Friends list.
     async function refreshFriends() {
       try {
