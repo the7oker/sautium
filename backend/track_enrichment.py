@@ -272,12 +272,24 @@ def run_parallel_enrichment(
         progress_cb("Phase 1: GPU + Last.fm + Lyrics (parallel)...")
     logger.info("=== Phase 1: parallel pipelines ===")
 
-    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="enrich") as pool:
+    # GPU runs in the main thread to keep the CUDA context owner stable across
+    # phases. Network-bound pipelines (Last.fm, lyrics) run in worker threads
+    # in parallel — same wall-clock as the previous all-in-pool layout, but
+    # Phase 2 inherits a clean CUDA context instead of one handed off from a
+    # worker that already exited.
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="enrich") as pool:
         futures = {
-            pool.submit(_run_gpu_pipeline): "gpu",
             pool.submit(_run_lastfm_pipeline): "lastfm",
             pool.submit(_run_lyrics_pipeline): "lyrics",
         }
+
+        try:
+            result_parts["gpu"] = _run_gpu_pipeline()
+            logger.info(f"Pipeline gpu complete: {result_parts['gpu']}")
+        except Exception as e:
+            logger.error(f"Pipeline gpu failed: {e}", exc_info=True)
+            result_parts["gpu"] = {"error": str(e)}
+
         for future in as_completed(futures):
             name = futures[future]
             try:
