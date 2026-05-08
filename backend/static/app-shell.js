@@ -396,6 +396,13 @@
         window.scrollTo(0, 0);
         return;
       }
+      if (kind === 'genre') {
+        renderGenre(app, id);
+        updateNavActive(route);
+        updateFabVisibility(route);
+        window.scrollTo(0, 0);
+        return;
+      }
     }
 
     const renderer = routes[route] || routes.home;
@@ -2860,7 +2867,11 @@
       : heroFallback;
 
     const tagsHtml = (d.tags || [])
-      .map(t => `<span class="tag-chip">${escapeHtml(t.name)}</span>`)
+      .map(t => t.genre_id
+        ? `<button class="tag-chip" type="button"
+                   data-genre-id="${escapeHtml(t.genre_id)}">${
+                     escapeHtml(t.name)}</button>`
+        : `<span class="tag-chip">${escapeHtml(t.name)}</span>`)
       .join('');
 
     const albumsHtml = (d.albums || []).map(a => {
@@ -3095,6 +3106,14 @@
         if (id) navigateToEntity('album', id);
       });
     });
+    // Genre chip — drills into the genre detail screen.
+    screen.querySelectorAll('[data-genre-id]').forEach(el => {
+      el.addEventListener('click', e => {
+        e.stopPropagation();
+        const id = el.getAttribute('data-genre-id');
+        if (id) navigateToEntity('genre', id);
+      });
+    });
     // Track row → play track
     screen.querySelectorAll('[data-media-file-id]').forEach(el => {
       el.addEventListener('click', e => {
@@ -3156,6 +3175,102 @@
         } catch (err) { console.warn('queue-tracks failed', err); }
         // No client-side refetch — see comment on .track-add above.
       });
+    });
+  }
+
+  /* ---------- Genre screen ----------
+     No claude-design reference for this one; layout follows the
+     Artist screen's pattern (hero band → name → tags → bio → row of
+     entity tiles). Hero is one representative album cover blurred
+     to a soft gradient — solves the "what image represents a genre"
+     question without forcing a specific album/artist into the role. */
+
+  async function renderGenre(root, genreId) {
+    root.innerHTML = '';
+    const screen = document.createElement('div');
+    screen.className = 'detail-screen';
+    root.appendChild(screen);
+
+    let d;
+    try {
+      const resp = await fetch('/api/genres/' + encodeURIComponent(genreId));
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      d = await resp.json();
+    } catch (err) {
+      screen.innerHTML = `<div class="placeholder-screen">
+        <p class="placeholder-body">Genre not found.</p>
+        <button class="legacy-link" onclick="history.back()">← Back</button>
+      </div>`;
+      return;
+    }
+
+    const c = coverPlaceholderColors(d.name || d.id);
+    const heroFallback = `<div class="genre-hero-fallback"
+        style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};"></div>`;
+    const coverUrlStr = d.cover_id
+      ? '/api/covers/' + encodeURIComponent(d.cover_id) : '';
+    // The cover lives in the hero with a strong blur applied via CSS,
+    // so it reads as a soft gradient field rather than "this album
+    // represents the whole genre". Fallback gradient kicks in when
+    // there's no cover at all.
+    const heroImg = coverUrlStr
+      ? `${heroFallback}<img class="genre-hero-bg" src="${coverUrlStr}"
+                              alt="" onerror="this.remove()">`
+      : heroFallback;
+
+    const stats = [
+      d.track_count ? `${d.track_count} tracks` : null,
+      d.album_count ? `${d.album_count} albums` : null,
+      d.artist_count ? `${d.artist_count} artists` : null,
+    ].filter(Boolean).join(' · ');
+
+    const desc = (d.description || '').trim();
+    // Genre descriptions from Last.fm tend to carry a "Read more on
+    // Last.fm" tail and HTML; trimLastFmTail + stripHtml are reused
+    // from the artist page for consistency.
+    const cleanDesc = trimLastFmTail(stripHtml(desc));
+
+    const artistsHtml = (d.artists || []).map(a => {
+      const ph = avatarPlaceholder(a.name || '?');
+      const initials = `<span class="artist-avatar-initials">${
+        escapeHtml(ph.initials)}</span>`;
+      return `
+        <button class="artist-tile" type="button"
+                data-artist-id="${escapeHtml(a.id)}">
+          <div class="artist-avatar" style="background: ${ph.bg};">${
+            artistAvatarInner(a.id, initials)
+          }</div>
+          <div class="artist-name">${escapeHtml(a.name || '')}</div>
+        </button>`;
+    }).join('');
+
+    screen.innerHTML = `
+      <div class="genre-hero">
+        ${heroImg}
+        <div class="genre-hero-scrim"></div>
+        <div class="artist-hero-controls">
+          <button class="icon-btn" type="button" data-action="back" aria-label="Back">${SVG_BACK}</button>
+        </div>
+        <h1 class="genre-hero-name">${escapeHtml(d.name || '')}</h1>
+      </div>
+      <div style="height: calc(14 * var(--px));"></div>
+      ${stats ? `<div class="genre-stats">${escapeHtml(stats)}</div>` : ''}
+      ${cleanDesc ? `<p class="bio">${escapeHtml(cleanDesc)}</p>` : ''}
+      ${artistsHtml ? `
+        <div class="section-sep"></div>
+        <div class="section-head">
+          <h3>Artists</h3>
+        </div>
+        <div class="artists-grid">${artistsHtml}</div>
+      ` : ''}
+    `;
+
+    screen.querySelector('[data-action="back"]')?.addEventListener('click', () => {
+      history.back();
+    });
+    screen.querySelectorAll('.artist-tile[data-artist-id]').forEach(el => {
+      el.addEventListener('click', () =>
+        navigateToEntity('artist', el.getAttribute('data-artist-id')));
     });
   }
 

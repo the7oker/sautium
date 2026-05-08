@@ -1155,6 +1155,9 @@ app.include_router(albums_router)
 from routers.discovery import router as discovery_router
 app.include_router(discovery_router)
 
+from routers.genres import router as genres_router
+app.include_router(genres_router)
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 

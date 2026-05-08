@@ -37,10 +37,23 @@ def get_artist(artist_id: str) -> dict:
     artist["bio"] = bio_row["content"] if bio_row else None
     artist["bio_summary"] = bio_row["summary"] if bio_row else None
 
+    # Some Last.fm tags ("rock", "ambient") line up 1-to-1 with our
+    # genre taxonomy; others ("atmospheric", "underrated") are
+    # descriptive and have no genre row. Surface the matching ones with
+    # a genre_id so the frontend can make those chips clickable, leave
+    # the rest as plain labels.
+    #
+    # The comparison strips everything that isn't [a-z0-9] from both
+    # sides — Last.fm uses hyphens ("nu-jazz", "hip-hop"), our genre
+    # rows use spaces ("Nu Jazz", "Hip Hop"). Plain LOWER() equality
+    # would miss every such pair.
     artist["tags"] = db_query("""
-        SELECT t.name
+        SELECT t.name, g.id::text AS genre_id
         FROM artist_tags at
         JOIN tags t ON t.id = at.tag_id
+        LEFT JOIN genres g ON
+            regexp_replace(LOWER(g.name), '[^a-z0-9]', '', 'g')
+          = regexp_replace(LOWER(t.name), '[^a-z0-9]', '', 'g')
         WHERE at.artist_id = %(id)s::uuid
         ORDER BY at.weight DESC NULLS LAST
         LIMIT 4

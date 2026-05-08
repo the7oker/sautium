@@ -2955,3 +2955,71 @@ body.has-miniplayer .chat-screen {
   flex-shrink: 0;
 }
 .send-btn:active { background: var(--color-amber-press); }
+
+/* ---- Genre detail ----
+   Hero geometry matches .artist-hero exactly (height + name
+   placement) so the title doesn't shift when the user navigates
+   between artist and genre screens — both share the same band
+   along the top of a detail screen. */
+.genre-hero {
+  position: relative;
+  width: 100%;
+  height: calc(200 * var(--px));
+  background: var(--color-surface);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+/* Strong blur turns one album cover into an abstract colour field —
+   we don't want any single album to "represent" the genre, just its
+   palette. The over-scaled inset hides the transparent halo a Gaussian
+   blur produces near the edges of an overflow-clipped image. */
+.genre-hero-bg {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;
+  filter: blur(calc(40 * var(--px))) saturate(1.2) brightness(0.85);
+  transform: scale(1.4);
+  display: block;
+}
+.genre-hero-fallback {
+  position: absolute; inset: 0;
+  background: linear-gradient(135deg,
+    var(--cover-bg-1, var(--color-surface-hi)),
+    var(--cover-bg-2, var(--color-surface-lo)));
+}
+.genre-hero-scrim {
+  position: absolute; inset: 0;
+  background: linear-gradient(180deg,
+    rgba(0, 0, 0, 0.10) 0%,
+    rgba(0, 0, 0, 0.55) 100%);
+}
+.genre-hero-name {
+  position: absolute;
+  left: calc(20 * var(--px));
+  right: calc(20 * var(--px));
+  bottom: calc(14 * var(--px));
+  z-index: 3;
+  margin: 0;
+  font-size: calc(28 * var(--px));
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  color: var(--color-text);
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.6),
+    0 2px 12px rgba(0, 0, 0, 0.45);
+}
+.genre-stats {
+  margin: 0 calc(16 * var(--px)) calc(8 * var(--px));
+  font-family: var(--font-mono);
+  font-size: calc(11 * var(--px));
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+}
+.detail-screen .artists-grid {
+  margin: 0 calc(16 * var(--px));
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(calc(96 * var(--px)), 1fr));
+  gap: calc(20 * var(--px)) calc(8 * var(--px));
+  justify-items: center;
+}
