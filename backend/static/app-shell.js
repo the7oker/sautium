@@ -3207,15 +3207,17 @@
     const c = coverPlaceholderColors(d.name || d.id);
     const heroFallback = `<div class="genre-hero-fallback"
         style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};"></div>`;
-    const coverUrlStr = d.cover_id
-      ? '/api/covers/' + encodeURIComponent(d.cover_id) : '';
-    // The cover lives in the hero with a strong blur applied via CSS,
-    // so it reads as a soft gradient field rather than "this album
-    // represents the whole genre". Fallback gradient kicks in when
-    // there's no cover at all.
-    const heroImg = coverUrlStr
-      ? `${heroFallback}<img class="genre-hero-bg" src="${coverUrlStr}"
-                              alt="" onerror="this.remove()">`
+    // Hero shows the photo of the top-ranked artist for the genre —
+    // gives the screen a recognisable face. Lazy-resolved via the
+    // existing /api/covers/by-artist endpoint, so the first visit
+    // may briefly land on the gradient fallback before the photo
+    // arrives. <img onerror="this.remove()"> reveals the gradient
+    // permanently for genres whose top artist has no Last.fm photo.
+    const topArtist = (d.artists && d.artists[0]) || null;
+    const heroImg = topArtist
+      ? `${heroFallback}<img class="genre-hero-bg"
+            src="/api/covers/by-artist/${encodeURIComponent(topArtist.id)}"
+            alt="" onerror="this.remove()">`
       : heroFallback;
 
     const stats = [

@@ -37,26 +37,47 @@ def get_artist(artist_id: str) -> dict:
     artist["bio"] = bio_row["content"] if bio_row else None
     artist["bio_summary"] = bio_row["summary"] if bio_row else None
 
-    # Some Last.fm tags ("rock", "ambient") line up 1-to-1 with our
-    # genre taxonomy; others ("atmospheric", "underrated") are
-    # descriptive and have no genre row. Surface the matching ones with
-    # a genre_id so the frontend can make those chips clickable, leave
-    # the rest as plain labels.
-    #
-    # The comparison strips everything that isn't [a-z0-9] from both
-    # sides — Last.fm uses hyphens ("nu-jazz", "hip-hop"), our genre
-    # rows use spaces ("Nu Jazz", "Hip Hop"). Plain LOWER() equality
-    # would miss every such pair.
+    # Genres for this artist — same evidence rule as the genre detail
+    # page (so artist-X-on-genre-Y and genre-Y-on-artist-X stay in
+    # sync). An artist is "in" a genre if either the Last.fm artist-
+    # tag for it carries weight >= 10 OR the artist has at least 5
+    # primary tracks tagged with that genre via track_genres.
+    # Last.fm weight wins on sort; track count is the supplementary
+    # signal that surfaces niche artists whose Last.fm tagging is
+    # weak but whose tracks are clearly genre-tagged in the library.
+    # The non-alphanumeric-strip lets "nu-jazz" resolve to "Nu Jazz".
     artist["tags"] = db_query("""
-        SELECT t.name, g.id::text AS genre_id
-        FROM artist_tags at
-        JOIN tags t ON t.id = at.tag_id
-        LEFT JOIN genres g ON
-            regexp_replace(LOWER(g.name), '[^a-z0-9]', '', 'g')
-          = regexp_replace(LOWER(t.name), '[^a-z0-9]', '', 'g')
-        WHERE at.artist_id = %(id)s::uuid
-        ORDER BY at.weight DESC NULLS LAST
-        LIMIT 4
+        WITH via_tag AS (
+            SELECT g.id::text AS genre_id, g.name,
+                   COALESCE(at.weight, 0)::int AS lastfm_weight,
+                   0::int AS track_count
+            FROM artist_tags at
+            JOIN tags tg ON tg.id = at.tag_id
+            JOIN genres g
+              ON regexp_replace(LOWER(g.name), '[^a-z0-9]', '', 'g')
+               = regexp_replace(LOWER(tg.name), '[^a-z0-9]', '', 'g')
+            WHERE at.artist_id = %(id)s::uuid
+              AND COALESCE(at.weight, 0) >= 10
+        ),
+        via_track AS (
+            SELECT g.id::text AS genre_id, g.name,
+                   0::int AS lastfm_weight,
+                   COUNT(DISTINCT t.id)::int AS track_count
+            FROM tracks t
+            JOIN track_artists ta
+              ON ta.track_id = t.id AND ta.role = 'primary'
+            JOIN track_genres tgr ON tgr.track_id = t.id
+            JOIN genres g ON g.id = tgr.genre_id
+            WHERE ta.artist_id = %(id)s::uuid
+            GROUP BY g.id, g.name
+            HAVING COUNT(DISTINCT t.id) >= 5
+        )
+        SELECT genre_id, name,
+               MAX(lastfm_weight)::int AS weight,
+               MAX(track_count)::int  AS track_count
+        FROM (SELECT * FROM via_tag UNION ALL SELECT * FROM via_track) u
+        GROUP BY genre_id, name
+        ORDER BY weight DESC, track_count DESC, name
     """, {"id": artist_id})
 
     # Discography: every album where the artist appears in any role.
