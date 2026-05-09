@@ -2129,6 +2129,19 @@ body.has-miniplayer .ai-fab {
 .album-tracklist .track-title-line {
   font-size: calc(14 * var(--px));
 }
+.album-tracklist .disc-header {
+  font-size: calc(11 * var(--px));
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  padding: calc(14 * var(--px)) 0 calc(6 * var(--px));
+  border-bottom: 1px solid var(--color-divider);
+  margin-bottom: calc(2 * var(--px));
+}
+.album-tracklist .disc-header:first-child {
+  padding-top: calc(4 * var(--px));
+}
 
 /* =====================================================================
  * Discovery screen (Step 1.5a)

@@ -3029,12 +3029,20 @@
                          data-genre-id="${escapeHtml(g.id)}">${escapeHtml(g.name)}</button>`)
       .join('');
 
-    const tracksHtml = (d.tracks || []).map(t => {
+    const tracksList = d.tracks || [];
+    const hasMultipleDiscs = tracksList.some(t => t.disc_number && t.disc_number > 1);
+    let lastDisc = null;
+    const trackParts = [];
+    for (const t of tracksList) {
+      if (hasMultipleDiscs && t.disc_number && t.disc_number !== lastDisc) {
+        lastDisc = t.disc_number;
+        trackParts.push(`<div class="disc-header">Disc ${t.disc_number}</div>`);
+      }
       const sub = [
         t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
         t.bpm ? Math.round(t.bpm) + ' bpm' : null,
       ].filter(Boolean).join(' · ');
-      return `
+      trackParts.push(`
         <button class="track-row" type="button"
                 data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}">
           <span class="track-rank">${t.track_number || ''}</span>
@@ -3045,8 +3053,9 @@
           <span class="track-dur">${fmtDuration(t.duration)}</span>
           <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
         </button>
-      `;
-    }).join('');
+      `);
+    }
+    const tracksHtml = trackParts.join('');
 
     const artistName = d.primary_artist ? d.primary_artist.name : '';
     const artistId = d.primary_artist ? d.primary_artist.id : '';
