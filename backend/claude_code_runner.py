@@ -190,6 +190,14 @@ def call_claude_code(
         raw_answer = output.get("result", "")
         claude_sid = output.get("session_id")
 
+        if output.get("is_error") and output.get("api_error_status") == 401:
+            raw_answer = (
+                "Claude Code OAuth token expired. "
+                "Run `claude /login` on the host to refresh — "
+                "the container will pick up the new token automatically "
+                "(no restart needed)."
+            )
+
         logger.info(
             f"Claude Code response: {len(raw_answer)} chars, session={claude_sid}"
         )
@@ -443,11 +451,25 @@ def call_claude_code_stream(
                     # `--resume <unknown-id>`); `result` carries the
                     # human-readable text on normal API errors.
                     errs = evt.get("errors") or []
-                    error_msg = (
-                        evt.get("result")
-                        or (errs[0] if errs else None)
-                        or "Claude Code error"
-                    )
+                    api_status = evt.get("api_error_status")
+                    if api_status == 401:
+                        # OAuth token expired or revoked. The CLI's raw
+                        # message ("Failed to authenticate. API Error:
+                        # 401 Invalid authentication credentials") tells
+                        # the user nothing actionable — replace it with
+                        # a recovery instruction.
+                        error_msg = (
+                            "Claude Code OAuth token expired. "
+                            "Run `claude /login` on the host to refresh — "
+                            "the container will pick up the new token "
+                            "automatically (no restart needed)."
+                        )
+                    else:
+                        error_msg = (
+                            evt.get("result")
+                            or (errs[0] if errs else None)
+                            or "Claude Code error"
+                        )
 
             # 'user' (tool_result) events are internal — ignore.
 

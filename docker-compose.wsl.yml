@@ -102,7 +102,12 @@ services:
       # do), and Docker substitutes empty → mounts /.credentials.json
       # (an empty dir) and Claude logs out. SAUTIUM_WSL_HOME in .env
       # is an explicit, shell-independent path. Required, not optional.
-      - ${SAUTIUM_WSL_HOME:?Set SAUTIUM_WSL_HOME=/home/<user> in .env}/.claude/.credentials.json:/home/claudeuser/.claude/.credentials.json:ro
+      #
+      # Mount the WHOLE .claude directory (see the equivalent block in
+      # docker-compose.yml for why): single-file bind pins the inode and
+      # the CLI rewrites credentials via atomic rename, so the container
+      # would otherwise stick to a stale token until restart.
+      - ${SAUTIUM_WSL_HOME:?Set SAUTIUM_WSL_HOME=/home/<user> in .env}/.claude:/home/claudeuser/.claude
       - ./data/claude_sessions:/home/claudeuser/.claude/projects
     ports:
       - "8800:8000"

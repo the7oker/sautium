@@ -118,11 +118,21 @@ services:
       # If your active Claude Code lives in WSL (refresh tokens written to
       # /home/<user>/.claude/) the Windows file is stale — use the
       # docker-compose.wsl.yml variant from a WSL bash shell instead.
-      - ${USERPROFILE:-${HOME}}/.claude/.credentials.json:/home/claudeuser/.claude/.credentials.json:ro
+      #
+      # Mount the WHOLE .claude directory, not just .credentials.json.
+      # The CLI rewrites credentials via atomic rename (write tmp → rename
+      # to .credentials.json), which changes the file's inode. A bind mount
+      # of a single file pins the original inode, so after every refresh
+      # the container reads a stale token until restart. Mounting the
+      # directory binds the dir inode (which doesn't change on rename),
+      # so the container sees the freshly-renamed file immediately.
+      - ${USERPROFILE:-${HOME}}/.claude:/home/claudeuser/.claude
       # Claude Code session storage — persisted on the host so chat history
       # survives container rebuilds. Without this, every `up --build`
       # invalidates every saved session_id and chat retries fail with
-      # "No conversation found".
+      # "No conversation found". Stacked on top of the .claude dir mount
+      # above so sessions live on the project's own volume, not in the
+      # user's home (where they'd mix with the host CLI's sessions).
       - ./data/claude_sessions:/home/claudeuser/.claude/projects
     ports:
       # Backend on 0.0.0.0 by design — LAN access (phone, tablet) is the
