@@ -560,6 +560,30 @@
           }
         });
       }
+      // Similar tracks: delegated listener — rows are re-rendered on
+      // every track change. Tap on `+` queues the track; tap anywhere
+      // else on the row plays it.
+      if (this.similarList) {
+        this.similarList.addEventListener('click', async (e) => {
+          const row = e.target.closest('.np-sim-row');
+          if (!row) return;
+          const mfId = row.getAttribute('data-track-id');
+          if (!mfId) return;
+          if (e.target.closest('.np-sim-add')) {
+            try {
+              await fetch('/api/player/queue-tracks', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ track_ids: [parseInt(mfId, 10)] }),
+              });
+            } catch (err) { console.warn('queue-tracks failed', err); }
+            return;
+          }
+          if (typeof window.playTrack === 'function') {
+            window.playTrack(parseInt(mfId, 10));
+          }
+        });
+      }
       document.addEventListener('keydown', e => {
         if (e.key === 'Escape' && this.isOpen) this.hide();
       });
@@ -3860,12 +3884,562 @@
     window.addEventListener('hashchange', onHashChange);
   }
 
+  /* ---------- More tab ----------
+     Aggregator screen: a list of subsections (HQPlayer settings,
+     etc.) that live under #more. Each row navigates to its own
+     sub-screen via #more/<section>. renderMore dispatches by hash
+     segment, so the same renderer covers both the index and any
+     leaf screen — keeps the routing table flat. */
+
+  function renderMore(root, hash) {
+    const segs = (hash || '').split('/').filter(Boolean);
+    const sub = segs[1] || '';
+    if (sub === 'hqplayer') return renderHqplayerSettings(root);
+    return renderMoreList(root);
+  }
+
+  async function renderMoreList(root) {
+    // Drawer-style layout per design (Session 3 v2 frame 2): bottom-
+    // anchored card with rounded top, handle, title, rows, version
+    // footer. Fast HQP status fetch in background to populate the
+    // "Connected / Disconnected" hint chip on the HQPlayer row.
+    const screen = document.createElement('div');
+    screen.className = 'more-screen';
+    const ICON_HQP = `
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="6" width="18" height="12" rx="2"/>
+        <path d="M7 10v4M11 9v6M15 11v2M19 10v4"/>
+      </svg>`;
+    const ICON_PROFILE = `
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="9" r="3.5"/>
+        <path d="M5 20a7 7 0 0114 0"/>
+      </svg>`;
+    const ICON_SETTINGS = `
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.07a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1.04 1.56V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.04-1.56 1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.7 1.7 0 00.34-1.87 1.7 1.7 0 00-1.56-1.04H3a2 2 0 110-4h.1a1.7 1.7 0 001.56-1.04 1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06a1.7 1.7 0 001.87.34h.04A1.7 1.7 0 0010 3.1V3a2 2 0 114 0v.1a1.7 1.7 0 001.04 1.56 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9v.04A1.7 1.7 0 0020.96 10H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.56 1.04z"/>
+      </svg>`;
+    const CHEV = `
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 6l6 6-6 6"/>
+      </svg>`;
+
+    screen.innerHTML = `
+      <div class="drawer">
+        <div class="drawer-handle"></div>
+        <div class="drawer-title-row"><h1 class="drawer-title">More</h1></div>
+        <div class="more-list">
+          <button class="more-row" type="button" data-go="more/hqplayer">
+            <span class="more-icon">${ICON_HQP}</span>
+            <span class="more-label">HQPlayer</span>
+            <span class="more-hint" id="hqpHint">…</span>
+            <span class="more-chev">${CHEV}</span>
+          </button>
+          <button class="more-row" type="button" disabled>
+            <span class="more-icon">${ICON_PROFILE}</span>
+            <span class="more-label">Profile</span>
+            <span class="more-hint">soon</span>
+            <span class="more-chev">${CHEV}</span>
+          </button>
+          <button class="more-row" type="button" disabled>
+            <span class="more-icon">${ICON_SETTINGS}</span>
+            <span class="more-label">Settings</span>
+            <span class="more-hint">soon</span>
+            <span class="more-chev">${CHEV}</span>
+          </button>
+        </div>
+        <div class="drawer-foot" id="drawerFoot">SAUTIUM</div>
+      </div>
+    `;
+    root.appendChild(screen);
+    screen.querySelectorAll('[data-go]').forEach(btn => {
+      btn.addEventListener('click', () => navigate(btn.dataset.go));
+    });
+    screen.querySelectorAll('.more-row[disabled]').forEach(btn => {
+      btn.addEventListener('click', e => e.preventDefault());
+    });
+
+    // Connection hint — fetch HQPlayer state in background so the
+    // row reads "● Connected" or "● Disconnected" with a live dot.
+    try {
+      const r = await fetch('/api/hqplayer/state');
+      if (r.ok) {
+        const s = await r.json();
+        const hint = screen.querySelector('#hqpHint');
+        if (s.connected) {
+          hint.classList.add('ok');
+          hint.innerHTML = '<span class="more-status-dot"></span>Connected';
+        } else {
+          hint.classList.add('off');
+          hint.innerHTML = '<span class="more-status-dot off"></span>Offline';
+        }
+      }
+    } catch (_) { /* leave the row as "…" — non-critical */ }
+  }
+
+  /* ---------- HQPlayer settings ----------
+     One screen at #more/hqplayer that consolidates the settings
+     audiophiles actually touch: Connection (read-only — edited in
+     the launcher Wizard), Output (Mode/Rate/Bits), Volume (read,
+     adjusted in Now Playing), Filter (with favourites + a modal
+     full-list picker), Matrix profile (only when profiles exist),
+     and Advanced (collapsed shaper). State is fetched on mount;
+     manual refresh button picks up changes made via HQP Desktop. */
+
+  function fmtRateLabel(hz) {
+    if (!hz) return '—';
+    // PCM range — straight kHz (44.1 kHz … 768 kHz). The audiophile
+    // convention switches at the DSD line, where rates are read as
+    // base × multiplier (DSD64 = 44.1k × 64) instead of raw MHz.
+    if (hz <= 768000) {
+      if (hz % 1000 === 0) return (hz / 1000) + ' kHz';
+      return (hz / 1000).toFixed(1) + ' kHz';
+    }
+    // 32k base appears too — HQP exposes 32k × 64/128/256/512 for
+    // DACs that prefer the lower base (2.048, 4.096, 8.192,
+    // 16.384 MHz). 22.05k family covers some legacy / mastering
+    // rates. Multiplier must be a clean power of two ≥ 64 for the
+    // base × N naming to be honest; anything else falls through.
+    const labels = {44100: '44.1k', 48000: '48k', 32000: '32k', 22050: '22.05k'};
+    for (const base of [44100, 48000, 32000, 22050]) {
+      if (hz % base === 0) {
+        const mult = hz / base;
+        if (mult >= 64 && (mult & (mult - 1)) === 0) {
+          return `${labels[base]} × ${mult}`;
+        }
+      }
+    }
+    const mhz = hz / 1_000_000;
+    return (mhz % 1 === 0 ? mhz.toFixed(0) : mhz.toFixed(2)) + ' MHz';
+  }
+
+  function fmtVolume(db) {
+    if (db === 0) return '0 dB';
+    const sign = db > 0 ? '+' : '';
+    return sign + db.toFixed(1) + ' dB';
+  }
+
+  function modeNameFromState(s, modes) {
+    if (!s || !modes) return '—';
+    const m = modes.find(x => x.index === s.mode);
+    return m ? m.name : '—';
+  }
+
+  function rateNameFromState(s, rates) {
+    if (!s || !rates || !rates.length) return '—';
+    const r = rates.find(x => x.index === s.rate);
+    return r ? fmtRateLabel(r.rate) : '—';
+  }
+
+  function filterNameFromIndex(idx, filters) {
+    if (!filters) return '—';
+    const f = filters.find(x => x.index === idx);
+    return f ? f.name : '—';
+  }
+
+  function shaperNameFromIndex(idx, shapers) {
+    if (!shapers) return '—';
+    const s = shapers.find(x => x.index === idx);
+    return s ? s.name : '—';
+  }
+
+  // Filters are named by family-prefix (poly-sinc-*, minring-*, IIR,
+  // FIR, etc). Group by the leading dotted/dashed token so the
+  // picker sheet has a usable hierarchy.
+  function filterFamily(name) {
+    if (!name) return 'Other';
+    const parts = name.split('-');
+    if (parts.length >= 2) {
+      // Two-token families: "poly-sinc", "minring-XX", "TPDF-…".
+      const head = parts[0].toLowerCase();
+      if (head === 'poly' && parts[1] === 'sinc') return 'poly-sinc';
+      return parts[0];
+    }
+    return name;
+  }
+
+  async function renderHqplayerSettings(root) {
+    root.innerHTML = '';
+    const screen = document.createElement('div');
+    screen.className = 'screen hqp-screen';
+    root.appendChild(screen);
+    screen.innerHTML = `
+      <header class="hqp-head">
+        <button class="icon-btn" type="button" data-action="back" aria-label="Back">${SVG_BACK}</button>
+        <h1 class="hqp-title">HQPlayer</h1>
+        <button class="icon-btn" type="button" data-action="refresh" aria-label="Refresh">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 12a9 9 0 11-3-6.7L21 8"/>
+            <path d="M21 3v5h-5"/>
+          </svg>
+        </button>
+      </header>
+      <div class="hqp-body" id="hqpBody">
+        <div class="hqp-loading">Loading…</div>
+      </div>
+    `;
+    screen.querySelector('[data-action="back"]').addEventListener('click', () => {
+      navigate('more');
+    });
+    screen.querySelector('[data-action="refresh"]').addEventListener('click', () => {
+      load();
+    });
+
+    let lastState = null;
+
+    async function load() {
+      const body = screen.querySelector('#hqpBody');
+      body.innerHTML = `<div class="hqp-loading">Loading…</div>`;
+      let s;
+      try {
+        const r = await fetch('/api/hqplayer/state');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        s = await r.json();
+      } catch (err) {
+        body.innerHTML = `<div class="hqp-error">Could not reach HQPlayer.</div>`;
+        return;
+      }
+      lastState = s;
+      renderBody(body, s);
+    }
+
+    function renderBody(body, s) {
+      const st = s.state || {};
+      const modeName = modeNameFromState(st, s.modes);
+      const rateName = rateNameFromState(st, s.rates);
+      const filterName = filterNameFromIndex(st.filter, s.filters);
+      const shaperName = shaperNameFromIndex(st.shaper, s.shapers);
+      const matrixActive = st.matrix_profile || '';
+      const profiles = s.matrix_profiles || [];
+      const favourites = s.favorite_filters || [];
+      // HQP Desktop labels the same Shaper control differently
+      // depending on output mode: "Dither" in PCM mode, "Modulator"
+      // in SDM. Mirror the language so the screen feels native to
+      // anyone coming from the Desktop UI.
+      const modeUpper = (modeName || '').toUpperCase();
+      const isPcm = modeUpper === 'PCM';
+      const isSdm = modeUpper.includes('SDM') || modeUpper.includes('DSD');
+      const shaperLabel = isPcm ? 'Dither' : isSdm ? 'Modulator' : 'Shaper';
+
+      const connBlock = s.connected
+        ? `<div class="hqp-conn ok">
+             <span class="hqp-conn-dot"></span>
+             <div class="hqp-conn-text">
+               <div class="hqp-conn-host">${escapeHtml(s.host)}:${s.port}</div>
+               <div class="hqp-conn-sub">${
+                 escapeHtml((s.info && (s.info.product || '')) || 'Connected')
+               }${s.info && s.info.version ? ' · ' + escapeHtml(s.info.version) : ''}</div>
+             </div>
+           </div>`
+        : `<div class="hqp-conn err">
+             <span class="hqp-conn-dot"></span>
+             <div class="hqp-conn-text">
+               <div class="hqp-conn-host">${escapeHtml(s.host)}:${s.port}</div>
+               <div class="hqp-conn-sub">Disconnected</div>
+             </div>
+           </div>`;
+
+      const modeOptions = (s.modes || []).map(m =>
+        `<option value="${m.index}"${m.index === st.mode ? ' selected' : ''}>${
+          escapeHtml(m.name)}</option>`).join('');
+
+      // HQPlayer's Control Protocol exposes only the "auto / [source]"
+      // rate slot via GetRates — the explicit rate menu shown in HQP
+      // Desktop isn't reachable from here. When the list is just the
+      // auto entry we show active_rate (the actual current output)
+      // as a read-only readout instead of a one-option dropdown.
+      const realRates = (s.rates || []).filter(r => r.rate > 0);
+      const showRateDropdown = realRates.length > 1;
+      const rateOptions = (s.rates || []).map(r =>
+        `<option value="${r.index}"${r.index === st.rate ? ' selected' : ''}>${
+          escapeHtml(r.rate ? fmtRateLabel(r.rate) : 'Auto')}</option>`).join('');
+      const activeRateLabel = st.active_rate
+        ? fmtRateLabel(st.active_rate)
+        : '—';
+
+      const shaperOptions = (s.shapers || []).map(sh =>
+        `<option value="${sh.index}"${sh.index === st.shaper ? ' selected' : ''}>${
+          escapeHtml(sh.name)}</option>`).join('');
+
+      const matrixOptions = profiles.length
+        ? profiles.map(p =>
+            `<option value="${escapeHtml(p)}"${p === matrixActive ? ' selected' : ''}>${
+              escapeHtml(p)}</option>`).join('')
+        : '';
+
+      // Active filter row + the favourites strip below it. Tap on the
+      // active filter or the [All filters] button opens the modal.
+      const favouritesStrip = favourites.length
+        ? `<div class="hqp-fav-strip">${favourites.map(name => {
+            const isCurrent = name === filterName;
+            return `<button type="button" class="hqp-fav-chip${
+              isCurrent ? ' is-current' : ''}" data-fav="${escapeHtml(name)}">
+              <span class="hqp-fav-star">★</span>
+              <span class="hqp-fav-name">${escapeHtml(name)}</span>
+            </button>`;
+          }).join('')}</div>`
+        : '';
+
+      // Bits aren't directly exposed by the Control Protocol — leave
+      // the row labelled "Bits" empty for now; it's read-only and
+      // rarely interesting once Mode/Rate are picked.
+      body.innerHTML = `
+        <section class="hqp-section">
+          <div class="hqp-section-label">Connection</div>
+          ${connBlock}
+        </section>
+
+        <section class="hqp-section">
+          <div class="hqp-section-label">Output</div>
+          <div class="hqp-row">
+            <label class="hqp-row-label" for="hqpMode">Mode</label>
+            <select class="hqp-select" id="hqpMode" data-knob="mode">${modeOptions}</select>
+          </div>
+          <div class="hqp-row">
+            <span class="hqp-row-label">Rate</span>
+            ${showRateDropdown
+              ? `<select class="hqp-select" id="hqpRate" data-knob="rate">${rateOptions}</select>`
+              : `<span class="hqp-row-value mono">${escapeHtml(activeRateLabel)}</span>`}
+          </div>
+          <div class="hqp-row hqp-volume-row">
+            <span class="hqp-row-label">Volume</span>
+            <div class="hqp-volume-ctrl">
+              <button class="hqp-vol-btn" type="button" data-vol="-1" aria-label="Volume -1 dB">−</button>
+              <span class="hqp-vol-value mono">${fmtVolume(Number(st.volume) || 0)}</span>
+              <button class="hqp-vol-btn" type="button" data-vol="+1" aria-label="Volume +1 dB">+</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="hqp-section">
+          <div class="hqp-section-label">Filter</div>
+          <button class="hqp-row hqp-row-tap" type="button" data-action="open-filter">
+            <span class="hqp-row-label">Active</span>
+            <span class="hqp-row-value">${escapeHtml(filterName)}</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.6"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M9 6l6 6-6 6"/>
+            </svg>
+          </button>
+          ${favouritesStrip}
+          <div class="hqp-row">
+            <label class="hqp-row-label" for="hqpShaper">${escapeHtml(shaperLabel)}</label>
+            <select class="hqp-select" id="hqpShaper" data-knob="shaper">${shaperOptions}</select>
+          </div>
+        </section>
+
+        ${profiles.length ? `
+        <section class="hqp-section">
+          <div class="hqp-section-label">Matrix profile</div>
+          <div class="hqp-row">
+            <label class="hqp-row-label" for="hqpMatrix">Active</label>
+            <select class="hqp-select" id="hqpMatrix" data-knob="matrix_profile">
+              <option value=""${matrixActive ? '' : ' selected'}>(none)</option>
+              ${matrixOptions}
+            </select>
+          </div>
+        </section>
+        ` : ''}
+      `;
+
+      // Wire dropdowns: each select calls /config with one knob.
+      body.querySelectorAll('select[data-knob]').forEach(sel => {
+        sel.addEventListener('change', async () => {
+          const knob = sel.dataset.knob;
+          const raw = sel.value;
+          const payload = {};
+          payload[knob] = (knob === 'matrix_profile') ? raw : parseInt(raw, 10);
+          if (knob === 'matrix_profile' && raw === '') return;
+          try {
+            const r = await fetch('/api/hqplayer/config', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify(payload),
+            });
+            const out = await r.json();
+            if (!r.ok || !out.ok) {
+              console.warn('hqp config rejected:', out);
+            }
+          } catch (err) { console.warn('hqp config failed', err); }
+          // Reload to reconcile (server-side change may cascade —
+          // e.g. mode flip changes filter availability).
+          load();
+        });
+      });
+
+      body.querySelectorAll('.hqp-fav-chip').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const name = btn.dataset.fav;
+          const filt = (s.filters || []).find(f => f.name === name);
+          if (!filt) return;
+          try {
+            await fetch('/api/hqplayer/config', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({filter: filt.index, filter1x: filt.index}),
+            });
+          } catch (err) { console.warn('filter switch failed', err); }
+          load();
+        });
+      });
+
+      body.querySelectorAll('[data-vol]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const delta = parseFloat(btn.dataset.vol);
+          try {
+            await fetch('/api/hqplayer/volume', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({delta}),
+            });
+          } catch (err) { console.warn('volume nudge failed', err); }
+          load();
+        });
+      });
+
+      body.querySelector('[data-action="open-filter"]').addEventListener('click', () => {
+        openFilterPicker(s, async (chosen) => {
+          try {
+            await fetch('/api/hqplayer/config', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({filter: chosen.index, filter1x: chosen.index}),
+            });
+          } catch (err) { console.warn('filter switch failed', err); }
+          load();
+        });
+      });
+    }
+
+    load();
+  }
+
+  // Modal sheet: full filter list, search box, sections (Favourites
+  // first, then by family). Sized to fill most of the viewport so
+  // the user can scan 77 entries comfortably.
+  function openFilterPicker(state, onPick) {
+    const sheet = document.createElement('div');
+    sheet.className = 'hqp-sheet';
+    sheet.innerHTML = `
+      <div class="hqp-sheet-bar">
+        <button class="icon-btn" type="button" data-action="close" aria-label="Close">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <path d="M6 6l12 12M18 6L6 18"/>
+          </svg>
+        </button>
+        <h2 class="hqp-sheet-title">Filter</h2>
+        <input class="hqp-sheet-search" type="search" placeholder="Search…">
+      </div>
+      <div class="hqp-sheet-body" id="hqpSheetBody"></div>
+    `;
+    document.body.appendChild(sheet);
+
+    const filters = state.filters || [];
+    const favs = new Set(state.favorite_filters || []);
+    const currentIdx = (state.state && state.state.filter) ?? -1;
+    const search = sheet.querySelector('.hqp-sheet-search');
+    const body = sheet.querySelector('#hqpSheetBody');
+
+    function paint() {
+      const q = (search.value || '').trim().toLowerCase();
+      const filtered = q
+        ? filters.filter(f => f.name.toLowerCase().includes(q))
+        : filters.slice();
+
+      const groups = new Map();
+      // Favourites group is synthesised from the filtered set so
+      // search applies uniformly; appears first when non-empty.
+      const favRows = filtered.filter(f => favs.has(f.name));
+      if (favRows.length) groups.set('★ Favourites', favRows);
+      for (const f of filtered) {
+        if (favs.has(f.name)) continue;
+        const fam = filterFamily(f.name);
+        if (!groups.has(fam)) groups.set(fam, []);
+        groups.get(fam).push(f);
+      }
+
+      if (!groups.size) {
+        body.innerHTML = `<div class="hqp-sheet-empty">No filters match.</div>`;
+        return;
+      }
+
+      body.innerHTML = Array.from(groups.entries()).map(([fam, rows]) => `
+        <div class="hqp-sheet-group">
+          <div class="hqp-sheet-group-label">${escapeHtml(fam)}</div>
+          ${rows.map(r => `
+            <div class="hqp-sheet-row${
+              r.index === currentIdx ? ' is-current' : ''}" data-idx="${r.index}">
+              <button class="hqp-sheet-row-name" type="button" data-pick="${r.index}">
+                ${r.index === currentIdx ? '<span class="hqp-sheet-dot"></span>' : ''}
+                ${escapeHtml(r.name)}
+              </button>
+              <button class="hqp-sheet-star${
+                favs.has(r.name) ? ' is-on' : ''}" type="button"
+                      data-fav="${escapeHtml(r.name)}" aria-label="Toggle favourite">
+                ★
+              </button>
+            </div>
+          `).join('')}
+        </div>
+      `).join('');
+
+      body.querySelectorAll('[data-pick]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const idx = parseInt(btn.dataset.pick, 10);
+          const f = filters.find(x => x.index === idx);
+          close();
+          if (f) onPick(f);
+        });
+      });
+      body.querySelectorAll('[data-fav]').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const name = btn.dataset.fav;
+          const action = favs.has(name) ? 'remove' : 'add';
+          if (action === 'add') favs.add(name); else favs.delete(name);
+          btn.classList.toggle('is-on');
+          try {
+            await fetch('/api/hqplayer/favorites/filter', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({name, action}),
+            });
+          } catch (err) {
+            console.warn('favourite update failed', err);
+          }
+        });
+      });
+    }
+
+    function close() {
+      sheet.remove();
+    }
+
+    sheet.querySelector('[data-action="close"]').addEventListener('click', close);
+    search.addEventListener('input', paint);
+    paint();
+  }
+
   /* ---------- Wire it up ---------- */
 
   registerScreen('home', renderHome);
   registerScreen('discovery', renderDiscovery);
   registerScreen('friends', renderFriends);
-  registerScreen('more', placeholderScreen('More'));
+  registerScreen('more', renderMore);
 
   function attachNavListeners() {
     document.querySelectorAll('.nav-tab').forEach(btn => {

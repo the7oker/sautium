@@ -346,6 +346,17 @@ CREATE TABLE IF NOT EXISTS genre_descriptions (
     CONSTRAINT chk_has_description CHECK (summary IS NOT NULL OR content IS NOT NULL)
 );
 
+-- Generic key/value store for app-level user preferences. Keys are
+-- dotted strings (e.g. 'hqplayer.favorite_filters') and the value
+-- carries whatever JSON the feature needs. Single-row-per-key by
+-- design; no per-account isolation because the launcher is
+-- single-user. Add new namespaces by inventing a key prefix.
+CREATE TABLE IF NOT EXISTS user_settings (
+    key TEXT PRIMARY KEY,
+    value JSONB NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS track_stats (
     id SERIAL PRIMARY KEY,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -700,6 +711,10 @@ DO $$ BEGIN CREATE TRIGGER trg_album_tags_updated_at BEFORE UPDATE ON album_tags
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN CREATE TRIGGER trg_genre_descriptions_updated_at BEFORE UPDATE ON genre_descriptions
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN CREATE TRIGGER trg_user_settings_updated_at BEFORE UPDATE ON user_settings
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 

@@ -1158,6 +1158,9 @@ app.include_router(discovery_router)
 from routers.genres import router as genres_router
 app.include_router(genres_router)
 
+from routers.hqplayer import router as hqplayer_router
+app.include_router(hqplayer_router)
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
