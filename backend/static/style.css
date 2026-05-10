@@ -3038,28 +3038,45 @@ body.has-miniplayer .chat-screen {
   justify-items: center;
 }
 
-/* ---- More tab (drawer-styled) ---- */
-.more-screen {
+/* ---- More drawer overlay ----
+   Fixed-position overlay so the drawer never scrolls with
+   underlying content. Z-index sits below the bottom nav (50) and
+   mini-player (49) so those keep their crisp colours — only the
+   page content above them gets dimmed. The scrim is also clipped
+   so it physically doesn't extend into the nav / mini-player
+   area, even visually. */
+.more-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
   display: block;
-  padding: 0;
-  gap: 0;
-  /* Push the drawer toward the bottom so it visually anchors above
-     the tab bar / mini-player rather than floating mid-screen. */
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  min-height: calc(100dvh - var(--nav-h) - var(--safe-bottom));
+  pointer-events: none;
 }
-body.has-miniplayer .more-screen {
-  min-height: calc(100dvh - var(--nav-h) - var(--mp-h) - var(--safe-bottom));
+.more-overlay[hidden] { display: none !important; }
+.more-scrim {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  bottom: calc(var(--nav-h) + var(--safe-bottom));
+  background: rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+  pointer-events: auto;
 }
-.drawer {
-  margin: 0 calc(0 * var(--px));
+body.has-miniplayer .more-scrim {
+  bottom: calc(var(--nav-h) + var(--mp-h) + var(--safe-bottom));
+}
+.more-overlay .drawer {
+  position: absolute;
+  left: 0; right: 0;
+  bottom: calc(var(--nav-h) + var(--safe-bottom));
   background: var(--color-surface);
   border-top-left-radius: calc(16 * var(--px));
   border-top-right-radius: calc(16 * var(--px));
   display: flex; flex-direction: column;
   box-shadow: 0 calc(-16 * var(--px)) calc(40 * var(--px)) rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+}
+body.has-miniplayer .more-overlay .drawer {
+  bottom: calc(var(--nav-h) + var(--mp-h) + var(--safe-bottom));
 }
 .drawer-handle {
   width: calc(36 * var(--px));

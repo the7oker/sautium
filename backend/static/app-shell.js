@@ -433,10 +433,12 @@
     if (!fab) return;
     const npOpen = sheet && sheet.isOpen;
     const aiOpen = ai && ai.isOpen;
+    const drawerOpen = typeof moreDrawer !== 'undefined' && moreDrawer.isOpen;
     const r = route || currentRoute;
     const segs = parseHash().split('/').filter(Boolean);
     const inChat = segs.length >= 3 && segs[1] === 'chat';
-    fab.hidden = !!(npOpen || aiOpen || FAB_HIDDEN_ROUTES.has(r) || inChat);
+    fab.hidden = !!(npOpen || aiOpen || drawerOpen
+                    || FAB_HIDDEN_ROUTES.has(r) || inChat);
   }
 
   /* ---------- Now Playing sheet ----------
@@ -3885,106 +3887,153 @@
   }
 
   /* ---------- More tab ----------
-     Aggregator screen: a list of subsections (HQPlayer settings,
-     etc.) that live under #more. Each row navigates to its own
-     sub-screen via #more/<section>. renderMore dispatches by hash
-     segment, so the same renderer covers both the index and any
-     leaf screen — keeps the routing table flat. */
+     The "More" tab opens a bottom-drawer overlay over whatever
+     screen is currently active — the underlying tab content stays
+     visible behind a scrim, the AI FAB is suppressed, and tapping
+     a row dismisses the drawer and navigates to that subsection's
+     full-screen route (e.g. #<tab>/hqplayer). The drawer itself is
+     not a route; URL hash stays put while open. Hitting #more/...
+     directly (deep link) still works because renderMore dispatches
+     to the leaf screen below. */
 
   function renderMore(root, hash) {
     const segs = (hash || '').split('/').filter(Boolean);
     const sub = segs[1] || '';
     if (sub === 'hqplayer') return renderHqplayerSettings(root);
-    return renderMoreList(root);
+    // Bare #more — nothing to render here; the drawer is the UI.
+    // Drop back to home so the page isn't blank if the user
+    // bookmarked the route.
+    navigate('home');
   }
 
-  async function renderMoreList(root) {
-    // Drawer-style layout per design (Session 3 v2 frame 2): bottom-
-    // anchored card with rounded top, handle, title, rows, version
-    // footer. Fast HQP status fetch in background to populate the
-    // "Connected / Disconnected" hint chip on the HQPlayer row.
-    const screen = document.createElement('div');
-    screen.className = 'more-screen';
-    const ICON_HQP = `
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
-           stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
-           stroke-linejoin="round" aria-hidden="true">
-        <rect x="3" y="6" width="18" height="12" rx="2"/>
-        <path d="M7 10v4M11 9v6M15 11v2M19 10v4"/>
-      </svg>`;
-    const ICON_PROFILE = `
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
-           stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
-           stroke-linejoin="round" aria-hidden="true">
-        <circle cx="12" cy="9" r="3.5"/>
-        <path d="M5 20a7 7 0 0114 0"/>
-      </svg>`;
-    const ICON_SETTINGS = `
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
-           stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
-           stroke-linejoin="round" aria-hidden="true">
-        <circle cx="12" cy="12" r="3"/>
-        <path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.07a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1.04 1.56V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.04-1.56 1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.7 1.7 0 00.34-1.87 1.7 1.7 0 00-1.56-1.04H3a2 2 0 110-4h.1a1.7 1.7 0 001.56-1.04 1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06a1.7 1.7 0 001.87.34h.04A1.7 1.7 0 0010 3.1V3a2 2 0 114 0v.1a1.7 1.7 0 001.04 1.56 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9v.04A1.7 1.7 0 0020.96 10H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.56 1.04z"/>
-      </svg>`;
-    const CHEV = `
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-           stroke="currentColor" stroke-width="2" stroke-linecap="round"
-           stroke-linejoin="round" aria-hidden="true">
-        <path d="M9 6l6 6-6 6"/>
-      </svg>`;
-
-    screen.innerHTML = `
-      <div class="drawer">
-        <div class="drawer-handle"></div>
-        <div class="drawer-title-row"><h1 class="drawer-title">More</h1></div>
-        <div class="more-list">
-          <button class="more-row" type="button" data-go="more/hqplayer">
-            <span class="more-icon">${ICON_HQP}</span>
-            <span class="more-label">HQPlayer</span>
-            <span class="more-hint" id="hqpHint">…</span>
-            <span class="more-chev">${CHEV}</span>
-          </button>
-          <button class="more-row" type="button" disabled>
-            <span class="more-icon">${ICON_PROFILE}</span>
-            <span class="more-label">Profile</span>
-            <span class="more-hint">soon</span>
-            <span class="more-chev">${CHEV}</span>
-          </button>
-          <button class="more-row" type="button" disabled>
-            <span class="more-icon">${ICON_SETTINGS}</span>
-            <span class="more-label">Settings</span>
-            <span class="more-hint">soon</span>
-            <span class="more-chev">${CHEV}</span>
-          </button>
-        </div>
-        <div class="drawer-foot" id="drawerFoot">SAUTIUM</div>
-      </div>
-    `;
-    root.appendChild(screen);
-    screen.querySelectorAll('[data-go]').forEach(btn => {
-      btn.addEventListener('click', () => navigate(btn.dataset.go));
-    });
-    screen.querySelectorAll('.more-row[disabled]').forEach(btn => {
-      btn.addEventListener('click', e => e.preventDefault());
-    });
-
-    // Connection hint — fetch HQPlayer state in background so the
-    // row reads "● Connected" or "● Disconnected" with a live dot.
-    try {
-      const r = await fetch('/api/hqplayer/state');
-      if (r.ok) {
-        const s = await r.json();
-        const hint = screen.querySelector('#hqpHint');
-        if (s.connected) {
-          hint.classList.add('ok');
-          hint.innerHTML = '<span class="more-status-dot"></span>Connected';
-        } else {
-          hint.classList.add('off');
-          hint.innerHTML = '<span class="more-status-dot off"></span>Offline';
+  // Drawer overlay (More tab handler). Built lazily on first open,
+  // reused across opens, content (the connection-status chip on
+  // the HQPlayer row) refreshed every time. Closed by tapping the
+  // scrim, the More tab again, the handle, or any other tab.
+  const moreDrawer = {
+    el: null,
+    isOpen: false,
+    init() {
+      const overlay = document.createElement('div');
+      overlay.className = 'more-overlay';
+      overlay.hidden = true;
+      overlay.innerHTML = this._html();
+      document.body.appendChild(overlay);
+      this.el = overlay;
+      overlay.querySelector('.more-scrim')
+        .addEventListener('click', () => this.close());
+      overlay.querySelector('.drawer-handle')
+        .addEventListener('click', () => this.close());
+      overlay.querySelectorAll('[data-go]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          this.close();
+          navigate(btn.dataset.go);
+        });
+      });
+      overlay.querySelectorAll('.more-row[disabled]').forEach(btn => {
+        btn.addEventListener('click', e => e.preventDefault());
+      });
+    },
+    open() {
+      if (!this.el) this.init();
+      this.el.hidden = false;
+      this.isOpen = true;
+      // Highlight the More tab visually so the user knows the
+      // drawer is "the More state" without changing route.
+      document.querySelectorAll('.nav-tab').forEach(b => {
+        if (b.getAttribute('data-route') === 'more') {
+          b.setAttribute('aria-current', 'page');
         }
-      }
-    } catch (_) { /* leave the row as "…" — non-critical */ }
-  }
+      });
+      updateFabVisibility(currentRoute);
+      this._refreshHqpStatus();
+    },
+    close() {
+      if (!this.el) return;
+      this.el.hidden = true;
+      this.isOpen = false;
+      // Restore the actual route's tab highlight.
+      updateNavActive(currentRoute);
+      updateFabVisibility(currentRoute);
+    },
+    toggle() { this.isOpen ? this.close() : this.open(); },
+    async _refreshHqpStatus() {
+      const hint = this.el && this.el.querySelector('#hqpHint');
+      if (!hint) return;
+      hint.className = 'more-hint';
+      hint.textContent = '…';
+      try {
+        const r = await fetch('/api/hqplayer/state');
+        if (r.ok) {
+          const s = await r.json();
+          if (s.connected) {
+            hint.classList.add('ok');
+            hint.innerHTML = '<span class="more-status-dot"></span>Connected';
+          } else {
+            hint.classList.add('off');
+            hint.innerHTML = '<span class="more-status-dot off"></span>Offline';
+          }
+        }
+      } catch (_) { /* leave hint as "…" — non-critical */ }
+    },
+    _html() {
+      const ICON_HQP = `
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="6" width="18" height="12" rx="2"/>
+          <path d="M7 10v4M11 9v6M15 11v2M19 10v4"/>
+        </svg>`;
+      const ICON_PROFILE = `
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="9" r="3.5"/>
+          <path d="M5 20a7 7 0 0114 0"/>
+        </svg>`;
+      const ICON_SETTINGS = `
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.07a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1.04 1.56V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.04-1.56 1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.7 1.7 0 00.34-1.87 1.7 1.7 0 00-1.56-1.04H3a2 2 0 110-4h.1a1.7 1.7 0 001.56-1.04 1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06a1.7 1.7 0 001.87.34h.04A1.7 1.7 0 0010 3.1V3a2 2 0 114 0v.1a1.7 1.7 0 001.04 1.56 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9v.04A1.7 1.7 0 0020.96 10H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.56 1.04z"/>
+        </svg>`;
+      const CHEV = `
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <path d="M9 6l6 6-6 6"/>
+        </svg>`;
+      return `
+        <div class="more-scrim"></div>
+        <div class="drawer">
+          <div class="drawer-handle"></div>
+          <div class="drawer-title-row"><h1 class="drawer-title">More</h1></div>
+          <div class="more-list">
+            <button class="more-row" type="button" data-go="more/hqplayer">
+              <span class="more-icon">${ICON_HQP}</span>
+              <span class="more-label">HQPlayer</span>
+              <span class="more-hint" id="hqpHint">…</span>
+              <span class="more-chev">${CHEV}</span>
+            </button>
+            <button class="more-row" type="button" disabled>
+              <span class="more-icon">${ICON_PROFILE}</span>
+              <span class="more-label">Profile</span>
+              <span class="more-hint">soon</span>
+              <span class="more-chev">${CHEV}</span>
+            </button>
+            <button class="more-row" type="button" disabled>
+              <span class="more-icon">${ICON_SETTINGS}</span>
+              <span class="more-label">Settings</span>
+              <span class="more-hint">soon</span>
+              <span class="more-chev">${CHEV}</span>
+            </button>
+          </div>
+          <div class="drawer-foot">SAUTIUM</div>
+        </div>
+      `;
+    },
+  };
 
   /* ---------- HQPlayer settings ----------
      One screen at #more/hqplayer that consolidates the settings
@@ -4445,6 +4494,14 @@
     document.querySelectorAll('.nav-tab').forEach(btn => {
       btn.addEventListener('click', () => {
         const route = btn.getAttribute('data-route');
+        // More is a drawer overlay rather than a route — toggle it
+        // in place. Other tabs dismiss the drawer (if open) and
+        // navigate normally.
+        if (route === 'more') {
+          moreDrawer.toggle();
+          return;
+        }
+        if (moreDrawer.isOpen) moreDrawer.close();
         if (route) navigate(route);
       });
     });
@@ -4456,6 +4513,7 @@
     sheet.init();
     ai.init();
     queue.init();
+    moreDrawer.init();
     document.addEventListener('np-update', e => {
       mp.update(e.detail);
       sheet.onStatus(e.detail);
