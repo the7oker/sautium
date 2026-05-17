@@ -371,6 +371,17 @@
     if (!app) return;
     app.innerHTML = '';
 
+    // Top-level peer-profile route — #profile/<16-hex-prefix>. Portable
+    // URL: same prefix works on any node since it's the friend's public
+    // key, not a local SERIAL id.
+    if (route === 'profile' && segments[1]) {
+      renderProfileOther(app, segments[1]);
+      updateNavActive('friends');
+      updateFabVisibility('friends');
+      window.scrollTo(0, 0);
+      return;
+    }
+
     // Nested entity routes — #<tab>/artist/<uuid>, #<tab>/album/<uuid>
     if (segments.length >= 3) {
       const kind = segments[1];
@@ -3900,6 +3911,7 @@
     const segs = (hash || '').split('/').filter(Boolean);
     const sub = segs[1] || '';
     if (sub === 'hqplayer') return renderHqplayerSettings(root);
+    if (sub === 'profile') return renderProfile(root);
     // Bare #more — nothing to render here; the drawer is the UI.
     // Drop back to home so the page isn't blank if the user
     // bookmarked the route.
@@ -4016,16 +4028,10 @@
               <span class="more-hint" id="hqpHint">…</span>
               <span class="more-chev">${CHEV}</span>
             </button>
-            <button class="more-row" type="button" disabled>
+            <button class="more-row" type="button" data-go="more/profile">
               <span class="more-icon">${ICON_PROFILE}</span>
               <span class="more-label">Profile</span>
-              <span class="more-hint">soon</span>
-              <span class="more-chev">${CHEV}</span>
-            </button>
-            <button class="more-row" type="button" disabled>
-              <span class="more-icon">${ICON_SETTINGS}</span>
-              <span class="more-label">Settings</span>
-              <span class="more-hint">soon</span>
+              <span class="more-hint"></span>
               <span class="more-chev">${CHEV}</span>
             </button>
           </div>
@@ -4481,6 +4487,723 @@
     sheet.querySelector('[data-action="close"]').addEventListener('click', close);
     search.addEventListener('input', paint);
     paint();
+  }
+
+  /* =====================================================================
+   * Profile + Audio chain (#more/profile)
+   * Mirrors docs/design/reference/claude-design-bundle/project/
+   * Profile - Gear sheet.html. Three sub-views: own profile under the
+   * More tab, peer profile under #profile/<key>, gear-item sheet
+   * (overlay opened from a gear row).
+   * ===================================================================== */
+
+  const PROFILE_ICONS = {
+    back:  '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>',
+    edit:  '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l6 6L8 22H2v-6L14 4z"/></svg>',
+    chev:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>',
+    pin:   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s-7-6.5-7-12a7 7 0 1114 0c0 5.5-7 12-7 12z"/><circle cx="12" cy="10" r="2.5"/></svg>',
+    check: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>',
+    close: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  };
+
+  const GEAR_CATEGORIES = [
+    { id: 'headphones', label: 'Headphones' },
+    { id: 'iems',       label: 'IEMs' },
+    { id: 'dac',        label: 'DAC' },
+    { id: 'amp',        label: 'Amp' },
+    { id: 'player',     label: 'Player' },
+    { id: 'power',      label: 'Power' },
+    { id: 'cable',      label: 'Cable' },
+  ];
+  function categoryLabel(id) {
+    const c = GEAR_CATEGORIES.find(x => x.id === id);
+    return c ? c.label : id;
+  }
+
+  function escapeProfileHtml(s) {
+    if (s == null) return '';
+    return String(s).replace(/[&<>"']/g, c => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+  }
+
+  function statusBadgeHTML(status) {
+    const map = {
+      own:              { cls: 'badge-own',  txt: 'Own' },
+      want:             { cls: 'badge-want', txt: 'Want' },
+      sell:             { cls: 'badge-sell', txt: 'Sell' },
+      previously_owned: { cls: 'badge-prev', txt: 'Previously-owned' },
+    };
+    const m = map[status] || map.own;
+    return `<span class="badge ${m.cls}">${m.txt}</span>`;
+  }
+
+  function humanizeSpecKey(key) {
+    if (!key) return '';
+    return key.replace(/_/g, ' ')
+              .replace(/\b\w/g, c => c.toUpperCase())
+              .replace(/\bOhm\b/i, 'Ω')
+              .replace(/\bDb\b/i, 'dB')
+              .replace(/\bKhz\b/i, 'kHz')
+              .replace(/\bMhz\b/i, 'MHz')
+              .replace(/\bUsd\b/i, '($)');
+  }
+
+  function researchChipHTML(gear) {
+    if (gear.research_state === 'researching') {
+      return '<span class="research-pending is-researching"><span class="pulse"></span>Researching…</span>';
+    }
+    if (gear.research_state === 'cached') {
+      const specs = gear.specs || {};
+      let parts = [];
+      // Pick a single "signature spec" per category — what audiophiles
+      // would actually want at a glance. price always trails.
+      if (specs.architecture) parts.push(specs.architecture);
+      else if (specs.topology) parts.push(specs.topology);
+      else if (specs.driver_type) parts.push(specs.driver_type);
+      else if (specs.type) parts.push(specs.type);
+      if (specs.price_usd) parts.push('$' + specs.price_usd);
+      if (parts.length === 0) parts = [categoryLabel(gear.category)];
+      return `<span class="research-chip">${escapeProfileHtml(parts.join(' · '))}</span>`;
+    }
+    return '<span class="research-pending">Awaiting research</span>';
+  }
+
+  async function renderProfile(root) {
+    let profile = null, account = null;
+    try {
+      const [pr, ar] = await Promise.all([
+        fetch('/api/profile'),
+        fetch('/api/p2p/account'),
+      ]);
+      if (pr.ok) profile = await pr.json();
+      if (ar.ok) account = await ar.json();
+    } catch (_) { /* fall through */ }
+
+    if (!profile) {
+      root.innerHTML = '<section class="screen"><div class="screen-head"><h2 class="screen-title">Profile</h2></div><div class="placeholder">Не вдалося завантажити профіль.</div></section>';
+      return;
+    }
+
+    const display = profile.display_name || '';
+    const initials = display.trim()
+      ? display.trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase()
+      : '—';
+    const username = (account && account.username) ? '@' + account.username : '';
+    const inviteTail = (account && account.invite_code)
+      ? '· ' + account.invite_code.split('#').pop()
+      : '';
+
+    const gear = profile.gear || [];
+    const byCategory = {};
+    for (const g of gear) (byCategory[g.category] || (byCategory[g.category] = [])).push(g);
+    const cats = GEAR_CATEGORIES.filter(c => byCategory[c.id] && byCategory[c.id].length);
+
+    const gearSection = cats.length === 0
+      ? `<div class="gear-list" style="padding:calc(18*var(--px));text-align:center;color:var(--color-text-muted);">
+           No gear yet. Tap <b style="color:var(--color-amber);">Add gear</b> to start your audio chain.
+         </div>`
+      : cats.map(cat => `
+          <div class="cat-header">
+            <span class="cat-name">${cat.label}</span>
+            <span class="cat-count">${byCategory[cat.id].length}</span>
+          </div>
+          <div class="gear-list">
+            ${byCategory[cat.id].map(g => `
+              <button class="gear-row" data-gear-id="${g.id}">
+                <div class="gear-info">
+                  <div class="gear-line1">
+                    <span class="gear-brand">${escapeProfileHtml(g.brand)}</span>
+                    <span class="gear-model">${escapeProfileHtml(g.model)}</span>
+                  </div>
+                  <div class="gear-line2">
+                    ${statusBadgeHTML(g.status)}
+                    ${researchChipHTML(g)}
+                  </div>
+                </div>
+                <span class="gear-chev">${PROFILE_ICONS.chev}</span>
+              </button>
+            `).join('')}
+          </div>
+        `).join('');
+
+    const filled = ['display_name', 'city', 'bio'].filter(k => (profile[k] || '').trim().length > 0).length
+      + (gear.length ? 1 : 0)
+      + (profile.avatar_cover_id ? 1 : 0);
+    const pct = Math.round((filled / 5) * 100);
+
+    root.innerHTML = `
+      <section class="screen screen-profile">
+        <div class="profile-header">
+          <button class="icon-btn" aria-label="back" data-back>${PROFILE_ICONS.back}</button>
+          <h1>Profile</h1>
+          <button class="icon-btn" aria-label="edit" data-edit-toggle>${PROFILE_ICONS.edit}</button>
+        </div>
+
+        <div class="identity-block">
+          <div class="avatar-big">${initials}</div>
+          <div>
+            <h2 class="identity-name">${display ? escapeProfileHtml(display) : '<span style="color:var(--color-text-dim);">Set your name</span>'}</h2>
+            ${(username || inviteTail) ? `
+              <div class="identity-handles">
+                <span class="handle">${escapeProfileHtml(username)}</span>
+                ${inviteTail ? `<span class="invite">${escapeProfileHtml(inviteTail)}</span>` : ''}
+              </div>
+            ` : ''}
+          </div>
+          ${profile.city ? `<div class="identity-city">${PROFILE_ICONS.pin}${escapeProfileHtml(profile.city)}</div>` : ''}
+          <p class="identity-bio ${profile.bio ? '' : 'placeholder'}">
+            ${profile.bio ? escapeProfileHtml(profile.bio) : 'Add a short bio so other audiophiles know who you are.'}
+          </p>
+        </div>
+
+        <div class="profile-group-label">Account</div>
+        <div class="form-group">
+          <div class="form-row">
+            <span class="form-label">Email</span>
+            <span class="form-actions">
+              <span class="form-value muted">${escapeProfileHtml((account && account.email) || 'not set')}</span>
+            </span>
+          </div>
+          <div class="form-row is-clickable" data-action="change-password">
+            <span class="form-label">Password</span>
+            <span class="form-actions">
+              <span class="form-value action">Change</span>
+              <span class="link-chev">${PROFILE_ICONS.chev}</span>
+            </span>
+          </div>
+          <div class="form-row is-clickable" data-action="lastfm">
+            <span class="form-label">Last.fm</span>
+            <span class="form-actions">
+              <span class="form-value muted">Not connected</span>
+              <span class="link-chev">${PROFILE_ICONS.chev}</span>
+            </span>
+          </div>
+          <div class="form-row">
+            <span class="form-label">Scrobbling</span>
+            <button class="toggle disabled" disabled><span class="knob"></span></button>
+          </div>
+        </div>
+
+        <div class="profile-section-head">
+          <h3>My setup</h3>
+          <button class="add-btn" data-add-gear><span class="plus">+</span>Add gear</button>
+        </div>
+        ${gearSection}
+
+        <div class="profile-group-label">Sociability</div>
+        <div class="sociability">
+          <div class="soc-row">
+            <div>
+              <div class="soc-label">Open to meet other audiophiles</div>
+              <div class="soc-hint">Phase 2 — discovery is not active yet.</div>
+            </div>
+            <button class="toggle ${profile.open_to_meet ? 'on' : ''} disabled" disabled><span class="knob"></span></button>
+          </div>
+          <div class="soc-progress">
+            <div class="soc-prose">
+              Profile is <span class="pct">${pct}%</span> complete — finish to unlock discovery when it launches.
+            </div>
+            <div class="soc-bar"><div class="fill" style="width:${pct}%"></div></div>
+          </div>
+        </div>
+      </section>
+    `;
+
+    root.querySelector('[data-back]').addEventListener('click', () => {
+      if (history.length > 1) history.back();
+      else navigate('home');
+    });
+    root.querySelectorAll('[data-gear-id]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const item = gear.find(g => g.id === btn.dataset.gearId);
+        if (item) gearSheet.open(item);
+      });
+    });
+    root.querySelector('[data-add-gear]').addEventListener('click', () => addGearSheet.open());
+    root.querySelector('[data-edit-toggle]').addEventListener('click', () => openInlineProfileEditor(profile));
+  }
+
+  function openInlineProfileEditor(profile) {
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Edit profile</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <input class="add-gear-input" id="editName" placeholder="Display name" maxlength="128" value="${escapeProfileHtml(profile.display_name || '')}">
+          <input class="add-gear-input" id="editCity" placeholder="City" maxlength="128" value="${escapeProfileHtml(profile.city || '')}">
+          <textarea class="add-gear-input" id="editBio" placeholder="A short bio" rows="3" maxlength="2000" style="height:auto;padding:calc(10*var(--px))calc(14*var(--px));resize:vertical;">${escapeProfileHtml(profile.bio || '')}</textarea>
+          <button class="profile-btn primary" data-save>Save</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    overlay.querySelector('[data-save]').addEventListener('click', async () => {
+      const payload = {
+        display_name: overlay.querySelector('#editName').value,
+        city: overlay.querySelector('#editCity').value,
+        bio: overlay.querySelector('#editBio').value,
+      };
+      try {
+        await fetch('/api/profile', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      } catch (_) {}
+      close();
+      render();
+    });
+  }
+
+  const addGearSheet = {
+    el: null,
+    isOpen: false,
+    category: 'headphones',
+    init() {
+      const overlay = document.createElement('div');
+      overlay.className = 'add-gear-overlay';
+      overlay.hidden = true;
+      overlay.innerHTML = `
+        <div class="add-gear-sheet">
+          <div class="sheet-handle"></div>
+          <div class="add-gear-head">
+            <h2 class="add-gear-title">Add gear</h2>
+            <button class="icon-btn" data-close aria-label="close">${PROFILE_ICONS.close}</button>
+          </div>
+          <div class="add-gear-category-row" id="agCatRow">
+            ${GEAR_CATEGORIES.map(c => `
+              <button class="filter-chip ${c.id === 'headphones' ? 'active' : ''}" data-cat="${c.id}">${c.label}</button>
+            `).join('')}
+          </div>
+          <div class="add-gear-row">
+            <input class="add-gear-input" id="agSearch" placeholder="Brand · model — start typing">
+          </div>
+          <div class="add-gear-results" id="agResults"></div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      this.el = overlay;
+      overlay.addEventListener('click', e => { if (e.target === overlay) this.close(); });
+      overlay.querySelector('[data-close]').addEventListener('click', () => this.close());
+      overlay.querySelectorAll('[data-cat]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          this.category = btn.dataset.cat;
+          overlay.querySelectorAll('.filter-chip').forEach(b => b.classList.toggle('active', b === btn));
+          this.refreshResults();
+        });
+      });
+      const input = overlay.querySelector('#agSearch');
+      let timer = null;
+      input.addEventListener('input', () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => this.refreshResults(), 150);
+      });
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          this.addFromInput();
+        }
+      });
+    },
+    open() {
+      if (!this.el) this.init();
+      this.el.hidden = false;
+      this.isOpen = true;
+      this.el.querySelector('#agSearch').value = '';
+      this.refreshResults();
+      setTimeout(() => this.el.querySelector('#agSearch').focus(), 100);
+    },
+    close() {
+      if (!this.el) return;
+      this.el.hidden = true;
+      this.isOpen = false;
+    },
+    async refreshResults() {
+      const q = this.el.querySelector('#agSearch').value.trim();
+      const results = this.el.querySelector('#agResults');
+      if (!q) {
+        results.innerHTML = `
+          <div class="add-gear-empty">
+            Type a brand or model to search the catalog,<br>
+            or press <b style="color:var(--color-text);">Enter</b> to add a new model.
+            We'll fetch specs in the background.
+          </div>
+        `;
+        return;
+      }
+      try {
+        const r = await fetch('/api/gear-models/search?q=' + encodeURIComponent(q) + '&limit=10');
+        if (!r.ok) throw new Error();
+        const rows = await r.json();
+        const inCat = rows.filter(x => x.category === this.category);
+        const list = inCat.length ? inCat : rows;
+        if (list.length === 0) {
+          results.innerHTML = `
+            <div class="add-gear-empty">
+              Press <b style="color:var(--color-text);">Enter</b> to add
+              "<b style="color:var(--color-text);">${escapeProfileHtml(q)}</b>" as a new ${categoryLabel(this.category)} model.
+            </div>
+          `;
+          return;
+        }
+        results.innerHTML = list.map(row => `
+          <div class="add-gear-result" data-model-id="${row.id}" data-cat="${row.category}">
+            <div>
+              <div class="gear-line1">
+                <span class="gear-brand">${escapeProfileHtml(row.brand)}</span>
+                <span class="gear-model">${escapeProfileHtml(row.model)}</span>
+              </div>
+              <div class="gear-line2">
+                <span class="cat-tag">${categoryLabel(row.category)}</span>
+              </div>
+            </div>
+            <span class="gear-chev">${PROFILE_ICONS.chev}</span>
+          </div>
+        `).join('');
+        results.querySelectorAll('[data-model-id]').forEach(el => {
+          el.addEventListener('click', () => {
+            this.add({ model_id: el.dataset.modelId, category: el.dataset.cat });
+          });
+        });
+      } catch (_) {
+        results.innerHTML = '<div class="add-gear-empty">Search failed — try again.</div>';
+      }
+    },
+    addFromInput() {
+      const q = this.el.querySelector('#agSearch').value.trim();
+      if (!q) return;
+      // Best-effort split: "Sennheiser HD 800 S" → brand="Sennheiser",
+      // model="HD 800 S". Single token → brand=model=q (user can edit
+      // later). AI-paste flow (Phase 2) parses much better.
+      const parts = q.split(/\s+/);
+      const brand = parts.length >= 2 ? parts[0] : q;
+      const model = parts.length >= 2 ? parts.slice(1).join(' ') : q;
+      this.add({ brand, model, category: this.category });
+    },
+    async add(payload) {
+      payload.status = 'own';
+      try {
+        const r = await fetch('/api/profile/gear', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!r.ok) throw new Error();
+      } catch (_) {}
+      this.close();
+      if (parseHash().startsWith('more/profile')) render();
+    },
+  };
+
+  const gearSheet = {
+    el: null,
+    isOpen: false,
+    current: null,
+    init() {
+      const overlay = document.createElement('div');
+      overlay.className = 'gear-overlay';
+      overlay.hidden = true;
+      document.body.appendChild(overlay);
+      this.el = overlay;
+      overlay.addEventListener('click', e => { if (e.target === overlay) this.close(); });
+    },
+    async open(gear) {
+      if (!this.el) this.init();
+      this.current = gear;
+      this.render();
+      this.el.hidden = false;
+      this.isOpen = true;
+      // Pull full detail (specs array, technologies, sentiment terms)
+      // from the canonical gear model — list payload only carries a
+      // compact spec map for the card chip.
+      if (gear.gear_model_id) {
+        try {
+          const r = await fetch('/api/gear-models/' + gear.gear_model_id);
+          if (r.ok) {
+            const detail = await r.json();
+            this.current = Object.assign({}, gear, detail);
+            this.render();
+          }
+        } catch (_) {}
+      }
+    },
+    close() {
+      if (!this.el) return;
+      this.el.hidden = true;
+      this.isOpen = false;
+      this.current = null;
+    },
+    render() {
+      const g = this.current;
+      if (!g) return;
+      const isCached = g.research_state === 'cached';
+      const isResearching = g.research_state === 'researching';
+      const specs = g.specs || {};
+      const sentiment = g.community_sentiment || null;
+
+      const statusOpts = ['own', 'want', 'sell', 'previously_owned'];
+      const segments = statusOpts.map(s => `
+        <button class="seg-opt ${g.status === s ? 'active' : ''}" data-status="${s}">
+          ${s === 'previously_owned' ? 'Past' : (s[0].toUpperCase() + s.slice(1))}
+        </button>
+      `).join('');
+
+      let researchHTML;
+      if (isCached && g.research_summary) {
+        const updatedAgo = g.researched_at ? formatRelativeTime(g.researched_at) : 'recently';
+        researchHTML = `
+          <div class="research-card">
+            <div class="research-state-row">
+              <span class="research-state-label">Community summary</span>
+            </div>
+            <p class="research-prose">${escapeProfileHtml(g.research_summary)}</p>
+            <div class="research-meta">
+              <span>Updated ${escapeProfileHtml(updatedAgo)}</span>
+              <button class="refresh cooldown" disabled>Refresh in ${g.refresh_cooldown_days || 7}d</button>
+            </div>
+          </div>`;
+      } else if (isResearching) {
+        researchHTML = `
+          <div class="research-card">
+            <div class="research-state-row">
+              <span class="pulse"></span>
+              <span class="research-state-label is-researching">Researching</span>
+            </div>
+            <p class="research-prose empty">Gathering specs and community sentiment from audiophile sources. This usually completes in a few minutes.</p>
+            <p class="helper-prose">Sources scanned: Head-Fi, ASR, manufacturer docs. The card refreshes automatically when the summary is ready.</p>
+          </div>`;
+      } else {
+        researchHTML = `
+          <div class="research-card">
+            <div class="research-state-row">
+              <span class="research-state-label is-awaiting">Awaiting research · queued</span>
+            </div>
+            <p class="research-prose empty">We don't have a community summary for this model yet. It's been added to the research queue.</p>
+            <p class="helper-prose">AI-on users trigger background research; results sync to everyone via P2P. You'll see specs, sentiment and a personalised take here once it lands.</p>
+          </div>`;
+      }
+
+      // Specs come either as a list of {key, label, unit, value, ...}
+      // from /api/gear-models/<id> (full detail) or as a flat dict
+      // from the list payload (chip-friendly, no labels). Normalise.
+      let specsList = [];
+      if (Array.isArray(g.specs)) {
+        specsList = g.specs;
+      } else if (g.specs && typeof g.specs === 'object') {
+        specsList = Object.entries(g.specs).map(([key, value]) => ({
+          key, label: humanizeSpecKey(key), value, unit: null,
+        }));
+      }
+      let specsHTML = '';
+      if (isCached && specsList.length > 0) {
+        const rows = specsList
+          .filter(s => s.value != null && s.value !== '')
+          .map(s => `
+            <div>
+              <div class="spec-key">${escapeProfileHtml(s.label || humanizeSpecKey(s.key))}</div>
+              <div class="spec-val">${escapeProfileHtml(String(s.value))}${s.unit ? ' <span style="color:var(--color-text-dim);">' + escapeProfileHtml(s.unit) + '</span>' : ''}</div>
+            </div>
+          `).join('');
+        if (rows) {
+          specsHTML = `<div class="specs-grid"><div class="specs-title">Specs</div><div class="specs-rows">${rows}</div></div>`;
+        }
+      }
+
+      let technologiesHTML = '';
+      if (isCached && Array.isArray(g.technologies) && g.technologies.length > 0) {
+        const items = g.technologies.map(t => `
+          <div style="padding:calc(8*var(--px)) 0;border-top:1px solid var(--color-divider);">
+            <div style="display:flex;justify-content:space-between;gap:calc(8*var(--px));">
+              <div style="font-size:calc(13*var(--px));font-weight:600;color:var(--color-text);">${escapeProfileHtml(t.label)}</div>
+              ${t.introduced_year ? `<div class="spec-val" style="font-size:calc(11*var(--px));">${t.introduced_year}</div>` : ''}
+            </div>
+            <div style="font-size:calc(12*var(--px));color:var(--color-text-muted);line-height:1.45;margin-top:calc(2*var(--px));">${escapeProfileHtml(t.description)}</div>
+          </div>
+        `).join('');
+        technologiesHTML = `
+          <div class="specs-grid" style="margin-top:calc(12*var(--px));">
+            <div class="specs-title">Technologies</div>
+            <div>${items}</div>
+          </div>`;
+      }
+
+      // Sentiment comes either as a `sentiment` object (from detail
+      // endpoint: {score, sample_size, praise[], criticism[]}) or as
+      // flat aggregate columns on the gear (sentiment_score / _sample_size)
+      // without term lists. Render both shapes.
+      const sent = g.sentiment || {
+        score: g.sentiment_score, sample_size: g.sentiment_sample_size,
+        praise: [], criticism: [],
+      };
+      let sentimentHTML = '';
+      if (isCached && (sent.score != null || (sent.praise || []).length || (sent.criticism || []).length)) {
+        const praise = (sent.praise || []).map(p => `<span class="sent-pill praise">${escapeProfileHtml(p)}</span>`).join('');
+        const crit   = (sent.criticism || []).map(p => `<span class="sent-pill crit">${escapeProfileHtml(p)}</span>`).join('');
+        sentimentHTML = `
+          <div class="sentiment-card">
+            ${sent.score != null ? `
+              <div class="sent-head">
+                <span class="sent-score">${escapeProfileHtml(String(sent.score))}</span>
+                <span class="sent-score-suffix">/ 10${sent.sample_size ? ' · n = ' + sent.sample_size : ''}</span>
+              </div>` : ''}
+            ${praise ? `<div class="sent-label">Praise</div><div class="sent-pills">${praise}</div>` : ''}
+            ${crit ? `<div class="sent-pill-sec">Criticism</div><div class="sent-pills" style="margin-top:calc(6*var(--px));">${crit}</div>` : ''}
+          </div>`;
+      }
+
+      const aiTakeHTML = isCached ? `
+        <div class="ai-take">
+          <div class="ai-take-head">
+            <span class="ai-take-glyph">AI</span>
+            <span class="ai-take-label">Your personalised take</span>
+          </div>
+          <p class="ai-take-prose">Ask AI to weigh in on how this fits your chain and your listening style.</p>
+          <button class="ai-take-cta" data-ai-prompt>Ask AI ${PROFILE_ICONS.chev}</button>
+        </div>` : '';
+
+      this.el.innerHTML = `
+        <div class="gear-sheet">
+          <div class="sheet-handle"></div>
+          <div class="gear-sheet-head">
+            <div class="gear-sheet-title-block">
+              <div class="gear-sheet-brand">${escapeProfileHtml(g.brand)}</div>
+              <h2 class="gear-sheet-model">${escapeProfileHtml(g.model)}</h2>
+              <div class="gear-sheet-meta-row">
+                <span class="cat-tag">${categoryLabel(g.category)}</span>
+                ${statusBadgeHTML(g.status)}
+              </div>
+            </div>
+            <button class="icon-btn" data-close aria-label="close" style="margin-top:calc(4*var(--px));">${PROFILE_ICONS.close}</button>
+          </div>
+          <div class="status-segmented">${segments}</div>
+          ${researchHTML}
+          ${specsHTML}
+          ${technologiesHTML}
+          ${sentimentHTML}
+          ${aiTakeHTML}
+          <div class="notes-card">
+            <div class="notes-title">My notes</div>
+            <textarea class="notes-area${g.notes ? '' : ' placeholder'}" id="gearNotes" placeholder="Notes only you can see — pairings, dealer, serial, settings…">${escapeProfileHtml(g.notes || '')}</textarea>
+          </div>
+          <div style="display:flex;gap:calc(10*var(--px));padding:0 calc(16*var(--px)) calc(20*var(--px));">
+            <button class="profile-btn secondary" data-delete>Remove from chain</button>
+          </div>
+        </div>
+      `;
+
+      this.el.querySelector('[data-close]').addEventListener('click', () => this.close());
+      this.el.querySelectorAll('[data-status]').forEach(btn => {
+        btn.addEventListener('click', () => this.setStatus(btn.dataset.status));
+      });
+      const notes = this.el.querySelector('#gearNotes');
+      let notesTimer = null;
+      notes.addEventListener('input', () => {
+        clearTimeout(notesTimer);
+        notesTimer = setTimeout(() => this.saveNotes(notes.value), 600);
+      });
+      this.el.querySelector('[data-delete]').addEventListener('click', () => this.remove());
+      const aiBtn = this.el.querySelector('[data-ai-prompt]');
+      if (aiBtn) aiBtn.addEventListener('click', () => {
+        this.close();
+        if (typeof ai !== 'undefined' && ai.open) ai.open();
+      });
+    },
+    async setStatus(status) {
+      try {
+        await fetch('/api/profile/gear/' + this.current.id, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status }),
+        });
+        this.current.status = status;
+        this.render();
+        if (parseHash().startsWith('more/profile')) render();
+      } catch (_) {}
+    },
+    async saveNotes(notes) {
+      try {
+        await fetch('/api/profile/gear/' + this.current.id, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ notes }),
+        });
+        this.current.notes = notes;
+      } catch (_) {}
+    },
+    async remove() {
+      if (!confirm('Remove this item from your audio chain?')) return;
+      try {
+        await fetch('/api/profile/gear/' + this.current.id, { method: 'DELETE' });
+      } catch (_) {}
+      this.close();
+      if (parseHash().startsWith('more/profile')) render();
+    },
+  };
+
+  async function renderProfileOther(root, pubkeyPrefix) {
+    let profile = null;
+    try {
+      const r = await fetch('/api/profile/by-pubkey/' + encodeURIComponent(pubkeyPrefix));
+      if (r.ok) profile = await r.json();
+    } catch (_) {}
+
+    if (!profile) {
+      root.innerHTML = '<section class="screen"><div class="screen-head"><h2 class="screen-title">Profile</h2></div><div class="placeholder">Peer not found.</div></section>';
+      return;
+    }
+
+    const display = profile.display_name || profile.username || '—';
+    const initials = display.trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase() || '—';
+    const handle = profile.username ? '@' + profile.username : '';
+    const inviteTail = profile.invite_code ? '· ' + profile.invite_code.split('#').pop() : '';
+
+    root.innerHTML = `
+      <section class="screen screen-profile">
+        <div class="profile-header">
+          <button class="icon-btn" aria-label="back" data-back>${PROFILE_ICONS.back}</button>
+          <h1>Profile</h1>
+          <span></span>
+        </div>
+
+        <div class="identity-block">
+          <div class="avatar-big">${initials}</div>
+          <div>
+            <h2 class="identity-name">${escapeProfileHtml(display)}</h2>
+            ${(handle || inviteTail) ? `
+              <div class="identity-handles">
+                <span class="handle">${escapeProfileHtml(handle)}</span>
+                ${inviteTail ? `<span class="invite">${escapeProfileHtml(inviteTail)}</span>` : ''}
+              </div>` : ''}
+          </div>
+          ${profile.city ? `<div class="identity-city">${PROFILE_ICONS.pin}${escapeProfileHtml(profile.city)}</div>` : ''}
+          ${profile.bio ? `<p class="identity-bio">${escapeProfileHtml(profile.bio)}</p>` : ''}
+        </div>
+
+        <div class="other-cta-row">
+          <button class="profile-btn primary" data-action="message">Send message</button>
+          <button class="profile-btn secondary" data-action="add-friend">Add as friend</button>
+        </div>
+
+        <p class="gear-visibility-note" style="margin-top:calc(28*var(--px));">Audio chain sharing is private for now (Phase 2).</p>
+      </section>
+    `;
+
+    root.querySelector('[data-back]').addEventListener('click', () => {
+      if (history.length > 1) history.back();
+      else navigate('friends');
+    });
+    root.querySelector('[data-action="message"]').addEventListener('click', () => {
+      if (profile.public_key_hex) navigate('friends/chat/' + profile.public_key_hex.slice(0, 16));
+    });
   }
 
   /* ---------- Wire it up ---------- */

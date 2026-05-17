@@ -58,6 +58,31 @@ def embedding_model_uuid(name: str) -> uuid.UUID:
     return uuid.uuid5(NAMESPACE, f"embedding_model:{normalize(name)}")
 
 
+def gear_brand_uuid(name: str) -> uuid.UUID:
+    """Deterministic UUID for an audio gear brand (Sennheiser, Holo Audio…)."""
+    return uuid.uuid5(NAMESPACE, f"gear_brand:{normalize(name)}")
+
+
+def gear_model_uuid(brand_name: str, model: str, category: str) -> uuid.UUID:
+    """Deterministic UUID for an audio gear model.
+
+    Keyed by (brand_name, model, category) so two nodes adding the
+    same product collapse to the same id — same canonicalization
+    pattern as artists/genres."""
+    return uuid.uuid5(NAMESPACE,
+                      f"gear_model:{normalize(category)}:{normalize(brand_name)}:{normalize(model)}")
+
+
+def gear_spec_attribute_uuid(key: str) -> uuid.UUID:
+    """Deterministic UUID for an EAV spec attribute (`impedance_ohm`…)."""
+    return uuid.uuid5(NAMESPACE, f"gear_spec_attribute:{normalize(key)}")
+
+
+def gear_technology_uuid(key: str) -> uuid.UUID:
+    """Deterministic UUID for a proprietary technology entry."""
+    return uuid.uuid5(NAMESPACE, f"gear_technology:{normalize(key)}")
+
+
 # Lossless audio formats
 LOSSLESS_FORMATS = {'flac', 'ape', 'alac', 'wav', 'aiff', 'wv', 'tta', 'dsf', 'dff'}
 

@@ -1161,6 +1161,12 @@ app.include_router(genres_router)
 from routers.hqplayer import router as hqplayer_router
 app.include_router(hqplayer_router)
 
+from routers.profile import router as profile_router
+app.include_router(profile_router)
+
+from routers.gear_models import router as gear_models_router
+app.include_router(gear_models_router)
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 

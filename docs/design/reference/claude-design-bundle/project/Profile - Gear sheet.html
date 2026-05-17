@@ -1,0 +1,1980 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sautium · Profile + Gear sheet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* Tokens — inlined to match tokens.css palette + scale (fixed-px for mocks). */
+  :root {
+    --color-foundation:   #1B1714;
+    --color-surface:      #2A2420;
+    --color-surface-hi:   #342D28;
+    --color-surface-lo:   #221D1A;
+    --color-divider:      #3A322C;
+    --color-text:         #EDE2D4;
+    --color-text-muted:   #A69B8E;
+    --color-text-dim:     #6E665C;
+    --color-amber:        #E8B06F;
+    --color-amber-hover:  #EFBE83;
+    --color-amber-weak:   rgba(232,176,111,.14);
+    --color-amber-stripe: rgba(232,176,111,.06);
+    --color-blue:         #4A7FA7;
+    --color-blue-weak:    rgba(74,127,167,.14);
+    --color-positive:     #8DA77B;
+    --color-positive-weak: rgba(141,167,123,.16);
+    --color-negative:     #C1564E;
+    --color-negative-weak: rgba(193,86,78,.14);
+    --color-hires:        #D4AF5A;
+
+    --font-sans: "Inter Tight", ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+    --safe-top: 44px;
+    --safe-bottom: 34px;
+    --tab-bar-h: 64px;
+    --mini-h: 60px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: radial-gradient(ellipse at 50% 15%, #221B17 0%, #15110F 70%) no-repeat, #15110F;
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    padding: 40px 24px 80px;
+  }
+
+  .canvas { max-width: 1280px; margin: 0 auto; }
+  .canvas-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 32px;
+  }
+  .canvas-title {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--color-text);
+  }
+  .canvas-sub {
+    color: var(--color-text-muted);
+    font-size: 13px;
+    text-wrap: pretty;
+    max-width: 720px;
+  }
+
+  .frames {
+    display: grid;
+    grid-template-columns: repeat(3, 360px);
+    gap: 48px 36px;
+    justify-content: center;
+    align-items: start;
+  }
+  .frame-label {
+    margin: 0 0 12px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+  .frame-label .num { color: var(--color-amber); margin-right: 6px; }
+
+  .viewport {
+    width: 360px;
+    background: var(--color-foundation);
+    position: relative;
+    overflow: hidden;
+    outline: 1px solid rgba(237,226,212,.06);
+    display: flex;
+    flex-direction: column;
+  }
+  .viewport.h820 { min-height: 820px; }
+  .viewport.h1100 { min-height: 1100px; }
+  .viewport.h1280 { min-height: 1280px; }
+
+  /* ============ STATUS ============ */
+  .status-bar {
+    height: var(--safe-top);
+    padding: 0 24px;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 14px; font-weight: 600; letter-spacing: -0.01em;
+    position: relative;
+    color: var(--color-text);
+    flex-shrink: 0;
+    z-index: 10;
+  }
+  .status-bar .time { padding-top: 14px; }
+  .status-bar .indicators { display: flex; gap: 6px; padding-top: 14px; }
+  .status-bar .island {
+    position: absolute; top: 10px; left: 50%;
+    transform: translateX(-50%);
+    width: 108px; height: 28px;
+    background: #0A0807; border-radius: 18px;
+  }
+
+  /* ============ SHELL BOTTOM ============ */
+  .shell-bottom {
+    margin-top: auto;
+    background: var(--color-foundation);
+    z-index: 5;
+    position: relative;
+  }
+  .mini {
+    height: var(--mini-h);
+    background: var(--color-surface);
+    border-top: 1px solid var(--color-divider);
+    display: grid;
+    grid-template-columns: 44px 1fr 44px 44px;
+    gap: 12px;
+    align-items: center;
+    padding: 0 12px;
+  }
+  .mini-art {
+    width: 44px; height: 44px;
+    overflow: hidden;
+    background: var(--color-surface-lo);
+  }
+  .mini-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .mini-title {
+    font-size: 13px; font-weight: 600; color: var(--color-text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    line-height: 1.3;
+  }
+  .mini-artist {
+    font-size: 11.5px; color: var(--color-text-muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    line-height: 1.3; margin-top: 2px;
+  }
+  .mini-btn {
+    width: 44px; height: 44px;
+    display: grid; place-items: center;
+    background: transparent; border: none; padding: 0; cursor: pointer;
+    color: var(--color-text);
+  }
+  .mini-btn.accent { color: var(--color-amber); }
+  .tab-bar {
+    height: var(--tab-bar-h);
+    background: var(--color-foundation);
+    border-top: 1px solid var(--color-divider);
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+  }
+  .tab {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 4px;
+    color: var(--color-text-muted);
+    font-family: var(--font-sans);
+    font-size: 10.5px; font-weight: 500;
+    background: transparent; border: none; cursor: pointer;
+    padding: 8px 0;
+  }
+  .tab.active { color: var(--color-amber); }
+  .home-indicator-wrap {
+    height: var(--safe-bottom);
+    display: flex; align-items: center; justify-content: center;
+    background: var(--color-foundation);
+  }
+  .home-indicator {
+    width: 128px; height: 5px;
+    background: var(--color-text);
+    opacity: 0.85; border-radius: 3px;
+  }
+
+  /* ============ AI FAB ============ */
+  .fab {
+    position: absolute;
+    left: 16px;
+    bottom: calc(var(--tab-bar-h) + var(--mini-h) + 16px + var(--safe-bottom));
+    width: 56px; height: 56px;
+    border-radius: 50%;
+    background: var(--color-amber);
+    color: #FFFFFF;
+    display: grid; place-items: center;
+    border: none; padding: 0; cursor: pointer;
+    font-family: var(--font-sans);
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    box-shadow:
+      0 6px 18px rgba(14,10,8,0.6),
+      0 1px 0 rgba(255,255,255,0.08) inset;
+    z-index: 6;
+  }
+
+  /* ============ COMMON ============ */
+  .scroll-area {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    padding-bottom: calc(var(--mini-h) + var(--tab-bar-h) + var(--safe-bottom));
+  }
+  .header-bar {
+    padding: 6px 4px;
+    display: grid;
+    grid-template-columns: 44px 1fr 44px;
+    align-items: center;
+  }
+  .icon-btn {
+    width: 44px; height: 44px;
+    display: grid; place-items: center;
+    background: transparent; border: none; padding: 0; cursor: pointer;
+    color: var(--color-text);
+  }
+  .h-title-center {
+    margin: 0;
+    text-align: center;
+    font-size: 17px; font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--color-text);
+  }
+  .group-label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    padding: 22px 20px 10px;
+  }
+
+  /* ============ IDENTITY CARD ============ */
+  .identity-block {
+    padding: 4px 20px 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+  }
+  .avatar-big {
+    width: 84px; height: 84px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #5a4838, #2f231b);
+    display: grid; place-items: center;
+    font-family: var(--font-sans);
+    font-size: 30px;
+    font-weight: 700;
+    color: var(--color-text);
+    letter-spacing: -0.01em;
+    overflow: hidden;
+    border: 1px solid var(--color-divider);
+    position: relative;
+  }
+  .avatar-big .edit-pen {
+    position: absolute;
+    right: -2px; bottom: -2px;
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    background: var(--color-surface);
+    border: 1.5px solid var(--color-foundation);
+    display: grid; place-items: center;
+    color: var(--color-amber);
+  }
+  .identity-name {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    color: var(--color-text);
+  }
+  .identity-handles {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+    color: var(--color-blue);
+    text-align: center;
+    line-height: 1.4;
+  }
+  .identity-handles .handle { color: var(--color-text-muted); margin-right: 6px; }
+  .identity-handles .invite { color: var(--color-blue); }
+  .identity-city {
+    font-size: 13px;
+    color: var(--color-text-muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .identity-city svg { color: var(--color-text-dim); }
+  .identity-bio {
+    text-align: center;
+    color: var(--color-text);
+    font-size: 13.5px;
+    line-height: 1.5;
+    max-width: 290px;
+    text-wrap: pretty;
+  }
+
+  /* ============ ACCOUNT FORM GROUP ============ */
+  .form-group {
+    margin: 0 16px;
+    background: var(--color-surface);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .form-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 12px;
+    align-items: center;
+    min-height: 52px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--color-divider);
+  }
+  .form-row:last-child { border-bottom: none; }
+  .form-label {
+    font-size: 13px;
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }
+  .form-value {
+    font-size: 13.5px;
+    color: var(--color-text);
+    font-weight: 500;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .form-value.mono {
+    font-family: var(--font-mono);
+    color: var(--color-blue);
+    letter-spacing: 0.02em;
+    font-size: 12.5px;
+  }
+  .form-actions { display: inline-flex; gap: 8px; align-items: center; justify-content: flex-end; }
+  .verified {
+    display: inline-flex; align-items: center; gap: 4px;
+    color: var(--color-positive);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+  }
+  .needs-verify {
+    color: var(--color-amber);
+  }
+  .link-chev {
+    color: var(--color-text-dim);
+  }
+  .toggle {
+    width: 42px; height: 24px;
+    background: var(--color-divider);
+    border-radius: 12px;
+    position: relative;
+    flex-shrink: 0;
+  }
+  .toggle.on { background: var(--color-amber); }
+  .toggle.disabled { background: var(--color-surface-lo); opacity: .55; }
+  .toggle .knob {
+    position: absolute;
+    top: 3px; left: 3px;
+    width: 18px; height: 18px;
+    background: var(--color-text);
+    border-radius: 50%;
+  }
+  .toggle.on .knob { transform: translateX(18px); background: #FFFFFF; }
+
+  /* ============ AUDIO CHAIN ============ */
+  .section-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding: 22px 20px 10px;
+  }
+  .section-head h3 {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+  .add-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--color-amber);
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-family: var(--font-sans);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    letter-spacing: 0.01em;
+  }
+  .add-btn .plus {
+    font-size: 16px;
+    line-height: 1;
+    margin-top: -1px;
+    font-weight: 500;
+  }
+
+  /* category sub-header for grouped view */
+  .cat-header {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 14px 20px 8px;
+  }
+  .cat-header .cat-name {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    color: var(--color-text);
+  }
+  .cat-header .cat-count {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--color-text-dim);
+    letter-spacing: 0.04em;
+  }
+
+  /* gear card — two-line density */
+  .gear-list {
+    margin: 0 16px;
+    background: var(--color-surface);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .gear-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 12px;
+    align-items: center;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--color-divider);
+    cursor: pointer;
+  }
+  .gear-row:last-child { border-bottom: none; }
+  .gear-info { min-width: 0; }
+  .gear-line1 {
+    display: flex; align-items: baseline; gap: 6px;
+    min-width: 0;
+  }
+  .gear-brand {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--color-text);
+    line-height: 1.3;
+  }
+  .gear-model {
+    font-size: 13.5px;
+    font-weight: 400;
+    color: var(--color-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    flex: 1;
+    line-height: 1.3;
+  }
+  .gear-line2 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    flex-wrap: nowrap;
+  }
+  .gear-line2 > * { flex-shrink: 0; }
+
+  /* Status badges — locked palette mapping */
+  .badge {
+    display: inline-flex; align-items: center;
+    height: 18px;
+    padding: 0 7px;
+    border-radius: 9px;
+    font-family: var(--font-sans);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    line-height: 1;
+    white-space: nowrap;
+  }
+  .badge-own       { background: var(--color-positive); color: #1B1714; }
+  .badge-want      { background: transparent; color: var(--color-amber); border: 1px solid rgba(232,176,111,.5); }
+  .badge-sell      { background: transparent; color: var(--color-negative); border: 1px solid rgba(193,86,78,.5); }
+  .badge-prev      { background: transparent; color: var(--color-text-dim); border: 1px solid var(--color-divider); }
+
+  /* Research chip — cached gist (cool blue mono) */
+  .research-chip {
+    display: inline-flex; align-items: center;
+    height: 18px;
+    padding: 0 7px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-blue);
+    background: var(--color-blue-weak);
+    border-radius: 4px;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 130px;
+  }
+  /* dim research label for awaiting/researching states */
+  .research-pending {
+    display: inline-flex; align-items: center;
+    gap: 5px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-text-dim);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .pulse {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--color-amber);
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 1; }
+  }
+
+  .gear-chev {
+    color: var(--color-text-dim);
+    display: grid; place-items: center;
+  }
+
+  /* Category filter chip rail (flat layout) */
+  .filter-rail {
+    padding: 0 16px 4px;
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .filter-rail::-webkit-scrollbar { display: none; }
+  .filter-chip {
+    flex-shrink: 0;
+    height: 30px;
+    padding: 0 12px;
+    display: inline-flex;
+    align-items: center;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    background: transparent;
+    border: 1px solid var(--color-divider);
+    border-radius: 15px;
+    white-space: nowrap;
+  }
+  .filter-chip.active {
+    background: var(--color-amber);
+    color: #1B1714;
+    border-color: var(--color-amber);
+    font-weight: 600;
+  }
+  .filter-chip .cnt {
+    margin-left: 5px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    opacity: 0.7;
+    letter-spacing: 0.02em;
+  }
+
+  /* Sociability block */
+  .sociability {
+    margin: 0 16px;
+    padding: 14px 16px;
+    background: var(--color-surface);
+    border-radius: 8px;
+  }
+  .soc-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px;
+  }
+  .soc-label {
+    font-size: 13.5px;
+    font-weight: 500;
+    color: var(--color-text);
+  }
+  .soc-hint {
+    margin-top: 6px;
+    font-size: 11.5px;
+    color: var(--color-text-muted);
+    line-height: 1.4;
+  }
+  .soc-progress {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--color-divider);
+  }
+  .soc-prose {
+    font-size: 12px;
+    color: var(--color-text-muted);
+    line-height: 1.5;
+  }
+  .soc-prose .pct {
+    color: var(--color-blue);
+    font-family: var(--font-mono);
+    letter-spacing: 0.02em;
+  }
+  .soc-bar {
+    margin-top: 8px;
+    height: 3px;
+    background: var(--color-divider);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .soc-bar .fill {
+    width: 60%;
+    height: 100%;
+    background: var(--color-amber);
+  }
+
+  /* Section separator gap before nav */
+  .end-spacer { height: 28px; }
+
+  /* ============ EMPTY STATE ============ */
+  .empty-gear {
+    margin: 0 16px;
+    border: 1px dashed var(--color-divider);
+    border-radius: 8px;
+    padding: 22px 16px;
+    text-align: center;
+  }
+  .empty-gear .ic {
+    color: var(--color-text-dim);
+    margin-bottom: 8px;
+  }
+  .empty-gear-msg {
+    font-size: 13px;
+    color: var(--color-text-muted);
+    line-height: 1.45;
+    max-width: 240px;
+    margin: 0 auto 12px;
+    text-wrap: pretty;
+  }
+  .empty-gear-cta {
+    height: 38px;
+    padding: 0 18px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--color-amber);
+    color: #1B1714;
+    border: none;
+    border-radius: 19px;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .empty-gear-cta .plus {
+    font-size: 16px;
+    line-height: 1;
+    margin-top: -1px;
+    font-weight: 500;
+  }
+
+  /* ============ VIEWING OTHER ============ */
+  .match-card {
+    margin: 0 16px 12px;
+    padding: 12px 14px;
+    background: var(--color-surface);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .match-pct {
+    font-family: var(--font-mono);
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--color-blue);
+    letter-spacing: -0.01em;
+    line-height: 1;
+  }
+  .match-body { min-width: 0; flex: 1; }
+  .match-label {
+    font-size: 12px;
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }
+  .match-shared {
+    font-size: 12px;
+    color: var(--color-text);
+    line-height: 1.35;
+    margin-top: 2px;
+  }
+  .match-shared b {
+    color: var(--color-amber);
+    font-weight: 600;
+  }
+
+  .other-cta-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    padding: 0 16px;
+    margin-top: 4px;
+  }
+  .btn {
+    height: 44px;
+    padding: 0 18px;
+    border-radius: 8px;
+    font-family: var(--font-sans);
+    font-size: 13.5px;
+    font-weight: 600;
+    letter-spacing: 0;
+    border: 1px solid transparent;
+    cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    gap: 6px;
+  }
+  .btn-primary { background: var(--color-amber); color: #1B1714; }
+  .btn-secondary { background: transparent; color: var(--color-text); border-color: var(--color-divider); }
+
+  .visibility-note {
+    margin: 18px 20px 4px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    color: var(--color-text-dim);
+    text-align: center;
+    text-wrap: pretty;
+    line-height: 1.5;
+  }
+
+  /* ============ GEAR SHEET ============ */
+  .sheet-handle {
+    width: 36px; height: 4px;
+    margin: 8px auto 4px;
+    background: rgba(237,226,212,.4);
+    border-radius: 2px;
+  }
+  .sheet-header {
+    padding: 8px 4px 16px;
+    display: grid;
+    grid-template-columns: 1fr 44px;
+    align-items: start;
+    gap: 8px;
+  }
+  .sheet-title-block {
+    padding: 4px 0 0 20px;
+  }
+  .sheet-brand {
+    font-size: 12px;
+    color: var(--color-text-muted);
+    font-weight: 500;
+    margin-bottom: 2px;
+    letter-spacing: 0.01em;
+  }
+  .sheet-model {
+    margin: 0;
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--color-text);
+    line-height: 1.15;
+  }
+  .sheet-meta-row {
+    margin-top: 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .cat-tag {
+    height: 22px;
+    padding: 0 9px;
+    display: inline-flex;
+    align-items: center;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    background: transparent;
+    border: 1px solid var(--color-divider);
+    border-radius: 11px;
+    letter-spacing: 0.01em;
+  }
+  /* Status segmented control inside the sheet (current status amber-stripe) */
+  .status-segmented {
+    margin: 0 16px;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    background: var(--color-surface-lo);
+    border-radius: 8px;
+    padding: 3px;
+    gap: 3px;
+  }
+  .seg-opt {
+    height: 32px;
+    display: grid; place-items: center;
+    font-family: var(--font-sans);
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    border-radius: 5px;
+    letter-spacing: 0.02em;
+  }
+  .seg-opt.active {
+    background: var(--color-amber);
+    color: #1B1714;
+    font-weight: 600;
+  }
+
+  /* Research panel */
+  .research-block { padding: 0; }
+  .research-card {
+    margin: 0 16px;
+    background: var(--color-surface);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .research-state-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .research-state-label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+  .research-state-label.awaiting { color: var(--color-text-dim); }
+  .research-state-label.researching { color: var(--color-amber); }
+  .research-prose {
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--color-text);
+    text-wrap: pretty;
+    margin: 6px 0 0;
+  }
+  .research-prose-empty {
+    font-size: 13px;
+    color: var(--color-text-dim);
+    line-height: 1.5;
+    text-wrap: pretty;
+    margin: 6px 0 0;
+    font-style: italic;
+  }
+  .research-meta {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--color-divider);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.04em;
+    color: var(--color-text-dim);
+  }
+  .research-meta .refresh {
+    color: var(--color-amber);
+    font-family: var(--font-sans);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0;
+  }
+  .research-meta .refresh.cooldown { color: var(--color-text-dim); font-weight: 500; }
+
+  /* Specs grid (cached) */
+  .specs-grid {
+    margin: 12px 16px 0;
+    background: var(--color-surface);
+    border-radius: 8px;
+    padding: 12px 16px;
+  }
+  .specs-title {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    margin-bottom: 8px;
+  }
+  .specs-rows {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 16px;
+    row-gap: 8px;
+  }
+  .spec-key {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    margin-bottom: 2px;
+    letter-spacing: 0.02em;
+  }
+  .spec-val {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--color-blue);
+    letter-spacing: 0.02em;
+    line-height: 1.2;
+  }
+
+  /* Community sentiment */
+  .sentiment-card {
+    margin: 12px 16px 0;
+    background: var(--color-surface);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .sent-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .sent-score {
+    font-family: var(--font-mono);
+    font-size: 28px;
+    font-weight: 600;
+    color: var(--color-blue);
+    letter-spacing: -0.01em;
+    line-height: 1;
+  }
+  .sent-score-suffix {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--color-text-dim);
+    letter-spacing: 0.02em;
+  }
+  .sent-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+  .sent-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .sent-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    height: 22px;
+    padding: 0 9px;
+    font-size: 11px;
+    font-weight: 500;
+    border-radius: 11px;
+    background: transparent;
+    border: 1px solid var(--color-divider);
+    color: var(--color-text);
+  }
+  .sent-pill.praise {
+    color: var(--color-positive);
+    border-color: rgba(141,167,123,.4);
+  }
+  .sent-pill.crit {
+    color: var(--color-negative);
+    border-color: rgba(193,86,78,.4);
+  }
+  .sent-pill-sec {
+    margin-top: 8px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+
+  /* AI personalised take */
+  .ai-take {
+    margin: 18px 16px 0;
+    background: var(--color-amber-stripe);
+    border: 1px solid var(--color-amber-weak);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .ai-take-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .ai-take-label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--color-amber);
+    font-weight: 600;
+  }
+  .ai-take-glyph {
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--color-amber);
+    color: #1B1714;
+    display: grid; place-items: center;
+    font-family: var(--font-sans);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+  .ai-take-prose {
+    font-size: 13.5px;
+    color: var(--color-text);
+    line-height: 1.55;
+    text-wrap: pretty;
+  }
+  .ai-take-prose b {
+    color: var(--color-amber);
+    font-weight: 600;
+  }
+  .ai-take-cta {
+    margin-top: 10px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--color-amber);
+    display: inline-flex; align-items: center; gap: 4px;
+  }
+
+  /* My notes */
+  .notes-card {
+    margin: 18px 16px 24px;
+    background: var(--color-surface);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .notes-title {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    margin-bottom: 8px;
+  }
+  .notes-area {
+    font-size: 13.5px;
+    color: var(--color-text);
+    line-height: 1.5;
+    min-height: 40px;
+  }
+  .notes-area.placeholder {
+    color: var(--color-text-dim);
+    font-style: italic;
+  }
+
+  /* Awaiting / researching helper */
+  .helper-prose {
+    font-size: 12.5px;
+    color: var(--color-text-muted);
+    line-height: 1.5;
+    margin: 8px 0 0;
+    text-wrap: pretty;
+  }
+
+</style>
+</head>
+<body>
+
+<div class="canvas">
+
+  <header class="canvas-head">
+    <h1 class="canvas-title">Sautium · Profile + Gear sheet</h1>
+    <span class="canvas-sub">
+      Profile (own, two audio-chain layouts) · Profile (viewing other) · Gear-item sheet (3 research states). 360pt viewports, no device chrome. Status badges mapped within locked palette: <b>Own</b> sage · <b>Want</b> amber · <b>Sell</b> terracotta · <b>Previously-owned</b> dim.
+    </span>
+  </header>
+
+  <div class="frames">
+
+<!-- ============================================================ -->
+<!-- 01 · PROFILE (own) — GROUPED audio chain                     -->
+<!-- ============================================================ -->
+<div>
+  <div class="frame-label"><span class="num">01</span>Profile · own · grouped chain</div>
+  <section class="viewport h1280">
+    <div class="status-bar">
+      <div class="island"></div>
+      <span class="time">9:41</span>
+      <div class="indicators">
+        <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4.5" y="5" width="3" height="6" rx="0.5"/><rect x="9" y="3" width="3" height="8" rx="0.5"/><rect x="13.5" y="0" width="3" height="11" rx="0.5"/></svg>
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M7.5 10a.8.8 0 100-1.6.8.8 0 000 1.6zM2.5 5.5a7 7 0 0110 0M4.5 7.5a4 4 0 016 0"/></svg>
+        <svg width="25" height="11" viewBox="0 0 25 11" fill="none"><rect x="0.5" y="0.5" width="21" height="10" rx="2" stroke="currentColor"/><rect x="22.5" y="3.5" width="1.5" height="4" rx="0.5" fill="currentColor"/><rect x="2" y="2" width="17" height="7" rx="1" fill="currentColor"/></svg>
+      </div>
+    </div>
+
+    <div class="scroll-area">
+      <div class="header-bar">
+        <button class="icon-btn" aria-label="back">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+        <h2 class="h-title-center">Profile</h2>
+        <button class="icon-btn" aria-label="edit">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l6 6L8 22H2v-6L14 4z"/></svg>
+        </button>
+      </div>
+
+      <!-- IDENTITY -->
+      <div class="identity-block">
+        <div class="avatar-big">
+          OM
+          <span class="edit-pen">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l6 6L8 22H2v-6L14 4z"/></svg>
+          </span>
+        </div>
+        <div>
+          <h3 class="identity-name" style="text-align:center;">Oleksandr M.</h3>
+          <div class="identity-handles">
+            <span class="handle">@oleks</span>
+            <span class="invite">· FRSN-9KZQ-LWB4</span>
+          </div>
+        </div>
+        <div class="identity-city">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s-7-6.5-7-12a7 7 0 1114 0c0 5.5-7 12-7 12z"/><circle cx="12" cy="10" r="2.5"/></svg>
+          Kyiv, UA
+        </div>
+        <p class="identity-bio">
+          Audiophile, FLAC archivist. Evenings on the couch, Roon-trained ear, working on a fully analog listening room.
+        </p>
+      </div>
+
+      <!-- ACCOUNT -->
+      <div class="group-label">Account</div>
+      <div class="form-group">
+        <div class="form-row">
+          <span class="form-label">Email</span>
+          <span class="form-actions">
+            <span class="form-value">o@example.com</span>
+            <span class="verified">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>
+              verified
+            </span>
+          </span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Password</span>
+          <span class="form-actions">
+            <span class="form-value" style="color:var(--color-amber); font-weight:600;">Change</span>
+            <span class="link-chev">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+            </span>
+          </span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Last.fm</span>
+          <span class="form-actions">
+            <span class="form-value">oleksandr_m</span>
+            <span class="verified">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>
+              connected
+            </span>
+          </span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Scrobbling</span>
+          <span class="toggle on"><span class="knob"></span></span>
+        </div>
+      </div>
+
+      <!-- AUDIO CHAIN — grouped -->
+      <div class="section-head">
+        <h3>My setup</h3>
+        <button class="add-btn"><span class="plus">+</span>Add gear</button>
+      </div>
+
+      <div class="cat-header">
+        <span class="cat-name">Headphones</span>
+        <span class="cat-count">3</span>
+      </div>
+      <div class="gear-list">
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1">
+              <span class="gear-brand">Meze</span>
+              <span class="gear-model">Empyrean II</span>
+            </div>
+            <div class="gear-line2">
+              <span class="badge badge-own">Own</span>
+              <span class="research-chip">isodynamic · $3000</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1">
+              <span class="gear-brand">Sennheiser</span>
+              <span class="gear-model">HD 800 S</span>
+            </div>
+            <div class="gear-line2">
+              <span class="badge badge-own">Own</span>
+              <span class="research-chip">dynamic · $1700</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1">
+              <span class="gear-brand">Focal</span>
+              <span class="gear-model">Utopia 2022</span>
+            </div>
+            <div class="gear-line2">
+              <span class="badge badge-want">Want</span>
+              <span class="research-chip">dynamic · $4400</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+      </div>
+
+      <div class="cat-header">
+        <span class="cat-name">IEMs</span>
+        <span class="cat-count">2</span>
+      </div>
+      <div class="gear-list">
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1">
+              <span class="gear-brand">64 Audio</span>
+              <span class="gear-model">U12t</span>
+            </div>
+            <div class="gear-line2">
+              <span class="badge badge-own">Own</span>
+              <span class="research-chip">12-BA · $2000</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1">
+              <span class="gear-brand">Campfire</span>
+              <span class="gear-model">Andromeda 2020</span>
+            </div>
+            <div class="gear-line2">
+              <span class="badge badge-prev">Previously-owned</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+      </div>
+
+      <div class="cat-header">
+        <span class="cat-name">DACs</span>
+        <span class="cat-count">2</span>
+      </div>
+      <div class="gear-list">
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1">
+              <span class="gear-brand">Holo Audio</span>
+              <span class="gear-model">Spring 3 KTE</span>
+            </div>
+            <div class="gear-line2">
+              <span class="badge badge-own">Own</span>
+              <span class="research-chip">R2R · $3700</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1">
+              <span class="gear-brand">Topping</span>
+              <span class="gear-model">E50</span>
+            </div>
+            <div class="gear-line2">
+              <span class="badge badge-sell">Sell</span>
+              <span class="research-chip">ES9068AS · $250</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+      </div>
+
+      <div class="cat-header">
+        <span class="cat-name">Amps</span>
+        <span class="cat-count">1</span>
+      </div>
+      <div class="gear-list">
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1">
+              <span class="gear-brand">Feliks</span>
+              <span class="gear-model">Envy</span>
+            </div>
+            <div class="gear-line2">
+              <span class="badge badge-own">Own</span>
+              <span class="research-pending">
+                <span class="pulse"></span>Researching…
+              </span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+      </div>
+
+      <div class="cat-header">
+        <span class="cat-name">Players</span>
+        <span class="cat-count">1</span>
+      </div>
+      <div class="gear-list">
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1">
+              <span class="gear-brand">Astell&amp;Kern</span>
+              <span class="gear-model">Kann Ultra</span>
+            </div>
+            <div class="gear-line2">
+              <span class="badge badge-own">Own</span>
+              <span class="research-chip">DAP · $1300</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+      </div>
+
+      <!-- SOCIABILITY -->
+      <div class="group-label">Sociability</div>
+      <div class="sociability">
+        <div class="soc-row">
+          <div>
+            <div class="soc-label">Open to meet other audiophiles</div>
+            <div class="soc-hint">Phase 2 — discovery is not active yet.</div>
+          </div>
+          <span class="toggle disabled"><span class="knob"></span></span>
+        </div>
+        <div class="soc-progress">
+          <div class="soc-prose">Profile is <span class="pct">60%</span> complete — finish to unlock discovery when it launches.</div>
+          <div class="soc-bar"><div class="fill"></div></div>
+        </div>
+      </div>
+
+      <div class="end-spacer"></div>
+    </div>
+
+    <button class="fab" aria-label="ask Sautium AI">AI</button>
+    <div class="shell-bottom">
+      <div class="mini">
+        <div class="mini-art"><img src="assets/cover-hidden-orchestra.jpg" alt=""></div>
+        <div>
+          <div class="mini-title">Wingbeats — First Light</div>
+          <div class="mini-artist">Hidden Orchestra</div>
+        </div>
+        <button class="mini-btn accent" aria-label="pause"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="5" width="4" height="14" rx="1"/><rect x="13" y="5" width="4" height="14" rx="1"/></svg></button>
+        <button class="mini-btn" aria-label="next"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M18 5v14h-2V5h2zM5 6.2v11.6c0 .8.9 1.3 1.6.9l9.5-5.8a1 1 0 000-1.7L6.6 5.3A1 1 0 005 6.2z"/></svg></button>
+      </div>
+      <div class="tab-bar">
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l9-7 9 7v10a2 2 0 01-2 2h-4v-6h-6v6H5a2 2 0 01-2-2V10z"/></svg>Home</button>
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>Discovery</button>
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><circle cx="17" cy="9" r="2.5"/><path d="M3 19c0-3 2.7-5.5 6-5.5s6 2.5 6 5.5M15 19c0-2 1.8-3.8 4-3.8s3 1.8 3 3.8"/></svg>Friends</button>
+        <button class="tab active"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>More</button>
+      </div>
+      <div class="home-indicator-wrap"><div class="home-indicator"></div></div>
+    </div>
+  </section>
+</div>
+
+<!-- ============================================================ -->
+<!-- 02 · PROFILE (own) — FLAT audio chain + filter chips         -->
+<!-- ============================================================ -->
+<div>
+  <div class="frame-label"><span class="num">02</span>Profile · own · flat + chips</div>
+  <section class="viewport h1100">
+    <div class="status-bar">
+      <div class="island"></div>
+      <span class="time">9:41</span>
+      <div class="indicators">
+        <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4.5" y="5" width="3" height="6" rx="0.5"/><rect x="9" y="3" width="3" height="8" rx="0.5"/><rect x="13.5" y="0" width="3" height="11" rx="0.5"/></svg>
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M7.5 10a.8.8 0 100-1.6.8.8 0 000 1.6zM2.5 5.5a7 7 0 0110 0M4.5 7.5a4 4 0 016 0"/></svg>
+        <svg width="25" height="11" viewBox="0 0 25 11" fill="none"><rect x="0.5" y="0.5" width="21" height="10" rx="2" stroke="currentColor"/><rect x="22.5" y="3.5" width="1.5" height="4" rx="0.5" fill="currentColor"/><rect x="2" y="2" width="17" height="7" rx="1" fill="currentColor"/></svg>
+      </div>
+    </div>
+
+    <div class="scroll-area">
+      <div class="header-bar">
+        <button class="icon-btn" aria-label="back">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+        <h2 class="h-title-center">Profile</h2>
+        <button class="icon-btn" aria-label="edit">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l6 6L8 22H2v-6L14 4z"/></svg>
+        </button>
+      </div>
+
+      <div class="identity-block">
+        <div class="avatar-big">OM<span class="edit-pen"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l6 6L8 22H2v-6L14 4z"/></svg></span></div>
+        <div>
+          <h3 class="identity-name" style="text-align:center;">Oleksandr M.</h3>
+          <div class="identity-handles">
+            <span class="handle">@oleks</span>
+            <span class="invite">· FRSN-9KZQ-LWB4</span>
+          </div>
+        </div>
+        <p class="identity-bio" style="margin-top:-2px;">
+          Audiophile, FLAC archivist. Evenings on the couch, Roon-trained ear.
+        </p>
+      </div>
+
+      <!-- AUDIO CHAIN — flat with filter chips -->
+      <div class="section-head">
+        <h3>My setup</h3>
+        <button class="add-btn"><span class="plus">+</span>Add gear</button>
+      </div>
+
+      <div class="filter-rail">
+        <span class="filter-chip active">All<span class="cnt">9</span></span>
+        <span class="filter-chip">Headphones<span class="cnt">3</span></span>
+        <span class="filter-chip">IEMs<span class="cnt">2</span></span>
+        <span class="filter-chip">DACs<span class="cnt">2</span></span>
+        <span class="filter-chip">Amps<span class="cnt">1</span></span>
+        <span class="filter-chip">Players<span class="cnt">1</span></span>
+      </div>
+
+      <div style="height: 10px;"></div>
+
+      <div class="gear-list">
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1"><span class="gear-brand">Meze</span><span class="gear-model">Empyrean II · Headphones</span></div>
+            <div class="gear-line2">
+              <span class="badge badge-own">Own</span>
+              <span class="research-chip">isodynamic · $3000</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1"><span class="gear-brand">Sennheiser</span><span class="gear-model">HD 800 S · Headphones</span></div>
+            <div class="gear-line2">
+              <span class="badge badge-own">Own</span>
+              <span class="research-chip">dynamic · $1700</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1"><span class="gear-brand">Focal</span><span class="gear-model">Utopia 2022 · Headphones</span></div>
+            <div class="gear-line2">
+              <span class="badge badge-want">Want</span>
+              <span class="research-chip">dynamic · $4400</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1"><span class="gear-brand">64 Audio</span><span class="gear-model">U12t · IEMs</span></div>
+            <div class="gear-line2">
+              <span class="badge badge-own">Own</span>
+              <span class="research-chip">12-BA · $2000</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1"><span class="gear-brand">Campfire</span><span class="gear-model">Andromeda 2020 · IEMs</span></div>
+            <div class="gear-line2">
+              <span class="badge badge-prev">Previously-owned</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1"><span class="gear-brand">Holo Audio</span><span class="gear-model">Spring 3 KTE · DAC</span></div>
+            <div class="gear-line2">
+              <span class="badge badge-own">Own</span>
+              <span class="research-chip">R2R · $3700</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1"><span class="gear-brand">Topping</span><span class="gear-model">E50 · DAC</span></div>
+            <div class="gear-line2">
+              <span class="badge badge-sell">Sell</span>
+              <span class="research-chip">ES9068AS · $250</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1"><span class="gear-brand">Feliks</span><span class="gear-model">Envy · Amp</span></div>
+            <div class="gear-line2">
+              <span class="badge badge-own">Own</span>
+              <span class="research-pending"><span class="pulse"></span>Researching…</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1"><span class="gear-brand">Astell&amp;Kern</span><span class="gear-model">Kann Ultra · Player</span></div>
+            <div class="gear-line2">
+              <span class="badge badge-own">Own</span>
+              <span class="research-chip">DAP · $1300</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+      </div>
+
+      <!-- An example of empty state shown as small inline note for context -->
+      <p class="visibility-note">
+        Power &amp; cables — empty. <span style="color:var(--color-amber); font-weight:600;">Add gear ›</span>
+      </p>
+
+      <div class="end-spacer"></div>
+    </div>
+
+    <button class="fab" aria-label="ask Sautium AI">AI</button>
+    <div class="shell-bottom">
+      <div class="mini">
+        <div class="mini-art"><img src="assets/cover-hidden-orchestra.jpg" alt=""></div>
+        <div>
+          <div class="mini-title">Wingbeats — First Light</div>
+          <div class="mini-artist">Hidden Orchestra</div>
+        </div>
+        <button class="mini-btn accent"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="5" width="4" height="14" rx="1"/><rect x="13" y="5" width="4" height="14" rx="1"/></svg></button>
+        <button class="mini-btn"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M18 5v14h-2V5h2zM5 6.2v11.6c0 .8.9 1.3 1.6.9l9.5-5.8a1 1 0 000-1.7L6.6 5.3A1 1 0 005 6.2z"/></svg></button>
+      </div>
+      <div class="tab-bar">
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l9-7 9 7v10a2 2 0 01-2 2h-4v-6h-6v6H5a2 2 0 01-2-2V10z"/></svg>Home</button>
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>Discovery</button>
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><circle cx="17" cy="9" r="2.5"/><path d="M3 19c0-3 2.7-5.5 6-5.5s6 2.5 6 5.5M15 19c0-2 1.8-3.8 4-3.8s3 1.8 3 3.8"/></svg>Friends</button>
+        <button class="tab active"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>More</button>
+      </div>
+      <div class="home-indicator-wrap"><div class="home-indicator"></div></div>
+    </div>
+  </section>
+</div>
+
+<!-- ============================================================ -->
+<!-- 03 · PROFILE (viewing other)                                 -->
+<!-- ============================================================ -->
+<div>
+  <div class="frame-label"><span class="num">03</span>Profile · viewing other</div>
+  <section class="viewport h1100">
+    <div class="status-bar">
+      <div class="island"></div>
+      <span class="time">9:41</span>
+      <div class="indicators">
+        <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4.5" y="5" width="3" height="6" rx="0.5"/><rect x="9" y="3" width="3" height="8" rx="0.5"/><rect x="13.5" y="0" width="3" height="11" rx="0.5"/></svg>
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M7.5 10a.8.8 0 100-1.6.8.8 0 000 1.6zM2.5 5.5a7 7 0 0110 0M4.5 7.5a4 4 0 016 0"/></svg>
+        <svg width="25" height="11" viewBox="0 0 25 11" fill="none"><rect x="0.5" y="0.5" width="21" height="10" rx="2" stroke="currentColor"/><rect x="22.5" y="3.5" width="1.5" height="4" rx="0.5" fill="currentColor"/><rect x="2" y="2" width="17" height="7" rx="1" fill="currentColor"/></svg>
+      </div>
+    </div>
+
+    <div class="scroll-area">
+      <div class="header-bar">
+        <button class="icon-btn" aria-label="back">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+        <h2 class="h-title-center">Profile</h2>
+        <button class="icon-btn" aria-label="more">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>
+        </button>
+      </div>
+
+      <div class="identity-block">
+        <div class="avatar-big" style="background: linear-gradient(135deg, #4d6378, #1f2933); font-size:28px;">MA</div>
+        <div>
+          <h3 class="identity-name" style="text-align:center;">Maksym A.</h3>
+          <div class="identity-handles">
+            <span class="handle">@maksym_a</span>
+            <span class="invite">· 9F2A4C7B</span>
+          </div>
+        </div>
+        <div class="identity-city">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s-7-6.5-7-12a7 7 0 1114 0c0 5.5-7 12-7 12z"/><circle cx="12" cy="10" r="2.5"/></svg>
+          Lviv, UA
+        </div>
+        <p class="identity-bio">
+          Tube-DAC convert. Half of my library is Ukrainian jazz, the other half is post-rock at 4am.
+        </p>
+      </div>
+
+      <!-- MATCH INDICATOR (placeholder copy) -->
+      <div style="height: 18px;"></div>
+      <div class="match-card">
+        <div class="match-pct">78<span style="font-size:13px;color:var(--color-text-muted);">%</span></div>
+        <div class="match-body">
+          <div class="match-label">Taste overlap</div>
+          <div class="match-shared">2 shared: <b>HD 800 S</b>, <b>Spring 3 KTE</b></div>
+        </div>
+      </div>
+
+      <!-- CTAs -->
+      <div class="other-cta-row">
+        <button class="btn btn-primary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 01-11.7 7.1L4 21l1.9-5.3A8 8 0 1121 12z"/></svg>
+          Send message
+        </button>
+        <button class="btn btn-secondary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+          Add as friend
+        </button>
+      </div>
+
+      <!-- PUBLIC AUDIO CHAIN -->
+      <div class="section-head">
+        <h3>Audio chain</h3>
+        <span style="font-size:11px; font-family: var(--font-mono); color: var(--color-text-dim); letter-spacing:0.06em; text-transform:uppercase;">public</span>
+      </div>
+
+      <div class="cat-header">
+        <span class="cat-name">Headphones</span>
+        <span class="cat-count">2</span>
+      </div>
+      <div class="gear-list">
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1"><span class="gear-brand">Sennheiser</span><span class="gear-model">HD 800 S</span></div>
+            <div class="gear-line2">
+              <span class="badge badge-own">Own</span>
+              <span class="research-chip">dynamic · $1700</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1"><span class="gear-brand">ZMF</span><span class="gear-model">Caldera Closed</span></div>
+            <div class="gear-line2">
+              <span class="badge badge-own">Own</span>
+              <span class="research-chip">planar · $3500</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+      </div>
+
+      <div class="cat-header">
+        <span class="cat-name">DACs</span>
+        <span class="cat-count">1</span>
+      </div>
+      <div class="gear-list">
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1"><span class="gear-brand">Holo Audio</span><span class="gear-model">Spring 3 KTE</span></div>
+            <div class="gear-line2">
+              <span class="badge badge-own">Own</span>
+              <span class="research-chip">R2R · $3700</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+      </div>
+
+      <div class="cat-header">
+        <span class="cat-name">Amps</span>
+        <span class="cat-count">1</span>
+      </div>
+      <div class="gear-list">
+        <div class="gear-row">
+          <div class="gear-info">
+            <div class="gear-line1"><span class="gear-brand">Cayin</span><span class="gear-model">HA-300 MK II</span></div>
+            <div class="gear-line2">
+              <span class="badge badge-want">Want</span>
+              <span class="research-chip">300B tube · $5500</span>
+            </div>
+          </div>
+          <span class="gear-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+        </div>
+      </div>
+
+      <p class="visibility-note">
+        Maksym chose to share his audio chain publicly.
+      </p>
+
+      <div class="end-spacer"></div>
+    </div>
+
+    <button class="fab" aria-label="ask Sautium AI">AI</button>
+    <div class="shell-bottom">
+      <div class="mini">
+        <div class="mini-art"><img src="assets/cover-hidden-orchestra.jpg" alt=""></div>
+        <div>
+          <div class="mini-title">Wingbeats — First Light</div>
+          <div class="mini-artist">Hidden Orchestra</div>
+        </div>
+        <button class="mini-btn accent"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="5" width="4" height="14" rx="1"/><rect x="13" y="5" width="4" height="14" rx="1"/></svg></button>
+        <button class="mini-btn"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M18 5v14h-2V5h2zM5 6.2v11.6c0 .8.9 1.3 1.6.9l9.5-5.8a1 1 0 000-1.7L6.6 5.3A1 1 0 005 6.2z"/></svg></button>
+      </div>
+      <div class="tab-bar">
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l9-7 9 7v10a2 2 0 01-2 2h-4v-6h-6v6H5a2 2 0 01-2-2V10z"/></svg>Home</button>
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>Discovery</button>
+        <button class="tab active"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><circle cx="17" cy="9" r="2.5"/><path d="M3 19c0-3 2.7-5.5 6-5.5s6 2.5 6 5.5M15 19c0-2 1.8-3.8 4-3.8s3 1.8 3 3.8"/></svg>Friends</button>
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>More</button>
+      </div>
+      <div class="home-indicator-wrap"><div class="home-indicator"></div></div>
+    </div>
+  </section>
+</div>
+
+<!-- ============================================================ -->
+<!-- 04 · GEAR SHEET · awaiting_research                          -->
+<!-- ============================================================ -->
+<div>
+  <div class="frame-label"><span class="num">04</span>Gear sheet · awaiting_research</div>
+  <section class="viewport h820" style="background: var(--color-surface-lo);">
+    <div class="status-bar">
+      <div class="island"></div>
+      <span class="time">9:41</span>
+      <div class="indicators">
+        <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4.5" y="5" width="3" height="6" rx="0.5"/><rect x="9" y="3" width="3" height="8" rx="0.5"/><rect x="13.5" y="0" width="3" height="11" rx="0.5"/></svg>
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M7.5 10a.8.8 0 100-1.6.8.8 0 000 1.6zM2.5 5.5a7 7 0 0110 0M4.5 7.5a4 4 0 016 0"/></svg>
+        <svg width="25" height="11" viewBox="0 0 25 11" fill="none"><rect x="0.5" y="0.5" width="21" height="10" rx="2" stroke="currentColor"/><rect x="22.5" y="3.5" width="1.5" height="4" rx="0.5" fill="currentColor"/><rect x="2" y="2" width="17" height="7" rx="1" fill="currentColor"/></svg>
+      </div>
+    </div>
+
+    <div class="sheet-handle"></div>
+
+    <div class="sheet-header">
+      <div class="sheet-title-block">
+        <div class="sheet-brand">Feliks Audio</div>
+        <h2 class="sheet-model">Envy</h2>
+        <div class="sheet-meta-row">
+          <span class="cat-tag">Amp · Tube</span>
+          <span class="badge badge-own">Own</span>
+        </div>
+      </div>
+      <button class="icon-btn" aria-label="close" style="margin-top: 4px;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <div class="status-segmented">
+      <div class="seg-opt active">Own</div>
+      <div class="seg-opt">Want</div>
+      <div class="seg-opt">Sell</div>
+      <div class="seg-opt">Past</div>
+    </div>
+
+    <div style="height: 18px;"></div>
+
+    <div class="research-card">
+      <div class="research-state-row">
+        <span class="research-state-label awaiting">Awaiting research · queued</span>
+      </div>
+      <p class="research-prose-empty">
+        We don't have a community summary for this model yet. It's been added to the research queue.
+      </p>
+      <p class="helper-prose">
+        AI-on users trigger background research; results sync to everyone via P2P. You'll see specs, sentiment, and a personalised take here once it lands — typically within a day.
+      </p>
+    </div>
+
+    <div class="notes-card">
+      <div class="notes-title">My notes</div>
+      <div class="notes-area placeholder">Notes only you can see — pairings, dealer, serial, settings…</div>
+    </div>
+
+    <div class="home-indicator-wrap"><div class="home-indicator"></div></div>
+  </section>
+</div>
+
+<!-- ============================================================ -->
+<!-- 05 · GEAR SHEET · researching                                -->
+<!-- ============================================================ -->
+<div>
+  <div class="frame-label"><span class="num">05</span>Gear sheet · researching</div>
+  <section class="viewport h820" style="background: var(--color-surface-lo);">
+    <div class="status-bar">
+      <div class="island"></div>
+      <span class="time">9:41</span>
+      <div class="indicators">
+        <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4.5" y="5" width="3" height="6" rx="0.5"/><rect x="9" y="3" width="3" height="8" rx="0.5"/><rect x="13.5" y="0" width="3" height="11" rx="0.5"/></svg>
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M7.5 10a.8.8 0 100-1.6.8.8 0 000 1.6zM2.5 5.5a7 7 0 0110 0M4.5 7.5a4 4 0 016 0"/></svg>
+        <svg width="25" height="11" viewBox="0 0 25 11" fill="none"><rect x="0.5" y="0.5" width="21" height="10" rx="2" stroke="currentColor"/><rect x="22.5" y="3.5" width="1.5" height="4" rx="0.5" fill="currentColor"/><rect x="2" y="2" width="17" height="7" rx="1" fill="currentColor"/></svg>
+      </div>
+    </div>
+
+    <div class="sheet-handle"></div>
+
+    <div class="sheet-header">
+      <div class="sheet-title-block">
+        <div class="sheet-brand">Feliks Audio</div>
+        <h2 class="sheet-model">Envy</h2>
+        <div class="sheet-meta-row">
+          <span class="cat-tag">Amp · Tube</span>
+          <span class="badge badge-own">Own</span>
+        </div>
+      </div>
+      <button class="icon-btn" aria-label="close" style="margin-top: 4px;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <div class="status-segmented">
+      <div class="seg-opt active">Own</div>
+      <div class="seg-opt">Want</div>
+      <div class="seg-opt">Sell</div>
+      <div class="seg-opt">Past</div>
+    </div>
+
+    <div style="height: 18px;"></div>
+
+    <div class="research-card">
+      <div class="research-state-row">
+        <span class="pulse"></span>
+        <span class="research-state-label researching">Researching</span>
+      </div>
+      <p class="research-prose-empty">
+        Gathering specs and community sentiment from audiophile sources. This usually completes in a few minutes.
+      </p>
+      <p class="helper-prose">
+        Sources scanned so far: Head-Fi, ASR, audiophile-heaven, manufacturer docs. The card refreshes automatically when the summary is ready.
+      </p>
+    </div>
+
+    <div class="notes-card">
+      <div class="notes-title">My notes</div>
+      <div class="notes-area">Pairing well with Holo Spring 3 KTE through balanced XLR. Stock tubes (Tung-Sol 6SN7 reissue) sound a touch bright at low volume — Sylvania VT-231 on order.</div>
+    </div>
+
+    <div class="home-indicator-wrap"><div class="home-indicator"></div></div>
+  </section>
+</div>
+
+<!-- ============================================================ -->
+<!-- 06 · GEAR SHEET · cached (full content + AI take)            -->
+<!-- ============================================================ -->
+<div>
+  <div class="frame-label"><span class="num">06</span>Gear sheet · cached + AI take</div>
+  <section class="viewport h1280" style="background: var(--color-surface-lo);">
+    <div class="status-bar">
+      <div class="island"></div>
+      <span class="time">9:41</span>
+      <div class="indicators">
+        <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4.5" y="5" width="3" height="6" rx="0.5"/><rect x="9" y="3" width="3" height="8" rx="0.5"/><rect x="13.5" y="0" width="3" height="11" rx="0.5"/></svg>
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M7.5 10a.8.8 0 100-1.6.8.8 0 000 1.6zM2.5 5.5a7 7 0 0110 0M4.5 7.5a4 4 0 016 0"/></svg>
+        <svg width="25" height="11" viewBox="0 0 25 11" fill="none"><rect x="0.5" y="0.5" width="21" height="10" rx="2" stroke="currentColor"/><rect x="22.5" y="3.5" width="1.5" height="4" rx="0.5" fill="currentColor"/><rect x="2" y="2" width="17" height="7" rx="1" fill="currentColor"/></svg>
+      </div>
+    </div>
+
+    <div class="sheet-handle"></div>
+
+    <div class="sheet-header">
+      <div class="sheet-title-block">
+        <div class="sheet-brand">Holo Audio</div>
+        <h2 class="sheet-model">Spring 3 KTE</h2>
+        <div class="sheet-meta-row">
+          <span class="cat-tag">DAC · Discrete R2R</span>
+          <span class="badge badge-own">Own</span>
+        </div>
+      </div>
+      <button class="icon-btn" aria-label="close" style="margin-top: 4px;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <div class="status-segmented">
+      <div class="seg-opt active">Own</div>
+      <div class="seg-opt">Want</div>
+      <div class="seg-opt">Sell</div>
+      <div class="seg-opt">Past</div>
+    </div>
+
+    <div style="height: 18px;"></div>
+
+    <!-- COMMUNITY RESEARCH (primary, above) -->
+    <div class="research-card">
+      <div class="research-state-row">
+        <span class="research-state-label">Community summary</span>
+      </div>
+      <p class="research-prose">
+        A reference-class discrete R2R DAC with NOS / OS modes and full DSD512 / PCM 1.536&nbsp;MHz over USB. The "KTE" tier adds a femto clock, OCC silver internal wiring and improved I/V stage. Praised for its natural, organic midrange and lifelike timbre; criticised by ASR-leaning listeners for measurements that trail the best delta-sigma DACs at the same price.
+      </p>
+      <div class="research-meta">
+        <span>Updated 2 days ago</span>
+        <span class="refresh cooldown">Refresh in 5d</span>
+      </div>
+    </div>
+
+    <!-- SPECS GRID -->
+    <div class="specs-grid">
+      <div class="specs-title">Specs</div>
+      <div class="specs-rows">
+        <div>
+          <div class="spec-key">Architecture</div>
+          <div class="spec-val">R2R · NOS/OS</div>
+        </div>
+        <div>
+          <div class="spec-key">PCM max</div>
+          <div class="spec-val">1.536 MHz</div>
+        </div>
+        <div>
+          <div class="spec-key">DSD max</div>
+          <div class="spec-val">DSD512</div>
+        </div>
+        <div>
+          <div class="spec-key">Clock</div>
+          <div class="spec-val">Femto-second</div>
+        </div>
+        <div>
+          <div class="spec-key">SNR</div>
+          <div class="spec-val">123 dB</div>
+        </div>
+        <div>
+          <div class="spec-key">Price MSRP</div>
+          <div class="spec-val">$3 700</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- COMMUNITY SENTIMENT -->
+    <div class="sentiment-card">
+      <div class="sent-head">
+        <span class="sent-score">8.7</span>
+        <span class="sent-score-suffix">/ 10 · n = 412</span>
+      </div>
+      <div class="sent-label" style="margin-bottom: 6px;">Praise</div>
+      <div class="sent-pills">
+        <span class="sent-pill praise">organic timbre</span>
+        <span class="sent-pill praise">wide stage</span>
+        <span class="sent-pill praise">natural decay</span>
+      </div>
+      <div class="sent-pill-sec">Criticism</div>
+      <div class="sent-pills" style="margin-top: 6px;">
+        <span class="sent-pill crit">runs hot</span>
+        <span class="sent-pill crit">measurements</span>
+      </div>
+    </div>
+
+    <!-- AI PERSONALISED TAKE (below, agent-only) -->
+    <div class="ai-take">
+      <div class="ai-take-head">
+        <span class="ai-take-glyph">AI</span>
+        <span class="ai-take-label">Your personalised take</span>
+      </div>
+      <p class="ai-take-prose">
+        Paired with your <b>Meze Empyrean II</b> and <b>Feliks Envy</b>, this DAC's natural midrange complements the Envy's tube bloom — you're hearing roughly 70% of its potential. You'd likely gain a touch of low-end articulation by switching to OS mode for jazz, NOS for orchestral. The <b>Topping E50</b> you're selling will sound clinical by comparison; keep this as your main.
+      </p>
+      <div class="ai-take-cta">
+        Ask AI for more
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+      </div>
+    </div>
+
+    <!-- MY NOTES -->
+    <div class="notes-card">
+      <div class="notes-title">My notes</div>
+      <div class="notes-area">Bought used from Apos · upgraded USB module installed Mar 2024 · best with Linear PSU and Apple-A-class 10MHz clock injection.</div>
+    </div>
+
+    <div class="home-indicator-wrap"><div class="home-indicator"></div></div>
+  </section>
+</div>
+
+  </div>
+</div>
+
+</body>
+</html>

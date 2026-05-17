@@ -821,6 +821,205 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_p2p_messages_uuid
     ON p2p_messages(message_uuid) WHERE message_uuid IS NOT NULL;
 
 -- ============================================================
+-- Profile + Audio chain (single-user appliance)
+-- ============================================================
+
+DO $$ BEGIN
+    CREATE TYPE gear_research_state AS ENUM ('queued', 'researching', 'cached', 'failed');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE user_gear_status AS ENUM ('own', 'want', 'sell', 'previously_owned');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Profile of the launcher's owner. Single-row table — Sautium is a
+-- single-user appliance per launcher install. NULL on display_name/
+-- city/country/bio/avatar means "not set" (Codd-style). The id=1
+-- CHECK keeps the row count at exactly one.
+CREATE TABLE IF NOT EXISTS user_profile (
+    id              INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    display_name    VARCHAR(128),
+    city            VARCHAR(128),
+    country         CHAR(2),                       -- ISO 3166-1 alpha-2
+    bio             TEXT,
+    avatar_cover_id UUID REFERENCES covers(id) ON DELETE SET NULL,
+    public_gear     BOOLEAN NOT NULL DEFAULT FALSE,
+    open_to_meet    BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO user_profile (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
+-- Peer profile fields, populated from the sync handshake. Avatar is
+-- referenced into the covers table — same blob-cache pattern as
+-- artist photos, so it survives peer offline and stays under our TLS.
+ALTER TABLE friends ADD COLUMN IF NOT EXISTS city            VARCHAR(128);
+ALTER TABLE friends ADD COLUMN IF NOT EXISTS bio             TEXT;
+ALTER TABLE friends ADD COLUMN IF NOT EXISTS avatar_cover_id UUID
+    REFERENCES covers(id) ON DELETE SET NULL;
+
+-- Canonical brand catalog. UUID v5 from normalised name so two nodes
+-- adding "Sennheiser" collapse to the same row — same pattern as
+-- artists/genres. Brand-level metadata (website, country of origin)
+-- is optional, populated by the research worker when adding a model.
+CREATE TABLE IF NOT EXISTS gear_brands (
+    id           UUID PRIMARY KEY,
+    name         VARCHAR(200) NOT NULL UNIQUE,
+    website      TEXT,
+    country      CHAR(2),
+    founded_year INTEGER,
+    created_at   TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at   TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_gear_brands_name_lower ON gear_brands(LOWER(name));
+
+DO $$ BEGIN CREATE TRIGGER trg_gear_brands_updated_at BEFORE UPDATE ON gear_brands
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Canonical model catalog. UUID v5 from (brand.name, model, category)
+-- so the same model on two nodes collapses to the same id. Sentiment
+-- score / sample size are top-level aggregate columns (no JSON);
+-- detailed praise / criticism terms live in gear_sentiment_terms.
+CREATE TABLE IF NOT EXISTS gear_models (
+    id                     UUID PRIMARY KEY,
+    brand_id               UUID NOT NULL REFERENCES gear_brands(id) ON DELETE RESTRICT,
+    model                  VARCHAR(300) NOT NULL,
+    category               VARCHAR(50) NOT NULL,
+    research_state         gear_research_state NOT NULL DEFAULT 'queued',
+    research_summary       TEXT,
+    researched_at          TIMESTAMPTZ,
+    sentiment_score        NUMERIC(3, 1),
+    sentiment_sample_size  INTEGER,
+    sentiment_updated_at   TIMESTAMPTZ,
+    created_at             TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at             TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_gear_category CHECK (category IN
+        ('headphones', 'iems', 'dac', 'amp', 'player', 'power', 'cable')),
+    UNIQUE (brand_id, model, category)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gear_models_brand        ON gear_models(brand_id);
+CREATE INDEX IF NOT EXISTS idx_gear_models_model_lower  ON gear_models(LOWER(model));
+CREATE INDEX IF NOT EXISTS idx_gear_models_category     ON gear_models(category);
+CREATE INDEX IF NOT EXISTS idx_gear_models_research_state
+    ON gear_models(research_state) WHERE research_state IN ('queued', 'researching');
+
+DO $$ BEGIN CREATE TRIGGER trg_gear_models_updated_at BEFORE UPDATE ON gear_models
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- The launcher owner's audio chain. NULL notes = "not written"; we
+-- don't collapse that to ''.
+CREATE TABLE IF NOT EXISTS user_gear (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    gear_model_id   UUID NOT NULL REFERENCES gear_models(id)
+                          ON DELETE CASCADE ON UPDATE CASCADE,
+    status          user_gear_status NOT NULL DEFAULT 'own',
+    notes           TEXT,
+    added_at        TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (gear_model_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_gear_status ON user_gear(status);
+
+DO $$ BEGIN CREATE TRIGGER trg_user_profile_updated_at BEFORE UPDATE ON user_profile
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN CREATE TRIGGER trg_user_gear_updated_at BEFORE UPDATE ON user_gear
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- EAV "schema" side — canonical attribute catalog. UUID v5 from key
+-- so two nodes adding "impedance_ohm" converge. Hand-curated seed
+-- (seeded=TRUE) is the reuse-first target the research worker must
+-- map to; AI-proposed additions land with seeded=FALSE and may
+-- be promoted after human review.
+CREATE TABLE IF NOT EXISTS gear_spec_attributes (
+    id           UUID PRIMARY KEY,
+    key          VARCHAR(60) UNIQUE NOT NULL,
+    label        VARCHAR(100) NOT NULL,
+    description  TEXT NOT NULL,
+    unit         VARCHAR(20),
+    value_type   VARCHAR(20) NOT NULL,
+    enum_values  TEXT[],
+    applies_to   TEXT[] NOT NULL,
+    seeded       BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at   TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at   TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_spec_value_type CHECK (value_type IN ('number', 'string', 'enum', 'boolean'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_gear_spec_attributes_applies_to ON gear_spec_attributes USING GIN(applies_to);
+
+DO $$ BEGIN CREATE TRIGGER trg_gear_spec_attributes_updated_at BEFORE UPDATE ON gear_spec_attributes
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- EAV "value" side. value_text holds the canonicalised value (numbers
+-- as text so unit / value_type from the attribute remain authoritative);
+-- raw_value preserves the AI's original string for audit.
+CREATE TABLE IF NOT EXISTS gear_specs (
+    gear_model_id  UUID NOT NULL REFERENCES gear_models(id) ON DELETE CASCADE,
+    attribute_id   UUID NOT NULL REFERENCES gear_spec_attributes(id) ON DELETE CASCADE,
+    value_text     TEXT NOT NULL,
+    raw_value      TEXT,
+    source_url     TEXT,
+    PRIMARY KEY (gear_model_id, attribute_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gear_specs_attribute ON gear_specs(attribute_id);
+
+-- Brand-IP / proprietary technology catalog. Distinct from specs:
+-- Ring Radiator / OSPF / WTA filter are nominal brand assets, often
+-- patented. brand_id is nullable for industry-wide tech (I²S, S/PDIF).
+CREATE TABLE IF NOT EXISTS gear_technologies (
+    id                UUID PRIMARY KEY,
+    key               VARCHAR(80) UNIQUE NOT NULL,
+    label             VARCHAR(150) NOT NULL,
+    description       TEXT NOT NULL,
+    brand_id          UUID REFERENCES gear_brands(id) ON DELETE SET NULL,
+    patent_or_source  TEXT,
+    introduced_year   INTEGER,
+    applies_to        TEXT[] NOT NULL,
+    seeded            BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at        TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_gear_technologies_brand      ON gear_technologies(brand_id);
+CREATE INDEX IF NOT EXISTS idx_gear_technologies_applies_to ON gear_technologies USING GIN(applies_to);
+
+DO $$ BEGIN CREATE TRIGGER trg_gear_technologies_updated_at BEFORE UPDATE ON gear_technologies
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS gear_model_technologies (
+    gear_model_id  UUID NOT NULL REFERENCES gear_models(id) ON DELETE CASCADE,
+    technology_id  UUID NOT NULL REFERENCES gear_technologies(id) ON DELETE CASCADE,
+    PRIMARY KEY (gear_model_id, technology_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gear_model_technologies_tech ON gear_model_technologies(technology_id);
+
+-- Praise / criticism tags from research worker, deduplicated per
+-- (model, polarity, term). Searchable across catalog ("which gear
+-- gets 'organic timbre' praise?").
+CREATE TABLE IF NOT EXISTS gear_sentiment_terms (
+    gear_model_id  UUID NOT NULL REFERENCES gear_models(id) ON DELETE CASCADE,
+    polarity       VARCHAR(10) NOT NULL,
+    term           VARCHAR(80) NOT NULL,
+    weight         REAL,
+    PRIMARY KEY (gear_model_id, polarity, term),
+    CONSTRAINT chk_polarity CHECK (polarity IN ('praise', 'criticism'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_gear_sentiment_term_lookup ON gear_sentiment_terms(polarity, term);
+
+-- ============================================================
 -- Views
 -- ============================================================
 
