@@ -4506,6 +4506,51 @@
     close: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
   };
 
+  /* ISO 3166-1 alpha-2 country codes. Country names rendered via
+     Intl.DisplayNames so we don't carry a localisation table in JS. */
+  const COUNTRY_CODES = [
+    'AD','AE','AF','AG','AI','AL','AM','AO','AR','AT','AU','AW','AZ',
+    'BA','BB','BD','BE','BF','BG','BH','BI','BJ','BM','BN','BO','BR','BS','BT','BW','BY','BZ',
+    'CA','CD','CF','CG','CH','CI','CL','CM','CN','CO','CR','CU','CV','CY','CZ',
+    'DE','DJ','DK','DM','DO','DZ',
+    'EC','EE','EG','ER','ES','ET',
+    'FI','FJ','FM','FR',
+    'GA','GB','GD','GE','GH','GM','GN','GQ','GR','GT','GW','GY',
+    'HK','HN','HR','HT','HU',
+    'ID','IE','IL','IN','IQ','IR','IS','IT',
+    'JM','JO','JP',
+    'KE','KG','KH','KI','KM','KN','KP','KR','KW','KZ',
+    'LA','LB','LC','LI','LK','LR','LS','LT','LU','LV','LY',
+    'MA','MC','MD','ME','MG','MH','MK','ML','MM','MN','MR','MT','MU','MV','MW','MX','MY','MZ',
+    'NA','NE','NG','NI','NL','NO','NP','NR','NZ',
+    'OM',
+    'PA','PE','PG','PH','PK','PL','PT','PW','PY',
+    'QA',
+    'RO','RS','RU','RW',
+    'SA','SB','SC','SD','SE','SG','SI','SK','SL','SM','SN','SO','SR','SS','ST','SV','SY','SZ',
+    'TD','TG','TH','TJ','TL','TM','TN','TO','TR','TT','TV','TW','TZ',
+    'UA','UG','US','UY','UZ',
+    'VA','VC','VE','VN','VU',
+    'WS',
+    'YE',
+    'ZA','ZM','ZW',
+  ];
+  const _countryDN = (() => {
+    try { return new Intl.DisplayNames(['en'], { type: 'region' }); }
+    catch (_) { return null; }
+  })();
+  function countryName(code) {
+    if (!code) return '';
+    if (_countryDN) {
+      try { return _countryDN.of(code) || code; } catch (_) {}
+    }
+    return code;
+  }
+  // Sorted once at script init so the editor dropdown is alphabetical.
+  const COUNTRY_OPTIONS = COUNTRY_CODES
+    .map(c => ({ code: c, name: countryName(c) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
   const GEAR_CATEGORIES = [
     { id: 'headphones', label: 'Headphones' },
     { id: 'iems',       label: 'IEMs' },
@@ -4589,7 +4634,7 @@
     const initials = display.trim()
       ? display.trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase()
       : '—';
-    const username = (account && account.username) ? '@' + account.username : '';
+    const username = (account && account.username) ? account.username : '';
     const inviteTail = (account && account.invite_code)
       ? '· ' + account.invite_code.split('#').pop()
       : '';
@@ -4651,7 +4696,7 @@
               </div>
             ` : ''}
           </div>
-          ${profile.city ? `<div class="identity-city">${PROFILE_ICONS.pin}${escapeProfileHtml(profile.city)}</div>` : ''}
+          ${(profile.city || profile.country) ? `<div class="identity-city">${PROFILE_ICONS.pin}${escapeProfileHtml([profile.city, countryName(profile.country)].filter(Boolean).join(', '))}</div>` : ''}
           <p class="identity-bio ${profile.bio ? '' : 'placeholder'}">
             ${profile.bio ? escapeProfileHtml(profile.bio) : 'Add a short bio so other audiophiles know who you are.'}
           </p>
@@ -4737,6 +4782,10 @@
         <div class="add-gear-row">
           <input class="add-gear-input" id="editName" placeholder="Display name" maxlength="128" value="${escapeProfileHtml(profile.display_name || '')}">
           <input class="add-gear-input" id="editCity" placeholder="City" maxlength="128" value="${escapeProfileHtml(profile.city || '')}">
+          <select class="add-gear-input" id="editCountry">
+            <option value="">Country (none)</option>
+            ${COUNTRY_OPTIONS.map(c => `<option value="${c.code}" ${profile.country === c.code ? 'selected' : ''}>${escapeProfileHtml(c.name)} (${c.code})</option>`).join('')}
+          </select>
           <textarea class="add-gear-input" id="editBio" placeholder="A short bio" rows="3" maxlength="2000" style="height:auto;padding:calc(10*var(--px))calc(14*var(--px));resize:vertical;">${escapeProfileHtml(profile.bio || '')}</textarea>
           <button class="profile-btn primary" data-save>Save</button>
         </div>
@@ -4750,6 +4799,7 @@
       const payload = {
         display_name: overlay.querySelector('#editName').value,
         city: overlay.querySelector('#editCity').value,
+        country: overlay.querySelector('#editCountry').value || null,
         bio: overlay.querySelector('#editBio').value,
       };
       try {
@@ -5163,7 +5213,7 @@
 
     const display = profile.display_name || profile.username || '—';
     const initials = display.trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase() || '—';
-    const handle = profile.username ? '@' + profile.username : '';
+    const handle = profile.username || '';
     const inviteTail = profile.invite_code ? '· ' + profile.invite_code.split('#').pop() : '';
 
     root.innerHTML = `
@@ -5184,7 +5234,7 @@
                 ${inviteTail ? `<span class="invite">${escapeProfileHtml(inviteTail)}</span>` : ''}
               </div>` : ''}
           </div>
-          ${profile.city ? `<div class="identity-city">${PROFILE_ICONS.pin}${escapeProfileHtml(profile.city)}</div>` : ''}
+          ${(profile.city || profile.country) ? `<div class="identity-city">${PROFILE_ICONS.pin}${escapeProfileHtml([profile.city, countryName(profile.country)].filter(Boolean).join(', '))}</div>` : ''}
           ${profile.bio ? `<p class="identity-bio">${escapeProfileHtml(profile.bio)}</p>` : ''}
         </div>
 

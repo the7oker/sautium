@@ -2151,18 +2151,15 @@ body.has-miniplayer .ai-fab {
  * insulated from the detail-screen variants.
  * ===================================================================== */
 
-/* Header — overrides Home's display-sized .screen-title (Home is the
-   brand logo case). Discovery / Friends / Settings etc. follow the
-   reference's 22px h-title size. */
+/* Header — matches the base .screen padding (24/16) so the h1 baseline
+   sits at the same y-position as Home and Friends. Tab-switching
+   between Home/Discovery/Friends keeps the title visually anchored
+   (no "jump"). Bottom padding stays at 14 so the search-wrap below
+   keeps its tight relationship to the title per the reference. */
 .discovery-screen .screen-head {
-  padding: calc(12 * var(--px)) calc(20 * var(--px)) calc(14 * var(--px));
+  padding: var(--space-5) var(--space-4) calc(14 * var(--px));
 }
-.discovery-screen .screen-title {
-  font-size: calc(22 * var(--px));
-  font-weight: 600;
-  letter-spacing: -0.015em;
-  line-height: var(--lh-tight);
-}
+/* .screen-title inherits the base 32px display style — no override. */
 
 .discovery-screen .search-wrap {
   margin: calc(2 * var(--px)) calc(20 * var(--px)) calc(14 * var(--px));
@@ -2590,7 +2587,10 @@ body.has-miniplayer .ai-fab {
 }
 .friends-screen .screen-head {
   display: block;
-  padding: calc(20 * var(--px)) calc(16 * var(--px)) calc(4 * var(--px));
+  /* top 24 matches base .screen padding so the h1 baseline lines up
+     with Home and Discovery during tab switches; bottom stays tight
+     to the group-label below per the Friends reference. */
+  padding: var(--space-5) var(--space-4) calc(4 * var(--px));
 }
 .friends-screen .screen-title {
   margin: 0;
@@ -3499,7 +3499,16 @@ body.has-miniplayer .more-overlay .drawer {
  * translated to calc(N * var(--px)) per POSITIONING.md.
  * ===================================================================== */
 
-.screen-profile { padding-bottom: calc(28 * var(--px)); }
+/* Profile screen overrides the base .screen container (which forces
+   flex+gap+padding to give other screens uniform breathing room).
+   Profile sections each carry their own padding per the reference
+   markup, so the parent stays flat — no flex gap, no outer padding
+   other than the bottom-nav safe area. */
+.screen-profile {
+  display: block;
+  padding: 0 0 calc(28 * var(--px));
+  gap: 0;
+}
 
 .profile-header {
   padding: calc(6 * var(--px)) calc(4 * var(--px));
@@ -4083,6 +4092,22 @@ body.has-miniplayer .more-overlay .drawer {
   font-family: var(--font-sans);
 }
 .add-gear-input:focus { outline: 1px solid var(--color-blue); border-color: var(--color-blue); }
+/* <select class="add-gear-input"> matches the HQPlayer dropdown chevron
+   pattern so country / future dropdowns read as the same component
+   family as the HQP settings selects. Native UA chevron is suppressed. */
+select.add-gear-input {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: calc(36 * var(--px));
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--color-text-muted) 50%),
+    linear-gradient(135deg, var(--color-text-muted) 50%, transparent 50%);
+  background-position: right calc(15 * var(--px)) center,
+                       right calc(11 * var(--px)) center;
+  background-size: calc(4 * var(--px)) calc(4 * var(--px));
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
 .add-gear-category-row {
   display: flex;
   gap: calc(6 * var(--px));
