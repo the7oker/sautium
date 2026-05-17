@@ -212,6 +212,59 @@ feel, calibrated instrument blue for numbers.
 
 ---
 
+## Implementation foundation
+
+The DS values live in `backend/static/tokens.css`. The methodology
+below governs how Claude Design output must size and type its work
+so that the implementation can render it pixel-perfectly.
+
+### Scaling model — locked above 360px
+
+```css
+:root {
+  --base: 13;
+  --design-viewport: 360;
+  --px: calc(1rem / var(--base));
+  font-size: calc(100vw / 360 * 13 * 1px);   /* fluid below 360 */
+}
+@media (min-width: 360px) {
+  :root { font-size: calc(var(--base) * 1px); }   /* locked at 13px */
+}
+```
+
+- **Below 360px** the root font-size scales fluidly so tiny screens
+  get a proportionally smaller copy of the design.
+- **At and above 360px** the root locks at 13px. Design-pixel tokens
+  (`19 * --px`, `16 * --px`) therefore render at exactly the same
+  actual-pixel values on any phone width — typography and controls
+  stay pixel-stable across 360 / 390 / 430 / desktop.
+- Containers (`100%`, `aspect-ratio`) still expand naturally with the
+  viewport, so wider phones get more breathing room around same-sized
+  typography.
+- At ≥ 768px the body is centred at ~468px (`360 × 1.3`) so the
+  design does not float in a sea of empty desktop background.
+
+### Sizing rules
+
+- **All layout sizes via `calc(N * var(--px))`** — never raw `px`.
+- Pre-built tokens: `--space-*`, `--text-*`, `--radius-*`, `--shadow-*`.
+- Raw `px` acceptable only for 1px hairlines and media-query breakpoints.
+- Durations (`--dur-*`) and easing (`--ease-*`) are time-based — don't scale.
+- Line-heights unitless; tracking uses `em` to follow local font-size.
+
+### Typography assignment
+
+- **Inter Tight** (sans) — all UI prose, titles, labels.
+- **JetBrains Mono** — numeric readouts ONLY (BPM, sample rate, bit
+  depth, durations, cosine-similarity scores, prices, dates, invite
+  codes). Never for prose.
+
+Mono + cool blue is the "technical precision" semantic. Sans + warm
+amber is the "emotion / brand" semantic. They carry distinct
+meaning — do not blur them.
+
+---
+
 ## Surface scope for Claude Design (MVP)
 
 Priority order for the first DS iteration:

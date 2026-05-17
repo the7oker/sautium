@@ -107,8 +107,7 @@ A **bottom-up sheet** with a vertical list of entries:
 
 - HQPlayer (status, host, port, quick-access to DSP)
 - DSP / Signal Chain (filter, matrix, dither, digital attenuation)
-- Settings (account, Last.fm auth)
-- Profile / identity
+- Profile (identity, account, Last.fm, audio chain)
 - About / version
 
 Sheet is dismissed with drag-down or tap-outside. Detail screens
@@ -140,7 +139,9 @@ back/forward and refresh work natively:
 #more                        → More drawer open
 #more/hqplayer               → HQPlayer config screen
 #more/dsp                    → DSP / Signal Chain screen
-#more/settings               → Settings
+#more/profile                → Profile (own — identity, account, audio chain)
+#more/profile/gear/<id>      → Gear item detail (sheet within Profile)
+#profile/<pubkey-prefix>     → Profile (viewing other, read-only)
 #queue                       → Full queue editor
 #queue/history/<id>          → Specific historical queue restore
 ```
@@ -192,7 +193,9 @@ current tab stack (changes hash).
 | **Queue history item** | Tap on "Recent queues" row | Snapshot preview + Restore action (loads queue, does not auto-play) |
 | **HQPlayer config** | From More | Status, host, port, filter / matrix / dither selector — read/write HQP state |
 | **DSP / Signal Chain** | From More or Now Playing "→ HQPlayer" icon | Deep HQP DSP controls: filter, oversampling, dither, digital attenuation stepper, matrix profile |
-| **Settings** | From More | Account tab (username, invite code, email verify), Last.fm auth |
+| **Profile (own)** | From More → Profile entry | Identity card (avatar, name, @login, invite, city, bio), account (email + verify, password, Last.fm, scrobbling), audio chain (gear list), sociability placeholder |
+| **Profile (viewing other)** | Tap on a user from friend chat header / friend list / future Discover-people | Read-only identity card, public audio chain (if owner opted in), match indicator (placeholder copy), CTAs (Send message · Add as friend) |
+| **Gear item detail** | Tap on a gear card from Profile | Sheet: header (brand · model · category · status), research panel (3 states), AI personalised take (only if agent active), My notes |
 | **Friend profile / chat thread** | Tap on friend in list | Chat messages, send-message input, identity info |
 
 ### Modal / overlay
@@ -409,6 +412,138 @@ list. Friends tab stays isolated in MVP.
 
 ---
 
+## Profile + Audio chain
+
+The Profile screen is the user's **audiophile identity card**. It
+lives under the More tab and serves three purposes:
+
+1. **Self-inventory** — own / want / sell / previously-owned gear
+   tracking.
+2. **AI context** — the gear list feeds the AI chat's personalised
+   recommendations (HQPlayer filters, pairings, comparisons).
+3. **Future social** — matchmaking and discovery placeholder,
+   designed-for but inactive in MVP.
+
+### Sections of the own-profile screen
+
+Top to bottom:
+
+- **Identity card** — avatar (circular), display name (editable,
+  friendly form, distinct from @login), `@login + invite code` (mono
+  blue), city (optional, editable), bio (3-line max, editable inline).
+- **Account** — email + verification badge (✓ / ⚠), change password,
+  Last.fm connect/disconnect, scrobbling toggle (enabled only when
+  Last.fm is connected).
+- **Audio chain (My setup)** — header with Add button, item list,
+  empty-state copy ("Add your audio chain. Search by brand or model —
+  we'll fill in details.").
+- **Sociability** — placeholder for MVP: toggle "Open to meet other
+  audiophiles" (disabled with tooltip), soft completion hint ("Your
+  profile is 60% complete · finish to discover others").
+
+### Audio-chain item flow
+
+**Add — silent input.** Search-box autocomplete against the canonical
+`gear_models` DB. Type → Enter → added. **No "No match" UI** — garbage
+in is on the user, doesn't pollute the shared DB (see canonical DB
+below). If the user has an AI agent active, an additional "Paste
+batch" affordance accepts free-text like *"Holo Spring 3 KTE, Meze
+Elite, AK Kann Ultra"* and parses it via the agent.
+
+**Card content.** Each item shows: brand, model, category tag, status
+badge, and a research-pulled chip when cached (e.g. `R2R · $6000` plus
+1–2 sound-signature pills).
+
+**Tap item → Gear item detail** (bottom sheet).
+
+### Canonical gear DB (`gear_models`)
+
+**Lazy canonicalization**, not upfront seed:
+
+- User adds an item not in DB → placeholder entry created with state
+  `awaiting_research`.
+- Background research worker (AI-powered, WebSearch + WebFetch +
+  Claude synthesis) fills in `specs JSONB`, `research_summary`,
+  `community_sentiment JSONB`.
+- P2P sync distributes completed entries across nodes — same protocol
+  as artist bios. One user's research benefits everyone.
+- Per-item DB cost is linear to actual demand (~$0.05 per real
+  addition), no waste on hypothetical models.
+
+A minimal **targeted seed** of ~200–300 most popular items (HD600/650,
+Topping E50, Schiit Modi, Focal Clear, HD800S, etc.) is acceptable to
+bootstrap autocomplete from day one (~$3 one-time, separate script).
+All beyond seed = lazy.
+
+### Research states
+
+Per gear item:
+
+| State | UI representation |
+|-------|-------------------|
+| `awaiting_research` | Silent muted "Awaiting research · queued" label. **No spinner as UI noise.** |
+| `researching` | Subtle inline indicator. Item card remains useful. |
+| `cached` | Full content: prose summary (3-5 lines), structured specs grid (category-specific keys with **mono-blue** values), community sentiment block (large mono-blue score · sample size · key praise / criticism pills), "Updated 2 days ago" + Refresh button (with cooldown indicator). |
+
+Refresh has a cooldown (e.g. 7 days per item) to throttle API budget.
+
+### AI-on vs no-AI users
+
+The gear screen serves both modes:
+
+- **AI-on users** are the **production engine** for community
+  knowledge — their agent triggers research-on-add. They also see a
+  **personalised take** per gear item: *"Relative to your current
+  Bliss KTE + AM5LE, this DAC would shift soundstage wider but lose
+  some midrange warmth…"*. Either pre-generated or an "Ask AI" CTA
+  opening the chat sheet with the gear pre-loaded as context.
+- **No-AI users** are **free consumers** of cached research. They can
+  browse, add gear, read prose + structured specs + sentiment, track
+  statuses. The personalised-take block is **hidden entirely** for
+  them — no greyed-out teaser.
+
+**Design contract**: research production may require AI; research
+consumption never does. Do not gate cached content behind agent
+state.
+
+### Status badges
+
+| Status | Semantic |
+|--------|----------|
+| **Own** | Current ownership (default state when adding) |
+| **Want** | Wishlist / research target |
+| **Sell** | Active listing (placeholder — marketplace inactive in MVP) |
+| **Previously-owned** | Past ownership; auto-transition from `sell` on a manual "sold" action |
+
+Visual mapping deferred to Claude Design within the locked palette
+(amber / cool blue / sage / terracotta / text shades — no new hues
+per `POSITIONING.md` palette discipline).
+
+### Viewing another user's profile (`#profile/<pubkey-prefix>`)
+
+Read-only variant of own profile. Differences:
+
+- CTAs: **Send message** · **Add as friend** (contextual if already
+  friends).
+- Audio chain visible only if owner has `users.public_gear = true`.
+- Match indicator: placeholder copy (`78% taste overlap · 2 shared:
+  Bliss KTE · HD800S`) — algorithm is Phase 2.
+- Bio + city visible.
+
+The `<pubkey-prefix>` is the first 16 hex chars of the friend's
+public key — same routable format as `#friends/chat/<peer>`.
+
+### Privacy
+
+MVP: profile-wide toggle `users.public_gear` (default false).
+Per-item privacy granularity is Phase 2.
+
+`users.open_to_meet` (default false) gates the future
+Discover-people surface; UI placeholder shows the toggle disabled in
+MVP.
+
+---
+
 ## Migration strategy — Option D (keep app.js)
 
 Recommended migration approach for this IA:
@@ -555,7 +690,33 @@ All Genre blocks roll up into a single `(new endpoint)` GET
 | HQPlayer status | existing HQP state poll | — |
 | HQPlayer config (host/port) | existing settings persistence | + save profiles per location |
 | DSP / Signal Chain | existing HQP filter / matrix / dither endpoints | + per-genre auto-profile |
-| Account / Last.fm auth | existing flows | — |
+
+### Profile (own)
+
+| Block | MVP source | Evolution |
+|-------|------------|-----------|
+| Identity (avatar, name, login, invite, city, bio) | `users` table extensions (`display_name`, `city`, `bio`, `avatar_cover_id`) **(new)** + `(new endpoint)` GET/PUT `/api/profile` | + avatar upload via existing covers pipeline |
+| Account (email, password, Last.fm, scrobbling) | existing flows (email-verify worker, Argon2id password, Last.fm OAuth) | — |
+| Audio chain (gear list) | `user_gear` table **(new)** joined to `gear_models` **(new)** + `(new endpoint)` GET/POST/DELETE `/api/profile/gear` | + per-item privacy granularity |
+| Sociability placeholder | static stub in MVP | + Phase 2 active feature |
+
+### Profile (viewing other)
+
+| Block | MVP source | Evolution |
+|-------|------------|-----------|
+| Public identity | `(new endpoint)` GET `/api/profile/<pubkey>` returning public subset | — |
+| Public audio chain | conditional on `users.public_gear = true` | + per-item privacy |
+| Match indicator | placeholder copy in MVP | + Phase 2 taste-overlap + shared-gear algorithm |
+
+### Gear item detail
+
+| Block | MVP source | Evolution |
+|-------|------------|-----------|
+| Header (brand · model · category) | `gear_models` table | — |
+| Status pill | `user_gear.status` enum | — |
+| Research panel | `gear_models.research_state`, `.research_summary`, `.specs JSONB`, `.community_sentiment JSONB`, `.researched_at` | + iterative research (Run 1 prose → Run 2 structured → Run 3 wiki-style corrections) |
+| Personalised take | runtime AI chat call with user's gear + listening history as context — only if agent active | + caching for repeat questions |
+| My notes | `user_gear.notes TEXT` | — |
 
 ### AI FAB (chat overlay)
 
@@ -577,8 +738,32 @@ For Phase-1 implementation:
 5. `GET /genres/:id` — aggregated genre detail payload (description, top
    artists/albums/tracks, related genres)
 6. Extend `/search/features` for multi-instrument filter (`instruments=piano,drums&op=AND`)
-7. Optional: cache layer for Last.fm `tag.getTopArtists/Albums/Tracks` if Evolution
-   tier work begins (not Phase-1 critical)
+7. `users` table extensions — `display_name TEXT`, `city TEXT`, `bio TEXT`,
+   `avatar_cover_id UUID REFERENCES covers(id)`, `public_gear BOOLEAN DEFAULT FALSE`,
+   `open_to_meet BOOLEAN DEFAULT FALSE`
+8. `gear_models` table **(new)** — `(id UUID PK, brand TEXT, model TEXT, category TEXT,
+   research_state gear_research_state ENUM, research_summary TEXT, specs JSONB,
+   community_sentiment JSONB, researched_at TIMESTAMPTZ, refresh_cooldown_days INT
+   DEFAULT 7)` — canonicalized via UUID v5 `(brand:model:category)`
+9. `user_gear` table **(new)** — `(id UUID PK, user_id, gear_model_id REFERENCES
+   gear_models(id), status user_gear_status ENUM (own / want / sell / previously_owned),
+   notes TEXT, added_at, status_changed_at)`
+10. `(new endpoints)` for Profile:
+    - `GET/PUT /api/profile` — own profile read/write
+    - `GET /api/profile/<pubkey>` — public profile of another user
+    - `GET/POST/DELETE /api/profile/gear` — manage own audio chain
+    - `GET /api/gear-models/search?q=` — autocomplete
+    - `GET /api/gear-models/<id>` — detail (research summary etc.)
+11. **Background research worker** — picks up `gear_models` rows with
+    `research_state = 'queued'`, performs WebSearch + WebFetch on
+    audiophile sources, runs Claude synthesis, writes back specs +
+    summary + sentiment. Triggered only when an AI-on user adds the
+    gear; no-AI users still consume cached results via P2P sync.
+12. **P2P sync extension** — `gear_models` joins the sync inventory
+    (same protocol as artist bios); user-specific tables (`user_gear`,
+    `users` profile fields) stay private to each node.
+13. Optional: cache layer for Last.fm `tag.getTopArtists/Albums/Tracks` if Evolution
+    tier work begins (not Phase-1 critical)
 
 No new ML pipelines required — existing CLAP + BGE-M3 + AST/PaSST
 embeddings cover everything. New backend work is database +
