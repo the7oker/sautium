@@ -210,6 +210,27 @@ class PlaybackTracker:
             logger.info("Connected to PostgreSQL")
         return self.db_conn
 
+    def _scrobbling_enabled(self) -> bool:
+        """Read the lastfm.scrobbling_enabled preference from user_settings.
+
+        Default True if absent so connected users keep prior behaviour.
+        Read fresh on every scrobble attempt so toggling in the UI takes
+        effect without restarting the tracker process."""
+        try:
+            conn = self._get_db()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT value FROM user_settings WHERE key = %s",
+                    ("lastfm.scrobbling_enabled",),
+                )
+                row = cur.fetchone()
+            if not row or row[0] is None:
+                return True
+            return bool(row[0])
+        except Exception as e:
+            logger.warning(f"Failed to read scrobbling toggle: {e}")
+            return True
+
     def _get_track_metadata(self, track_id: int) -> Optional[dict]:
         """Get track artist, title, album, duration from DB for scrobbling.
 
@@ -295,8 +316,11 @@ class PlaybackTracker:
                         f"({session.percent_listened:.1f}% listened) — play_count++"
                     )
 
-                    # Scrobble to Last.fm (if not already scrobbled in real-time)
-                    if self.scrobbler and not session.scrobbled:
+                    # Scrobble to Last.fm (if not already scrobbled in real-time).
+                    # Check the user_settings toggle each time so the UI's
+                    # Scrobbling switch takes effect without restarting the
+                    # tracker.
+                    if self.scrobbler and not session.scrobbled and self._scrobbling_enabled():
                         meta = self._get_track_metadata(session.track_id)
                         if meta:
                             timestamp = int(session.started_at.timestamp())

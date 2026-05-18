@@ -4615,14 +4615,20 @@
   }
 
   async function renderProfile(root) {
-    let profile = null, account = null;
+    let profile = null, account = null, emailStatus = null, config = null, scrobbling = null;
     try {
-      const [pr, ar] = await Promise.all([
+      const [pr, ar, es, cr, sr] = await Promise.all([
         fetch('/api/profile'),
         fetch('/api/p2p/account'),
+        fetch('/api/p2p/email/status'),
+        fetch('/config'),
+        fetch('/api/profile/scrobbling'),
       ]);
       if (pr.ok) profile = await pr.json();
       if (ar.ok) account = await ar.json();
+      if (es.ok) emailStatus = await es.json();
+      if (cr.ok) config = await cr.json();
+      if (sr.ok) scrobbling = await sr.json();
     } catch (_) { /* fall through */ }
 
     if (!profile) {
@@ -4686,7 +4692,13 @@
         </div>
 
         <div class="identity-block">
-          <div class="avatar-big">${initials}</div>
+          <button class="avatar-big" data-avatar-upload type="button" aria-label="upload avatar">
+            ${profile.avatar_cover_id
+              ? `<img src="/api/covers/${escapeProfileHtml(profile.avatar_cover_id)}" alt="">`
+              : `<span>${initials}</span>`}
+            <span class="edit-pen">${PROFILE_ICONS.edit}</span>
+          </button>
+          <input type="file" id="avatarFile" accept="image/*" hidden>
           <div>
             <h2 class="identity-name">${display ? escapeProfileHtml(display) : '<span style="color:var(--color-text-dim);">Set your name</span>'}</h2>
             ${(username || inviteTail) ? `
@@ -4704,12 +4716,37 @@
 
         <div class="profile-group-label">Account</div>
         <div class="form-group">
-          <div class="form-row">
-            <span class="form-label">Email</span>
-            <span class="form-actions">
-              <span class="form-value muted">${escapeProfileHtml((account && account.email) || 'not set')}</span>
-            </span>
-          </div>
+          ${(() => {
+            const email = (emailStatus && emailStatus.email) || (account && account.email) || '';
+            if (!email) {
+              return `
+                <div class="form-row">
+                  <span class="form-label">Email</span>
+                  <span class="form-actions">
+                    <span class="form-value muted">not set</span>
+                  </span>
+                </div>`;
+            }
+            if (emailStatus && emailStatus.verified) {
+              return `
+                <div class="form-row">
+                  <span class="form-label">Email</span>
+                  <span class="form-actions">
+                    <span class="form-value">${escapeProfileHtml(email)}</span>
+                    <span class="verified">${PROFILE_ICONS.check}verified</span>
+                  </span>
+                </div>`;
+            }
+            return `
+              <div class="form-row is-clickable" data-action="verify-email">
+                <span class="form-label">Email</span>
+                <span class="form-actions">
+                  <span class="form-value">${escapeProfileHtml(email)}</span>
+                  <span class="form-value action">Verify</span>
+                  <span class="link-chev">${PROFILE_ICONS.chev}</span>
+                </span>
+              </div>`;
+          })()}
           <div class="form-row is-clickable" data-action="change-password">
             <span class="form-label">Password</span>
             <span class="form-actions">
@@ -4717,17 +4754,37 @@
               <span class="link-chev">${PROFILE_ICONS.chev}</span>
             </span>
           </div>
-          <div class="form-row is-clickable" data-action="lastfm">
-            <span class="form-label">Last.fm</span>
-            <span class="form-actions">
-              <span class="form-value muted">Not connected</span>
-              <span class="link-chev">${PROFILE_ICONS.chev}</span>
-            </span>
-          </div>
-          <div class="form-row">
-            <span class="form-label">Scrobbling</span>
-            <button class="toggle disabled" disabled><span class="knob"></span></button>
-          </div>
+          ${(() => {
+            const lfmUser = (config && config.lastfm_username) || '';
+            const lfmOn   = !!(config && config.lastfm_authorized);
+            const scrobOn = !!(scrobbling && scrobbling.enabled);
+            if (lfmOn) {
+              return `
+                <div class="form-row">
+                  <span class="form-label">Last.fm</span>
+                  <span class="form-actions">
+                    <span class="form-value">${escapeProfileHtml(lfmUser || 'connected')}</span>
+                    <span class="verified">${PROFILE_ICONS.check}connected</span>
+                  </span>
+                </div>
+                <div class="form-row">
+                  <span class="form-label">Scrobbling</span>
+                  <button class="toggle ${scrobOn ? 'on' : ''}" data-action="scrobble-toggle"><span class="knob"></span></button>
+                </div>`;
+            }
+            return `
+              <div class="form-row is-clickable" data-action="lastfm">
+                <span class="form-label">Last.fm</span>
+                <span class="form-actions">
+                  <span class="form-value muted">Not connected</span>
+                  <span class="link-chev">${PROFILE_ICONS.chev}</span>
+                </span>
+              </div>
+              <div class="form-row">
+                <span class="form-label">Scrobbling</span>
+                <button class="toggle disabled" disabled><span class="knob"></span></button>
+              </div>`;
+          })()}
         </div>
 
         <div class="profile-section-head">
@@ -4767,6 +4824,134 @@
     });
     root.querySelector('[data-add-gear]').addEventListener('click', () => addGearSheet.open());
     root.querySelector('[data-edit-toggle]').addEventListener('click', () => openInlineProfileEditor(profile));
+
+    const verifyRow = root.querySelector('[data-action="verify-email"]');
+    if (verifyRow) verifyRow.addEventListener('click', () => openEmailVerifyFlow());
+
+    const scrobBtn = root.querySelector('[data-action="scrobble-toggle"]');
+    if (scrobBtn) {
+      scrobBtn.addEventListener('click', async () => {
+        const next = !scrobBtn.classList.contains('on');
+        scrobBtn.classList.toggle('on', next); // optimistic
+        try {
+          const r = await fetch('/api/profile/scrobbling', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: next }),
+          });
+          if (!r.ok) scrobBtn.classList.toggle('on', !next); // rollback
+        } catch (_) {
+          scrobBtn.classList.toggle('on', !next);
+        }
+      });
+    }
+
+    const fileInput = root.querySelector('#avatarFile');
+    root.querySelector('[data-avatar-upload]').addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      try {
+        const ab = await file.arrayBuffer();
+        const r = await fetch('/api/profile/avatar', {
+          method: 'POST',
+          headers: { 'Content-Type': file.type || 'application/octet-stream' },
+          body: ab,
+        });
+        if (r.ok) render();
+        else console.error('avatar upload failed', r.status, await r.text());
+      } catch (err) {
+        console.error('avatar upload error', err);
+      }
+      fileInput.value = '';
+    });
+  }
+
+  /* Email verification — two-step Worker-mediated flow.
+     POST /api/p2p/email/send-code sends a 6-char code to the
+     account's email; POST /api/p2p/email/verify-code redeems it
+     and registers the email on the Cloudflare Worker so future
+     invites can claim the ✅ Verified badge. */
+  async function openEmailVerifyFlow() {
+    let sentTo = '';
+    try {
+      const r = await fetch('/api/p2p/email/send-code', { method: 'POST' });
+      if (!r.ok) {
+        const txt = await r.text();
+        alert('Could not send verification code: ' + txt);
+        return;
+      }
+      const data = await r.json();
+      sentTo = data.email || '';
+    } catch (err) {
+      alert('Could not send verification code: ' + err);
+      return;
+    }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Verify email</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(13*var(--px));line-height:1.5;">
+            We sent a 6-character code to <b style="color:var(--color-text);">${escapeProfileHtml(sentTo)}</b>. Enter it below to confirm the address.
+          </p>
+          <input class="add-gear-input" id="verifyCode" placeholder="ABC123" maxlength="6"
+                 style="text-transform:uppercase;letter-spacing:0.2em;font-family:var(--font-mono);text-align:center;">
+          <button class="profile-btn primary" data-confirm>Confirm</button>
+          <div id="verifyMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    const codeInput = overlay.querySelector('#verifyCode');
+    const msg = overlay.querySelector('#verifyMsg');
+    setTimeout(() => codeInput.focus(), 100);
+
+    const submit = async () => {
+      const code = codeInput.value.trim().toUpperCase();
+      if (code.length !== 6) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = 'Code must be 6 characters.';
+        return;
+      }
+      msg.style.color = 'var(--color-text-muted)';
+      msg.textContent = 'Verifying…';
+      try {
+        const r = await fetch('/api/p2p/email/verify-code', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code }),
+        });
+        if (!r.ok) {
+          msg.style.color = 'var(--color-negative)';
+          msg.textContent = await r.text();
+          return;
+        }
+        const data = await r.json();
+        if (data.verified) {
+          msg.style.color = 'var(--color-positive)';
+          msg.textContent = 'Verified.';
+          setTimeout(() => { close(); render(); }, 600);
+        } else {
+          msg.style.color = 'var(--color-negative)';
+          msg.textContent = data.error || 'Invalid code.';
+        }
+      } catch (err) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = String(err);
+      }
+    };
+    overlay.querySelector('[data-confirm]').addEventListener('click', submit);
+    codeInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
   }
 
   function openInlineProfileEditor(profile) {
@@ -4781,11 +4966,11 @@
         </div>
         <div class="add-gear-row">
           <input class="add-gear-input" id="editName" placeholder="Display name" maxlength="128" value="${escapeProfileHtml(profile.display_name || '')}">
-          <input class="add-gear-input" id="editCity" placeholder="City" maxlength="128" value="${escapeProfileHtml(profile.city || '')}">
           <select class="add-gear-input" id="editCountry">
             <option value="">Country (none)</option>
             ${COUNTRY_OPTIONS.map(c => `<option value="${c.code}" ${profile.country === c.code ? 'selected' : ''}>${escapeProfileHtml(c.name)} (${c.code})</option>`).join('')}
           </select>
+          <input class="add-gear-input" id="editCity" placeholder="City" maxlength="128" value="${escapeProfileHtml(profile.city || '')}">
           <textarea class="add-gear-input" id="editBio" placeholder="A short bio" rows="3" maxlength="2000" style="height:auto;padding:calc(10*var(--px))calc(14*var(--px));resize:vertical;">${escapeProfileHtml(profile.bio || '')}</textarea>
           <button class="profile-btn primary" data-save>Save</button>
         </div>
@@ -5225,7 +5410,11 @@
         </div>
 
         <div class="identity-block">
-          <div class="avatar-big">${initials}</div>
+          <div class="avatar-big">
+            ${profile.avatar_cover_id
+              ? `<img src="/api/covers/${escapeProfileHtml(profile.avatar_cover_id)}" alt="">`
+              : initials}
+          </div>
           <div>
             <h2 class="identity-name">${escapeProfileHtml(display)}</h2>
             ${(handle || inviteTail) ? `

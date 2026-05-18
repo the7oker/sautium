@@ -11,9 +11,12 @@ this router just stitches them together for the UI.
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
+from covers import ingest_cover
+from database import get_db_context
 from db_pool import db_execute, db_query, db_query_one
 from uuid_utils import gear_brand_uuid, gear_model_uuid
 
@@ -188,6 +191,103 @@ def update_profile(req: ProfileUpdate) -> Dict[str, Any]:
             params,
         )
     return _load_profile_row()
+
+
+# ============================================================
+# Avatar upload
+# ============================================================
+
+# Image upload ceiling. WebP re-encode shrinks most photos to under
+# 100 KB, but we accept raw bytes up to 10 MB so phone-camera shots
+# don't fail before the encoder gets a chance.
+_AVATAR_MAX_BYTES = 10 * 1024 * 1024
+
+
+@router.post("/avatar")
+async def upload_avatar(request: Request) -> Dict[str, Any]:
+    # Raw-body upload (Content-Type: image/*) rather than multipart so
+    # auth.js can hash the body byte-for-byte; the HMAC signer in
+    # auth.js rejects FormData explicitly because the multipart
+    # boundary string is generated only after fetch starts and the
+    # pre-fetch hash would therefore mismatch.
+    data = await request.body()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty file")
+    if len(data) > _AVATAR_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="image too large (max 10 MB)")
+
+    # Reuse the canonical cover-ingest pipeline so the avatar gets
+    # the same BLAKE2 dedup + WebP encoding + max-1024 resize all
+    # album / artist covers go through.
+    with get_db_context() as db:
+        cover_id = ingest_cover(
+            db=db,
+            data=data,
+            # `external` is the catch-all for non-embedded sources in
+            # the covers table CHECK constraint (matches album-cover
+            # files on disk and Last.fm artist photos).
+            source_type="external",
+            source_path="user_profile:avatar",
+        )
+        if cover_id is None:
+            db.rollback()
+            raise HTTPException(status_code=500, detail="failed to encode image")
+        db.execute(
+            text("UPDATE user_profile SET avatar_cover_id = :id WHERE id = 1"),
+            {"id": str(cover_id)},
+        )
+        db.commit()
+    return {"avatar_cover_id": str(cover_id)}
+
+
+@router.delete("/avatar")
+def delete_avatar() -> Dict[str, Any]:
+    db_execute("UPDATE user_profile SET avatar_cover_id = NULL WHERE id = 1")
+    return {"ok": True}
+
+
+# ============================================================
+# Scrobbling toggle (preference, persisted in user_settings)
+# ============================================================
+
+# Persisted independently of `lastfm_session_key` so the user can keep
+# their Last.fm OAuth connected for enrichment / bio fetches but pause
+# scrobbling without re-authorising later. Defaults to True so existing
+# connected users keep their previous behaviour.
+_SCROBBLING_KEY = "lastfm.scrobbling_enabled"
+
+
+def _read_scrobbling() -> bool:
+    row = db_query_one(
+        "SELECT value FROM user_settings WHERE key = %(k)s",
+        {"k": _SCROBBLING_KEY},
+    )
+    if row is None or row.get("value") is None:
+        return True
+    return bool(row["value"])
+
+
+class ScrobblingUpdate(BaseModel):
+    enabled: bool
+
+
+@router.get("/scrobbling")
+def get_scrobbling() -> Dict[str, Any]:
+    return {"enabled": _read_scrobbling()}
+
+
+@router.put("/scrobbling")
+def set_scrobbling(req: ScrobblingUpdate) -> Dict[str, Any]:
+    import json
+    db_execute(
+        """
+        INSERT INTO user_settings (key, value) VALUES (%s, %s::jsonb)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
+                                        updated_at = CURRENT_TIMESTAMP
+        """,
+        (_SCROBBLING_KEY, json.dumps(req.enabled)),
+    )
+    return {"enabled": req.enabled}
 
 
 # ============================================================
