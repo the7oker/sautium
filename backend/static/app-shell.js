@@ -4557,6 +4557,7 @@
     { id: 'dac',        label: 'DAC' },
     { id: 'amp',        label: 'Amp' },
     { id: 'player',     label: 'Player' },
+    { id: 'streamer',   label: 'Streamer' },
     { id: 'power',      label: 'Power' },
     { id: 'cable',      label: 'Cable' },
   ];
@@ -4614,19 +4615,86 @@
     return '<span class="research-pending">Awaiting research</span>';
   }
 
-  async function renderProfile(root) {
-    let profile = null, account = null, emailStatus = null, config = null, scrobbling = null;
+  function emailRowHTML(account, emailStatus) {
+    const email = (emailStatus && emailStatus.email) || (account && account.email) || '';
+    if (!email) {
+      return `
+        <div class="form-row" data-row="email">
+          <span class="form-label">Email</span>
+          <span class="form-actions">
+            <span class="form-value muted">not set</span>
+          </span>
+        </div>`;
+    }
+    if (emailStatus === null) {
+      return `
+        <div class="form-row" data-row="email">
+          <span class="form-label">Email</span>
+          <span class="form-actions">
+            <span class="form-value">${escapeProfileHtml(email)}</span>
+            <span class="form-value muted">checking…</span>
+          </span>
+        </div>`;
+    }
+    if (emailStatus.verified) {
+      return `
+        <div class="form-row" data-row="email">
+          <span class="form-label">Email</span>
+          <span class="form-actions">
+            <span class="form-value">${escapeProfileHtml(email)}</span>
+            <span class="verified">${PROFILE_ICONS.check}verified</span>
+          </span>
+        </div>`;
+    }
+    return `
+      <div class="form-row is-clickable" data-action="verify-email" data-row="email">
+        <span class="form-label">Email</span>
+        <span class="form-actions">
+          <span class="form-value">${escapeProfileHtml(email)}</span>
+          <span class="form-value action">Verify</span>
+          <span class="link-chev">${PROFILE_ICONS.chev}</span>
+        </span>
+      </div>`;
+  }
+
+  async function _refreshEmailRow(root, account) {
+    // Background fetch — 8s client timeout shields the UI even if the
+    // backend cache misses and the Worker is cold-starting.
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 8000);
+    let data = null;
     try {
-      const [pr, ar, es, cr, sr] = await Promise.all([
+      const r = await fetch('/api/p2p/email/status', { signal: ctrl.signal });
+      if (r.ok) data = await r.json();
+    } catch (_) {}
+    clearTimeout(t);
+
+    const old = root.querySelector('[data-row="email"]');
+    if (!old) return;
+    const wrap = document.createElement('template');
+    wrap.innerHTML = emailRowHTML(account, data).trim();
+    const replacement = wrap.content.firstElementChild;
+    old.replaceWith(replacement);
+    const verifyRow = root.querySelector('[data-action="verify-email"]');
+    if (verifyRow) verifyRow.addEventListener('click', () => openEmailVerifyFlow());
+  }
+
+  async function renderProfile(root) {
+    let profile = null, account = null, config = null, scrobbling = null;
+    // emailStatus stays null at first paint — fetched in background
+    // after render so a slow Worker can't hang the page. The verify
+    // status seldom changes, so checking-in-the-background is the
+    // honest pattern here.
+    const emailStatus = null;
+    try {
+      const [pr, ar, cr, sr] = await Promise.all([
         fetch('/api/profile'),
         fetch('/api/p2p/account'),
-        fetch('/api/p2p/email/status'),
         fetch('/config'),
         fetch('/api/profile/scrobbling'),
       ]);
       if (pr.ok) profile = await pr.json();
       if (ar.ok) account = await ar.json();
-      if (es.ok) emailStatus = await es.json();
       if (cr.ok) config = await cr.json();
       if (sr.ok) scrobbling = await sr.json();
     } catch (_) { /* fall through */ }
@@ -4716,37 +4784,7 @@
 
         <div class="profile-group-label">Account</div>
         <div class="form-group">
-          ${(() => {
-            const email = (emailStatus && emailStatus.email) || (account && account.email) || '';
-            if (!email) {
-              return `
-                <div class="form-row">
-                  <span class="form-label">Email</span>
-                  <span class="form-actions">
-                    <span class="form-value muted">not set</span>
-                  </span>
-                </div>`;
-            }
-            if (emailStatus && emailStatus.verified) {
-              return `
-                <div class="form-row">
-                  <span class="form-label">Email</span>
-                  <span class="form-actions">
-                    <span class="form-value">${escapeProfileHtml(email)}</span>
-                    <span class="verified">${PROFILE_ICONS.check}verified</span>
-                  </span>
-                </div>`;
-            }
-            return `
-              <div class="form-row is-clickable" data-action="verify-email">
-                <span class="form-label">Email</span>
-                <span class="form-actions">
-                  <span class="form-value">${escapeProfileHtml(email)}</span>
-                  <span class="form-value action">Verify</span>
-                  <span class="link-chev">${PROFILE_ICONS.chev}</span>
-                </span>
-              </div>`;
-          })()}
+          ${emailRowHTML(account, emailStatus)}
           <div class="form-row is-clickable" data-action="change-password">
             <span class="form-label">Password</span>
             <span class="form-actions">
@@ -4825,8 +4863,11 @@
     root.querySelector('[data-add-gear]').addEventListener('click', () => addGearSheet.open());
     root.querySelector('[data-edit-toggle]').addEventListener('click', () => openInlineProfileEditor(profile));
 
-    const verifyRow = root.querySelector('[data-action="verify-email"]');
-    if (verifyRow) verifyRow.addEventListener('click', () => openEmailVerifyFlow());
+    // No verify-email handler attached here — the email row starts in
+    // "checking…" state with no clickable affordance, _refreshEmailRow
+    // re-renders it (and wires the click handler if needed) when the
+    // status fetch returns.
+    _refreshEmailRow(root, account);
 
     const scrobBtn = root.querySelector('[data-action="scrobble-toggle"]');
     if (scrobBtn) {

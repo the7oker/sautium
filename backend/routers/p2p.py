@@ -12,9 +12,10 @@ import select
 import ssl
 import string
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -545,14 +546,32 @@ def _generate_verify_code(length: int = 6) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
+_email_status_cache: Dict[str, Tuple[bool, float]] = {}
+_EMAIL_STATUS_TTL_SEC = 300  # 5 min — verified state changes rarely
+_EMAIL_STATUS_NEGATIVE_TTL_SEC = 30  # shorter for unverified so a fresh verify reflects faster
+
+
 @router.get("/email/status")
 async def email_status() -> Dict[str, Any]:
-    """Check if the configured P2P email is verified on the Worker."""
+    """Check if the configured P2P email is verified on the Worker.
+
+    Cached in-memory with a per-state TTL so Profile re-renders don't
+    hit the Worker every time (the underlying call is up to 15s on a
+    cold start). The verify-code endpoint primes the cache on success
+    so the UI flips to "verified" instantly after a successful flow."""
     identity = _get_identity()
     if not identity or not identity.get("email"):
         return {"email": "", "verified": False}
 
     email = identity["email"]
+    now = time.time()
+    cached = _email_status_cache.get(email)
+    if cached is not None:
+        verified, fetched_at = cached
+        ttl = _EMAIL_STATUS_TTL_SEC if verified else _EMAIL_STATUS_NEGATIVE_TTL_SEC
+        if now - fetched_at < ttl:
+            return {"email": email, "verified": verified}
+
     invite_code = identity["invite_code"]
     public_key_hex = identity["public_key_hex"]
 
@@ -569,6 +588,7 @@ async def email_status() -> Dict[str, Any]:
     })
 
     verified = bool(result and result.get("verified"))
+    _email_status_cache[email] = (verified, now)
     return {"email": email, "verified": verified}
 
 
@@ -631,6 +651,9 @@ async def email_verify_code(req: VerifyCodeRequest) -> Dict[str, Any]:
         raise HTTPException(502, "Failed to register email on verification server")
 
     _pending_email_verify.clear()
+    # Prime the status cache so the Profile screen flips to "verified"
+    # without another Worker round-trip.
+    _email_status_cache[email] = (True, time.time())
     return {"verified": True, "email": email}
 
 

@@ -896,7 +896,7 @@ CREATE TABLE IF NOT EXISTS gear_models (
     created_at             TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at             TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_gear_category CHECK (category IN
-        ('headphones', 'iems', 'dac', 'amp', 'player', 'power', 'cable')),
+        ('headphones', 'iems', 'dac', 'amp', 'player', 'streamer', 'power', 'cable')),
     UNIQUE (brand_id, model, category)
 );
 
