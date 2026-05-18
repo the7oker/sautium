@@ -845,10 +845,17 @@ CREATE TABLE IF NOT EXISTS user_profile (
     avatar_cover_id UUID REFERENCES covers(id) ON DELETE SET NULL,
     public_gear     BOOLEAN NOT NULL DEFAULT FALSE,
     open_to_meet    BOOLEAN NOT NULL DEFAULT FALSE,
+    -- True once the user's *current* identity email has been verified
+    -- on the Worker. Reset to FALSE whenever the email changes or the
+    -- password changes (a new password derives a new Ed25519 key and
+    -- therefore a new invite_code that the Worker has no record of).
+    -- See feedback memory on the reset-trigger rules.
+    email_verified  BOOLEAN NOT NULL DEFAULT FALSE,
     updated_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 INSERT INTO user_profile (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+ALTER TABLE user_profile ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Peer profile fields, populated from the sync handshake. Avatar is
 -- referenced into the covers table — same blob-cache pattern as

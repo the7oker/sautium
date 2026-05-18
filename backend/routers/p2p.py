@@ -12,10 +12,9 @@ import select
 import ssl
 import string
 import threading
-import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -26,7 +25,7 @@ from pydantic import BaseModel, Field
 import psycopg2
 import psycopg2.extensions
 from config import settings
-from db_pool import db_query as _db_query, db_execute as _db_execute, get_conn as _get_conn
+from db_pool import db_query as _db_query, db_query_one as _db_query_one, db_execute as _db_execute, get_conn as _get_conn
 
 logger = logging.getLogger(__name__)
 
@@ -546,31 +545,23 @@ def _generate_verify_code(length: int = 6) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
-_email_status_cache: Dict[str, Tuple[bool, float]] = {}
-_EMAIL_STATUS_TTL_SEC = 300  # 5 min — verified state changes rarely
-_EMAIL_STATUS_NEGATIVE_TTL_SEC = 30  # shorter for unverified so a fresh verify reflects faster
-
-
 @router.get("/email/status")
 async def email_status() -> Dict[str, Any]:
     """Check if the configured P2P email is verified on the Worker.
 
-    Cached in-memory with a per-state TTL so Profile re-renders don't
-    hit the Worker every time (the underlying call is up to 15s on a
-    cold start). The verify-code endpoint primes the cache on success
-    so the UI flips to "verified" instantly after a successful flow."""
+    Persistent state: user_profile.email_verified (boolean). When
+    True, the Profile screen renders "verified" without hitting the
+    Worker. Reset to False on email change or password change — both
+    flows must clear the flag because the new state invalidates the
+    Worker's stored mapping (invite_code derives from the password)."""
     identity = _get_identity()
     if not identity or not identity.get("email"):
         return {"email": "", "verified": False}
 
     email = identity["email"]
-    now = time.time()
-    cached = _email_status_cache.get(email)
-    if cached is not None:
-        verified, fetched_at = cached
-        ttl = _EMAIL_STATUS_TTL_SEC if verified else _EMAIL_STATUS_NEGATIVE_TTL_SEC
-        if now - fetched_at < ttl:
-            return {"email": email, "verified": verified}
+    row = _db_query_one("SELECT email_verified FROM user_profile WHERE id = 1")
+    if row and row.get("email_verified"):
+        return {"email": email, "verified": True}
 
     invite_code = identity["invite_code"]
     public_key_hex = identity["public_key_hex"]
@@ -588,7 +579,10 @@ async def email_status() -> Dict[str, Any]:
     })
 
     verified = bool(result and result.get("verified"))
-    _email_status_cache[email] = (verified, now)
+    if verified:
+        _db_execute(
+            "UPDATE user_profile SET email_verified = TRUE WHERE id = 1"
+        )
     return {"email": email, "verified": verified}
 
 
@@ -651,9 +645,10 @@ async def email_verify_code(req: VerifyCodeRequest) -> Dict[str, Any]:
         raise HTTPException(502, "Failed to register email on verification server")
 
     _pending_email_verify.clear()
-    # Prime the status cache so the Profile screen flips to "verified"
-    # without another Worker round-trip.
-    _email_status_cache[email] = (True, time.time())
+    # Persist so future /email/status checks return verified without a
+    # Worker round-trip. Email-change and password-change flows (when
+    # they land) must clear this flag.
+    _db_execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
     return {"verified": True, "email": email}
 
 

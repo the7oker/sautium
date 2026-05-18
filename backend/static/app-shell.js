@@ -4658,16 +4658,15 @@
   }
 
   async function _refreshEmailRow(root, account) {
-    // Background fetch — 8s client timeout shields the UI even if the
-    // backend cache misses and the Worker is cold-starting.
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 8000);
+    // Background fetch — the backend itself has a 15s timeout on the
+    // Worker call (httpx Timeout(15.0)) so we don't add a redundant
+    // client-side abort that would mark the request "canceled" while
+    // the backend is still legitimately waiting on a cold-start Worker.
     let data = null;
     try {
-      const r = await fetch('/api/p2p/email/status', { signal: ctrl.signal });
+      const r = await fetch('/api/p2p/email/status');
       if (r.ok) data = await r.json();
     } catch (_) {}
-    clearTimeout(t);
 
     const old = root.querySelector('[data-row="email"]');
     if (!old) return;
