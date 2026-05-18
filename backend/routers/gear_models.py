@@ -24,6 +24,29 @@ from db_pool import db_query, db_query_one
 router = APIRouter(prefix="/api/gear-models", tags=["gear_models"])
 
 
+@router.get("/brands/search")
+def search_gear_brands(
+    q: str = Query(..., min_length=1, max_length=200),
+    limit: int = Query(default=10, ge=1, le=20),
+) -> List[Dict[str, Any]]:
+    """Autocomplete against gear_brands.name. Lets the add-gear UI
+    collapse user-typed brand variants ("ambient", "Ambient Acoustics")
+    to a canonical row instead of forking off duplicates."""
+    needle = f"%{q.strip().lower()}%"
+    return db_query(
+        """
+        SELECT id::text AS id, name
+        FROM gear_brands
+        WHERE LOWER(name) LIKE %(q)s
+        ORDER BY
+            CASE WHEN LOWER(name) LIKE %(prefix)s THEN 0 ELSE 1 END,
+            name
+        LIMIT %(limit)s
+        """,
+        {"q": needle, "prefix": f"{q.strip().lower()}%", "limit": limit},
+    )
+
+
 @router.get("/search")
 def search_gear_models(
     q: str = Query(..., min_length=1, max_length=200),

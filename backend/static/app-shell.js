@@ -5030,6 +5030,17 @@
     });
   }
 
+  /* Add-gear sheet.
+     Pure two-field form (Brand + Model) with the category strip
+     on top. No catalog-of-models search — the user is adding their
+     own gear, not browsing global inventory, and stale model
+     suggestions ("AM5LE" while typing "AM20") are noise. Only
+     gear_brands has live autocomplete because that's where
+     duplicates actually collide (Holo vs Holo Audio, Audeze vs
+     Audeze, Inc.). When a brand suggestion is tapped, the diff
+     between what the user typed and the suggestion is stripped
+     from the start of the model field — "Holo" → "Holo Audio"
+     trims a leading "Audio " from "Audio Spring 3 KTE". */
   const addGearSheet = {
     el: null,
     isOpen: false,
@@ -5050,10 +5061,15 @@
               <button class="filter-chip ${c.id === 'headphones' ? 'active' : ''}" data-cat="${c.id}">${c.label}</button>
             `).join('')}
           </div>
-          <div class="add-gear-row">
-            <input class="add-gear-input" id="agSearch" placeholder="Brand · model — start typing">
+          <div class="add-gear-row" style="overflow:visible;">
+            <div style="position:relative;">
+              <input class="add-gear-input" id="agBrand" placeholder="Brand" autocomplete="off">
+              <div id="agBrandSuggest" style="position:absolute;top:calc(48*var(--px));left:0;right:0;background:var(--color-surface);border:1px solid var(--color-divider);border-radius:var(--radius-md);box-shadow:var(--shadow-2);z-index:5;max-height:calc(180*var(--px));overflow-y:auto;display:none;"></div>
+            </div>
+            <input class="add-gear-input" id="agModel" placeholder="Model">
+            <div id="agMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+            <button class="profile-btn primary" data-add>Add</button>
           </div>
-          <div class="add-gear-results" id="agResults"></div>
         </div>
       `;
       document.body.appendChild(overlay);
@@ -5064,109 +5080,122 @@
         btn.addEventListener('click', () => {
           this.category = btn.dataset.cat;
           overlay.querySelectorAll('.filter-chip').forEach(b => b.classList.toggle('active', b === btn));
-          this.refreshResults();
         });
       });
-      const input = overlay.querySelector('#agSearch');
+
+      const brandInput = overlay.querySelector('#agBrand');
+      const modelInput = overlay.querySelector('#agModel');
+      const suggest = overlay.querySelector('#agBrandSuggest');
       let timer = null;
-      input.addEventListener('input', () => {
-        clearTimeout(timer);
-        timer = setTimeout(() => this.refreshResults(), 150);
-      });
-      input.addEventListener('keydown', e => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          this.addFromInput();
+
+      const refreshBrandSuggest = async () => {
+        const q = brandInput.value.trim();
+        if (!q) { suggest.style.display = 'none'; return; }
+        try {
+          const r = await fetch('/api/gear-models/brands/search?q=' + encodeURIComponent(q) + '&limit=8');
+          if (!r.ok) throw new Error();
+          const rows = await r.json();
+          if (rows.length === 0 ||
+              (rows.length === 1 && rows[0].name.toLowerCase() === q.toLowerCase())) {
+            suggest.style.display = 'none';
+            return;
+          }
+          suggest.innerHTML = rows.map(r => `
+            <div data-brand-name="${escapeProfileHtml(r.name)}"
+                 style="padding:calc(10*var(--px)) calc(14*var(--px));font-size:calc(13.5*var(--px));color:var(--color-text);cursor:pointer;border-bottom:1px solid var(--color-divider);">
+              ${escapeProfileHtml(r.name)}
+            </div>
+          `).join('');
+          suggest.style.display = 'block';
+          suggest.querySelectorAll('[data-brand-name]').forEach(el => {
+            el.addEventListener('click', () => {
+              const newBrand = el.dataset.brandName;
+              const oldBrand = brandInput.value.trim();
+              brandInput.value = newBrand;
+              // Smart strip: if the new (canonical) brand extends the
+              // user's typed brand by some trailing word(s), and the
+              // model field starts with those same word(s), drop them
+              // — they originally belonged to the brand. "Holo" →
+              // "Holo Audio" with model "Audio Spring 3 KTE" becomes
+              // model "Spring 3 KTE".
+              if (oldBrand && newBrand.toLowerCase().startsWith(oldBrand.toLowerCase())) {
+                const extra = newBrand.slice(oldBrand.length).trim();
+                if (extra) {
+                  const escaped = extra.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                  modelInput.value = modelInput.value.replace(
+                    new RegExp('^\\s*' + escaped + '\\s*', 'i'), '',
+                  );
+                }
+              }
+              suggest.style.display = 'none';
+              modelInput.focus();
+            });
+          });
+        } catch (_) {
+          suggest.style.display = 'none';
         }
+      };
+      brandInput.addEventListener('input', () => {
+        clearTimeout(timer);
+        timer = setTimeout(refreshBrandSuggest, 120);
+      });
+      brandInput.addEventListener('blur', () => {
+        setTimeout(() => { suggest.style.display = 'none'; }, 150);
+      });
+      brandInput.addEventListener('focus', refreshBrandSuggest);
+
+      overlay.querySelector('[data-add]').addEventListener('click', () => this._submit());
+      modelInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); this._submit(); }
+      });
+      brandInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); modelInput.focus(); }
       });
     },
     open() {
       if (!this.el) this.init();
       this.el.hidden = false;
       this.isOpen = true;
-      this.el.querySelector('#agSearch').value = '';
-      this.refreshResults();
-      setTimeout(() => this.el.querySelector('#agSearch').focus(), 100);
+      this.el.querySelector('#agBrand').value = '';
+      this.el.querySelector('#agModel').value = '';
+      this.el.querySelector('#agMsg').textContent = '';
+      const suggest = this.el.querySelector('#agBrandSuggest');
+      if (suggest) suggest.style.display = 'none';
+      setTimeout(() => this.el.querySelector('#agBrand').focus(), 100);
     },
     close() {
       if (!this.el) return;
       this.el.hidden = true;
       this.isOpen = false;
     },
-    async refreshResults() {
-      const q = this.el.querySelector('#agSearch').value.trim();
-      const results = this.el.querySelector('#agResults');
-      if (!q) {
-        results.innerHTML = `
-          <div class="add-gear-empty">
-            Type a brand or model to search the catalog,<br>
-            or press <b style="color:var(--color-text);">Enter</b> to add a new model.
-            We'll fetch specs in the background.
-          </div>
-        `;
+    async _submit() {
+      const brand = this.el.querySelector('#agBrand').value.trim();
+      const model = this.el.querySelector('#agModel').value.trim();
+      const msg = this.el.querySelector('#agMsg');
+      if (!brand || !model) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = 'Brand and model are required.';
         return;
       }
-      try {
-        const r = await fetch('/api/gear-models/search?q=' + encodeURIComponent(q) + '&limit=10');
-        if (!r.ok) throw new Error();
-        const rows = await r.json();
-        const inCat = rows.filter(x => x.category === this.category);
-        const list = inCat.length ? inCat : rows;
-        if (list.length === 0) {
-          results.innerHTML = `
-            <div class="add-gear-empty">
-              Press <b style="color:var(--color-text);">Enter</b> to add
-              "<b style="color:var(--color-text);">${escapeProfileHtml(q)}</b>" as a new ${categoryLabel(this.category)} model.
-            </div>
-          `;
-          return;
-        }
-        results.innerHTML = list.map(row => `
-          <div class="add-gear-result" data-model-id="${row.id}" data-cat="${row.category}">
-            <div>
-              <div class="gear-line1">
-                <span class="gear-brand">${escapeProfileHtml(row.brand)}</span>
-                <span class="gear-model">${escapeProfileHtml(row.model)}</span>
-              </div>
-              <div class="gear-line2">
-                <span class="cat-tag">${categoryLabel(row.category)}</span>
-              </div>
-            </div>
-            <span class="gear-chev">${PROFILE_ICONS.chev}</span>
-          </div>
-        `).join('');
-        results.querySelectorAll('[data-model-id]').forEach(el => {
-          el.addEventListener('click', () => {
-            this.add({ model_id: el.dataset.modelId, category: el.dataset.cat });
-          });
-        });
-      } catch (_) {
-        results.innerHTML = '<div class="add-gear-empty">Search failed — try again.</div>';
-      }
-    },
-    addFromInput() {
-      const q = this.el.querySelector('#agSearch').value.trim();
-      if (!q) return;
-      // Best-effort split: "Sennheiser HD 800 S" → brand="Sennheiser",
-      // model="HD 800 S". Single token → brand=model=q (user can edit
-      // later). AI-paste flow (Phase 2) parses much better.
-      const parts = q.split(/\s+/);
-      const brand = parts.length >= 2 ? parts[0] : q;
-      const model = parts.length >= 2 ? parts.slice(1).join(' ') : q;
-      this.add({ brand, model, category: this.category });
-    },
-    async add(payload) {
-      payload.status = 'own';
+      msg.style.color = 'var(--color-text-muted)';
+      msg.textContent = 'Adding…';
       try {
         const r = await fetch('/api/profile/gear', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
+          body: JSON.stringify({ brand, model, category: this.category, status: 'own' }),
         });
-        if (!r.ok) throw new Error();
-      } catch (_) {}
-      this.close();
-      if (parseHash().startsWith('more/profile')) render();
+        if (!r.ok) {
+          msg.style.color = 'var(--color-negative)';
+          msg.textContent = await r.text();
+          return;
+        }
+        this.close();
+        if (parseHash().startsWith('more/profile')) render();
+      } catch (err) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = String(err);
+      }
     },
   };
 
@@ -5350,7 +5379,10 @@
           <div class="gear-sheet-head">
             <div class="gear-sheet-title-block">
               <div class="gear-sheet-brand">${escapeProfileHtml(g.brand)}</div>
-              <h2 class="gear-sheet-model">${escapeProfileHtml(g.model)}</h2>
+              <h2 class="gear-sheet-model">
+                <span>${escapeProfileHtml(g.model)}</span>
+                <button class="gear-sheet-rename" data-rename type="button" aria-label="edit brand and model">${PROFILE_ICONS.edit}</button>
+              </h2>
               <div class="gear-sheet-meta-row">
                 <span class="cat-tag">${categoryLabel(g.category)}</span>
                 ${statusBadgeHTML(g.status)}
@@ -5375,6 +5407,7 @@
       `;
 
       this.el.querySelector('[data-close]').addEventListener('click', () => this.close());
+      this.el.querySelector('[data-rename]').addEventListener('click', () => this.openRenameForm());
       this.el.querySelectorAll('[data-status]').forEach(btn => {
         btn.addEventListener('click', () => this.setStatus(btn.dataset.status));
       });
@@ -5390,6 +5423,105 @@
         this.close();
         if (typeof ai !== 'undefined' && ai.open) ai.open();
       });
+    },
+    openRenameForm() {
+      const g = this.current;
+      const overlay = document.createElement('div');
+      overlay.className = 'add-gear-overlay';
+      overlay.innerHTML = `
+        <div class="add-gear-sheet">
+          <div class="sheet-handle"></div>
+          <div class="add-gear-head">
+            <h2 class="add-gear-title">Edit brand &amp; model</h2>
+            <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+          </div>
+          <div class="add-gear-row">
+            <div style="position:relative;">
+              <input class="add-gear-input" id="renameBrand" placeholder="Brand" value="${escapeProfileHtml(g.brand || '')}" autocomplete="off">
+              <div id="renameBrandSuggest" style="position:absolute;top:calc(48*var(--px));left:0;right:0;background:var(--color-surface);border:1px solid var(--color-divider);border-radius:var(--radius-md);box-shadow:var(--shadow-2);z-index:5;max-height:calc(180*var(--px));overflow-y:auto;display:none;"></div>
+            </div>
+            <input class="add-gear-input" id="renameModel" placeholder="Model" value="${escapeProfileHtml(g.model || '')}">
+            <div id="renameMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+            <button class="profile-btn primary" data-save>Save</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      const close = () => overlay.remove();
+      overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+      overlay.querySelector('[data-cancel]').addEventListener('click', close);
+
+      const brandInput = overlay.querySelector('#renameBrand');
+      const modelInput = overlay.querySelector('#renameModel');
+      const suggest = overlay.querySelector('#renameBrandSuggest');
+      const msg = overlay.querySelector('#renameMsg');
+
+      let t = null;
+      const refresh = async () => {
+        const q = brandInput.value.trim();
+        if (!q) { suggest.style.display = 'none'; return; }
+        try {
+          const r = await fetch('/api/gear-models/brands/search?q=' + encodeURIComponent(q) + '&limit=8');
+          if (!r.ok) throw new Error();
+          const rows = await r.json();
+          if (rows.length === 0 || (rows.length === 1 && rows[0].name.toLowerCase() === q.toLowerCase())) {
+            suggest.style.display = 'none';
+            return;
+          }
+          suggest.innerHTML = rows.map(r => `
+            <div data-brand-name="${escapeProfileHtml(r.name)}"
+                 style="padding:calc(10*var(--px)) calc(14*var(--px));font-size:calc(13.5*var(--px));color:var(--color-text);cursor:pointer;border-bottom:1px solid var(--color-divider);">
+              ${escapeProfileHtml(r.name)}
+            </div>
+          `).join('');
+          suggest.style.display = 'block';
+          suggest.querySelectorAll('[data-brand-name]').forEach(el => {
+            el.addEventListener('click', () => {
+              brandInput.value = el.dataset.brandName;
+              suggest.style.display = 'none';
+              modelInput.focus();
+            });
+          });
+        } catch (_) {
+          suggest.style.display = 'none';
+        }
+      };
+      brandInput.addEventListener('input', () => { clearTimeout(t); t = setTimeout(refresh, 120); });
+      brandInput.addEventListener('blur', () => { setTimeout(() => { suggest.style.display = 'none'; }, 150); });
+      brandInput.addEventListener('focus', refresh);
+
+      const submit = async () => {
+        const b = brandInput.value.trim();
+        const m = modelInput.value.trim();
+        if (!b || !m) {
+          msg.style.color = 'var(--color-negative)';
+          msg.textContent = 'Brand and model are required.';
+          return;
+        }
+        msg.style.color = 'var(--color-text-muted)';
+        msg.textContent = 'Saving…';
+        try {
+          const r = await fetch('/api/profile/gear/' + g.id + '/model', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ brand: b, model: m }),
+          });
+          if (!r.ok) {
+            const txt = await r.text();
+            msg.style.color = 'var(--color-negative)';
+            msg.textContent = txt || 'Could not save.';
+            return;
+          }
+          close();
+          this.close();
+          if (parseHash().startsWith('more/profile')) render();
+        } catch (err) {
+          msg.style.color = 'var(--color-negative)';
+          msg.textContent = String(err);
+        }
+      };
+      overlay.querySelector('[data-save]').addEventListener('click', submit);
+      modelInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
     },
     async setStatus(status) {
       try {

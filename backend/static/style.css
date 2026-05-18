@@ -4190,7 +4190,23 @@ select.add-gear-input {
   letter-spacing: -0.02em;
   color: var(--color-text);
   line-height: 1.15;
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--px));
 }
+.gear-sheet-rename {
+  width: calc(28 * var(--px));
+  height: calc(28 * var(--px));
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--color-text-dim);
+  cursor: pointer;
+  padding: 0;
+}
+.gear-sheet-rename:hover { color: var(--color-amber); }
+.gear-sheet-rename svg { width: calc(14 * var(--px)); height: calc(14 * var(--px)); }
 .gear-sheet-meta-row {
   margin-top: calc(10 * var(--px));
   display: flex;

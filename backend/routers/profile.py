@@ -379,6 +379,100 @@ def update_gear(gear_id: str, req: GearUpdate) -> Dict[str, Any]:
     return {"ok": True}
 
 
+class GearReassignRequest(BaseModel):
+    brand: str = Field(..., max_length=200)
+    model: str = Field(..., max_length=300)
+
+
+@router.put("/gear/{gear_id}/model")
+def reassign_gear_model(gear_id: str, req: GearReassignRequest) -> Dict[str, Any]:
+    """Move a user_gear row to a different canonical (brand, model).
+
+    gear_models.id is UUID v5 from (brand_name, model, category), so
+    renaming brand and/or model means routing the user_gear row to a
+    different canonical row (which may need to be created). The
+    category is preserved — categories are a strict enum we don't
+    expose here.
+
+    After re-pointing we drop the source gear_models row and source
+    gear_brands row if they're now orphaned (no other user_gear or
+    gear_models referencing them). This keeps the catalog tight on a
+    single-user appliance; P2P peers will re-resolve naturally on
+    next sync."""
+    brand_name = (req.brand or "").strip()
+    model_name = (req.model or "").strip()
+    if not brand_name or not model_name:
+        raise HTTPException(status_code=400, detail="brand and model are required")
+
+    current = db_query_one(
+        """
+        SELECT ug.gear_model_id::text AS old_gm_id,
+               gm.category,
+               gm.brand_id::text AS old_brand_id
+        FROM user_gear ug
+        JOIN gear_models gm ON gm.id = ug.gear_model_id
+        WHERE ug.id = %(id)s::uuid
+        """,
+        {"id": gear_id},
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="gear not found")
+
+    new_brand_id = _resolve_brand_id(brand_name)
+    new_gm_id = str(gear_model_uuid(brand_name, model_name, current["category"]))
+
+    if new_gm_id == current["old_gm_id"]:
+        return {"ok": True, "gear_model_id": new_gm_id, "no_op": True}
+
+    db_execute(
+        """
+        INSERT INTO gear_models (id, brand_id, model, category, research_state)
+        VALUES (%(id)s::uuid, %(brand_id)s::uuid, %(model)s, %(category)s, 'queued')
+        ON CONFLICT (id) DO NOTHING
+        """,
+        {
+            "id": new_gm_id,
+            "brand_id": new_brand_id,
+            "model": model_name,
+            "category": current["category"],
+        },
+    )
+
+    # Re-point. If the user happens to already own the target model
+    # under a different user_gear row, UNIQUE(gear_model_id) on
+    # user_gear blocks the update; surface that as a 409 rather than
+    # a silent failure.
+    try:
+        db_execute(
+            "UPDATE user_gear SET gear_model_id = %(new)s::uuid WHERE id = %(ug)s::uuid",
+            {"new": new_gm_id, "ug": gear_id},
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=409,
+            detail=f"You already have this brand+model in your chain. ({e})",
+        )
+
+    db_execute(
+        """
+        DELETE FROM gear_models
+        WHERE id = %(old)s::uuid
+          AND NOT EXISTS (SELECT 1 FROM user_gear WHERE gear_model_id = %(old)s::uuid)
+        """,
+        {"old": current["old_gm_id"]},
+    )
+    db_execute(
+        """
+        DELETE FROM gear_brands
+        WHERE id = %(old_brand)s::uuid
+          AND NOT EXISTS (SELECT 1 FROM gear_models WHERE brand_id = %(old_brand)s::uuid)
+        """,
+        {"old_brand": current["old_brand_id"]},
+    )
+
+    return {"ok": True, "gear_model_id": new_gm_id}
+
+
 @router.delete("/gear/{gear_id}")
 def delete_gear(gear_id: str) -> Dict[str, Any]:
     row = db_execute(
