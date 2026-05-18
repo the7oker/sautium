@@ -4487,3 +4487,55 @@ select.add-gear-input {
   outline: none;
 }
 .notes-area.placeholder { color: var(--color-text-dim); font-style: italic; }
+
+/* =====================================================================
+ * Destructive-action confirm modal — replaces window.confirm()
+ * ===================================================================== */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(14, 10, 8, 0.65);
+  padding: calc(20 * var(--px));
+}
+.confirm-overlay[hidden] { display: none !important; }
+.confirm-sheet {
+  width: 100%;
+  max-width: calc(320 * var(--px));
+  background: var(--color-surface);
+  border-radius: var(--radius-lg);
+  padding: calc(22 * var(--px)) calc(20 * var(--px)) calc(18 * var(--px));
+  box-shadow: var(--shadow-2);
+  border: 1px solid var(--color-divider);
+}
+.confirm-title {
+  margin: 0 0 calc(8 * var(--px));
+  font-size: calc(17 * var(--px));
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+}
+.confirm-message {
+  margin: 0 0 calc(18 * var(--px));
+  font-size: calc(13.5 * var(--px));
+  line-height: 1.5;
+  color: var(--color-text-muted);
+  text-wrap: pretty;
+}
+.confirm-message b { color: var(--color-text); font-weight: 600; }
+.confirm-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: calc(10 * var(--px));
+}
+.profile-btn.destructive {
+  background: var(--color-negative);
+  color: var(--color-text);
+  border-color: var(--color-negative);
+}
+.profile-btn.destructive:hover {
+  background: color-mix(in srgb, var(--color-negative) 88%, white);
+}

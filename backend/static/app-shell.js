@@ -4867,6 +4867,37 @@
     });
   }
 
+  /* Destructive-action confirm dialog. Replaces window.confirm so
+     the prompt sits inside our visual language (warm dark sheet,
+     terracotta primary). Returns a Promise<boolean>. */
+  function confirmDestructive({ title, message, confirmText = 'Remove', cancelText = 'Cancel' }) {
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.className = 'confirm-overlay';
+      overlay.innerHTML = `
+        <div class="confirm-sheet" role="dialog" aria-modal="true">
+          <h2 class="confirm-title">${escapeProfileHtml(title)}</h2>
+          <p class="confirm-message">${message}</p>
+          <div class="confirm-actions">
+            <button class="profile-btn secondary" data-cancel>${escapeProfileHtml(cancelText)}</button>
+            <button class="profile-btn destructive" data-confirm>${escapeProfileHtml(confirmText)}</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      const close = (result) => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(result); };
+      const onKey = (e) => {
+        if (e.key === 'Escape') close(false);
+        if (e.key === 'Enter')  close(true);
+      };
+      document.addEventListener('keydown', onKey);
+      overlay.addEventListener('click', e => { if (e.target === overlay) close(false); });
+      overlay.querySelector('[data-cancel]').addEventListener('click', () => close(false));
+      overlay.querySelector('[data-confirm]').addEventListener('click', () => close(true));
+      setTimeout(() => overlay.querySelector('[data-confirm]').focus(), 50);
+    });
+  }
+
   /* Email verification — two-step Worker-mediated flow.
      POST /api/p2p/email/send-code sends a 6-char code to the
      account's email; POST /api/p2p/email/verify-code redeems it
@@ -5165,7 +5196,15 @@
           const r = await fetch('/api/gear-models/' + gear.gear_model_id);
           if (r.ok) {
             const detail = await r.json();
-            this.current = Object.assign({}, gear, detail);
+            // Merge canonical detail first, then re-apply user_gear
+            // fields — detail.id is gear_models.id (canonical), but
+            // status / notes / DELETE path key off user_gear.id.
+            this.current = Object.assign({}, detail, {
+              id:             gear.id,
+              gear_model_id:  gear.gear_model_id,
+              status:         gear.status,
+              notes:          gear.notes,
+            });
             this.render();
           }
         } catch (_) {}
@@ -5375,10 +5414,23 @@
       } catch (_) {}
     },
     async remove() {
-      if (!confirm('Remove this item from your audio chain?')) return;
+      const label = `${this.current.brand} ${this.current.model}`;
+      const ok = await confirmDestructive({
+        title: 'Remove from chain?',
+        message: `<b>${escapeProfileHtml(label)}</b> will be removed from your audio chain. The model stays in the shared catalog.`,
+        confirmText: 'Remove',
+      });
+      if (!ok) return;
       try {
-        await fetch('/api/profile/gear/' + this.current.id, { method: 'DELETE' });
-      } catch (_) {}
+        const r = await fetch('/api/profile/gear/' + this.current.id, { method: 'DELETE' });
+        if (!r.ok) {
+          console.error('delete gear failed', r.status, await r.text());
+          return;
+        }
+      } catch (err) {
+        console.error('delete gear error', err);
+        return;
+      }
       this.close();
       if (parseHash().startsWith('more/profile')) render();
     },
