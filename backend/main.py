@@ -1167,6 +1167,9 @@ app.include_router(profile_router)
 from routers.gear_models import router as gear_models_router
 app.include_router(gear_models_router)
 
+from routers.settings import router as settings_router
+app.include_router(settings_router)
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 

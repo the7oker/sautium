@@ -1,0 +1,373 @@
+"""
+Settings endpoints — single-roundtrip read of everything the Settings
+screen needs (library stats + scan state, AI provider/model/auth/usage,
+sync & P2P preferences, HQPlayer connection summary), plus PUT/POST
+endpoints to mutate the user-controlled bits.
+
+Preferences live in user_settings (JSONB K/V) so the values survive
+across backend restarts and are sync-able through P2P in the future.
+The scan/enrich actions are thin wrappers around the existing top-
+level /scan/* and /enrich/* endpoints so the Settings UI does not
+need to know about them directly.
+"""
+
+import json
+import logging
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy import text
+
+from config import settings as app_settings
+from database import get_db_context
+from db_pool import db_execute, db_query, db_query_one
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+
+# ============================================================
+# Preference keys + defaults (single source of truth)
+# ============================================================
+
+# user_settings JSONB stores one row per key, value can be any JSON.
+# Defaults are returned to the UI when the row is missing so first-
+# run users get a sensible Settings screen with no prior writes.
+_DEFAULTS: Dict[str, Any] = {
+    "sync.p2p_enabled":          True,
+    "sync.auto_interval_min":    30,
+    "sync.announce_limit":       None,   # null = announce all
+    "sync.announce_rotation_min": 30,
+    "enrichment.background_enabled": True,
+    "ai.provider":               "claude",
+    "ai.model":                  "claude-opus-4-7",
+    "ai.api_key":                None,
+    # last sync metadata — written by the sync runner when a cycle
+    # completes; surfaced in the "Last sync · N new items" row.
+    "sync.last_at":              None,
+    "sync.last_items_received":  None,
+}
+
+
+def _read(key: str) -> Any:
+    row = db_query_one("SELECT value FROM user_settings WHERE key = %(k)s", {"k": key})
+    if row is None:
+        return _DEFAULTS.get(key)
+    return row.get("value")
+
+
+def _write(key: str, value: Any) -> None:
+    db_execute(
+        """
+        INSERT INTO user_settings (key, value) VALUES (%s, %s::jsonb)
+        ON CONFLICT (key) DO UPDATE
+            SET value = EXCLUDED.value,
+                updated_at = CURRENT_TIMESTAMP
+        """,
+        (key, json.dumps(value)),
+    )
+
+
+# ============================================================
+# Reads
+# ============================================================
+
+async def _library_state() -> Dict[str, Any]:
+    """Stats + ongoing scan progress for the Library section.
+
+    Mirrors the launcher's `_update_stats_labels` shape so the web
+    Library screen reads identical numbers to the launcher's stats
+    panel — Tracks / Artists / Albums / Genres on the Library side,
+    Embeddings / Features / Last.fm / Lyrics on the Enrichment side."""
+    from main import get_stats, _scan_state, _enrich_state
+
+    try:
+        stats = await get_stats()
+    except Exception as e:
+        logger.warning(f"Library stats query failed: {e}")
+        stats = {}
+
+    scan = {
+        "running":  bool(_scan_state.get("running")),
+        "progress": _scan_state.get("progress"),
+        "stats":    _scan_state.get("stats"),
+    }
+    enrich = {
+        "running":  bool(_enrich_state.get("running")),
+        "progress": _enrich_state.get("progress"),
+    }
+
+    # Show the host-side music path (E:\Music etc.), not the
+    # container's /music bind-mount. MUSIC_HOST_PATH is set by the
+    # launcher when starting the container.
+    music_path = app_settings.music_host_path or app_settings.music_library_path
+
+    return {
+        "music_path":         music_path,
+        # Library counts (matches launcher's Library block 2×2)
+        "total_tracks":       stats.get("total_tracks", 0),
+        "total_artists":      stats.get("total_artists", 0),
+        "total_albums":       stats.get("total_albums", 0),
+        "total_genres":       stats.get("unique_genres", 0),
+        "total_size_bytes":   stats.get("total_file_size_bytes", 0),
+        # Enrichment coverage (matches launcher's Enrichment 2×2)
+        "embeddings_done":    stats.get("tracks_with_embeddings", 0),
+        "features_done":      stats.get("tracks_with_features", 0),
+        "lyrics_done":        stats.get("tracks_with_lyrics", 0),
+        "lastfm_done":        (stats.get("artists_with_lastfm", 0)
+                               + stats.get("albums_with_lastfm", 0)),
+        "lastfm_total":       (stats.get("library_artists", 0)
+                               + stats.get("library_albums", 0)),
+        # Last scan + runtime workers
+        "last_scan_at":       _read("library.last_scan_at"),
+        "scan":               scan,
+        "enrich":             enrich,
+    }
+
+
+def _ai_state() -> Dict[str, Any]:
+    """Provider/model/auth/usage snapshot for the AI section.
+
+    Authentication state is one of:
+      - 'oauth_signed_in' — Claude Code OAuth is connected (existing
+        flow). expires_in_days populated.
+      - 'api_key_set'    — user has provided a raw API key.
+        masked_key shows last 4 chars.
+      - 'not_authenticated' — neither.
+
+    Usage (balance, monthly spent, limit, days_left) is null when the
+    provider doesn't expose a billing API for the current credential
+    type — UI hides the row in that case."""
+    provider = _read("ai.provider") or "claude"
+    model    = _read("ai.model")    or "claude-opus-4-7"
+    api_key  = _read("ai.api_key")
+
+    auth_state = "not_authenticated"
+    masked_key: Optional[str] = None
+    expires_in_days: Optional[int] = None
+    if api_key:
+        auth_state = "api_key_set"
+        masked_key = "●" * 8 + (api_key[-4:] if len(api_key) >= 4 else api_key)
+    else:
+        # OAuth check — chat.py persists a refresh token; if present
+        # we treat the user as OAuth-signed-in. Days-to-expiry is
+        # best-effort: parse the JWT or fall back to a placeholder.
+        try:
+            from routers.chat import oauth_status  # type: ignore
+            st = oauth_status()
+            if st and st.get("authenticated"):
+                auth_state = "oauth_signed_in"
+                expires_in_days = st.get("expires_in_days")
+        except Exception:
+            pass
+
+    # Usage is intentionally null until we wire the provider billing
+    # API; UI handles "row hidden when null". Placeholder structure
+    # documents the shape we expect:
+    usage = None  # {"spent": 3.20, "limit": 20, "days_left": 5}
+
+    return {
+        "provider":       provider,
+        "model":          model,
+        "auth_state":     auth_state,
+        "masked_key":     masked_key,
+        "expires_in_days": expires_in_days,
+        "usage":          usage,
+    }
+
+
+def _sync_state() -> Dict[str, Any]:
+    friends_online = 0
+    friends_total = 0
+    try:
+        row = db_query_one("""
+            SELECT
+                COUNT(*) FILTER (WHERE is_blocked = FALSE) AS total,
+                COUNT(*) FILTER (
+                    WHERE is_blocked = FALSE
+                      AND last_seen IS NOT NULL
+                      AND last_seen > NOW() - INTERVAL '5 minutes'
+                ) AS online
+            FROM friends
+        """)
+        if row:
+            friends_total  = int(row.get("total") or 0)
+            friends_online = int(row.get("online") or 0)
+    except Exception as e:
+        logger.warning(f"friends count failed: {e}")
+
+    return {
+        "p2p_enabled":             bool(_read("sync.p2p_enabled")),
+        "auto_interval_min":       _read("sync.auto_interval_min"),
+        "announce_limit":          _read("sync.announce_limit"),
+        "announce_rotation_min":   _read("sync.announce_rotation_min"),
+        "background_enrichment":   bool(_read("enrichment.background_enabled")),
+        "last_sync_at":            _read("sync.last_at"),
+        "last_items_received":     _read("sync.last_items_received"),
+        "friends_online":          friends_online,
+        "friends_total":           friends_total,
+    }
+
+
+def _audio_output_state() -> Dict[str, Any]:
+    """Lightweight Audio output stub.
+
+    We deliberately do NOT call routers.hqplayer.get_state() here —
+    that endpoint does a full multi-roundtrip status/info/modes/rates
+    fetch and can block for seconds when HQPlayer is unreachable. The
+    frontend pings /api/hqplayer/state separately (with its own
+    timeout / re-render) for the live connection indicator. Settings
+    just returns the configured host:port so the row paints
+    instantly with `connected: null`."""
+    return {
+        "hqplayer_connected": None,
+        "hqplayer_host":      app_settings.hqplayer_host,
+        "hqplayer_port":      app_settings.hqplayer_port,
+    }
+
+
+@router.get("/library")
+async def get_library_state() -> Dict[str, Any]:
+    return await _library_state()
+
+
+@router.get("/ai")
+def get_ai_state() -> Dict[str, Any]:
+    return _ai_state()
+
+
+@router.get("/sync")
+def get_sync_state() -> Dict[str, Any]:
+    return _sync_state()
+
+
+@router.get("")
+async def get_settings() -> Dict[str, Any]:
+    """Aggregate roundtrip (kept for clients that want one fetch)."""
+    return {
+        "library":      await _library_state(),
+        "ai":           _ai_state(),
+        "sync":         _sync_state(),
+        "audio_output": _audio_output_state(),
+    }
+
+
+# ============================================================
+# AI preferences
+# ============================================================
+
+class AiProviderUpdate(BaseModel):
+    provider: str = Field(..., max_length=40)
+
+
+class AiModelUpdate(BaseModel):
+    model: str = Field(..., max_length=80)
+
+
+class AiKeyUpdate(BaseModel):
+    api_key: Optional[str] = Field(default=None, max_length=300)
+
+
+@router.put("/ai/provider")
+def put_ai_provider(req: AiProviderUpdate) -> Dict[str, Any]:
+    _write("ai.provider", req.provider)
+    return {"provider": req.provider}
+
+
+@router.put("/ai/model")
+def put_ai_model(req: AiModelUpdate) -> Dict[str, Any]:
+    _write("ai.model", req.model)
+    return {"model": req.model}
+
+
+@router.put("/ai/key")
+def put_ai_key(req: AiKeyUpdate) -> Dict[str, Any]:
+    """Set or clear the user-supplied API key. Validation against the
+    provider's API is deferred — the UI's chat surface will surface
+    auth errors on first call. Empty/null clears the key."""
+    key = (req.api_key or "").strip() or None
+    _write("ai.key", key)  # legacy alias readable elsewhere
+    _write("ai.api_key", key)
+    return _ai_state()
+
+
+@router.delete("/ai/key")
+def delete_ai_key() -> Dict[str, Any]:
+    _write("ai.api_key", None)
+    _write("ai.key", None)
+    return _ai_state()
+
+
+# ============================================================
+# Sync & P2P preferences
+# ============================================================
+
+class SyncPrefs(BaseModel):
+    p2p_enabled:             Optional[bool] = None
+    auto_interval_min:       Optional[int]  = None  # null disables
+    announce_limit:          Optional[int]  = None  # null = announce all
+    announce_rotation_min:   Optional[int]  = None
+    background_enrichment:   Optional[bool] = None
+
+
+@router.put("/sync")
+def put_sync_prefs(req: SyncPrefs) -> Dict[str, Any]:
+    if req.p2p_enabled is not None:
+        _write("sync.p2p_enabled", bool(req.p2p_enabled))
+    if req.auto_interval_min is not None:
+        # None gets coerced to null serverside via _write — explicit
+        # 0 here means "every 0 min" (disabled in the UI). We store
+        # the raw int; UI maps 0/null → "Disabled".
+        _write("sync.auto_interval_min",
+               int(req.auto_interval_min) if req.auto_interval_min > 0 else None)
+    if req.announce_limit is not None:
+        _write("sync.announce_limit",
+               int(req.announce_limit) if req.announce_limit > 0 else None)
+    if req.announce_rotation_min is not None:
+        _write("sync.announce_rotation_min", int(req.announce_rotation_min))
+    if req.background_enrichment is not None:
+        _write("enrichment.background_enabled", bool(req.background_enrichment))
+    return _sync_state()
+
+
+@router.post("/sync/force")
+def force_sync() -> Dict[str, Any]:
+    """Kick the P2P sync runner manually. Implementation is a stub
+    for now — the desktop launcher owns the actual sync loop. We
+    write a placeholder 'last sync' marker so the UI's transient
+    toast reflects the action. Wire the real call when the launcher
+    grows a backend-callable trigger."""
+    from datetime import datetime, timezone
+    _write("sync.last_at", datetime.now(timezone.utc).isoformat())
+    _write("sync.last_items_received", 0)
+    return {"ok": True, "items_received": 0, "note": "stub — wire to launcher sync trigger"}
+
+
+# ============================================================
+# Library actions (thin passthroughs for the Settings buttons)
+# ============================================================
+
+@router.post("/library/scan")
+async def trigger_scan() -> Dict[str, Any]:
+    """Start a library scan from the Settings screen.
+
+    Delegates to the existing /scan/start endpoint logic so we don't
+    duplicate the scan-worker setup."""
+    from main import scan_start
+    return await scan_start()
+
+
+@router.post("/library/scan/cancel")
+async def cancel_scan() -> Dict[str, Any]:
+    from main import scan_cancel
+    return await scan_cancel()
+
+
+@router.post("/library/enrich")
+async def trigger_enrich() -> Dict[str, Any]:
+    """Start enrichment for items missing bios / audio analysis."""
+    from main import enrich_start
+    # default args; the existing endpoint sets sensible options
+    return await enrich_start()  # type: ignore[call-arg]

@@ -3912,6 +3912,9 @@
     const sub = segs[1] || '';
     if (sub === 'hqplayer') return renderHqplayerSettings(root);
     if (sub === 'profile') return renderProfile(root);
+    if (sub === 'library') return renderLibrary(root);
+    if (sub === 'ai')      return renderAI(root);
+    if (sub === 'sync')    return renderSync(root);
     // Bare #more — nothing to render here; the drawer is the UI.
     // Drop back to home so the page isn't blank if the user
     // bookmarked the route.
@@ -4003,12 +4006,27 @@
           <circle cx="12" cy="9" r="3.5"/>
           <path d="M5 20a7 7 0 0114 0"/>
         </svg>`;
-      const ICON_SETTINGS = `
+      const ICON_LIBRARY = `
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
              stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
              stroke-linejoin="round" aria-hidden="true">
-          <circle cx="12" cy="12" r="3"/>
-          <path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.07a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1.04 1.56V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.04-1.56 1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.7 1.7 0 00.34-1.87 1.7 1.7 0 00-1.56-1.04H3a2 2 0 110-4h.1a1.7 1.7 0 001.56-1.04 1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06a1.7 1.7 0 001.87.34h.04A1.7 1.7 0 0010 3.1V3a2 2 0 114 0v.1a1.7 1.7 0 001.04 1.56 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0019.4 9v.04A1.7 1.7 0 0020.96 10H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.56 1.04z"/>
+          <path d="M9 17V5l11-2v12"/>
+          <circle cx="6" cy="17" r="3"/>
+          <circle cx="17" cy="15" r="3"/>
+        </svg>`;
+      const ICON_AI = `
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 3l1.6 4 4 1.6-4 1.6L12 14l-1.6-3.8-4-1.6 4-1.6z"/>
+          <path d="M19 14l.8 2 2 .8-2 .8L19 20l-.8-2.4-2-.8 2-.8z"/>
+        </svg>`;
+      const ICON_SYNC = `
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12a9 9 0 11-3-6.7M21 4v5h-5"/>
+          <path d="M3 12a9 9 0 003 6.7M3 20v-5h5"/>
         </svg>`;
       const CHEV = `
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
@@ -4031,6 +4049,24 @@
             <button class="more-row" type="button" data-go="more/profile">
               <span class="more-icon">${ICON_PROFILE}</span>
               <span class="more-label">Profile</span>
+              <span class="more-hint"></span>
+              <span class="more-chev">${CHEV}</span>
+            </button>
+            <button class="more-row" type="button" data-go="more/library">
+              <span class="more-icon">${ICON_LIBRARY}</span>
+              <span class="more-label">Library</span>
+              <span class="more-hint"></span>
+              <span class="more-chev">${CHEV}</span>
+            </button>
+            <button class="more-row" type="button" data-go="more/ai">
+              <span class="more-icon">${ICON_AI}</span>
+              <span class="more-label">AI assistant</span>
+              <span class="more-hint"></span>
+              <span class="more-chev">${CHEV}</span>
+            </button>
+            <button class="more-row" type="button" data-go="more/sync">
+              <span class="more-icon">${ICON_SYNC}</span>
+              <span class="more-label">Sync &amp; P2P</span>
               <span class="more-hint"></span>
               <span class="more-chev">${CHEV}</span>
             </button>
@@ -5666,6 +5702,813 @@
     });
     root.querySelector('[data-action="message"]').addEventListener('click', () => {
       if (profile.public_key_hex) navigate('friends/chat/' + profile.public_key_hex.slice(0, 16));
+    });
+  }
+
+  /* =====================================================================
+   * Settings (#more/settings)
+   * Mirrors docs/design/reference/claude-design-bundle/project/
+   * Settings.html. Four stacked sections (Library / AI assistant /
+   * Sync & P2P / Audio output) with three rendering states driven by
+   * the /api/settings payload: default, in-flight (scanning), empty
+   * library (first-run).
+   * ===================================================================== */
+
+  const SETTINGS_ICONS = {
+    refresh: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 11-3-6.7M21 4v5h-5"/></svg>',
+    check:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>',
+    chev:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>',
+    rightCh: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>',
+    vinyl:   '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17V5l11-2v12"/><circle cx="6" cy="17" r="3"/><circle cx="17" cy="15" r="3"/></svg>',
+  };
+
+  const PROVIDER_OPTIONS = [
+    { id: 'claude',  label: 'Claude' },
+    { id: 'openai',  label: 'OpenAI' },
+  ];
+  const MODEL_OPTIONS = {
+    claude: [
+      { id: 'claude-opus-4-7',   label: 'Opus 4.7' },
+      { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+      { id: 'claude-haiku-4-5',  label: 'Haiku 4.5' },
+    ],
+    openai: [
+      { id: 'gpt-5',     label: 'GPT-5' },
+      { id: 'gpt-4o',    label: 'GPT-4o' },
+      { id: 'gpt-4o-mini', label: 'GPT-4o mini' },
+    ],
+  };
+  const AUTO_SYNC_OPTIONS = [
+    { id: 0,   label: 'Disabled' },
+    { id: 15,  label: 'Every 15 min' },
+    { id: 30,  label: 'Every 30 min' },
+    { id: 60,  label: 'Every 1 hour' },
+    { id: 240, label: 'Every 4 hours' },
+  ];
+  const ANNOUNCE_LIMIT_OPTIONS = [
+    { id: 0,   label: 'All artists' },
+    { id: 10,  label: '10 artists' },
+    { id: 50,  label: '50 artists' },
+    { id: 200, label: '200 artists' },
+  ];
+  const ROTATION_OPTIONS = [
+    { id: 15, label: 'Every 15 min' },
+    { id: 30, label: 'Every 30 min' },
+    { id: 60, label: 'Every 1 hour' },
+  ];
+
+  function fmtPathForDisplay(p) {
+    // Windows paths carry a drive-letter prefix (C:, E:, …). The
+    // launcher stores them with forward slashes for Docker / config
+    // portability ("E:/Music"); for human display we flip those to
+    // backslashes ("E:\\Music"). POSIX paths (/Volumes/..., /home/...)
+    // keep forward slashes regardless of where the UI is viewed
+    // — the path is native to the host that holds the files, not to
+    // the client looking at the screen.
+    if (!p) return '';
+    if (/^[A-Za-z]:[/\\]/.test(p)) return p.replace(/\//g, '\\');
+    return p;
+  }
+
+  function fmtBytes(n) {
+    // Binary (1024-based) sizing matches Windows Explorer / macOS
+    // Finder so the figure shown here lines up with whatever the
+    // user sees in the OS file manager on their music folder.
+    n = Number(n) || 0;
+    const TB = 1024 ** 4, GB = 1024 ** 3, MB = 1024 ** 2, KB = 1024;
+    if (n >= TB) return (n / TB).toFixed(2) + ' TB';
+    if (n >= GB) return (n / GB).toFixed(1) + ' GB';
+    if (n >= MB) return (n / MB).toFixed(0) + ' MB';
+    if (n >= KB) return (n / KB).toFixed(0) + ' KB';
+    return n + ' B';
+  }
+  function fmtNum(n) {
+    return Number(n || 0).toLocaleString('en-US').replace(/,/g, ' ');
+  }
+  function fmtRelative(iso) {
+    if (!iso) return '—';
+    const t = new Date(iso).getTime();
+    if (!t) return '—';
+    const diff = Math.round((Date.now() - t) / 1000);
+    if (diff < 60)   return 'moments ago';
+    if (diff < 3600) return Math.round(diff / 60) + ' min ago';
+    if (diff < 86400) return Math.round(diff / 3600) + ' hours ago';
+    return Math.round(diff / 86400) + ' days ago';
+  }
+  function fmtAbs(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d)) return '';
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mi = String(d.getMinutes()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd} · ${hh}:${mi}`;
+  }
+
+  /* Picker sheet — generic single-select. Returns Promise<id|null>. */
+  function openSettingsPicker({ title, options, currentId }) {
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.className = 'add-gear-overlay';
+      overlay.innerHTML = `
+        <div class="add-gear-sheet">
+          <div class="sheet-handle"></div>
+          <div class="add-gear-head">
+            <h2 class="add-gear-title">${escapeProfileHtml(title)}</h2>
+            <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+          </div>
+          <div class="add-gear-results">
+            ${options.map(o => `
+              <div class="add-gear-result" data-pick="${escapeProfileHtml(String(o.id))}">
+                <div>
+                  <div class="gear-line1">
+                    <span class="gear-model">${escapeProfileHtml(o.label)}</span>
+                  </div>
+                </div>
+                ${String(o.id) === String(currentId) ? `<span style="color:var(--color-amber);">${SETTINGS_ICONS.check}</span>` : `<span class="gear-chev">${SETTINGS_ICONS.rightCh}</span>`}
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      const close = (id) => { overlay.remove(); resolve(id); };
+      overlay.addEventListener('click', e => { if (e.target === overlay) close(null); });
+      overlay.querySelector('[data-cancel]').addEventListener('click', () => close(null));
+      overlay.querySelectorAll('[data-pick]').forEach(el => {
+        el.addEventListener('click', () => close(el.dataset.pick));
+      });
+    });
+  }
+
+  /* API-key entry modal. Provider-aware helper link. */
+  function openApiKeyModal(provider, onSaved) {
+    const isClaude = provider === 'claude';
+    const placeholder = isClaude ? 'sk-ant-...' : 'sk-...';
+    const helpLink = isClaude
+      ? '<a href="https://console.anthropic.com/" target="_blank" rel="noopener" style="color:var(--color-amber);">console.anthropic.com</a>'
+      : '<a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener" style="color:var(--color-amber);">platform.openai.com</a>';
+
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Connect ${escapeProfileHtml(isClaude ? 'Claude' : 'OpenAI')} API key</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <input class="add-gear-input" id="apiKeyInput" type="password" placeholder="${placeholder}" maxlength="280" autocomplete="off" spellcheck="false">
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.45;">
+            Get a key at ${helpLink}. Stored locally; sent only to ${escapeProfileHtml(isClaude ? 'Anthropic' : 'OpenAI')}.
+          </p>
+          <div id="apiKeyMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+          <button class="btn btn-primary" data-save>Save</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    const input = overlay.querySelector('#apiKeyInput');
+    const msg = overlay.querySelector('#apiKeyMsg');
+    setTimeout(() => input.focus(), 50);
+
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+
+    const submit = async () => {
+      const key = input.value.trim();
+      if (!key) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = 'Paste a key first.';
+        return;
+      }
+      msg.style.color = 'var(--color-text-muted)';
+      msg.textContent = 'Saving…';
+      try {
+        const r = await fetch('/api/settings/ai/key', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ api_key: key }),
+        });
+        if (!r.ok) {
+          msg.style.color = 'var(--color-negative)';
+          msg.textContent = (await r.text()) || 'Save failed.';
+          return;
+        }
+        close();
+        if (typeof onSaved === 'function') onSaved();
+      } catch (err) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = String(err);
+      }
+    };
+    overlay.querySelector('[data-save]').addEventListener('click', submit);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+  }
+
+  /* Library section renderers — full vs first-run-empty. */
+  /* 2×2 stat cell builders for the Library screen. */
+  function _statCell(label, value) {
+    return `
+      <div class="stat-cell">
+        <span class="lbl">${escapeProfileHtml(label)}</span>
+        <span class="val">${escapeProfileHtml(String(value))}</span>
+      </div>`;
+  }
+  function _enrichRow(label, done, total) {
+    if (!total || total <= 0) {
+      return `
+        <div class="form-row">
+          <span class="form-label">${escapeProfileHtml(label)}</span>
+          <span class="form-value muted">—</span>
+        </div>`;
+    }
+    const pct = Math.round((done * 100) / total);
+    const cls = pct === 100 ? 'pct-full' : pct >= 80 ? 'pct-near' : 'pct-low';
+    return `
+      <div class="form-row">
+        <span class="form-label">${escapeProfileHtml(label)}</span>
+        <span class="form-value mono ${cls}">${fmtNum(done)} / ${fmtNum(total)}<span class="pct-suffix">· ${pct}%</span></span>
+      </div>`;
+  }
+
+  function _renderLibraryFull(lib) {
+    const scanRunning = !!(lib.scan && lib.scan.running);
+    const enrichRunning = !!(lib.enrich && lib.enrich.running);
+    const tracks = lib.total_tracks || 0;
+    const artists = lib.total_artists || 0;
+    const totalArtists = artists;
+    const withBio = lib.artists_with_bio || 0;
+    const bioPct = totalArtists > 0 ? Math.round((withBio / totalArtists) * 100) : 0;
+    const totalTracks = tracks;
+    const withAudio = lib.tracks_with_audio || 0;
+    const audioPct = totalTracks > 0 ? Math.round((withAudio / totalTracks) * 100) : 0;
+    const path = fmtPathForDisplay(lib.music_path || '/music');
+    const lastScan = lib.last_scan_at;
+
+    return `
+      <div class="form-group">
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Music path</span>
+            <span class="path-value" title="${escapeProfileHtml(path)}">${escapeProfileHtml(path)}</span>
+          </div>
+          <div class="row-stack-sub">Configured in the launcher.</div>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Tracks</span>
+          <span class="form-value mono">${fmtNum(tracks)}</span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Artists</span>
+          <span class="form-value mono">${fmtNum(artists)}</span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Albums</span>
+          <span class="form-value mono">${fmtNum(lib.total_albums || 0)}</span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Storage</span>
+          <span class="form-value mono">${escapeProfileHtml(fmtBytes(lib.total_size_bytes))}</span>
+        </div>
+        <div class="enrich-row">
+          <div class="enrich-line">
+            <span class="label">Artist bios</span>
+            <span class="val">${fmtNum(withBio)} <span class="of">/ ${fmtNum(totalArtists)}</span></span>
+          </div>
+          <div class="enrich-bar"><div class="fill" style="width:${bioPct}%;"></div></div>
+        </div>
+        <div class="enrich-row">
+          <div class="enrich-line">
+            <span class="label">Tracks analysed</span>
+            <span class="val">${fmtNum(withAudio)} <span class="of">/ ${fmtNum(totalTracks)}</span></span>
+          </div>
+          <div class="enrich-bar"><div class="fill" style="width:${audioPct}%;"></div></div>
+        </div>
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Last scan</span>
+            <span class="row-stack-value">${scanRunning ? 'running…' : escapeProfileHtml(fmtRelative(lastScan))}</span>
+          </div>
+          ${(!scanRunning && lastScan) ? `<div class="row-stack-sub" style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(fmtAbs(lastScan))}</div>` : ''}
+        </div>
+      </div>
+
+      ${scanRunning ? `
+        <div class="progress-strip">
+          <div class="head">
+            <span class="label">Scanning library</span>
+            <span class="stats">${escapeProfileHtml((lib.scan.stats && lib.scan.stats.scanned) || lib.scan.progress || '…')}</span>
+          </div>
+          <div class="bar"><div class="fill" style="width:36%;"></div></div>
+          <div class="cancel"><button data-cancel-scan>Cancel</button></div>
+        </div>
+        <div class="btn-row single" style="margin-top:calc(10*var(--px));">
+          <button class="btn btn-secondary" ${enrichRunning ? 'disabled' : ''} data-action="enrich">Re-enrich missing</button>
+        </div>
+      ` : `
+        <div class="btn-row">
+          <button class="btn btn-primary" data-action="scan">Rescan library</button>
+          <button class="btn btn-secondary" ${enrichRunning ? 'disabled' : ''} data-action="enrich">Re-enrich missing</button>
+        </div>
+      `}
+    `;
+  }
+  function _renderLibraryEmpty(lib) {
+    const path = fmtPathForDisplay(lib.music_path || '/music');
+    return `
+      <div class="form-group">
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Music path</span>
+            <span class="path-value" title="${escapeProfileHtml(path)}">${escapeProfileHtml(path)}</span>
+          </div>
+          <div class="row-stack-sub">Configured in the launcher.</div>
+        </div>
+      </div>
+      <div class="empty-library">
+        <div class="icon">${SETTINGS_ICONS.vinyl}</div>
+        <p class="empty-library-msg">
+          No tracks indexed yet. Run the first scan to discover your library — it usually takes a few minutes per 10k tracks.
+        </p>
+        <button class="empty-cta" data-action="scan">${SETTINGS_ICONS.refresh}Run first scan</button>
+      </div>
+    `;
+  }
+
+  function _renderAi(ai) {
+    const provider = ai.provider || 'claude';
+    const providerLabel = (PROVIDER_OPTIONS.find(p => p.id === provider) || {}).label || provider;
+    const model = ai.model || '';
+    const modelLabel = ((MODEL_OPTIONS[provider] || []).find(m => m.id === model) || {}).label || model || '—';
+    const auth = ai.auth_state || 'not_authenticated';
+    const usage = ai.usage;
+
+    let authRow;
+    if (auth === 'oauth_signed_in') {
+      const expires = ai.expires_in_days != null ? `<span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">· expires in <span style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(11.5*var(--px));letter-spacing:0.02em;">${ai.expires_in_days} days</span></span>` : '';
+      authRow = `
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Authentication</span>
+            <button class="btn-link" data-action="reauthorize">Reauthorize</button>
+          </div>
+          <div class="row-stack-value" style="display:flex;align-items:center;gap:calc(8*var(--px));flex-wrap:wrap;">
+            <span style="color:var(--color-positive);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;"><span class="status-dot green"></span>Signed in</span>
+            ${expires}
+          </div>
+        </div>`;
+    } else if (auth === 'api_key_set') {
+      authRow = `
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Authentication</span>
+            <button class="btn-link" data-action="replace-key">Replace</button>
+          </div>
+          <div class="row-stack-value" style="display:flex;align-items:center;gap:calc(8*var(--px));">
+            <span style="color:var(--color-positive);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;"><span class="status-dot green"></span>API key set</span>
+            <span style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(12*var(--px));letter-spacing:0.04em;">${escapeProfileHtml(ai.masked_key || '')}</span>
+          </div>
+        </div>`;
+    } else {
+      authRow = `
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Authentication</span>
+            <span></span>
+          </div>
+          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));">Not signed in</div>
+          <div class="btn-row single" style="margin:calc(10*var(--px)) 0 0;">
+            <button class="btn btn-primary" data-action="sign-in">Sign in / set key</button>
+          </div>
+        </div>`;
+    }
+
+    const usageRow = (usage && usage.spent != null) ? `
+      <div class="form-row stacked">
+        <div class="row-stack">
+          <span class="row-stack-label">Usage</span>
+          <span style="font-family:var(--font-mono);font-size:calc(11*var(--px));color:var(--color-text-muted);letter-spacing:0.04em;text-transform:uppercase;">monthly</span>
+        </div>
+        <div class="row-stack-value" style="display:flex;align-items:baseline;gap:calc(6*var(--px));">
+          <span style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(14*var(--px));font-weight:600;">$${escapeProfileHtml(String(usage.spent))}</span>
+          <span style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));">of <span style="font-family:var(--font-mono);color:var(--color-blue);">$${escapeProfileHtml(String(usage.limit))}</span> limit${usage.days_left != null ? ` · <span style="font-family:var(--font-mono);color:var(--color-blue);">${usage.days_left}d</span> left` : ''}</span>
+        </div>
+        ${usage.limit ? `<div class="enrich-bar" style="margin-top:calc(8*var(--px));"><div class="fill" style="width:${Math.round((usage.spent / usage.limit) * 100)}%;"></div></div>` : ''}
+      </div>` : '';
+
+    const isUnauth = auth === 'not_authenticated';
+    return `
+      <div class="form-group">
+        <div class="form-row">
+          <span class="form-label">Provider</span>
+          <button class="select-trigger" data-action="pick-provider">
+            ${escapeProfileHtml(providerLabel)}
+            <span class="chev">${SETTINGS_ICONS.chev}</span>
+          </button>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Model</span>
+          ${isUnauth
+            ? '<span class="form-value muted">Sign in to choose</span>'
+            : `<button class="select-trigger" data-action="pick-model">
+                 ${escapeProfileHtml(modelLabel)}
+                 <span class="chev">${SETTINGS_ICONS.chev}</span>
+               </button>`}
+        </div>
+        ${authRow}
+        ${usageRow}
+      </div>
+    `;
+  }
+
+  function _renderSync(sync) {
+    const on = !!sync.p2p_enabled;
+    const interval = sync.auto_interval_min;
+    const intervalLabel = (AUTO_SYNC_OPTIONS.find(o => o.id === (interval || 0)) || AUTO_SYNC_OPTIONS[0]).label;
+    const limit = sync.announce_limit;
+    const limitLabel = (ANNOUNCE_LIMIT_OPTIONS.find(o => o.id === (limit || 0)) || ANNOUNCE_LIMIT_OPTIONS[0]).label;
+    const rotation = sync.announce_rotation_min || 30;
+    const rotationLabel = (ROTATION_OPTIONS.find(o => o.id === rotation) || ROTATION_OPTIONS[1]).label;
+    const bgEnrich = !!sync.background_enrichment;
+    const showRotation = !!limit;  // hidden when "All"
+
+    if (!on) {
+      // Sharing OFF — consolidated explainer in place of the three
+      // detail rows. Background enrichment toggle still visible
+      // because it's not gated on P2P.
+      return `
+        <div class="form-group">
+          <div class="form-row">
+            <span class="form-label">P2P sharing</span>
+            <button class="toggle ${on ? 'on' : ''}" data-action="toggle-p2p"><span class="knob"></span></button>
+          </div>
+          <div class="form-row stacked">
+            <div class="row-stack">
+              <span class="row-stack-label" style="color:var(--color-text-dim);">Auto-sync · Announce · Rotation</span>
+              <span></span>
+            </div>
+            <div class="row-stack-sub">Turn P2P sharing on to configure sync and node-announce limits.</div>
+          </div>
+          <div class="form-row">
+            <span class="form-label">Background enrichment</span>
+            <button class="toggle ${bgEnrich ? 'on' : ''}" data-action="toggle-bg-enrich"><span class="knob"></span></button>
+          </div>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="form-group">
+        <div class="form-row">
+          <span class="form-label">P2P sharing</span>
+          <button class="toggle on" data-action="toggle-p2p"><span class="knob"></span></button>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Auto-sync interval</span>
+          <button class="select-trigger" data-action="pick-interval">
+            ${escapeProfileHtml(intervalLabel)}
+            <span class="chev">${SETTINGS_ICONS.chev}</span>
+          </button>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Announce limit</span>
+          <button class="select-trigger" data-action="pick-limit">
+            ${escapeProfileHtml(limitLabel)}
+            <span class="chev">${SETTINGS_ICONS.chev}</span>
+          </button>
+        </div>
+        ${showRotation ? `
+        <div class="form-row">
+          <span class="form-label">Announce rotation</span>
+          <button class="select-trigger" data-action="pick-rotation">
+            ${escapeProfileHtml(rotationLabel)}
+            <span class="chev">${SETTINGS_ICONS.chev}</span>
+          </button>
+        </div>` : ''}
+        <div class="form-row">
+          <span class="form-label">Background enrichment</span>
+          <button class="toggle ${bgEnrich ? 'on' : ''}" data-action="toggle-bg-enrich"><span class="knob"></span></button>
+        </div>
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Last sync</span>
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">${escapeProfileHtml(fmtRelative(sync.last_sync_at))}</span>
+          </div>
+          ${sync.last_items_received != null ? `<div class="row-stack-value" style="margin-top:calc(2*var(--px));">
+            <span style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(12.5*var(--px));letter-spacing:0.02em;">${fmtNum(sync.last_items_received)} new ${sync.last_items_received === 1 ? 'item' : 'items'}</span>
+          </div>` : ''}
+        </div>
+        <div class="form-row">
+          <span class="form-label">Friends online</span>
+          <span class="form-value mono">${fmtNum(sync.friends_online || 0)} <span style="color:var(--color-text-dim);">/ ${fmtNum(sync.friends_total || 0)}</span></span>
+        </div>
+      </div>
+      <div class="btn-row single">
+        <button class="btn btn-secondary" data-action="force-sync">Force sync now</button>
+      </div>
+    `;
+  }
+
+  function _renderHqpRow(ao, connected) {
+    const host = ao.hqplayer_host || '—';
+    const port = ao.hqplayer_port || '—';
+    let statusBlock;
+    if (connected === null || connected === undefined) {
+      // unknown — initial render, waiting on /api/hqplayer/state
+      statusBlock = `<span style="color:var(--color-text-muted);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;">checking…</span>
+                     <span style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(11.5*var(--px));letter-spacing:0.02em;">${escapeProfileHtml(host)}:${escapeProfileHtml(String(port))}</span>`;
+    } else if (connected) {
+      statusBlock = `<span style="color:var(--color-positive);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;"><span class="status-dot green"></span>Connected</span>
+                     <span style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(11.5*var(--px));letter-spacing:0.02em;">${escapeProfileHtml(host)}:${escapeProfileHtml(String(port))}</span>`;
+    } else {
+      statusBlock = `<span style="color:var(--color-negative);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;"><span class="status-dot red"></span>Disconnected</span>
+                     <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">— check launcher</span>`;
+    }
+    return `
+      <div class="form-row stacked" data-action="open-hqplayer" data-row="hqp" style="cursor:pointer;">
+        <div class="row-stack">
+          <span class="row-stack-label">HQPlayer</span>
+          <span style="color:var(--color-text-dim);display:inline-flex;">${SETTINGS_ICONS.rightCh}</span>
+        </div>
+        <div class="row-stack-value" style="display:flex;align-items:center;gap:calc(8*var(--px));flex-wrap:wrap;">
+          ${statusBlock}
+        </div>
+      </div>`;
+  }
+  function _renderAudioOutput(ao) {
+    return `
+      <div class="form-group">
+        ${_renderHqpRow(ao, null)}
+        <div class="form-row disabled stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Native output<span class="coming-soon-tag">Coming soon</span></span>
+            <span></span>
+          </div>
+          <div class="row-stack-value">
+            <span style="font-family:var(--font-mono);font-size:calc(11.5*var(--px));color:var(--color-text-dim);letter-spacing:0.04em;">WASAPI · ASIO · CoreAudio · NAA</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  async function _refreshHqpRow(root, ao) {
+    let connected = null;
+    try {
+      const r = await fetch('/api/hqplayer/state');
+      if (r.ok) {
+        const data = await r.json();
+        connected = !!data.connected;
+      } else {
+        connected = false;
+      }
+    } catch (_) {
+      connected = false;
+    }
+    const old = root.querySelector('[data-row="hqp"]');
+    if (!old) return;
+    const wrap = document.createElement('template');
+    wrap.innerHTML = _renderHqpRow(ao, connected).trim();
+    const fresh = wrap.content.firstElementChild;
+    fresh.addEventListener('click', () => navigate('more/hqplayer'));
+    old.replaceWith(fresh);
+  }
+
+  /* Render entrypoint. */
+  const _settingsHeader = (title) => `
+    <div class="profile-header">
+      <button class="icon-btn" aria-label="back" data-back>${PROFILE_ICONS.back}</button>
+      <h1>${escapeProfileHtml(title)}</h1>
+      <span></span>
+    </div>`;
+
+  function _wireBack(root) {
+    root.querySelector('[data-back]').addEventListener('click', () => {
+      if (history.length > 1) history.back();
+      else navigate('home');
+    });
+  }
+
+  /* ============ Library screen — #more/library ============ */
+  async function renderLibrary(root) {
+    let lib = null;
+    try {
+      const r = await fetch('/api/settings/library');
+      if (r.ok) lib = await r.json();
+    } catch (_) {}
+    if (!lib) {
+      root.innerHTML = `<section class="screen screen-settings">${_settingsHeader('Library')}<div class="placeholder">Не вдалося завантажити статистику.</div></section>`;
+      _wireBack(root);
+      return;
+    }
+
+    const scanRunning   = !!(lib.scan   && lib.scan.running);
+    const enrichRunning = !!(lib.enrich && lib.enrich.running);
+    const isEmpty       = (lib.total_tracks || 0) === 0;
+    const path          = fmtPathForDisplay(lib.music_path || '/music');
+
+    const libraryStats = isEmpty ? '' : `
+      <div class="profile-group-label">Library</div>
+      <div class="form-group">
+        <div class="stats-grid">
+          ${_statCell('Tracks',  fmtNum(lib.total_tracks))}
+          ${_statCell('Artists', fmtNum(lib.total_artists))}
+          ${_statCell('Albums',  fmtNum(lib.total_albums))}
+          ${_statCell('Genres',  fmtNum(lib.total_genres))}
+        </div>
+      </div>
+
+      <div class="profile-group-label">Enrichment</div>
+      <div class="form-group">
+        ${_enrichRow('Embeddings', lib.embeddings_done, lib.total_tracks)}
+        ${_enrichRow('Features',   lib.features_done,   lib.total_tracks)}
+        ${_enrichRow('Last.fm',    lib.lastfm_done,     lib.lastfm_total)}
+        ${_enrichRow('Lyrics',     lib.lyrics_done,     lib.total_tracks)}
+      </div>
+    `;
+
+    const emptyState = isEmpty ? `
+      <div class="empty-library">
+        <div class="icon">${SETTINGS_ICONS.vinyl}</div>
+        <p class="empty-library-msg">
+          No tracks indexed yet. Run the first scan to discover your library — it usually takes a few minutes per 10k tracks.
+        </p>
+        <button class="empty-cta" data-action="scan">${SETTINGS_ICONS.refresh}Run first scan</button>
+      </div>` : '';
+
+    const actions = isEmpty ? '' : (scanRunning ? `
+      <div class="progress-strip">
+        <div class="head">
+          <span class="label">Scanning library</span>
+          <span class="stats">${escapeProfileHtml(lib.scan.progress || '…')}</span>
+        </div>
+        <div class="bar"><div class="fill" style="width:36%;"></div></div>
+        <div class="cancel"><button data-cancel-scan>Cancel</button></div>
+      </div>
+      <div class="btn-row single" style="margin-top:calc(10*var(--px));">
+        <button class="btn btn-secondary" ${enrichRunning ? 'disabled' : ''} data-action="enrich">Re-enrich missing</button>
+      </div>
+    ` : `
+      <div class="btn-row">
+        <button class="btn btn-primary" data-action="scan">Rescan library</button>
+        <button class="btn btn-secondary" ${enrichRunning ? 'disabled' : ''} data-action="enrich">Re-enrich missing</button>
+      </div>
+    `);
+
+    root.innerHTML = `
+      <section class="screen screen-settings">
+        ${_settingsHeader('Library')}
+
+        <div class="form-group" style="margin-top:calc(14*var(--px));">
+          <div class="form-row stacked">
+            <div class="row-stack">
+              <span class="row-stack-label">Music path</span>
+              <span class="path-value" title="${escapeProfileHtml(path)}">${escapeProfileHtml(path)}</span>
+            </div>
+            <div class="row-stack-sub">Configured in the launcher.</div>
+          </div>
+          ${isEmpty ? '' : `
+            <div class="form-row">
+              <span class="form-label">Storage</span>
+              <span class="form-value mono">${escapeProfileHtml(fmtBytes(lib.total_size_bytes))}</span>
+            </div>
+            <div class="form-row stacked">
+              <div class="row-stack">
+                <span class="row-stack-label">Last scan</span>
+                <span class="row-stack-value">${scanRunning ? 'running…' : escapeProfileHtml(fmtRelative(lib.last_scan_at))}</span>
+              </div>
+              ${(!scanRunning && lib.last_scan_at)
+                ? `<div class="row-stack-sub" style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(fmtAbs(lib.last_scan_at))}</div>`
+                : ''}
+            </div>
+          `}
+        </div>
+
+        ${libraryStats}
+        ${emptyState}
+        ${actions}
+      </section>
+    `;
+    _wireBack(root);
+
+    const onAction = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
+    onAction('[data-action="scan"]',   async () => { await fetch('/api/settings/library/scan',          { method: 'POST' }); render(); });
+    onAction('[data-action="enrich"]', async () => { await fetch('/api/settings/library/enrich',        { method: 'POST' }); render(); });
+    onAction('[data-cancel-scan]',     async () => { await fetch('/api/settings/library/scan/cancel',   { method: 'POST' }); render(); });
+
+    if (scanRunning || enrichRunning) {
+      setTimeout(() => {
+        if (parseHash().startsWith('more/library')) render();
+      }, 1500);
+    }
+  }
+
+  /* ============ AI assistant screen — #more/ai ============ */
+  async function renderAI(root) {
+    let ai = null;
+    try {
+      const r = await fetch('/api/settings/ai');
+      if (r.ok) ai = await r.json();
+    } catch (_) {}
+    if (!ai) {
+      root.innerHTML = `<section class="screen screen-settings">${_settingsHeader('AI assistant')}<div class="placeholder">Не вдалося завантажити налаштування.</div></section>`;
+      _wireBack(root);
+      return;
+    }
+
+    root.innerHTML = `
+      <section class="screen screen-settings">
+        ${_settingsHeader('AI assistant')}
+        <div style="margin-top:calc(14*var(--px));">${_renderAi(ai)}</div>
+      </section>
+    `;
+    _wireBack(root);
+
+    const onAction = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
+    onAction('[data-action="pick-provider"]', async () => {
+      const id = await openSettingsPicker({ title: 'Provider', options: PROVIDER_OPTIONS, currentId: ai.provider });
+      if (id && id !== ai.provider) {
+        await fetch('/api/settings/ai/provider', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ provider: id }) });
+        render();
+      }
+    });
+    onAction('[data-action="pick-model"]', async () => {
+      const options = MODEL_OPTIONS[ai.provider] || [];
+      const id = await openSettingsPicker({ title: 'Model', options, currentId: ai.model });
+      if (id && id !== ai.model) {
+        await fetch('/api/settings/ai/model', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ model: id }) });
+        render();
+      }
+    });
+    onAction('[data-action="sign-in"]',     () => openApiKeyModal(ai.provider || 'claude', () => render()));
+    onAction('[data-action="replace-key"]', () => openApiKeyModal(ai.provider || 'claude', () => render()));
+    onAction('[data-action="reauthorize"]', () => {
+      // OAuth handshake lives in the chat module — route there for now.
+      navigate('friends');
+    });
+  }
+
+  /* ============ Sync & P2P screen — #more/sync ============ */
+  async function renderSync(root) {
+    let sync = null;
+    try {
+      const r = await fetch('/api/settings/sync');
+      if (r.ok) sync = await r.json();
+    } catch (_) {}
+    if (!sync) {
+      root.innerHTML = `<section class="screen screen-settings">${_settingsHeader('Sync & P2P')}<div class="placeholder">Не вдалося завантажити налаштування.</div></section>`;
+      _wireBack(root);
+      return;
+    }
+
+    root.innerHTML = `
+      <section class="screen screen-settings">
+        ${_settingsHeader('Sync & P2P')}
+        <div style="margin-top:calc(14*var(--px));">${_renderSync(sync)}</div>
+      </section>
+    `;
+    _wireBack(root);
+
+    const onAction = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
+    const putSync = async (body) => {
+      await fetch('/api/settings/sync', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      render();
+    };
+
+    onAction('[data-action="toggle-p2p"]',       () => putSync({ p2p_enabled: !sync.p2p_enabled }));
+    onAction('[data-action="toggle-bg-enrich"]', () => putSync({ background_enrichment: !sync.background_enrichment }));
+    onAction('[data-action="pick-interval"]', async () => {
+      const id = await openSettingsPicker({ title: 'Auto-sync interval', options: AUTO_SYNC_OPTIONS, currentId: sync.auto_interval_min || 0 });
+      if (id != null) await putSync({ auto_interval_min: Number(id) });
+    });
+    onAction('[data-action="pick-limit"]', async () => {
+      const id = await openSettingsPicker({ title: 'Announce limit', options: ANNOUNCE_LIMIT_OPTIONS, currentId: sync.announce_limit || 0 });
+      if (id != null) await putSync({ announce_limit: Number(id) });
+    });
+    onAction('[data-action="pick-rotation"]', async () => {
+      const id = await openSettingsPicker({ title: 'Announce rotation', options: ROTATION_OPTIONS, currentId: sync.announce_rotation_min || 30 });
+      if (id != null) await putSync({ announce_rotation_min: Number(id) });
+    });
+    onAction('[data-action="force-sync"]', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      btn.textContent = 'Syncing…';
+      try {
+        const r = await fetch('/api/settings/sync/force', { method: 'POST' });
+        const d = r.ok ? await r.json() : null;
+        const toast = document.createElement('div');
+        toast.className = 'toast-inline';
+        toast.innerHTML = `${SETTINGS_ICONS.check} Synced · <span class="mono">${d ? fmtNum(d.items_received || 0) : '?'}</span> new items`;
+        btn.parentElement.parentElement.insertBefore(toast, btn.parentElement);
+        setTimeout(() => render(), 1400);
+      } catch (_) {
+        btn.disabled = false;
+        btn.textContent = 'Force sync now';
+      }
     });
   }
 

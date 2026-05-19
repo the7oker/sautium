@@ -4555,3 +4555,397 @@ select.add-gear-input {
 .profile-btn.destructive:hover {
   background: color-mix(in srgb, var(--color-negative) 88%, white);
 }
+
+/* =====================================================================
+ * Settings (#more/settings)
+ * Mirrors docs/design/reference/claude-design-bundle/project/Settings.html.
+ * Reuses .form-group / .form-row / .toggle from the Profile section
+ * where the markup converges; adds stacked-row, select-trigger,
+ * enrich progress, in-flight scan strip, transient toast,
+ * status-dot, coming-soon-tag and the empty-library card.
+ * ===================================================================== */
+
+.screen-settings {
+  display: block;
+  padding: 0 0 calc(28 * var(--px));
+  gap: 0;
+}
+
+/* Stacked-row modifier: label row on top, value/CTA row below. */
+.form-row.stacked {
+  display: block;
+  padding: calc(12 * var(--px)) calc(14 * var(--px));
+}
+.row-stack {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(10 * var(--px));
+}
+.row-stack .row-stack-label {
+  font-size: calc(13 * var(--px));
+  color: var(--color-text-muted);
+  font-weight: 500;
+}
+.row-stack-value {
+  font-size: calc(13.5 * var(--px));
+  color: var(--color-text);
+  margin-top: calc(4 * var(--px));
+  line-height: 1.4;
+}
+.row-stack-value.mono {
+  font-family: var(--font-mono);
+  color: var(--color-blue);
+  font-size: calc(12.5 * var(--px));
+  letter-spacing: 0.02em;
+}
+.row-stack-sub {
+  font-size: calc(11 * var(--px));
+  color: var(--color-text-dim);
+  margin-top: calc(3 * var(--px));
+  line-height: 1.3;
+}
+.helper-line {
+  margin: calc(6 * var(--px)) calc(14 * var(--px)) 0;
+  font-size: calc(11 * var(--px));
+  color: var(--color-text-dim);
+  line-height: 1.4;
+}
+
+/* select-trigger — used as the visual surface for dropdowns whose
+   real <select> is wrapped or replaced by a custom picker sheet
+   (consistent with the HQPlayer filter picker pattern). */
+.select-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--px));
+  color: var(--color-text);
+  font-size: calc(13.5 * var(--px));
+  font-weight: 500;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.select-trigger .chev { color: var(--color-text-dim); display: inline-flex; }
+.select-trigger.mono {
+  font-family: var(--font-mono);
+  color: var(--color-blue);
+  font-size: calc(12.5 * var(--px));
+  letter-spacing: 0.02em;
+}
+
+/* btn / btn-row — generic primary/secondary; settings-first usage,
+   but the names are deliberately unscoped so other screens can
+   migrate away from local variants over time. */
+.btn-row {
+  margin: calc(14 * var(--px)) calc(16 * var(--px)) 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: calc(10 * var(--px));
+}
+.btn-row.single { grid-template-columns: 1fr; }
+.btn {
+  height: calc(44 * var(--px));
+  padding: 0 calc(14 * var(--px));
+  border-radius: var(--radius-md);
+  font-family: var(--font-sans);
+  font-size: calc(13.5 * var(--px));
+  font-weight: 600;
+  border: 1px solid transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(6 * var(--px));
+}
+.btn-primary {
+  background: var(--color-amber);
+  color: var(--color-foundation);
+}
+.btn-secondary {
+  background: transparent;
+  color: var(--color-text);
+  border-color: var(--color-divider);
+}
+.btn-link {
+  color: var(--color-amber);
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font-family: var(--font-sans);
+  font-size: calc(13 * var(--px));
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Enrichment-style mini progress row (Artist bios, Tracks analysed) */
+.enrich-row {
+  padding: calc(12 * var(--px)) calc(14 * var(--px));
+  border-bottom: 1px solid var(--color-divider);
+}
+.enrich-row:last-child { border-bottom: none; }
+.enrich-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: calc(10 * var(--px));
+}
+.enrich-line .label {
+  font-size: calc(13 * var(--px));
+  color: var(--color-text-muted);
+}
+.enrich-line .val {
+  font-family: var(--font-mono);
+  font-size: calc(12 * var(--px));
+  color: var(--color-blue);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.enrich-line .val .of { color: var(--color-text-dim); }
+.enrich-bar {
+  margin-top: calc(6 * var(--px));
+  height: calc(3 * var(--px));
+  background: var(--color-divider);
+  border-radius: calc(2 * var(--px));
+  overflow: hidden;
+}
+.enrich-bar .fill {
+  height: 100%;
+  background: var(--color-amber);
+  transition: width var(--dur-base) var(--ease-standard);
+}
+
+/* In-flight scan / enrichment progress strip — replaces the primary
+   action button while the worker is running. */
+.progress-strip {
+  margin: calc(14 * var(--px)) calc(16 * var(--px)) 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.progress-strip .head {
+  padding: calc(10 * var(--px)) calc(14 * var(--px)) calc(8 * var(--px));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(10 * var(--px));
+}
+.progress-strip .label {
+  font-size: calc(13 * var(--px));
+  color: var(--color-text);
+  font-weight: 500;
+}
+.progress-strip .stats {
+  font-family: var(--font-mono);
+  font-size: calc(11 * var(--px));
+  color: var(--color-blue);
+  letter-spacing: 0.02em;
+  text-align: right;
+  line-height: 1.3;
+}
+.progress-strip .stats .eta {
+  display: block;
+  color: var(--color-text-muted);
+  font-family: var(--font-sans);
+  font-size: calc(11 * var(--px));
+  letter-spacing: 0;
+  margin-top: calc(1 * var(--px));
+}
+.progress-strip .bar {
+  height: calc(3 * var(--px));
+  background: var(--color-divider);
+  position: relative;
+}
+.progress-strip .bar .fill {
+  position: absolute;
+  top: 0; left: 0; bottom: 0;
+  background: var(--color-amber);
+}
+.progress-strip .cancel {
+  padding: calc(8 * var(--px)) calc(14 * var(--px));
+  display: flex;
+  justify-content: flex-end;
+}
+.progress-strip .cancel button {
+  background: transparent;
+  border: 0;
+  color: var(--color-text-muted);
+  font-size: calc(12 * var(--px));
+  font-weight: 500;
+  cursor: pointer;
+}
+
+/* Inline transient feedback ("Force sync now" → "Synced · 5 new items"). */
+.toast-inline {
+  margin: calc(12 * var(--px)) calc(16 * var(--px)) 0;
+  padding: calc(10 * var(--px)) calc(14 * var(--px));
+  background: var(--color-positive);
+  border-radius: var(--radius-md);
+  color: var(--color-foundation);
+  font-size: calc(12.5 * var(--px));
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--px));
+}
+.toast-inline .mono {
+  font-family: var(--font-mono);
+  color: var(--color-foundation);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+/* Connection status indicator dots */
+.status-dot {
+  display: inline-block;
+  width: calc(8 * var(--px));
+  height: calc(8 * var(--px));
+  border-radius: 50%;
+  margin-right: calc(5 * var(--px));
+  vertical-align: 0;
+}
+.status-dot.green { background: var(--color-positive); }
+.status-dot.red   { background: var(--color-negative); }
+
+/* Disabled (placeholder / "coming soon") form-row */
+.form-row.disabled .row-stack-label,
+.form-row.disabled .row-stack-value,
+.form-row.disabled .row-stack-sub {
+  color: var(--color-text-dim);
+}
+.form-row.disabled .row-stack-value { color: var(--color-text-muted); }
+.coming-soon-tag {
+  display: inline-flex;
+  align-items: center;
+  height: calc(18 * var(--px));
+  padding: 0 calc(7 * var(--px));
+  border-radius: calc(9 * var(--px));
+  font-family: var(--font-mono);
+  font-size: calc(10 * var(--px));
+  color: var(--color-amber);
+  background: transparent;
+  border: 1px solid rgba(232, 176, 111, 0.4);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-left: calc(8 * var(--px));
+  vertical-align: 1px;
+}
+
+/* Empty-library card for first-run state */
+.empty-library {
+  margin: calc(14 * var(--px)) calc(16 * var(--px)) 0;
+  border: 1px dashed var(--color-divider);
+  border-radius: var(--radius-md);
+  padding: calc(22 * var(--px)) calc(18 * var(--px));
+  text-align: center;
+}
+.empty-library .icon {
+  color: var(--color-text-dim);
+  margin-bottom: calc(8 * var(--px));
+}
+.empty-library-msg {
+  font-size: calc(13 * var(--px));
+  color: var(--color-text-muted);
+  line-height: 1.45;
+  max-width: calc(260 * var(--px));
+  margin: 0 auto calc(14 * var(--px));
+  text-wrap: pretty;
+}
+.empty-cta {
+  height: calc(40 * var(--px));
+  padding: 0 calc(18 * var(--px));
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--px));
+  background: var(--color-amber);
+  color: var(--color-foundation);
+  border: 0;
+  border-radius: calc(20 * var(--px));
+  font-family: var(--font-sans);
+  font-size: calc(13 * var(--px));
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* 2×2 stat grid — matches the launcher's Library / Enrichment blocks
+   (Tracks / Artists / Albums / Genres on one side, Embeddings /
+   Features / Last.fm / Lyrics on the other). Each cell stacks label
+   above value so the per-column width never has to fit a long
+   coverage string like "35 794 / 35 794 (100%)" on one line. */
+.stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: calc(10 * var(--px)) calc(16 * var(--px));
+  padding: calc(14 * var(--px));
+}
+.stat-cell { display: block; min-width: 0; }
+.stat-cell .lbl {
+  display: block;
+  font-size: calc(13 * var(--px));
+  color: var(--color-text-muted);
+  font-weight: 500;
+}
+.stat-cell .val {
+  display: block;
+  margin-top: calc(2 * var(--px));
+  font-family: var(--font-mono);
+  font-size: calc(12.5 * var(--px));
+  color: var(--color-blue);
+  letter-spacing: 0.02em;
+  line-height: 1.3;
+  /* Enrichment values like "35 794 / 35 794 · 100%" don't fit on a
+     single 165px-wide grid column at this font size — allow them to
+     wrap to two lines instead of truncating with an ellipsis. */
+  white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+.stat-cell .val.pct-full { color: var(--color-positive); }
+.stat-cell .val.pct-near { color: var(--color-amber); }
+.stat-cell .val.pct-low  { color: var(--color-text-muted); }
+.stat-cell .pct {
+  font-size: calc(11 * var(--px));
+  color: var(--color-text-dim);
+  margin-left: calc(3 * var(--px));
+}
+
+/* mono modifier was used throughout (Profile, Settings) without an
+   actual style — markup said "form-value mono" but it rendered as
+   the base 13.5px sans. Define it explicitly so it matches the
+   stat-cell .val size, and the Library 2×2 grid + Enrichment rows
+   + Storage / Friends-online numbers all share one font signature. */
+.form-value.mono {
+  font-family: var(--font-mono);
+  color: var(--color-blue);
+  letter-spacing: 0.02em;
+  font-size: calc(12.5 * var(--px));
+}
+
+/* Coverage colour cue for single-column enrichment form-rows.
+   .form-value.mono is already mono-blue; these override the colour
+   based on done/total proportion: 100% sage, ≥80% amber, <80% muted. */
+.form-value.mono.pct-full { color: var(--color-positive); }
+.form-value.mono.pct-near { color: var(--color-amber); }
+.form-value.mono.pct-low  { color: var(--color-text-muted); }
+.form-value .pct-suffix {
+  font-size: calc(11 * var(--px));
+  color: var(--color-text-dim);
+  margin-left: calc(3 * var(--px));
+}
+
+/* Music path — RTL trick keeps the tail visible when truncated. */
+.path-value {
+  font-family: var(--font-mono);
+  font-size: calc(12.5 * var(--px));
+  color: var(--color-blue);
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: calc(220 * var(--px));
+  direction: rtl;
+  text-align: left;
+  unicode-bidi: plaintext;
+}

@@ -1,0 +1,1104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sautium · Settings</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --color-foundation:   #1B1714;
+    --color-surface:      #2A2420;
+    --color-surface-hi:   #342D28;
+    --color-surface-lo:   #221D1A;
+    --color-divider:      #3A322C;
+    --color-text:         #EDE2D4;
+    --color-text-muted:   #A69B8E;
+    --color-text-dim:     #6E665C;
+    --color-amber:        #E8B06F;
+    --color-amber-hover:  #EFBE83;
+    --color-amber-weak:   rgba(232,176,111,.14);
+    --color-amber-stripe: rgba(232,176,111,.06);
+    --color-blue:         #4A7FA7;
+    --color-blue-weak:    rgba(74,127,167,.14);
+    --color-positive:     #8DA77B;
+    --color-negative:     #C1564E;
+
+    --font-sans: "Inter Tight", ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+    --safe-top: 44px;
+    --safe-bottom: 34px;
+    --tab-bar-h: 64px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: radial-gradient(ellipse at 50% 15%, #221B17 0%, #15110F 70%) no-repeat, #15110F;
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    padding: 40px 24px 80px;
+  }
+
+  .canvas { max-width: 1280px; margin: 0 auto; }
+  .canvas-head {
+    display: flex; flex-wrap: wrap; align-items: baseline;
+    gap: 16px; margin-bottom: 32px;
+  }
+  .canvas-title {
+    margin: 0;
+    font-size: 22px; font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .canvas-sub {
+    color: var(--color-text-muted);
+    font-size: 13px;
+    text-wrap: pretty;
+    max-width: 760px;
+  }
+
+  .frames {
+    display: grid;
+    grid-template-columns: repeat(3, 360px);
+    gap: 48px 36px;
+    justify-content: center;
+    align-items: start;
+  }
+  .frame-label {
+    margin: 0 0 12px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+  }
+  .frame-label .num { color: var(--color-amber); margin-right: 6px; }
+
+  .viewport {
+    width: 360px;
+    background: var(--color-foundation);
+    position: relative;
+    overflow: hidden;
+    outline: 1px solid rgba(237,226,212,.06);
+    display: flex;
+    flex-direction: column;
+  }
+  .viewport.h820  { min-height: 820px; }
+  .viewport.h1380 { min-height: 1380px; }
+
+  /* ============ STATUS ============ */
+  .status-bar {
+    height: var(--safe-top);
+    padding: 0 24px;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 14px; font-weight: 600; letter-spacing: -0.01em;
+    position: relative;
+    color: var(--color-text);
+    flex-shrink: 0;
+    z-index: 10;
+  }
+  .status-bar .time { padding-top: 14px; }
+  .status-bar .indicators { display: flex; gap: 6px; padding-top: 14px; }
+  .status-bar .island {
+    position: absolute; top: 10px; left: 50%;
+    transform: translateX(-50%);
+    width: 108px; height: 28px;
+    background: #0A0807; border-radius: 18px;
+  }
+
+  /* ============ SHELL BOTTOM (no mini, no FAB) ============ */
+  .shell-bottom {
+    margin-top: auto;
+    background: var(--color-foundation);
+    z-index: 5;
+    position: relative;
+  }
+  .tab-bar {
+    height: var(--tab-bar-h);
+    background: var(--color-foundation);
+    border-top: 1px solid var(--color-divider);
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+  }
+  .tab {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 4px;
+    color: var(--color-text-muted);
+    font-family: var(--font-sans);
+    font-size: 10.5px; font-weight: 500;
+    background: transparent; border: none; cursor: pointer;
+    padding: 8px 0;
+  }
+  .tab.active { color: var(--color-amber); }
+  .home-indicator-wrap {
+    height: var(--safe-bottom);
+    display: flex; align-items: center; justify-content: center;
+    background: var(--color-foundation);
+  }
+  .home-indicator {
+    width: 128px; height: 5px;
+    background: var(--color-text);
+    opacity: 0.85; border-radius: 3px;
+  }
+
+  /* ============ COMMON ============ */
+  .scroll-area {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    padding-bottom: calc(var(--tab-bar-h) + var(--safe-bottom));
+  }
+  .header-bar {
+    padding: 6px 4px;
+    display: grid;
+    grid-template-columns: 44px 1fr 44px;
+    align-items: center;
+  }
+  .icon-btn {
+    width: 44px; height: 44px;
+    display: grid; place-items: center;
+    background: transparent; border: none; padding: 0; cursor: pointer;
+    color: var(--color-text);
+  }
+  .h-title-center {
+    margin: 0;
+    text-align: center;
+    font-size: 17px; font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--color-text);
+  }
+  .group-label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    padding: 24px 20px 10px;
+  }
+
+  /* ============ FORM GROUP ============ */
+  .form-group {
+    margin: 0 16px;
+    background: var(--color-surface);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .form-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 12px;
+    align-items: center;
+    min-height: 52px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--color-divider);
+  }
+  .form-row:last-child { border-bottom: none; }
+  .form-row.stacked {
+    display: block;
+    padding: 12px 14px;
+  }
+  .form-label {
+    font-size: 13px;
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }
+  .form-value {
+    font-size: 13.5px;
+    color: var(--color-text);
+    font-weight: 500;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .form-value.mono {
+    font-family: var(--font-mono);
+    color: var(--color-blue);
+    letter-spacing: 0.02em;
+    font-size: 12.5px;
+  }
+  .form-value.muted { color: var(--color-text-muted); font-weight: 400; }
+  .form-actions { display: inline-flex; gap: 8px; align-items: center; justify-content: flex-end; }
+
+  /* Inline two-line: label on top, value+chevron below */
+  .row-stack {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .row-stack .row-stack-label {
+    font-size: 13px;
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }
+  .row-stack-value {
+    font-size: 13.5px;
+    color: var(--color-text);
+    margin-top: 4px;
+    line-height: 1.4;
+  }
+  .row-stack-value.mono {
+    font-family: var(--font-mono);
+    color: var(--color-blue);
+    font-size: 12.5px;
+    letter-spacing: 0.02em;
+  }
+  .row-stack-sub {
+    font-size: 11px;
+    color: var(--color-text-dim);
+    margin-top: 3px;
+    line-height: 1.3;
+  }
+  .helper-line {
+    margin: 6px 14px 0;
+    font-size: 11px;
+    color: var(--color-text-dim);
+    line-height: 1.4;
+  }
+
+  /* Select chevron (matches Profile select pattern) */
+  .select-trigger {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--color-text);
+    font-size: 13.5px;
+    font-weight: 500;
+  }
+  .select-trigger .chev { color: var(--color-text-dim); }
+  .select-trigger.mono { font-family: var(--font-mono); color: var(--color-blue); font-size: 12.5px; letter-spacing: 0.02em; }
+
+  /* Toggle (matches Profile) */
+  .toggle {
+    width: 42px; height: 24px;
+    background: var(--color-divider);
+    border-radius: 12px;
+    position: relative;
+    flex-shrink: 0;
+  }
+  .toggle.on { background: var(--color-amber); }
+  .toggle .knob {
+    position: absolute;
+    top: 3px; left: 3px;
+    width: 18px; height: 18px;
+    background: var(--color-text);
+    border-radius: 50%;
+  }
+  .toggle.on .knob { transform: translateX(18px); background: #FFFFFF; }
+
+  /* Buttons */
+  .btn-row {
+    margin: 14px 16px 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .btn-row.single { grid-template-columns: 1fr; }
+  .btn {
+    height: 44px;
+    padding: 0 14px;
+    border-radius: 8px;
+    font-family: var(--font-sans);
+    font-size: 13.5px;
+    font-weight: 600;
+    letter-spacing: 0;
+    border: 1px solid transparent;
+    cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    gap: 6px;
+  }
+  .btn-primary { background: var(--color-amber); color: #1B1714; }
+  .btn-secondary { background: transparent; color: var(--color-text); border-color: var(--color-divider); }
+  .btn-link {
+    color: var(--color-amber);
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  /* Stats progress (3px hairline, amber fill) */
+  .enrich-row {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--color-divider);
+  }
+  .enrich-row:last-child { border-bottom: none; }
+  .enrich-line {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 10px;
+  }
+  .enrich-line .label {
+    font-size: 13px;
+    color: var(--color-text-muted);
+  }
+  .enrich-line .val {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--color-blue);
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+  .enrich-line .val .of { color: var(--color-text-dim); }
+  .enrich-bar {
+    margin-top: 6px;
+    height: 3px;
+    background: var(--color-divider);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .enrich-bar .fill {
+    height: 100%;
+    background: var(--color-amber);
+  }
+
+  /* In-flight progress strip (replaces button) */
+  .progress-strip {
+    margin: 14px 16px 0;
+    background: var(--color-surface);
+    border: 1px solid var(--color-divider);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .progress-strip .head {
+    padding: 10px 14px 8px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px;
+  }
+  .progress-strip .label {
+    font-size: 13px;
+    color: var(--color-text);
+    font-weight: 500;
+  }
+  .progress-strip .stats {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--color-blue);
+    letter-spacing: 0.02em;
+    text-align: right;
+    line-height: 1.3;
+  }
+  .progress-strip .stats .eta {
+    display: block;
+    color: var(--color-text-muted);
+    font-family: var(--font-sans);
+    font-size: 11px;
+    letter-spacing: 0;
+    margin-top: 1px;
+  }
+  .progress-strip .bar {
+    height: 3px;
+    background: var(--color-divider);
+    position: relative;
+  }
+  .progress-strip .bar .fill {
+    position: absolute;
+    top: 0; left: 0; bottom: 0;
+    width: 36%;
+    background: var(--color-amber);
+  }
+  .progress-strip .cancel {
+    padding: 8px 14px;
+    display: flex; justify-content: flex-end;
+  }
+  .progress-strip .cancel button {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  /* Inline transient feedback for "Force sync now" */
+  .toast-inline {
+    margin: 12px 16px 0;
+    padding: 10px 14px;
+    background: var(--color-positive);
+    border-radius: 8px;
+    color: #1B1714;
+    font-size: 12.5px;
+    font-weight: 600;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .toast-inline .mono {
+    font-family: var(--font-mono);
+    color: #1B1714;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+
+  /* Connection status dots */
+  .status-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 5px;
+    vertical-align: 0;
+  }
+  .status-dot.green { background: var(--color-positive); }
+  .status-dot.red { background: var(--color-negative); }
+
+  /* Disabled placeholder row */
+  .form-row.disabled .row-stack-label,
+  .form-row.disabled .row-stack-value,
+  .form-row.disabled .row-stack-sub {
+    color: var(--color-text-dim);
+  }
+  .form-row.disabled .row-stack-value {
+    color: var(--color-text-muted);
+  }
+  .coming-soon-tag {
+    display: inline-flex;
+    align-items: center;
+    height: 18px;
+    padding: 0 7px;
+    border-radius: 9px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-amber);
+    background: transparent;
+    border: 1px solid rgba(232,176,111,.4);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-left: 8px;
+    vertical-align: 1px;
+  }
+
+  /* Empty state for Library section */
+  .empty-library {
+    margin: 14px 16px 0;
+    border: 1px dashed var(--color-divider);
+    border-radius: 8px;
+    padding: 22px 18px;
+    text-align: center;
+  }
+  .empty-library .icon {
+    color: var(--color-text-dim);
+    margin-bottom: 8px;
+  }
+  .empty-library-msg {
+    font-size: 13px;
+    color: var(--color-text-muted);
+    line-height: 1.45;
+    max-width: 260px;
+    margin: 0 auto 14px;
+    text-wrap: pretty;
+  }
+  .empty-cta {
+    height: 40px;
+    padding: 0 18px;
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--color-amber);
+    color: #1B1714;
+    border: none;
+    border-radius: 20px;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .end-spacer { height: 28px; }
+
+  /* truncate music path nicely */
+  .path-value {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--color-blue);
+    letter-spacing: 0.02em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 220px;
+    direction: rtl;       /* keep tail visible */
+    text-align: left;
+    unicode-bidi: plaintext;
+  }
+
+</style>
+</head>
+<body>
+
+<div class="canvas">
+
+  <header class="canvas-head">
+    <h1 class="canvas-title">Sautium · Settings</h1>
+    <span class="canvas-sub">
+      Single scrollable screen under <b>More → Settings</b>. Four stacked sections — Library, AI assistant, Sync &amp; P2P, Audio Output. No mini-player and no AI FAB (Settings is the assistant's own configuration surface). Three frames: default state, library scanning state, empty library + first-run.
+    </span>
+  </header>
+
+  <div class="frames">
+
+<!-- ============================================================ -->
+<!-- 01 · DEFAULT STATE                                            -->
+<!-- ============================================================ -->
+<div>
+  <div class="frame-label"><span class="num">01</span>Default · all four sections</div>
+  <section class="viewport h1380">
+    <div class="status-bar">
+      <div class="island"></div>
+      <span class="time">9:41</span>
+      <div class="indicators">
+        <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4.5" y="5" width="3" height="6" rx="0.5"/><rect x="9" y="3" width="3" height="8" rx="0.5"/><rect x="13.5" y="0" width="3" height="11" rx="0.5"/></svg>
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M7.5 10a.8.8 0 100-1.6.8.8 0 000 1.6zM2.5 5.5a7 7 0 0110 0M4.5 7.5a4 4 0 016 0"/></svg>
+        <svg width="25" height="11" viewBox="0 0 25 11" fill="none"><rect x="0.5" y="0.5" width="21" height="10" rx="2" stroke="currentColor"/><rect x="22.5" y="3.5" width="1.5" height="4" rx="0.5" fill="currentColor"/><rect x="2" y="2" width="17" height="7" rx="1" fill="currentColor"/></svg>
+      </div>
+    </div>
+
+    <div class="scroll-area">
+      <div class="header-bar">
+        <button class="icon-btn" aria-label="back">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+        <h2 class="h-title-center">Settings</h2>
+        <span></span>
+      </div>
+
+      <!-- A · LIBRARY -->
+      <div class="group-label">Library</div>
+      <div class="form-group">
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Music path</span>
+            <span class="path-value">/Volumes/Audio/Music/FLAC</span>
+          </div>
+          <div class="row-stack-sub">Configured in the launcher.</div>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Indexed</span>
+          <span class="form-value mono">34 837 · 12 585 · 3 210</span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Storage</span>
+          <span class="form-value mono">428 GB</span>
+        </div>
+        <div class="enrich-row">
+          <div class="enrich-line">
+            <span class="label">Artist bios</span>
+            <span class="val">2 550 <span class="of">/ 12 585</span></span>
+          </div>
+          <div class="enrich-bar"><div class="fill" style="width: 20%;"></div></div>
+        </div>
+        <div class="enrich-row">
+          <div class="enrich-line">
+            <span class="label">Tracks analysed</span>
+            <span class="val">28 400 <span class="of">/ 34 837</span></span>
+          </div>
+          <div class="enrich-bar"><div class="fill" style="width: 81%;"></div></div>
+        </div>
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Last scan</span>
+            <span class="row-stack-value">3 hours ago</span>
+          </div>
+          <div class="row-stack-sub">
+            <span style="font-family: var(--font-mono); color: var(--color-text-dim); letter-spacing: 0.02em;">2026-05-19 · 06:14</span>
+          </div>
+        </div>
+      </div>
+      <div class="helper-line"><span style="color: var(--color-text-muted);">Counts: tracks · artists · albums.</span></div>
+
+      <div class="btn-row">
+        <button class="btn btn-primary">Rescan library</button>
+        <button class="btn btn-secondary">Re-enrich missing</button>
+      </div>
+
+      <!-- B · AI ASSISTANT -->
+      <div class="group-label">AI assistant</div>
+      <div class="form-group">
+        <div class="form-row">
+          <span class="form-label">Provider</span>
+          <span class="select-trigger">
+            Claude
+            <span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+          </span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Model</span>
+          <span class="select-trigger">
+            Opus 4.7
+            <span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+          </span>
+        </div>
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Authentication</span>
+            <button class="btn-link">Reauthorize</button>
+          </div>
+          <div class="row-stack-value" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <span style="color: var(--color-positive); font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.02em;"><span class="status-dot green"></span>Signed in</span>
+            <span style="color: var(--color-text-muted); font-size: 12px;">· expires in <span style="font-family: var(--font-mono); color: var(--color-blue); font-size: 11.5px; letter-spacing: 0.02em;">6 days</span></span>
+          </div>
+        </div>
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Usage</span>
+            <span style="font-family: var(--font-mono); font-size: 11px; color: var(--color-text-muted); letter-spacing: 0.04em; text-transform: uppercase;">monthly</span>
+          </div>
+          <div class="row-stack-value" style="display: flex; align-items: baseline; gap: 6px;">
+            <span style="font-family: var(--font-mono); color: var(--color-blue); font-size: 14px; font-weight: 600; letter-spacing: -0.005em;">$3.20</span>
+            <span style="color: var(--color-text-muted); font-size: 12.5px;">of <span style="font-family: var(--font-mono); color: var(--color-blue);">$20</span> limit · <span style="font-family: var(--font-mono); color: var(--color-blue);">5d</span> left</span>
+          </div>
+          <div class="enrich-bar" style="margin-top: 8px;">
+            <div class="fill" style="width: 16%;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- C · SYNC & P2P -->
+      <div class="group-label">Sync &amp; P2P</div>
+      <div class="form-group">
+        <div class="form-row">
+          <span class="form-label">P2P sharing</span>
+          <span class="toggle on"><span class="knob"></span></span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Auto-sync interval</span>
+          <span class="select-trigger">
+            Every 30 min
+            <span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+          </span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Announce limit</span>
+          <span class="select-trigger">
+            <span style="font-family: var(--font-mono); color: var(--color-blue); letter-spacing: 0.02em; font-size: 12.5px; margin-right: 4px;">50</span> artists
+            <span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+          </span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Announce rotation</span>
+          <span class="select-trigger">
+            Every 30 min
+            <span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+          </span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Background enrichment</span>
+          <span class="toggle on"><span class="knob"></span></span>
+        </div>
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Last sync</span>
+            <span style="color: var(--color-text-muted); font-size: 12px;">2 hours ago</span>
+          </div>
+          <div class="row-stack-value" style="margin-top: 2px;">
+            <span style="font-family: var(--font-mono); color: var(--color-blue); font-size: 12.5px; letter-spacing: 0.02em;">3 new artists</span>
+          </div>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Friends online</span>
+          <span class="form-value mono">2 <span style="color: var(--color-text-dim);">/ 5</span></span>
+        </div>
+      </div>
+      <div class="btn-row single">
+        <button class="btn btn-secondary">Force sync now</button>
+      </div>
+
+      <!-- D · AUDIO OUTPUT -->
+      <div class="group-label">Audio output</div>
+      <div class="form-group">
+        <div class="form-row stacked" style="cursor: pointer;">
+          <div class="row-stack">
+            <span class="row-stack-label">HQPlayer</span>
+            <span style="color: var(--color-text-dim);">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+            </span>
+          </div>
+          <div class="row-stack-value" style="display: flex; align-items: center; gap: 8px;">
+            <span style="color: var(--color-positive); font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.02em;"><span class="status-dot green"></span>Connected</span>
+            <span style="font-family: var(--font-mono); color: var(--color-blue); font-size: 11.5px; letter-spacing: 0.02em;">NUC.local:4321</span>
+          </div>
+        </div>
+        <div class="form-row disabled stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">
+              Native output
+              <span class="coming-soon-tag">Coming soon</span>
+            </span>
+            <span></span>
+          </div>
+          <div class="row-stack-value">
+            <span style="font-family: var(--font-mono); font-size: 11.5px; color: var(--color-text-dim); letter-spacing: 0.04em;">WASAPI · ASIO · CoreAudio · NAA</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="end-spacer"></div>
+    </div>
+
+    <div class="shell-bottom">
+      <div class="tab-bar">
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l9-7 9 7v10a2 2 0 01-2 2h-4v-6h-6v6H5a2 2 0 01-2-2V10z"/></svg>Home</button>
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>Discovery</button>
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><circle cx="17" cy="9" r="2.5"/><path d="M3 19c0-3 2.7-5.5 6-5.5s6 2.5 6 5.5M15 19c0-2 1.8-3.8 4-3.8s3 1.8 3 3.8"/></svg>Friends</button>
+        <button class="tab active"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>More</button>
+      </div>
+      <div class="home-indicator-wrap"><div class="home-indicator"></div></div>
+    </div>
+  </section>
+</div>
+
+<!-- ============================================================ -->
+<!-- 02 · LIBRARY SCANNING + SYNC TOAST                            -->
+<!-- ============================================================ -->
+<div>
+  <div class="frame-label"><span class="num">02</span>Scanning · API-key auth · sync toast</div>
+  <section class="viewport h1380">
+    <div class="status-bar">
+      <div class="island"></div>
+      <span class="time">9:41</span>
+      <div class="indicators">
+        <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4.5" y="5" width="3" height="6" rx="0.5"/><rect x="9" y="3" width="3" height="8" rx="0.5"/><rect x="13.5" y="0" width="3" height="11" rx="0.5"/></svg>
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M7.5 10a.8.8 0 100-1.6.8.8 0 000 1.6zM2.5 5.5a7 7 0 0110 0M4.5 7.5a4 4 0 016 0"/></svg>
+        <svg width="25" height="11" viewBox="0 0 25 11" fill="none"><rect x="0.5" y="0.5" width="21" height="10" rx="2" stroke="currentColor"/><rect x="22.5" y="3.5" width="1.5" height="4" rx="0.5" fill="currentColor"/><rect x="2" y="2" width="17" height="7" rx="1" fill="currentColor"/></svg>
+      </div>
+    </div>
+
+    <div class="scroll-area">
+      <div class="header-bar">
+        <button class="icon-btn" aria-label="back">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+        <h2 class="h-title-center">Settings</h2>
+        <span></span>
+      </div>
+
+      <!-- A · LIBRARY · in flight -->
+      <div class="group-label">Library</div>
+      <div class="form-group">
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Music path</span>
+            <span class="path-value">/Volumes/Audio/Music/FLAC</span>
+          </div>
+          <div class="row-stack-sub">Configured in the launcher.</div>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Indexed</span>
+          <span class="form-value mono">34 837 · 12 585 · 3 210</span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Storage</span>
+          <span class="form-value mono">428 GB</span>
+        </div>
+        <div class="enrich-row">
+          <div class="enrich-line">
+            <span class="label">Artist bios</span>
+            <span class="val">2 550 <span class="of">/ 12 585</span></span>
+          </div>
+          <div class="enrich-bar"><div class="fill" style="width: 20%;"></div></div>
+        </div>
+        <div class="enrich-row">
+          <div class="enrich-line">
+            <span class="label">Tracks analysed</span>
+            <span class="val">28 400 <span class="of">/ 34 837</span></span>
+          </div>
+          <div class="enrich-bar"><div class="fill" style="width: 81%;"></div></div>
+        </div>
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Last scan</span>
+            <span class="row-stack-value">running…</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- In-flight progress strip replacing the primary button -->
+      <div class="progress-strip">
+        <div class="head">
+          <span class="label">Scanning library</span>
+          <span class="stats">
+            12 432 / 34 837
+            <span class="eta">≈ 3 h remaining</span>
+          </span>
+        </div>
+        <div class="bar"><div class="fill" style="width: 36%;"></div></div>
+        <div class="cancel">
+          <button>Cancel</button>
+        </div>
+      </div>
+      <div class="btn-row single" style="margin-top: 10px;">
+        <button class="btn btn-secondary">Re-enrich missing</button>
+      </div>
+
+      <!-- B · AI ASSISTANT · API-key state -->
+      <div class="group-label">AI assistant</div>
+      <div class="form-group">
+        <div class="form-row">
+          <span class="form-label">Provider</span>
+          <span class="select-trigger">
+            Claude
+            <span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+          </span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Model</span>
+          <span class="select-trigger">
+            Sonnet 4.6
+            <span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+          </span>
+        </div>
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Authentication</span>
+            <button class="btn-link">Replace</button>
+          </div>
+          <div class="row-stack-value" style="display: flex; align-items: center; gap: 8px;">
+            <span style="color: var(--color-positive); font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.02em;"><span class="status-dot green"></span>API key set</span>
+            <span style="font-family: var(--font-mono); color: var(--color-blue); font-size: 12px; letter-spacing: 0.04em;">●●●●●●●●xyz</span>
+          </div>
+        </div>
+        <!-- Usage row hidden — billing API unavailable for this key -->
+      </div>
+
+      <!-- C · SYNC & P2P with toast -->
+      <div class="group-label">Sync &amp; P2P</div>
+      <div class="form-group">
+        <div class="form-row">
+          <span class="form-label">P2P sharing</span>
+          <span class="toggle on"><span class="knob"></span></span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Auto-sync interval</span>
+          <span class="select-trigger">
+            Every 1 hour
+            <span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+          </span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Announce limit</span>
+          <span class="select-trigger">
+            All
+            <span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+          </span>
+        </div>
+        <!-- Announce rotation hidden because limit == All -->
+        <div class="form-row">
+          <span class="form-label">Background enrichment</span>
+          <span class="toggle"><span class="knob"></span></span>
+        </div>
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Last sync</span>
+            <span style="color: var(--color-text-muted); font-size: 12px;">moments ago</span>
+          </div>
+          <div class="row-stack-value" style="margin-top: 2px;">
+            <span style="font-family: var(--font-mono); color: var(--color-blue); font-size: 12.5px; letter-spacing: 0.02em;">5 new items</span>
+          </div>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Friends online</span>
+          <span class="form-value mono">2 <span style="color: var(--color-text-dim);">/ 5</span></span>
+        </div>
+      </div>
+
+      <!-- Transient feedback after Force sync now -->
+      <div class="toast-inline">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>
+        Synced · <span class="mono">5</span> new items
+      </div>
+      <div class="btn-row single" style="margin-top: 10px;">
+        <button class="btn btn-secondary">Force sync now</button>
+      </div>
+
+      <!-- D · AUDIO OUTPUT · disconnected -->
+      <div class="group-label">Audio output</div>
+      <div class="form-group">
+        <div class="form-row stacked" style="cursor: pointer;">
+          <div class="row-stack">
+            <span class="row-stack-label">HQPlayer</span>
+            <span style="color: var(--color-text-dim);">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+            </span>
+          </div>
+          <div class="row-stack-value" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <span style="color: var(--color-negative); font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.02em;"><span class="status-dot red"></span>Disconnected</span>
+            <span style="color: var(--color-text-muted); font-size: 12px;">— check launcher</span>
+          </div>
+        </div>
+        <div class="form-row disabled stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">
+              Native output
+              <span class="coming-soon-tag">Coming soon</span>
+            </span>
+            <span></span>
+          </div>
+          <div class="row-stack-value">
+            <span style="font-family: var(--font-mono); font-size: 11.5px; color: var(--color-text-dim); letter-spacing: 0.04em;">WASAPI · ASIO · CoreAudio · NAA</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="end-spacer"></div>
+    </div>
+
+    <div class="shell-bottom">
+      <div class="tab-bar">
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l9-7 9 7v10a2 2 0 01-2 2h-4v-6h-6v6H5a2 2 0 01-2-2V10z"/></svg>Home</button>
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>Discovery</button>
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><circle cx="17" cy="9" r="2.5"/><path d="M3 19c0-3 2.7-5.5 6-5.5s6 2.5 6 5.5M15 19c0-2 1.8-3.8 4-3.8s3 1.8 3 3.8"/></svg>Friends</button>
+        <button class="tab active"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>More</button>
+      </div>
+      <div class="home-indicator-wrap"><div class="home-indicator"></div></div>
+    </div>
+  </section>
+</div>
+
+<!-- ============================================================ -->
+<!-- 03 · EMPTY LIBRARY + NOT-AUTHENTICATED                        -->
+<!-- ============================================================ -->
+<div>
+  <div class="frame-label"><span class="num">03</span>First-run · empty library · no AI auth</div>
+  <section class="viewport h1100" style="min-height: 1100px;">
+    <div class="status-bar">
+      <div class="island"></div>
+      <span class="time">9:41</span>
+      <div class="indicators">
+        <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4.5" y="5" width="3" height="6" rx="0.5"/><rect x="9" y="3" width="3" height="8" rx="0.5"/><rect x="13.5" y="0" width="3" height="11" rx="0.5"/></svg>
+        <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M7.5 10a.8.8 0 100-1.6.8.8 0 000 1.6zM2.5 5.5a7 7 0 0110 0M4.5 7.5a4 4 0 016 0"/></svg>
+        <svg width="25" height="11" viewBox="0 0 25 11" fill="none"><rect x="0.5" y="0.5" width="21" height="10" rx="2" stroke="currentColor"/><rect x="22.5" y="3.5" width="1.5" height="4" rx="0.5" fill="currentColor"/><rect x="2" y="2" width="17" height="7" rx="1" fill="currentColor"/></svg>
+      </div>
+    </div>
+
+    <div class="scroll-area">
+      <div class="header-bar">
+        <button class="icon-btn" aria-label="back">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+        <h2 class="h-title-center">Settings</h2>
+        <span></span>
+      </div>
+
+      <!-- A · LIBRARY · empty -->
+      <div class="group-label">Library</div>
+      <div class="form-group">
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Music path</span>
+            <span class="path-value">/Volumes/Audio/Music/FLAC</span>
+          </div>
+          <div class="row-stack-sub">Configured in the launcher.</div>
+        </div>
+      </div>
+      <div class="empty-library">
+        <div class="icon">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 17V5l11-2v12"/>
+            <circle cx="6" cy="17" r="3"/>
+            <circle cx="17" cy="15" r="3"/>
+          </svg>
+        </div>
+        <p class="empty-library-msg">
+          No tracks indexed yet. Run the first scan to discover your library — it usually takes a few minutes per 10k tracks.
+        </p>
+        <button class="empty-cta">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 11-3-6.7M21 4v5h-5"/></svg>
+          Run first scan
+        </button>
+      </div>
+
+      <!-- B · AI ASSISTANT · not signed in -->
+      <div class="group-label">AI assistant</div>
+      <div class="form-group">
+        <div class="form-row">
+          <span class="form-label">Provider</span>
+          <span class="select-trigger">
+            Claude
+            <span class="chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+          </span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Model</span>
+          <span class="form-value muted">Sign in to choose</span>
+        </div>
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Authentication</span>
+            <span></span>
+          </div>
+          <div class="row-stack-value" style="color: var(--color-text-muted); font-size: 12.5px;">Not signed in</div>
+          <div class="btn-row single" style="margin: 10px 0 0;">
+            <button class="btn btn-primary">Sign in / set key</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- C · SYNC & P2P · sharing OFF -->
+      <div class="group-label">Sync &amp; P2P</div>
+      <div class="form-group">
+        <div class="form-row">
+          <span class="form-label">P2P sharing</span>
+          <span class="toggle"><span class="knob"></span></span>
+        </div>
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label" style="color: var(--color-text-dim);">Auto-sync · Announce · Rotation</span>
+            <span></span>
+          </div>
+          <div class="row-stack-sub">Turn P2P sharing on to configure sync and node-announce limits.</div>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Background enrichment</span>
+          <span class="toggle on"><span class="knob"></span></span>
+        </div>
+      </div>
+
+      <!-- D · AUDIO OUTPUT -->
+      <div class="group-label">Audio output</div>
+      <div class="form-group">
+        <div class="form-row stacked" style="cursor: pointer;">
+          <div class="row-stack">
+            <span class="row-stack-label">HQPlayer</span>
+            <span style="color: var(--color-text-dim);">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+            </span>
+          </div>
+          <div class="row-stack-value" style="display: flex; align-items: center; gap: 8px;">
+            <span style="color: var(--color-positive); font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.02em;"><span class="status-dot green"></span>Connected</span>
+            <span style="font-family: var(--font-mono); color: var(--color-blue); font-size: 11.5px; letter-spacing: 0.02em;">NUC.local:4321</span>
+          </div>
+        </div>
+        <div class="form-row disabled stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">
+              Native output
+              <span class="coming-soon-tag">Coming soon</span>
+            </span>
+            <span></span>
+          </div>
+          <div class="row-stack-value">
+            <span style="font-family: var(--font-mono); font-size: 11.5px; color: var(--color-text-dim); letter-spacing: 0.04em;">WASAPI · ASIO · CoreAudio · NAA</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="end-spacer"></div>
+    </div>
+
+    <div class="shell-bottom">
+      <div class="tab-bar">
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l9-7 9 7v10a2 2 0 01-2 2h-4v-6h-6v6H5a2 2 0 01-2-2V10z"/></svg>Home</button>
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>Discovery</button>
+        <button class="tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><circle cx="17" cy="9" r="2.5"/><path d="M3 19c0-3 2.7-5.5 6-5.5s6 2.5 6 5.5M15 19c0-2 1.8-3.8 4-3.8s3 1.8 3 3.8"/></svg>Friends</button>
+        <button class="tab active"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>More</button>
+      </div>
+      <div class="home-indicator-wrap"><div class="home-indicator"></div></div>
+    </div>
+  </section>
+</div>
+
+  </div>
+</div>
+
+</body>
+</html>
