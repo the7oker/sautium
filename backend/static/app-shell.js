@@ -333,6 +333,11 @@
   const routes = {};
   let currentRoute = null;
   let _lastRenderedHash = '';
+  // null = unknown / still loading — keep the FAB hidden so we don't
+  // flash it on every page load only to immediately retract it once
+  // /api/chat/providers comes back empty. 0 = no providers configured;
+  // ≥1 = at least one provider works. The FAB shows only on ≥1.
+  let _aiProviderCount = null;
 
   function registerScreen(name, render) {
     routes[name] = render;
@@ -457,8 +462,24 @@
     const r = route || currentRoute;
     const segs = parseHash().split('/').filter(Boolean);
     const inChat = segs.length >= 3 && segs[1] === 'chat';
+    const aiNotReady = !(_aiProviderCount > 0);
     fab.hidden = !!(npOpen || aiOpen || drawerOpen
-                    || FAB_HIDDEN_ROUTES.has(r) || inChat);
+                    || FAB_HIDDEN_ROUTES.has(r) || inChat || aiNotReady);
+  }
+
+  async function refreshAiAvailability() {
+    try {
+      const r = await fetch('/api/chat/providers');
+      if (r.ok) {
+        const data = await r.json();
+        _aiProviderCount = Array.isArray(data) ? data.length : 0;
+      } else {
+        _aiProviderCount = 0;
+      }
+    } catch (_) {
+      _aiProviderCount = 0;
+    }
+    updateFabVisibility(currentRoute);
   }
 
   /* ---------- Now Playing sheet ----------
@@ -4759,10 +4780,12 @@
     }
 
     const display = profile.display_name || '';
+    const username = (account && account.username) ? account.username : '';
     const initials = display.trim()
       ? display.trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase()
-      : '—';
-    const username = (account && account.username) ? account.username : '';
+      : username.trim()
+        ? username.trim().charAt(0).toUpperCase()
+        : '—';
     const inviteTail = (account && account.invite_code)
       ? '· ' + account.invite_code.split('#').pop()
       : '';
@@ -6716,6 +6739,7 @@
       const id = await openSettingsPicker({ title: 'Provider', options: PROVIDER_OPTIONS, currentId: ai.provider });
       if (id && id !== ai.provider) {
         await fetch('/api/settings/ai/provider', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ provider: id }) });
+        refreshAiAvailability();
         render();
       }
     });
@@ -6727,8 +6751,9 @@
         render();
       }
     });
-    onAction('[data-action="sign-in"]',     () => openApiKeyModal(ai.provider || 'claude', () => render()));
-    onAction('[data-action="replace-key"]', () => openApiKeyModal(ai.provider || 'claude', () => render()));
+    const afterKeySaved = () => { refreshAiAvailability(); render(); };
+    onAction('[data-action="sign-in"]',     () => openApiKeyModal(ai.provider || 'claude', afterKeySaved));
+    onAction('[data-action="replace-key"]', () => openApiKeyModal(ai.provider || 'claude', afterKeySaved));
     onAction('[data-action="reauthorize"]', () => {
       // OAuth handshake lives in the chat module — route there for now.
       navigate('friends');
@@ -6826,6 +6851,7 @@
     ai.init();
     queue.init();
     moreDrawer.init();
+    refreshAiAvailability();
     document.addEventListener('np-update', e => {
       mp.update(e.detail);
       sheet.onStatus(e.detail);
