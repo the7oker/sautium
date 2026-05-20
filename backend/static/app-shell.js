@@ -5778,12 +5778,18 @@
     // launcher stores them with forward slashes for Docker / config
     // portability ("E:/Music"); for human display we flip those to
     // backslashes ("E:\\Music"). POSIX paths (/Volumes/..., /home/...)
-    // keep forward slashes regardless of where the UI is viewed
-    // — the path is native to the host that holds the files, not to
-    // the client looking at the screen.
+    // keep forward slashes regardless of where the UI is viewed.
     if (!p) return '';
     if (/^[A-Za-z]:[/\\]/.test(p)) return p.replace(/\//g, '\\');
     return p;
+  }
+  function fmtPathTruncatedFromStart(p, max = 27) {
+    // Truncate from the head, not the tail — the meaningful part of
+    // a music-library path is the folder name at the end. The full
+    // string remains accessible via the title= tooltip in markup.
+    const formatted = fmtPathForDisplay(p);
+    if (formatted.length <= max) return formatted;
+    return '…' + formatted.slice(-(max - 1));
   }
 
   function fmtBytes(n) {
@@ -6344,7 +6350,8 @@
     const scanRunning   = !!(lib.scan   && lib.scan.running)   && !_terminalRe.test(scanProgress);
     const enrichRunning = !!(lib.enrich && lib.enrich.running) && !_terminalRe.test(enrichProgress);
     const isEmpty       = (lib.total_tracks || 0) === 0;
-    const path          = fmtPathForDisplay(lib.music_path || '/music');
+    const pathFull      = fmtPathForDisplay(lib.music_path || '/music');
+    const path          = fmtPathTruncatedFromStart(pathFull);
 
     const scanCancelling   = scanRunning   && !!(lib.scan   && lib.scan.cancel_requested);
     const enrichCancelling = enrichRunning && !!(lib.enrich && lib.enrich.cancel_requested);
@@ -6416,7 +6423,7 @@
           <div class="form-row stacked">
             <div class="row-stack">
               <span class="row-stack-label">Music path</span>
-              <span class="path-value" title="${escapeProfileHtml(path)}">${escapeProfileHtml(path)}</span>
+              <span class="path-value" title="${escapeProfileHtml(pathFull)}">${escapeProfileHtml(path)}</span>
             </div>
             <div class="row-stack-sub">Configured in the launcher.</div>
           </div>

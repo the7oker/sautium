@@ -4954,17 +4954,14 @@ select.add-gear-input {
   margin-left: calc(3 * var(--px));
 }
 
-/* Music path — RTL trick keeps the tail visible when truncated. */
+/* Music path — JS-side truncation in fmtPathTruncatedFromStart keeps
+   the tail visible (it's the user-meaningful folder name). CSS just
+   styles the font; no max-width / text-overflow, so the string the
+   renderer produces is the string the user sees. */
 .path-value {
   font-family: var(--font-mono);
   font-size: calc(12.5 * var(--px));
   color: var(--color-blue);
   letter-spacing: 0.02em;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: calc(220 * var(--px));
-  direction: rtl;
-  text-align: left;
-  unicode-bidi: plaintext;
 }
