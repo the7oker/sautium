@@ -332,6 +332,7 @@
 
   const routes = {};
   let currentRoute = null;
+  let _lastRenderedHash = '';
 
   function registerScreen(name, render) {
     routes[name] = render;
@@ -369,12 +370,15 @@
     currentRoute = route;
     const app = document.getElementById('app');
     if (!app) return;
-    // Deliberately NOT wiping app.innerHTML here. Each renderer
-    // overwrites the content atomically once its data is ready,
-    // so the previous screen stays visible during a network fetch
-    // instead of flashing to blank. Important for re-render after
-    // poll ticks / cancel actions where the visual jump was the
-    // user-visible symptom of "flicker".
+    // Wipe app only when navigating to a *different* hash. Same-hash
+    // re-renders (poll ticks on Library, cancel action) skip the wipe
+    // so the renderer can do an atomic innerHTML swap without an
+    // intermediate blank flash. Cross-route navigation still wipes
+    // because most screen renderers append (not overwrite) their
+    // section into root.
+    const sameHash = hash === _lastRenderedHash;
+    _lastRenderedHash = hash;
+    if (!sameHash) app.innerHTML = '';
 
     // Top-level peer-profile route — #profile/<16-hex-prefix>. Portable
     // URL: same prefix works on any node since it's the friend's public
@@ -5931,21 +5935,33 @@
         <span class="val">${escapeProfileHtml(String(value))}</span>
       </div>`;
   }
-  function _enrichRow(label, done, total) {
+  function _enrichRowValueHTML(done, total) {
     if (!total || total <= 0) {
-      return `
-        <div class="form-row">
-          <span class="form-label">${escapeProfileHtml(label)}</span>
-          <span class="form-value muted">—</span>
-        </div>`;
+      return { className: 'form-value muted', html: '—' };
     }
     const pct = Math.round((done * 100) / total);
     const cls = pct === 100 ? 'pct-full' : pct >= 80 ? 'pct-near' : 'pct-low';
+    return {
+      className: `form-value mono ${cls}`,
+      html: `${fmtNum(done)} / ${fmtNum(total)}<span class="pct-suffix">· ${pct}%</span>`,
+    };
+  }
+  function _enrichRow(key, label, done, total) {
+    const v = _enrichRowValueHTML(done, total);
     return `
-      <div class="form-row">
+      <div class="form-row" data-enrich-row="${key}">
         <span class="form-label">${escapeProfileHtml(label)}</span>
-        <span class="form-value mono ${cls}">${fmtNum(done)} / ${fmtNum(total)}<span class="pct-suffix">· ${pct}%</span></span>
+        <span class="${v.className}">${v.html}</span>
       </div>`;
+  }
+  function _refreshEnrichRow(root, key, done, total) {
+    const row = root.querySelector(`[data-enrich-row="${key}"]`);
+    if (!row) return;
+    const value = row.querySelector('.form-value');
+    if (!value) return;
+    const v = _enrichRowValueHTML(done, total);
+    if (value.className !== v.className) value.className = v.className;
+    if (value.innerHTML !== v.html) value.innerHTML = v.html;
   }
 
   function _renderLibraryFull(lib) {
@@ -6370,10 +6386,10 @@
 
       <div class="profile-group-label">Enrichment</div>
       <div class="form-group">
-        ${_enrichRow('Embeddings', lib.embeddings_done, lib.total_tracks)}
-        ${_enrichRow('Features',   lib.features_done,   lib.total_tracks)}
-        ${_enrichRow('Last.fm',    lib.lastfm_done,     lib.lastfm_total)}
-        ${_enrichRow('Lyrics',     lib.lyrics_done,     lib.total_tracks)}
+        ${_enrichRow('embeddings', 'Embeddings', lib.embeddings_done, lib.total_tracks)}
+        ${_enrichRow('features',   'Features',   lib.features_done,   lib.total_tracks)}
+        ${_enrichRow('lastfm',     'Last.fm',    lib.lastfm_done,     lib.lastfm_total)}
+        ${_enrichRow('lyrics',     'Lyrics',     lib.lyrics_done,     lib.total_tracks)}
       </div>
       ${enrichActions}
     `;
@@ -6467,7 +6483,8 @@
       const scanRunning   = !!(lib.scan   && lib.scan.running)   && !terminalRe.test(scanProgress);
       const enrichRunning = !!(lib.enrich && lib.enrich.running) && !terminalRe.test(enrichProgress);
 
-      // Update only the live progress lines — DOM structure stays.
+      // Update only the live progress lines and the four Enrichment
+      // coverage values in place — DOM structure stays, no flicker.
       const scanLine = root.querySelector('[data-progress-for="scan"]');
       if (scanLine && scanProgress) {
         if (scanLine.textContent !== scanProgress) scanLine.textContent = scanProgress;
@@ -6476,6 +6493,10 @@
       if (enrichLine && enrichProgress) {
         if (enrichLine.textContent !== enrichProgress) enrichLine.textContent = enrichProgress;
       }
+      _refreshEnrichRow(root, 'embeddings', lib.embeddings_done, lib.total_tracks);
+      _refreshEnrichRow(root, 'features',   lib.features_done,   lib.total_tracks);
+      _refreshEnrichRow(root, 'lastfm',     lib.lastfm_done,     lib.lastfm_total);
+      _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.total_tracks);
 
       if (scanRunning || enrichRunning) {
         _pollLibraryProgress(root);
