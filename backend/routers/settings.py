@@ -11,11 +11,14 @@ level /scan/* and /enrich/* endpoints so the Settings UI does not
 need to know about them directly.
 """
 
+import asyncio
 import json
 import logging
-from typing import Any, Dict, List, Optional
+import threading
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -26,6 +29,37 @@ from db_pool import db_execute, db_query, db_query_one
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+
+# ============================================================
+# SSE: live updates for the Library screen
+# ============================================================
+#
+# Workers (scan / enrich) mutate _scan_state / _enrich_state in
+# main.py. Whenever they reach a meaningful checkpoint they call
+# notify_library_subscribers() from this module. Each subscriber is
+# an (asyncio.Event, loop) pair that the SSE endpoint registers when
+# a client connects. Workers wake every subscriber via
+# loop.call_soon_threadsafe(evt.set). Client then re-fetches
+# /api/settings/library to read the fresh state. Same shape as the
+# /api/p2p/chat/stream pattern — wake-event, not payload queue, so
+# workers don't pay serialization cost on every progress tick.
+
+_library_sse_clients: List[Tuple[asyncio.Event, asyncio.AbstractEventLoop]] = []
+_library_sse_lock = threading.Lock()
+
+
+def notify_library_subscribers() -> None:
+    """Thread-safe wake of every connected Library SSE client.
+    Workers call this after start / phase transition / completion."""
+    with _library_sse_lock:
+        for evt, loop in list(_library_sse_clients):
+            try:
+                loop.call_soon_threadsafe(evt.set)
+            except RuntimeError:
+                # Loop closed; subscriber will clean itself up on the
+                # next iteration of its generator's finally block.
+                continue
 
 
 # ============================================================
@@ -233,6 +267,51 @@ def _audio_output_state() -> Dict[str, Any]:
 @router.get("/library")
 async def get_library_state() -> Dict[str, Any]:
     return await _library_state()
+
+
+@router.get("/library/stream")
+async def library_stream() -> StreamingResponse:
+    """SSE channel. Emits a wake event whenever scan / enrich workers
+    transition state. The client receives "data: {}" and pulls fresh
+    state via GET /api/settings/library. Replaces 1.5s polling.
+
+    Pattern mirrors /api/p2p/chat/stream — wake-event, not payload."""
+    loop = asyncio.get_event_loop()
+    evt = asyncio.Event()
+
+    async def event_generator():
+        try:
+            with _library_sse_lock:
+                _library_sse_clients.append((evt, loop))
+
+            # Initial ping so the client knows the channel is live.
+            yield "data: {}\n\n"
+
+            while True:
+                try:
+                    await asyncio.wait_for(evt.wait(), timeout=20.0)
+                    evt.clear()
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                yield "data: {}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            with _library_sse_lock:
+                _library_sse_clients[:] = [
+                    (e, l) for e, l in _library_sse_clients if e is not evt
+                ]
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/ai")

@@ -482,10 +482,16 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
     state = _scan_state
     try:
         from scanner import LibraryScanner
+        from routers.settings import notify_library_subscribers
 
         def progress_cb(msg: str, stats: dict):
             state["progress"] = msg
             state["stats"] = dict(stats)
+            # Push a wake event to every connected Library SSE client.
+            # Throttled to scanner's existing checkpoint cadence (≈ one
+            # callback per 100-256 files / phase transition), not the
+            # per-row state["progress"] write.
+            notify_library_subscribers()
 
         def cancel_check() -> bool:
             return state["cancel_requested"]
@@ -553,6 +559,11 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
         state["result"] = {"error": str(e)}
     finally:
         state["running"] = False
+        try:
+            from routers.settings import notify_library_subscribers
+            notify_library_subscribers()
+        except Exception:
+            pass
 
 
 @app.post("/scan/start")
@@ -686,6 +697,14 @@ _enrich_state: Dict[str, Any] = {
 _enrich_lock = threading.Lock()
 
 
+def _notify_library_subs_safe():
+    try:
+        from routers.settings import notify_library_subscribers
+        notify_library_subscribers()
+    except Exception:
+        pass
+
+
 def _enrich_worker(limit: Optional[int], skip_embeddings: bool,
                    skip_lastfm: bool, skip_audio_analysis: bool):
     """Background worker that delegates to run_parallel_enrichment."""
@@ -695,12 +714,14 @@ def _enrich_worker(limit: Optional[int], skip_embeddings: bool,
 
     def _progress_cb(msg):
         state["progress"] = msg
+        _notify_library_subs_safe()
 
     def _cancel_flag():
         return state["cancel_requested"]
 
     try:
         state["step"] = "running"
+        _notify_library_subs_safe()
         result = run_parallel_enrichment(
             limit=limit,
             skip_embeddings=skip_embeddings,
@@ -732,6 +753,7 @@ def _enrich_worker(limit: Optional[int], skip_embeddings: bool,
     finally:
         state["running"] = False
         state["step"] = "done"
+        _notify_library_subs_safe()
 
 
 def _fetch_lyrics_sync(limit=None, cancel_flag=None, progress_cb=None):

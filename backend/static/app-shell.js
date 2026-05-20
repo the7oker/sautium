@@ -6458,20 +6458,27 @@
     onAction('[data-cancel-scan]',         async () => { await fetch('/api/settings/library/scan/cancel',   { method: 'POST' }); render(); });
     onAction('[data-cancel-enrich]',       async () => { await fetch('/api/settings/library/enrich/cancel', { method: 'POST' }); render(); });
 
-    if (scanRunning || enrichRunning) {
-      _pollLibraryProgress(root);
-    }
+    _subscribeLibraryStream(root);
   }
 
-  /* Targeted polling tick for the in-flight Library scan / enrich.
-     Avoids a full renderLibrary re-fetch + innerHTML rewrite every
-     1.5s (which strobed the whole screen). Updates only the
-     mutating bits — progress-strip stats text + last-scan label —
-     and triggers a full re-render only when the worker finishes,
-     so the new totals and final actions appear. */
-  async function _pollLibraryProgress(root) {
-    setTimeout(async () => {
-      if (!parseHash().startsWith('more/library')) return;
+  /* Live Library updates over SSE. Replaces 1.5s polling per
+     CLAUDE.md "Event-driven over polling" rule. Worker side wakes
+     /api/settings/library/stream subscribers at meaningful
+     checkpoints (start / progress callback / completion). Client
+     re-fetches /api/settings/library on each wake and updates the
+     same in-place targets that the old poll used. */
+  let _libraryStreamCtrl = null;
+  let _libraryStreamDebounce = null;
+  function _subscribeLibraryStream(root) {
+    if (_libraryStreamCtrl) { _libraryStreamCtrl.abort(); _libraryStreamCtrl = null; }
+    if (_libraryStreamDebounce) { clearTimeout(_libraryStreamDebounce); _libraryStreamDebounce = null; }
+
+    async function refresh() {
+      if (!parseHash().startsWith('more/library')) {
+        _libraryStreamCtrl && _libraryStreamCtrl.abort();
+        _libraryStreamCtrl = null;
+        return;
+      }
       let lib;
       try {
         const r = await fetch('/api/settings/library');
@@ -6482,38 +6489,52 @@
       const scanProgress   = String((lib.scan   && lib.scan.progress)   || '');
       const enrichProgress = String((lib.enrich && lib.enrich.progress) || '');
       const terminalRe = /(complete|failed|cancelled)/i;
-      // Defensive: treat a terminal-sounding progress string as
-      // "worker done" even if running=true is still observed,
-      // because the worker sometimes lingers in post-scan steps
-      // before clearing the flag and we don't want the Cancel
-      // button stuck on screen forever in that gap.
       const scanRunning   = !!(lib.scan   && lib.scan.running)   && !terminalRe.test(scanProgress);
       const enrichRunning = !!(lib.enrich && lib.enrich.running) && !terminalRe.test(enrichProgress);
 
-      // Update only the live progress lines and the four Enrichment
-      // coverage values in place — DOM structure stays, no flicker.
       const scanLine = root.querySelector('[data-progress-for="scan"]');
-      if (scanLine && scanProgress) {
-        if (scanLine.textContent !== scanProgress) scanLine.textContent = scanProgress;
+      if (scanLine && scanProgress && scanLine.textContent !== scanProgress) {
+        scanLine.textContent = scanProgress;
       }
       const enrichLine = root.querySelector('[data-progress-for="enrich"]');
-      if (enrichLine && enrichProgress) {
-        if (enrichLine.textContent !== enrichProgress) enrichLine.textContent = enrichProgress;
+      if (enrichLine && enrichProgress && enrichLine.textContent !== enrichProgress) {
+        enrichLine.textContent = enrichProgress;
       }
       _refreshEnrichRow(root, 'embeddings', lib.embeddings_done, lib.total_tracks);
       _refreshEnrichRow(root, 'features',   lib.features_done,   lib.total_tracks);
       _refreshEnrichRow(root, 'lastfm',     lib.lastfm_done,     lib.lastfm_total);
       _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.total_tracks);
 
-      if (scanRunning || enrichRunning) {
-        _pollLibraryProgress(root);
-      } else {
-        // Worker finished (or reached terminal progress) — do one
-        // full re-render to flip the Cancel button back to the
-        // normal action row and refresh counts.
+      // When workers finish (or hit terminal progress), full
+      // re-render once to flip Cancel button back to normal row.
+      const wasRunning = !!root.querySelector('[data-cancel-scan], [data-cancel-enrich]');
+      if (wasRunning && !scanRunning && !enrichRunning) {
         if (parseHash().startsWith('more/library')) render();
       }
-    }, 1500);
+    }
+
+    // Trailing-edge debounce on the SSE wake-event burst.
+    // A single enrichment-run hits progress_cb a dozen times in
+    // the first second (Phase 1 GPU init, Phase 2 text embeddings
+    // start, lyrics embeddings start, enrichment embeddings start
+    // …). Without coalescing the client would fire one
+    // /api/settings/library fetch per wake; debouncing collapses
+    // the burst into a single refresh while keeping the
+    // "immediate" feel — the longest gap before a visible update
+    // is ~200ms.
+    const scheduleRefresh = () => {
+      if (_libraryStreamDebounce) return;
+      _libraryStreamDebounce = setTimeout(() => {
+        _libraryStreamDebounce = null;
+        refresh();
+      }, 200);
+    };
+
+    _libraryStreamCtrl = window.sseStream('/api/settings/library/stream', () => {
+      scheduleRefresh();
+    }, (_err) => {
+      // sseStream auto-reconnects with backoff; nothing to do here.
+    });
   }
 
   /* ============ AI assistant screen — #more/ai ============ */
