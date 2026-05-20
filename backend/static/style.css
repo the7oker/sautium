@@ -4678,6 +4678,25 @@ select.add-gear-input {
   font-weight: 600;
   cursor: pointer;
 }
+/* Destructive action — same terracotta as confirmDestructive's
+   primary. Used to turn the Scan / Re-enrich button into Cancel while
+   the worker is running. */
+.btn.btn-danger {
+  background: var(--color-negative);
+  color: var(--color-text);
+  border-color: var(--color-negative);
+}
+/* Compact progress line under the Cancel button. */
+.action-progress {
+  margin: calc(8 * var(--px)) calc(16 * var(--px)) 0;
+  font-family: var(--font-mono);
+  font-size: calc(11 * var(--px));
+  color: var(--color-text-muted);
+  letter-spacing: 0.02em;
+  text-align: center;
+  line-height: 1.4;
+  text-wrap: pretty;
+}
 
 /* Enrichment-style mini progress row (Artist bios, Tracks analysed) */
 .enrich-row {

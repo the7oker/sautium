@@ -511,11 +511,15 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
             except Exception as e:
                 logger.error(f"Post-scan normalization failed: {e}")
 
-            if prune:
+            if prune and not state["cancel_requested"]:
                 state["progress"] = "Pruning missing files..."
                 try:
                     from scanner import prune_missing_files
-                    prune_stats = prune_missing_files(progress_cb=lambda msg: state.update(progress=msg), subpath=subpath)
+                    prune_stats = prune_missing_files(
+                        progress_cb=lambda msg: state.update(progress=msg),
+                        subpath=subpath,
+                        cancel_check=lambda: state["cancel_requested"],
+                    )
                     result["prune"] = prune_stats
                     logger.info(f"Prune results: {prune_stats}")
                 except Exception as e:
@@ -523,6 +527,24 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                     result["prune_error"] = str(e)
 
             state["progress"] = "Scan complete"
+            # Persist the completion timestamp so the Library screen's
+            # "Last scan" row reflects reality across backend restarts.
+            try:
+                from datetime import datetime, timezone
+                import json as _json
+                from db_pool import db_execute
+                db_execute(
+                    """
+                    INSERT INTO user_settings (key, value) VALUES (%s, %s::jsonb)
+                    ON CONFLICT (key) DO UPDATE
+                        SET value = EXCLUDED.value,
+                            updated_at = CURRENT_TIMESTAMP
+                    """,
+                    ("library.last_scan_at",
+                     _json.dumps(datetime.now(timezone.utc).isoformat())),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to persist last_scan_at: {e}")
         state["result"] = result
 
     except Exception as e:

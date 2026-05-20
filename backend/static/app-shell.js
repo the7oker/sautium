@@ -369,7 +369,12 @@
     currentRoute = route;
     const app = document.getElementById('app');
     if (!app) return;
-    app.innerHTML = '';
+    // Deliberately NOT wiping app.innerHTML here. Each renderer
+    // overwrites the content atomically once its data is ready,
+    // so the previous screen stays visible during a network fetch
+    // instead of flashing to blank. Important for re-render after
+    // poll ticks / cancel actions where the visual jump was the
+    // user-visible symptom of "flicker".
 
     // Top-level peer-profile route — #profile/<16-hex-prefix>. Portable
     // URL: same prefix works on any node since it's the friend's public
@@ -4191,7 +4196,14 @@
 
     async function load() {
       const body = screen.querySelector('#hqpBody');
-      body.innerHTML = `<div class="hqp-loading">Loading…</div>`;
+      // First-time render shows the Loading placeholder; subsequent
+      // refreshes (filter pick, refresh button) keep current content
+      // visible while the fetch is in flight so the screen doesn't
+      // flash to "Loading…" and back. Without this guard, every
+      // small DSP change strobed the entire panel.
+      if (!body.firstElementChild) {
+        body.innerHTML = `<div class="hqp-loading">Loading…</div>`;
+      }
       let s;
       try {
         const r = await fetch('/api/hqplayer/state');
@@ -6306,10 +6318,43 @@
       return;
     }
 
-    const scanRunning   = !!(lib.scan   && lib.scan.running);
-    const enrichRunning = !!(lib.enrich && lib.enrich.running);
+    const scanProgress   = String((lib.scan   && lib.scan.progress)   || '');
+    const enrichProgress = String((lib.enrich && lib.enrich.progress) || '');
+    const _terminalRe    = /(complete|failed|cancelled)/i;
+    // Mirror the polling-tick logic: if progress text already reads
+    // as a terminal state, treat the worker as done even when the
+    // running flag is still true (worker lingering between
+    // "Scan complete" and the finally-block that resets the flag).
+    const scanRunning   = !!(lib.scan   && lib.scan.running)   && !_terminalRe.test(scanProgress);
+    const enrichRunning = !!(lib.enrich && lib.enrich.running) && !_terminalRe.test(enrichProgress);
     const isEmpty       = (lib.total_tracks || 0) === 0;
     const path          = fmtPathForDisplay(lib.music_path || '/music');
+
+    const scanCancelling   = scanRunning   && !!(lib.scan   && lib.scan.cancel_requested);
+    const enrichCancelling = enrichRunning && !!(lib.enrich && lib.enrich.cancel_requested);
+
+    const scanActions = scanRunning ? `
+      <div class="btn-row single">
+        <button class="btn btn-danger" data-cancel-scan ${scanCancelling ? 'disabled' : ''}>${scanCancelling ? 'Cancelling…' : 'Cancel scan'}</button>
+      </div>
+      <div class="action-progress" data-progress-for="scan">${escapeProfileHtml(scanCancelling ? 'Finishing the current step… cancel will take effect at the next checkpoint.' : (lib.scan.progress || 'Scanning…'))}</div>
+    ` : `
+      <div class="btn-row">
+        <button class="btn btn-primary" data-action="scan">Scan for new</button>
+        <button class="btn btn-secondary" data-action="scan-prune">Rescan</button>
+      </div>
+    `;
+
+    const enrichActions = enrichRunning ? `
+      <div class="btn-row single">
+        <button class="btn btn-danger" data-cancel-enrich ${enrichCancelling ? 'disabled' : ''}>${enrichCancelling ? 'Cancelling…' : 'Cancel enrichment'}</button>
+      </div>
+      <div class="action-progress" data-progress-for="enrich">${escapeProfileHtml(enrichCancelling ? 'Finishing the current step… cancel will take effect at the next checkpoint.' : (lib.enrich.progress || 'Enriching…'))}</div>
+    ` : `
+      <div class="btn-row single">
+        <button class="btn btn-secondary" data-action="enrich">Re-enrich missing</button>
+      </div>
+    `;
 
     const libraryStats = isEmpty ? '' : `
       <div class="profile-group-label">Library</div>
@@ -6321,6 +6366,7 @@
           ${_statCell('Genres',  fmtNum(lib.total_genres))}
         </div>
       </div>
+      ${scanActions}
 
       <div class="profile-group-label">Enrichment</div>
       <div class="form-group">
@@ -6329,6 +6375,7 @@
         ${_enrichRow('Last.fm',    lib.lastfm_done,     lib.lastfm_total)}
         ${_enrichRow('Lyrics',     lib.lyrics_done,     lib.total_tracks)}
       </div>
+      ${enrichActions}
     `;
 
     const emptyState = isEmpty ? `
@@ -6340,24 +6387,10 @@
         <button class="empty-cta" data-action="scan">${SETTINGS_ICONS.refresh}Run first scan</button>
       </div>` : '';
 
-    const actions = isEmpty ? '' : (scanRunning ? `
-      <div class="progress-strip">
-        <div class="head">
-          <span class="label">Scanning library</span>
-          <span class="stats">${escapeProfileHtml(lib.scan.progress || '…')}</span>
-        </div>
-        <div class="bar"><div class="fill" style="width:36%;"></div></div>
-        <div class="cancel"><button data-cancel-scan>Cancel</button></div>
-      </div>
-      <div class="btn-row single" style="margin-top:calc(10*var(--px));">
-        <button class="btn btn-secondary" ${enrichRunning ? 'disabled' : ''} data-action="enrich">Re-enrich missing</button>
-      </div>
-    ` : `
-      <div class="btn-row">
-        <button class="btn btn-primary" data-action="scan">Rescan library</button>
-        <button class="btn btn-secondary" ${enrichRunning ? 'disabled' : ''} data-action="enrich">Re-enrich missing</button>
-      </div>
-    `);
+    // Action button rows now live inside libraryStats — under their
+    // respective sections (scan under Library, enrich under
+    // Enrichment) — so no end-of-screen action block is emitted.
+    const actions = '';
 
     root.innerHTML = `
       <section class="screen screen-settings">
@@ -6396,15 +6429,63 @@
     _wireBack(root);
 
     const onAction = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
-    onAction('[data-action="scan"]',   async () => { await fetch('/api/settings/library/scan',          { method: 'POST' }); render(); });
-    onAction('[data-action="enrich"]', async () => { await fetch('/api/settings/library/enrich',        { method: 'POST' }); render(); });
-    onAction('[data-cancel-scan]',     async () => { await fetch('/api/settings/library/scan/cancel',   { method: 'POST' }); render(); });
+    onAction('[data-action="scan"]',       async () => { await fetch('/api/settings/library/scan',          { method: 'POST' }); render(); });
+    onAction('[data-action="scan-prune"]', async () => { await fetch('/api/settings/library/scan?prune=true', { method: 'POST' }); render(); });
+    onAction('[data-action="enrich"]',     async () => { await fetch('/api/settings/library/enrich',        { method: 'POST' }); render(); });
+    onAction('[data-cancel-scan]',         async () => { await fetch('/api/settings/library/scan/cancel',   { method: 'POST' }); render(); });
+    onAction('[data-cancel-enrich]',       async () => { await fetch('/api/settings/library/enrich/cancel', { method: 'POST' }); render(); });
 
     if (scanRunning || enrichRunning) {
-      setTimeout(() => {
-        if (parseHash().startsWith('more/library')) render();
-      }, 1500);
+      _pollLibraryProgress(root);
     }
+  }
+
+  /* Targeted polling tick for the in-flight Library scan / enrich.
+     Avoids a full renderLibrary re-fetch + innerHTML rewrite every
+     1.5s (which strobed the whole screen). Updates only the
+     mutating bits — progress-strip stats text + last-scan label —
+     and triggers a full re-render only when the worker finishes,
+     so the new totals and final actions appear. */
+  async function _pollLibraryProgress(root) {
+    setTimeout(async () => {
+      if (!parseHash().startsWith('more/library')) return;
+      let lib;
+      try {
+        const r = await fetch('/api/settings/library');
+        if (!r.ok) return;
+        lib = await r.json();
+      } catch (_) { return; }
+
+      const scanProgress   = String((lib.scan   && lib.scan.progress)   || '');
+      const enrichProgress = String((lib.enrich && lib.enrich.progress) || '');
+      const terminalRe = /(complete|failed|cancelled)/i;
+      // Defensive: treat a terminal-sounding progress string as
+      // "worker done" even if running=true is still observed,
+      // because the worker sometimes lingers in post-scan steps
+      // before clearing the flag and we don't want the Cancel
+      // button stuck on screen forever in that gap.
+      const scanRunning   = !!(lib.scan   && lib.scan.running)   && !terminalRe.test(scanProgress);
+      const enrichRunning = !!(lib.enrich && lib.enrich.running) && !terminalRe.test(enrichProgress);
+
+      // Update only the live progress lines — DOM structure stays.
+      const scanLine = root.querySelector('[data-progress-for="scan"]');
+      if (scanLine && scanProgress) {
+        if (scanLine.textContent !== scanProgress) scanLine.textContent = scanProgress;
+      }
+      const enrichLine = root.querySelector('[data-progress-for="enrich"]');
+      if (enrichLine && enrichProgress) {
+        if (enrichLine.textContent !== enrichProgress) enrichLine.textContent = enrichProgress;
+      }
+
+      if (scanRunning || enrichRunning) {
+        _pollLibraryProgress(root);
+      } else {
+        // Worker finished (or reached terminal progress) — do one
+        // full re-render to flip the Cancel button back to the
+        // normal action row and refresh counts.
+        if (parseHash().startsWith('more/library')) render();
+      }
+    }, 1500);
   }
 
   /* ============ AI assistant screen — #more/ai ============ */

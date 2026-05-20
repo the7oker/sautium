@@ -178,13 +178,24 @@ class LibraryScanner:
             logger.error(f"Unexpected error reading {file_path}: {e}")
             return None
 
-    def find_audio_files(self, limit: Optional[int] = None, subpath: Optional[str] = None) -> List[Path]:
+    def find_audio_files(
+        self,
+        limit: Optional[int] = None,
+        subpath: Optional[str] = None,
+        cancel_check: Optional[callable] = None,
+    ) -> List[Path]:
         """
         Recursively find all audio files in library.
 
         Args:
             limit: Maximum number of files to return (for testing).
             subpath: Optional subdirectory within library to scan.
+            cancel_check: Optional callable returning True if the
+                          enclosing scan was cancelled. Discovery can
+                          take many seconds on a large library (rglob
+                          stats every node); checking inside the walk
+                          lets a Cancel tap take effect immediately
+                          instead of waiting until extraction phase.
 
         Returns:
             List of Path objects for audio files.
@@ -199,7 +210,10 @@ class LibraryScanner:
             logger.info(f"Searching for audio files in {scan_path}")
 
         audio_files = []
-        for file_path in scan_path.rglob("*"):
+        for i, file_path in enumerate(scan_path.rglob("*")):
+            if cancel_check and (i & 0xFF) == 0 and cancel_check():
+                logger.info("Discovery cancelled by user")
+                break
             if file_path.is_file() and file_path.suffix.lower() in AUDIO_EXTENSIONS:
                 audio_files.append(file_path)
                 if limit and len(audio_files) >= limit:
@@ -375,7 +389,10 @@ class LibraryScanner:
         # ── Discover files ──────────────────────────────────────────
         if progress_cb:
             progress_cb("Discovering files...", stats)
-        audio_files = self.find_audio_files(limit=limit, subpath=subpath)
+        audio_files = self.find_audio_files(limit=limit, subpath=subpath, cancel_check=cancel_check)
+        if _cancelled():
+            logger.info("Scan cancelled during discovery")
+            return stats
 
         if not audio_files:
             logger.warning("No audio files found")
@@ -718,7 +735,11 @@ def scan_library(limit: Optional[int] = None, skip_existing: bool = True, subpat
     return scanner.scan_and_import(limit=limit, skip_existing=skip_existing, subpath=subpath)
 
 
-def prune_missing_files(progress_cb: Optional[callable] = None, subpath: Optional[str] = None) -> Dict[str, int]:
+def prune_missing_files(
+    progress_cb: Optional[callable] = None,
+    subpath: Optional[str] = None,
+    cancel_check: Optional[callable] = None,
+) -> Dict[str, int]:
     """Remove DB records for files that no longer exist on disk.
 
     Uses a single directory scan + set difference instead of per-file exists()
@@ -726,6 +747,9 @@ def prune_missing_files(progress_cb: Optional[callable] = None, subpath: Optiona
 
     Deletion order: MediaFile → Track → AlbumVariant → Album → Artist.
     DB-level ON DELETE CASCADE handles child tables (embeddings, stats, etc).
+
+    cancel_check is forwarded to find_audio_files so a Cancel tap takes
+    effect during the slow disk-discovery phase.
     """
     from sqlalchemy import text
 
@@ -736,7 +760,10 @@ def prune_missing_files(progress_cb: Optional[callable] = None, subpath: Optiona
         progress_cb("Discovering files on disk...")
 
     scanner = LibraryScanner()
-    disk_files = scanner.find_audio_files(subpath=subpath)
+    disk_files = scanner.find_audio_files(subpath=subpath, cancel_check=cancel_check)
+    if cancel_check and cancel_check():
+        logger.info("Prune cancelled during discovery")
+        return stats
     disk_paths = {settings.translate_to_host_path(str(fp.absolute())) for fp in disk_files}
 
     with get_db_context() as db:

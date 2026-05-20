@@ -90,13 +90,15 @@ async def _library_state() -> Dict[str, Any]:
         stats = {}
 
     scan = {
-        "running":  bool(_scan_state.get("running")),
-        "progress": _scan_state.get("progress"),
-        "stats":    _scan_state.get("stats"),
+        "running":           bool(_scan_state.get("running")),
+        "cancel_requested":  bool(_scan_state.get("cancel_requested")),
+        "progress":          _scan_state.get("progress"),
+        "stats":             _scan_state.get("stats"),
     }
     enrich = {
-        "running":  bool(_enrich_state.get("running")),
-        "progress": _enrich_state.get("progress"),
+        "running":           bool(_enrich_state.get("running")),
+        "cancel_requested":  bool(_enrich_state.get("cancel_requested")),
+        "progress":          _enrich_state.get("progress"),
     }
 
     # Show the host-side music path (E:\Music etc.), not the
@@ -350,13 +352,15 @@ def force_sync() -> Dict[str, Any]:
 # ============================================================
 
 @router.post("/library/scan")
-async def trigger_scan() -> Dict[str, Any]:
+async def trigger_scan(prune: bool = False) -> Dict[str, Any]:
     """Start a library scan from the Settings screen.
 
     Delegates to the existing /scan/start endpoint logic so we don't
-    duplicate the scan-worker setup."""
+    duplicate the scan-worker setup. `prune=true` also removes DB
+    rows whose underlying files have disappeared from the music
+    folder (slower; the default is add-only)."""
     from main import scan_start
-    return await scan_start()
+    return await scan_start(prune=prune)
 
 
 @router.post("/library/scan/cancel")
@@ -371,3 +375,9 @@ async def trigger_enrich() -> Dict[str, Any]:
     from main import enrich_start
     # default args; the existing endpoint sets sensible options
     return await enrich_start()  # type: ignore[call-arg]
+
+
+@router.post("/library/enrich/cancel")
+async def cancel_enrich() -> Dict[str, Any]:
+    from main import enrich_cancel
+    return await enrich_cancel()
