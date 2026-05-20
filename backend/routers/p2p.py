@@ -53,6 +53,10 @@ class VerifyCodeRequest(BaseModel):
     message: str = Field(default="", max_length=500)
 
 
+class SetEmailRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=320)
+
+
 # -- Chat SSE infrastructure --------------------------------------------------
 
 _chat_sse_clients: list = []  # list of (asyncio.Event, asyncio.AbstractEventLoop)
@@ -260,6 +264,45 @@ async def get_account() -> Dict[str, Any]:
         "email": identity.get("email", ""),
         "public_key_hex": identity["public_key_hex"],
     }
+
+
+@router.put("/account/email")
+async def set_account_email(req: SetEmailRequest) -> Dict[str, Any]:
+    """Set or change the account email. Persisted to node_info.json
+    (desktop mode only) and resets user_profile.email_verified — both
+    a new email and changing an existing one invalidate the Worker's
+    `invite_code → email` mapping for this identity."""
+    global _cached_identity
+
+    email = req.email.strip()
+    if "@" not in email or "." not in email.split("@", 1)[1]:
+        raise HTTPException(400, "Invalid email address")
+
+    if not settings.p2p_identity_dir:
+        raise HTTPException(
+            400,
+            "Email is configured via the P2P_EMAIL environment variable "
+            "in this deployment — edit the .env and restart the backend.",
+        )
+
+    import json
+    from pathlib import Path
+    info_path = Path(settings.p2p_identity_dir) / "node_info.json"
+    if not info_path.exists():
+        raise HTTPException(500, "node_info.json is missing")
+    try:
+        data = json.loads(info_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(500, f"Cannot read node_info.json: {e}")
+
+    data["email"] = email
+    data["email_verified"] = False
+    info_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    _cached_identity = None
+    _db_execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")
+
+    return {"email": email, "email_verified": False}
 
 
 @router.get("/friends")

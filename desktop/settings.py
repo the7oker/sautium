@@ -296,13 +296,18 @@ class SettingsDialog(ctk.CTkToplevel):
         def _complete():
             result = self.api_client.lastfm_auth_complete()
             if result and result.get("success"):
-                session_key = result["session_key"]
-                self._lastfm_session_var.set(session_key)
+                self._lastfm_session_var.set(result.get("session_key", ""))
+                if result.get("username"):
+                    self._lastfm_user_var.set(result["username"])
+                msg_text = (
+                    f"Authorized as {result['username']}! Click Save to apply."
+                    if result.get("username")
+                    else "Authorization successful! Click Save to apply."
+                )
                 self.after(0, lambda: self._lastfm_status.configure(
                     text="Authorized", text_color="#22c55e"))
                 self.after(0, lambda: self._lastfm_msg.configure(
-                    text="Authorization successful! Click Save to apply.",
-                    text_color="#22c55e"))
+                    text=msg_text, text_color="#22c55e"))
                 self.after(0, lambda: self._lastfm_auth_btn.configure(
                     state="normal", text="Authorize Scrobbling"))
             else:

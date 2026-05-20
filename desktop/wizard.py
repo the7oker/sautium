@@ -303,15 +303,11 @@ class SetupWizard(ctk.CTkToplevel):
             return True
 
         if self.current_step == 4:  # Last.fm
+            self.config.setdefault("lastfm", {})
             if self._lastfm_enabled_var.get():
-                username = self._lastfm_user_var.get().strip()
-                if not username:
-                    return True  # Allow empty — will skip auth
-                self.config.setdefault("lastfm", {})["username"] = username
                 self.config["lastfm"]["pending_auth"] = True
             else:
-                self.config.setdefault("lastfm", {})["username"] = None
-                self.config.setdefault("lastfm", {})["pending_auth"] = False
+                self.config["lastfm"]["pending_auth"] = False
             return True
 
         return True
@@ -1138,55 +1134,30 @@ class SetupWizard(ctk.CTkToplevel):
         ).pack(pady=5)
 
         lastfm = self.config.get("lastfm", {})
+        # `pending_auth` is the wizard's own marker — `username` is filled
+        # in only after the OAuth callback returns from Last.fm.
         self._lastfm_enabled_var = ctk.BooleanVar(
-            value=bool(lastfm.get("username"))
+            value=bool(lastfm.get("pending_auth") or lastfm.get("username"))
         )
 
         ctk.CTkCheckBox(
             self.content_frame,
             text="Enable Last.fm scrobbling",
             variable=self._lastfm_enabled_var,
-            command=self._toggle_lastfm_fields,
         ).pack(pady=10)
 
-        self._lastfm_fields_frame = ctk.CTkFrame(
-            self.content_frame, fg_color="transparent"
-        )
-        self._lastfm_fields_frame.pack(fill="x", padx=30, pady=5)
-
-        self._lastfm_user_var = ctk.StringVar(
-            value=lastfm.get("username") or ""
-        )
-
-        self._toggle_lastfm_fields()
-
-    def _toggle_lastfm_fields(self):
-        for widget in self._lastfm_fields_frame.winfo_children():
-            widget.destroy()
-
-        if not self._lastfm_enabled_var.get():
-            return
-
         ctk.CTkLabel(
-            self._lastfm_fields_frame, text="Last.fm Username:"
-        ).pack(anchor="w")
-        ctk.CTkEntry(
-            self._lastfm_fields_frame,
-            textvariable=self._lastfm_user_var,
-            width=300,
-            placeholder_text="your Last.fm username",
-        ).pack(anchor="w", pady=(0, 10))
-
-        ctk.CTkLabel(
-            self._lastfm_fields_frame,
+            self.content_frame,
             text=(
                 "After setup, the app will open Last.fm in your browser\n"
-                "to authorize scrobbling. You can also do this later in Settings."
+                "to authorize scrobbling. Your Last.fm username is detected\n"
+                "automatically once you allow access. You can also do this\n"
+                "later in Settings."
             ),
             text_color="gray",
             font=ctk.CTkFont(size=12),
-            justify="left",
-        ).pack(anchor="w", pady=5)
+            justify="center",
+        ).pack(pady=5)
 
     def _step_summary(self):
         ctk.CTkLabel(
@@ -1200,7 +1171,7 @@ class SetupWizard(ctk.CTkToplevel):
 
         account = self.config.get("_account")
         account_text = account["username"] if account else "Random (no account)"
-        lastfm_user = self.config.get("lastfm", {}).get("username")
+        lastfm_cfg = self.config.get("lastfm", {})
         items = [
             ("Identity", account_text),
             ("AI Provider", {
@@ -1218,8 +1189,10 @@ class SetupWizard(ctk.CTkToplevel):
             ),
             (
                 "Last.fm",
-                f"{lastfm_user} (will authorize after start)"
-                if lastfm_user
+                f"{lastfm_cfg['username']} (connected)"
+                if lastfm_cfg.get("session_key")
+                else "Will authorize after start"
+                if lastfm_cfg.get("pending_auth")
                 else "Disabled",
             ),
             ("Accelerator", self._gpu_name if self._gpu_available else "CPU mode"),

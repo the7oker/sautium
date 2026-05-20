@@ -4671,10 +4671,11 @@
     const email = (emailStatus && emailStatus.email) || (account && account.email) || '';
     if (!email) {
       return `
-        <div class="form-row" data-row="email">
+        <div class="form-row is-clickable" data-action="set-email" data-row="email">
           <span class="form-label">Email</span>
           <span class="form-actions">
-            <span class="form-value muted">not set</span>
+            <span class="form-value action">Add</span>
+            <span class="link-chev">${PROFILE_ICONS.chev}</span>
           </span>
         </div>`;
     }
@@ -4728,6 +4729,8 @@
     old.replaceWith(replacement);
     const verifyRow = root.querySelector('[data-action="verify-email"]');
     if (verifyRow) verifyRow.addEventListener('click', () => openEmailVerifyFlow());
+    const setRow = root.querySelector('[data-action="set-email"]');
+    if (setRow) setRow.addEventListener('click', () => openSetEmailFlow());
   }
 
   async function renderProfile(root) {
@@ -4920,6 +4923,9 @@
     // status fetch returns.
     _refreshEmailRow(root, account);
 
+    const lfmRow = root.querySelector('[data-action="lastfm"]');
+    if (lfmRow) lfmRow.addEventListener('click', () => openLastfmAuthFlow());
+
     const scrobBtn = root.querySelector('[data-action="scrobble-toggle"]');
     if (scrobBtn) {
       scrobBtn.addEventListener('click', async () => {
@@ -5075,6 +5081,153 @@
     };
     overlay.querySelector('[data-confirm]').addEventListener('click', submit);
     codeInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+  }
+
+  async function openSetEmailFlow() {
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Add email</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(13*var(--px));line-height:1.5;">
+            Used to receive invites from friends and as the reply-to on
+            invites you send. Verification is a separate step — saving an
+            address here doesn't send any email yet.
+          </p>
+          <input class="add-gear-input" id="setEmailInput" type="email" placeholder="you@example.com" maxlength="320" autocomplete="email">
+          <button class="profile-btn primary" data-confirm>Save</button>
+          <div id="setEmailMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    const emailInput = overlay.querySelector('#setEmailInput');
+    const msg = overlay.querySelector('#setEmailMsg');
+    setTimeout(() => emailInput.focus(), 100);
+
+    const submit = async () => {
+      const email = emailInput.value.trim();
+      if (!email || !email.includes('@') || !email.split('@')[1].includes('.')) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = 'Enter a valid email address.';
+        return;
+      }
+      msg.style.color = 'var(--color-text-muted)';
+      msg.textContent = 'Saving…';
+      try {
+        const r = await fetch('/api/p2p/account/email', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email }),
+        });
+        if (!r.ok) {
+          msg.style.color = 'var(--color-negative)';
+          msg.textContent = await r.text();
+          return;
+        }
+        msg.style.color = 'var(--color-positive)';
+        msg.textContent = 'Saved.';
+        setTimeout(() => { close(); render(); }, 400);
+      } catch (err) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = String(err);
+      }
+    };
+    overlay.querySelector('[data-confirm]').addEventListener('click', submit);
+    emailInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+  }
+
+  async function openLastfmAuthFlow() {
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Connect Last.fm</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(13*var(--px));line-height:1.5;">
+            Sautium uses your Last.fm account to fetch artist bios, similar artists and tags, and to scrobble what you play. The next step opens last.fm in a new tab — authorise there, come back here, and tap <b style="color:var(--color-text);">Finish</b>.
+          </p>
+          <div id="lfmStartRow">
+            <button class="profile-btn primary" data-start>Open Last.fm authorisation</button>
+          </div>
+          <div id="lfmFinishRow" style="display:none;">
+            <a id="lfmReopen" target="_blank" rel="noopener" style="display:block;font-size:calc(12*var(--px));color:var(--color-accent);word-break:break-all;text-decoration:underline;margin-bottom:calc(10*var(--px));"></a>
+            <button class="profile-btn primary" data-finish>Finish</button>
+          </div>
+          <div id="lfmMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    const msg = overlay.querySelector('#lfmMsg');
+    const startRow = overlay.querySelector('#lfmStartRow');
+    const finishRow = overlay.querySelector('#lfmFinishRow');
+    const reopen = overlay.querySelector('#lfmReopen');
+
+    overlay.querySelector('[data-start]').addEventListener('click', async () => {
+      msg.style.color = 'var(--color-text-muted)';
+      msg.textContent = 'Requesting authorisation URL…';
+      try {
+        const r = await fetch('/lastfm/auth/start', { method: 'POST' });
+        if (!r.ok) {
+          msg.style.color = 'var(--color-negative)';
+          msg.textContent = 'Could not start: ' + await r.text();
+          return;
+        }
+        const data = await r.json();
+        if (!data.auth_url) {
+          msg.style.color = 'var(--color-negative)';
+          msg.textContent = 'Last.fm did not return an authorisation URL.';
+          return;
+        }
+        window.open(data.auth_url, '_blank', 'noopener');
+        reopen.href = data.auth_url;
+        reopen.textContent = 'Reopen authorisation page';
+        startRow.style.display = 'none';
+        finishRow.style.display = '';
+        msg.textContent = 'After clicking "Yes, allow access" on Last.fm, return here and tap Finish.';
+      } catch (err) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = String(err);
+      }
+    });
+
+    overlay.querySelector('[data-finish]').addEventListener('click', async () => {
+      msg.style.color = 'var(--color-text-muted)';
+      msg.textContent = 'Confirming…';
+      try {
+        const r = await fetch('/lastfm/auth/complete', { method: 'POST' });
+        if (!r.ok) {
+          let detail = await r.text();
+          try { detail = JSON.parse(detail).detail || detail; } catch (_) {}
+          msg.style.color = 'var(--color-negative)';
+          msg.textContent = detail;
+          return;
+        }
+        const data = await r.json();
+        msg.style.color = 'var(--color-positive)';
+        msg.textContent = data.username ? `Connected as ${data.username}.` : 'Connected.';
+        setTimeout(() => { close(); render(); }, 700);
+      } catch (err) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = String(err);
+      }
+    });
   }
 
   function openInlineProfileEditor(profile) {

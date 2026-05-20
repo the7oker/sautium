@@ -538,7 +538,7 @@ class LauncherApp(ctk.CTk):
     def _check_lastfm_pending_auth(self):
         """If user enabled Last.fm in wizard, trigger authorization."""
         lastfm = self.config.get("lastfm", {})
-        if not lastfm.get("pending_auth") or not lastfm.get("username"):
+        if not lastfm.get("pending_auth"):
             return
         if lastfm.get("session_key"):
             return  # Already authorized
@@ -609,11 +609,18 @@ class LauncherApp(ctk.CTk):
         def _complete():
             result = self.api_client.lastfm_auth_complete()
             if result and result.get("success"):
-                session_key = result["session_key"]
-                self.config.setdefault("lastfm", {})["session_key"] = session_key
+                self.config.setdefault("lastfm", {})
+                self.config["lastfm"]["session_key"] = result.get("session_key", "")
+                if result.get("username"):
+                    self.config["lastfm"]["username"] = result["username"]
                 save_config(self.config)
+                ok_text = (
+                    f"Authorized as {result['username']}!"
+                    if result.get("username")
+                    else "Authorized successfully!"
+                )
                 self.after(0, lambda: self._lastfm_dialog_msg.configure(
-                    text="Authorized successfully!", text_color="#22c55e"))
+                    text=ok_text, text_color="#22c55e"))
                 self.after(1500, dialog.destroy)
             else:
                 detail = ""
