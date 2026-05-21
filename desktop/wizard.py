@@ -10,6 +10,7 @@ A multi-step customtkinter wizard that collects:
 """
 
 import logging
+import secrets
 import shutil
 import subprocess
 import sys
@@ -172,8 +173,19 @@ class SetupWizard(ctk.CTkToplevel):
             self._account_email_val = email
 
             if not username:
-                # Skip account — will use random identity
-                self.config["_account"] = None
+                # Skipping the form still produces a real account —
+                # `anonymous-<4 hex>` username plus a 32-byte random
+                # password. Without one `_get_identity()` returns None
+                # downstream, which hides the invite code and leaves
+                # Friends / chat / P2P sync silently broken. The user
+                # can rename later from Profile.
+                anon_user = "anonymous-" + secrets.token_hex(2)
+                anon_pass = secrets.token_urlsafe(32)
+                self.config["_account"] = {
+                    "username": anon_user,
+                    "password": anon_pass,
+                    "anonymous": True,
+                }
                 return True
 
             if len(username) < 3:
@@ -420,8 +432,9 @@ class SetupWizard(ctk.CTkToplevel):
         ctk.CTkLabel(
             self.content_frame,
             text=(
-                "Leave all empty to skip — a random identity will be created.\n"
-                "You can create an account later in Settings."
+                "Leave all empty to skip — an anonymous identity\n"
+                "(anonymous-XXXX) will be created. You can rename it\n"
+                "later from your Profile."
             ),
             text_color="gray",
             font=ctk.CTkFont(size=12),
