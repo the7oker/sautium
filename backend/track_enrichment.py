@@ -109,35 +109,43 @@ def run_parallel_enrichment(
         logger.info("Pipeline A (GPU): starting audio embeddings + features")
         combined = {}
 
-        if not skip_embeddings:
-            pipeline_progress["gpu"] = "GPU: embeddings..."
-            _update_progress()
-            gen = AudioEmbeddingGenerator()
-            try:
-                emb_stats = gen.generate_embeddings(**gpu_kwargs, cancel_flag=cancel_flag)
-                combined["embeddings"] = emb_stats
-                pipeline_progress["gpu"] = f"GPU: {emb_stats.get('success', 0)} embeddings"
-                _update_progress()
-            finally:
-                gen.unload_model()
+        # Both steps load CLAP; an outer refcount hold keeps it ≥1 between
+        # them so the inner unload-after-embeddings doesn't free a model
+        # also held by model_cache pre-warm or about to be reused by analysis.
+        import torch
+        from clap_model import shared_clap_model
+        clap_device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        if cancel_flag():
-            return combined
-
-        if not skip_audio_analysis:
-            pipeline_progress["gpu"] = "GPU: audio analysis..."
-            _update_progress()
-            analyzer = AudioAnalyzer()
-            try:
-                af_stats = analyzer.analyze_all(
-                    force=force_audio_analysis, cancel_flag=cancel_flag,
-                    **gpu_kwargs
-                )
-                combined["audio_features"] = af_stats
-                pipeline_progress["gpu"] = f"GPU: {af_stats.get('success', 0)} features"
+        with shared_clap_model(settings.embedding_model, clap_device):
+            if not skip_embeddings:
+                pipeline_progress["gpu"] = "GPU: embeddings..."
                 _update_progress()
-            finally:
-                analyzer.unload_model()
+                gen = AudioEmbeddingGenerator()
+                try:
+                    emb_stats = gen.generate_embeddings(**gpu_kwargs, cancel_flag=cancel_flag)
+                    combined["embeddings"] = emb_stats
+                    pipeline_progress["gpu"] = f"GPU: {emb_stats.get('success', 0)} embeddings"
+                    _update_progress()
+                finally:
+                    gen.unload_model()
+
+            if cancel_flag():
+                return combined
+
+            if not skip_audio_analysis:
+                pipeline_progress["gpu"] = "GPU: audio analysis..."
+                _update_progress()
+                analyzer = AudioAnalyzer()
+                try:
+                    af_stats = analyzer.analyze_all(
+                        force=force_audio_analysis, cancel_flag=cancel_flag,
+                        **gpu_kwargs
+                    )
+                    combined["audio_features"] = af_stats
+                    pipeline_progress["gpu"] = f"GPU: {af_stats.get('success', 0)} features"
+                    _update_progress()
+                finally:
+                    analyzer.unload_model()
 
         pipeline_progress["gpu"] = "GPU: done"
         _update_progress()
@@ -307,49 +315,57 @@ def run_parallel_enrichment(
     # === Phase 2: Text embeddings (sentence-transformers, needs GPU) ===
     logger.info("=== Phase 2: text embeddings ===")
 
-    # Text embeddings
-    try:
-        from text_embeddings import generate_text_embeddings
-        if progress_cb:
-            progress_cb("Phase 2: text embeddings...")
-        text_stats = generate_text_embeddings(limit=None)
-        result_parts["text_embeddings"] = text_stats
-        logger.info(f"Text embeddings: {text_stats}")
-    except Exception as e:
-        logger.error(f"Text embeddings failed: {e}", exc_info=True)
-        result_parts["text_embeddings"] = {"error": str(e)}
+    # All three steps share one BGE-M3 instance via text_embedder's refcount.
+    # An outer hold here keeps refcount >= 1 between steps so inner releases
+    # never trigger an unload-reload cycle.
+    import torch
+    from text_embedder import shared_text_embedder
+    _phase2_device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    if cancel_flag():
-        result_parts["note"] = "cancelled during phase 2"
-        return result_parts
+    with shared_text_embedder(settings.text_embedding_model, _phase2_device):
+        # Text embeddings
+        try:
+            from text_embeddings import generate_text_embeddings
+            if progress_cb:
+                progress_cb("Phase 2: text embeddings...")
+            text_stats = generate_text_embeddings(limit=None)
+            result_parts["text_embeddings"] = text_stats
+            logger.info(f"Text embeddings: {text_stats}")
+        except Exception as e:
+            logger.error(f"Text embeddings failed: {e}", exc_info=True)
+            result_parts["text_embeddings"] = {"error": str(e)}
 
-    # Lyrics embeddings
-    try:
-        from lyrics_embeddings import generate_lyrics_embeddings
-        if progress_cb:
-            progress_cb("Phase 2: lyrics embeddings...")
-        lyrics_emb_stats = generate_lyrics_embeddings(limit=None)
-        result_parts["lyrics_embeddings"] = lyrics_emb_stats
-        logger.info(f"Lyrics embeddings: {lyrics_emb_stats}")
-    except Exception as e:
-        logger.error(f"Lyrics embeddings failed: {e}", exc_info=True)
-        result_parts["lyrics_embeddings"] = {"error": str(e)}
+        if cancel_flag():
+            result_parts["note"] = "cancelled during phase 2"
+            return result_parts
 
-    if cancel_flag():
-        result_parts["note"] = "cancelled during phase 2"
-        return result_parts
+        # Lyrics embeddings
+        try:
+            from lyrics_embeddings import generate_lyrics_embeddings
+            if progress_cb:
+                progress_cb("Phase 2: lyrics embeddings...")
+            lyrics_emb_stats = generate_lyrics_embeddings(limit=None)
+            result_parts["lyrics_embeddings"] = lyrics_emb_stats
+            logger.info(f"Lyrics embeddings: {lyrics_emb_stats}")
+        except Exception as e:
+            logger.error(f"Lyrics embeddings failed: {e}", exc_info=True)
+            result_parts["lyrics_embeddings"] = {"error": str(e)}
 
-    # Enrichment embeddings (artist bios, album info, genre descriptions)
-    try:
-        from enrichment_embeddings import generate_all_enrichment_embeddings
-        if progress_cb:
-            progress_cb("Phase 2: enrichment embeddings...")
-        enrich_emb_stats = generate_all_enrichment_embeddings(limit=None)
-        result_parts["enrichment_embeddings"] = enrich_emb_stats
-        logger.info(f"Enrichment embeddings: {enrich_emb_stats}")
-    except Exception as e:
-        logger.error(f"Enrichment embeddings failed: {e}", exc_info=True)
-        result_parts["enrichment_embeddings"] = {"error": str(e)}
+        if cancel_flag():
+            result_parts["note"] = "cancelled during phase 2"
+            return result_parts
+
+        # Enrichment embeddings (artist bios, album info, genre descriptions)
+        try:
+            from enrichment_embeddings import generate_all_enrichment_embeddings
+            if progress_cb:
+                progress_cb("Phase 2: enrichment embeddings...")
+            enrich_emb_stats = generate_all_enrichment_embeddings(limit=None)
+            result_parts["enrichment_embeddings"] = enrich_emb_stats
+            logger.info(f"Enrichment embeddings: {enrich_emb_stats}")
+        except Exception as e:
+            logger.error(f"Enrichment embeddings failed: {e}", exc_info=True)
+            result_parts["enrichment_embeddings"] = {"error": str(e)}
 
     return result_parts
 

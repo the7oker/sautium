@@ -99,21 +99,19 @@ class _BaseEnrichmentGenerator:
         self.model = None
 
     def load_model(self):
+        """Acquire shared text embedding model (loaded once per process)."""
         if self.model is not None:
             return
-        from sentence_transformers import SentenceTransformer
-        logger.info(f"Loading text embedding model: {self.model_name} on {self.device}")
-        self.model = SentenceTransformer(self.model_name, device=self.device)
-        logger.info("Text embedding model loaded")
+        from text_embedder import get_text_embedder
+        self.model = get_text_embedder(self.model_name, self.device)
 
     def unload_model(self):
-        if self.model is not None:
-            del self.model
-            self.model = None
-            import torch
-            if self.device == "cuda":
-                torch.cuda.empty_cache()
-            logger.info("Text embedding model unloaded")
+        """Release shared model; underlying SentenceTransformer freed at refcount 0."""
+        if self.model is None:
+            return
+        self.model = None
+        from text_embedder import release_text_embedder
+        release_text_embedder(self.model_name, self.device)
 
     def encode(self, texts: List[str]) -> np.ndarray:
         self.load_model()
@@ -526,27 +524,25 @@ def generate_genre_desc_embeddings(
 def generate_all_enrichment_embeddings(
     limit: Optional[int] = None, batch_size: Optional[int] = None, force: bool = False,
 ) -> Dict[str, Dict[str, int]]:
-    """Generate all three enrichment embedding types. Shares model across all."""
-    gen = ArtistBioEmbeddingGenerator(batch_size=batch_size)
-    results = {}
-    try:
-        with get_db_context() as db:
-            results["artist_bios"] = gen.generate_all(db, limit=limit, force=force)
+    """Generate all three enrichment embedding types under one shared model load."""
+    import torch
+    from text_embedder import shared_text_embedder
 
-        # Reuse loaded model for album info
-        album_gen = AlbumInfoEmbeddingGenerator(batch_size=batch_size)
-        album_gen.model = gen.model
-        album_gen.device = gen.device
-        with get_db_context() as db:
-            results["album_info"] = album_gen.generate_all(db, limit=limit, force=force)
+    model_name = settings.text_embedding_model
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    results: Dict[str, Dict[str, int]] = {}
 
-        # Reuse for genre descriptions
-        genre_gen = GenreDescEmbeddingGenerator(batch_size=batch_size)
-        genre_gen.model = gen.model
-        genre_gen.device = gen.device
-        with get_db_context() as db:
-            results["genre_descs"] = genre_gen.generate_all(db, limit=limit, force=force)
-    finally:
-        gen.unload_model()
+    with shared_text_embedder(model_name, device):
+        for cls, key in (
+            (ArtistBioEmbeddingGenerator, "artist_bios"),
+            (AlbumInfoEmbeddingGenerator, "album_info"),
+            (GenreDescEmbeddingGenerator, "genre_descs"),
+        ):
+            gen = cls(batch_size=batch_size)
+            try:
+                with get_db_context() as db:
+                    results[key] = gen.generate_all(db, limit=limit, force=force)
+            finally:
+                gen.unload_model()
 
     return results

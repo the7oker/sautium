@@ -16,7 +16,6 @@ import torch
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 from tqdm import tqdm
-from transformers import ClapModel, ClapProcessor
 
 from config import settings
 from database import get_db_context
@@ -53,32 +52,20 @@ class AudioEmbeddingGenerator:
         self.processor = None
 
     def load_model(self):
-        """Load CLAP model and processor onto device."""
+        """Acquire shared CLAP processor + model (loaded once per process)."""
         if self.model is not None:
             return
-
-        logger.info(f"Loading CLAP model: {self.model_name} on {self.device}")
-        self.processor = ClapProcessor.from_pretrained(self.model_name)
-        self.model = ClapModel.from_pretrained(self.model_name)
-        self.model = self.model.to(self.device)
-        self.model.eval()
-
-        if self.device == "cuda":
-            mem = torch.cuda.memory_allocated() / 1e9
-            logger.info(f"Model loaded, GPU memory used: {mem:.2f} GB")
-        else:
-            logger.info("Model loaded on CPU")
+        from clap_model import get_clap_model
+        self.processor, self.model = get_clap_model(self.model_name, self.device)
 
     def unload_model(self):
-        """Free GPU memory by unloading model."""
-        if self.model is not None:
-            del self.model
-            del self.processor
-            self.model = None
-            self.processor = None
-            if self.device == "cuda":
-                torch.cuda.empty_cache()
-            logger.info("Model unloaded")
+        """Release shared CLAP; underlying model freed at refcount 0."""
+        if self.model is None:
+            return
+        self.model = None
+        self.processor = None
+        from clap_model import release_clap_model
+        release_clap_model(self.model_name, self.device)
 
     def text_to_embedding(self, text: str) -> np.ndarray:
         """

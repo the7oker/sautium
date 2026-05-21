@@ -20,11 +20,9 @@ from scipy.stats import pearsonr
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 from tqdm import tqdm
-from transformers import ClapModel, ClapProcessor
 
 from config import settings
 from database import get_db_context
-from ensemble_instruments import InstrumentEnsembleTagger
 from models import AudioFeature, Track, MediaFile
 
 logger = logging.getLogger(__name__)
@@ -82,43 +80,32 @@ class AudioAnalyzer:
         self.model = None
         self.processor = None
         self._text_embeddings_cache = {}
-        self.ensemble = InstrumentEnsembleTagger(device=self.device)
+        self.ensemble = None
 
     # --- Model management ---
 
     def load_model(self):
-        """Load CLAP model (moods/vocal/dance) + AST+PaSST ensemble (instruments)."""
+        """Acquire shared CLAP (moods/vocal/dance) + AST+PaSST ensemble (instruments)."""
         if self.model is not None:
             return
-
-        logger.info(f"Loading CLAP model: {self.model_name} on {self.device}")
-        self.processor = ClapProcessor.from_pretrained(self.model_name)
-        self.model = ClapModel.from_pretrained(self.model_name)
-        self.model = self.model.to(self.device)
-        self.model.eval()
-
-        # Pre-encode all text label sets
+        from clap_model import get_clap_model
+        from instrument_tagger import get_instrument_tagger
+        self.processor, self.model = get_clap_model(self.model_name, self.device)
         self._encode_text_labels()
-
-        # Load instrument ensemble alongside CLAP
-        self.ensemble.load()
-
-        if self.device == "cuda":
-            mem = torch.cuda.memory_allocated() / 1e9
-            logger.info(f"CLAP + ensemble loaded, GPU memory: {mem:.2f} GB")
+        self.ensemble = get_instrument_tagger(self.device)
 
     def unload_model(self):
-        """Free GPU memory."""
+        """Release shared CLAP + ensemble; both freed at their own refcount 0."""
         if self.model is not None:
-            del self.model
-            del self.processor
             self.model = None
             self.processor = None
             self._text_embeddings_cache = {}
-            if self.device == "cuda":
-                torch.cuda.empty_cache()
-            logger.info("CLAP model unloaded")
-        self.ensemble.unload()
+            from clap_model import release_clap_model
+            release_clap_model(self.model_name, self.device)
+        if self.ensemble is not None:
+            self.ensemble = None
+            from instrument_tagger import release_instrument_tagger
+            release_instrument_tagger(self.device)
 
     def _encode_text_labels(self):
         """Pre-encode CLAP text label sets (moods/vocal/dance). Called once."""
