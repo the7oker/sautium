@@ -6526,8 +6526,14 @@
     const scanRunning   = !!(lib.scan   && lib.scan.running)   && !_terminalRe.test(scanProgress);
     const enrichRunning = !!(lib.enrich && lib.enrich.running) && !_terminalRe.test(enrichProgress);
     const isEmpty       = (lib.total_tracks || 0) === 0;
-    const pathFull      = fmtPathForDisplay(lib.music_path || '/music');
-    const path          = fmtPathTruncatedFromStart(pathFull);
+    // Launcher writes MUSIC_LIBRARY_PATH= (blank) into .env when the
+    // user hasn't picked a folder yet; Pydantic then loads it as ''.
+    // Treat that — and the Docker default '/music' when nothing was
+    // bind-mounted — as "not configured" so we don't pretend a path
+    // exists.
+    const isPathSet     = !!(lib.music_path && lib.music_path !== '/music');
+    const pathFull      = isPathSet ? fmtPathForDisplay(lib.music_path) : '';
+    const path          = isPathSet ? fmtPathTruncatedFromStart(pathFull) : 'Not set';
 
     const scanCancelling   = scanRunning   && !!(lib.scan   && lib.scan.cancel_requested);
     const enrichCancelling = enrichRunning && !!(lib.enrich && lib.enrich.cancel_requested);
@@ -6577,14 +6583,20 @@
       ${enrichActions}
     `;
 
-    const emptyState = isEmpty ? `
+    const emptyState = !isEmpty ? '' : !isPathSet ? `
+      <div class="empty-library">
+        <div class="icon">${SETTINGS_ICONS.vinyl}</div>
+        <p class="empty-library-msg">
+          Music library path is not configured yet. Open the <b>Desktop Launcher</b>, set the folder that holds your music, and click <b>Scan library</b> there.
+        </p>
+      </div>` : `
       <div class="empty-library">
         <div class="icon">${SETTINGS_ICONS.vinyl}</div>
         <p class="empty-library-msg">
           No tracks indexed yet. Run the first scan to discover your library — it usually takes a few minutes per 10k tracks.
         </p>
         <button class="empty-cta" data-action="scan">${SETTINGS_ICONS.refresh}Run first scan</button>
-      </div>` : '';
+      </div>`;
 
     // Action button rows now live inside libraryStats — under their
     // respective sections (scan under Library, enrich under
@@ -6599,7 +6611,7 @@
           <div class="form-row stacked">
             <div class="row-stack">
               <span class="row-stack-label">Music path</span>
-              <span class="path-value" title="${escapeProfileHtml(pathFull)}">${escapeProfileHtml(path)}</span>
+              <span class="${isPathSet ? 'path-value' : 'form-value muted'}"${isPathSet ? ` title="${escapeProfileHtml(pathFull)}"` : ''}>${escapeProfileHtml(path)}</span>
             </div>
             <div class="row-stack-sub">Configured in the launcher.</div>
           </div>
