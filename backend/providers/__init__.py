@@ -11,9 +11,45 @@ _providers: dict[str, BaseProvider] = {}
 _initialized = False
 
 
+def reset() -> None:
+    """Force `_init_providers` to re-run. Call after the user
+    completes Claude Code sign-in or adds an API key in Settings —
+    provider availability is otherwise cached for the process
+    lifetime."""
+    global _initialized
+    _initialized = False
+    _providers.clear()
+
+
+def _claude_code_ready() -> bool:
+    """True when the Claude Code CLI is installed and authenticated.
+    Used instead of an env flag so adding/removing the credentials
+    file is picked up after a reset(). Docker can't shell out to the
+    host so `get_claude_executable()` returns None there."""
+    try:
+        from claude_code import get_claude_executable, claude_authenticated
+        return get_claude_executable() is not None and claude_authenticated()
+    except Exception as e:
+        logger.debug(f"claude_code readiness probe failed: {e}")
+        return False
+
+
+def _maybe_reset_for_claude_code() -> None:
+    """If Claude Code's readiness has changed since the cache was
+    built, drop the cache so the next access re-detects. Cheap
+    enough to call on every entry — it's two file/keychain probes."""
+    if not _initialized:
+        return
+    have = "claude_code" in _providers
+    ready = _claude_code_ready()
+    if have != ready:
+        reset()
+
+
 def _init_providers():
     """Initialize available providers based on configuration."""
     global _initialized
+    _maybe_reset_for_claude_code()
     if _initialized:
         return
     _initialized = True
@@ -24,8 +60,11 @@ def _init_providers():
 
     from config import settings
 
-    # Claude Code (subprocess) — always available if enabled
-    if settings.claude_code_enabled:
+    # Claude Code (subprocess) — fact-based detection so that signing
+    # in from the Web UI flips it on without a backend restart. The
+    # legacy env flag still acts as an override for the corner case
+    # where the user wants to force-enable it.
+    if settings.claude_code_enabled or _claude_code_ready():
         from providers.claude_code import ClaudeCodeProvider
         _providers["claude_code"] = ClaudeCodeProvider()
 

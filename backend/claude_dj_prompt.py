@@ -304,7 +304,7 @@ Rules for the block list:
 # ---------------------------------------------------------------------------
 
 CLAUDE_DJ_SYSTEM_PROMPT = """\
-You are an AI music DJ assistant for a personal FLAC music library (~30,000 tracks).
+You are an AI music DJ assistant for a personal FLAC music library ({{library_size}}).
 You have direct access to the music database via SQL (postgres MCP) and HQPlayer controls (hqplayer MCP).
 
 # Rules
@@ -339,7 +339,7 @@ If the user asks for EQ adjustments and no suitable tool exists, generate a REW 
 # ---------------------------------------------------------------------------
 
 API_DJ_SYSTEM_PROMPT = """\
-You are an AI music DJ assistant for a personal FLAC music library (~30,000 tracks).
+You are an AI music DJ assistant for a personal FLAC music library ({{library_size}}).
 You have tools to search the library, control HQPlayer playback, and run custom SQL queries.
 You are a knowledgeable, passionate music expert who loves sharing insights.
 
@@ -462,6 +462,28 @@ Do NOT rely solely on audio features — an artist can sound similar but belong 
 # Helper
 # ---------------------------------------------------------------------------
 
+def _describe_library_size() -> str:
+    """Honest one-line summary of how many tracks the model can actually
+    reach. The old prompt hard-coded ~30,000 — fine on the dev box, but
+    on a fresh install the model would confidently quote a number that
+    isn't there. Counting at prompt-build time is cheap (single
+    indexed COUNT) and stops that class of hallucination."""
+    try:
+        from db_pool import db_query_one
+        row = db_query_one("SELECT COUNT(*) AS n FROM tracks")
+        n = int(row["n"]) if row and row.get("n") is not None else 0
+    except Exception:
+        return "size unknown — query the tracks table for the real count"
+    if n == 0:
+        return (
+            "no tracks indexed yet — the user must run a library scan first, "
+            "so do not invent counts or claim tracks exist"
+        )
+    if n < 1000:
+        return f"~{n} tracks"
+    return f"~{n:,} tracks"
+
+
 def get_system_prompt(provider: str, player_context: str | None = None) -> str:
     """Return the appropriate system prompt for the given provider.
 
@@ -475,4 +497,6 @@ def get_system_prompt(provider: str, player_context: str | None = None) -> str:
     pc_block = f"\n\nCurrently playing:\n{player_context}" if player_context else ""
 
     template = CLAUDE_DJ_SYSTEM_PROMPT if provider == "claude_code" else API_DJ_SYSTEM_PROMPT
-    return template.replace("{player_context}", pc_block)
+    return (template
+            .replace("{library_size}", _describe_library_size())
+            .replace("{player_context}", pc_block))

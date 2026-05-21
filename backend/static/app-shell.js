@@ -5915,10 +5915,17 @@
   };
 
   const PROVIDER_OPTIONS = [
-    { id: 'claude',  label: 'Claude' },
-    { id: 'openai',  label: 'OpenAI' },
+    { id: 'claude_code', label: 'Claude Code (subscription)' },
+    { id: 'claude',      label: 'Claude API' },
+    { id: 'openai',      label: 'OpenAI' },
   ];
   const MODEL_OPTIONS = {
+    // Claude Code CLI accepts short identifiers (sonnet / haiku), not
+    // the long claude-haiku-4-5-* aliases used by the API provider.
+    claude_code: [
+      { id: 'sonnet', label: 'Sonnet' },
+      { id: 'haiku',  label: 'Haiku' },
+    ],
     claude: [
       { id: 'claude-opus-4-7',   label: 'Opus 4.7' },
       { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
@@ -6250,9 +6257,13 @@
     `;
   }
 
-  function _renderAi(ai) {
-    const provider = ai.provider || 'claude';
-    const providerLabel = (PROVIDER_OPTIONS.find(p => p.id === provider) || {}).label || provider;
+  function _renderAi(ai, claudeState) {
+    const provider = ai.provider || '';
+    const hasProvider = !!provider;
+    const isClaudeCode = provider === 'claude_code';
+    const providerLabel = hasProvider
+      ? ((PROVIDER_OPTIONS.find(p => p.id === provider) || {}).label || provider)
+      : 'Not selected';
     const model = ai.model || '';
     const modelLabel = ((MODEL_OPTIONS[provider] || []).find(m => m.id === model) || {}).label || model || '—';
     const auth = ai.auth_state || 'not_authenticated';
@@ -6312,28 +6323,122 @@
       </div>` : '';
 
     const isUnauth = auth === 'not_authenticated';
+    const ccBlock = (isClaudeCode && claudeState) ? _renderClaudeCodeBlock(claudeState) : '';
+    const ccReady = (isClaudeCode && claudeState && claudeState.state === 'ready');
+    const ccBlocksAuth = (isClaudeCode && claudeState && claudeState.state !== 'ready');
     return `
       <div class="form-group">
         <div class="form-row">
           <span class="form-label">Provider</span>
-          <button class="select-trigger" data-action="pick-provider">
+          <button class="select-trigger ${hasProvider ? '' : 'muted'}" data-action="pick-provider">
             ${escapeProfileHtml(providerLabel)}
             <span class="chev">${SETTINGS_ICONS.chev}</span>
           </button>
         </div>
         <div class="form-row">
           <span class="form-label">Model</span>
-          ${isUnauth
-            ? '<span class="form-value muted">Sign in to choose</span>'
-            : `<button class="select-trigger" data-action="pick-model">
-                 ${escapeProfileHtml(modelLabel)}
-                 <span class="chev">${SETTINGS_ICONS.chev}</span>
-               </button>`}
+          ${!hasProvider
+            ? '<span class="form-value muted">Select provider first</span>'
+            : ccBlocksAuth
+              ? '<span class="form-value muted">Sign in to choose</span>'
+              : (isClaudeCode && ccReady)
+                ? `<button class="select-trigger" data-action="pick-model">
+                     ${escapeProfileHtml(modelLabel)}
+                     <span class="chev">${SETTINGS_ICONS.chev}</span>
+                   </button>`
+                : isUnauth
+                  ? '<span class="form-value muted">Sign in to choose</span>'
+                  : `<button class="select-trigger" data-action="pick-model">
+                       ${escapeProfileHtml(modelLabel)}
+                       <span class="chev">${SETTINGS_ICONS.chev}</span>
+                     </button>`}
         </div>
-        ${authRow}
-        ${usageRow}
+        ${isClaudeCode ? ccBlock : (hasProvider ? authRow : '')}
+        ${hasProvider && !isClaudeCode ? usageRow : ''}
       </div>
     `;
+  }
+
+  function _renderClaudeCodeBlock(cc) {
+    const s = cc.state;
+    const installing = cc.install && cc.install.running;
+    const installErr = cc.install && cc.install.error;
+    if (s === 'ready') {
+      return `
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Authentication</span>
+            <button class="btn-link" data-action="cc-signin">Reauthorize</button>
+          </div>
+          <div class="row-stack-value" style="display:flex;align-items:center;gap:calc(8*var(--px));">
+            <span style="color:var(--color-positive);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;"><span class="status-dot green"></span>Signed in via subscription</span>
+          </div>
+          <div class="row-stack-sub">No API key needed. Plays nicely with the Claude Code CLI.</div>
+        </div>`;
+    }
+    if (s === 'host_unsupported') {
+      return `
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Setup</span>
+            <span></span>
+          </div>
+          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
+            Claude Code installation needs native access to your machine. Open the <b>Sautium Desktop Launcher</b> → <b>Settings</b> → <b>AI provider</b> to install and sign in.
+          </div>
+        </div>`;
+    }
+    if (s === 'node_missing') {
+      return `
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Setup</span>
+            <button class="btn-link" data-action="cc-refresh">Refresh</button>
+          </div>
+          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
+            Node.js 18+ is required for Claude Code. Re-run the Sautium installer (it bundles Node) or install Node.js manually, then tap Refresh.
+          </div>
+        </div>`;
+    }
+    if (s === 'claude_missing') {
+      return `
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Setup</span>
+            <span></span>
+          </div>
+          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
+            Claude Code is not installed yet. Downloads ~5 MB via npm.
+          </div>
+          ${installErr ? `<div class="row-stack-sub" style="color:var(--color-negative);white-space:pre-wrap;">${escapeProfileHtml(installErr)}</div>` : ''}
+          <div class="btn-row single" style="margin:calc(10*var(--px)) 0 0;">
+            <button class="btn btn-primary" data-action="cc-install" ${installing ? 'disabled' : ''}>${installing ? 'Installing…' : 'Install Claude Code'}</button>
+          </div>
+        </div>`;
+    }
+    if (s === 'not_authed') {
+      return `
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Sign in</span>
+            <button class="btn-link" data-action="cc-refresh">Refresh</button>
+          </div>
+          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.6;">
+            Sautium will open a terminal running <b>claude</b>. In it:
+            <ol style="margin:calc(6*var(--px)) 0 0;padding-left:calc(18*var(--px));">
+              <li>Pick a theme (first run only)</li>
+              <li>Type <code style="font-family:var(--font-mono);color:var(--color-blue);">/login</code></li>
+              <li>Choose <i>Claude account with subscription</i></li>
+              <li>Authorize in the browser tab</li>
+            </ol>
+            Sautium detects the sign-in automatically.
+          </div>
+          <div class="btn-row single" style="margin:calc(10*var(--px)) 0 0;">
+            <button class="btn btn-primary" data-action="cc-signin">Sign in to Claude</button>
+          </div>
+        </div>`;
+    }
+    return '';
   }
 
   function _renderSync(sync) {
@@ -6726,7 +6831,43 @@
   }
 
   /* ============ AI assistant screen — #more/ai ============ */
+  let _ccPollTimer = null;
+  function _stopCcPoll() {
+    if (_ccPollTimer) { clearTimeout(_ccPollTimer); _ccPollTimer = null; }
+  }
+  function _startCcPoll() {
+    _stopCcPoll();
+    // Re-render once every 2s as long as we're still on the AI screen
+    // and the state needs watching (install running or awaiting sign-in).
+    const tick = async () => {
+      _ccPollTimer = null;
+      if (!parseHash().startsWith('more/ai')) return;
+      const cc = await _fetchClaudeState();
+      if (!cc) return;
+      const needsPoll = (cc.install && cc.install.running)
+                       || cc.state === 'not_authed';
+      // Only re-render when something user-visible could have changed —
+      // running flag flipping, install error appearing, or state moving
+      // to 'ready'. Cheap to call so we just render every tick during
+      // polled phases.
+      if (needsPoll) {
+        renderAI(document.getElementById('app'));
+        _ccPollTimer = setTimeout(tick, 2000);
+      } else {
+        renderAI(document.getElementById('app'));
+      }
+    };
+    _ccPollTimer = setTimeout(tick, 2000);
+  }
+  async function _fetchClaudeState() {
+    try {
+      const r = await fetch('/api/settings/ai/claude/state');
+      if (r.ok) return await r.json();
+    } catch (_) {}
+    return null;
+  }
   async function renderAI(root) {
+    _stopCcPoll();
     let ai = null;
     try {
       const r = await fetch('/api/settings/ai');
@@ -6738,10 +6879,15 @@
       return;
     }
 
+    let claudeState = null;
+    if (ai.provider === 'claude_code') {
+      claudeState = await _fetchClaudeState();
+    }
+
     root.innerHTML = `
       <section class="screen screen-settings">
         ${_settingsHeader('AI assistant')}
-        <div style="margin-top:calc(14*var(--px));">${_renderAi(ai)}</div>
+        <div style="margin-top:calc(14*var(--px));">${_renderAi(ai, claudeState)}</div>
       </section>
     `;
     _wireBack(root);
@@ -6770,6 +6916,35 @@
       // OAuth handshake lives in the chat module — route there for now.
       navigate('friends');
     });
+
+    // Claude Code state actions
+    onAction('[data-action="cc-refresh"]', () => render());
+    onAction('[data-action="cc-install"]', async () => {
+      try {
+        const r = await fetch('/api/settings/ai/claude/install', { method: 'POST' });
+        if (!r.ok) { alert(await r.text()); return; }
+      } catch (err) { alert(String(err)); return; }
+      render();
+      _startCcPoll();
+    });
+    onAction('[data-action="cc-signin"]', async () => {
+      try {
+        const r = await fetch('/api/settings/ai/claude/signin', { method: 'POST' });
+        if (!r.ok) { alert(await r.text()); return; }
+      } catch (err) { alert(String(err)); return; }
+      // Render right away so user sees the "waiting" hint, then poll
+      // for the credentials file appearing.
+      render();
+      _startCcPoll();
+    });
+
+    // Start polling if we entered the screen mid-install or mid-signin
+    if (claudeState
+        && ((claudeState.install && claudeState.install.running)
+            || claudeState.state === 'not_authed')) {
+      _startCcPoll();
+    }
+    refreshAiAvailability();
   }
 
   /* ============ Sync & P2P screen — #more/sync ============ */

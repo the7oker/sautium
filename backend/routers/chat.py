@@ -374,7 +374,8 @@ def _title_via_claude_code(prompt: str) -> Optional[str]:
     the CLI uses the user's Claude subscription rather than the
     pay-as-you-go API account. ~3-5s total.
     """
-    if not settings.claude_code_enabled:
+    from providers import get_provider as _get_provider
+    if _get_provider("claude_code") is None:
         return None
     try:
         from claude_code_runner import _resolve_claude_executable, CLAUDE_USER
@@ -389,8 +390,14 @@ def _title_via_claude_code(prompt: str) -> Optional[str]:
         env = os.environ.copy()
         env.pop("ANTHROPIC_API_KEY", None)
 
+        # `text=True` without `encoding=` falls back to the platform's
+        # ANSI codepage on Windows (cp1251 for many Ukrainian/Russian
+        # locales), which mangles UTF-8 output from the CLI. Force
+        # UTF-8 + errors="replace" so we get printable glyphs even on
+        # the rare line that includes something un-decodable.
         kwargs = dict(
             capture_output=True, text=True, timeout=20, env=env,
+            encoding="utf-8", errors="replace",
         )
         if sys.platform != "win32" and sys.platform != "darwin":
             # Linux/Docker — same demote path as call_claude_code.
@@ -458,9 +465,31 @@ def _generate_session_title(
     return title
 
 
+def _user_settings_value(key: str) -> Optional[str]:
+    """One-shot lookup from user_settings (the DB-backed prefs that
+    the Web UI's Settings screen writes to). Falls back to None if
+    the row is missing or unreadable."""
+    try:
+        from db_pool import db_query_one
+        row = db_query_one(
+            "SELECT value FROM user_settings WHERE key = %(k)s", {"k": key}
+        )
+        if row is None:
+            return None
+        v = row.get("value")
+        return v if isinstance(v, str) else None
+    except Exception as e:
+        logger.debug(f"user_settings[{key}] read failed: {e}")
+        return None
+
+
 def _resolve_provider(req_provider: Optional[str]) -> str:
     """Pick a provider name, validating availability. Raises
-    HTTPException on no usable provider."""
+    HTTPException on no usable provider. Selection priority:
+      1. explicit `req_provider` from the request,
+      2. `ai.provider` row in user_settings (Settings UI writes this),
+      3. `settings.default_provider` from env,
+      4. first available provider in the registry."""
     from providers import available_providers, get_provider
 
     providers = available_providers()
@@ -470,18 +499,15 @@ def _resolve_provider(req_provider: Optional[str]) -> str:
             detail="No LLM providers configured. Set CLAUDE_CODE_ENABLED, ANTHROPIC_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY.",
         )
 
-    name = req_provider or settings.default_provider
-    if name != "claude_code" and get_provider(name) is None:
+    name = (
+        req_provider
+        or _user_settings_value("ai.provider")
+        or settings.default_provider
+    )
+    if get_provider(name) is None:
+        # Requested provider isn't available — pick whatever first
+        # appears in the registry (claude_code wins when it's ready).
         name = providers[0]["id"]
-    if name == "claude_code" and not settings.claude_code_enabled:
-        non_cc = [p for p in providers if p["id"] != "claude_code"]
-        if non_cc:
-            name = non_cc[0]["id"]
-        else:
-            raise HTTPException(
-                status_code=503,
-                detail="Claude Code is not enabled and no other providers available.",
-            )
     return name
 
 
@@ -490,19 +516,22 @@ def _resolve_model(provider_name: str, req_model: Optional[str]) -> str:
     Mirrors the per-provider validation done deep inside `chat_stream()`
     so the streaming `meta` event can carry an authoritative model
     name before any provider tokens arrive — the chat bubble shows
-    the model tag immediately, not just after `done`."""
+    the model tag immediately, not just after `done`. Falls back to
+    the user's Settings choice (`ai.model`) when the request omits one."""
+    fallback = req_model or _user_settings_value("ai.model")
+
     if provider_name == "claude_code":
         from claude_code_runner import ALLOWED_MODELS, DEFAULT_MODEL
-        return req_model if req_model in ALLOWED_MODELS else DEFAULT_MODEL
+        return fallback if fallback in ALLOWED_MODELS else DEFAULT_MODEL
 
     from providers import get_provider
 
     provider = get_provider(provider_name)
     if provider is None:
-        return req_model or ""
+        return fallback or ""
     models = provider.models()
-    if req_model and req_model in models:
-        return req_model
+    if fallback and fallback in models:
+        return fallback
     return models[0] if models else ""
 
 
@@ -614,7 +643,7 @@ async def send_message(session_id: int, req: ChatMessageRequest):
             message=req.message,
             history=history,
             player_context=player_context,
-            model=req.model,
+            model=model_resolved,
         )
     except HTTPException:
         raise
@@ -880,8 +909,9 @@ async def legacy_chat(req: LegacyChatRequest):
     """Stateless chat endpoint for backward compatibility with existing frontend."""
     player_context = _get_player_context()
 
-    if not settings.claude_code_enabled:
-        raise HTTPException(status_code=503, detail="Claude Code is not enabled")
+    from providers import get_provider as _get_provider
+    if _get_provider("claude_code") is None:
+        raise HTTPException(status_code=503, detail="Claude Code is not installed or not signed in")
 
     try:
         from claude_code_runner import call_claude_code

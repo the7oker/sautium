@@ -75,8 +75,11 @@ _DEFAULTS: Dict[str, Any] = {
     "sync.announce_limit":       None,   # null = announce all
     "sync.announce_rotation_min": 30,
     "enrichment.background_enabled": True,
-    "ai.provider":               "claude",
-    "ai.model":                  "claude-opus-4-7",
+    # Provider/model default to None so the first-run UI shows
+    # "Not selected" instead of pretending Claude is picked when the
+    # wizard offered an explicit "no AI" option.
+    "ai.provider":               None,
+    "ai.model":                  None,
     "ai.api_key":                None,
     # last sync metadata — written by the sync runner when a cycle
     # completes; surfaced in the "Last sync · N new items" row.
@@ -176,28 +179,32 @@ def _ai_state() -> Dict[str, Any]:
     Usage (balance, monthly spent, limit, days_left) is null when the
     provider doesn't expose a billing API for the current credential
     type — UI hides the row in that case."""
-    provider = _read("ai.provider") or "claude"
-    model    = _read("ai.model")    or "claude-opus-4-7"
+    provider = _read("ai.provider")
+    model    = _read("ai.model")
     api_key  = _read("ai.api_key")
 
     auth_state = "not_authenticated"
     masked_key: Optional[str] = None
     expires_in_days: Optional[int] = None
-    if api_key:
-        auth_state = "api_key_set"
-        masked_key = "●" * 8 + (api_key[-4:] if len(api_key) >= 4 else api_key)
-    else:
-        # OAuth check — chat.py persists a refresh token; if present
-        # we treat the user as OAuth-signed-in. Days-to-expiry is
-        # best-effort: parse the JWT or fall back to a placeholder.
-        try:
-            from routers.chat import oauth_status  # type: ignore
-            st = oauth_status()
-            if st and st.get("authenticated"):
-                auth_state = "oauth_signed_in"
-                expires_in_days = st.get("expires_in_days")
-        except Exception:
-            pass
+    # Authentication state is only meaningful once a provider has been
+    # picked. Without one we leave auth_state at the default so the UI
+    # hides the auth/usage rows entirely.
+    if provider:
+        if api_key:
+            auth_state = "api_key_set"
+            masked_key = "●" * 8 + (api_key[-4:] if len(api_key) >= 4 else api_key)
+        else:
+            # OAuth check — chat.py persists a refresh token; if present
+            # we treat the user as OAuth-signed-in. Days-to-expiry is
+            # best-effort: parse the JWT or fall back to a placeholder.
+            try:
+                from routers.chat import oauth_status  # type: ignore
+                st = oauth_status()
+                if st and st.get("authenticated"):
+                    auth_state = "oauth_signed_in"
+                    expires_in_days = st.get("expires_in_days")
+            except Exception:
+                pass
 
     # Usage is intentionally null until we wire the provider billing
     # API; UI handles "row hidden when null". Placeholder structure
@@ -379,6 +386,112 @@ def delete_ai_key() -> Dict[str, Any]:
     _write("ai.api_key", None)
     _write("ai.key", None)
     return _ai_state()
+
+
+# ============================================================
+# Claude Code (subscription CLI) state + install + sign-in
+# ============================================================
+
+# Reuse the existing _scan/_enrich pattern: a single dict tracks the
+# install job so the UI can poll it while npm runs in a thread.
+_claude_install_state: Dict[str, Any] = {
+    "running": False,
+    "progress": "",
+    "error": None,
+}
+
+
+@router.get("/ai/claude/state")
+def get_claude_state() -> Dict[str, Any]:
+    """State machine for the Claude Code subscription CLI. The Web UI
+    branches on `state` to show install / sign-in / ready affordances.
+    `host_unsupported` means the backend can't shell out (Docker mode)
+    and the UI should point the user at the Desktop Launcher.
+
+    When the state transitions to 'ready' we invalidate the providers
+    cache so /api/chat picks up the freshly-installed CLI without a
+    backend restart."""
+    from claude_code import (
+        get_state, get_claude_executable, detect_node_version,
+        is_launcher_mode,
+    )
+    state = get_state()
+    if state == "ready":
+        from providers import reset as _reset_providers
+        _reset_providers()
+    node_ver = detect_node_version()
+    claude = get_claude_executable()
+    return {
+        "state":          state,
+        "launcher_mode":  is_launcher_mode(),
+        "node_version":   ".".join(str(p) for p in node_ver) if node_ver else None,
+        "claude_path":    str(claude) if claude else None,
+        "install":        dict(_claude_install_state),
+    }
+
+
+@router.post("/ai/claude/install")
+def post_claude_install() -> Dict[str, Any]:
+    """Kick off `npm install @anthropic-ai/claude-code` in a worker
+    thread. Returns immediately; the client polls /state until the
+    job's `install.running` goes false. Idempotent — calling while a
+    job is already running returns the in-flight state."""
+    import threading
+    from claude_code import (
+        is_launcher_mode, detect_node_version, install_claude_runtime,
+    )
+    if not is_launcher_mode():
+        raise HTTPException(
+            status_code=400,
+            detail="Claude Code install is only available in the native launcher. "
+                   "Open Sautium's Desktop Launcher to install.",
+        )
+    if _claude_install_state.get("running"):
+        return dict(_claude_install_state)
+
+    node_ver = detect_node_version()
+    if node_ver is None or node_ver[0] < 18:
+        raise HTTPException(
+            status_code=400,
+            detail="Node.js 18+ is required. Re-run the Sautium installer to repair the Node bundle.",
+        )
+
+    _claude_install_state.update({
+        "running": True,
+        "progress": "Running npm install…",
+        "error":   None,
+    })
+
+    def _worker():
+        try:
+            ok, msg = install_claude_runtime()
+            _claude_install_state["progress"] = msg
+            _claude_install_state["error"] = None if ok else msg
+        except Exception as e:
+            _claude_install_state["error"] = str(e)
+        finally:
+            _claude_install_state["running"] = False
+
+    threading.Thread(target=_worker, daemon=True, name="claude-install").start()
+    return dict(_claude_install_state)
+
+
+@router.post("/ai/claude/signin")
+def post_claude_signin() -> Dict[str, Any]:
+    """Launch a terminal window running the `claude` CLI so the user
+    can run `/login`. Caller polls /state.state for transition to
+    'ready'. Returns immediately."""
+    from claude_code import is_launcher_mode, launch_signin_terminal
+    if not is_launcher_mode():
+        raise HTTPException(
+            status_code=400,
+            detail="Sign-in requires a native terminal — use the Desktop Launcher.",
+        )
+    try:
+        launch_signin_terminal()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"opened": True}
 
 
 # ============================================================

@@ -733,9 +733,11 @@ async function sendChat(e) {
   chatMessages.scrollTop = chatMessages.scrollHeight;
 
   try {
+    // Provider/model selection now lives in /api/settings/ai (DB-
+    // backed, edited from Settings → AI assistant). Sending nothing
+    // here lets the backend read those values — single source of
+    // truth instead of localStorage drifting from Settings.
     const body = { message: msg };
-    if (selectedProvider) body.provider = selectedProvider;
-    if (selectedModel) body.model = selectedModel;
 
     const resp = await fetch("/api/chat/sessions/" + currentSessionId + "/messages", {
       method: "POST",
