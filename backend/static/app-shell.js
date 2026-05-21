@@ -4275,7 +4275,11 @@
       }
       let s;
       try {
-        const r = await fetch('/api/hqplayer/state');
+        // cache: 'no-store' so the connection state reflects what the
+        // backend just resolved — without it Chrome serves a stale GET
+        // after a PUT /api/settings/hqplayer reconfig, and the UI
+        // keeps saying "connected" even when the socket is gone.
+        const r = await fetch('/api/hqplayer/state', { cache: 'no-store' });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         s = await r.json();
       } catch (err) {
@@ -4305,7 +4309,7 @@
       const shaperLabel = isPcm ? 'Dither' : isSdm ? 'Modulator' : 'Shaper';
 
       const connBlock = s.connected
-        ? `<div class="hqp-conn ok">
+        ? `<div class="hqp-conn ok is-clickable" data-action="edit-conn" role="button" tabindex="0">
              <span class="hqp-conn-dot"></span>
              <div class="hqp-conn-text">
                <div class="hqp-conn-host">${escapeHtml(s.host)}:${s.port}</div>
@@ -4314,11 +4318,11 @@
                }${s.info && s.info.version ? ' · ' + escapeHtml(s.info.version) : ''}</div>
              </div>
            </div>`
-        : `<div class="hqp-conn err">
+        : `<div class="hqp-conn err is-clickable" data-action="edit-conn" role="button" tabindex="0">
              <span class="hqp-conn-dot"></span>
              <div class="hqp-conn-text">
                <div class="hqp-conn-host">${escapeHtml(s.host)}:${s.port}</div>
-               <div class="hqp-conn-sub">Disconnected</div>
+               <div class="hqp-conn-sub">Disconnected — tap to change host or port</div>
              </div>
            </div>`;
 
@@ -4480,6 +4484,13 @@
           load();
         });
       });
+
+      const connEl = body.querySelector('[data-action="edit-conn"]');
+      if (connEl) {
+        connEl.addEventListener('click', () => {
+          openHqpConnectionEditor({host: s.host, port: s.port}, () => load());
+        });
+      }
 
       body.querySelector('[data-action="open-filter"]').addEventListener('click', () => {
         openFilterPicker(s, async (chosen) => {
@@ -5148,6 +5159,85 @@
     };
     overlay.querySelector('[data-confirm]').addEventListener('click', submit);
     codeInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+  }
+
+  async function openHqpConnectionEditor(current, onSaved) {
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">HQPlayer connection</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(13*var(--px));line-height:1.5;">
+            Address of the HQPlayer Control Protocol endpoint. <b>localhost</b> when HQPlayer runs on the same machine, the LAN IP otherwise. Default port is 4321.
+          </p>
+          <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Host</span>
+            <input class="add-gear-input" id="hqpHostInput" type="text" placeholder="localhost" maxlength="255" autocomplete="off" spellcheck="false" value="${escapeProfileHtml(current.host || '')}">
+          </label>
+          <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Port</span>
+            <input class="add-gear-input" id="hqpPortInput" type="number" min="1" max="65535" placeholder="4321" value="${current.port || 4321}">
+          </label>
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(11.5*var(--px));line-height:1.5;">
+            Scrobbling runs in a separate process — restart the Sautium launcher to apply the change there too.
+          </p>
+          <button class="profile-btn primary" data-confirm>Save</button>
+          <div id="hqpConnMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    const hostInput = overlay.querySelector('#hqpHostInput');
+    const portInput = overlay.querySelector('#hqpPortInput');
+    const msg = overlay.querySelector('#hqpConnMsg');
+    setTimeout(() => hostInput.focus(), 100);
+
+    const submit = async () => {
+      const host = hostInput.value.trim();
+      const port = parseInt(portInput.value, 10);
+      if (!host) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = 'Host is required.';
+        return;
+      }
+      if (!port || port < 1 || port > 65535) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = 'Port must be 1–65535.';
+        return;
+      }
+      msg.style.color = 'var(--color-text-muted)';
+      msg.textContent = 'Saving…';
+      try {
+        const r = await fetch('/api/settings/hqplayer', {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({host, port}),
+        });
+        if (!r.ok) {
+          msg.style.color = 'var(--color-negative)';
+          msg.textContent = await r.text();
+          return;
+        }
+        msg.style.color = 'var(--color-positive)';
+        msg.textContent = 'Saved.';
+        setTimeout(() => { close(); if (onSaved) onSaved(); }, 400);
+      } catch (err) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = String(err);
+      }
+    };
+    overlay.querySelector('[data-confirm]').addEventListener('click', submit);
+    [hostInput, portInput].forEach(el => {
+      el.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+    });
   }
 
   async function openSetEmailFlow() {

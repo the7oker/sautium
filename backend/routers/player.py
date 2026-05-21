@@ -258,6 +258,16 @@ def _reset_hqp_status():
         _hqp_status_client = None
 
 
+def reset_all_clients() -> None:
+    """Public entry point — called by /api/settings/hqplayer after the
+    host or port changes so the next status/command call reconnects
+    against the new address instead of holding onto the old socket."""
+    with _hqp_lock:
+        _reset_hqp()
+    with _hqp_status_lock:
+        _reset_hqp_status()
+
+
 def _hqp_cmd(func):
     """Execute a function with HQPlayer client under lock. Auto-reconnects on broken pipe."""
     with _hqp_lock:

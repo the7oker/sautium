@@ -13,12 +13,15 @@ changes settings via HQP Desktop, a manual refresh in the UI picks
 up the new values.
 """
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from config import settings
+
+logger = logging.getLogger(__name__)
 from db_pool import db_execute, db_query_one
 from routers.player import (
     _hqp_lock,
@@ -113,13 +116,20 @@ def get_state() -> Dict[str, Any]:
     except (BrokenPipeError, ConnectionError, OSError) as e:
         return {**response, "error": str(e)}
 
-    response["connected"] = True
+    # TCP connect() on its own isn't proof of being talking to the
+    # HQPlayer control protocol — HQPlayer also listens on 4322
+    # (UPnP) and 4323 (events), and a stray service can hold any
+    # port. Treat the connection as healthy only when GetInfo came
+    # back with the actual `product` field — that's protocol-level
+    # confirmation that the other side is HQPlayer.
+    really_connected = bool(info and info.get("product"))
+    response["connected"] = really_connected
     response["info"] = info or {}
     response["state"] = state or {}
-    response["modes"] = modes
-    response["rates"] = rates
-    response["filters"] = filters
-    response["shapers"] = shapers
+    response["modes"] = modes or []
+    response["rates"] = rates or []
+    response["filters"] = filters or []
+    response["shapers"] = shapers or []
     response["matrix_profiles"] = matrix_profiles
     response["favorite_filters"] = _load_favorites()
     return response

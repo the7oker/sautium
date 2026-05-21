@@ -81,6 +81,10 @@ _DEFAULTS: Dict[str, Any] = {
     "ai.provider":               None,
     "ai.model":                  None,
     "ai.api_key":                None,
+    # HQPlayer connection — env defaults still apply at first boot;
+    # user_settings overrides them on PUT /api/settings/hqplayer.
+    "hqplayer.host":             None,
+    "hqplayer.port":             None,
     # last sync metadata — written by the sync runner when a cycle
     # completes; surfaced in the "Last sync · N new items" row.
     "sync.last_at":              None,
@@ -579,6 +583,70 @@ def post_claude_signin() -> Dict[str, Any]:
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"opened": True}
+
+
+# ============================================================
+# HQPlayer connection
+# ============================================================
+
+class HqplayerPrefs(BaseModel):
+    host: Optional[str] = Field(default=None, max_length=255)
+    port: Optional[int] = Field(default=None, ge=1, le=65535)
+
+
+@router.get("/hqplayer")
+def get_hqplayer_prefs() -> Dict[str, Any]:
+    from config import settings as app_settings
+    return {
+        "host": _read("hqplayer.host") or app_settings.hqplayer_host,
+        "port": _read("hqplayer.port") or app_settings.hqplayer_port,
+    }
+
+
+@router.put("/hqplayer")
+def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
+    """Update HQPlayer host/port. Persisted to user_settings and
+    overlaid onto Pydantic settings runtime so the control client
+    reconnects on the next call. playback-tracker reads env vars at
+    process start — it picks up the change after the launcher
+    restarts it."""
+    from config import settings as app_settings
+    if req.host is not None:
+        host = req.host.strip() or None
+        _write("hqplayer.host", host)
+        if host:
+            app_settings.hqplayer_host = host
+    if req.port is not None:
+        _write("hqplayer.port", req.port)
+        app_settings.hqplayer_port = req.port
+    logger.info(
+        f"HQPlayer settings updated: host={app_settings.hqplayer_host}, "
+        f"port={app_settings.hqplayer_port}"
+    )
+    # Drop cached HQPlayer sockets so the next status/command call
+    # reconnects against the new address.
+    try:
+        from routers.player import reset_all_clients as _reset_hqp
+        _reset_hqp()
+        logger.info("HQPlayer cached clients reset")
+    except Exception as e:
+        logger.warning(f"HQPlayer client reset failed: {e}")
+    return get_hqplayer_prefs()
+
+
+def load_hqplayer_from_db() -> None:
+    """Startup overlay: copy persisted host/port onto settings before
+    the first request."""
+    try:
+        from config import settings as app_settings
+        host = _read("hqplayer.host")
+        port = _read("hqplayer.port")
+        if host:
+            app_settings.hqplayer_host = host
+        if port:
+            app_settings.hqplayer_port = int(port)
+    except Exception as e:
+        logger.warning(f"Failed to load HQPlayer settings from DB: {e}")
 
 
 # ============================================================

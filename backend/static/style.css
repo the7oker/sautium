@@ -3313,6 +3313,8 @@ body.has-miniplayer .more-overlay .drawer {
   border-top: 1px solid var(--color-divider);
 }
 .hqp-conn:first-of-type { border-top: 0; }
+.hqp-conn.is-clickable { cursor: pointer; }
+.hqp-conn.is-clickable:hover { background: var(--color-bg-elevated, rgba(255,255,255,0.02)); }
 .hqp-conn-dot {
   width: calc(8 * var(--px));
   height: calc(8 * var(--px));

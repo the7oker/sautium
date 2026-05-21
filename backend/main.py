@@ -110,6 +110,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Failed to overlay AI credentials at startup: {e}")
 
+    # HQPlayer host/port editable from the Web UI; same env→DB overlay
+    # so the change survives a restart and applies on next request.
+    try:
+        from routers.settings import load_hqplayer_from_db
+        load_hqplayer_from_db()
+    except Exception as e:
+        logger.warning(f"Failed to overlay HQPlayer settings at startup: {e}")
+
     # Start SSE status poller
     from routers.player import start_status_poller, stop_status_poller
     start_status_poller()
