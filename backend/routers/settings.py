@@ -370,6 +370,29 @@ def put_ai_model(req: AiModelUpdate) -> Dict[str, Any]:
     return {"model": req.model}
 
 
+def _apply_api_key_to_runtime(key: Optional[str]) -> None:
+    """Push the saved key onto Settings so providers/__init__ creates
+    the right provider on the next access. Mirrors the lastfm overlay
+    in main.py — Pydantic Settings only reads .env at startup, so
+    Web-UI key edits would otherwise stay invisible to the provider
+    registry. Key is attributed by the currently-selected provider —
+    the UI only exposes one key slot at a time, so we know whose
+    credential this is."""
+    from config import settings as app_settings
+    provider = _read("ai.provider")
+    if provider == "anthropic":
+        app_settings.anthropic_api_key = key
+    elif provider == "openai":
+        app_settings.openai_api_key = key
+    # Tear down the cached registry so the next get_provider() call
+    # rebuilds with the new credential.
+    try:
+        from providers import reset as _reset_providers
+        _reset_providers()
+    except Exception:
+        pass
+
+
 @router.put("/ai/key")
 def put_ai_key(req: AiKeyUpdate) -> Dict[str, Any]:
     """Set or clear the user-supplied API key. Validation against the
@@ -378,6 +401,7 @@ def put_ai_key(req: AiKeyUpdate) -> Dict[str, Any]:
     key = (req.api_key or "").strip() or None
     _write("ai.key", key)  # legacy alias readable elsewhere
     _write("ai.api_key", key)
+    _apply_api_key_to_runtime(key)
     return _ai_state()
 
 
@@ -385,7 +409,26 @@ def put_ai_key(req: AiKeyUpdate) -> Dict[str, Any]:
 def delete_ai_key() -> Dict[str, Any]:
     _write("ai.api_key", None)
     _write("ai.key", None)
+    _apply_api_key_to_runtime(None)
     return _ai_state()
+
+
+def load_ai_credentials_from_db() -> None:
+    """Startup-time overlay: bring DB-stored credentials onto Settings
+    so the first request after a backend restart already sees them.
+    Called from main.lifespan."""
+    try:
+        provider = _read("ai.provider")
+        key = _read("ai.api_key")
+        if not key:
+            return
+        from config import settings as app_settings
+        if provider == "anthropic":
+            app_settings.anthropic_api_key = key
+        elif provider == "openai":
+            app_settings.openai_api_key = key
+    except Exception as e:
+        logger.warning(f"Failed to load AI credentials from DB: {e}")
 
 
 # ============================================================

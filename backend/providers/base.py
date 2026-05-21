@@ -62,6 +62,11 @@ class StreamDone(StreamEvent):
     tool_calls_count: int = 0
     claude_session_id: Optional[str] = None  # Claude Code only
     error: Optional[str] = None
+    # When the provider knows what concrete action the user can take to
+    # fix `error` (top up balance, rotate the API key, wait out a rate
+    # limit page) the chat UI renders this as a clickable link under
+    # the error bubble. None means "no actionable next step".
+    error_action: Optional[dict] = None  # {"label": str, "url": str}
 
 
 class BaseProvider(ABC):

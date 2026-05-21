@@ -132,7 +132,14 @@
       .replace(/(^|[^*])\*(?!\s)([^*\n]+?)\*/g,
                (_, pre, body) => `${pre}<em>${body}</em>`)
       // 3. Bold last. By now any nested italic is already <em>…</em>.
-      .replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>');
+      .replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>')
+      // 4. Links. HTTPS only — disarms javascript:, file:, data: URIs
+      //    that would otherwise execute when the user clicks. The
+      //    href has already been HTML-escaped by mdToHtml, so we
+      //    just need to wrap it.
+      .replace(/\[([^\]]+)\]\(((?:https?:)?\/\/[^)\s]+)\)/g,
+               (_, label, url) =>
+                 `<a href="${url}" target="_blank" rel="noopener" style="color:var(--color-amber);">${label}</a>`);
   }
 
   function mdToHtml(text) {
@@ -1606,8 +1613,7 @@
       const title = (session.title || 'New chat').trim() || 'New chat';
       const preview = (session.preview || '').trim();
       const ts = formatRelativeTime(session.updated_at || session.created_at);
-      const modelLabel = session.last_model
-        ? String(session.last_model).split(':').pop() : '';
+      const modelLabel = shortModelLabel(session.last_model);
 
       const main = document.createElement('div');
       main.className = 'ai-chat-row-main';
@@ -1783,7 +1789,7 @@
         if (m.model) {
           const tag = document.createElement('span');
           tag.className = 'ai-model-tag';
-          tag.textContent = String(m.model).split(':').pop() || m.model;
+          tag.textContent = shortModelLabel(m.model) || m.model;
           body.appendChild(tag);
         }
         const prose = document.createElement('div');
@@ -2001,6 +2007,19 @@
                   s => s.id === this.activeSessionId);
                 if (cached) cached.title = evt.data.title;
               }
+              // Provider-side failure (Anthropic 402 / quota / rate
+              // limit / OpenAI invalid_api_key…). The stream finished
+              // cleanly but the assistant has nothing to say. Surface
+              // the message instead of leaving the bubble empty —
+              // attach the SDK-derived action link when we have one
+              // so the user can fix it in one click.
+              if (evt.data.provider_error) {
+                const err = new Error(evt.data.provider_error);
+                if (evt.data.provider_error_action) {
+                  err.action = evt.data.provider_error_action;
+                }
+                throw err;
+              }
             } else if (evt.event === 'error') {
               throw new Error(evt.data.message || 'AI error');
             }
@@ -2017,19 +2036,25 @@
       } catch (err) {
         if (typing.parentNode) typing.remove();
         console.warn('send failed:', err);
+        const action = err && err.action && err.action.url && err.action.label
+          ? err.action
+          : null;
+        const actionHtml = action
+          ? ` <a href="${escapeHtml(action.url)}" target="_blank" rel="noopener" style="color:var(--color-amber);text-decoration:underline;">${escapeHtml(action.label)} →</a>`
+          : '';
         if (aiRow && proseDiv) {
           // Stream started before failure — append the error inline
           // so partial output stays visible.
           const errP = document.createElement('p');
           errP.style.color = 'var(--color-text-muted)';
-          errP.textContent = '— ' + String(err.message || err);
+          errP.innerHTML = '— ' + escapeHtml(String(err.message || err)) + actionHtml;
           proseDiv.appendChild(errP);
         } else {
           const errRow = document.createElement('div');
           errRow.className = 'ai-msg-row';
           errRow.innerHTML =
             '<div class="ai-msg-ai" style="color:var(--color-text-muted);">' +
-            escapeHtml(String(err.message || err)) + '</div>';
+            escapeHtml(String(err.message || err)) + actionHtml + '</div>';
           this.thread.appendChild(errRow);
         }
         this.scrollToBottom();
@@ -2059,6 +2084,25 @@
       this.renderChatList();
     },
   };
+
+  // Friendly label for the model tag — strips the provider prefix
+  // and the date suffix (claude-haiku-4-5-20251001 → Haiku 4.5) so
+  // the chat-list row stays under the 32 px reserved column instead
+  // of stealing space from the title.
+  function shortModelLabel(raw) {
+    if (!raw) return '';
+    const m = String(raw).split(':').pop().trim();
+    const apiMatch = m.match(/^claude-(haiku|sonnet|opus)-([\d-]+?)(?:-\d{8})?$/i);
+    if (apiMatch) {
+      const tier = apiMatch[1].charAt(0).toUpperCase() + apiMatch[1].slice(1);
+      return `${tier} ${apiMatch[2].replace(/-/g, '.')}`;
+    }
+    if (/^(sonnet|haiku|opus)$/i.test(m)) {
+      return m.charAt(0).toUpperCase() + m.slice(1);
+    }
+    if (/^gpt-/i.test(m)) return m;
+    return m.replace(/-\d{8}$/, '');
+  }
 
   // Compact relative time for chat-list rows. "now" / "5m" / "2h" /
   // "yesterday" / "apr 26" / locale date for older entries.
@@ -5916,24 +5960,26 @@
 
   const PROVIDER_OPTIONS = [
     { id: 'claude_code', label: 'Claude Code (subscription)' },
-    { id: 'claude',      label: 'Claude API' },
+    { id: 'anthropic',   label: 'Claude API' },
     { id: 'openai',      label: 'OpenAI' },
   ];
+  // IDs here must match what each provider's models() method returns —
+  // _resolve_model on the backend bails to models[0] when the picked
+  // id isn't in the list, which silently flipped Anthropic users from
+  // Haiku to Sonnet. Long-term we should drive these from
+  // /api/chat/providers so the UI is auto-synced.
   const MODEL_OPTIONS = {
-    // Claude Code CLI accepts short identifiers (sonnet / haiku), not
-    // the long claude-haiku-4-5-* aliases used by the API provider.
+    // Claude Code CLI accepts the short --model alias only.
     claude_code: [
       { id: 'sonnet', label: 'Sonnet' },
       { id: 'haiku',  label: 'Haiku' },
     ],
-    claude: [
-      { id: 'claude-opus-4-7',   label: 'Opus 4.7' },
-      { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
-      { id: 'claude-haiku-4-5',  label: 'Haiku 4.5' },
+    anthropic: [
+      { id: 'claude-sonnet-4-20250514',  label: 'Sonnet 4' },
+      { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
     ],
     openai: [
-      { id: 'gpt-5',     label: 'GPT-5' },
-      { id: 'gpt-4o',    label: 'GPT-4o' },
+      { id: 'gpt-4o',      label: 'GPT-4o' },
       { id: 'gpt-4o-mini', label: 'GPT-4o mini' },
     ],
   };
@@ -6050,9 +6096,9 @@
 
   /* API-key entry modal. Provider-aware helper link. */
   function openApiKeyModal(provider, onSaved) {
-    const isClaude = provider === 'claude';
-    const placeholder = isClaude ? 'sk-ant-...' : 'sk-...';
-    const helpLink = isClaude
+    const isAnthropic = provider === 'anthropic';
+    const placeholder = isAnthropic ? 'sk-ant-...' : 'sk-...';
+    const helpLink = isAnthropic
       ? '<a href="https://console.anthropic.com/" target="_blank" rel="noopener" style="color:var(--color-amber);">console.anthropic.com</a>'
       : '<a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener" style="color:var(--color-amber);">platform.openai.com</a>';
 
@@ -6910,8 +6956,8 @@
       }
     });
     const afterKeySaved = () => { refreshAiAvailability(); render(); };
-    onAction('[data-action="sign-in"]',     () => openApiKeyModal(ai.provider || 'claude', afterKeySaved));
-    onAction('[data-action="replace-key"]', () => openApiKeyModal(ai.provider || 'claude', afterKeySaved));
+    onAction('[data-action="sign-in"]',     () => openApiKeyModal(ai.provider || 'anthropic', afterKeySaved));
+    onAction('[data-action="replace-key"]', () => openApiKeyModal(ai.provider || 'anthropic', afterKeySaved));
     onAction('[data-action="reauthorize"]', () => {
       // OAuth handshake lives in the chat module — route there for now.
       navigate('friends');

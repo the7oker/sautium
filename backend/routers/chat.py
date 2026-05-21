@@ -504,6 +504,12 @@ def _resolve_provider(req_provider: Optional[str]) -> str:
         or _user_settings_value("ai.provider")
         or settings.default_provider
     )
+    # Web UI used to surface the Anthropic API provider under the
+    # short id 'claude'; backend registers it as 'anthropic'. Map the
+    # legacy value here so users who picked it before the rename
+    # don't silently fall through to claude_code.
+    if name == "claude":
+        name = "anthropic"
     if get_provider(name) is None:
         # Requested provider isn't available — pick whatever first
         # appears in the registry (claude_code wins when it's ready).
@@ -703,6 +709,19 @@ async def send_message(session_id: int, req: ChatMessageRequest):
                         out_q.put(_format_sse("blocks", {"blocks": hydrated}))
 
             clean_text = strip_tracks_marker(strip_blocks_marker(blocks_filter.full_text))
+            # When the provider failed before producing any tokens
+            # (quota / auth / rate limit) clean_text is empty. Persist
+            # the user-facing error as the assistant content so the
+            # message survives a reload — otherwise the chat bubble
+            # disappears as soon as the user switches sessions or
+            # refreshes. Embed the action link as inline markdown so
+            # the link is preserved through the markdown renderer on
+            # history reloads.
+            if not clean_text and final and final.error:
+                clean_text = f"⚠️ {final.error}"
+                act = getattr(final, "error_action", None)
+                if isinstance(act, dict) and act.get("url") and act.get("label"):
+                    clean_text += f"\n\n[{act['label']}]({act['url']})"
             tracks = _tracks_from_blocks(blocks)
             tracks_data = [
                 {
@@ -783,6 +802,8 @@ async def send_message(session_id: int, req: ChatMessageRequest):
                 done_payload["title"] = ai_title
             if final and final.error:
                 done_payload["provider_error"] = final.error
+            if final and getattr(final, "error_action", None):
+                done_payload["provider_error_action"] = final.error_action
             out_q.put(_format_sse("done", done_payload))
         except Exception as e:
             logger.error(f"Provider stream error: {e}", exc_info=True)

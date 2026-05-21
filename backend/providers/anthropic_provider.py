@@ -21,6 +21,65 @@ MAX_ITERATIONS = 15
 TIMEOUT_SECONDS = 120
 
 
+def _humanize_error(exc: Exception) -> tuple[str, Optional[dict]]:
+    """Pull (message, action) out of an Anthropic SDK exception.
+
+    `str(exc)` from the SDK looks like
+        `Error code: 400 - {'type': 'error', 'error': {...message: 'X'}}`
+    — readable for engineers, not for users. The SDK exposes the same
+    message under `.message`/`.body['error']['message']`; preferring it
+    drops the HTTP code, the dict noise and the request_id, leaving
+    just 'Your credit balance is too low …'.
+
+    When the failure is something the user can fix with a single click
+    (top up balance, rotate the key) we also return an `action` dict
+    so the chat UI can render a clickable link."""
+    # Priority order: the parsed `body['error']['message']` is the only
+    # clean source. `.message` and str(exc) both look like
+    # `Error code: 400 - {dict}` because the SDK formats them via
+    # __init__ — using them first means we re-emit the raw payload.
+    msg = ""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            m = err.get("message")
+            if isinstance(m, str) and m.strip():
+                msg = m.strip()
+    if not msg:
+        # SDK exceptions that don't carry a body — typically network
+        # errors. `.message` may still be human-readable here, just
+        # less specific.
+        direct = getattr(exc, "message", None)
+        if isinstance(direct, str) and direct.strip():
+            msg = direct.strip()
+    if not msg:
+        msg = str(exc).strip() or "Anthropic API call failed"
+
+    # Map known classes of Anthropic errors to concrete next steps. We
+    # match on the SDK exception class first (most reliable), then fall
+    # back to keyword sniffing in the message text for cases where the
+    # SDK only raises a generic APIError.
+    low = msg.lower()
+    name = type(exc).__name__
+    if "credit balance" in low or "billing" in low or "insufficient" in low:
+        return msg, {
+            "label": "Top up balance",
+            "url": "https://console.anthropic.com/settings/billing",
+        }
+    if name == "AuthenticationError" or "api key" in low or "401" in low:
+        return msg, {
+            "label": "Manage API keys",
+            "url": "https://console.anthropic.com/settings/keys",
+        }
+    if name == "RateLimitError" or "rate limit" in low or "429" in low:
+        return msg, {
+            "label": "View rate limits",
+            "url": "https://docs.anthropic.com/en/api/rate-limits",
+        }
+    return msg, None
+
+
 class AnthropicProvider(BaseProvider):
     """Provider using Anthropic SDK with tool calling."""
 
@@ -205,10 +264,11 @@ class AnthropicProvider(BaseProvider):
                 )
             except Exception as e:
                 logger.error(f"Anthropic API error: {e}")
+                msg, action = _humanize_error(e)
                 yield StreamDone(
                     model=use_model, provider=self.name,
                     tool_calls_count=tool_calls_count,
-                    error=str(e),
+                    error=msg, error_action=action,
                 )
                 return
 
@@ -234,10 +294,11 @@ class AnthropicProvider(BaseProvider):
                     final_msg = stream.get_final_message()
             except Exception as e:
                 logger.error(f"Anthropic streaming error: {e}")
+                msg, action = _humanize_error(e)
                 yield StreamDone(
                     model=use_model, provider=self.name,
                     tool_calls_count=tool_calls_count,
-                    error=str(e),
+                    error=msg, error_action=action,
                 )
                 return
 

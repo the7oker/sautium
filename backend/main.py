@@ -100,6 +100,16 @@ async def lifespan(app: FastAPI):
     # only reads .env at startup; the OAuth callback persists to DB).
     _load_lastfm_from_db()
 
+    # Same idea for AI provider API keys — Web UI writes them to DB,
+    # but providers/__init__.py reads `settings.anthropic_api_key`
+    # etc. Without this overlay AnthropicProvider would not register
+    # until the user re-saved the key after a backend restart.
+    try:
+        from routers.settings import load_ai_credentials_from_db
+        load_ai_credentials_from_db()
+    except Exception as e:
+        logger.warning(f"Failed to overlay AI credentials at startup: {e}")
+
     # Start SSE status poller
     from routers.player import start_status_poller, stop_status_poller
     start_status_poller()
