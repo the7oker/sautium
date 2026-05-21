@@ -6108,13 +6108,13 @@
       <div class="add-gear-sheet">
         <div class="sheet-handle"></div>
         <div class="add-gear-head">
-          <h2 class="add-gear-title">Connect ${escapeProfileHtml(isClaude ? 'Claude' : 'OpenAI')} API key</h2>
+          <h2 class="add-gear-title">Connect ${escapeProfileHtml(isAnthropic ? 'Claude' : 'OpenAI')} API key</h2>
           <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
         </div>
         <div class="add-gear-row">
           <input class="add-gear-input" id="apiKeyInput" type="password" placeholder="${placeholder}" maxlength="280" autocomplete="off" spellcheck="false">
           <p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.45;">
-            Get a key at ${helpLink}. Stored locally; sent only to ${escapeProfileHtml(isClaude ? 'Anthropic' : 'OpenAI')}.
+            Get a key at ${helpLink}. Stored locally; sent only to ${escapeProfileHtml(isAnthropic ? 'Anthropic' : 'OpenAI')}.
           </p>
           <div id="apiKeyMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
           <button class="btn btn-primary" data-save>Save</button>

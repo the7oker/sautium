@@ -358,15 +358,51 @@ class AiKeyUpdate(BaseModel):
     api_key: Optional[str] = Field(default=None, max_length=300)
 
 
+def _canon_provider(p: Optional[str]) -> Optional[str]:
+    """Web UI used to expose the Anthropic API provider as 'claude';
+    backend registers it as 'anthropic'. Mapping at this layer keeps
+    per-provider key/model buckets coherent across the rename."""
+    return "anthropic" if p == "claude" else p
+
+
 @router.put("/ai/provider")
 def put_ai_provider(req: AiProviderUpdate) -> Dict[str, Any]:
-    _write("ai.provider", req.provider)
-    return {"provider": req.provider}
+    """Switch provider. Stash the current model/key under per-provider
+    keys so the next switch back restores them, then activate the new
+    provider's saved model/key (or clear when there's nothing saved).
+    The single `ai.api_key` / `ai.model` rows stay the source of truth
+    for `_ai_state()` and `_resolve_*()` — switching just swaps what
+    lives in them."""
+    cur_provider = _canon_provider(_read("ai.provider"))
+    new_provider = _canon_provider(req.provider) or req.provider
+
+    # Stash the current pair under the *outgoing* provider's bucket
+    # before overwriting the active slot.
+    if cur_provider and cur_provider != new_provider:
+        _write(f"ai.{cur_provider}.api_key", _read("ai.api_key"))
+        _write(f"ai.{cur_provider}.model",   _read("ai.model"))
+
+    # Restore the *incoming* provider's pair, or clear if unset.
+    next_key   = _read(f"ai.{new_provider}.api_key")
+    next_model = _read(f"ai.{new_provider}.model")
+    _write("ai.api_key", next_key)
+    _write("ai.key",     next_key)  # legacy alias
+    _write("ai.model",   next_model)
+    _write("ai.provider", new_provider)
+
+    # Re-overlay credentials onto Pydantic settings and bust the
+    # providers cache — same path PUT /ai/key uses.
+    _apply_api_key_to_runtime(next_key)
+
+    return {"provider": new_provider}
 
 
 @router.put("/ai/model")
 def put_ai_model(req: AiModelUpdate) -> Dict[str, Any]:
     _write("ai.model", req.model)
+    provider = _canon_provider(_read("ai.provider"))
+    if provider:
+        _write(f"ai.{provider}.model", req.model)
     return {"model": req.model}
 
 
@@ -397,10 +433,15 @@ def _apply_api_key_to_runtime(key: Optional[str]) -> None:
 def put_ai_key(req: AiKeyUpdate) -> Dict[str, Any]:
     """Set or clear the user-supplied API key. Validation against the
     provider's API is deferred — the UI's chat surface will surface
-    auth errors on first call. Empty/null clears the key."""
+    auth errors on first call. Empty/null clears the key. Also stored
+    under `ai.<provider>.api_key` so the next provider switch preserves
+    it for restoration."""
     key = (req.api_key or "").strip() or None
     _write("ai.key", key)  # legacy alias readable elsewhere
     _write("ai.api_key", key)
+    provider = _canon_provider(_read("ai.provider"))
+    if provider:
+        _write(f"ai.{provider}.api_key", key)
     _apply_api_key_to_runtime(key)
     return _ai_state()
 
@@ -409,6 +450,9 @@ def put_ai_key(req: AiKeyUpdate) -> Dict[str, Any]:
 def delete_ai_key() -> Dict[str, Any]:
     _write("ai.api_key", None)
     _write("ai.key", None)
+    provider = _canon_provider(_read("ai.provider"))
+    if provider:
+        _write(f"ai.{provider}.api_key", None)
     _apply_api_key_to_runtime(None)
     return _ai_state()
 

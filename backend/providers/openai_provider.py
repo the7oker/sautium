@@ -21,6 +21,88 @@ MAX_ITERATIONS = 15
 TIMEOUT_SECONDS = 120
 
 
+def _humanize_error(exc: Exception) -> tuple[str, Optional[dict]]:
+    """Mirror of anthropic_provider._humanize_error for OpenAI SDK
+    exceptions. The SDK formats `str(exc)` as
+        `Error code: 429 - {'error': {'message': 'X', ...}}`
+    — readable for engineers, not for users. body['error']['message']
+    is the clean source.
+
+    Maps insufficient_quota / authentication / rate_limit to concrete
+    next-step links so the chat UI can show 'Top up credits →'
+    instead of dropping the user on docs."""
+    import ast
+    import re
+
+    msg = ""
+    err_code = ""
+    err_type = ""
+
+    # 1. Preferred path: APIStatusError.body is a parsed dict.
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            m = err.get("message")
+            if isinstance(m, str) and m.strip():
+                msg = m.strip()
+            err_code = (err.get("code") or "").lower()
+            err_type = (err.get("type") or "").lower()
+
+    # 2. Fallback: extract the dict literal from `str(exc)` and parse
+    # it. We hit this when the SDK doesn't surface a dict in .body —
+    # eg. some streaming code paths, or third-party wrappers — but
+    # str(exc) reliably starts with "Error code: N - {...}".
+    if not msg:
+        text = str(exc)
+        match = re.search(r"Error code:\s*\d+\s*-\s*(\{.*\})", text, re.DOTALL)
+        if match:
+            try:
+                parsed = ast.literal_eval(match.group(1))
+                if isinstance(parsed, dict):
+                    err = parsed.get("error")
+                    if isinstance(err, dict):
+                        m = err.get("message")
+                        if isinstance(m, str) and m.strip():
+                            msg = m.strip()
+                        if not err_code:
+                            err_code = (err.get("code") or "").lower()
+                        if not err_type:
+                            err_type = (err.get("type") or "").lower()
+            except (ValueError, SyntaxError):
+                pass
+
+    if not msg:
+        # Last resort — `.message` from the SDK base class. Often the
+        # same `Error code: N - {...}` text but occasionally cleaner.
+        direct = getattr(exc, "message", None)
+        if isinstance(direct, str) and direct.strip():
+            msg = direct.strip()
+    if not msg:
+        msg = str(exc).strip() or "OpenAI API call failed"
+
+    low = msg.lower()
+    name = type(exc).__name__
+    if (err_code == "insufficient_quota" or err_type == "insufficient_quota"
+            or "quota" in low or "billing" in low or "credit" in low):
+        return msg, {
+            "label": "Top up credits",
+            "url": "https://platform.openai.com/account/billing",
+        }
+    if (name == "AuthenticationError" or err_code == "invalid_api_key"
+            or "invalid api key" in low or "401" in low):
+        return msg, {
+            "label": "Manage API keys",
+            "url": "https://platform.openai.com/api-keys",
+        }
+    if name == "RateLimitError" or "rate limit" in low or "429" in low:
+        return msg, {
+            "label": "View rate limits",
+            "url": "https://platform.openai.com/docs/guides/rate-limits",
+        }
+    return msg, None
+
+
 class OpenAIProvider(BaseProvider):
     """Provider using OpenAI SDK with function calling."""
 
@@ -212,10 +294,11 @@ class OpenAIProvider(BaseProvider):
                 stream = client.chat.completions.create(**create_kwargs)
             except Exception as e:
                 logger.error(f"OpenAI API error: {e}")
+                msg, action = _humanize_error(e)
                 yield StreamDone(
                     model=use_model, provider=self.name,
                     tool_calls_count=tool_calls_count,
-                    error=str(e),
+                    error=msg, error_action=action,
                 )
                 return
 
@@ -262,10 +345,11 @@ class OpenAIProvider(BaseProvider):
                         finish_reason = choice.finish_reason
             except Exception as e:
                 logger.error(f"OpenAI streaming error: {e}")
+                msg, action = _humanize_error(e)
                 yield StreamDone(
                     model=use_model, provider=self.name,
                     tool_calls_count=tool_calls_count,
-                    error=str(e),
+                    error=msg, error_action=action,
                 )
                 return
 
