@@ -268,20 +268,6 @@ class SetupWizard(ctk.CTkToplevel):
                     self._provider_error.configure(text="API key is required")
                     return False
                 self.config["api_keys"]["openai"] = key
-            elif provider == "openai_compat":
-                url = self._compat_url_var.get().strip()
-                model = self._compat_model_var.get().strip()
-                if not url or not model:
-                    self._provider_error.configure(
-                        text="Base URL and model name are required"
-                    )
-                    return False
-                self.config["openai_compat"] = {
-                    "base_url": url,
-                    "api_key": self._compat_key_var.get().strip() or None,
-                    "model": model,
-                    "name": self._compat_name_var.get().strip() or None,
-                }
             elif provider == "claude_code":
                 if self._claude_state() != "ready":
                     self._provider_error.configure(
@@ -608,15 +594,6 @@ class SetupWizard(ctk.CTkToplevel):
             command=self._update_provider_fields,
         ).pack(anchor="w", pady=3)
 
-        # OpenAI-compatible
-        ctk.CTkRadioButton(
-            providers_frame,
-            text="OpenAI-compatible (Ollama, LM Studio, etc.)",
-            variable=self._provider_var,
-            value="openai_compat",
-            command=self._update_provider_fields,
-        ).pack(anchor="w", pady=3)
-
         # Dynamic fields container
         self._provider_fields_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
         self._provider_fields_frame.pack(fill="x", padx=30, pady=5)
@@ -628,11 +605,6 @@ class SetupWizard(ctk.CTkToplevel):
         self._openai_key_var = ctk.StringVar(
             value=self.config.get("api_keys", {}).get("openai") or ""
         )
-        compat = self.config.get("openai_compat", {})
-        self._compat_url_var = ctk.StringVar(value=compat.get("base_url") or "")
-        self._compat_key_var = ctk.StringVar(value=compat.get("api_key") or "")
-        self._compat_model_var = ctk.StringVar(value=compat.get("model") or "")
-        self._compat_name_var = ctk.StringVar(value=compat.get("name") or "")
 
         self._provider_error = ctk.CTkLabel(
             self.content_frame, text="", text_color="red",
@@ -681,43 +653,6 @@ class SetupWizard(ctk.CTkToplevel):
                 self._provider_fields_frame,
                 textvariable=self._openai_key_var,
                 width=400, show="*",
-            ).pack(fill="x")
-
-        elif provider == "openai_compat":
-            ctk.CTkLabel(
-                self._provider_fields_frame, text="Base URL:",
-            ).pack(anchor="w")
-            ctk.CTkEntry(
-                self._provider_fields_frame,
-                textvariable=self._compat_url_var,
-                width=400, placeholder_text="http://localhost:11434/v1",
-            ).pack(fill="x", pady=(0, 5))
-
-            ctk.CTkLabel(
-                self._provider_fields_frame, text="API Key (optional):",
-            ).pack(anchor="w")
-            ctk.CTkEntry(
-                self._provider_fields_frame,
-                textvariable=self._compat_key_var,
-                width=400, show="*",
-            ).pack(fill="x", pady=(0, 5))
-
-            ctk.CTkLabel(
-                self._provider_fields_frame, text="Model name:",
-            ).pack(anchor="w")
-            ctk.CTkEntry(
-                self._provider_fields_frame,
-                textvariable=self._compat_model_var,
-                width=400, placeholder_text="llama3:70b",
-            ).pack(fill="x", pady=(0, 5))
-
-            ctk.CTkLabel(
-                self._provider_fields_frame, text="Display name (optional):",
-            ).pack(anchor="w")
-            ctk.CTkEntry(
-                self._provider_fields_frame,
-                textvariable=self._compat_name_var,
-                width=400, placeholder_text="My Local LLM",
             ).pack(fill="x")
 
     # ================================================================
@@ -1179,7 +1114,6 @@ class SetupWizard(ctk.CTkToplevel):
                 "claude_code": "Claude Code",
                 "anthropic": "Anthropic API",
                 "openai": "OpenAI API",
-                "openai_compat": "Custom API",
             }.get(self.config.get("provider", "none"), self.config.get("provider", "none"))),
             (
                 "HQPlayer",
