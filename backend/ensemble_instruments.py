@@ -84,13 +84,10 @@ class InstrumentEnsembleTagger:
         device: Optional[str] = None,
         threshold: float = DEFAULT_THRESHOLD,
     ):
-        if device:
-            self.device = device
-        elif torch.cuda.is_available():
-            self.device = "cuda"
-        else:
-            self.device = "cpu"
-            logger.warning("CUDA not available; AST/PaSST will be slow on CPU")
+        from device import get_device
+        self.device = device or get_device()
+        if self.device == "cpu":
+            logger.warning("No GPU accelerator detected; AST/PaSST will be slow on CPU")
 
         self.threshold = threshold
         self.ast = None
@@ -110,9 +107,14 @@ class InstrumentEnsembleTagger:
                 "Add `hear21passt>=0.0.26` to requirements and rebuild the backend image."
             )
 
-        logger.info("Loading AST model: %s on %s", self.AST_MODEL_NAME, self.device)
+        from device import get_model_dtype
+        dtype = get_model_dtype(self.device)
+
+        logger.info("Loading AST model: %s on %s (%s)", self.AST_MODEL_NAME, self.device, dtype)
         self.ast_extractor = ASTFeatureExtractor.from_pretrained(self.AST_MODEL_NAME)
-        self.ast = ASTForAudioClassification.from_pretrained(self.AST_MODEL_NAME)
+        self.ast = ASTForAudioClassification.from_pretrained(
+            self.AST_MODEL_NAME, torch_dtype=dtype,
+        )
         self.ast = self.ast.to(self.device).eval()
         self.id2label = self.ast.config.id2label
 
@@ -131,9 +133,14 @@ class InstrumentEnsembleTagger:
             )
         logger.info("Ensemble: %d instrument classes resolved", len(self.instrument_ids))
 
+        # PaSST: hear21passt's get_basic_model() doesn't expose torch_dtype,
+        # so build in fp32 then convert. The model is small (~340MB) — the
+        # transient peak is fine.
         logger.info("Loading PaSST model (hear21passt, logits mode)")
         with contextlib.redirect_stdout(io.StringIO()):
             self.passt = _passt_get_basic_model(mode="logits")
+        if dtype == torch.float16:
+            self.passt = self.passt.half()
         self.passt = self.passt.to(self.device).eval()
 
         if self.device == "cuda":
@@ -153,6 +160,7 @@ class InstrumentEnsembleTagger:
         logger.info("AST+PaSST unloaded")
 
     def _run_ast(self, audio_48k: np.ndarray) -> np.ndarray:
+        from device import autocast, cast_inputs
         audio_16k = librosa.resample(audio_48k, orig_sr=48000, target_sr=self.AST_SR)
         want = self.AST_SR * self.WINDOW_SECONDS
         if len(audio_16k) >= want:
@@ -162,22 +170,26 @@ class InstrumentEnsembleTagger:
         inputs = self.ast_extractor(
             audio_16k, sampling_rate=self.AST_SR, return_tensors="pt"
         )
+        inputs = cast_inputs(inputs, self.ast.dtype)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        with torch.no_grad():
+        with torch.no_grad(), autocast(self.device):
             logits = self.ast(**inputs).logits
-        return torch.sigmoid(logits)[0].cpu().numpy()
+        # sigmoid in fp32 — fp16 saturates around |x|>10 and clips probabilities
+        return torch.sigmoid(logits.float())[0].cpu().numpy()
 
     def _run_passt(self, audio_48k: np.ndarray) -> np.ndarray:
+        from device import autocast
         audio_32k = librosa.resample(audio_48k, orig_sr=48000, target_sr=self.PASST_SR)
         want = self.PASST_SR * self.WINDOW_SECONDS
         if len(audio_32k) >= want:
             audio_32k = audio_32k[:want]
         else:
             audio_32k = np.pad(audio_32k, (0, want - len(audio_32k)))
-        tensor = torch.from_numpy(audio_32k).float().unsqueeze(0).to(self.device)
-        with torch.no_grad(), contextlib.redirect_stdout(io.StringIO()):
+        passt_dtype = next(self.passt.parameters()).dtype
+        tensor = torch.from_numpy(audio_32k).to(self.device, dtype=passt_dtype).unsqueeze(0)
+        with torch.no_grad(), autocast(self.device), contextlib.redirect_stdout(io.StringIO()):
             logits = self.passt(tensor)
-        return torch.sigmoid(logits)[0].cpu().numpy()
+        return torch.sigmoid(logits.float())[0].cpu().numpy()
 
     def tag(self, audio_48k: np.ndarray) -> Dict[str, float]:
         """Return {lowercase_label: max(ast_score, passt_score)} filtered by threshold.

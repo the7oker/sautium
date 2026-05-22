@@ -35,12 +35,8 @@ class TextEmbeddingGenerator:
         self.batch_size = batch_size or settings.text_embedding_batch_size
         self.dimension = settings.text_embedding_dimension
 
-        if device:
-            self.device = device
-        else:
-            import torch
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-
+        from device import get_device
+        self.device = device or get_device()
         self.model = None
 
     def load_model(self):

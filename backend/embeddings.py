@@ -40,13 +40,10 @@ class AudioEmbeddingGenerator:
         self.sample_duration = sample_duration or settings.audio_sample_duration
         self.sample_rate = 48000  # CLAP expects 48kHz
 
-        if device:
-            self.device = device
-        elif torch.cuda.is_available():
-            self.device = "cuda"
-        else:
-            self.device = "cpu"
-            logger.warning("CUDA not available, using CPU (will be slow)")
+        from device import get_device
+        self.device = device or get_device()
+        if self.device == "cpu":
+            logger.warning("No GPU accelerator detected, using CPU (will be slow)")
 
         self.model = None
         self.processor = None
@@ -71,16 +68,18 @@ class AudioEmbeddingGenerator:
         Returns:
             L2-normalized numpy array of shape (512,).
         """
+        from device import autocast, cast_inputs
         self.load_model()
 
         inputs = self.processor(text=[text], return_tensors="pt", padding=True)
+        inputs = cast_inputs(inputs, self.model.dtype)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-        with torch.no_grad():
+        with torch.no_grad(), autocast(self.device):
             text_features = self.model.get_text_features(**inputs)
 
-        # L2 normalize to match audio embeddings
-        text_features = torch.nn.functional.normalize(text_features, p=2, dim=1)
+        # L2 normalize in fp32 — normalization on fp16 saturates near zero
+        text_features = torch.nn.functional.normalize(text_features.float(), p=2, dim=1)
 
         return text_features[0].cpu().numpy()
 
@@ -126,25 +125,35 @@ class AudioEmbeddingGenerator:
         Returns L2-normalized embeddings as numpy array, or None on failure.
         """
         try:
+            from device import autocast, cast_inputs
             inputs = self.processor(
                 audio=audio_arrays,
                 sampling_rate=self.sample_rate,
                 return_tensors="pt",
                 padding=True,
             )
+            inputs = cast_inputs(inputs, self.model.dtype)
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-            with torch.no_grad():
+            with torch.no_grad(), autocast(self.device):
                 embeddings = self.model.get_audio_features(**inputs)
 
-            # L2 normalize
-            embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+            # Diagnostic: report dtype + pre-normalize stats on first NaN to
+            # distinguish fp16 attention overflow (post-encoder inf/NaN) from
+            # actual model output failure.
+            pre_nan = torch.isnan(embeddings).any().item()
+            pre_inf = torch.isinf(embeddings).any().item()
+
+            # L2 normalize in fp32 — fp16 norm saturates and loses precision
+            embeddings = torch.nn.functional.normalize(embeddings.float(), p=2, dim=1)
 
             result = embeddings.cpu().numpy()
 
-            # Check for NaN
             if np.isnan(result).any():
-                logger.error("NaN detected in embeddings")
+                logger.error(
+                    "NaN detected in embeddings (model_dtype=%s, pre_norm_nan=%s, pre_norm_inf=%s, batch=%d)",
+                    self.model.dtype, pre_nan, pre_inf, len(audio_arrays),
+                )
                 return None
 
             return result

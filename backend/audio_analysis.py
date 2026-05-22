@@ -69,13 +69,10 @@ class AudioAnalyzer:
         self.duration = duration or settings.audio_analysis_duration
         self.model_name = settings.embedding_model
 
-        if device:
-            self.device = device
-        elif torch.cuda.is_available():
-            self.device = "cuda"
-        else:
-            self.device = "cpu"
-            logger.warning("CUDA not available, CLAP zero-shot will be slow on CPU")
+        from device import get_device
+        self.device = device or get_device()
+        if self.device == "cpu":
+            logger.warning("No GPU accelerator detected, CLAP zero-shot will be slow on CPU")
 
         self.model = None
         self.processor = None
@@ -96,6 +93,7 @@ class AudioAnalyzer:
 
     def _encode_text_labels(self):
         """Pre-encode CLAP text label sets (moods/vocal/dance). Called once."""
+        from device import autocast, cast_inputs
         label_sets = {
             "moods": [f"This is {l} music" for l in MOOD_LABELS],
             "vocal": [f"This is {l}" for l in VOCAL_LABELS],
@@ -104,10 +102,13 @@ class AudioAnalyzer:
 
         for key, prompts in label_sets.items():
             inputs = self.processor(text=prompts, return_tensors="pt", padding=True)
+            inputs = cast_inputs(inputs, self.model.dtype)
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            with torch.no_grad():
+            with torch.no_grad(), autocast(self.device):
                 text_features = self.model.get_text_features(**inputs)
-                text_features = torch.nn.functional.normalize(text_features, p=2, dim=1)
+            # Keep cached label embeddings in fp32 so cosine math against
+            # audio features stays stable across precision boundaries
+            text_features = torch.nn.functional.normalize(text_features.float(), p=2, dim=1)
             self._text_embeddings_cache[key] = text_features
 
         logger.info(f"Pre-encoded {sum(len(v) for v in label_sets.values())} text labels")
@@ -236,6 +237,7 @@ class AudioAnalyzer:
 
     def _extract_clap_features(self, audio_48k: np.ndarray) -> Dict[str, Any]:
         """CLAP moods/vocal/dance + AST+PaSST ensemble instruments."""
+        from device import autocast, cast_inputs
         # Encode audio
         inputs = self.processor(
             audio=[audio_48k],
@@ -243,11 +245,12 @@ class AudioAnalyzer:
             return_tensors="pt",
             padding=True,
         )
+        inputs = cast_inputs(inputs, self.model.dtype)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-        with torch.no_grad():
+        with torch.no_grad(), autocast(self.device):
             audio_features = self.model.get_audio_features(**inputs)
-            audio_features = torch.nn.functional.normalize(audio_features, p=2, dim=1)
+        audio_features = torch.nn.functional.normalize(audio_features.float(), p=2, dim=1)
 
         features = {}
 
@@ -341,17 +344,19 @@ class AudioAnalyzer:
         invoked per-track since AST/PaSST are cheap enough (~200 ms each)
         and keeping the batch loader simple matters more than micro-gains.
         """
+        from device import autocast, cast_inputs
         inputs = self.processor(
             audio=audio_arrays,
             sampling_rate=self.clap_sr,
             return_tensors="pt",
             padding=True,
         )
+        inputs = cast_inputs(inputs, self.model.dtype)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-        with torch.no_grad():
+        with torch.no_grad(), autocast(self.device):
             all_audio_features = self.model.get_audio_features(**inputs)
-            all_audio_features = torch.nn.functional.normalize(all_audio_features, p=2, dim=1)
+        all_audio_features = torch.nn.functional.normalize(all_audio_features.float(), p=2, dim=1)
 
         results = []
         for i, audio_48k in enumerate(audio_arrays):

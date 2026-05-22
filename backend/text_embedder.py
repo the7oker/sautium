@@ -49,8 +49,13 @@ def get_text_embedder(model_name: str, device: str):
         evt.wait()
 
     try:
-        logger.info(f"Loading text embedding model: {model_name} on {device}")
+        from device import get_model_dtype
+        import torch
+        dtype = get_model_dtype(device)
+        logger.info(f"Loading text embedding model: {model_name} on {device} ({dtype})")
         model = SentenceTransformer(model_name, device=device)
+        if dtype == torch.float16:
+            model.half()
         logger.info("Text embedding model loaded")
     except BaseException:
         with _lock:

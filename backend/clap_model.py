@@ -45,9 +45,11 @@ def get_clap_model(model_name: str, device: str):
         evt.wait()
 
     try:
-        logger.info(f"Loading CLAP model: {model_name} on {device}")
+        from device import get_model_dtype
+        dtype = get_model_dtype(device)
+        logger.info(f"Loading CLAP model: {model_name} on {device} ({dtype})")
         processor = ClapProcessor.from_pretrained(model_name)
-        model = ClapModel.from_pretrained(model_name).to(device)
+        model = ClapModel.from_pretrained(model_name, torch_dtype=dtype).to(device)
         model.eval()
         if device == "cuda":
             import torch
