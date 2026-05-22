@@ -109,43 +109,29 @@ def run_parallel_enrichment(
         logger.info("Pipeline A (GPU): starting audio embeddings + features")
         combined = {}
 
-        # Both steps load CLAP; an outer refcount hold keeps it ≥1 between
-        # them so the inner unload-after-embeddings doesn't free a model
-        # also held by model_cache pre-warm or about to be reused by analysis.
-        import torch
-        from clap_model import shared_clap_model
-        clap_device = "cuda" if torch.cuda.is_available() else "cpu"
+        if not skip_embeddings:
+            pipeline_progress["gpu"] = "GPU: embeddings..."
+            _update_progress()
+            emb_stats = AudioEmbeddingGenerator().generate_embeddings(
+                **gpu_kwargs, cancel_flag=cancel_flag
+            )
+            combined["embeddings"] = emb_stats
+            pipeline_progress["gpu"] = f"GPU: {emb_stats.get('success', 0)} embeddings"
+            _update_progress()
 
-        with shared_clap_model(settings.embedding_model, clap_device):
-            if not skip_embeddings:
-                pipeline_progress["gpu"] = "GPU: embeddings..."
-                _update_progress()
-                gen = AudioEmbeddingGenerator()
-                try:
-                    emb_stats = gen.generate_embeddings(**gpu_kwargs, cancel_flag=cancel_flag)
-                    combined["embeddings"] = emb_stats
-                    pipeline_progress["gpu"] = f"GPU: {emb_stats.get('success', 0)} embeddings"
-                    _update_progress()
-                finally:
-                    gen.unload_model()
+        if cancel_flag():
+            return combined
 
-            if cancel_flag():
-                return combined
-
-            if not skip_audio_analysis:
-                pipeline_progress["gpu"] = "GPU: audio analysis..."
-                _update_progress()
-                analyzer = AudioAnalyzer()
-                try:
-                    af_stats = analyzer.analyze_all(
-                        force=force_audio_analysis, cancel_flag=cancel_flag,
-                        **gpu_kwargs
-                    )
-                    combined["audio_features"] = af_stats
-                    pipeline_progress["gpu"] = f"GPU: {af_stats.get('success', 0)} features"
-                    _update_progress()
-                finally:
-                    analyzer.unload_model()
+        if not skip_audio_analysis:
+            pipeline_progress["gpu"] = "GPU: audio analysis..."
+            _update_progress()
+            af_stats = AudioAnalyzer().analyze_all(
+                force=force_audio_analysis, cancel_flag=cancel_flag,
+                **gpu_kwargs
+            )
+            combined["audio_features"] = af_stats
+            pipeline_progress["gpu"] = f"GPU: {af_stats.get('success', 0)} features"
+            _update_progress()
 
         pipeline_progress["gpu"] = "GPU: done"
         _update_progress()
@@ -315,57 +301,49 @@ def run_parallel_enrichment(
     # === Phase 2: Text embeddings (sentence-transformers, needs GPU) ===
     logger.info("=== Phase 2: text embeddings ===")
 
-    # All three steps share one BGE-M3 instance via text_embedder's refcount.
-    # An outer hold here keeps refcount >= 1 between steps so inner releases
-    # never trigger an unload-reload cycle.
-    import torch
-    from text_embedder import shared_text_embedder
-    _phase2_device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Text embeddings
+    try:
+        from text_embeddings import generate_text_embeddings
+        if progress_cb:
+            progress_cb("Phase 2: text embeddings...")
+        text_stats = generate_text_embeddings(limit=None)
+        result_parts["text_embeddings"] = text_stats
+        logger.info(f"Text embeddings: {text_stats}")
+    except Exception as e:
+        logger.error(f"Text embeddings failed: {e}", exc_info=True)
+        result_parts["text_embeddings"] = {"error": str(e)}
 
-    with shared_text_embedder(settings.text_embedding_model, _phase2_device):
-        # Text embeddings
-        try:
-            from text_embeddings import generate_text_embeddings
-            if progress_cb:
-                progress_cb("Phase 2: text embeddings...")
-            text_stats = generate_text_embeddings(limit=None)
-            result_parts["text_embeddings"] = text_stats
-            logger.info(f"Text embeddings: {text_stats}")
-        except Exception as e:
-            logger.error(f"Text embeddings failed: {e}", exc_info=True)
-            result_parts["text_embeddings"] = {"error": str(e)}
+    if cancel_flag():
+        result_parts["note"] = "cancelled during phase 2"
+        return result_parts
 
-        if cancel_flag():
-            result_parts["note"] = "cancelled during phase 2"
-            return result_parts
+    # Lyrics embeddings
+    try:
+        from lyrics_embeddings import generate_lyrics_embeddings
+        if progress_cb:
+            progress_cb("Phase 2: lyrics embeddings...")
+        lyrics_emb_stats = generate_lyrics_embeddings(limit=None)
+        result_parts["lyrics_embeddings"] = lyrics_emb_stats
+        logger.info(f"Lyrics embeddings: {lyrics_emb_stats}")
+    except Exception as e:
+        logger.error(f"Lyrics embeddings failed: {e}", exc_info=True)
+        result_parts["lyrics_embeddings"] = {"error": str(e)}
 
-        # Lyrics embeddings
-        try:
-            from lyrics_embeddings import generate_lyrics_embeddings
-            if progress_cb:
-                progress_cb("Phase 2: lyrics embeddings...")
-            lyrics_emb_stats = generate_lyrics_embeddings(limit=None)
-            result_parts["lyrics_embeddings"] = lyrics_emb_stats
-            logger.info(f"Lyrics embeddings: {lyrics_emb_stats}")
-        except Exception as e:
-            logger.error(f"Lyrics embeddings failed: {e}", exc_info=True)
-            result_parts["lyrics_embeddings"] = {"error": str(e)}
+    if cancel_flag():
+        result_parts["note"] = "cancelled during phase 2"
+        return result_parts
 
-        if cancel_flag():
-            result_parts["note"] = "cancelled during phase 2"
-            return result_parts
-
-        # Enrichment embeddings (artist bios, album info, genre descriptions)
-        try:
-            from enrichment_embeddings import generate_all_enrichment_embeddings
-            if progress_cb:
-                progress_cb("Phase 2: enrichment embeddings...")
-            enrich_emb_stats = generate_all_enrichment_embeddings(limit=None)
-            result_parts["enrichment_embeddings"] = enrich_emb_stats
-            logger.info(f"Enrichment embeddings: {enrich_emb_stats}")
-        except Exception as e:
-            logger.error(f"Enrichment embeddings failed: {e}", exc_info=True)
-            result_parts["enrichment_embeddings"] = {"error": str(e)}
+    # Enrichment embeddings (artist bios, album info, genre descriptions)
+    try:
+        from enrichment_embeddings import generate_all_enrichment_embeddings
+        if progress_cb:
+            progress_cb("Phase 2: enrichment embeddings...")
+        enrich_emb_stats = generate_all_enrichment_embeddings(limit=None)
+        result_parts["enrichment_embeddings"] = enrich_emb_stats
+        logger.info(f"Enrichment embeddings: {enrich_emb_stats}")
+    except Exception as e:
+        logger.error(f"Enrichment embeddings failed: {e}", exc_info=True)
+        result_parts["enrichment_embeddings"] = {"error": str(e)}
 
     return result_parts
 
@@ -924,103 +902,97 @@ class TrackEnrichmentPipeline:
 
         start_time = time.time()
 
-        try:
-            with get_db_context() as db:
-                query = db.query(Track)
+        with get_db_context() as db:
+            query = db.query(Track)
 
-                if track_ids is not None:
-                    query = query.filter(Track.id.in_(track_ids))
+            if track_ids is not None:
+                query = query.filter(Track.id.in_(track_ids))
 
-                # Worker filtering: use hash-based partitioning for UUID PKs
-                if worker_count is not None:
-                    query = query.filter(
-                        func.abs(func.hashtext(cast(Track.id, String))) % worker_count == worker_id
-                    )
-                    logger.info(f"Worker {worker_id}/{worker_count}: hash-partitioned tracks")
+            # Worker filtering: use hash-based partitioning for UUID PKs
+            if worker_count is not None:
+                query = query.filter(
+                    func.abs(func.hashtext(cast(Track.id, String))) % worker_count == worker_id
+                )
+                logger.info(f"Worker {worker_id}/{worker_count}: hash-partitioned tracks")
 
-                # Pre-filter: only tracks that need at least one enrichment step
-                needs_conditions = self._build_needs_enrichment_filter()
-                real_conditions = [c for c in needs_conditions if c is not True]
-                has_force = len(real_conditions) < len(needs_conditions)
+            # Pre-filter: only tracks that need at least one enrichment step
+            needs_conditions = self._build_needs_enrichment_filter()
+            real_conditions = [c for c in needs_conditions if c is not True]
+            has_force = len(real_conditions) < len(needs_conditions)
 
-                if not has_force and real_conditions:
-                    query = query.filter(or_(*real_conditions))
-                    logger.info("Pre-filtering: only tracks needing enrichment")
-                elif not real_conditions and not has_force:
-                    logger.info("All enrichment steps are skipped — nothing to do")
-                    return stats
+            if not has_force and real_conditions:
+                query = query.filter(or_(*real_conditions))
+                logger.info("Pre-filtering: only tracks needing enrichment")
+            elif not real_conditions and not has_force:
+                logger.info("All enrichment steps are skipped — nothing to do")
+                return stats
 
-                if order_by_date:
-                    # Order by newest media file modification date
-                    newest_file_date = select(
-                        func.max(MediaFile.file_modified_at)
-                    ).where(
-                        MediaFile.track_id == Track.id
-                    ).correlate(Track).scalar_subquery()
-                    query = query.order_by(newest_file_date.desc().nulls_last())
+            if order_by_date:
+                # Order by newest media file modification date
+                newest_file_date = select(
+                    func.max(MediaFile.file_modified_at)
+                ).where(
+                    MediaFile.track_id == Track.id
+                ).correlate(Track).scalar_subquery()
+                query = query.order_by(newest_file_date.desc().nulls_last())
 
-                if limit:
-                    query = query.limit(limit)
+            if limit:
+                query = query.limit(limit)
 
-                tracks = query.all()
-                total = len(tracks)
+            tracks = query.all()
+            total = len(tracks)
 
-                if total == 0:
-                    logger.info("No tracks to process")
-                    return stats
+            if total == 0:
+                logger.info("No tracks to process")
+                return stats
 
-                logger.info(f"Processing {total} tracks")
+            logger.info(f"Processing {total} tracks")
+            if max_duration_seconds:
+                logger.info(f"Time limit: {max_duration_seconds}s")
+
+            for i, track in enumerate(tqdm(tracks, desc="Enriching tracks", unit="track")):
+                if cancel_flag and cancel_flag():
+                    logger.info("Enrichment cancelled by user")
+                    break
+
                 if max_duration_seconds:
-                    logger.info(f"Time limit: {max_duration_seconds}s")
-
-                for i, track in enumerate(tqdm(tracks, desc="Enriching tracks", unit="track")):
-                    if cancel_flag and cancel_flag():
-                        logger.info("Enrichment cancelled by user")
+                    elapsed = time.time() - start_time
+                    if elapsed >= max_duration_seconds:
+                        logger.info(f"Time limit reached ({elapsed:.1f}s), stopping")
                         break
 
-                    if max_duration_seconds:
-                        elapsed = time.time() - start_time
-                        if elapsed >= max_duration_seconds:
-                            logger.info(f"Time limit reached ({elapsed:.1f}s), stopping")
-                            break
+                stats['processed'] += 1
 
-                    stats['processed'] += 1
+                if progress_cb:
+                    elapsed = time.time() - start_time
+                    if i > 0:
+                        eta = elapsed / i * (total - i)
+                        eta_str = f", ETA {int(eta)}s" if eta < 3600 else f", ETA {eta/3600:.1f}h"
+                    else:
+                        eta_str = ""
+                    progress_cb(f"Enriching {i+1}/{total}{eta_str}")
 
-                    if progress_cb:
-                        elapsed = time.time() - start_time
-                        if i > 0:
-                            eta = elapsed / i * (total - i)
-                            eta_str = f", ETA {int(eta)}s" if eta < 3600 else f", ETA {eta/3600:.1f}h"
-                        else:
-                            eta_str = ""
-                        progress_cb(f"Enriching {i+1}/{total}{eta_str}")
+                status = self._check_track_status(db, track)
+                results = self._enrich_track(db, track, status)
 
-                    status = self._check_track_status(db, track)
-                    results = self._enrich_track(db, track, status)
+                if results.get('audio_embedding') == 'success':
+                    stats['audio_embedding_success'] += 1
+                elif results.get('audio_embedding') == 'failed':
+                    stats['audio_embedding_failed'] += 1
 
-                    if results.get('audio_embedding') == 'success':
-                        stats['audio_embedding_success'] += 1
-                    elif results.get('audio_embedding') == 'failed':
-                        stats['audio_embedding_failed'] += 1
+                if results.get('lastfm_artist') == 'success':
+                    stats['lastfm_artist_success'] += 1
+                if results.get('lastfm_album') == 'success':
+                    stats['lastfm_album_success'] += 1
+                if results.get('lastfm_track') == 'success':
+                    stats['lastfm_track_success'] += 1
 
-                    if results.get('lastfm_artist') == 'success':
-                        stats['lastfm_artist_success'] += 1
-                    if results.get('lastfm_album') == 'success':
-                        stats['lastfm_album_success'] += 1
-                    if results.get('lastfm_track') == 'success':
-                        stats['lastfm_track_success'] += 1
+                if results.get('audio_features') == 'success':
+                    stats['audio_features_success'] += 1
+                elif results.get('audio_features') == 'failed':
+                    stats['audio_features_failed'] += 1
 
-                    if results.get('audio_features') == 'success':
-                        stats['audio_features_success'] += 1
-                    elif results.get('audio_features') == 'failed':
-                        stats['audio_features_failed'] += 1
+            logger.info(f"Enrichment complete: {stats['processed']} tracks processed")
 
-                logger.info(f"Enrichment complete: {stats['processed']} tracks processed")
-
-        finally:
-            if self._audio_embedding_generator:
-                self._audio_embedding_generator.unload_model()
-            if self._audio_analyzer:
-                self._audio_analyzer.unload_model()
 
         return stats

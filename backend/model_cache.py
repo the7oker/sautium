@@ -1,24 +1,22 @@
 """
 Cached ML model access for search queries.
 
-Models stay loaded in GPU/CPU memory for IDLE_TIMEOUT seconds after
-last use, then auto-unload to free resources. Prevents expensive
-model load/unload cycles on every search request.
+Wraps the underlying singleton model caches (clap_model, text_embedder,
+instrument_tagger) with per-generator wrappers used by search/discovery.
+The underlying models are process-wide singletons — never unloaded — so
+this cache is effectively a process-lifetime wrapper registry.
 
-Typical first-request latency: 3-10s (model load).
-Subsequent requests within TTL: <100ms (model already in memory).
+Typical first-request latency: 3-10s (cold model load).
+Subsequent requests: <100ms (singleton already resident).
 """
 
 import logging
 import threading
-import time
 
 logger = logging.getLogger(__name__)
 
-IDLE_TIMEOUT = 300  # 5 minutes
-
 _lock = threading.Lock()
-_cache: dict[str, dict] = {}
+_cache: dict[str, object] = {}
 # Per-key Event so concurrent get_model callers wait on a single load
 # without holding `_lock` for the entire 30-180s factory call.
 _load_events: dict[str, threading.Event] = {}
@@ -83,63 +81,38 @@ def get_model(key: str, factory):
     """
     while True:
         with _lock:
-            entry = _cache.get(key)
-            if entry is not None:
-                entry["last_used"] = time.monotonic()
-                return entry["instance"]
+            instance = _cache.get(key)
+            if instance is not None:
+                return instance
             evt = _load_events.get(key)
             if evt is None:
-                # We win the race: register an Event and become the loader.
                 evt = threading.Event()
                 _load_events[key] = evt
-                is_loader = True
                 break
-            # Another thread is already loading — wait below, then retry.
-            is_loader = False
-        # Outside lock: wait for the in-flight load to finish, then loop.
         evt.wait()
 
-    # `is_loader` path — run factory outside the lock so other threads
-    # (is_loaded, cleanup_idle, sibling get_model with different key)
-    # are not blocked while the model is loading.
-    logger.info(f"Loading model '{key}' into cache (TTL={IDLE_TIMEOUT}s)")
+    logger.info(f"Loading model '{key}' into cache")
     try:
         instance = factory()
     except BaseException:
         with _lock:
             _load_events.pop(key, None)
-        evt.set()  # release waiters (they will retry and hit empty cache → become loader themselves or error out)
+        evt.set()
         raise
 
     with _lock:
-        _cache[key] = {"instance": instance, "last_used": time.monotonic()}
+        _cache[key] = instance
         _load_events.pop(key, None)
     evt.set()
     return instance
 
 
-def cleanup_idle():
-    """Unload models idle for more than IDLE_TIMEOUT seconds."""
-    now = time.monotonic()
-    with _lock:
-        to_remove = []
-        for key, entry in _cache.items():
-            if (now - entry["last_used"]) > IDLE_TIMEOUT:
-                logger.info(f"Unloading idle model: {key}")
-                instance = entry["instance"]
-                if hasattr(instance, "unload_model"):
-                    instance.unload_model()
-                to_remove.append(key)
-        for key in to_remove:
-            del _cache[key]
-
-
 def shutdown():
-    """Force unload all cached models."""
+    """Clear the wrapper registry on process shutdown.
+
+    Underlying singleton models are owned by clap_model / text_embedder /
+    instrument_tagger and live for the process lifetime; this just drops
+    the wrapper references.
+    """
     with _lock:
-        for key, entry in list(_cache.items()):
-            logger.info(f"Shutting down model: {key}")
-            instance = entry["instance"]
-            if hasattr(instance, "unload_model"):
-                instance.unload_model()
         _cache.clear()

@@ -85,7 +85,7 @@ class AudioAnalyzer:
     # --- Model management ---
 
     def load_model(self):
-        """Acquire shared CLAP (moods/vocal/dance) + AST+PaSST ensemble (instruments)."""
+        """Acquire process-wide singleton CLAP + AST+PaSST ensemble."""
         if self.model is not None:
             return
         from clap_model import get_clap_model
@@ -93,19 +93,6 @@ class AudioAnalyzer:
         self.processor, self.model = get_clap_model(self.model_name, self.device)
         self._encode_text_labels()
         self.ensemble = get_instrument_tagger(self.device)
-
-    def unload_model(self):
-        """Release shared CLAP + ensemble; both freed at their own refcount 0."""
-        if self.model is not None:
-            self.model = None
-            self.processor = None
-            self._text_embeddings_cache = {}
-            from clap_model import release_clap_model
-            release_clap_model(self.model_name, self.device)
-        if self.ensemble is not None:
-            self.ensemble = None
-            from instrument_tagger import release_instrument_tagger
-            release_instrument_tagger(self.device)
 
     def _encode_text_labels(self):
         """Pre-encode CLAP text label sets (moods/vocal/dance). Called once."""
@@ -454,194 +441,190 @@ class AudioAnalyzer:
         clap_batch_size = 16
         prefetch_workers = 4
 
-        try:
-            with get_db_context() as db:
-                # Query tracks to analyze
-                if force:
-                    query_sql = """
-                        SELECT t.id as track_id, mf.id as media_file_id,
-                               mf.file_path, mf.bit_depth,
-                               mf.sample_rate as mf_sample_rate, mf.is_lossless,
-                               mf.duration_seconds
-                        FROM tracks t
-                        JOIN LATERAL (
-                            SELECT * FROM media_files
-                            WHERE track_id = t.id AND is_analysis_source = true
-                            ORDER BY id LIMIT 1
-                        ) mf ON true
-                    """
-                else:
-                    query_sql = """
-                        SELECT t.id as track_id, mf.id as media_file_id,
-                               mf.file_path, mf.bit_depth,
-                               mf.sample_rate as mf_sample_rate, mf.is_lossless,
-                               mf.duration_seconds
-                        FROM tracks t
-                        LEFT JOIN audio_features af ON af.track_id = t.id
-                        JOIN LATERAL (
-                            SELECT * FROM media_files
-                            WHERE track_id = t.id AND is_analysis_source = true
-                            ORDER BY id LIMIT 1
-                        ) mf ON true
-                        WHERE af.id IS NULL
-                           OR (af.source_media_file_id IS NOT NULL
-                               AND af.source_media_file_id != mf.id)
-                    """
+        with get_db_context() as db:
+            # Query tracks to analyze
+            if force:
+                query_sql = """
+                    SELECT t.id as track_id, mf.id as media_file_id,
+                           mf.file_path, mf.bit_depth,
+                           mf.sample_rate as mf_sample_rate, mf.is_lossless,
+                           mf.duration_seconds
+                    FROM tracks t
+                    JOIN LATERAL (
+                        SELECT * FROM media_files
+                        WHERE track_id = t.id AND is_analysis_source = true
+                        ORDER BY id LIMIT 1
+                    ) mf ON true
+                """
+            else:
+                query_sql = """
+                    SELECT t.id as track_id, mf.id as media_file_id,
+                           mf.file_path, mf.bit_depth,
+                           mf.sample_rate as mf_sample_rate, mf.is_lossless,
+                           mf.duration_seconds
+                    FROM tracks t
+                    LEFT JOIN audio_features af ON af.track_id = t.id
+                    JOIN LATERAL (
+                        SELECT * FROM media_files
+                        WHERE track_id = t.id AND is_analysis_source = true
+                        ORDER BY id LIMIT 1
+                    ) mf ON true
+                    WHERE af.id IS NULL
+                       OR (af.source_media_file_id IS NOT NULL
+                           AND af.source_media_file_id != mf.id)
+                """
 
-                params = {}
+            params = {}
 
-                if track_ids is not None:
-                    query_sql += " AND t.id = ANY(:track_ids)"
-                    params["track_ids"] = track_ids
+            if track_ids is not None:
+                query_sql += " AND t.id = ANY(:track_ids)"
+                params["track_ids"] = track_ids
 
-                if order_by_date:
-                    query_sql += " ORDER BY mf.file_modified_at DESC NULLS LAST"
-                else:
-                    query_sql += " ORDER BY t.id"
+            if order_by_date:
+                query_sql += " ORDER BY mf.file_modified_at DESC NULLS LAST"
+            else:
+                query_sql += " ORDER BY t.id"
 
-                if limit:
-                    query_sql += f" LIMIT {limit}"
+            if limit:
+                query_sql += f" LIMIT {limit}"
 
-                rows = db.execute(sa_text(query_sql), params).fetchall()
-                total = len(rows)
+            rows = db.execute(sa_text(query_sql), params).fetchall()
+            total = len(rows)
 
-                if total == 0:
-                    logger.info("No tracks pending audio analysis")
-                    return stats
+            if total == 0:
+                logger.info("No tracks pending audio analysis")
+                return stats
 
-                if not librosa_only:
-                    self.load_model()
+            if not librosa_only:
+                self.load_model()
 
-                logger.info(f"Analyzing {total} tracks (librosa_only={librosa_only}, "
-                            f"prefetch={prefetch_workers}, clap_batch={clap_batch_size})")
+            logger.info(f"Analyzing {total} tracks (librosa_only={librosa_only}, "
+                        f"prefetch={prefetch_workers}, clap_batch={clap_batch_size})")
 
-                # Process in batches: prefetch + librosa in threads, CLAP on GPU
-                pbar = tqdm(total=total, desc="Analyzing audio", unit="track")
-                # Single thread pool for all batches (avoid 2000+ pool creations)
-                _io_pool = ThreadPoolExecutor(max_workers=prefetch_workers)
+            # Process in batches: prefetch + librosa in threads, CLAP on GPU
+            pbar = tqdm(total=total, desc="Analyzing audio", unit="track")
+            # Single thread pool for all batches (avoid 2000+ pool creations)
+            _io_pool = ThreadPoolExecutor(max_workers=prefetch_workers)
 
-                for batch_start in range(0, total, clap_batch_size):
-                    if cancel_flag and cancel_flag():
-                        logger.info("Audio analysis cancelled by user")
+            for batch_start in range(0, total, clap_batch_size):
+                if cancel_flag and cancel_flag():
+                    logger.info("Audio analysis cancelled by user")
+                    break
+
+                if max_duration_seconds:
+                    elapsed = time.time() - start_time
+                    if elapsed >= max_duration_seconds:
+                        logger.info(f"Time limit reached ({elapsed:.1f}s), stopping")
                         break
 
-                    if max_duration_seconds:
-                        elapsed = time.time() - start_time
-                        if elapsed >= max_duration_seconds:
-                            logger.info(f"Time limit reached ({elapsed:.1f}s), stopping")
-                            break
+                batch_rows = rows[batch_start:batch_start + clap_batch_size]
 
-                    batch_rows = rows[batch_start:batch_start + clap_batch_size]
-
-                    # Phase 1: parallel load + librosa (I/O + CPU)
-                    prepared = []  # (row, librosa_features, audio_48k)
-                    future_to_row = {
-                        _io_pool.submit(
-                            self._load_and_extract_librosa, row.file_path,
-                            float(row.duration_seconds) if row.duration_seconds else None,
-                        ): row
-                        for row in batch_rows
-                    }
-                    for future in as_completed(future_to_row):
-                        row = future_to_row[future]
-                        stats["processed"] += 1
-                        try:
-                            result = future.result()
-                            if result is not None:
-                                prepared.append((row, result))
-                            else:
-                                stats["failed"] += 1
-                        except Exception as e:
+                # Phase 1: parallel load + librosa (I/O + CPU)
+                prepared = []  # (row, librosa_features, audio_48k)
+                future_to_row = {
+                    _io_pool.submit(
+                        self._load_and_extract_librosa, row.file_path,
+                        float(row.duration_seconds) if row.duration_seconds else None,
+                    ): row
+                    for row in batch_rows
+                }
+                for future in as_completed(future_to_row):
+                    row = future_to_row[future]
+                    stats["processed"] += 1
+                    try:
+                        result = future.result()
+                        if result is not None:
+                            prepared.append((row, result))
+                        else:
                             stats["failed"] += 1
-                            logger.error(f"Prefetch failed for {row.track_id}: {e}")
+                    except Exception as e:
+                        stats["failed"] += 1
+                        logger.error(f"Prefetch failed for {row.track_id}: {e}")
 
-                    if not prepared:
-                        pbar.update(len(batch_rows))
-                        continue
-
-                    # Phase 2: batch CLAP on GPU (with single-item fallback)
-                    if not librosa_only and self.model is not None:
-                        audio_arrays = [p[1]["audio_48k"] for p in prepared]
-                        try:
-                            clap_results = self._extract_clap_features_batch(audio_arrays)
-                        except Exception as e:
-                            logger.warning(f"CLAP batch failed, falling back to single: {e}")
-                            clap_results = []
-                            for audio in audio_arrays:
-                                try:
-                                    single = self._extract_clap_features_batch([audio])
-                                    clap_results.append(single[0])
-                                except Exception:
-                                    clap_results.append({})
-                    else:
-                        clap_results = [{}] * len(prepared)
-
-                    # Free audio arrays
-                    for _, prep in prepared:
-                        del prep["audio_48k"]
-
-                    # Phase 3: merge features + save to DB (savepoint per track, commit per batch)
-                    for (row, prep), clap_feat in zip(prepared, clap_results):
-                        try:
-                            features = prep["librosa_features"]
-                            features.update(clap_feat)
-
-                            savepoint = db.begin_nested()
-                            try:
-                                existing = db.query(AudioFeature).filter(
-                                    AudioFeature.track_id == row.track_id
-                                ).first()
-                                if existing:
-                                    for k, v in features.items():
-                                        setattr(existing, k, v)
-                                    existing.source_media_file_id = row.media_file_id
-                                    existing.source_bit_depth = row.bit_depth
-                                    existing.source_sample_rate = row.mf_sample_rate
-                                    existing.source_is_lossless = row.is_lossless
-                                else:
-                                    af = AudioFeature(
-                                        track_id=row.track_id,
-                                        bpm=features.get("bpm"),
-                                        key=features.get("key"),
-                                        mode=features.get("mode"),
-                                        key_confidence=features.get("key_confidence"),
-                                        energy=features.get("energy"),
-                                        energy_db=features.get("energy_db"),
-                                        brightness=features.get("brightness"),
-                                        dynamic_range_db=features.get("dynamic_range_db"),
-                                        zero_crossing_rate=features.get("zero_crossing_rate"),
-                                        instruments=features.get("instruments"),
-                                        moods=features.get("moods"),
-                                        vocal_instrumental=features.get("vocal_instrumental"),
-                                        vocal_score=features.get("vocal_score"),
-                                        danceability=features.get("danceability"),
-                                        source_media_file_id=row.media_file_id,
-                                        source_bit_depth=row.bit_depth,
-                                        source_sample_rate=row.mf_sample_rate,
-                                        source_is_lossless=row.is_lossless,
-                                    )
-                                    db.add(af)
-                                savepoint.commit()
-                            except Exception:
-                                savepoint.rollback()
-                                raise
-                            stats["success"] += 1
-
-                        except Exception as e:
-                            stats["failed"] += 1
-                            logger.error(f"Failed to save features for {row.track_id}: {e}")
-
-                    db.commit()
+                if not prepared:
                     pbar.update(len(batch_rows))
+                    continue
 
-                _io_pool.shutdown(wait=True, cancel_futures=True)
-                pbar.close()
-                logger.info(
-                    f"Audio analysis complete: {stats['success']} success, {stats['failed']} failed"
-                )
+                # Phase 2: batch CLAP on GPU (with single-item fallback)
+                if not librosa_only and self.model is not None:
+                    audio_arrays = [p[1]["audio_48k"] for p in prepared]
+                    try:
+                        clap_results = self._extract_clap_features_batch(audio_arrays)
+                    except Exception as e:
+                        logger.warning(f"CLAP batch failed, falling back to single: {e}")
+                        clap_results = []
+                        for audio in audio_arrays:
+                            try:
+                                single = self._extract_clap_features_batch([audio])
+                                clap_results.append(single[0])
+                            except Exception:
+                                clap_results.append({})
+                else:
+                    clap_results = [{}] * len(prepared)
 
-        finally:
-            if not librosa_only:
-                self.unload_model()
+                # Free audio arrays
+                for _, prep in prepared:
+                    del prep["audio_48k"]
+
+                # Phase 3: merge features + save to DB (savepoint per track, commit per batch)
+                for (row, prep), clap_feat in zip(prepared, clap_results):
+                    try:
+                        features = prep["librosa_features"]
+                        features.update(clap_feat)
+
+                        savepoint = db.begin_nested()
+                        try:
+                            existing = db.query(AudioFeature).filter(
+                                AudioFeature.track_id == row.track_id
+                            ).first()
+                            if existing:
+                                for k, v in features.items():
+                                    setattr(existing, k, v)
+                                existing.source_media_file_id = row.media_file_id
+                                existing.source_bit_depth = row.bit_depth
+                                existing.source_sample_rate = row.mf_sample_rate
+                                existing.source_is_lossless = row.is_lossless
+                            else:
+                                af = AudioFeature(
+                                    track_id=row.track_id,
+                                    bpm=features.get("bpm"),
+                                    key=features.get("key"),
+                                    mode=features.get("mode"),
+                                    key_confidence=features.get("key_confidence"),
+                                    energy=features.get("energy"),
+                                    energy_db=features.get("energy_db"),
+                                    brightness=features.get("brightness"),
+                                    dynamic_range_db=features.get("dynamic_range_db"),
+                                    zero_crossing_rate=features.get("zero_crossing_rate"),
+                                    instruments=features.get("instruments"),
+                                    moods=features.get("moods"),
+                                    vocal_instrumental=features.get("vocal_instrumental"),
+                                    vocal_score=features.get("vocal_score"),
+                                    danceability=features.get("danceability"),
+                                    source_media_file_id=row.media_file_id,
+                                    source_bit_depth=row.bit_depth,
+                                    source_sample_rate=row.mf_sample_rate,
+                                    source_is_lossless=row.is_lossless,
+                                )
+                                db.add(af)
+                            savepoint.commit()
+                        except Exception:
+                            savepoint.rollback()
+                            raise
+                        stats["success"] += 1
+
+                    except Exception as e:
+                        stats["failed"] += 1
+                        logger.error(f"Failed to save features for {row.track_id}: {e}")
+
+                db.commit()
+                pbar.update(len(batch_rows))
+
+            _io_pool.shutdown(wait=True, cancel_futures=True)
+            pbar.close()
+            logger.info(
+                f"Audio analysis complete: {stats['success']} success, {stats['failed']} failed"
+            )
+
 
         return stats

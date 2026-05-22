@@ -52,20 +52,11 @@ class AudioEmbeddingGenerator:
         self.processor = None
 
     def load_model(self):
-        """Acquire shared CLAP processor + model (loaded once per process)."""
+        """Acquire process-wide singleton CLAP processor + model."""
         if self.model is not None:
             return
         from clap_model import get_clap_model
         self.processor, self.model = get_clap_model(self.model_name, self.device)
-
-    def unload_model(self):
-        """Release shared CLAP; underlying model freed at refcount 0."""
-        if self.model is None:
-            return
-        self.model = None
-        self.processor = None
-        from clap_model import release_clap_model
-        release_clap_model(self.model_name, self.device)
 
     def text_to_embedding(self, text: str) -> np.ndarray:
         """
@@ -250,160 +241,157 @@ class AudioEmbeddingGenerator:
         stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0}
         start_time = time.time()
 
-        try:
-            with get_db_context() as db:
-                embedding_model = self._get_or_create_embedding_model(db)
+        with get_db_context() as db:
+            embedding_model = self._get_or_create_embedding_model(db)
 
-                # Query tracks without embeddings OR with stale embeddings
-                # (analysis source changed since embedding was generated)
-                query_sql = """
-                    SELECT t.id as track_id, mf.id as media_file_id,
-                           mf.file_path, mf.bit_depth,
-                           mf.sample_rate, mf.is_lossless,
-                           mf.duration_seconds
-                    FROM tracks t
-                    LEFT JOIN embeddings e ON e.track_id = t.id
-                    JOIN LATERAL (
-                        SELECT * FROM media_files
-                        WHERE track_id = t.id AND is_analysis_source = true
-                        ORDER BY id LIMIT 1
-                    ) mf ON true
-                    WHERE e.id IS NULL
-                       OR (e.source_media_file_id IS NOT NULL
-                           AND e.source_media_file_id != mf.id)
-                """
-                params = {}
+            # Query tracks without embeddings OR with stale embeddings
+            # (analysis source changed since embedding was generated)
+            query_sql = """
+                SELECT t.id as track_id, mf.id as media_file_id,
+                       mf.file_path, mf.bit_depth,
+                       mf.sample_rate, mf.is_lossless,
+                       mf.duration_seconds
+                FROM tracks t
+                LEFT JOIN embeddings e ON e.track_id = t.id
+                JOIN LATERAL (
+                    SELECT * FROM media_files
+                    WHERE track_id = t.id AND is_analysis_source = true
+                    ORDER BY id LIMIT 1
+                ) mf ON true
+                WHERE e.id IS NULL
+                   OR (e.source_media_file_id IS NOT NULL
+                       AND e.source_media_file_id != mf.id)
+            """
+            params = {}
 
-                if track_ids is not None:
-                    query_sql += " AND t.id = ANY(:track_ids)"
-                    params["track_ids"] = track_ids
+            if track_ids is not None:
+                query_sql += " AND t.id = ANY(:track_ids)"
+                params["track_ids"] = track_ids
 
-                if order_by_date:
-                    query_sql += " ORDER BY mf.file_modified_at DESC NULLS LAST"
-                else:
-                    query_sql += " ORDER BY t.id"
+            if order_by_date:
+                query_sql += " ORDER BY mf.file_modified_at DESC NULLS LAST"
+            else:
+                query_sql += " ORDER BY t.id"
 
-                if limit:
-                    query_sql += f" LIMIT {limit}"
+            if limit:
+                query_sql += f" LIMIT {limit}"
 
-                rows = db.execute(sa_text(query_sql), params).fetchall()
-                total = len(rows)
+            rows = db.execute(sa_text(query_sql), params).fetchall()
+            total = len(rows)
 
-                if total == 0:
-                    logger.info("No tracks pending embedding generation")
-                    return stats
+            if total == 0:
+                logger.info("No tracks pending embedding generation")
+                return stats
 
-                self.load_model()
+            self.load_model()
 
-                logger.info(
-                    f"Processing {total} tracks (batch_size={self.batch_size})"
-                )
-                if max_duration_seconds:
-                    logger.info(f"Time limit: {max_duration_seconds} seconds ({max_duration_seconds/60:.1f} minutes)")
+            logger.info(
+                f"Processing {total} tracks (batch_size={self.batch_size})"
+            )
+            if max_duration_seconds:
+                logger.info(f"Time limit: {max_duration_seconds} seconds ({max_duration_seconds/60:.1f} minutes)")
 
-                # --- Pipelined batch processing ---
-                # CPU threads decode batch N+1 while GPU processes batch N
-                def _load_one(row):
-                    local_path = settings.translate_to_local_path(row.file_path)
-                    dur = float(row.duration_seconds) if row.duration_seconds else None
-                    return row, self._load_audio(local_path, duration_seconds=dur)
+            # --- Pipelined batch processing ---
+            # CPU threads decode batch N+1 while GPU processes batch N
+            def _load_one(row):
+                local_path = settings.translate_to_local_path(row.file_path)
+                dur = float(row.duration_seconds) if row.duration_seconds else None
+                return row, self._load_audio(local_path, duration_seconds=dur)
 
-                def _load_batch(batch_rows):
-                    """Load audio for a batch using thread pool. Returns (valid_rows, audio_arrays, failed_count)."""
-                    audio_arrays = []
-                    valid_rows = []
-                    failed = 0
-                    futures = [io_pool.submit(_load_one, row) for row in batch_rows]
-                    for future in as_completed(futures):
-                        row, audio = future.result()
-                        if audio is not None:
-                            audio_arrays.append(audio)
-                            valid_rows.append(row)
-                        else:
-                            failed += 1
-                            logger.warning(f"Skipping track {row.track_id}: audio load failed")
-                    return valid_rows, audio_arrays, failed
+            def _load_batch(batch_rows):
+                """Load audio for a batch using thread pool. Returns (valid_rows, audio_arrays, failed_count)."""
+                audio_arrays = []
+                valid_rows = []
+                failed = 0
+                futures = [io_pool.submit(_load_one, row) for row in batch_rows]
+                for future in as_completed(futures):
+                    row, audio = future.result()
+                    if audio is not None:
+                        audio_arrays.append(audio)
+                        valid_rows.append(row)
+                    else:
+                        failed += 1
+                        logger.warning(f"Skipping track {row.track_id}: audio load failed")
+                return valid_rows, audio_arrays, failed
 
-                # Split into batch slices
-                batch_slices = [rows[i:i + self.batch_size] for i in range(0, total, self.batch_size)]
-                num_batches = len(batch_slices)
+            # Split into batch slices
+            batch_slices = [rows[i:i + self.batch_size] for i in range(0, total, self.batch_size)]
+            num_batches = len(batch_slices)
 
-                # Persistent I/O thread pool (16 workers for i9-14900HX)
-                io_pool = ThreadPoolExecutor(max_workers=16)
-                # Prefetch pool runs _load_batch in background
-                prefetch_pool = ThreadPoolExecutor(max_workers=1)
+            # Persistent I/O thread pool (16 workers for i9-14900HX)
+            io_pool = ThreadPoolExecutor(max_workers=16)
+            # Prefetch pool runs _load_batch in background
+            prefetch_pool = ThreadPoolExecutor(max_workers=1)
 
-                try:
-                    # Pre-submit first batch loading
-                    prefetch_future = prefetch_pool.submit(_load_batch, batch_slices[0])
+            try:
+                # Pre-submit first batch loading
+                prefetch_future = prefetch_pool.submit(_load_batch, batch_slices[0])
 
-                    for batch_idx in tqdm(range(num_batches), desc="Generating embeddings", unit="batch"):
-                        # Check cancellation
-                        if cancel_flag and cancel_flag():
-                            logger.info("Embedding generation cancelled by user")
+                for batch_idx in tqdm(range(num_batches), desc="Generating embeddings", unit="batch"):
+                    # Check cancellation
+                    if cancel_flag and cancel_flag():
+                        logger.info("Embedding generation cancelled by user")
+                        break
+
+                    # Check time limit
+                    if max_duration_seconds:
+                        elapsed = time.time() - start_time
+                        if elapsed >= max_duration_seconds:
+                            logger.info(f"Time limit reached ({elapsed:.1f}s), stopping gracefully")
                             break
 
-                        # Check time limit
-                        if max_duration_seconds:
-                            elapsed = time.time() - start_time
-                            if elapsed >= max_duration_seconds:
-                                logger.info(f"Time limit reached ({elapsed:.1f}s), stopping gracefully")
-                                break
+                    # Wait for current batch audio (should already be ready or nearly ready)
+                    valid_rows, audio_arrays, batch_failed = prefetch_future.result()
+                    stats["processed"] += len(batch_slices[batch_idx])
+                    stats["failed"] += batch_failed
 
-                        # Wait for current batch audio (should already be ready or nearly ready)
-                        valid_rows, audio_arrays, batch_failed = prefetch_future.result()
-                        stats["processed"] += len(batch_slices[batch_idx])
-                        stats["failed"] += batch_failed
+                    # Start loading NEXT batch immediately (runs while GPU works)
+                    if batch_idx + 1 < num_batches:
+                        prefetch_future = prefetch_pool.submit(_load_batch, batch_slices[batch_idx + 1])
 
-                        # Start loading NEXT batch immediately (runs while GPU works)
-                        if batch_idx + 1 < num_batches:
-                            prefetch_future = prefetch_pool.submit(_load_batch, batch_slices[batch_idx + 1])
+                    if not audio_arrays:
+                        continue
 
-                        if not audio_arrays:
-                            continue
+                    # Generate embeddings on GPU (next batch loads in parallel!)
+                    embeddings = self._generate_batch_embeddings(audio_arrays)
 
-                        # Generate embeddings on GPU (next batch loads in parallel!)
-                        embeddings = self._generate_batch_embeddings(audio_arrays)
-
-                        if embeddings is None:
-                            logger.warning("Batch failed, falling back to single processing")
-                            for audio, row in zip(audio_arrays, valid_rows):
-                                single = self._generate_batch_embeddings([audio])
-                                if single is not None:
-                                    self._save_embedding(
-                                        db, row.track_id, single[0], embedding_model,
-                                        source_media_file_id=row.media_file_id,
-                                        source_bit_depth=row.bit_depth,
-                                        source_sample_rate=row.sample_rate,
-                                        source_is_lossless=row.is_lossless,
-                                    )
-                                    stats["success"] += 1
-                                else:
-                                    stats["failed"] += 1
-                                    logger.error(f"Failed single embedding for track {row.track_id}")
-                        else:
-                            for row, vector in zip(valid_rows, embeddings):
+                    if embeddings is None:
+                        logger.warning("Batch failed, falling back to single processing")
+                        for audio, row in zip(audio_arrays, valid_rows):
+                            single = self._generate_batch_embeddings([audio])
+                            if single is not None:
                                 self._save_embedding(
-                                    db, row.track_id, vector, embedding_model,
+                                    db, row.track_id, single[0], embedding_model,
                                     source_media_file_id=row.media_file_id,
                                     source_bit_depth=row.bit_depth,
                                     source_sample_rate=row.sample_rate,
                                     source_is_lossless=row.is_lossless,
                                 )
                                 stats["success"] += 1
+                            else:
+                                stats["failed"] += 1
+                                logger.error(f"Failed single embedding for track {row.track_id}")
+                    else:
+                        for row, vector in zip(valid_rows, embeddings):
+                            self._save_embedding(
+                                db, row.track_id, vector, embedding_model,
+                                source_media_file_id=row.media_file_id,
+                                source_bit_depth=row.bit_depth,
+                                source_sample_rate=row.sample_rate,
+                                source_is_lossless=row.is_lossless,
+                            )
+                            stats["success"] += 1
 
-                        db.commit()
-                finally:
-                    io_pool.shutdown(wait=True, cancel_futures=True)
-                    prefetch_pool.shutdown(wait=True, cancel_futures=True)
+                    db.commit()
+            finally:
+                io_pool.shutdown(wait=True, cancel_futures=True)
+                prefetch_pool.shutdown(wait=True, cancel_futures=True)
 
-                logger.info(
-                    f"Embedding generation complete: "
-                    f"{stats['success']} success, {stats['failed']} failed"
-                )
+            logger.info(
+                f"Embedding generation complete: "
+                f"{stats['success']} success, {stats['failed']} failed"
+            )
 
-        finally:
-            self.unload_model()
 
         return stats
 

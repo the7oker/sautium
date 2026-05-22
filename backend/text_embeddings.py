@@ -44,19 +44,11 @@ class TextEmbeddingGenerator:
         self.model = None
 
     def load_model(self):
-        """Acquire shared text embedding model (loaded once per process)."""
+        """Acquire process-wide singleton text embedding model."""
         if self.model is not None:
             return
         from text_embedder import get_text_embedder
         self.model = get_text_embedder(self.model_name, self.device)
-
-    def unload_model(self):
-        """Release shared model; underlying SentenceTransformer freed at refcount 0."""
-        if self.model is None:
-            return
-        self.model = None
-        from text_embedder import release_text_embedder
-        release_text_embedder(self.model_name, self.device)
 
     def encode(self, texts: List[str]) -> np.ndarray:
         """
@@ -381,12 +373,9 @@ def generate_text_embeddings(
         Statistics dictionary.
     """
     generator = TextEmbeddingGenerator(batch_size=batch_size)
-    try:
-        with get_db_context() as db:
-            return generator.generate_all(
-                db, limit=limit, force=force, order_by_date=order_by_date,
-                max_duration_seconds=max_duration_seconds, track_ids=track_ids,
-                worker_id=worker_id, worker_count=worker_count,
-            )
-    finally:
-        generator.unload_model()
+    with get_db_context() as db:
+        return generator.generate_all(
+            db, limit=limit, force=force, order_by_date=order_by_date,
+            max_duration_seconds=max_duration_seconds, track_ids=track_ids,
+            worker_id=worker_id, worker_count=worker_count,
+        )

@@ -99,19 +99,11 @@ class _BaseEnrichmentGenerator:
         self.model = None
 
     def load_model(self):
-        """Acquire shared text embedding model (loaded once per process)."""
+        """Acquire process-wide singleton text embedding model."""
         if self.model is not None:
             return
         from text_embedder import get_text_embedder
         self.model = get_text_embedder(self.model_name, self.device)
-
-    def unload_model(self):
-        """Release shared model; underlying SentenceTransformer freed at refcount 0."""
-        if self.model is None:
-            return
-        self.model = None
-        from text_embedder import release_text_embedder
-        release_text_embedder(self.model_name, self.device)
 
     def encode(self, texts: List[str]) -> np.ndarray:
         self.load_model()
@@ -492,57 +484,37 @@ def generate_artist_bio_embeddings(
     limit: Optional[int] = None, batch_size: Optional[int] = None, force: bool = False,
 ) -> Dict[str, int]:
     gen = ArtistBioEmbeddingGenerator(batch_size=batch_size)
-    try:
-        with get_db_context() as db:
-            return gen.generate_all(db, limit=limit, force=force)
-    finally:
-        gen.unload_model()
+    with get_db_context() as db:
+        return gen.generate_all(db, limit=limit, force=force)
 
 
 def generate_album_info_embeddings(
     limit: Optional[int] = None, batch_size: Optional[int] = None, force: bool = False,
 ) -> Dict[str, int]:
     gen = AlbumInfoEmbeddingGenerator(batch_size=batch_size)
-    try:
-        with get_db_context() as db:
-            return gen.generate_all(db, limit=limit, force=force)
-    finally:
-        gen.unload_model()
+    with get_db_context() as db:
+        return gen.generate_all(db, limit=limit, force=force)
 
 
 def generate_genre_desc_embeddings(
     limit: Optional[int] = None, batch_size: Optional[int] = None, force: bool = False,
 ) -> Dict[str, int]:
     gen = GenreDescEmbeddingGenerator(batch_size=batch_size)
-    try:
-        with get_db_context() as db:
-            return gen.generate_all(db, limit=limit, force=force)
-    finally:
-        gen.unload_model()
+    with get_db_context() as db:
+        return gen.generate_all(db, limit=limit, force=force)
 
 
 def generate_all_enrichment_embeddings(
     limit: Optional[int] = None, batch_size: Optional[int] = None, force: bool = False,
 ) -> Dict[str, Dict[str, int]]:
-    """Generate all three enrichment embedding types under one shared model load."""
-    import torch
-    from text_embedder import shared_text_embedder
-
-    model_name = settings.text_embedding_model
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    """Generate all three enrichment embedding types."""
     results: Dict[str, Dict[str, int]] = {}
-
-    with shared_text_embedder(model_name, device):
-        for cls, key in (
-            (ArtistBioEmbeddingGenerator, "artist_bios"),
-            (AlbumInfoEmbeddingGenerator, "album_info"),
-            (GenreDescEmbeddingGenerator, "genre_descs"),
-        ):
-            gen = cls(batch_size=batch_size)
-            try:
-                with get_db_context() as db:
-                    results[key] = gen.generate_all(db, limit=limit, force=force)
-            finally:
-                gen.unload_model()
-
+    for cls, key in (
+        (ArtistBioEmbeddingGenerator, "artist_bios"),
+        (AlbumInfoEmbeddingGenerator, "album_info"),
+        (GenreDescEmbeddingGenerator, "genre_descs"),
+    ):
+        gen = cls(batch_size=batch_size)
+        with get_db_context() as db:
+            results[key] = gen.generate_all(db, limit=limit, force=force)
     return results

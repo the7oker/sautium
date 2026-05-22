@@ -49,15 +49,6 @@ logger = logging.getLogger(__name__)
 # Global DHT service reference (set during lifespan)
 _dht_service: DHTService | None = None
 _dht_reannounce_task: asyncio.Task | None = None
-_model_cleanup_task: asyncio.Task | None = None
-
-
-async def _model_cleanup_loop():
-    """Periodically unload idle ML models to free GPU memory."""
-    import model_cache
-    while True:
-        await asyncio.sleep(60)
-        model_cache.cleanup_idle()
 
 
 @asynccontextmanager
@@ -201,10 +192,6 @@ async def lifespan(app: FastAPI):
     elif settings.p2p_enabled:
         logger.warning("P2P enabled but libtorrent not installed — DHT disabled")
 
-    # Start model cache cleanup task
-    global _model_cleanup_task
-    _model_cleanup_task = asyncio.create_task(_model_cleanup_loop())
-
     # Pre-warm search models so Discovery's first query doesn't hit a
     # ~30-60s cold-load. Fired as background tasks; uvicorn reports
     # "startup complete" immediately and model_cache.get_model is
@@ -220,21 +207,29 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"{label} pre-warm failed: {e}")
 
+    # Eagerly import model modules in the main thread before pre-warm tasks
+    # spawn worker threads. The transformers package uses _LazyModule whose
+    # __getattr__ is not thread-safe — concurrent first-time imports from
+    # sibling pre-warm threads (CLAP + sentence_transformers + lyrics) race
+    # and one of them surfaces as `cannot import name 'ClapProcessor'`.
+    # Loading the modules here serialises their `from transformers import …`
+    # statements through the main-thread import lock.
+    import embeddings as _eager_embeddings
+    import enrichment_embeddings as _eager_enrichment
+    import lyrics_embeddings as _eager_lyrics
+
     def _clap_factory():
-        from embeddings import AudioEmbeddingGenerator
-        gen = AudioEmbeddingGenerator()
+        gen = _eager_embeddings.AudioEmbeddingGenerator()
         gen.load_model()
         return gen
 
     def _enrichment_factory():
-        from enrichment_embeddings import _BaseEnrichmentGenerator
-        gen = _BaseEnrichmentGenerator()
+        gen = _eager_enrichment._BaseEnrichmentGenerator()
         gen.load_model()
         return gen
 
     def _lyrics_factory():
-        from lyrics_embeddings import LyricsEmbeddingGenerator
-        gen = LyricsEmbeddingGenerator()
+        gen = _eager_lyrics.LyricsEmbeddingGenerator()
         gen.load_model()
         return gen
 
@@ -245,13 +240,6 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    if _model_cleanup_task:
-        _model_cleanup_task.cancel()
-        try:
-            await _model_cleanup_task
-        except asyncio.CancelledError:
-            pass
-
     if _dht_reannounce_task:
         _dht_reannounce_task.cancel()
         try:
