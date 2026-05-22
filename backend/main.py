@@ -126,6 +126,10 @@ async def lifespan(app: FastAPI):
     from routers.p2p import start_chat_listener, stop_chat_listener
     start_chat_listener()
 
+    # Start sync SSE listener (bridges launcher NOTIFY → library SSE)
+    from routers.settings import start_sync_listener, stop_sync_listener
+    start_sync_listener()
+
     # Derive P2P identity
     _p2p_identity = None
     if settings.p2p_enabled:
@@ -260,6 +264,7 @@ async def lifespan(app: FastAPI):
 
     stop_status_poller()
     stop_chat_listener()
+    stop_sync_listener()
 
     # Cleanup resources
     import model_cache

@@ -473,9 +473,12 @@ def get_track_uuids_for_artist(conn, artist_uuid: str) -> list[str]:
 
 def get_unenriched_artist_uuids(conn) -> list[str]:
     """
-    Return artist UUIDs that have tracks but NO enrichment data
+    Return artist UUIDs that have tracks but NO audio enrichment data
     (no embeddings and no audio_features for any of their tracks).
-    These are the artists we should look for in DHT.
+    These are the artists we should look for in DHT — DHT lookup is
+    expensive and only worth it when we don't have anything for the
+    artist; partial-enrichment gaps are filled via the manual/LAN
+    sync flow which uses get_incomplete_artist_uuids instead.
     """
     rows = db_query(
         conn,
@@ -487,5 +490,43 @@ def get_unenriched_artist_uuids(conn) -> list[str]:
            AND NOT EXISTS (
                SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id
            )""",
+    )
+    return [r["artist_uuid"] for r in rows]
+
+
+def get_incomplete_artist_uuids(conn) -> list[str]:
+    """
+    Return artist UUIDs whose data is missing in at least one sync
+    category — used as the trigger set for manual/LAN peer sync.
+
+    Track-level (any track missing → trigger): embeddings, audio_features,
+    track_lyrics, track_stats.
+    Artist-level (artist itself missing → trigger): artist_bios,
+    artist_tags, similar_artists.
+
+    Why broader than get_unenriched_artist_uuids: that one is for DHT
+    lookup and uses AND-of-audio to keep DHT traffic down. Inside the
+    sync flow we want to catch partial states — e.g. embeddings landed
+    but features didn't (transient pull failure), or audio is full but
+    Last.fm bios never came through because the artist was already
+    "audio-enriched" and skipped. Inventory + _compute_needed at the
+    peer/category level filter out anything we already have, so even
+    a wide trigger here is cheap when there's nothing new to pull.
+
+    Not included: artist_members (compound-artist-only — would trigger
+    every solo artist forever), album_info/album_tags (per-album, not
+    per-artist), genre_descriptions (per-genre).
+    """
+    rows = db_query(
+        conn,
+        """SELECT DISTINCT ta.artist_id::text AS artist_uuid
+           FROM track_artists ta
+           WHERE NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = ta.track_id)
+              OR NOT EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id)
+              OR NOT EXISTS (SELECT 1 FROM track_lyrics tl WHERE tl.track_id = ta.track_id)
+              OR NOT EXISTS (SELECT 1 FROM track_stats ts WHERE ts.track_id = ta.track_id)
+              OR NOT EXISTS (SELECT 1 FROM artist_bios ab WHERE ab.artist_id = ta.artist_id)
+              OR NOT EXISTS (SELECT 1 FROM artist_tags atg WHERE atg.artist_id = ta.artist_id)
+              OR NOT EXISTS (SELECT 1 FROM similar_artists sa WHERE sa.artist_id = ta.artist_id)""",
     )
     return [r["artist_uuid"] for r in rows]

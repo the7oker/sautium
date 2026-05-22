@@ -9,10 +9,12 @@ Provides P2P sync: find peers via DHT, sync enrichment data via HTTP.
 """
 
 import asyncio
+import json
 import logging
 import select
 import threading
 import time
+from datetime import datetime, timezone
 from functools import partial
 from typing import Callable, Optional
 
@@ -52,6 +54,11 @@ class P2PManager:
         self._pending_accepts_task: Optional[asyncio.Task] = None
         self._lan_discovery_task: Optional[asyncio.Task] = None
         self._db_listen_task: Optional[asyncio.Task] = None
+        self._sync_request_task: Optional[asyncio.Task] = None
+        self._sync_request_listen_task: Optional[asyncio.Task] = None
+        self._auto_sync_task: Optional[asyncio.Task] = None
+        self._sync_request_notify: Optional[asyncio.Event] = None
+        self._sync_lock: Optional[asyncio.Lock] = None
         self._running = False
         self._on_message_cb: Optional[Callable] = None
         # Peer address cache: friend_id -> peers_list
@@ -197,6 +204,8 @@ class P2PManager:
         """Main async routine: start services, announce, wait."""
         self._stop_event = asyncio.Event()
         self._chat_notify = asyncio.Event()
+        self._sync_request_notify = asyncio.Event()
+        self._sync_lock = asyncio.Lock()
 
         def _progress(msg):
             logger.info(msg)
@@ -283,6 +292,20 @@ class P2PManager:
                 self._pending_accepts_task = asyncio.create_task(
                     self._poll_pending_accepts()
                 )
+
+            # Sync triggers: NOTIFY sautium_sync_request (Web UI Force
+            # sync now → backend → here) + auto-sync timer
+            # (sync.auto_interval_min). Both serialise through
+            # self._sync_lock so concurrent triggers merge to one run.
+            self._sync_request_listen_task = asyncio.create_task(
+                self._sync_request_listener_thread()
+            )
+            self._sync_request_task = asyncio.create_task(
+                self._sync_request_loop()
+            )
+            self._auto_sync_task = asyncio.create_task(
+                self._auto_sync_loop()
+            )
 
             self._running = True
 
@@ -381,7 +404,9 @@ class P2PManager:
         """Clean shutdown of all services."""
         for task in (self._reannounce_task, self._pending_retry_task,
                      self._resolve_friends_task, self._db_listen_task,
-                     self._pending_accepts_task, self._lan_discovery_task):
+                     self._pending_accepts_task, self._lan_discovery_task,
+                     self._sync_request_listen_task, self._sync_request_task,
+                     self._auto_sync_task):
             if task:
                 task.cancel()
                 try:
@@ -470,12 +495,28 @@ class P2PManager:
         return await asyncio.get_event_loop().run_in_executor(None, _blocking)
 
     async def _get_unenriched_artists(self) -> list[str]:
-        """Query local DB for artists needing enrichment."""
+        """Audio-only-empty artists — DHT lookup candidates (cheap to
+        skip when we have any audio data; partial gaps are filled by
+        _get_incomplete_artists in the manual/LAN sync path)."""
         def _blocking() -> list[str]:
             conn = psycopg2.connect(self.db_dsn)
             conn.autocommit = True
             try:
                 return sync_queries.get_unenriched_artist_uuids(conn)
+            finally:
+                conn.close()
+        return await asyncio.get_event_loop().run_in_executor(None, _blocking)
+
+    async def _get_incomplete_artists(self) -> list[str]:
+        """Artists missing data in any sync category — manual/LAN trigger
+        set. Catches partial-sync states (audio landed but Last.fm bio
+        didn't, etc.) that the audio-only AND-logic in
+        _get_unenriched_artists silently skipped."""
+        def _blocking() -> list[str]:
+            conn = psycopg2.connect(self.db_dsn)
+            conn.autocommit = True
+            try:
+                return sync_queries.get_incomplete_artist_uuids(conn)
             finally:
                 conn.close()
         return await asyncio.get_event_loop().run_in_executor(None, _blocking)
@@ -560,17 +601,24 @@ class P2PManager:
             if progress_cb:
                 progress_cb(msg)
 
-        # Step 1: Find artists needing enrichment
-        _progress("Finding artists without enrichment...")
-        unenriched = await self._get_unenriched_artists()
-        if not unenriched:
-            _progress("All artists already enriched!")
-            return {"status": "all_enriched"}
+        # Step 1: Find artists missing data in any sync category.
+        # `incomplete` is broader than `unenriched` (which is audio-only,
+        # AND-logic) — incomplete catches partial states like
+        # "audio landed, Last.fm bio never came through" that the old
+        # gate silently skipped. Inventory + _compute_needed inside
+        # the peer sync handles per-category filtering so a wide
+        # trigger here costs only one inventory round-trip per peer
+        # when nothing new exists.
+        _progress("Finding artists needing sync...")
+        incomplete = await self._get_incomplete_artists()
+        if not incomplete:
+            _progress("All artists fully synced!")
+            return {"status": "all_synced"}
 
-        _progress(f"Found {len(unenriched)} artists needing enrichment")
+        _progress(f"Found {len(incomplete)} artists with missing data")
 
-        # Step 2: Collect track UUIDs for all unenriched artists (single query)
-        track_uuids = await self._get_tracks_for_artists(unenriched)
+        # Step 2: Collect track UUIDs for all incomplete artists (single query)
+        track_uuids = await self._get_tracks_for_artists(incomplete)
 
         if not track_uuids:
             _progress("No tracks found for unenriched artists")
@@ -1644,6 +1692,178 @@ class P2PManager:
                         await self._find_friend_peers(
                             friend_info, refresh=True
                         )
+
+    # -------------------------------------------------------------------
+    # Sync triggers: Web UI Force sync + Auto-sync timer
+    # -------------------------------------------------------------------
+
+    async def _sync_request_listener_thread(self):
+        """LISTEN on sautium_sync_request, wake _sync_request_loop.
+
+        Mirrors _listen_for_db_notifications (chat) — same select-on-
+        socket pattern with a 5s timeout so cancellation is responsive.
+        """
+        while self._running:
+            conn = None
+            try:
+                conn = psycopg2.connect(self.db_dsn)
+                conn.set_isolation_level(
+                    psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT
+                )
+                with conn.cursor() as cur:
+                    cur.execute("LISTEN sautium_sync_request")
+
+                while self._running:
+                    ready = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: select.select([conn], [], [], 5),
+                    )
+                    if ready[0]:
+                        conn.poll()
+                        while conn.notifies:
+                            conn.notifies.pop(0)
+                        if self._sync_request_notify:
+                            self._sync_request_notify.set()
+            except Exception as e:
+                logger.debug(f"sync_request LISTEN error: {e}")
+                await asyncio.sleep(5)
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+    async def _sync_request_loop(self):
+        """Dispatcher: on notify, run sync_from_peers via _run_sync_with_status."""
+        while self._running:
+            try:
+                await self._sync_request_notify.wait()
+                self._sync_request_notify.clear()
+            except asyncio.CancelledError:
+                break
+            if not self._running:
+                break
+            await self._run_sync_with_status(trigger="manual")
+
+    async def _auto_sync_loop(self):
+        """Periodic sync based on sync.auto_interval_min.
+
+        Re-reads the setting each cycle so config changes apply at the
+        next interval without restart. Initial delay of 60s lets the
+        DHT/LAN discovery warm up before the first auto-sync.
+        """
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            return
+
+        while self._running:
+            interval_min = self._read_auto_sync_interval()
+            if interval_min and interval_min > 0:
+                await self._run_sync_with_status(trigger="auto")
+                sleep_for = interval_min * 60
+            else:
+                sleep_for = 60  # re-check setting every minute when disabled
+
+            try:
+                await asyncio.sleep(sleep_for)
+            except asyncio.CancelledError:
+                break
+
+    # Mirrors _DEFAULTS["sync.auto_interval_min"] in
+    # backend/routers/settings.py — keep in sync so the UI's displayed
+    # default and the launcher's actual cadence match on a fresh
+    # install (no user_settings row yet).
+    _AUTO_SYNC_INTERVAL_DEFAULT_MIN = 30
+
+    def _read_auto_sync_interval(self) -> Optional[int]:
+        """Read sync.auto_interval_min from user_settings (None = disabled)."""
+        try:
+            conn = psycopg2.connect(self.db_dsn)
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT value FROM user_settings WHERE key = %s",
+                        ("sync.auto_interval_min",),
+                    )
+                    row = cur.fetchone()
+                    if row is None:
+                        return self._AUTO_SYNC_INTERVAL_DEFAULT_MIN
+                    if row[0] is None:
+                        return None  # explicitly disabled
+                    return int(row[0]) if row[0] else None
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug(f"Failed to read sync.auto_interval_min: {e}")
+        return None
+
+    async def _run_sync_with_status(self, trigger: str):
+        """Run sync_from_peers, persist results to user_settings, NOTIFY UI.
+
+        Serialised via self._sync_lock so manual + auto triggers can't
+        run concurrently. Writes sync.last_at and sync.last_items_received
+        on completion (success or failure), then NOTIFY sautium_sync_done
+        wakes the backend SSE bridge.
+        """
+        if self._sync_lock.locked():
+            logger.debug(
+                f"P2P sync already in progress, skipping {trigger} trigger"
+            )
+            return
+
+        async with self._sync_lock:
+            started = datetime.now(timezone.utc)
+            logger.info(f"P2P sync starting (trigger={trigger})")
+            try:
+                stats = await self._async_sync_from_peers(progress_cb=None)
+            except Exception as e:
+                logger.error(f"P2P sync failed: {e}", exc_info=True)
+                stats = {"error": str(e)}
+
+            items = sum(v for v in stats.values() if isinstance(v, int))
+            await asyncio.get_event_loop().run_in_executor(
+                None, self._write_sync_status, started, items
+            )
+            logger.info(
+                f"P2P sync complete (trigger={trigger}): "
+                f"{items} items, stats={stats}"
+            )
+
+    def _write_sync_status(self, started: datetime, items: int) -> None:
+        """Persist sync.last_at + items_received, fire sautium_sync_done."""
+        try:
+            conn = psycopg2.connect(self.db_dsn)
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO user_settings (key, value)
+                        VALUES (%s, %s::jsonb)
+                        ON CONFLICT (key) DO UPDATE
+                            SET value = EXCLUDED.value,
+                                updated_at = CURRENT_TIMESTAMP
+                        """,
+                        ("sync.last_at", json.dumps(started.isoformat())),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO user_settings (key, value)
+                        VALUES (%s, %s::jsonb)
+                        ON CONFLICT (key) DO UPDATE
+                            SET value = EXCLUDED.value,
+                                updated_at = CURRENT_TIMESTAMP
+                        """,
+                        ("sync.last_items_received", json.dumps(int(items))),
+                    )
+                    cur.execute("NOTIFY sautium_sync_done")
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"Failed to write sync status: {e}")
 
     def get_status(self) -> dict:
         """Get P2P status for UI display."""

@@ -6264,7 +6264,11 @@
     if (!total || total <= 0) {
       return { className: 'form-value muted', html: '—' };
     }
-    const pct = Math.round((done * 100) / total);
+    // Floor, not round: 1827/1829 must read 99%, not 100%. 100% is
+    // reserved for done === total — otherwise the UI lies about
+    // completeness when there's a tiny gap left (e.g. 71 tracks
+    // missing features but rounded up because the gap is < 0.5%).
+    const pct = done >= total ? 100 : Math.floor((done * 100) / total);
     const cls = pct === 100 ? 'pct-full' : pct >= 80 ? 'pct-near' : 'pct-low';
     return {
       className: `form-value mono ${cls}`,
@@ -6660,10 +6664,20 @@
         </div>
       </div>
       <div class="btn-row single">
-        <button class="btn btn-secondary" data-action="force-sync">Force sync now</button>
+        <button class="btn btn-secondary" data-action="force-sync"${_syncInFlight ? ' disabled' : ''}>${_syncInFlight ? 'Syncing…' : 'Force sync now'}</button>
       </div>
     `;
   }
+
+  // Module-scope state for the async Force sync flow. _syncInFlight
+  // keeps the button in "Syncing…" state across re-renders triggered
+  // by /api/settings/library/stream wake events (the same SSE channel
+  // backed by sautium_sync_done). _syncBaselineLastAt snapshots the
+  // last_sync_at value at trigger time so the next render that sees
+  // a different last_sync_at recognises completion and shows the
+  // "Synced · N items" toast — no polling, no setTimeout.
+  let _syncInFlight = false;
+  let _syncBaselineLastAt = null;
 
   function _renderHqpRow(ao, connected) {
     const host = ao.hqplayer_host || '—';
@@ -7084,12 +7098,11 @@
   }
 
   /* ============ Sync & P2P screen — #more/sync ============ */
+  let _syncStreamCtrl = null;
+  let _syncStreamDebounce = null;
+
   async function renderSync(root) {
-    let sync = null;
-    try {
-      const r = await fetch('/api/settings/sync');
-      if (r.ok) sync = await r.json();
-    } catch (_) {}
+    const sync = await _fetchSyncState();
     if (!sync) {
       root.innerHTML = `<section class="screen screen-settings">${_settingsHeader('Sync & P2P')}<div class="placeholder">Не вдалося завантажити налаштування.</div></section>`;
       _wireBack(root);
@@ -7099,11 +7112,23 @@
     root.innerHTML = `
       <section class="screen screen-settings">
         ${_settingsHeader('Sync & P2P')}
-        <div style="margin-top:calc(14*var(--px));">${_renderSync(sync)}</div>
+        <div data-sync-content style="margin-top:calc(14*var(--px));">${_renderSync(sync)}</div>
       </section>
     `;
     _wireBack(root);
+    _wireSyncActions(root, sync);
+    _subscribeSyncStream(root);
+  }
 
+  async function _fetchSyncState() {
+    try {
+      const r = await fetch('/api/settings/sync');
+      if (r.ok) return await r.json();
+    } catch (_) {}
+    return null;
+  }
+
+  function _wireSyncActions(root, sync) {
     const onAction = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
     const putSync = async (body) => {
       await fetch('/api/settings/sync', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
@@ -7124,22 +7149,79 @@
       const id = await openSettingsPicker({ title: 'Announce rotation', options: ROTATION_OPTIONS, currentId: sync.announce_rotation_min || 30 });
       if (id != null) await putSync({ announce_rotation_min: Number(id) });
     });
-    onAction('[data-action="force-sync"]', async (e) => {
-      const btn = e.currentTarget;
-      btn.disabled = true;
-      btn.textContent = 'Syncing…';
+    onAction('[data-action="force-sync"]', async () => {
+      if (_syncInFlight) return;  // double-click guard
+      _syncBaselineLastAt = sync.last_sync_at || null;
+      _syncInFlight = true;
+      // Targeted button update — keeps SSE subscription alive (re-
+      // rendering the whole screen would re-subscribe and trigger
+      // the server's initial ping, causing an SSE/fetch ping-pong).
+      const btn = root.querySelector('[data-action="force-sync"]');
+      if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
       try {
-        const r = await fetch('/api/settings/sync/force', { method: 'POST' });
-        const d = r.ok ? await r.json() : null;
-        const toast = document.createElement('div');
-        toast.className = 'toast-inline';
-        toast.innerHTML = `${SETTINGS_ICONS.check} Synced · <span class="mono">${d ? fmtNum(d.items_received || 0) : '?'}</span> new items`;
-        btn.parentElement.parentElement.insertBefore(toast, btn.parentElement);
-        setTimeout(() => render(), 1400);
+        await fetch('/api/settings/sync/force', { method: 'POST' });
       } catch (_) {
-        btn.disabled = false;
-        btn.textContent = 'Force sync now';
+        _syncInFlight = false;
+        if (btn) { btn.disabled = false; btn.textContent = 'Force sync now'; }
       }
+      // Completion is reported via SSE wake (sautium_sync_done →
+      // library/stream subscribers); _refreshSyncContents handles it.
+    });
+  }
+
+  /* SSE-driven refresh — re-renders ONLY the [data-sync-content] block
+     and re-wires its actions. Does NOT touch the SSE subscription, so
+     the server's initial-ping → renderSync → re-subscribe loop is
+     impossible. Mirrors Library's refresh() / sseStream pattern. */
+  function _subscribeSyncStream(root) {
+    if (_syncStreamCtrl) { _syncStreamCtrl.abort(); _syncStreamCtrl = null; }
+    if (_syncStreamDebounce) { clearTimeout(_syncStreamDebounce); _syncStreamDebounce = null; }
+
+    async function refresh() {
+      if (!parseHash().startsWith('more/sync')) {
+        _syncStreamCtrl && _syncStreamCtrl.abort();
+        _syncStreamCtrl = null;
+        return;
+      }
+      const sync = await _fetchSyncState();
+      if (!sync) return;
+
+      let justCompletedItems = null;
+      if (_syncInFlight
+          && sync.last_sync_at
+          && sync.last_sync_at !== _syncBaselineLastAt) {
+        _syncInFlight = false;
+        justCompletedItems = sync.last_items_received;
+      }
+
+      const contentDiv = root.querySelector('[data-sync-content]');
+      if (!contentDiv) return;
+      contentDiv.innerHTML = _renderSync(sync);
+
+      if (justCompletedItems != null) {
+        const btnRow = root.querySelector('[data-action="force-sync"]')?.parentElement;
+        if (btnRow) {
+          const toast = document.createElement('div');
+          toast.className = 'toast-inline';
+          toast.innerHTML = `${SETTINGS_ICONS.check} Synced · <span class="mono">${fmtNum(justCompletedItems)}</span> new ${justCompletedItems === 1 ? 'item' : 'items'}`;
+          btnRow.parentElement.insertBefore(toast, btnRow);
+        }
+      }
+      _wireSyncActions(root, sync);
+    }
+
+    const scheduleRefresh = () => {
+      if (_syncStreamDebounce) return;
+      _syncStreamDebounce = setTimeout(() => {
+        _syncStreamDebounce = null;
+        refresh();
+      }, 200);
+    };
+
+    _syncStreamCtrl = window.sseStream('/api/settings/library/stream', () => {
+      scheduleRefresh();
+    }, (_err) => {
+      // sseStream auto-reconnects; nothing to do here.
     });
   }
 

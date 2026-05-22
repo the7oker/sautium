@@ -239,7 +239,18 @@ class SyncClient:
     def _pull_and_import_category(
         self, cat_key: str, pull_endpoint: str, uuids: list[str]
     ) -> int:
-        """Pull and import a single category in batches."""
+        """Pull and import a single category in batches.
+
+        Each batch is retried once after a 2s backoff. Empirically pull
+        failures on localhost are transient — TLS handshake interrupts,
+        gzip-middleware boundary cases on large audio_features payloads
+        (the instruments+moods JSONB columns blow up the wire size),
+        HMAC timestamp drift during a CPU stall, or uvicorn keepalive
+        races. A single retry catches the bulk of them; persistent
+        failure logs a warning and the broader incomplete-artist sync
+        flow will pick up the gap on the next pass.
+        """
+        import time
         total_imported = 0
         batches = [
             uuids[i: i + self.batch_size]
@@ -252,9 +263,22 @@ class SyncClient:
                 f"({len(batch_uuids)} items)..."
             )
 
-            result = self.api.sync_pull(pull_endpoint, batch_uuids)
+            result = None
+            for attempt in (1, 2):
+                result = self.api.sync_pull(pull_endpoint, batch_uuids)
+                if result and "items" in result:
+                    break
+                if attempt == 1:
+                    logger.warning(
+                        f"Pull {cat_key} batch {batch_idx} failed "
+                        f"(attempt 1), retrying in 2s"
+                    )
+                    time.sleep(2)
             if not result or "items" not in result:
-                logger.warning(f"Pull {cat_key} batch {batch_idx} failed")
+                logger.warning(
+                    f"Pull {cat_key} batch {batch_idx} failed after retry, "
+                    f"skipping {len(batch_uuids)} uuids"
+                )
                 continue
 
             items = result["items"]

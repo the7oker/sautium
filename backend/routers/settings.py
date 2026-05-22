@@ -14,8 +14,12 @@ need to know about them directly.
 import asyncio
 import json
 import logging
+import select
 import threading
 from typing import Any, Dict, List, Optional, Tuple
+
+import psycopg2
+import psycopg2.extensions
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -60,6 +64,66 @@ def notify_library_subscribers() -> None:
                 # Loop closed; subscriber will clean itself up on the
                 # next iteration of its generator's finally block.
                 continue
+
+
+# Sync DB listener: bridge between launcher's P2PManager and the
+# library SSE channel. The launcher fires NOTIFY sautium_sync_done
+# after each P2P sync (manual or auto). We listen here, then wake
+# library subscribers so the Settings screen re-fetches and shows
+# the new last_sync_at / items_received. Same NOTIFY pattern used
+# by chat (routers/p2p.py); no polling.
+
+_sync_listener_thread: Optional[threading.Thread] = None
+_sync_listener_running = False
+
+
+def _sync_db_listener() -> None:
+    """Background thread: LISTEN sautium_sync_done, wake library SSE."""
+    while _sync_listener_running:
+        conn = None
+        try:
+            conn = psycopg2.connect(app_settings.database_url)
+            conn.set_isolation_level(
+                psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT
+            )
+            with conn.cursor() as cur:
+                cur.execute("LISTEN sautium_sync_done")
+
+            while _sync_listener_running:
+                ready = select.select([conn], [], [], 5)
+                if ready[0]:
+                    conn.poll()
+                    if conn.notifies:
+                        while conn.notifies:
+                            conn.notifies.pop(0)
+                        notify_library_subscribers()
+        except Exception as e:
+            logger.debug(f"Sync DB listener error: {e}")
+            if _sync_listener_running:
+                import time
+                time.sleep(1)
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+
+def start_sync_listener() -> None:
+    global _sync_listener_thread, _sync_listener_running
+    if _sync_listener_thread and _sync_listener_thread.is_alive():
+        return
+    _sync_listener_running = True
+    _sync_listener_thread = threading.Thread(
+        target=_sync_db_listener, daemon=True, name="sync-sse-listener"
+    )
+    _sync_listener_thread.start()
+
+
+def stop_sync_listener() -> None:
+    global _sync_listener_running
+    _sync_listener_running = False
 
 
 # ============================================================
@@ -683,15 +747,15 @@ def put_sync_prefs(req: SyncPrefs) -> Dict[str, Any]:
 
 @router.post("/sync/force")
 def force_sync() -> Dict[str, Any]:
-    """Kick the P2P sync runner manually. Implementation is a stub
-    for now — the desktop launcher owns the actual sync loop. We
-    write a placeholder 'last sync' marker so the UI's transient
-    toast reflects the action. Wire the real call when the launcher
-    grows a backend-callable trigger."""
-    from datetime import datetime, timezone
-    _write("sync.last_at", datetime.now(timezone.utc).isoformat())
-    _write("sync.last_items_received", 0)
-    return {"ok": True, "items_received": 0, "note": "stub — wire to launcher sync trigger"}
+    """Kick the P2P sync runner manually.
+
+    Fires NOTIFY sautium_sync_request — the launcher's P2PManager
+    listens on this channel and runs sync_from_peers() in its asyncio
+    loop. The sync is asynchronous; the listener writes sync.last_at
+    and sync.last_items_received on completion and emits
+    NOTIFY sautium_sync_done so the SSE stream can push the result."""
+    db_execute("NOTIFY sautium_sync_request")
+    return {"ok": True, "triggered": True}
 
 
 # ============================================================
