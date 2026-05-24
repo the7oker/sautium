@@ -469,6 +469,45 @@ new design system and information architecture. Function contracts
 in `app.js` (playerCmd, doSearch, sendChat, addFriend, etc.) stay
 stable; their DOM targets change.
 
+### Native dialogs are an anti-pattern
+
+**Never call `alert()`, `confirm()`, or `prompt()`.** Browsers
+render them with the OS chrome (white panel, default sans-serif,
+"localhost says" prefix on Chrome), which breaks the design
+language the rest of the UI is built in — colour palette, type
+scale, dark theme, terracotta accents all disappear the moment one
+of these fires. They also block the JS event loop, can't be styled
+or animated, can't carry rich content (icons, formatting, links),
+and on mobile they're an interaction trap.
+
+Use the HTML equivalents wired into the design system instead:
+
+- **`window.notifyDialog({ title, message, kind })`** — replaces
+  `alert()`. Single primary button, `kind` is `'error' | 'success'
+  | 'info'` and tints the title via `.confirm-title.<kind>`.
+  Returns `Promise<void>`.
+- **`window.confirmDestructive({ title, message, confirmText,
+  cancelText })`** — replaces `confirm()` for irreversible actions
+  (delete friend, drop scan, reset key). Returns `Promise<boolean>`.
+- **For text input** (`prompt()` replacement) build a small overlay
+  in the `add-gear-sheet` style — see `openEmailVerifyFlow` and
+  `openHqpConnectionEditor` in `app-shell.js` for the pattern.
+
+Both dialogs live in `app-shell.js` and share the `.confirm-overlay
+/ .confirm-sheet` shell in `style.css`. The `kind` accent and the
+`.confirm-actions.single` modifier are the extension points — add
+to those rather than minting parallel dialog systems.
+
+Native dialogs are acceptable **only** when no HTML equivalent is
+reachable — e.g. inside a Web Worker, or before `app-shell.js` has
+loaded. In those rare cases, leave a `// native dialog: <reason>`
+comment next to the call so future readers see it was deliberate.
+
+Always escape user-controlled data with `window.escapeProfileHtml()`
+before passing into `message` (both dialogs render `message` as
+HTML so a `<b>highlight</b>` works — XSS is the caller's
+responsibility).
+
 ---
 
 ## Key Files

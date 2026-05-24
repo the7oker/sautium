@@ -1208,13 +1208,21 @@ async function addFriend(e) {
     const data = await resp.json();
 
     if (data.error) {
-      alert("Failed: " + data.error);
+      window.notifyDialog({
+        title: "Couldn't add friend",
+        message: window.escapeProfileHtml(data.error),
+        kind: "error",
+      });
     } else {
       input.value = "";
       loadFriends();
     }
   } catch (err) {
-    alert("Error: " + err.message);
+    window.notifyDialog({
+      title: "Couldn't add friend",
+      message: window.escapeProfileHtml(err.message || String(err)),
+      kind: "error",
+    });
   }
 
   input.disabled = false;

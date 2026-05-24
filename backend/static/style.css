@@ -4507,7 +4507,10 @@ select.add-gear-input {
 .notes-area.placeholder { color: var(--color-text-dim); font-style: italic; }
 
 /* =====================================================================
- * Destructive-action confirm modal — replaces window.confirm()
+ * Dialog shell — backs both confirmDestructive() (binary choice) and
+ * notifyDialog() (single-button alert replacement). Native
+ * alert/confirm/prompt are banned (see CLAUDE.md); these live inside
+ * the design system instead.
  * ===================================================================== */
 .confirm-overlay {
   position: fixed;
@@ -4536,12 +4539,16 @@ select.add-gear-input {
   letter-spacing: -0.01em;
   color: var(--color-text);
 }
+.confirm-title.error   { color: var(--color-negative); }
+.confirm-title.success { color: var(--color-positive); }
 .confirm-message {
   margin: 0 0 calc(18 * var(--px));
   font-size: calc(13.5 * var(--px));
   line-height: 1.5;
   color: var(--color-text-muted);
   text-wrap: pretty;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .confirm-message b { color: var(--color-text); font-weight: 600; }
 .confirm-actions {
@@ -4549,6 +4556,7 @@ select.add-gear-input {
   grid-template-columns: 1fr 1fr;
   gap: calc(10 * var(--px));
 }
+.confirm-actions.single { grid-template-columns: 1fr; }
 .profile-btn.destructive {
   background: var(--color-negative);
   color: var(--color-text);

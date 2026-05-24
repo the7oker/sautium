@@ -5074,6 +5074,50 @@
     });
   }
 
+  /* Notification dialog — single-button HTML replacement for
+     window.alert(). Sits inside the same .confirm-overlay /
+     .confirm-sheet shell as confirmDestructive so we don't fork
+     visual languages. `kind` controls the title accent
+     (error → negative, success → positive, info → default).
+     Returns a Promise<void> that resolves once the dialog closes.
+
+     `message` is rendered as HTML, mirroring confirmDestructive —
+     callers must escape any user-controlled data themselves
+     (escapeProfileHtml is exported on window for that). */
+  function notifyDialog({ title, message, kind = 'info', dismissText = 'OK' } = {}) {
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.className = 'confirm-overlay';
+      const titleHtml = title
+        ? `<h2 class="confirm-title ${kind}">${escapeProfileHtml(title)}</h2>`
+        : '';
+      overlay.innerHTML = `
+        <div class="confirm-sheet" role="dialog" aria-modal="true">
+          ${titleHtml}
+          <p class="confirm-message">${message || ''}</p>
+          <div class="confirm-actions single">
+            <button class="profile-btn primary" data-confirm>${escapeProfileHtml(dismissText)}</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(); };
+      const onKey = (e) => {
+        if (e.key === 'Escape' || e.key === 'Enter') close();
+      };
+      document.addEventListener('keydown', onKey);
+      overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+      overlay.querySelector('[data-confirm]').addEventListener('click', close);
+      setTimeout(() => overlay.querySelector('[data-confirm]').focus(), 50);
+    });
+  }
+
+  // Cross-file API — app.js (non-IIFE legacy bootstrap) and any future
+  // module needs the same dialogs to avoid native alert/confirm.
+  window.confirmDestructive = confirmDestructive;
+  window.notifyDialog       = notifyDialog;
+  window.escapeProfileHtml  = escapeProfileHtml;
+
   /* Email verification — two-step Worker-mediated flow.
      POST /api/p2p/email/send-code sends a 6-char code to the
      account's email; POST /api/p2p/email/verify-code redeems it
@@ -5084,14 +5128,22 @@
     try {
       const r = await fetch('/api/p2p/email/send-code', { method: 'POST' });
       if (!r.ok) {
-        const txt = await r.text();
-        alert('Could not send verification code: ' + txt);
+        const txt = await _errorMessage(r);
+        await notifyDialog({
+          title: 'Could not send verification code',
+          message: escapeProfileHtml(txt),
+          kind: 'error',
+        });
         return;
       }
       const data = await r.json();
       sentTo = data.email || '';
     } catch (err) {
-      alert('Could not send verification code: ' + err);
+      await notifyDialog({
+        title: 'Could not send verification code',
+        message: escapeProfileHtml(String(err)),
+        kind: 'error',
+      });
       return;
     }
 
@@ -7088,11 +7140,15 @@
 
     // Claude Code state actions
     onAction('[data-action="cc-refresh"]', () => render());
+    const _ccError = async (title, r, err) => {
+      const msg = err ? String(err) : await _errorMessage(r);
+      await notifyDialog({ title, message: escapeProfileHtml(msg), kind: 'error' });
+    };
     onAction('[data-action="cc-install"]', async () => {
       try {
         const r = await fetch('/api/settings/ai/claude/install', { method: 'POST' });
-        if (!r.ok) { alert(await _errorMessage(r)); return; }
-      } catch (err) { alert(String(err)); return; }
+        if (!r.ok) { await _ccError('Claude Code install failed', r); return; }
+      } catch (err) { await _ccError('Claude Code install failed', null, err); return; }
       // No client-side polling — server wakes us on install state
       // transitions over /api/settings/ai/claude/stream.
       render();
@@ -7100,8 +7156,8 @@
     onAction('[data-action="cc-signin"]', async () => {
       try {
         const r = await fetch('/api/settings/ai/claude/signin', { method: 'POST' });
-        if (!r.ok) { alert(await _errorMessage(r)); return; }
-      } catch (err) { alert(String(err)); return; }
+        if (!r.ok) { await _ccError('Claude Code sign-in failed', r); return; }
+      } catch (err) { await _ccError('Claude Code sign-in failed', null, err); return; }
       render();
     });
 
