@@ -28,6 +28,7 @@ from dht_service import DHTService, HAS_LIBTORRENT
 _API_SECRET_PATH = _Path(__file__).parent / "data" / ".api_secret"
 _INDEX_HTML_PATH = _Path(__file__).parent / "static" / "index.html"
 _API_SECRET_CACHE: Optional[bytes] = None
+_INDEX_HTML_CACHE: Optional[str] = None
 
 
 def _get_api_secret() -> bytes:
@@ -41,6 +42,20 @@ def _get_api_secret() -> bytes:
     if _API_SECRET_CACHE is None:
         _API_SECRET_CACHE = ensure_secret(_API_SECRET_PATH)
     return _API_SECRET_CACHE
+
+
+def _get_index_html() -> str:
+    """Module-level cache for the Web UI shell.
+
+    `index.html` lives on drvfs in WSL2 deployments and re-reading it
+    on every GET / sporadically surfaces EIO (Errno 5). The file is
+    static for the process lifetime — bake it into memory at startup
+    and reuse the string forever.
+    """
+    global _INDEX_HTML_CACHE
+    if _INDEX_HTML_CACHE is None:
+        _INDEX_HTML_CACHE = _INDEX_HTML_PATH.read_text(encoding="utf-8")
+    return _INDEX_HTML_CACHE
 
 # Configure logging
 logging.config.dictConfig(LOGGING_CONFIG)
@@ -62,6 +77,7 @@ async def lifespan(app: FastAPI):
     # startup surfaces filesystem errors here rather than on first
     # 401, and populating the cache means GET / never re-reads drvfs.
     _get_api_secret()
+    _get_index_html()
 
     # Validate configuration
     missing_settings = settings.validate_required_settings()
@@ -340,7 +356,7 @@ async def root() -> HTMLResponse:
     avoids a separate auth-less endpoint.
     """
     secret = _get_api_secret().decode("ascii")
-    html = _INDEX_HTML_PATH.read_text(encoding="utf-8")
+    html = _get_index_html()
     inject = f'<script>window.__SAUTIUM_SECRET="{secret}";</script>'
     if "</head>" in html:
         html = html.replace("</head>", f"  {inject}\n</head>", 1)
