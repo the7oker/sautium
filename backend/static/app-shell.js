@@ -6633,6 +6633,53 @@
     return '';
   }
 
+  function _bgEnrichStatusLine(s, enabled) {
+    // Status under the Background enrichment toggle. Three states:
+    //   - toggle off → nothing (the row above already says "off")
+    //   - on + idle → "Idle · last run X min ago · 17 stats, 4 lyrics"
+    //   - on + busy → "Working on track stats · 17 stats, 4 lyrics so far"
+    if (!enabled || !s) return '';
+    const totals = s.totals || {};
+    const partsArr = [];
+    if (totals.track_stats) partsArr.push(totals.track_stats + ' stats');
+    if (totals.lyrics)      partsArr.push(totals.lyrics      + ' lyrics');
+    if (totals.artists)     partsArr.push(totals.artists     + ' artists');
+    if (totals.albums)      partsArr.push(totals.albums      + ' albums');
+    if (totals.genres)      partsArr.push(totals.genres      + ' genres');
+    const totalsLine = partsArr.length ? partsArr.join(', ') : 'no items yet';
+
+    const stepLabels = {
+      track_stats: 'fetching track stats',
+      lyrics:      'fetching lyrics',
+      artists:     'fetching artist info',
+      albums:      'fetching album info',
+      genres:      'fetching genre wikis',
+      idle:        'idle',
+      starting:    'starting',
+      '':          'idle',
+    };
+    const step = stepLabels[s.current_step] || s.current_step;
+    const isWorking = s.current_step && s.current_step !== 'idle' && s.current_step !== '';
+
+    let primary;
+    if (isWorking) {
+      primary = 'Working · ' + step;
+    } else if (s.last_run_at) {
+      primary = 'Idle · last batch ' + fmtRelative(s.last_run_at);
+    } else {
+      primary = 'Idle · awaiting first batch';
+    }
+
+    return `
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label" style="color:var(--color-text-muted);font-size:calc(12*var(--px));">${escapeProfileHtml(primary)}</span>
+            <span></span>
+          </div>
+          <div class="row-stack-sub" style="color:var(--color-text-dim);font-size:calc(11.5*var(--px));">${escapeProfileHtml(totalsLine)}</div>
+        </div>`;
+  }
+
   function _renderSync(sync) {
     const on = !!sync.p2p_enabled;
     const interval = sync.auto_interval_min;
@@ -6642,6 +6689,7 @@
     const rotation = sync.announce_rotation_min || 30;
     const rotationLabel = (ROTATION_OPTIONS.find(o => o.id === rotation) || ROTATION_OPTIONS[1]).label;
     const bgEnrich = !!sync.background_enrichment;
+    const bgStatusLine = _bgEnrichStatusLine(sync.background_status, bgEnrich);
     const showRotation = !!limit;  // hidden when "All"
 
     if (!on) {
@@ -6665,6 +6713,7 @@
             <span class="form-label">Background enrichment</span>
             <button class="toggle ${bgEnrich ? 'on' : ''}" data-action="toggle-bg-enrich"><span class="knob"></span></button>
           </div>
+          ${bgStatusLine}
         </div>
       `;
     }

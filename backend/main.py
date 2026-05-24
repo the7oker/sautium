@@ -237,6 +237,18 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_prewarm("BGE-M3",     "enrichment", _enrichment_factory))
     asyncio.create_task(_prewarm("Lyrics-BGE", "lyrics",     _lyrics_factory))
 
+    # Background (network-only) enrichment — gated by the
+    # `enrichment.background_enabled` user_settings flag. The toggle in
+    # More → Sync & P2P also calls start()/stop() so the flag and the
+    # thread state stay in lockstep.
+    try:
+        import background_enrichment
+        from routers.settings import _read as _read_setting
+        if bool(_read_setting("enrichment.background_enabled")):
+            background_enrichment.start()
+    except Exception as e:
+        logger.warning(f"Background enrichment autostart failed: {e}")
+
     yield
 
     # Shutdown
@@ -253,6 +265,12 @@ async def lifespan(app: FastAPI):
     stop_status_poller()
     stop_chat_listener()
     stop_sync_listener()
+
+    try:
+        import background_enrichment
+        background_enrichment.stop()
+    except Exception:
+        pass
 
     # Cleanup resources
     import model_cache

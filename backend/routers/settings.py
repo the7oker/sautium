@@ -327,12 +327,20 @@ def _sync_state() -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"friends count failed: {e}")
 
+    bg_status = None
+    try:
+        import background_enrichment
+        bg_status = background_enrichment.status()
+    except Exception as e:
+        logger.warning(f"background_enrichment status read failed: {e}")
+
     return {
         "p2p_enabled":             bool(_read("sync.p2p_enabled")),
         "auto_interval_min":       _read("sync.auto_interval_min"),
         "announce_limit":          _read("sync.announce_limit"),
         "announce_rotation_min":   _read("sync.announce_rotation_min"),
         "background_enrichment":   bool(_read("enrichment.background_enabled")),
+        "background_status":       bg_status,
         "last_sync_at":            _read("sync.last_at"),
         "last_items_received":     _read("sync.last_items_received"),
         "friends_online":          friends_online,
@@ -805,7 +813,19 @@ def put_sync_prefs(req: SyncPrefs) -> Dict[str, Any]:
     if req.announce_rotation_min is not None:
         _write("sync.announce_rotation_min", int(req.announce_rotation_min))
     if req.background_enrichment is not None:
-        _write("enrichment.background_enabled", bool(req.background_enrichment))
+        want = bool(req.background_enrichment)
+        _write("enrichment.background_enabled", want)
+        # Drive the loop directly off the flag — the toggle is the
+        # source of truth, so the persisted value and the running
+        # thread can never disagree.
+        try:
+            import background_enrichment
+            if want:
+                background_enrichment.start()
+            else:
+                background_enrichment.stop()
+        except Exception as e:
+            logger.warning(f"background_enrichment toggle failed: {e}")
     return _sync_state()
 
 
