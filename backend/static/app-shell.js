@@ -6981,33 +6981,38 @@
   }
 
   /* ============ AI assistant screen — #more/ai ============ */
-  let _ccPollTimer = null;
-  function _stopCcPoll() {
-    if (_ccPollTimer) { clearTimeout(_ccPollTimer); _ccPollTimer = null; }
+  // Wake-event SSE subscription replaces 2s polling
+  // (CLAUDE.md "Event-driven over polling"). Server emits a wake
+  // whenever the install worker thread mutates state; client re-fetches
+  // /api/settings/ai/claude/state and re-renders in place.
+  //
+  // Two correctness guards:
+  //  - idempotent: renderAI() re-runs on every wake, and re-invokes
+  //    _subscribeClaudeStream(); without an early-return the abort/
+  //    reopen pair would echo the server's initial ping into a
+  //    self-sustaining refresh loop.
+  //  - initial ping skipped: server's "data: {}" on connect is just an
+  //    acknowledgement that the channel is live, not a state change —
+  //    acting on it would re-render immediately after the renderAI()
+  //    that opened the stream in the first place.
+  let _claudeStreamCtrl = null;
+  function _stopClaudeStream() {
+    if (_claudeStreamCtrl) { _claudeStreamCtrl.abort(); _claudeStreamCtrl = null; }
   }
-  function _startCcPoll() {
-    _stopCcPoll();
-    // Re-render once every 2s as long as we're still on the AI screen
-    // and the state needs watching (install running or awaiting sign-in).
-    const tick = async () => {
-      _ccPollTimer = null;
-      if (!parseHash().startsWith('more/ai')) return;
-      const cc = await _fetchClaudeState();
-      if (!cc) return;
-      const needsPoll = (cc.install && cc.install.running)
-                       || cc.state === 'not_authed';
-      // Only re-render when something user-visible could have changed —
-      // running flag flipping, install error appearing, or state moving
-      // to 'ready'. Cheap to call so we just render every tick during
-      // polled phases.
-      if (needsPoll) {
-        renderAI(document.getElementById('app'));
-        _ccPollTimer = setTimeout(tick, 2000);
-      } else {
-        renderAI(document.getElementById('app'));
+  function _subscribeClaudeStream() {
+    if (_claudeStreamCtrl) return;
+    if (typeof window.sseStream !== 'function') return;
+    let primed = false;
+    _claudeStreamCtrl = window.sseStream('/api/settings/ai/claude/stream', () => {
+      if (!primed) { primed = true; return; }
+      if (!parseHash().startsWith('more/ai')) {
+        _stopClaudeStream();
+        return;
       }
-    };
-    _ccPollTimer = setTimeout(tick, 2000);
+      renderAI(document.getElementById('app'));
+    }, (_err) => {
+      // sseStream auto-reconnects with backoff; nothing to do here.
+    });
   }
   async function _fetchClaudeState() {
     try {
@@ -7016,8 +7021,22 @@
     } catch (_) {}
     return null;
   }
+  // Pull a human-readable message out of a FastAPI error response.
+  // FastAPI's HTTPException renders as `{"detail": "..."}` — showing
+  // the raw JSON in an alert is the worst-case fallback.
+  async function _errorMessage(resp) {
+    try {
+      const txt = await resp.text();
+      try {
+        const obj = JSON.parse(txt);
+        if (obj && typeof obj.detail === 'string') return obj.detail;
+      } catch (_) {}
+      return txt;
+    } catch (_) {
+      return `HTTP ${resp.status}`;
+    }
+  }
   async function renderAI(root) {
-    _stopCcPoll();
     let ai = null;
     try {
       const r = await fetch('/api/settings/ai');
@@ -7072,28 +7091,21 @@
     onAction('[data-action="cc-install"]', async () => {
       try {
         const r = await fetch('/api/settings/ai/claude/install', { method: 'POST' });
-        if (!r.ok) { alert(await r.text()); return; }
+        if (!r.ok) { alert(await _errorMessage(r)); return; }
       } catch (err) { alert(String(err)); return; }
+      // No client-side polling — server wakes us on install state
+      // transitions over /api/settings/ai/claude/stream.
       render();
-      _startCcPoll();
     });
     onAction('[data-action="cc-signin"]', async () => {
       try {
         const r = await fetch('/api/settings/ai/claude/signin', { method: 'POST' });
-        if (!r.ok) { alert(await r.text()); return; }
+        if (!r.ok) { alert(await _errorMessage(r)); return; }
       } catch (err) { alert(String(err)); return; }
-      // Render right away so user sees the "waiting" hint, then poll
-      // for the credentials file appearing.
       render();
-      _startCcPoll();
     });
 
-    // Start polling if we entered the screen mid-install or mid-signin
-    if (claudeState
-        && ((claudeState.install && claudeState.install.running)
-            || claudeState.state === 'not_authed')) {
-      _startCcPoll();
-    }
+    if (ai.provider === 'claude_code') _subscribeClaudeStream();
     refreshAiAvailability();
   }
 

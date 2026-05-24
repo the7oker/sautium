@@ -25,9 +25,21 @@ logger = logging.getLogger(__name__)
 def is_launcher_mode() -> bool:
     """True when backend runs as a native process on the host. Native
     mode is the only one where we can shell out to node/npm/claude
-    and open a terminal window."""
+    and open a terminal window.
+
+    The launcher writes its identity dir into the .env it passes to
+    the Docker backend (so the container can reuse the same Ed25519
+    key), so the *presence* of P2P_IDENTITY_DIR isn't enough — under
+    Docker the path is a Windows path (`C:\\Users\\...\\node_identity`)
+    that doesn't resolve inside the Linux container. Require the path
+    to actually exist on this filesystem."""
     from config import settings
-    return bool(settings.p2p_identity_dir)
+    if not settings.p2p_identity_dir:
+        return False
+    try:
+        return Path(settings.p2p_identity_dir).exists()
+    except OSError:
+        return False
 
 
 # --- Node / npm -------------------------------------------------------------
@@ -125,7 +137,14 @@ def get_claude_executable() -> Optional[Path]:
 def claude_authenticated() -> bool:
     """True iff Claude Code has stored OAuth credentials. Storage is
     platform-dependent: macOS Keychain entry "Claude Code-credentials",
-    Windows/Linux JSON at ~/.claude/.credentials.json."""
+    Windows/Linux JSON at ~/.claude/.credentials.json.
+
+    On Linux (incl. Docker) the CLI is launched as CLAUDE_USER by
+    `claude_code_runner._spawn_claude` (the CLI refuses to run as root
+    with --dangerously-skip-permissions), so credentials live in
+    that user's HOME — not the backend process's HOME, which under
+    Docker is /root and finds nothing while the host mount puts the
+    file at /home/claudeuser/.claude/.credentials.json."""
     if sys.platform == "darwin":
         try:
             result = subprocess.run(
@@ -138,7 +157,16 @@ def claude_authenticated() -> bool:
             logger.debug(f"Keychain probe failed: {e}")
             return False
 
-    creds = Path.home() / ".claude" / ".credentials.json"
+    home = Path.home()
+    if sys.platform == "linux":
+        try:
+            import pwd
+            from claude_code_runner import CLAUDE_USER
+            home = Path(pwd.getpwnam(CLAUDE_USER).pw_dir)
+        except (KeyError, ImportError) as e:
+            logger.debug(f"CLAUDE_USER lookup failed, falling back to Path.home(): {e}")
+
+    creds = home / ".claude" / ".credentials.json"
     if not creds.is_file():
         return False
     try:
@@ -153,7 +181,21 @@ def claude_authenticated() -> bool:
 
 def get_state() -> str:
     """Return one of: 'host_unsupported', 'node_missing', 'claude_missing',
-    'not_authed', 'ready'. host_unsupported is reserved for Docker mode."""
+    'not_authed', 'ready'.
+
+    Fact-based detection runs first: when the `claude` binary is
+    present and credentials are readable, the CLI is ready regardless
+    of whether the backend is "launcher mode" or "Docker with host
+    volume mount" — both serve identical chat requests. This mirrors
+    providers._claude_code_ready(); keep the two in sync.
+
+    The launcher-mode branches only fire as guidance when the CLI
+    isn't ready: in Docker without credentials we surface
+    'host_unsupported' (point user at the Desktop Launcher); in
+    native launcher mode we walk through node/install/signin so the
+    Web UI can drive setup."""
+    if get_claude_executable() is not None and claude_authenticated():
+        return "ready"
     if not is_launcher_mode():
         return "host_unsupported"
     node_ver = detect_node_version()
@@ -161,9 +203,7 @@ def get_state() -> str:
         return "node_missing"
     if get_claude_executable() is None:
         return "claude_missing"
-    if not claude_authenticated():
-        return "not_authed"
-    return "ready"
+    return "not_authed"
 
 
 # --- Install ----------------------------------------------------------------

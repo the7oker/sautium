@@ -52,6 +52,13 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 _library_sse_clients: List[Tuple[asyncio.Event, asyncio.AbstractEventLoop]] = []
 _library_sse_lock = threading.Lock()
 
+# Mirror channel for the AI > Claude Code screen. Wake events fire
+# from the install worker thread when state transitions (running →
+# done / error) so the Web UI re-fetches /api/settings/ai/claude/state
+# without polling. Same wake-event pattern as the library channel.
+_claude_sse_clients: List[Tuple[asyncio.Event, asyncio.AbstractEventLoop]] = []
+_claude_sse_lock = threading.Lock()
+
 
 def notify_library_subscribers() -> None:
     """Thread-safe wake of every connected Library SSE client.
@@ -63,6 +70,17 @@ def notify_library_subscribers() -> None:
             except RuntimeError:
                 # Loop closed; subscriber will clean itself up on the
                 # next iteration of its generator's finally block.
+                continue
+
+
+def notify_claude_subscribers() -> None:
+    """Thread-safe wake of every AI > Claude Code SSE client. Called
+    from the install worker thread on state transitions."""
+    with _claude_sse_lock:
+        for evt, loop in list(_claude_sse_clients):
+            try:
+                loop.call_soon_threadsafe(evt.set)
+            except RuntimeError:
                 continue
 
 
@@ -556,6 +574,50 @@ _claude_install_state: Dict[str, Any] = {
 }
 
 
+@router.get("/ai/claude/stream")
+async def claude_stream() -> StreamingResponse:
+    """SSE channel for the AI > Claude Code screen. Wakes whenever the
+    install worker mutates `_claude_install_state` or the signin
+    endpoint is invoked, so the client re-fetches /api/settings/ai/claude/state
+    in response to a real event instead of polling on a 2s timer.
+
+    Same wake-event pattern as /api/settings/library/stream — server
+    emits "data: {}" and the client re-pulls state."""
+    loop = asyncio.get_event_loop()
+    evt = asyncio.Event()
+
+    async def event_generator():
+        try:
+            with _claude_sse_lock:
+                _claude_sse_clients.append((evt, loop))
+            yield "data: {}\n\n"
+            while True:
+                try:
+                    await asyncio.wait_for(evt.wait(), timeout=20.0)
+                    evt.clear()
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                yield "data: {}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            with _claude_sse_lock:
+                _claude_sse_clients[:] = [
+                    (e, l) for e, l in _claude_sse_clients if e is not evt
+                ]
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/ai/claude/state")
 def get_claude_state() -> Dict[str, Any]:
     """State machine for the Claude Code subscription CLI. The Web UI
@@ -616,6 +678,7 @@ def post_claude_install() -> Dict[str, Any]:
         "progress": "Running npm install…",
         "error":   None,
     })
+    notify_claude_subscribers()
 
     def _worker():
         try:
@@ -626,6 +689,7 @@ def post_claude_install() -> Dict[str, Any]:
             _claude_install_state["error"] = str(e)
         finally:
             _claude_install_state["running"] = False
+            notify_claude_subscribers()
 
     threading.Thread(target=_worker, daemon=True, name="claude-install").start()
     return dict(_claude_install_state)
