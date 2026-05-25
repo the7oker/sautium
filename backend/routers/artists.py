@@ -265,27 +265,62 @@ def get_artist(
     artist["albums"] = rows
     artist["albums_sort"] = sort
 
-    artist["popular_tracks"] = db_query("""
+    # Popular tracks — hybrid rank:
+    #   1. Tracks that are popular on Last.fm come first, ordered by
+    #      Last.fm playcount. This is the "general / cultural" rank —
+    #      what the world considers the artist's hits, useful when
+    #      the user hasn't streamed this artist yet.
+    #   2. Tracks with no Last.fm data but local plays > 0 fall back
+    #      after, ordered by personal play_count. Keeps the block
+    #      useful for niche library-only material the user has
+    #      actually listened to.
+    #   3. Tracks with neither signal are dropped — a tile under a
+    #      "Popular" header that is actually random would lie about
+    #      the data. If the filter empties the list, the section
+    #      hides entirely (see renderArtist on the frontend).
+    rows = db_query("""
         SELECT DISTINCT ON (t.id)
                t.id::text AS track_id,
                mf.id AS media_file_id,
                t.title,
                al.title AS album,
                mf.duration_seconds AS duration,
-               COALESCE(lps.play_count, 0) AS plays
+               COALESCE(lps.play_count, 0)::int AS local_plays,
+               COALESCE(ts.playcount, 0)::bigint AS lastfm_playcount
         FROM tracks t
         JOIN track_artists ta ON ta.track_id = t.id
         JOIN media_files mf ON mf.track_id = t.id AND mf.is_analysis_source = true
         JOIN album_variants av ON av.id = mf.album_variant_id
         JOIN albums al ON al.id = av.album_id
         LEFT JOIN local_play_stats lps ON lps.track_id = t.id
+        LEFT JOIN track_stats ts ON ts.track_id = t.id AND ts.source = 'lastfm'
         WHERE ta.artist_id = %(id)s::uuid
-        ORDER BY t.id, COALESCE(lps.play_count, 0) DESC
+        ORDER BY t.id, COALESCE(ts.playcount, 0) DESC,
+                       COALESCE(lps.play_count, 0) DESC
     """, {"id": artist_id})
-    # Re-sort by plays after DISTINCT ON, take top 5
-    artist["popular_tracks"] = sorted(
-        artist["popular_tracks"], key=lambda r: r["plays"], reverse=True
-    )[:5]
+
+    def _rank(r):
+        # Tier 0 = Last.fm knows this track; tier 1 = only the user
+        # has played it locally. Within a tier, sort by the relevant
+        # metric descending.
+        local = int(r["local_plays"] or 0)
+        lastfm = int(r["lastfm_playcount"] or 0)
+        if lastfm > 0:
+            return (0, -lastfm, -local)
+        return (1, 0, -local)
+
+    filtered = [
+        r for r in rows
+        if (r.get("local_plays") or 0) > 0
+           or (r.get("lastfm_playcount") or 0) > 0
+    ]
+    filtered.sort(key=_rank)
+    top = filtered[:5]
+    for r in top:
+        # Internal-only signals; the tile renders title/album/duration.
+        r.pop("local_plays", None)
+        r.pop("lastfm_playcount", None)
+    artist["popular_tracks"] = top
 
     # Whole similar-artists list, ordered by the Last.fm match score
     # (0..1). No cap — the row is a horizontal scroll, so showing the
