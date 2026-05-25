@@ -3155,7 +3155,6 @@
         <div class="section-sep"></div>
         <div class="section-head">
           <h3>Similar artists</h3>
-          <button class="see-all" type="button">See all ›</button>
         </div>
         <div class="similar-row">${similarHtml}</div>
       ` : ''}

@@ -287,6 +287,10 @@ def get_artist(
         artist["popular_tracks"], key=lambda r: r["plays"], reverse=True
     )[:5]
 
+    # Whole similar-artists list, ordered by the Last.fm match score
+    # (0..1). No cap — the row is a horizontal scroll, so showing the
+    # full set lets the user explore beyond the obvious top-5 without
+    # a separate "see all" screen.
     artist["similar_artists"] = db_query("""
         SELECT a.id::text AS id,
                a.name,
@@ -305,8 +309,7 @@ def get_artist(
         FROM similar_artists sa
         JOIN artists a ON a.id = sa.similar_artist_id
         WHERE sa.artist_id = %(id)s::uuid
-        ORDER BY sa.match_score DESC NULLS LAST
-        LIMIT 5
+        ORDER BY sa.match_score DESC NULLS LAST, a.name
     """, {"id": artist_id})
 
     return artist
