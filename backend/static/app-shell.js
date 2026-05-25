@@ -2946,15 +2946,70 @@
   const SVG_PLUS = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
   const SVG_PLAY = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.2v13.6a1 1 0 001.5.87l11-6.8a1 1 0 000-1.74l-11-6.8A1 1 0 008 5.2z"/></svg>';
 
+  // Sort spec for the Artist screen's Albums block. Each entry maps
+  // the user-facing label, the picker hint, the inline glyph that
+  // prefixes the tile metric (release_year and a_z reuse the year
+  // and don't get a glyph), and which sorts skip the glyph entirely.
+  const ALBUMS_SORTS = [
+    { id: 'release_year',   label: 'Release year',   hint: 'Newest first',                       glyph: null },
+    { id: 'time_listened',  label: 'Time listened',  hint: 'My total time on each album',        glyph: 'clock' },
+    { id: 'popularity',     label: 'Popularity',     hint: 'Last.fm scrobble count',             glyph: 'plays' },
+    { id: 'recently_added', label: 'Recently added', hint: 'When it landed in your library',     glyph: 'plus' },
+    { id: 'a_z',            label: 'A–Z',            hint: 'Alphabetical, leading articles stripped', glyph: null },
+  ];
+  const ALBUMS_SORT_BY_ID = Object.fromEntries(ALBUMS_SORTS.map(s => [s.id, s]));
+  const ALBUMS_SORT_GLYPHS = {
+    clock:
+      '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+      + ' stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">'
+      + '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+    plays:
+      '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+      + ' stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="M4 20V9M10 20V4M16 20v-7M22 20v-4"/></svg>',
+    plus:
+      '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+      + ' stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="M12 5v14M5 12h14"/></svg>',
+  };
+  const ALBUMS_SORT_TRIGGER_SVG =
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"'
+    + ' stroke="currentColor" stroke-width="1.8" stroke-linecap="round"'
+    + ' stroke-linejoin="round">'
+    + '<path d="M4 7h12M4 12h8M4 17h4"/>'
+    + '<path d="M18 8v12M14 16l4 4 4-4"/></svg>';
+  const ALBUMS_SORT_CHEV_SVG =
+    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none"'
+    + ' stroke="currentColor" stroke-width="2.2" stroke-linecap="round"'
+    + ' stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
+  const ALBUMS_SORT_CHECK_SVG =
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none"'
+    + ' stroke="currentColor" stroke-width="2.4" stroke-linecap="round"'
+    + ' stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>';
+
+  async function _fetchAlbumsSort() {
+    try {
+      const r = await fetch('/api/settings/albums-sort');
+      if (r.ok) {
+        const data = await r.json();
+        if (ALBUMS_SORT_BY_ID[data.sort]) return data.sort;
+      }
+    } catch (_) {}
+    return 'release_year';
+  }
+
   async function renderArtist(root, artistId) {
     root.innerHTML = '';
     const screen = document.createElement('div');
     screen.className = 'detail-screen';
     root.appendChild(screen);
 
+    const sort = await _fetchAlbumsSort();
     let d;
     try {
-      const resp = await fetch('/api/artists/' + encodeURIComponent(artistId));
+      const url = '/api/artists/' + encodeURIComponent(artistId)
+                  + '?sort=' + encodeURIComponent(sort);
+      const resp = await fetch(url);
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       d = await resp.json();
     } catch (err) {
@@ -2985,7 +3040,15 @@
         : `<span class="tag-chip">${escapeHtml(t.name)}</span>`)
       .join('');
 
-    const albumsHtml = (d.albums || []).map(a => {
+    const sortSpec = ALBUMS_SORT_BY_ID[d.albums_sort] || ALBUMS_SORT_BY_ID.release_year;
+    const glyphSvg = sortSpec.glyph ? ALBUMS_SORT_GLYPHS[sortSpec.glyph] || '' : '';
+    const glyphHtml = glyphSvg ? `<span class="ic">${glyphSvg}</span>` : '';
+    // Walk the (already group-sorted by the backend) album list once
+    // and inject a `<span class="group-gap">` between the last
+    // is_primary tile and the first feat. tile. Keeps the visual
+    // grouping signal that role_priority drives on the server side.
+    const albumsList = d.albums || [];
+    const albumsHtml = albumsList.map((a, i) => {
       const c = coverPlaceholderColors(a.title || a.id);
       const url = coverUrl(a);
       const inner = url
@@ -2999,12 +3062,22 @@
       // so the discography is honest without splitting into sections.
       const featBadge = a.is_primary === false
         ? '<span class="album-tile-feat">feat.</span>' : '';
+      const prev = i > 0 ? albumsList[i - 1] : null;
+      const gap = prev && prev.is_primary !== false && a.is_primary === false
+        ? '<span class="group-gap" aria-hidden="true"></span>'
+        : '';
+      const metricRaw = (a.metric || '').toString();
+      const hasMetric = !!metricRaw;
+      const metricLine = hasMetric
+        ? `${glyphHtml}${escapeHtml(metricRaw)}`
+        : `${glyphHtml}—`;
       return `
+        ${gap}
         <button class="album-tile" type="button" data-album-id="${escapeHtml(a.id)}">
           <div class="album-cover"
                style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${inner}${featBadge}</div>
           <div class="album-tile-title">${escapeHtml(a.title || '')}</div>
-          <div class="album-tile-year">${a.year || ''}</div>
+          <div class="album-tile-year${hasMetric ? '' : ' unavailable'}">${metricLine}</div>
         </button>`;
     }).join('');
 
@@ -3062,7 +3135,14 @@
         <div class="section-sep"></div>
         <div class="section-head">
           <h3>Albums</h3>
-          <button class="see-all" type="button">See all ›</button>
+          <button class="sort-trigger" type="button"
+                  data-action="albums-sort"
+                  aria-haspopup="dialog" aria-expanded="false"
+                  aria-label="Sort albums by ${escapeHtml(sortSpec.label)}">
+            <span class="glyph">${ALBUMS_SORT_TRIGGER_SVG}</span>
+            <span class="label">${escapeHtml(sortSpec.label)}</span>
+            <span class="chev">${ALBUMS_SORT_CHEV_SVG}</span>
+          </button>
         </div>
         <div class="h-scroll">${albumsHtml}</div>
       ` : ''}
@@ -3099,8 +3179,68 @@
       }
     }
 
+    const sortBtn = screen.querySelector('[data-action="albums-sort"]');
+    if (sortBtn) {
+      sortBtn.addEventListener('click', () => {
+        openAlbumsSortPicker(d.albums_sort || 'release_year', async (picked) => {
+          if (!picked || picked === d.albums_sort) return;
+          try {
+            await fetch('/api/settings/albums-sort', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ sort: picked }),
+            });
+          } catch (_) {}
+          // Re-fetch the whole artist payload so the tiles get the
+          // metric formatted server-side for the new sort.
+          renderArtist(root, artistId);
+        });
+      });
+    }
+
     wireDetailHandlers(screen);
     updatePlayingHighlight();
+  }
+
+  function openAlbumsSortPicker(currentSort, onPick) {
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    const rows = ALBUMS_SORTS.map(s => `
+      <button class="sort-row${s.id === currentSort ? ' active' : ''}"
+              type="button"
+              role="radio"
+              aria-checked="${s.id === currentSort ? 'true' : 'false'}"
+              data-sort-id="${escapeHtml(s.id)}">
+        <div>
+          <div class="sort-row-label">${escapeHtml(s.label)}</div>
+          <div class="sort-row-hint">${escapeHtml(s.hint)}</div>
+        </div>
+        <span class="sort-check">${ALBUMS_SORT_CHECK_SVG}</span>
+      </button>
+    `).join('');
+    overlay.innerHTML = `
+      <div class="confirm-sheet">
+        <div class="sheet-handle" aria-hidden="true"></div>
+        <h4 class="sheet-title">Sort albums by</h4>
+        <div class="sort-list">${rows}</div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    const close = (picked) => {
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+      if (typeof onPick === 'function') onPick(picked);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') close(null); };
+    document.addEventListener('keydown', onKey);
+    overlay.addEventListener('click', e => {
+      if (e.target === overlay) close(null);
+    });
+    overlay.querySelectorAll('[data-sort-id]').forEach(btn => {
+      btn.addEventListener('click', () => close(btn.dataset.sortId));
+    });
   }
 
   async function renderAlbum(root, albumId) {

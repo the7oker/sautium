@@ -8,7 +8,9 @@ representative cover for each. Photo URL is reserved for future
 Last.fm artist-image enrichment — returned as null until Step 1.7.
 """
 
-from fastapi import APIRouter, HTTPException
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException, Query
 
 from db_pool import db_query, db_query_one
 
@@ -16,8 +18,77 @@ from db_pool import db_query, db_query_one
 router = APIRouter(prefix="/api/artists", tags=["artists"])
 
 
+# Supported album-sort modes. Each one corresponds to an ORDER BY
+# expression injected below the role_priority grouping, plus a
+# metric-line formatter that the tile renders under the title.
+_ALBUM_SORTS = {
+    "release_year",   # default
+    "time_listened",
+    "popularity",
+    "recently_added",
+    "a_z",
+}
+
+
+def _fmt_seconds(total: int) -> str:
+    """Compact listening-time label, '12h 4m' / '42m' / '—' for nothing."""
+    if total is None or total <= 0:
+        return ""
+    minutes = int(total) // 60
+    if minutes < 1:
+        return ""
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, rem = divmod(minutes, 60)
+    if rem == 0:
+        return f"{hours}h"
+    return f"{hours}h {rem}m"
+
+
+def _fmt_plays(count: int) -> str:
+    """Human plays — 1.2M / 280k / 850. Last.fm scrobble counts can be
+    huge; tile space is tight, so we compact above 1k."""
+    if count is None or count <= 0:
+        return ""
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M".replace(".0M", "M")
+    if count >= 1000:
+        return f"{count / 1000:.0f}k"
+    return str(count)
+
+
+def _fmt_added(added_at) -> str:
+    """'3d ago' / '12h ago' / 'today'. The tile prefixes a small `+`
+    glyph so the unit (when the album was added) is unambiguous."""
+    if added_at is None:
+        return ""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    if added_at.tzinfo is None:
+        added_at = added_at.replace(tzinfo=timezone.utc)
+    delta = now - added_at
+    secs = int(delta.total_seconds())
+    if secs < 3600:
+        return "today"
+    if secs < 86400:
+        return f"{secs // 3600}h ago"
+    days = secs // 86400
+    if days < 14:
+        return f"{days}d ago"
+    if days < 60:
+        return f"{days // 7}w ago"
+    if days < 365:
+        return f"{days // 30}mo ago"
+    return f"{days // 365}y ago"
+
+
 @router.get("/{artist_id}")
-def get_artist(artist_id: str) -> dict:
+def get_artist(
+    artist_id: str,
+    sort: str = Query(default="release_year"),
+) -> dict:
+    if sort not in _ALBUM_SORTS:
+        sort = "release_year"
     artist = db_query_one("""
         SELECT a.id::text AS id,
                a.name,
@@ -85,10 +156,50 @@ def get_artist(artist_id: str) -> dict:
     # collabs (multiple primary artists) follow, and featured-only
     # appearances close out the grid. is_primary feeds a small
     # "feat." badge on tiles where the artist isn't the headline.
-    artist["albums"] = db_query("""
+    #
+    # Per-album metrics (listening time, scrobble count, added-at) are
+    # always computed so the UI can switch sort without an extra
+    # round-trip. role_priority is the primary ORDER BY column for
+    # every sort — solo work stays grouped, feat. credits stay in
+    # their own block — and the user-picked column controls the order
+    # within each group.
+    sort_expr = {
+        "release_year":   "al.release_year DESC NULLS LAST, al.title",
+        "time_listened":  "time_listened_seconds DESC NULLS LAST, al.title",
+        "popularity":     "popularity DESC NULLS LAST, al.title",
+        "recently_added": "al.created_at DESC NULLS LAST, al.title",
+        "a_z":            ("regexp_replace(LOWER(al.title), "
+                           "'^(the|a|an)\\s+', '', 'i')"),
+    }[sort]
+
+    rows = db_query(f"""
+        WITH metrics AS (
+            SELECT al.id AS album_id,
+                   COALESCE(SUM(lh.duration_listened), 0)::bigint
+                       AS time_listened_seconds,
+                   COALESCE(SUM(ts.playcount), 0)::bigint
+                       AS popularity
+            FROM albums al
+            JOIN album_variants av ON av.album_id = al.id
+            JOIN media_files mf ON mf.album_variant_id = av.id
+            JOIN tracks t ON t.id = mf.track_id
+            LEFT JOIN listening_history lh ON lh.track_id = t.id
+            LEFT JOIN track_stats ts
+                   ON ts.track_id = t.id AND ts.source = 'lastfm'
+            WHERE al.id IN (
+                SELECT DISTINCT av2.album_id
+                FROM album_variants av2
+                JOIN media_files mf2 ON mf2.album_variant_id = av2.id
+                JOIN tracks t2 ON t2.id = mf2.track_id
+                JOIN track_artists ta2 ON ta2.track_id = t2.id
+                WHERE ta2.artist_id = %(id)s::uuid
+            )
+            GROUP BY al.id
+        )
         SELECT al.id::text AS id,
                al.title,
                al.release_year AS year,
+               al.created_at AS added_at,
                (SELECT mf.cover_id::text
                 FROM media_files mf
                 JOIN album_variants av ON av.id = mf.album_variant_id
@@ -109,12 +220,15 @@ def get_artist(artist_id: str) -> dict:
                  WHEN BOOL_OR(ta.role = 'primary' AND ta.artist_id = %(id)s::uuid)
                    THEN 2
                  ELSE 3
-               END AS role_priority
+               END AS role_priority,
+               m.time_listened_seconds,
+               m.popularity
         FROM albums al
         JOIN album_variants av ON av.album_id = al.id
         JOIN media_files mf ON mf.album_variant_id = av.id
         JOIN tracks t ON t.id = mf.track_id
         JOIN track_artists ta ON ta.track_id = t.id
+        JOIN metrics m ON m.album_id = al.id
         WHERE al.id IN (
             SELECT DISTINCT av2.album_id
             FROM album_variants av2
@@ -123,10 +237,33 @@ def get_artist(artist_id: str) -> dict:
             JOIN track_artists ta2 ON ta2.track_id = t2.id
             WHERE ta2.artist_id = %(id)s::uuid
         )
-        GROUP BY al.id, al.title, al.release_year
-        ORDER BY role_priority, al.release_year DESC NULLS LAST, al.title
-        LIMIT 12
+        GROUP BY al.id, al.title, al.release_year, al.created_at,
+                 m.time_listened_seconds, m.popularity
+        ORDER BY role_priority, {sort_expr}
     """, {"id": artist_id})
+
+    # Pre-format the metric so the UI doesn't have to mirror server
+    # formatting rules. Empty string == unavailable; the tile renders
+    # it as '—' in the dimmed style.
+    metric_for = {
+        "release_year":   lambda r: (str(r["year"]) if r["year"] else ""),
+        "time_listened":  lambda r: _fmt_seconds(r["time_listened_seconds"]),
+        "popularity":     lambda r: _fmt_plays(r["popularity"]),
+        "recently_added": lambda r: _fmt_added(r["added_at"]),
+        "a_z":            lambda r: (str(r["year"]) if r["year"] else ""),
+    }[sort]
+
+    for r in rows:
+        r["metric"] = metric_for(r)
+        # Drop the raw metric columns from the response — they are
+        # implementation detail of the sort; the tile only uses
+        # `metric` + the screen-wide `sort` value.
+        r.pop("time_listened_seconds", None)
+        r.pop("popularity", None)
+        r.pop("added_at", None)
+
+    artist["albums"] = rows
+    artist["albums_sort"] = sort
 
     artist["popular_tracks"] = db_query("""
         SELECT DISTINCT ON (t.id)

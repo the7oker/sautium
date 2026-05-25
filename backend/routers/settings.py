@@ -167,6 +167,11 @@ _DEFAULTS: Dict[str, Any] = {
     # user_settings overrides them on PUT /api/settings/hqplayer.
     "hqplayer.host":             None,
     "hqplayer.port":             None,
+    # Artist-screen Albums block sort. release_year is the default;
+    # other valid values: time_listened, popularity, recently_added,
+    # a_z. UI exposes this through a bottom-sheet picker on the
+    # Albums section header.
+    "albums.sort":               "release_year",
     # last sync metadata — written by the sync runner when a cycle
     # completes; surfaced in the "Last sync · N new items" row.
     "sync.last_at":              None,
@@ -719,6 +724,36 @@ def post_claude_signin() -> Dict[str, Any]:
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"opened": True}
+
+
+# ============================================================
+# Albums sort (Artist screen)
+# ============================================================
+
+_ALBUMS_SORTS = {
+    "release_year", "time_listened", "popularity",
+    "recently_added", "a_z",
+}
+
+
+class AlbumsSortUpdate(BaseModel):
+    sort: str = Field(..., max_length=40)
+
+
+@router.get("/albums-sort")
+def get_albums_sort() -> Dict[str, Any]:
+    val = _read("albums.sort")
+    if val not in _ALBUMS_SORTS:
+        val = "release_year"
+    return {"sort": val}
+
+
+@router.put("/albums-sort")
+def put_albums_sort(req: AlbumsSortUpdate) -> Dict[str, Any]:
+    if req.sort not in _ALBUMS_SORTS:
+        raise HTTPException(status_code=400, detail="Unknown sort key")
+    _write("albums.sort", req.sort)
+    return {"sort": req.sort}
 
 
 # ============================================================

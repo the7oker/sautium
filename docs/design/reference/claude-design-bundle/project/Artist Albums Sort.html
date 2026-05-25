@@ -1,0 +1,929 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sautium · Artist · Albums sort redesign</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* Scaling — same model as tokens.css, but at 1rem == 13px for the mock canvas */
+    --base: 13;
+    --design-viewport: 360;
+    --px: calc(1rem / var(--base));
+
+    --color-foundation:   #1B1714;
+    --color-surface:      #2A2420;
+    --color-surface-hi:   #342D28;
+    --color-surface-lo:   #221D1A;
+    --color-divider:      #3A322C;
+    --color-text:         #EDE2D4;
+    --color-text-muted:   #A69B8E;
+    --color-text-dim:     #6E665C;
+    --color-amber:        #E8B06F;
+    --color-amber-weak:   rgba(232,176,111,.14);
+    --color-amber-stripe: rgba(232,176,111,.06);
+    --color-blue:         #4A7FA7;
+    --color-positive:     #8DA77B;
+    --color-negative:     #C1564E;
+
+    --font-sans: "Inter Tight", ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+    --radius-sm: calc(4  * var(--px));
+    --radius-md: calc(8  * var(--px));
+    --radius-lg: calc(14 * var(--px));
+
+    --space-1: calc(4  * var(--px));
+    --space-2: calc(8  * var(--px));
+    --space-3: calc(12 * var(--px));
+    --space-4: calc(16 * var(--px));
+    --space-5: calc(24 * var(--px));
+    --space-6: calc(32 * var(--px));
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: radial-gradient(ellipse at 50% 15%, #221B17 0%, #15110F 70%) no-repeat, #15110F;
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    padding: 40px 24px 80px;
+  }
+
+  /* ============ DOC SHELL ============ */
+  .doc { max-width: 920px; margin: 0 auto; }
+  .doc-head { margin-bottom: 32px; }
+  .doc-title { margin: 0 0 8px; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+  .doc-sub {
+    color: var(--color-text-muted);
+    font-size: 13px;
+    text-wrap: pretty;
+    max-width: 720px;
+    line-height: 1.5;
+  }
+  h2.variant-h {
+    margin: 40px 0 14px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--color-divider);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }
+  h2.variant-h .num { color: var(--color-amber); margin-right: 8px; }
+  h2.variant-h .title { color: var(--color-text); letter-spacing: 0; text-transform: none; font-family: var(--font-sans); font-size: 15px; font-weight: 600; margin-left: 6px; }
+
+  .variant-pair {
+    display: grid;
+    grid-template-columns: 360px 1fr;
+    gap: 28px;
+    align-items: start;
+  }
+
+  /* ============ ARTIST SECTION (360pt viewport excerpt) ============ */
+  .stage {
+    width: 360px;
+    background: var(--color-foundation);
+    border-radius: var(--radius-md);
+    outline: 1px solid rgba(237,226,212,.06);
+    overflow: hidden;
+    padding: calc(14 * var(--px)) 0 calc(20 * var(--px));
+    position: relative;
+  }
+  .stage.with-sheet { padding-bottom: 0; }
+
+  /* ============ SECTION HEAD ============ */
+  .section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: calc(6 * var(--px)) calc(20 * var(--px)) calc(10 * var(--px));
+    gap: var(--space-3);
+  }
+  .section-head h3 {
+    margin: 0;
+    font-size: calc(15 * var(--px));
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--color-text);
+  }
+  .sort-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: calc(4 * var(--px));
+    height: calc(44 * var(--px));
+    padding: 0 calc(10 * var(--px)) 0 calc(8 * var(--px));
+    background: transparent;
+    border: none;
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    font-size: calc(12.5 * var(--px));
+    font-weight: 500;
+    cursor: pointer;
+    margin-right: calc(-10 * var(--px));         /* optical hit-target alignment to edge */
+  }
+  .sort-trigger .glyph {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-text-muted);
+  }
+  .sort-trigger .label {
+    color: var(--color-text);
+    letter-spacing: -0.005em;
+  }
+  .sort-trigger .chev {
+    color: var(--color-text-dim);
+    margin-left: calc(2 * var(--px));
+  }
+
+  /* ============ HORIZONTAL SCROLL ============ */
+  .h-scroll {
+    display: flex;
+    gap: calc(12 * var(--px));
+    padding: 0 calc(20 * var(--px)) calc(4 * var(--px));
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .h-scroll::-webkit-scrollbar { display: none; }
+
+  /* ============ ALBUM TILE ============ */
+  .album-tile {
+    flex: 0 0 calc(104 * var(--px));
+    display: flex;
+    flex-direction: column;
+    gap: calc(6 * var(--px));
+    cursor: pointer;
+  }
+  .album-cover {
+    position: relative;
+    width: calc(104 * var(--px));
+    height: calc(104 * var(--px));
+    overflow: hidden;
+    background: var(--color-surface);
+    border-radius: 0;
+  }
+  .album-cover img {
+    width: 100%; height: 100%;
+    object-fit: cover; display: block;
+  }
+  /* Inline SVG covers as data-style placeholders */
+  .album-cover.tone-a { background: linear-gradient(135deg, #4d3a2a 0%, #2a1d14 100%); }
+  .album-cover.tone-b { background: linear-gradient(135deg, #5b6e8a 0%, #1f2933 100%); }
+  .album-cover.tone-c { background: linear-gradient(135deg, #8a6e5b 0%, #2e1f17 100%); }
+  .album-cover.tone-d { background: linear-gradient(135deg, #6e8a5b 0%, #1d2a18 100%); }
+  .album-cover.tone-e { background: linear-gradient(135deg, #8a5b6e 0%, #2a1820 100%); }
+  .album-cover.tone-f { background: linear-gradient(135deg, #5b8a8a 0%, #1f2a2a 100%); }
+  .album-cover.tone-g { background: linear-gradient(135deg, #3a322c 0%, #221d1a 100%); }
+  .album-cover .glyph {
+    position: absolute;
+    inset: 0;
+    display: grid; place-items: center;
+    color: rgba(237,226,212,0.22);
+    font-family: var(--font-mono);
+    font-size: calc(22 * var(--px));
+    letter-spacing: 0.04em;
+    font-weight: 500;
+  }
+
+  /* feat. pill keeps its existing place over the cover */
+  .album-tile-feat {
+    position: absolute;
+    left: calc(6 * var(--px));
+    top: calc(6 * var(--px));
+    height: calc(18 * var(--px));
+    padding: 0 calc(7 * var(--px));
+    display: inline-flex;
+    align-items: center;
+    font-family: var(--font-sans);
+    font-size: calc(9.5 * var(--px));
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: lowercase;
+    color: var(--color-text);
+    background: rgba(14,10,8,0.65);
+    border-radius: calc(9 * var(--px));
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+
+  .album-tile-title {
+    font-family: var(--font-sans);
+    font-size: calc(12 * var(--px));
+    font-weight: 500;
+    color: var(--color-text);
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: calc(104 * var(--px));
+  }
+  .album-tile-year {
+    font-family: var(--font-mono);
+    font-size: calc(10.5 * var(--px));
+    color: var(--color-blue);
+    letter-spacing: 0.02em;
+    line-height: 1.3;
+  }
+  .album-tile-year.unavailable {
+    color: var(--color-text-dim);
+  }
+  .album-tile-year .ic {
+    display: inline-flex;
+    align-items: center;
+    margin-right: calc(3 * var(--px));
+    vertical-align: -1px;
+    color: var(--color-blue);
+  }
+  .album-tile-year.unavailable .ic { color: var(--color-text-dim); }
+
+  /* tiny visual separator between primary and featured group ends */
+  .group-gap {
+    flex: 0 0 calc(20 * var(--px));
+    align-self: stretch;
+    border-left: 1px dashed var(--color-divider);
+    margin: calc(8 * var(--px)) 0;
+    opacity: 0.6;
+  }
+
+  /* ============ BOTTOM SHEET ============ */
+  .confirm-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(11,8,7,.55);
+    z-index: 10;
+    display: flex;
+    align-items: flex-end;
+    justify-content: stretch;
+  }
+  .confirm-sheet {
+    width: 100%;
+    background: var(--color-surface);
+    border-top-left-radius: var(--radius-lg);
+    border-top-right-radius: var(--radius-lg);
+    padding: 0 0 calc(10 * var(--px));
+    box-shadow: 0 calc(-16 * var(--px)) calc(40 * var(--px)) rgba(0,0,0,.45);
+  }
+  .sheet-handle {
+    width: calc(36 * var(--px));
+    height: calc(4 * var(--px));
+    margin: calc(8 * var(--px)) auto calc(6 * var(--px));
+    background: rgba(237,226,212,.4);
+    border-radius: calc(2 * var(--px));
+  }
+  .sheet-title {
+    margin: 0;
+    padding: calc(8 * var(--px)) calc(20 * var(--px)) calc(12 * var(--px));
+    font-family: var(--font-mono);
+    font-size: calc(10.5 * var(--px));
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }
+  .sort-list {
+    display: flex;
+    flex-direction: column;
+  }
+  .sort-row {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: var(--space-3);
+    align-items: center;
+    padding: calc(14 * var(--px)) calc(20 * var(--px));
+    border-top: 1px solid var(--color-divider);
+    cursor: pointer;
+  }
+  .sort-row.active {
+    background: var(--color-amber-stripe);
+  }
+  .sort-row.active::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: calc(3 * var(--px));
+    background: var(--color-amber);
+  }
+  .sort-row-label {
+    font-family: var(--font-sans);
+    font-size: calc(14 * var(--px));
+    font-weight: 500;
+    color: var(--color-text);
+    letter-spacing: -0.005em;
+  }
+  .sort-row-hint {
+    margin-top: calc(2 * var(--px));
+    font-family: var(--font-mono);
+    font-size: calc(10 * var(--px));
+    color: var(--color-text-dim);
+    letter-spacing: 0.04em;
+  }
+  .sort-row.active .sort-row-hint { color: var(--color-amber); }
+  .sort-check {
+    color: var(--color-amber);
+    opacity: 0;
+  }
+  .sort-row.active .sort-check { opacity: 1; }
+
+  /* ============ SPEC PANEL ============ */
+  .spec {
+    background: var(--color-surface);
+    border-radius: var(--radius-md);
+    padding: 16px 18px;
+    color: var(--color-text);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .spec h4 {
+    margin: 0 0 8px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }
+  .spec ul {
+    margin: 0;
+    padding-left: 18px;
+    color: var(--color-text-muted);
+    text-wrap: pretty;
+  }
+  .spec li { margin: 4px 0; }
+  .spec li b { color: var(--color-text); font-weight: 600; }
+  .spec li code,
+  .spec code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--color-blue);
+    background: var(--color-surface-lo);
+    border-radius: 3px;
+    padding: 1px 5px;
+    letter-spacing: 0.02em;
+  }
+  .spec li .cool { color: var(--color-blue); font-family: var(--font-mono); }
+  .spec li .amber { color: var(--color-amber); font-weight: 600; }
+
+  /* ============ INLINE TINY LEGEND CHIP IN SECTION HEADER ============ */
+  /* When sort doesn't use year, show small "ic" prefix to disambiguate metric.
+     Implemented via a generic prefix on .album-tile-year. */
+
+</style>
+</head>
+<body>
+
+<div class="doc">
+
+  <header class="doc-head">
+    <h1 class="doc-title">Artist · Albums block — sort redesign</h1>
+    <p class="doc-sub">
+      Replaces the dead <code style="font-family:var(--font-mono); color:var(--color-blue);">See all ›</code> button with a sort picker. Header trigger ≥ 44 px, bottom-sheet uses the existing
+      <code style="font-family:var(--font-mono); color:var(--color-blue);">.confirm-overlay</code> / <code style="font-family:var(--font-mono); color:var(--color-blue);">.confirm-sheet</code>. The horizontal scroll is preserved — backend drops the LIMIT, so the row is the full discography. Each tile's
+      secondary line is the active sort's metric, mono + cool blue. <code style="font-family:var(--font-mono); color:var(--color-blue);">feat.</code> grouping is preserved across every sort: chosen sort is applied
+      within the "primary" group and within the "featured" group independently.
+    </p>
+  </header>
+
+  <!-- ================================================================ -->
+  <!-- V1 · DEFAULT (Release year)                                      -->
+  <!-- ================================================================ -->
+  <h2 class="variant-h"><span class="num">V1</span>Default state<span class="title">Sort = Release year (newest)</span></h2>
+
+  <div class="variant-pair">
+    <div class="stage">
+
+      <div class="section-head">
+        <h3>Albums</h3>
+        <button class="sort-trigger" aria-haspopup="dialog" aria-expanded="false" aria-label="Sort albums by Release year">
+          <span class="glyph">
+            <!-- sort glyph: two stacked lines + arrow (Material-style) -->
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 7h12M4 12h8M4 17h4"/>
+              <path d="M18 8v12M14 16l4 4 4-4"/>
+            </svg>
+          </span>
+          <span class="label">Release year</span>
+          <span class="chev">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M6 9l6 6 6-6"/>
+            </svg>
+          </span>
+        </button>
+      </div>
+
+      <div class="h-scroll">
+        <div class="album-tile">
+          <div class="album-cover tone-a"><div class="glyph">WB</div></div>
+          <div class="album-tile-title">Wingbeats</div>
+          <div class="album-tile-year">2019</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-b"><div class="glyph">DC</div></div>
+          <div class="album-tile-title">Dawn Chorus</div>
+          <div class="album-tile-year">2017</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-c"><div class="glyph">AR</div></div>
+          <div class="album-tile-title">Archipelago</div>
+          <div class="album-tile-year">2015</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-d"><div class="glyph">NW</div></div>
+          <div class="album-tile-title">Night Walks</div>
+          <div class="album-tile-year">2013</div>
+        </div>
+        <!-- featured group separator -->
+        <span class="group-gap" aria-hidden="true"></span>
+        <div class="album-tile">
+          <div class="album-cover tone-e">
+            <span class="album-tile-feat">feat.</span>
+            <div class="glyph">CO</div>
+          </div>
+          <div class="album-tile-title">Composition</div>
+          <div class="album-tile-year">2021</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-f">
+            <span class="album-tile-feat">feat.</span>
+            <div class="glyph">RR</div>
+          </div>
+          <div class="album-tile-title">Re-Routes</div>
+          <div class="album-tile-year">2016</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="spec">
+      <h4>Spec · header trigger</h4>
+      <ul>
+        <li>Trigger height <b>≥ 44 px</b> — <code>height: calc(44 * var(--px))</code> · padding <code>0 10px 0 8px</code>.</li>
+        <li>Glyph <b>sort-list-arrow</b> (14×14), <code>--color-text-muted</code>.</li>
+        <li>Label "Release year" — <code>Inter Tight 500 / calc(12.5 * var(--px))</code>, <code>--color-text</code>.</li>
+        <li>Chevron <b>down</b>, 12×12, <code>--color-text-dim</code>.</li>
+        <li>Optical alignment: <code>margin-right: calc(-10 * var(--px))</code> so the glyph sits on the same gutter as the section title.</li>
+        <li>Tile metric line stays <code>.album-tile-year</code> — JetBrains Mono · 10.5 px · <code>--color-blue</code> · 0.02em tracking.</li>
+        <li><b>Featured grouping</b>: a dashed <code>.group-gap</code> 1 px vertical hairline separates the primary &amp; <code>feat.</code> tiles. Sort applies independently to each group.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- V2 · Time listened (data-rich tile)                              -->
+  <!-- ================================================================ -->
+  <h2 class="variant-h"><span class="num">V2</span>Sort = Time listened<span class="title">Metric = my total time on album</span></h2>
+
+  <div class="variant-pair">
+    <div class="stage">
+
+      <div class="section-head">
+        <h3>Albums</h3>
+        <button class="sort-trigger" aria-haspopup="dialog" aria-expanded="false" aria-label="Sort albums by Time listened">
+          <span class="glyph">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 7h12M4 12h8M4 17h4"/>
+              <path d="M18 8v12M14 16l4 4 4-4"/>
+            </svg>
+          </span>
+          <span class="label">Time listened</span>
+          <span class="chev">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M6 9l6 6 6-6"/>
+            </svg>
+          </span>
+        </button>
+      </div>
+
+      <div class="h-scroll">
+        <div class="album-tile">
+          <div class="album-cover tone-c"><div class="glyph">AR</div></div>
+          <div class="album-tile-title">Archipelago</div>
+          <div class="album-tile-year">
+            <span class="ic">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+            </span>12h 4m</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-a"><div class="glyph">WB</div></div>
+          <div class="album-tile-title">Wingbeats</div>
+          <div class="album-tile-year">
+            <span class="ic"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>8h 32m</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-d"><div class="glyph">NW</div></div>
+          <div class="album-tile-title">Night Walks</div>
+          <div class="album-tile-year">
+            <span class="ic"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>3h 18m</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-b"><div class="glyph">DC</div></div>
+          <div class="album-tile-title">Dawn Chorus</div>
+          <div class="album-tile-year unavailable">
+            <span class="ic"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>—</div>
+        </div>
+        <span class="group-gap" aria-hidden="true"></span>
+        <div class="album-tile">
+          <div class="album-cover tone-e">
+            <span class="album-tile-feat">feat.</span>
+            <div class="glyph">CO</div>
+          </div>
+          <div class="album-tile-title">Composition</div>
+          <div class="album-tile-year">
+            <span class="ic"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>1h 12m</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-f">
+            <span class="album-tile-feat">feat.</span>
+            <div class="glyph">RR</div>
+          </div>
+          <div class="album-tile-title">Re-Routes</div>
+          <div class="album-tile-year unavailable">
+            <span class="ic"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="spec">
+      <h4>Spec · metric variant</h4>
+      <ul>
+        <li>Metric line keeps class <b><code>.album-tile-year</code></b> — we add a small <code>.ic</code> mono-blue prefix glyph (10×10) so the unit is unambiguous when the value is not a year.</li>
+        <li>Unavailable value (e.g. <code>play_count = 0</code>) renders as <code>—</code> with <code>.album-tile-year.unavailable</code> swapping the colour to <code>--color-text-dim</code>. Tile is <b>not hidden</b>.</li>
+        <li>Mono-blue stays the only colour on the metric, including the prefix glyph — keeps the "numbers are cool" semantic consistent.</li>
+        <li>Sort applies <b>within</b> primary group, then <b>within</b> featured group; the dashed gap preserves grouping.</li>
+        <li>Formats <span class="cool">12h 4m</span> · <span class="cool">8h 32m</span> · <span class="cool">280k</span> · <span class="cool">added 3d ago</span>. Sub-hour minutes show as <code>42m</code>; under a minute as <code>—</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- V3 · Popularity (scrobbles)                                       -->
+  <!-- ================================================================ -->
+  <h2 class="variant-h"><span class="num">V3</span>Sort = Popularity<span class="title">Metric = Last.fm scrobble count</span></h2>
+
+  <div class="variant-pair">
+    <div class="stage">
+
+      <div class="section-head">
+        <h3>Albums</h3>
+        <button class="sort-trigger" aria-haspopup="dialog" aria-expanded="false">
+          <span class="glyph">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 7h12M4 12h8M4 17h4"/>
+              <path d="M18 8v12M14 16l4 4 4-4"/>
+            </svg>
+          </span>
+          <span class="label">Popularity</span>
+          <span class="chev">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </span>
+        </button>
+      </div>
+
+      <div class="h-scroll">
+        <div class="album-tile">
+          <div class="album-cover tone-a"><div class="glyph">WB</div></div>
+          <div class="album-tile-title">Wingbeats</div>
+          <div class="album-tile-year">
+            <span class="ic">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            </span>280k</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-c"><div class="glyph">AR</div></div>
+          <div class="album-tile-title">Archipelago</div>
+          <div class="album-tile-year">
+            <span class="ic"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></span>184k</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-d"><div class="glyph">NW</div></div>
+          <div class="album-tile-title">Night Walks</div>
+          <div class="album-tile-year">
+            <span class="ic"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></span>92k</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-b"><div class="glyph">DC</div></div>
+          <div class="album-tile-title">Dawn Chorus</div>
+          <div class="album-tile-year">
+            <span class="ic"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></span>41k</div>
+        </div>
+        <span class="group-gap" aria-hidden="true"></span>
+        <div class="album-tile">
+          <div class="album-cover tone-e">
+            <span class="album-tile-feat">feat.</span>
+            <div class="glyph">CO</div>
+          </div>
+          <div class="album-tile-title">Composition</div>
+          <div class="album-tile-year">
+            <span class="ic"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></span>520k</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-f">
+            <span class="album-tile-feat">feat.</span>
+            <div class="glyph">RR</div>
+          </div>
+          <div class="album-tile-title">Re-Routes</div>
+          <div class="album-tile-year unavailable">
+            <span class="ic"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></span>—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="spec">
+      <h4>Spec · popularity prefix glyph</h4>
+      <ul>
+        <li>Prefix is an <b>up-arrow</b> (10×10) — reads as "rank / count up" without inventing a new icon vocabulary.</li>
+        <li>Counts use compact format: <code>280k</code> · <code>1.2M</code> · <code>4 102</code>. SI prefixes only — no spelled-out "thousand".</li>
+        <li>"Not yet fetched" → <code>—</code> muted; tile remains in the row at its DB-default position (typically year-DESC fallback).</li>
+        <li>Cross-group <code>Composition (feat.)</code> sits in the <b>featured</b> half despite its 520k — preserved <code>role_priority</code> grouping.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- V4 · Recently added                                              -->
+  <!-- ================================================================ -->
+  <h2 class="variant-h"><span class="num">V4</span>Sort = Recently added<span class="title">Metric = when added to library</span></h2>
+
+  <div class="variant-pair">
+    <div class="stage">
+
+      <div class="section-head">
+        <h3>Albums</h3>
+        <button class="sort-trigger" aria-haspopup="dialog" aria-expanded="false">
+          <span class="glyph">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 7h12M4 12h8M4 17h4"/>
+              <path d="M18 8v12M14 16l4 4 4-4"/>
+            </svg>
+          </span>
+          <span class="label">Recently added</span>
+          <span class="chev">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </span>
+        </button>
+      </div>
+
+      <div class="h-scroll">
+        <div class="album-tile">
+          <div class="album-cover tone-a"><div class="glyph">WB</div></div>
+          <div class="album-tile-title">Wingbeats</div>
+          <div class="album-tile-year">
+            <span class="ic">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+            </span>3d ago</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-c"><div class="glyph">AR</div></div>
+          <div class="album-tile-title">Archipelago</div>
+          <div class="album-tile-year">
+            <span class="ic"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></span>2w ago</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-d"><div class="glyph">NW</div></div>
+          <div class="album-tile-title">Night Walks</div>
+          <div class="album-tile-year">
+            <span class="ic"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></span>2mo ago</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-b"><div class="glyph">DC</div></div>
+          <div class="album-tile-title">Dawn Chorus</div>
+          <div class="album-tile-year">
+            <span class="ic"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></span>1y ago</div>
+        </div>
+        <span class="group-gap" aria-hidden="true"></span>
+        <div class="album-tile">
+          <div class="album-cover tone-e">
+            <span class="album-tile-feat">feat.</span>
+            <div class="glyph">CO</div>
+          </div>
+          <div class="album-tile-title">Composition</div>
+          <div class="album-tile-year">
+            <span class="ic"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></span>11d ago</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-f">
+            <span class="album-tile-feat">feat.</span>
+            <div class="glyph">RR</div>
+          </div>
+          <div class="album-tile-title">Re-Routes</div>
+          <div class="album-tile-year">
+            <span class="ic"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></span>3mo ago</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="spec">
+      <h4>Spec · relative-time metric</h4>
+      <ul>
+        <li>Prefix is a <b>plus glyph</b> (10×10) — "added".</li>
+        <li>Relative format: <code>3d</code> · <code>2w</code> · <code>2mo</code> · <code>1y</code> ago. ≤ 48 h shows hours (<code>14h ago</code>); &gt; 1 y rounds to whole years.</li>
+        <li>Featured group keeps its own recency ordering — a guest appearance added yesterday still sits in the featured half.</li>
+        <li>If the album was added before the scanner started tracking timestamps, value is <code>—</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- V5 · A–Z (year metric)                                            -->
+  <!-- ================================================================ -->
+  <h2 class="variant-h"><span class="num">V5</span>Sort = A–Z<span class="title">Same data reordered · metric stays Release year</span></h2>
+
+  <div class="variant-pair">
+    <div class="stage">
+
+      <div class="section-head">
+        <h3>Albums</h3>
+        <button class="sort-trigger" aria-haspopup="dialog" aria-expanded="false">
+          <span class="glyph">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 7h12M4 12h8M4 17h4"/>
+              <path d="M18 8v12M14 16l4 4 4-4"/>
+            </svg>
+          </span>
+          <span class="label">A–Z</span>
+          <span class="chev">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </span>
+        </button>
+      </div>
+
+      <div class="h-scroll">
+        <div class="album-tile">
+          <div class="album-cover tone-c"><div class="glyph">AR</div></div>
+          <div class="album-tile-title">Archipelago</div>
+          <div class="album-tile-year">2015</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-b"><div class="glyph">DC</div></div>
+          <div class="album-tile-title">Dawn Chorus</div>
+          <div class="album-tile-year">2017</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-d"><div class="glyph">NW</div></div>
+          <div class="album-tile-title">Night Walks</div>
+          <div class="album-tile-year">2013</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-a"><div class="glyph">WB</div></div>
+          <div class="album-tile-title">Wingbeats</div>
+          <div class="album-tile-year">2019</div>
+        </div>
+        <span class="group-gap" aria-hidden="true"></span>
+        <div class="album-tile">
+          <div class="album-cover tone-e">
+            <span class="album-tile-feat">feat.</span>
+            <div class="glyph">CO</div>
+          </div>
+          <div class="album-tile-title">Composition</div>
+          <div class="album-tile-year">2021</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-f">
+            <span class="album-tile-feat">feat.</span>
+            <div class="glyph">RR</div>
+          </div>
+          <div class="album-tile-title">Re-Routes</div>
+          <div class="album-tile-year">2016</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="spec">
+      <h4>Spec · A–Z keeps Release year metric</h4>
+      <ul>
+        <li>A–Z is purely a reordering of the same data; release year remains the most interesting thing to see on each tile, so the metric line is unchanged (<code>.album-tile-year</code>, no <code>.ic</code> prefix).</li>
+        <li>Collation: case-insensitive, leading articles (<code>The</code>, <code>A</code>, <code>An</code>) stripped before compare — <i>The Vivaldi Album</i> sorts as <i>Vivaldi Album</i>.</li>
+        <li>Inside the featured group the same A–Z rule applies — preserved <code>role_priority</code> grouping.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- V6 · BOTTOM SHEET (sort picker)                                  -->
+  <!-- ================================================================ -->
+  <h2 class="variant-h"><span class="num">V6</span>Bottom sheet · "Sort albums by"<span class="title">Reuses .confirm-overlay / .confirm-sheet</span></h2>
+
+  <div class="variant-pair">
+    <div class="stage with-sheet" style="min-height: 540px;">
+
+      <div class="section-head">
+        <h3>Albums</h3>
+        <button class="sort-trigger" aria-haspopup="dialog" aria-expanded="true">
+          <span class="glyph">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 7h12M4 12h8M4 17h4"/>
+              <path d="M18 8v12M14 16l4 4 4-4"/>
+            </svg>
+          </span>
+          <span class="label">Release year</span>
+          <span class="chev">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </span>
+        </button>
+      </div>
+
+      <div class="h-scroll" style="opacity: 0.35; filter: blur(0.4px);">
+        <div class="album-tile">
+          <div class="album-cover tone-a"><div class="glyph">WB</div></div>
+          <div class="album-tile-title">Wingbeats</div>
+          <div class="album-tile-year">2019</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-b"><div class="glyph">DC</div></div>
+          <div class="album-tile-title">Dawn Chorus</div>
+          <div class="album-tile-year">2017</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-c"><div class="glyph">AR</div></div>
+          <div class="album-tile-title">Archipelago</div>
+          <div class="album-tile-year">2015</div>
+        </div>
+        <div class="album-tile">
+          <div class="album-cover tone-d"><div class="glyph">NW</div></div>
+          <div class="album-tile-title">Night Walks</div>
+          <div class="album-tile-year">2013</div>
+        </div>
+      </div>
+
+      <div class="confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="sort-sheet-title">
+        <div class="confirm-sheet">
+          <div class="sheet-handle" aria-hidden="true"></div>
+          <h4 class="sheet-title" id="sort-sheet-title">Sort albums by</h4>
+          <div class="sort-list">
+            <div class="sort-row active" role="radio" aria-checked="true" tabindex="0">
+              <div>
+                <div class="sort-row-label">Release year</div>
+                <div class="sort-row-hint">Newest first</div>
+              </div>
+              <span class="sort-check">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>
+              </span>
+            </div>
+            <div class="sort-row" role="radio" aria-checked="false" tabindex="0">
+              <div>
+                <div class="sort-row-label">Time listened</div>
+                <div class="sort-row-hint">My total time on each album</div>
+              </div>
+              <span class="sort-check">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>
+              </span>
+            </div>
+            <div class="sort-row" role="radio" aria-checked="false" tabindex="0">
+              <div>
+                <div class="sort-row-label">Popularity</div>
+                <div class="sort-row-hint">Last.fm scrobble count</div>
+              </div>
+              <span class="sort-check">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>
+              </span>
+            </div>
+            <div class="sort-row" role="radio" aria-checked="false" tabindex="0">
+              <div>
+                <div class="sort-row-label">Recently added</div>
+                <div class="sort-row-hint">When it landed in your library</div>
+              </div>
+              <span class="sort-check">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>
+              </span>
+            </div>
+            <div class="sort-row" role="radio" aria-checked="false" tabindex="0">
+              <div>
+                <div class="sort-row-label">A–Z</div>
+                <div class="sort-row-hint">Alphabetical, leading articles stripped</div>
+              </div>
+              <span class="sort-check">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="spec">
+      <h4>Spec · bottom sheet</h4>
+      <ul>
+        <li>Shell: existing <b><code>.confirm-overlay</code></b> (full-frame scrim <code>rgba(11,8,7,.55)</code>, z-index 10) + <b><code>.confirm-sheet</code></b> (anchored bottom, <code>border-radius: var(--radius-lg) var(--radius-lg) 0 0</code>, warm shadow).</li>
+        <li>Handle 36×4 px, <code>rgba(237,226,212,0.4)</code>.</li>
+        <li>Title <code>.sheet-title</code>: mono · 10.5 px · 0.14em tracking · uppercase · <code>--color-text-muted</code>. Reads as a label, not a heading — matches Settings group-label pattern.</li>
+        <li>Each row 14 / 20 px padding, 1 px <code>--color-divider</code> top border. <b>Tap target</b> ≈ 52 px including padding.</li>
+        <li>Active row: <code>background: --color-amber-stripe</code> + 3 px amber left bar <b>strictly</b> (no amber on text). Hint flips from <code>--color-text-dim</code> to <code>--color-amber</code>. Check glyph (16×16) <code>--color-amber</code>.</li>
+        <li>Dismissing without picking: tap-outside on overlay, or drag-down on handle — both keep the current sort.</li>
+        <li>The "Featured albums stay grouped at the end" line is intentionally <b>not</b> shown in the sheet — that's an invariant, not a per-sort option. Surfacing it as a toggle would invite a footgun.</li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>
