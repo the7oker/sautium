@@ -1829,13 +1829,19 @@ body.has-miniplayer .ai-fab {
   color: var(--color-text-dim);
 }
 
-/* Sort trigger on the Albums section header (Artist screen) */
+/* Sort trigger on the Albums section header (Artist screen). The
+   `.section-head` flex container aligns by baseline, so a fixed
+   height on the trigger would push its text below the h3 baseline.
+   Vertical padding here is what gives the button its 44 px hit
+   area without disturbing baseline alignment. */
 .detail-screen .section-head .sort-trigger {
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   gap: calc(4 * var(--px));
-  height: calc(44 * var(--px));
-  padding: 0 calc(10 * var(--px)) 0 calc(8 * var(--px));
+  min-height: calc(44 * var(--px));
+  padding: calc(11 * var(--px)) calc(10 * var(--px))
+           calc(11 * var(--px)) calc(8 * var(--px));
+  box-sizing: border-box;
   background: transparent;
   border: 0;
   color: var(--color-text);
@@ -1849,6 +1855,7 @@ body.has-miniplayer .ai-fab {
   display: inline-flex;
   align-items: center;
   color: var(--color-text-muted);
+  transform: translateY(calc(2 * var(--px)));
 }
 .detail-screen .section-head .sort-trigger .label {
   color: var(--color-text);
