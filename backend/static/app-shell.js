@@ -3124,7 +3124,6 @@
         <div class="artist-hero-scrim-bottom"></div>
         <div class="artist-hero-controls">
           <button class="icon-btn" type="button" data-action="back" aria-label="Back">${SVG_BACK}</button>
-          <button class="icon-btn" type="button" aria-label="More">${SVG_KEBAB}</button>
         </div>
         <h1 class="artist-hero-name">${escapeHtml(d.name || '')}</h1>
       </div>
