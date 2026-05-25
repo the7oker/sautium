@@ -3383,25 +3383,23 @@
         }
       });
     });
-    // Track-add button → append exactly this track to the queue.
-    // /queue-next is Radio Mode (similar tracks); /queue-tracks is
-    // literal append. No client-side fetchPlaylist refresh — backend
-    // bumps playlist_version, the SSE handler in app.js awaits a
-    // fresh fetchPlaylist() before notifying subscribers.
+    // Track-add button → toggles an inline "Add to: [Next] [End]"
+    // confirmation, matching the chat-row delete pattern. The same
+    // `+` glyph plays the role of × in open state via a 45° rotate.
+    // End appends via /queue-tracks. Next does the same plus a
+    // /reorder call to slot the new track right after the current
+    // one — HQPlayer has no insert primitive, so the seamless-
+    // rebuild reorder is the cleanest path.
     screen.querySelectorAll('.track-add').forEach(btn => {
-      btn.addEventListener('click', async (e) => {
+      btn.addEventListener('click', (e) => {
         e.stopPropagation();
         const row = btn.closest('[data-media-file-id]');
         if (!row) return;
-        const mfId = row.getAttribute('data-media-file-id');
-        if (!mfId) return;
-        try {
-          await fetch('/api/player/queue-tracks', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ track_ids: [parseInt(mfId, 10)] }),
-          });
-        } catch (err) { console.warn('queue-tracks failed', err); }
+        if (row.classList.contains('is-confirming')) {
+          closeQueueConfirm(row);
+        } else {
+          openQueueConfirm(row);
+        }
       });
     });
     // Play all (album) — replaces queue with full album
@@ -3433,6 +3431,93 @@
         } catch (err) { console.warn('queue-tracks failed', err); }
         // No client-side refetch — see comment on .track-add above.
       });
+    });
+  }
+
+  /* Inline "Add to: [Next] [End]" confirmation row. Mirrors the
+     chat-row delete pattern. The same `+` button toggles the bar
+     open/closed; CSS rotates it 45° in open state so the glyph
+     visually morphs into ×, but the DOM node is unchanged. Bar
+     content sits as a sibling in the row's grid and the non-bar
+     non-`+` children are hidden via CSS, so no innerHTML swap is
+     needed — keeps the original `.track-add` listener alive. */
+  function closeQueueConfirm(row) {
+    row.classList.remove('is-confirming');
+    const bar = row.querySelector('.track-confirm-bar');
+    if (bar) bar.remove();
+  }
+
+  function openQueueConfirm(row) {
+    const mfId = parseInt(row.getAttribute('data-media-file-id'), 10);
+    if (!mfId) return;
+    row.classList.add('is-confirming');
+
+    const bar = document.createElement('div');
+    bar.className = 'track-confirm-bar';
+    bar.innerHTML = `
+      <span class="track-confirm-ask">Add to:</span>
+      <button class="track-confirm-btn" type="button" data-confirm="next">Next</button>
+      <button class="track-confirm-btn" type="button" data-confirm="end">End</button>
+    `;
+    // Slot the bar before .track-add so the grid lays out as
+    // [bar 1fr][+ 44px] — the + stays at the right edge in the
+    // same column it occupies when idle.
+    const addBtn = row.querySelector('.track-add');
+    if (addBtn) row.insertBefore(bar, addBtn);
+    else row.appendChild(bar);
+
+    bar.querySelector('[data-confirm="end"]').addEventListener('click', async e => {
+      e.stopPropagation();
+      try {
+        await fetch('/api/player/queue-tracks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ track_ids: [mfId] }),
+        });
+      } catch (err) { console.warn('queue-tracks (end) failed', err); }
+      closeQueueConfirm(row);
+    });
+    bar.querySelector('[data-confirm="next"]').addEventListener('click', async e => {
+      e.stopPropagation();
+      try {
+        // 1. Pull current playing index + freshest playlist so we
+        //    can build the new order from a consistent snapshot.
+        //    HQPlayer's track_index is 1-based; convert to JS index.
+        const [statusResp, plResp] = await Promise.all([
+          fetch('/api/player/status'),
+          fetch('/api/player/playlist'),
+        ]);
+        const status = statusResp.ok ? await statusResp.json() : null;
+        const pl = plResp.ok ? await plResp.json() : null;
+        const tracks = (pl && pl.tracks) || [];
+        const currentIdx = status && status.track_index
+          ? status.track_index - 1
+          : -1;
+        // 2. Append the new track so HQPlayer has it in the
+        //    playlist (the protocol has no insert primitive).
+        await fetch('/api/player/queue-tracks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ track_ids: [mfId] }),
+        });
+        // 3. Reorder: splice the just-appended track into the slot
+        //    right after the currently playing one. /reorder takes
+        //    the FULL new order including the current slot at its
+        //    original position. If we don't know the current index
+        //    (stopped / no playlist), we leave it at the end — same
+        //    fallback as a plain End.
+        if (currentIdx >= 0 && currentIdx < tracks.length) {
+          const newOrder = tracks.map(t => t.id);
+          newOrder.push(mfId);
+          newOrder.splice(currentIdx + 1, 0, newOrder.pop());
+          await fetch('/api/player/reorder', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ order: newOrder }),
+          });
+        }
+      } catch (err) { console.warn('queue-tracks (next) failed', err); }
+      closeQueueConfirm(row);
     });
   }
 

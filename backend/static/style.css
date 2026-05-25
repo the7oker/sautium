@@ -2031,7 +2031,60 @@ body.has-miniplayer .ai-fab {
   border-radius: 50%;
   background: var(--color-amber);
 }
+.track-add { transition: transform 180ms ease; }
 .track-add:active { color: var(--color-amber); }
+/* When the row is in queue-confirm mode the same `+` button stays
+   visible and rotates 45° — same glyph (a plus), same DOM node, just
+   visually morphed into an ×. Click closes the dialog. */
+.track-row.is-confirming .track-add { transform: rotate(45deg); }
+
+/* Inline "Add to: [Next] [End] +" confirmation row.
+   Mirrors `.ai-chat-row.is-confirming` — same compact 32 px button
+   style, neutral border, no destructive accent. The `+` glyph plays
+   the role of × via rotation; we keep it visible while every other
+   non-bar child is hidden behind the .is-confirming flag. */
+.track-row.is-confirming {
+  cursor: default;
+  background: var(--color-surface-lo);
+}
+.track-row.is-confirming > *:not(.track-confirm-bar):not(.track-add) {
+  display: none;
+}
+.track-row.is-confirming {
+  grid-template-columns: 1fr calc(44 * var(--px));
+}
+.track-confirm-bar {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--px));
+  width: 100%;
+  /* Align "Add to" with .track-title-line: rank column (22 px) +
+     grid gap (10 px) = 32 px from the row's left edge. */
+  padding-left: calc(32 * var(--px));
+}
+.track-confirm-ask {
+  flex: 1;
+  font-size: calc(14 * var(--px));
+  font-weight: 500;
+  color: var(--color-text);
+}
+.track-confirm-btn {
+  height: calc(32 * var(--px));
+  padding: 0 calc(14 * var(--px));
+  border-radius: calc(6 * var(--px));
+  font-family: var(--font-sans);
+  font-size: calc(13 * var(--px));
+  font-weight: 600;
+  border: 1px solid var(--color-divider);
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+}
+.track-confirm-btn:active {
+  background: var(--color-amber-stripe);
+  border-color: var(--color-amber);
+  color: var(--color-amber);
+}
 
 /* ---- Similar artists row ---- */
 .similar-row {
