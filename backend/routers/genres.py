@@ -128,4 +128,88 @@ def get_genre(genre_id: str) -> dict:
     genre["artist_count"] = len(artist_rows)
     genre["artists"] = artist_rows
 
+    # Popular tracks for this genre — hybrid rank weighted by how
+    # strongly each track belongs to the genre.
+    #
+    #   relevance = max(
+    #       direct  : 1.0 if track is tagged with the genre,
+    #       indirect: artist_tags.weight / 100,
+    #   )
+    #
+    # Tracks with relevance = 0 are dropped (artist isn't in the
+    # cohort). Surviving tracks rank in two tiers, mirroring the
+    # artist-page rule:
+    #   tier 0 — track is known to Last.fm; order by
+    #            playcount * relevance descending
+    #   tier 1 — Last.fm knows nothing but the user has played it
+    #            locally; order by play_count * relevance
+    # Tracks with no popularity signal at all fall out — keeps the
+    # block honest on a freshly-imported library.
+    #
+    # Tier ordering, weighting and the 5-row cap all happen in SQL.
+    # `candidates` dedups media_file variants per track (one row per
+    # track id, picking the variant with the strongest signal); the
+    # outer SELECT applies the two-tier order and LIMITs to top 5,
+    # so we never haul tens of thousands of rows into Python for a
+    # genre with a large catalogue.
+    genre["popular_tracks"] = db_query("""
+        WITH g AS (
+            SELECT id,
+                   regexp_replace(LOWER(name), '[^a-z0-9]', '', 'g') AS norm
+            FROM genres WHERE id = %(id)s::uuid
+        ),
+        artist_weights AS (
+            SELECT a.id AS artist_id,
+                   MAX(at.weight)::int AS weight
+            FROM artists a
+            JOIN artist_tags at ON at.artist_id = a.id
+            JOIN tags tg ON tg.id = at.tag_id
+            WHERE regexp_replace(LOWER(tg.name), '[^a-z0-9]', '', 'g')
+                = (SELECT norm FROM g)
+            GROUP BY a.id
+        ),
+        candidates AS (
+            SELECT DISTINCT ON (t.id)
+                   t.id::text AS track_id,
+                   mf.id AS media_file_id,
+                   t.title,
+                   al.title AS album,
+                   a.name AS artist,
+                   mf.duration_seconds AS duration,
+                   GREATEST(
+                       CASE WHEN tg.track_id IS NOT NULL THEN 100 ELSE 0 END,
+                       COALESCE(aw.weight, 0)
+                   )::int AS relevance_pct,
+                   COALESCE(lps.play_count, 0)::int AS local_plays,
+                   COALESCE(ts.playcount, 0)::bigint AS lastfm_playcount
+            FROM tracks t
+            JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+            JOIN artists a ON a.id = ta.artist_id
+            JOIN media_files mf ON mf.track_id = t.id AND mf.is_analysis_source = true
+            JOIN album_variants av ON av.id = mf.album_variant_id
+            JOIN albums al ON al.id = av.album_id
+            LEFT JOIN track_genres tg
+                   ON tg.track_id = t.id AND tg.genre_id = (SELECT id FROM g)
+            LEFT JOIN artist_weights aw ON aw.artist_id = ta.artist_id
+            LEFT JOIN local_play_stats lps ON lps.track_id = t.id
+            LEFT JOIN track_stats ts
+                   ON ts.track_id = t.id AND ts.source = 'lastfm'
+            WHERE GREATEST(
+                      CASE WHEN tg.track_id IS NOT NULL THEN 100 ELSE 0 END,
+                      COALESCE(aw.weight, 0)
+                  ) > 0
+            ORDER BY t.id, COALESCE(ts.playcount, 0) DESC,
+                           COALESCE(lps.play_count, 0) DESC
+        )
+        SELECT track_id, media_file_id, title, album, artist, duration
+        FROM candidates
+        WHERE lastfm_playcount > 0 OR local_plays > 0
+        ORDER BY
+            CASE WHEN lastfm_playcount > 0 THEN 0 ELSE 1 END,
+            lastfm_playcount * relevance_pct DESC,
+            local_plays * relevance_pct DESC,
+            title
+        LIMIT 5
+    """, {"id": genre_id})
+
     return genre

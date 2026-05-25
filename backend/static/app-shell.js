@@ -3504,6 +3504,24 @@
         </button>`;
     }).join('');
 
+    // Popular tracks for this genre — same row layout as the artist
+    // page, but the secondary line shows "<artist> · <album>" so the
+    // user can tell different artists apart in a genre-scoped list.
+    const tracksHtml = (d.popular_tracks || []).map((t, i) => {
+      const second = [t.artist, t.album].filter(Boolean).join(' · ');
+      return `
+        <button class="track-row" type="button"
+                data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}">
+          <span class="track-rank">${i + 1}</span>
+          <div class="track-info">
+            <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+            <div class="track-artist-line">${escapeHtml(second)}</div>
+          </div>
+          <span class="track-dur">${fmtDuration(t.duration)}</span>
+          <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
+        </button>`;
+    }).join('');
+
     screen.innerHTML = `
       <div class="genre-hero">
         ${heroImg}
@@ -3516,6 +3534,11 @@
       <div style="height: calc(14 * var(--px));"></div>
       ${stats ? `<div class="genre-stats">${escapeHtml(stats)}</div>` : ''}
       ${cleanDesc ? `<p class="bio">${escapeHtml(cleanDesc)}</p>` : ''}
+      ${tracksHtml ? `
+        <div class="section-sep"></div>
+        <div class="section-head"><h3>Popular tracks</h3></div>
+        <div class="track-list">${tracksHtml}</div>
+      ` : ''}
       ${artistsHtml ? `
         <div class="section-sep"></div>
         <div class="section-head">
@@ -3532,6 +3555,11 @@
       el.addEventListener('click', () =>
         navigateToEntity('artist', el.getAttribute('data-artist-id')));
     });
+    // Same play / queue handlers the artist + album screens use, so
+    // a click on a Popular-tracks row plays through HQPlayer and the
+    // '+' icon queues without leaving the page.
+    wireDetailHandlers(screen);
+    updatePlayingHighlight();
   }
 
   /* ---------- Friends screen ----------

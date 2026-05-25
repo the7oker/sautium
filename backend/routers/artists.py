@@ -278,49 +278,43 @@ def get_artist(
     #      "Popular" header that is actually random would lie about
     #      the data. If the filter empties the list, the section
     #      hides entirely (see renderArtist on the frontend).
-    rows = db_query("""
-        SELECT DISTINCT ON (t.id)
-               t.id::text AS track_id,
-               mf.id AS media_file_id,
-               t.title,
-               al.title AS album,
-               mf.duration_seconds AS duration,
-               COALESCE(lps.play_count, 0)::int AS local_plays,
-               COALESCE(ts.playcount, 0)::bigint AS lastfm_playcount
-        FROM tracks t
-        JOIN track_artists ta ON ta.track_id = t.id
-        JOIN media_files mf ON mf.track_id = t.id AND mf.is_analysis_source = true
-        JOIN album_variants av ON av.id = mf.album_variant_id
-        JOIN albums al ON al.id = av.album_id
-        LEFT JOIN local_play_stats lps ON lps.track_id = t.id
-        LEFT JOIN track_stats ts ON ts.track_id = t.id AND ts.source = 'lastfm'
-        WHERE ta.artist_id = %(id)s::uuid
-        ORDER BY t.id, COALESCE(ts.playcount, 0) DESC,
-                       COALESCE(lps.play_count, 0) DESC
+    #
+    # Tier ordering and the 5-row cap happen entirely in SQL. The
+    # `candidates` CTE dedups media_file variants per track id; the
+    # outer SELECT filters tracks with no signal, applies the two
+    # tiers and LIMITs to 5.
+    artist["popular_tracks"] = db_query("""
+        WITH candidates AS (
+            SELECT DISTINCT ON (t.id)
+                   t.id::text AS track_id,
+                   mf.id AS media_file_id,
+                   t.title,
+                   al.title AS album,
+                   mf.duration_seconds AS duration,
+                   COALESCE(lps.play_count, 0)::int AS local_plays,
+                   COALESCE(ts.playcount, 0)::bigint AS lastfm_playcount
+            FROM tracks t
+            JOIN track_artists ta ON ta.track_id = t.id
+            JOIN media_files mf ON mf.track_id = t.id AND mf.is_analysis_source = true
+            JOIN album_variants av ON av.id = mf.album_variant_id
+            JOIN albums al ON al.id = av.album_id
+            LEFT JOIN local_play_stats lps ON lps.track_id = t.id
+            LEFT JOIN track_stats ts
+                   ON ts.track_id = t.id AND ts.source = 'lastfm'
+            WHERE ta.artist_id = %(id)s::uuid
+            ORDER BY t.id, COALESCE(ts.playcount, 0) DESC,
+                           COALESCE(lps.play_count, 0) DESC
+        )
+        SELECT track_id, media_file_id, title, album, duration
+        FROM candidates
+        WHERE lastfm_playcount > 0 OR local_plays > 0
+        ORDER BY
+            CASE WHEN lastfm_playcount > 0 THEN 0 ELSE 1 END,
+            lastfm_playcount DESC,
+            local_plays DESC,
+            title
+        LIMIT 5
     """, {"id": artist_id})
-
-    def _rank(r):
-        # Tier 0 = Last.fm knows this track; tier 1 = only the user
-        # has played it locally. Within a tier, sort by the relevant
-        # metric descending.
-        local = int(r["local_plays"] or 0)
-        lastfm = int(r["lastfm_playcount"] or 0)
-        if lastfm > 0:
-            return (0, -lastfm, -local)
-        return (1, 0, -local)
-
-    filtered = [
-        r for r in rows
-        if (r.get("local_plays") or 0) > 0
-           or (r.get("lastfm_playcount") or 0) > 0
-    ]
-    filtered.sort(key=_rank)
-    top = filtered[:5]
-    for r in top:
-        # Internal-only signals; the tile renders title/album/duration.
-        r.pop("local_plays", None)
-        r.pop("lastfm_playcount", None)
-    artist["popular_tracks"] = top
 
     # Whole similar-artists list, ordered by the Last.fm match score
     # (0..1). No cap — the row is a horizontal scroll, so showing the

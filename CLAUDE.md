@@ -69,6 +69,17 @@ See:
   partial failures and resumes are normal operating conditions.
 - **Persistent DB connections in long-lived services.** Opening a new
   connection per call costs real seconds (measured). Reuse a session/pool.
+- **Push computation into SQL.** Filtering, ranking, scoring,
+  multi-tier ordering and `LIMIT` belong in the query whenever the
+  database can express them. Pulling thousands of rows into Python
+  just to `sorted(rows, key=...)` and `rows[:5]` wastes bandwidth,
+  burns memory and skips every index Postgres would have used.
+  Concretely: weighted scores (`a.metric * b.weight`), two-tier
+  ranks (`CASE WHEN signal>0 THEN 0 ELSE 1 END`), top-N cuts and
+  text normalisation (`regexp_replace`, `lower`, article stripping)
+  are all in-SQL operations. Python-side post-processing is only
+  for formatting the response (`12h 4m`, `added 3d ago`) — never
+  for ordering or trimming the result set.
 - **Trust framework and internal guarantees.** Only validate at system
   boundaries (user input, external APIs, file system). Don't defensively
   re-check what the ORM, framework or internal caller already enforced.
