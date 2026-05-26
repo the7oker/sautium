@@ -1593,8 +1593,23 @@ body.has-miniplayer .ai-fab {
   background: transparent;
   border: 0; padding: 0; cursor: pointer;
   color: var(--color-text-muted);
+  transition: transform 180ms ease;
 }
 .np-sim-add:active { color: var(--color-amber); }
+
+/* Inline queue-confirm bar on a Now Playing 'similar' row — mirrors
+   the .track-row pattern. Hide art + info, keep the `+` button
+   visible so its rotation acts as the close affordance. */
+.np-sim-row.is-confirming {
+  cursor: default;
+  grid-template-columns: 1fr calc(44 * var(--px));
+}
+.np-sim-row.is-confirming > *:not(.track-confirm-bar):not(.np-sim-add) {
+  display: none;
+}
+.np-sim-row.is-confirming .np-sim-add { transform: rotate(45deg); }
+/* Align "Add to" with .np-sim-track: art (44 px) + grid gap (12 px). */
+.np-sim-row .track-confirm-bar { padding-left: calc(56 * var(--px)); }
 
 .np-spacer {
   height: calc(32 * var(--px));

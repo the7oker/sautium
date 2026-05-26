@@ -613,24 +613,27 @@
         });
       }
       // Similar tracks: delegated listener — rows are re-rendered on
-      // every track change. Tap on `+` queues the track; tap anywhere
-      // else on the row plays it.
+      // every track change. Tap on `+` opens the same inline
+      // "Add to: [Next] [End]" confirm bar used on detail screens;
+      // clicks inside the bar are handled by its own per-button
+      // listeners attached by openQueueConfirm. Tap anywhere else
+      // on the row plays the track.
       if (this.similarList) {
-        this.similarList.addEventListener('click', async (e) => {
+        this.similarList.addEventListener('click', (e) => {
           const row = e.target.closest('.np-sim-row');
           if (!row) return;
-          const mfId = row.getAttribute('data-track-id');
-          if (!mfId) return;
+          if (e.target.closest('.track-confirm-bar')) return;
           if (e.target.closest('.np-sim-add')) {
-            try {
-              await fetch('/api/player/queue-tracks', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ track_ids: [parseInt(mfId, 10)] }),
-              });
-            } catch (err) { console.warn('queue-tracks failed', err); }
+            if (row.classList.contains('is-confirming')) {
+              closeQueueConfirm(row);
+            } else {
+              openQueueConfirm(row);
+            }
             return;
           }
+          if (row.classList.contains('is-confirming')) return;
+          const mfId = row.getAttribute('data-track-id');
+          if (!mfId) return;
           if (typeof window.playTrack === 'function') {
             window.playTrack(parseInt(mfId, 10));
           }
@@ -3466,7 +3469,17 @@
   }
 
   function openQueueConfirm(row) {
-    const mfId = parseInt(row.getAttribute('data-media-file-id'), 10);
+    // mfId attribute name differs across call sites: detail screens
+    // use data-media-file-id, Now Playing similar list uses
+    // data-track-id. Same with the add-button class name (.track-add
+    // vs .np-sim-add) — both are tagged with aria-label "Add to
+    // queue" so a single query covers both. Keeping one function
+    // shared means UX changes only need editing in one place.
+    const mfId = parseInt(
+      row.getAttribute('data-media-file-id')
+        || row.getAttribute('data-track-id'),
+      10,
+    );
     if (!mfId) return;
     row.classList.add('is-confirming');
 
@@ -3477,10 +3490,10 @@
       <button class="track-confirm-btn" type="button" data-confirm="next">Next</button>
       <button class="track-confirm-btn" type="button" data-confirm="end">End</button>
     `;
-    // Slot the bar before .track-add so the grid lays out as
+    // Slot the bar before the add button so the grid lays out as
     // [bar 1fr][+ 44px] — the + stays at the right edge in the
     // same column it occupies when idle.
-    const addBtn = row.querySelector('.track-add');
+    const addBtn = row.querySelector('.track-add, .np-sim-add');
     if (addBtn) row.insertBefore(bar, addBtn);
     else row.appendChild(bar);
 
