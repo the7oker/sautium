@@ -3354,7 +3354,9 @@
       </div>
       <div class="album-actions">
         <button class="btn-primary" type="button" data-action="play-all">${SVG_PLAY} Play all</button>
-        <button class="btn-secondary" type="button" data-action="queue-album">${SVG_PLUS} Queue</button>
+        <button class="btn-secondary album-queue-btn" type="button" data-action="queue-album">
+          <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
+        </button>
       </div>
       <div class="album-tracklist">${tracksHtml}</div>
       <div style="height: calc(24 * var(--px));"></div>
@@ -3437,20 +3439,23 @@
         } catch (err) { console.warn('play-tracks failed', err); }
       });
     });
-    // Queue album — append all tracks in one request.
+    // Queue album — opens the same inline "Add to: [Next] [End]"
+    // confirm as a track row, except scoped to the album as a whole.
+    // The Queue button itself plays the open/close role: CSS rotates
+    // it 45° in confirming state. Play all is hidden under the bar
+    // so the bar can stretch into its column.
     screen.querySelectorAll('[data-action="queue-album"]').forEach(btn => {
-      btn.addEventListener('click', async () => {
+      btn.addEventListener('click', () => {
         if (!ctx.tracks || !ctx.tracks.length) return;
         const ids = ctx.tracks.map(t => t.media_file_id).filter(Boolean);
         if (!ids.length) return;
-        try {
-          await fetch('/api/player/queue-tracks', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ track_ids: ids }),
-          });
-        } catch (err) { console.warn('queue-tracks failed', err); }
-        // No client-side refetch — see comment on .track-add above.
+        const wrap = btn.closest('.album-actions');
+        if (!wrap) return;
+        if (wrap.classList.contains('is-confirming')) {
+          closeAlbumQueueConfirm(wrap);
+        } else {
+          openAlbumQueueConfirm(wrap, ids);
+        }
       });
     });
   }
@@ -3549,6 +3554,81 @@
         }
       } catch (err) { console.warn('queue-tracks (next) failed', err); }
       closeQueueConfirm(row);
+    });
+  }
+
+  /* Album-wide "Add to: [Next] [End]" confirm. Reuses the
+     `.track-confirm-bar` markup; CSS hides Play all under
+     `.album-actions.is-confirming` and rotates the Queue button
+     45° so the same glyph plays the role of × (open ↔ close). */
+  function closeAlbumQueueConfirm(wrap) {
+    wrap.classList.remove('is-confirming');
+    const bar = wrap.querySelector('.track-confirm-bar');
+    if (bar) bar.remove();
+  }
+
+  function openAlbumQueueConfirm(wrap, ids) {
+    wrap.classList.add('is-confirming');
+
+    const bar = document.createElement('div');
+    bar.className = 'track-confirm-bar';
+    bar.innerHTML = `
+      <span class="track-confirm-ask">Add album to:</span>
+      <button class="track-confirm-btn" type="button" data-confirm="next">Next</button>
+      <button class="track-confirm-btn" type="button" data-confirm="end">End</button>
+    `;
+    const queueBtn = wrap.querySelector('.album-queue-btn');
+    if (queueBtn) wrap.insertBefore(bar, queueBtn);
+    else wrap.appendChild(bar);
+
+    bar.querySelector('[data-confirm="end"]').addEventListener('click', async e => {
+      e.stopPropagation();
+      try {
+        await fetch('/api/player/queue-tracks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ track_ids: ids }),
+        });
+      } catch (err) { console.warn('queue-album (end) failed', err); }
+      closeAlbumQueueConfirm(wrap);
+    });
+    bar.querySelector('[data-confirm="next"]').addEventListener('click', async e => {
+      e.stopPropagation();
+      try {
+        // Same approach as single-track Next: snapshot current
+        // index + playlist, append the whole album, then reorder
+        // so the appended block lands right after the current slot.
+        const [statusResp, plResp] = await Promise.all([
+          fetch('/api/player/status'),
+          fetch('/api/player/playlist'),
+        ]);
+        const status = statusResp.ok ? await statusResp.json() : null;
+        const pl = plResp.ok ? await plResp.json() : null;
+        const tracks = (pl && pl.tracks) || [];
+        const currentIdx = status && status.track_index
+          ? status.track_index - 1
+          : -1;
+        await fetch('/api/player/queue-tracks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ track_ids: ids }),
+        });
+        if (currentIdx >= 0 && currentIdx < tracks.length) {
+          // The new ids were just appended in `ids` order. Build the
+          // full new order: existing playlist + appended block,
+          // then splice the appended block out and re-insert it
+          // immediately after the current slot.
+          const fullOrder = tracks.map(t => t.id).concat(ids);
+          const tail = fullOrder.splice(fullOrder.length - ids.length, ids.length);
+          fullOrder.splice(currentIdx + 1, 0, ...tail);
+          await fetch('/api/player/reorder', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ order: fullOrder }),
+          });
+        }
+      } catch (err) { console.warn('queue-album (next) failed', err); }
+      closeAlbumQueueConfirm(wrap);
     });
   }
 

@@ -2287,6 +2287,31 @@ body.has-miniplayer .ai-fab {
   grid-template-columns: 1fr auto;
   gap: calc(10 * var(--px));
 }
+/* Confirming state — Play all collapses behind the bar; the Queue
+   button stays in the right column and rotates 45° so the same `+`
+   glyph plays the role of ×. Mirrors the per-track confirm pattern
+   so the user's reflex from track-row `+` carries over to the
+   album-wide Queue button. */
+.album-actions.is-confirming > .btn-primary { display: none; }
+.album-actions.is-confirming .album-queue-btn .btn-label { display: none; }
+.album-actions.is-confirming .album-queue-btn {
+  width: calc(48 * var(--px));
+  padding: 0;
+}
+.album-actions .album-queue-btn .btn-icon {
+  display: inline-flex;
+  align-items: center;
+  transition: transform 180ms ease;
+}
+.album-actions.is-confirming .album-queue-btn .btn-icon {
+  transform: rotate(45deg);
+}
+.album-actions .track-confirm-bar {
+  /* Bar slots into the row's first grid column (1fr); align the
+     "Add album to:" label with .album-title-line on the same screen,
+     which sits at the same 20 px page gutter. */
+  padding-left: 0;
+}
 .btn-primary {
   height: calc(48 * var(--px));
   display: flex; align-items: center; justify-content: center;
