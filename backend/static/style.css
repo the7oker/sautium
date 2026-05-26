@@ -1067,7 +1067,11 @@ body.has-miniplayer .ai-fab {
 .ai-confirm-bar .ai-confirm-ask {
   flex: 1;
   font-size: calc(14 * var(--px));
-  color: var(--color-text);
+  /* Terracotta — same hue family as .is-danger Delete button so
+     the row reads as one cohesive "you're about to destroy this"
+     unit, but kept softer than the button itself by 0.85 opacity. */
+  color: var(--color-negative);
+  opacity: 0.85;
   font-weight: 500;
 }
 .ai-confirm-btn {
@@ -2066,7 +2070,9 @@ body.has-miniplayer .ai-fab {
   flex: 1;
   font-size: calc(14 * var(--px));
   font-weight: 500;
-  color: var(--color-text);
+  /* Muted — this is a neutral "choose how" prompt, not a warning.
+     Sits visually behind the action buttons it labels. */
+  color: var(--color-text-muted);
 }
 .track-confirm-btn {
   height: calc(32 * var(--px));
