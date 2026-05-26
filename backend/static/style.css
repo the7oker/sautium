@@ -2309,6 +2309,13 @@ body.has-miniplayer .ai-fab {
 .album-tracklist .track-row {
   grid-template-columns: calc(26 * var(--px)) 1fr auto calc(44 * var(--px));
 }
+/* The album-tracklist override above has higher specificity than
+   the generic `.track-row.is-confirming` two-column rule, so it
+   has to be re-asserted here — otherwise the confirm bar lands in
+   the old grid's title slot and the layout breaks. */
+.album-tracklist .track-row.is-confirming {
+  grid-template-columns: 1fr calc(44 * var(--px));
+}
 .album-tracklist .track-title-line {
   font-size: calc(14 * var(--px));
 }
