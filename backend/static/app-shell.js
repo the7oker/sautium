@@ -55,11 +55,13 @@
      Wired to the `np-update` SSE event so highlight follows
      playback across detail-screen renders. */
 
+  // Cached from the most recent np-update so `playlist-loaded` (which
+  // carries no detail of its own) can re-run the highlight pass after a
+  // detail screen renders with stale rows.
+  let _lastNpMediaFileId = null;
+
   function updatePlayingHighlight() {
-    const mfId = (typeof window._getCurrentMediaFileId === 'function')
-      ? window._getCurrentMediaFileId()
-      : null;
-    const target = mfId != null ? String(mfId) : null;
+    const target = _lastNpMediaFileId != null ? String(_lastNpMediaFileId) : null;
     document.querySelectorAll('.detail-screen .track-row[data-media-file-id]')
       .forEach(row => {
         const match = target !== null
@@ -696,6 +698,18 @@
         if (this.coverImg) {
           this.coverImg.hidden = true;
           this.coverImg.removeAttribute('src');
+          // Cover URL is resolvable from the SSE payload alone — paint
+          // the big cover immediately so opening the sheet during a
+          // detail fetch doesn't flash a blank placeholder.
+          const eagerUrl = coverUrl({
+            cover_id: data.cover_id,
+            media_file_id: data.media_file_id,
+          });
+          if (eagerUrl) {
+            this.coverImg.src = eagerUrl;
+            this.coverImg.onerror = () => { this.coverImg.hidden = true; };
+            this.coverImg.hidden = false;
+          }
         }
         if (this.coverFallback) {
           const c = coverPlaceholderColors(data.song || data.album || '');
@@ -717,20 +731,16 @@
         if (this.similarList) this.similarList.innerHTML = '';
       }
 
-      // Retry detail fetch on every status update until we successfully
-      // pull it. _getCurrentMediaFileId depends on currentPlaylist which
-      // app.js loads asynchronously, so the first attempt typically
-      // fails right after page load.
-      if (this.lastDetailFetchedKey !== trackKey) {
-        this.tryFetchDetail(trackKey);
+      // The SSE payload now carries media_file_id (resolved server-side
+      // against the playlist cache), so detail fetch can proceed on the
+      // first np-update for a track — no race with playlist-loaded.
+      if (this.lastDetailFetchedKey !== trackKey && data.media_file_id) {
+        this.tryFetchDetail(trackKey, data.media_file_id);
       }
     },
 
-    async tryFetchDetail(trackKey) {
+    async tryFetchDetail(trackKey, mfId) {
       if (this.inflightKey === trackKey) return; // already fetching
-      const mfId = (typeof window._getCurrentMediaFileId === 'function')
-        ? window._getCurrentMediaFileId()
-        : null;
       if (!mfId) return;  // playlist not yet loaded — retry on next status
       this.inflightKey = trackKey;
       try {
@@ -951,18 +961,26 @@
             : 'M8 5v14l11-7z');                  // play triangle
       }
 
-      // Reset cover to gradient placeholder only when the track changes.
-      // The np-detail listener will swap to the real cover image once
-      // the sheet's tryFetchDetail completes. CSS already declares
-      // background-size:cover + background-position:center on .mp-cover,
-      // so the gradient and the image both render correctly without
-      // per-call inline overrides.
+      // Reset cover to gradient placeholder only when the track changes,
+      // then immediately try the cover_id from the SSE payload itself —
+      // it's served by the playlist cache so we don't have to wait for
+      // /now-playing-detail to settle. The np-detail listener still
+      // runs and re-applies the URL, but in the common case the image
+      // is already on screen by then. CSS declares background-size:cover
+      // + background-position:center on .mp-cover, so the gradient and
+      // the image both render correctly without per-call overrides.
       const songKey = (data.song || '') + '|' + (data.album || '');
       if (songKey !== this.lastSongKey) {
         this.lastSongKey = songKey;
         const c = coverPlaceholderColors(data.song || data.album || '');
         this.cover.style.backgroundImage =
           `linear-gradient(135deg, ${c.bg1}, ${c.bg2})`;
+        if (data.cover_id || data.media_file_id) {
+          this.setCover({
+            cover_id: data.cover_id,
+            media_file_id: data.media_file_id,
+          });
+        }
       }
     },
 
@@ -7626,24 +7644,21 @@
     moreDrawer.init();
     refreshAiAvailability();
     document.addEventListener('np-update', e => {
-      mp.update(e.detail);
-      sheet.onStatus(e.detail);
+      const d = e.detail || {};
+      _lastNpMediaFileId = d.media_file_id != null ? d.media_file_id : null;
+      mp.update(d);
+      sheet.onStatus(d);
       updatePlayingHighlight();
     });
     document.addEventListener('np-detail', e => {
       mp.setCover(e.detail);
     });
-    // currentPlaylist resolves async; once it lands, the previous
-    // np-update events that bailed (no mfId yet) need a re-run.
+    // playlist-loaded races np-update on the first SSE tick of a new
+    // playlist (the version bump arrives within the same payload that
+    // also triggers fetchPlaylist). Re-run the highlight pass against
+    // detail screens once the playlist DOM is reachable; tryFetchDetail
+    // no longer needs a re-poke because media_file_id is in np-update.
     document.addEventListener('playlist-loaded', updatePlayingHighlight);
-    // When the legacy playlist load resolves, kick a detail fetch in
-    // case SSE already fired before playlist was ready (in which case
-    // the previous tryFetchDetail bailed because mfId was null).
-    document.addEventListener('playlist-loaded', () => {
-      if (sheet.lastTrackKey && sheet.lastDetailFetchedKey !== sheet.lastTrackKey) {
-        sheet.tryFetchDetail(sheet.lastTrackKey);
-      }
-    });
     window.addEventListener('hashchange', render);
 
     if (!location.hash) {

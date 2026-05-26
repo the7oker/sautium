@@ -91,6 +91,17 @@ def _status_poller():
                     PlaybackState.PLAYING: "playing",
                     PlaybackState.STOPREQ: "stopping",
                 }
+                # Resolve media_file_id / cover_id from the playlist cache
+                # so the SSE payload is self-sufficient: subscribers no
+                # longer need to cross-reference track_index against
+                # `currentPlaylist` to fetch detail / similar / cover.
+                idx = status.track_index
+                pl_tracks = _latest_playlist.get("tracks") or []
+                pl_row = (
+                    pl_tracks[idx - 1]
+                    if isinstance(idx, int) and 1 <= idx <= len(pl_tracks)
+                    else None
+                )
                 new_data = {
                     "state": state_names.get(status.state, "unknown"),
                     "artist": status.artist,
@@ -101,6 +112,8 @@ def _status_poller():
                     "length": status.length,
                     "volume": status.volume,
                     "track_index": status.track_index,
+                    "media_file_id": pl_row["id"] if pl_row else None,
+                    "cover_id": pl_row["cover_id"] if pl_row else None,
                     "progress_percent": round(status.progress_percent, 1),
                     "position_formatted": format_time(status.position),
                     "length_formatted": format_time(status.length),

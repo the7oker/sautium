@@ -101,6 +101,10 @@
     catch (e) { console.error('Player command failed:', e); }
   }
 
+  function togglePlayPause() {
+    return playerCmd(currentState === 'playing' ? 'pause' : 'play');
+  }
+
   async function playTrack(mediaFileId) {
     try {
       await fetch('/api/player/play-track', {
@@ -119,6 +123,7 @@
   // --- Public API ------------------------------------------------------
   window.playerCmd = playerCmd;
   window.playTrack = playTrack;
+  window.togglePlayPause = togglePlayPause;
   window.fetchPlaylist = fetchPlaylist;
 
   // --- Boot ------------------------------------------------------------
