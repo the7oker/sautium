@@ -50,6 +50,12 @@ _poller_running = False
 # periodic full refresh.
 _latest_playlist: dict = {"tracks": [], "count": 0}
 _playlist_version: int = 0
+
+# Radio Mode flag. Surfaced in /status so the UI's Now Playing
+# toggle reflects state across reloads / tabs. Set true by
+# /api/player/radio/start, false by /radio/stop. Pure in-memory —
+# the next backend restart starts at off.
+_radio_mode: bool = False
 _playlist_dirty: bool = True   # force refresh on first poll
 PLAYLIST_REFRESH_EVERY = 5      # otherwise refresh every N status polls
 
@@ -118,6 +124,7 @@ def _status_poller():
                     "position_formatted": format_time(status.position),
                     "length_formatted": format_time(status.length),
                     "playlist_version": _playlist_version,
+                    "radio_mode": _radio_mode,
                 }
 
             if new_data != _latest_status:
@@ -1106,6 +1113,7 @@ def play_track(req: PlayTrackRequest):
             _register_playlist([req.track_id])
             hqp.play()
         _invalidate_playlist()
+        _exit_radio_mode()
         _notify_update()
 
         return {
@@ -1183,6 +1191,7 @@ def play_album(req: PlayAlbumRequest):
             hqp.play()
 
         _invalidate_playlist()
+        _exit_radio_mode()
         _notify_update()
 
         return {
@@ -1257,6 +1266,7 @@ def play_similar(req: PlaySimilarRequest):
             hqp.play()
 
         _invalidate_playlist()
+        _exit_radio_mode()
         _notify_update()
 
         return {
@@ -1331,6 +1341,7 @@ def play_tracks(req: PlayTracksRequest):
                         break
 
         _invalidate_playlist()
+        _exit_radio_mode()
         _notify_update()
 
         return {
@@ -1455,6 +1466,145 @@ def queue_next(req: QueueNextRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+
+# -- Radio mode ---------------------------------------------------------------
+
+class RadioStartRequest(BaseModel):
+    track_id: int           # media_file_id of the seed
+    limit: int = 20         # how many similar tracks to append after the seed
+
+
+@router.post("/radio/start")
+def radio_start(req: RadioStartRequest):
+    """Replace the queue with `seed + top-N CLAP-similar tracks`, start
+    playback, and flip _radio_mode true. Same destructive nature as
+    /play-track + /queue-next chained — the caller (Now Playing
+    toggle) is responsible for warning the user before invoking."""
+    global _radio_mode
+
+    source = _db_query_one("""
+        SELECT mf.id, mf.file_path,
+               t.id AS db_track_id,
+               regexp_replace(LOWER(t.title), '\\s+', ' ', 'g') AS title_norm,
+               LOWER(a.name) AS artist_norm
+        FROM media_files mf
+        JOIN tracks t ON mf.track_id = t.id
+        JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+        JOIN artists a ON a.id = ta.artist_id
+        WHERE mf.id = %(track_id)s
+        LIMIT 1
+    """, {"track_id": req.track_id})
+    if not source:
+        raise HTTPException(status_code=404, detail="Track not found")
+
+    logger.info(
+        f"radio_start seed: track_id={source['db_track_id']} "
+        f"title_norm={source['title_norm']!r} artist_norm={source['artist_norm']!r}"
+    )
+
+    # CLAP-similar tracks for the seed. Mirrors /queue-next, with an
+    # extra filter: exclude tracks whose (whitespace-normalized
+    # lower title, lower artist name) matches the seed.
+    #
+    # Matching by artist NAME (not id) shields us from duplicate
+    # artist rows in the DB — different uuids that both spell
+    # "Lionel Richie" wouldn't share an id, but they would share a
+    # normalized name. Same idea for title: multiple spaces and
+    # case differences across album reissues are smoothed out by
+    # regexp_replace+LOWER.
+    similar_rows = _db_query("""
+        WITH target AS (
+            SELECT e.vector
+            FROM embeddings e
+            WHERE e.track_id = %(db_track_id)s
+        )
+        SELECT mf_rep.id, mf_rep.file_path,
+               t.title AS dbg_title, a.name AS dbg_artist
+        FROM tracks t
+        JOIN embeddings e ON e.track_id = t.id
+        JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+        JOIN artists a ON a.id = ta.artist_id
+        JOIN LATERAL (
+            SELECT mf.id, mf.file_path
+            FROM media_files mf
+            WHERE mf.track_id = t.id
+            ORDER BY mf.is_analysis_source DESC, mf.id
+            LIMIT 1
+        ) mf_rep ON true
+        WHERE t.id != %(db_track_id)s
+          AND NOT (
+              regexp_replace(LOWER(t.title), '\\s+', ' ', 'g') = %(title_norm)s
+              AND LOWER(a.name) = %(artist_norm)s
+          )
+        ORDER BY e.vector <=> (SELECT vector FROM target)
+        LIMIT %(limit)s
+    """, {
+        "db_track_id": source["db_track_id"],
+        "title_norm":  source["title_norm"],
+        "artist_norm": source["artist_norm"],
+        "limit":       req.limit,
+    })
+    logger.info(
+        f"radio_start picked {len(similar_rows)} similar tracks; first 3: "
+        + ", ".join(
+            f"{r['dbg_artist']} — {r['dbg_title']}"
+            for r in similar_rows[:3]
+        )
+    )
+
+    try:
+        with _hqp_lock:
+            hqp = _get_hqp()
+            # Seamless seed handling. The seed is whatever's playing
+            # right now, so we don't re-add it or restart anything —
+            # restarting would cut the user's listen mid-song.
+            # `PlaylistClear` keeps the active slot intact (HQPlayer
+            # can't drop a track that's reading), so the call below
+            # erases everything queued AFTER the current track while
+            # the seed keeps playing untouched. Then we append CLAP-
+            # similar picks; HQPlayer flows into them when the seed
+            # ends, no `play()` needed.
+            hqp.playlist_clear()
+            for row in similar_rows:
+                hqp.playlist_add(file_path_to_uri(row["file_path"]))
+        _invalidate_playlist()
+        _radio_mode = True
+        # Wake SSE so the UI's Radio toggle flips amber without
+        # waiting for the next 1s poll tick.
+        global _status_version
+        _status_version += 1
+        _wake_sse_clients()
+        return {
+            "ok": True,
+            "seed_id": source["id"],
+            "similar_count": len(similar_rows),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@router.post("/radio/stop")
+def radio_stop():
+    """Flip _radio_mode off. The queue is left alone — radio's
+    'replace' behaviour only happens on start, and turning it off
+    just means future track-ends won't trigger an append."""
+    _exit_radio_mode()
+    return {"ok": True, "radio_mode": False}
+
+
+def _exit_radio_mode() -> None:
+    """Drop the radio flag and wake SSE so the Now Playing toggle
+    snaps off immediately. Called from every endpoint that
+    replaces the queue with explicit user-picked content (play-
+    track, play-album, play-tracks, play-similar). Append-only
+    paths like queue-tracks and queue-next don't touch the flag —
+    they extend the radio rather than ending it."""
+    global _radio_mode, _status_version
+    if _radio_mode:
+        _radio_mode = False
+        _status_version += 1
+        _wake_sse_clients()
 
 
 # -- Lyrics -------------------------------------------------------------------

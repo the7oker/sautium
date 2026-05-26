@@ -361,7 +361,12 @@
     if (location.hash !== target) {
       location.hash = target;  // hashchange event will trigger render()
     } else {
-      render();
+      // Already on this hash. The shared renderers (Home, Discovery,
+      // Friends) appendChild into root, so calling render() here
+      // would duplicate the whole screen markup on every re-tap of
+      // an active tab. Standard mobile behaviour: scroll back to
+      // the top instead.
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   }
 
@@ -525,7 +530,7 @@
     qBadge: null, keyPill: null, bpm: null, bpmNum: null,
     energy: null, energyDots: null,
     progressFill: null, progressHead: null,
-    timeCurrent: null, timeTotal: null, repeatBtn: null,
+    timeCurrent: null, timeTotal: null, radioBtn: null,
     playPause: null, playPauseIcon: null,
     prev: null, next: null, close: null, lyricsBtn: null,
     similar: null, similarList: null, similarCount: null,
@@ -554,7 +559,7 @@
       this.progressHead = document.getElementById('npProgressHead');
       this.timeCurrent = document.getElementById('npTimeCurrent');
       this.timeTotal = document.getElementById('npTimeTotal');
-      this.repeatBtn = document.getElementById('npRepeatBtn');
+      this.radioBtn = document.getElementById('npRadioBtn');
       this.queueBtn = document.getElementById('npQueueBtn');
       this.playPause = document.getElementById('npPlayPauseBtn');
       this.playPauseIcon = document.getElementById('npPlayPauseIcon');
@@ -583,6 +588,40 @@
         this.queueBtn.addEventListener('click', e => {
           e.stopPropagation();
           queue.show();
+        });
+      }
+      if (this.radioBtn) {
+        this.radioBtn.addEventListener('click', async e => {
+          e.stopPropagation();
+          const isOn = this.radioBtn.getAttribute('data-state') === 'on';
+          if (isOn) {
+            try {
+              await fetch('/api/player/radio/stop', { method: 'POST' });
+            } catch (err) { console.warn('radio stop failed', err); }
+            return;
+          }
+          // Off → On. Radio replaces the queue, so warn the user if
+          // there's more than just the current track to lose.
+          const seedId = (this.lastDetail && this.lastDetail.media_file_id)
+                       || (this._npMfId || null);
+          if (!seedId) return;
+          const playlistLen = (window.currentPlaylist || []).length;
+          if (playlistLen > 1) {
+            const ok = await window.confirmDestructive({
+              title: 'Start radio?',
+              message: 'Your current queue will be replaced with this track plus similar ones.',
+              confirmText: 'Start radio',
+              cancelText: 'Cancel',
+            });
+            if (!ok) return;
+          }
+          try {
+            await fetch('/api/player/radio/start', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ track_id: seedId }),
+            });
+          } catch (err) { console.warn('radio start failed', err); }
         });
       }
       // Tap artist / album text → open the corresponding detail screen.
@@ -683,6 +722,15 @@
             ? 'M9 5h4v20H9V5zm8 0h4v20h-4V5z'   // pause bars
             : 'M9 5v20l16-10z');                 // play triangle
       }
+      // Radio toggle visual reflects backend flag every tick. Stashed
+      // mfId so the radio start handler can use the current seed
+      // without waiting on a detail fetch.
+      if (this.radioBtn) {
+        this.radioBtn.setAttribute(
+          'data-state', data.radio_mode ? 'on' : 'off',
+        );
+      }
+      this._npMfId = data.media_file_id || this._npMfId;
 
       if (!data.song) return;
 
@@ -3337,7 +3385,6 @@
         <div class="album-hero-scrim"></div>
         <div class="album-hero-controls">
           <button class="icon-btn" type="button" data-action="back" aria-label="Back">${SVG_BACK}</button>
-          <button class="icon-btn" type="button" aria-label="More">${SVG_KEBAB}</button>
         </div>
       </div>
       <div class="album-meta-block">

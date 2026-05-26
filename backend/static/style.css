@@ -1456,26 +1456,12 @@ body.has-miniplayer .ai-fab {
   flex-shrink: 0;
   position: relative;
 }
-.np-repeat[data-state="one"],
-.np-repeat[data-state="all"] { color: var(--color-amber); }
-.np-repeat-badge {
-  position: absolute;
-  top: calc(8 * var(--px));
-  right: calc(6 * var(--px));
-  min-width: calc(12 * var(--px));
-  height: calc(12 * var(--px));
-  padding: 0 calc(3 * var(--px));
-  border-radius: calc(6 * var(--px));
-  background: var(--color-amber);
-  color: var(--color-foundation);
-  font-family: var(--font-mono);
-  font-size: calc(8 * var(--px));
-  font-weight: 700;
-  line-height: calc(12 * var(--px));
-  text-align: center;
-  display: none;
-}
-.np-repeat[data-state="one"] .np-repeat-badge { display: block; }
+/* Radio toggle. Off = muted icon; on = amber-stroke icon, button
+   chrome unchanged. The user's signal is the glyph colour switching
+   to amber — no background fill, so the toggle reads as a status
+   indicator rather than a "selected" pill. */
+.np-radio { transition: color 160ms ease; }
+.np-radio[data-state="on"] { color: var(--color-amber); }
 .np-play {
   width: calc(68 * var(--px));
   height: calc(68 * var(--px));
