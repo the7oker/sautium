@@ -19,6 +19,7 @@ and can retry within a few seconds — by then `is_loaded()` is True
 and the next request returns real results.
 """
 
+import random
 from typing import Any, Optional
 from fastapi import APIRouter, Query
 from sqlalchemy import text
@@ -217,8 +218,30 @@ def _filtered_track_ids(f: dict, cap: int = 5000) -> Optional[list[str]]:
 # -- Shuffle (Step 1.5a, kept) ------------------------------------------------
 
 @router.get("/shuffle")
-def shuffle_albums(limit: int = Query(12, ge=1, le=48)) -> dict[str, list[dict[str, Any]]]:
-    """Random album sample for the Discovery shuffle mosaic."""
+def shuffle_albums(
+    limit: int = Query(14, ge=1, le=48),
+    seed: int | None = Query(None),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    """Random album sample for the Discovery shuffle mosaic.
+
+    Pagination uses a per-session seed and an offset so successive
+    pages stay consistent with the first one (a fresh ORDER BY RANDOM()
+    on each request would reshuffle and duplicate tiles the user has
+    already scrolled past). The seed is generated server-side on the
+    first call and returned in next_cursor; clients echo it back for
+    subsequent pages.
+    """
+
+    if seed is None:
+        seed = random.randint(0, 2**31 - 1)
+
+    # md5(album_id || seed) is a deterministic pseudo-random ordering
+    # over the album set: cheap (no plpgsql call, no setseed transaction
+    # state), monotonic for a fixed seed, and uniformly distributed for
+    # UUID inputs. Postgres can't index this expression usefully, but a
+    # 3.5k-row seq scan + sort costs <50ms and avoids the seed-bleed
+    # issues setseed has with pooled connections.
     albums = db_query("""
         SELECT al.id::text AS id,
                al.title,
@@ -250,10 +273,16 @@ def shuffle_albums(limit: int = Query(12, ge=1, le=48)) -> dict[str, list[dict[s
             JOIN media_files mf ON mf.album_variant_id = av.id
             WHERE av.album_id = al.id
         )
-        ORDER BY RANDOM()
+        ORDER BY md5(al.id::text || %(seed)s::text)
+        OFFSET %(offset)s
         LIMIT %(limit)s
-    """, {"limit": limit})
-    return {"albums": albums}
+    """, {"limit": limit, "seed": seed, "offset": offset})
+
+    next_cursor = None
+    if len(albums) == limit:
+        next_cursor = {"seed": seed, "offset": offset + limit}
+
+    return {"albums": albums, "next_cursor": next_cursor}
 
 
 # -- Per-block search endpoints ----------------------------------------------

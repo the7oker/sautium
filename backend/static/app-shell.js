@@ -2297,12 +2297,18 @@
     }
   }
 
+  // Resolves a "tile kind" — either a string id ('artist'/'album') for the
+  // built-in renderers, or a caller-supplied function(item)->HTMLElement for
+  // surfaces (Discovery shuffle, etc) that mint custom tile DOM.
+  function _tileRendererFor(kind) {
+    if (typeof kind === 'function') return kind;
+    return kind === 'artist' ? renderArtistTile : renderAlbumTile;
+  }
+
   function appendTilesBeforeSentinel(row, items, kind, sentinel) {
+    const renderer = _tileRendererFor(kind);
     const frag = document.createDocumentFragment();
-    for (const item of items) {
-      if (kind === 'artist') frag.appendChild(renderArtistTile(item));
-      else frag.appendChild(renderAlbumTile(item));
-    }
+    for (const item of items) frag.appendChild(renderer(item));
     if (sentinel && sentinel.parentNode === row) row.insertBefore(frag, sentinel);
     else row.appendChild(frag);
   }
@@ -2314,9 +2320,17 @@
   // front of the sentinel. Failures don't auto-retry — the next
   // scroll-induced intersection re-fires the observer, which is
   // event-driven not polling, so we stay within the project rule.
-  function attachInfiniteScroll(row, endpoint, initialCursor, kind) {
+  //
+  // `initialCursor` is an opaque object echoed verbatim back into the
+  // next request as query params — `{before, before_id}` for Home's
+  // new-in-library, `{seed, offset}` for Discovery shuffle. The server
+  // decides the cursor shape; the utility just plumbs it through.
+  // `kind` is either a string ('artist'|'album') or a custom
+  // renderer function(item) -> HTMLElement.
+  function attachInfiniteScroll(row, endpoint, initialCursor, kind, opts = {}) {
     if (!initialCursor) return { disconnect() {} };
 
+    const limit = opts.limit || 20;
     const sentinel = document.createElement('div');
     sentinel.className = 'home-row-sentinel';
     sentinel.setAttribute('aria-hidden', 'true');
@@ -2328,15 +2342,14 @@
       if (state.loading || state.exhausted) return;
       state.loading = true;
       try {
-        const params = new URLSearchParams({
-          limit: '20',
-          before: state.cursor.before,
-          before_id: state.cursor.before_id,
-        });
+        const params = new URLSearchParams({ limit: String(limit) });
+        for (const [k, v] of Object.entries(state.cursor)) {
+          if (v != null) params.set(k, String(v));
+        }
         const resp = await fetch(`${endpoint}?${params}`);
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const data = await resp.json();
-        const items = data.albums || data.artists || [];
+        const items = data.albums || data.artists || data.items || [];
         appendTilesBeforeSentinel(row, items, kind, sentinel);
         if (data.next_cursor) {
           state.cursor = data.next_cursor;
@@ -2994,8 +3007,41 @@
     }</div>`;
   }
 
+  // Builds one mosaic tile for the Discovery shuffle row. Kept as a
+  // DOM-returning factory (rather than HTML string template) so it
+  // plugs into attachInfiniteScroll's renderer signature.
+  function renderMosaicTile(item) {
+    const c = coverPlaceholderColors(item.title || item.id || '');
+    const url = coverUrl(item);
+    const tile = document.createElement('button');
+    tile.type = 'button';
+    tile.className = 'mosaic-tile';
+    if (item.id) tile.dataset.albumId = item.id;
+    const cover = url
+      ? `<img src="${url}" alt="" loading="lazy" onerror="this.style.display='none'">`
+      : '';
+    tile.innerHTML = `
+      <div class="mosaic-cover"
+           style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}</div>
+      <div class="mosaic-title">${escapeHtml(item.title || '')}</div>
+      <div class="mosaic-artist">${escapeHtml(item.artist || '')}</div>
+    `;
+    if (item.id) {
+      tile.addEventListener('click', () => navigateToEntity('album', item.id));
+    }
+    return tile;
+  }
+
+  // Track the per-screen infinite-scroll handle so showShuffle teardown
+  // can disconnect the observer when Discovery navigates elsewhere; a
+  // leaked observer would keep firing fetches after the row's DOM is
+  // gone, polluting the network panel with cancelled requests.
+  let _shuffleScroll = null;
+
   async function fetchShuffle(screen) {
     const row = screen.querySelector('#discoveryShuffleRow');
+    if (_shuffleScroll) { _shuffleScroll.disconnect(); _shuffleScroll = null; }
+    row.innerHTML = '';
     try {
       const resp = await fetch('/api/discovery/shuffle?limit=14');
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -3005,28 +3051,13 @@
         row.innerHTML = '<p class="placeholder-body">No albums in library yet.</p>';
         return;
       }
-      row.innerHTML = albums.map(a => {
-        const c = coverPlaceholderColors(a.title || a.id || '');
-        const url = coverUrl(a);
-        const cover = url
-          ? `<img src="${url}" alt="" loading="lazy"
-                  onerror="this.style.display='none'">`
-          : '';
-        return `
-          <button class="mosaic-tile" type="button"
-                  data-album-id="${escapeHtml(a.id || '')}">
-            <div class="mosaic-cover"
-                 style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}</div>
-            <div class="mosaic-title">${escapeHtml(a.title || '')}</div>
-            <div class="mosaic-artist">${escapeHtml(a.artist || '')}</div>
-          </button>`;
-      }).join('');
-      row.querySelectorAll('[data-album-id]').forEach(el => {
-        el.addEventListener('click', () => {
-          const id = el.getAttribute('data-album-id');
-          if (id) navigateToEntity('album', id);
-        });
-      });
+      const frag = document.createDocumentFragment();
+      for (const a of albums) frag.appendChild(renderMosaicTile(a));
+      row.appendChild(frag);
+      _shuffleScroll = attachInfiniteScroll(
+        row, '/api/discovery/shuffle', data.next_cursor, renderMosaicTile,
+        { limit: 14 }
+      );
     } catch (err) {
       console.warn('shuffle failed:', err);
       row.innerHTML = '<p class="placeholder-body">Could not load shuffle.</p>';
