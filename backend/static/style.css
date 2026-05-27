@@ -2446,9 +2446,11 @@ body.has-miniplayer .ai-fab {
 .discovery-screen .discovery-section-head {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
+  gap: calc(10 * var(--px));
   padding: 0 calc(20 * var(--px)) calc(8 * var(--px));
   margin-top: calc(4 * var(--px));
+  flex-wrap: wrap;
+  row-gap: calc(2 * var(--px));
 }
 .discovery-screen .discovery-section-head h3 {
   margin: 0;
@@ -2463,6 +2465,15 @@ body.has-miniplayer .ai-fab {
   font-size: calc(11.5 * var(--px));
   color: var(--color-text-muted);
   line-height: 1.4;
+}
+/* Strip the standalone-paragraph padding when the sub-line lives inside
+   the section head — it shares the head's 20px gutter and the baseline
+   alignment makes a leading offset push the title visually off-grid.
+   margin-left: auto pushes the sub-line to the trailing edge so the
+   title sits at the left gutter and the muted caption right-aligns. */
+.discovery-screen .discovery-section-head .section-sub {
+  padding: 0;
+  margin-left: auto;
 }
 
 .discovery-screen .shuffle-mosaic {
@@ -2481,9 +2492,14 @@ body.has-miniplayer .ai-fab {
   padding: 0 calc(20 * var(--px));
   overflow-x: auto;
   scrollbar-width: none;
+  scroll-snap-type: x proximity;
   scroll-padding-inline-start: calc(20 * var(--px));
 }
 .shuffle-row::-webkit-scrollbar { display: none; }
+.shuffle-row > * {
+  scroll-snap-align: start;
+  flex-shrink: 0;
+}
 .mosaic-tile {
   flex: 0 0 calc(120 * var(--px));
   display: flex;

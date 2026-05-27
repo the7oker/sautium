@@ -2620,8 +2620,10 @@
       </div>
 
       <section class="discovery-shuffle" id="discoveryShuffle">
-        <div class="discovery-section-head"><h3>Shuffle your library</h3></div>
-        <p class="section-sub">Recall forgotten favourites</p>
+        <div class="discovery-section-head">
+          <h3>Shuffle your library</h3>
+          <p class="section-sub">Recall forgotten favourites</p>
+        </div>
         <div class="shuffle-mosaic">
           <div class="shuffle-row" id="discoveryShuffleRow"></div>
           <div class="edge-fade"></div>
