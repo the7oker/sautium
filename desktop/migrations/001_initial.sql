@@ -130,6 +130,11 @@ CREATE TABLE IF NOT EXISTS album_variants (
     sample_rate INTEGER,
     bit_depth INTEGER,
     is_lossless BOOLEAN DEFAULT TRUE,
+    -- Denormalised MAX(media_files.file_modified_at) across this variant's
+    -- files. Maintained by FOR EACH STATEMENT triggers on media_files so the
+    -- Home "New in library" feed sorts by an indexed column instead of a
+    -- runtime GROUP BY across 30k media_files on every request.
+    file_modified_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
@@ -574,6 +579,8 @@ CREATE INDEX IF NOT EXISTS idx_track_genres_genre_id ON track_genres(genre_id);
 
 -- Physical entity indexes
 CREATE INDEX IF NOT EXISTS idx_album_variants_album_id ON album_variants(album_id);
+CREATE INDEX IF NOT EXISTS idx_album_variants_file_modified_at_desc
+    ON album_variants(file_modified_at DESC NULLS LAST);
 CREATE INDEX IF NOT EXISTS idx_media_files_track_id ON media_files(track_id);
 CREATE INDEX IF NOT EXISTS idx_media_files_album_variant_id ON media_files(album_variant_id);
 CREATE INDEX IF NOT EXISTS idx_media_files_play_count ON media_files(play_count);
@@ -673,6 +680,86 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN CREATE TRIGGER update_media_files_updated_at BEFORE UPDATE ON media_files
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Denormalise media_files.file_modified_at onto album_variants so the Home
+-- "New in library" sort uses an index on album_variants instead of MAX() +
+-- GROUP BY across 30k media_files on every request. FOR EACH STATEMENT (not
+-- FOR EACH ROW) so a bulk import inserting hundreds of files triggers one
+-- recompute, not one per row. Postgres forbids combining REFERENCING ...
+-- TABLE with AFTER UPDATE OF <columns>, so the UPDATE trigger fires on any
+-- column change and filters affected variants inside the function — rows
+-- where neither file_modified_at nor album_variant_id changed produce an
+-- empty array and skip the UPDATE entirely.
+CREATE OR REPLACE FUNCTION refresh_av_file_modified_at(p_av_ids INTEGER[])
+RETURNS VOID AS $$
+BEGIN
+    UPDATE album_variants av
+    SET file_modified_at = (
+        SELECT MAX(mf.file_modified_at)
+        FROM media_files mf
+        WHERE mf.album_variant_id = av.id
+    )
+    WHERE av.id = ANY(p_av_ids);
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION trg_mf_av_mtime_ins() RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM refresh_av_file_modified_at(
+        ARRAY(SELECT DISTINCT album_variant_id FROM new_table)
+    );
+    RETURN NULL;
+END $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION trg_mf_av_mtime_upd() RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM refresh_av_file_modified_at(
+        ARRAY(
+            SELECT DISTINCT av_id FROM (
+                SELECT n.album_variant_id AS av_id
+                FROM new_table n
+                JOIN old_table o ON o.id = n.id
+                WHERE n.file_modified_at IS DISTINCT FROM o.file_modified_at
+                   OR n.album_variant_id IS DISTINCT FROM o.album_variant_id
+                UNION
+                SELECT o.album_variant_id
+                FROM new_table n
+                JOIN old_table o ON o.id = n.id
+                WHERE n.album_variant_id IS DISTINCT FROM o.album_variant_id
+            ) affected
+        )
+    );
+    RETURN NULL;
+END $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION trg_mf_av_mtime_del() RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM refresh_av_file_modified_at(
+        ARRAY(SELECT DISTINCT album_variant_id FROM old_table)
+    );
+    RETURN NULL;
+END $$ LANGUAGE plpgsql;
+
+DO $$ BEGIN
+    CREATE TRIGGER trg_media_files_av_mtime_ins
+    AFTER INSERT ON media_files
+    REFERENCING NEW TABLE AS new_table
+    FOR EACH STATEMENT EXECUTE FUNCTION trg_mf_av_mtime_ins();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TRIGGER trg_media_files_av_mtime_upd
+    AFTER UPDATE ON media_files
+    REFERENCING NEW TABLE AS new_table OLD TABLE AS old_table
+    FOR EACH STATEMENT EXECUTE FUNCTION trg_mf_av_mtime_upd();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TRIGGER trg_media_files_av_mtime_del
+    AFTER DELETE ON media_files
+    REFERENCING OLD TABLE AS old_table
+    FOR EACH STATEMENT EXECUTE FUNCTION trg_mf_av_mtime_del();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN CREATE TRIGGER trg_covers_updated_at BEFORE UPDATE ON covers

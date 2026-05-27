@@ -152,6 +152,15 @@ body.has-miniplayer #app {
   scroll-snap-align: start;
   flex-shrink: 0;
 }
+/* Invisible end-of-row marker that the infinite-scroll IntersectionObserver
+   watches; opted out of scroll-snap so it never becomes a snap target. */
+.home-row-sentinel {
+  flex: 0 0 1px;
+  width: 1px;
+  height: 1px;
+  scroll-snap-align: none;
+  pointer-events: none;
+}
 
 /* Artist tile */
 .artist-tile {
@@ -2206,6 +2215,34 @@ body.has-miniplayer .ai-fab {
   font-size: calc(15 * var(--px));
   font-weight: 500;
   color: var(--color-text);
+}
+/* Compact pill that opens the variant picker sheet; only rendered when
+   the album has more than one rip. Mono+blue label matches the visual
+   language used for other technical readouts (BPM, sample rate). */
+.album-variant-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--px));
+  margin-top: calc(8 * var(--px));
+  padding: calc(5 * var(--px)) calc(10 * var(--px));
+  border: 1px solid var(--color-divider);
+  border-radius: calc(8 * var(--px));
+  background: var(--color-surface-hi, var(--color-bg-elev, transparent));
+  color: var(--color-text-dim);
+  font-family: var(--font-mono);
+  font-size: calc(11 * var(--px));
+  cursor: pointer;
+  max-width: 100%;
+}
+.album-variant-toggle .variant-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.album-variant-toggle .variant-chevron {
+  color: var(--color-text-muted);
+  font-size: calc(10 * var(--px));
+  flex-shrink: 0;
 }
 .album-meta-row {
   margin-top: calc(12 * var(--px));

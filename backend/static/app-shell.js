@@ -2261,34 +2261,109 @@
     return tile;
   }
 
-  function renderHomeSection(parent, title, items, kind) {
+  // Renders an empty Home section shell (title + horizontally-scrolling
+  // row container) and returns the row so callers can append tiles as
+  // their fetches resolve. Splitting creation from population lets the
+  // three Home blocks render on-readiness instead of waiting for the
+  // slowest endpoint, and lets attachInfiniteScroll bolt onto the row
+  // without reaching into renderHome's local state.
+  function createHomeSection(parent, title) {
     const sec = document.createElement('section');
     sec.className = 'home-section';
     sec.innerHTML = `
       <div class="home-section-head">
         <h2 class="home-section-title">${escapeHtml(title)}</h2>
-        <button class="see-all" type="button">See all</button>
       </div>
     `;
     const row = document.createElement('div');
     row.className = 'home-row';
+    sec.appendChild(row);
+    parent.appendChild(sec);
+    return { section: sec, row };
+  }
 
+  function fillHomeRow(row, items, kind) {
     if (!items || items.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'placeholder-body';
       empty.style.padding = 'var(--space-2)';
       empty.textContent = '—';
       row.appendChild(empty);
-    } else {
-      for (const item of items) {
-        if (kind === 'artist') row.appendChild(renderArtistTile(item));
-        else row.appendChild(renderAlbumTile(item));
-      }
+      return;
     }
-    sec.appendChild(row);
-    parent.appendChild(sec);
+    for (const item of items) {
+      if (kind === 'artist') row.appendChild(renderArtistTile(item));
+      else row.appendChild(renderAlbumTile(item));
+    }
   }
 
+  function appendTilesBeforeSentinel(row, items, kind, sentinel) {
+    const frag = document.createDocumentFragment();
+    for (const item of items) {
+      if (kind === 'artist') frag.appendChild(renderArtistTile(item));
+      else frag.appendChild(renderAlbumTile(item));
+    }
+    if (sentinel && sentinel.parentNode === row) row.insertBefore(frag, sentinel);
+    else row.appendChild(frag);
+  }
+
+  // IntersectionObserver-based infinite scroll for horizontal rows.
+  // Watches a 1px sentinel at the end of the row; when it enters the
+  // viewport (with 200px rootMargin so we fetch *before* the user
+  // hits the wall), pulls the next cursor page and appends tiles in
+  // front of the sentinel. Failures don't auto-retry — the next
+  // scroll-induced intersection re-fires the observer, which is
+  // event-driven not polling, so we stay within the project rule.
+  function attachInfiniteScroll(row, endpoint, initialCursor, kind) {
+    if (!initialCursor) return { disconnect() {} };
+
+    const sentinel = document.createElement('div');
+    sentinel.className = 'home-row-sentinel';
+    sentinel.setAttribute('aria-hidden', 'true');
+    row.appendChild(sentinel);
+
+    const state = { cursor: initialCursor, loading: false, exhausted: false };
+
+    const fetchNext = async () => {
+      if (state.loading || state.exhausted) return;
+      state.loading = true;
+      try {
+        const params = new URLSearchParams({
+          limit: '20',
+          before: state.cursor.before,
+          before_id: state.cursor.before_id,
+        });
+        const resp = await fetch(`${endpoint}?${params}`);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        const items = data.albums || data.artists || [];
+        appendTilesBeforeSentinel(row, items, kind, sentinel);
+        if (data.next_cursor) {
+          state.cursor = data.next_cursor;
+        } else {
+          state.exhausted = true;
+          sentinel.remove();
+          observer.disconnect();
+        }
+      } catch (err) {
+        console.warn('Infinite scroll fetch failed:', err);
+      } finally {
+        state.loading = false;
+      }
+    };
+
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some(e => e.isIntersecting)) fetchNext();
+    }, { root: row, threshold: 0, rootMargin: '0px 200px 0px 0px' });
+    observer.observe(sentinel);
+
+    return { disconnect: () => observer.disconnect() };
+  }
+
+  // Three independent fetches, each section renders as its endpoint
+  // resolves. Mirrors the Discovery "render on readiness" pattern so
+  // a slow Favourite-artists aggregation doesn't block New in library
+  // from appearing.
   async function renderHome(root) {
     const screen = document.createElement('div');
     screen.className = 'screen';
@@ -2299,27 +2374,38 @@
     `;
     root.appendChild(screen);
 
-    let feed;
-    try {
-      const resp = await fetch('/api/home/feed?limit=8');
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      feed = await resp.json();
-    } catch (err) {
-      console.error('Home feed failed:', err);
-      const errBox = document.createElement('div');
-      errBox.className = 'placeholder-body';
-      errBox.style.padding = 'var(--space-4)';
-      errBox.textContent = 'Could not load Home feed. Try refreshing.';
-      screen.appendChild(errBox);
-      return;
-    }
+    const favSec = createHomeSection(screen, 'Favourite artists');
+    const newSec = createHomeSection(screen, 'New in library');
+    const recSec = createHomeSection(screen, 'Recommendations');
 
-    renderHomeSection(screen, 'Favourite artists',
-      feed.favourite_artists, 'artist');
-    renderHomeSection(screen, 'New in library',
-      feed.new_in_library, 'album');
-    renderHomeSection(screen, 'Recommendations',
-      feed.recommendations, 'album');
+    const sectionFailure = (section, label) => (err) => {
+      console.warn(`Home/${label} failed:`, err);
+      section.row.innerHTML = '';
+      const empty = document.createElement('div');
+      empty.className = 'placeholder-body';
+      empty.style.padding = 'var(--space-2)';
+      empty.textContent = '—';
+      section.row.appendChild(empty);
+    };
+
+    fetch('/api/home/favourite-artists?limit=100')
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(data => fillHomeRow(favSec.row, data.artists, 'artist'))
+      .catch(sectionFailure(favSec, 'favourite-artists'));
+
+    fetch('/api/home/new-in-library?limit=20')
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(data => {
+        fillHomeRow(newSec.row, data.albums, 'album');
+        attachInfiniteScroll(newSec.row, '/api/home/new-in-library',
+          data.next_cursor, 'album');
+      })
+      .catch(sectionFailure(newSec, 'new-in-library'));
+
+    fetch('/api/home/recommendations?limit=20')
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(data => fillHomeRow(recSec.row, data.albums, 'album'))
+      .catch(sectionFailure(recSec, 'recommendations'));
   }
 
   /* ---------- Discovery screen (Step 1.5b) ----------
@@ -3310,107 +3396,209 @@
     });
   }
 
+  // Human-readable label for an album_variant entry. Uses tech specs when
+  // they uniquely identify the rip and falls back to the last segments of
+  // the directory_path (which is UNIQUE on album_variants) when two
+  // variants share specs — e.g. The Wall's two separate 96/24 rips
+  // disambiguate via "[TR24]" vs "[Vinyl]" path tails.
+  function variantLabel(v) {
+    const sr = v.sample_rate ? (v.sample_rate / 1000).toFixed(v.sample_rate % 1000 === 0 ? 0 : 1) + ' kHz' : null;
+    const bd = v.bit_depth ? v.bit_depth + '-bit' : null;
+    const fmt = v.file_format || (v.is_lossless ? 'Lossless' : null);
+    const specs = [sr, bd, fmt].filter(Boolean).join(' · ');
+    const tailParts = (v.directory_path || '').split(/[\\/]/).filter(Boolean).slice(-2);
+    const tail = tailParts.join('/');
+    return specs && tail ? `${specs} · ${tail}` : (specs || tail || ('Variant ' + v.variant_id));
+  }
+
+  function openVariantPicker(variants, currentVid, onPick) {
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    const rows = variants.map(v => {
+      const active = v.variant_id === currentVid;
+      return `
+        <button class="sort-row${active ? ' active' : ''}"
+                type="button"
+                role="radio"
+                aria-checked="${active ? 'true' : 'false'}"
+                data-variant-id="${v.variant_id}">
+          <div>
+            <div class="sort-row-label">${escapeHtml(variantLabel(v))}</div>
+          </div>
+          <span class="sort-check">${ALBUMS_SORT_CHECK_SVG}</span>
+        </button>
+      `;
+    }).join('');
+    overlay.innerHTML = `
+      <div class="confirm-sheet">
+        <div class="sheet-handle" aria-hidden="true"></div>
+        <h4 class="sheet-title">Pick variant</h4>
+        <div class="sort-list">${rows}</div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    const close = (picked) => {
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+      if (typeof onPick === 'function' && picked !== null) onPick(picked);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') close(null); };
+    document.addEventListener('keydown', onKey);
+    overlay.addEventListener('click', e => {
+      if (e.target === overlay) close(null);
+    });
+    overlay.querySelectorAll('[data-variant-id]').forEach(btn => {
+      btn.addEventListener('click', () => close(parseInt(btn.dataset.variantId, 10)));
+    });
+  }
+
   async function renderAlbum(root, albumId) {
     root.innerHTML = '';
     const screen = document.createElement('div');
     screen.className = 'detail-screen';
     root.appendChild(screen);
 
-    let d;
-    try {
-      const resp = await fetch('/api/albums/' + encodeURIComponent(albumId));
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      d = await resp.json();
-    } catch (err) {
-      screen.innerHTML = `<div class="placeholder-screen">
-        <p class="placeholder-body">Album not found.</p>
-        <button class="legacy-link" onclick="history.back()">← Back</button>
-      </div>`;
-      return;
-    }
+    // Local screen state. selectedVariantId is null until the user picks
+    // a specific rip; the server then falls back to its DISTINCT ON
+    // default (analysis-source preferred). On variant change we re-fetch
+    // and re-render the whole screen — header/cover usually doesn't move
+    // since covers are identical across variants of the same album, and
+    // a clean rebuild keeps the wiring logic in one place.
+    let selectedVariantId = null;
 
-    const c = coverPlaceholderColors(d.title || d.id);
-    const heroUrl = coverUrl(d);
-    const heroImg = heroUrl
-      ? `<img src="${heroUrl}" alt="" onerror="this.style.display='none'">`
-      : `<div class="album-hero-fallback"
-            style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};"></div>`;
-
-    const qual = d.quality || 'lossy';
-    const qualLabel = qual === 'hi-res' ? 'Hi-Res'
-      : qual === 'lossless' ? 'Lossless' : 'Lossy';
-    const qualClass = qual === 'hi-res' ? 'is-hires'
-      : qual === 'lossless' ? 'is-lossless' : 'is-lossy';
-
-    const genresHtml = (d.genres || [])
-      .map(g => `<button class="tag-chip" type="button"
-                         data-genre-id="${escapeHtml(g.id)}">${escapeHtml(g.name)}</button>`)
-      .join('');
-
-    const tracksList = d.tracks || [];
-    const hasMultipleDiscs = tracksList.some(t => t.disc_number && t.disc_number > 1);
-    let lastDisc = null;
-    const trackParts = [];
-    for (const t of tracksList) {
-      if (hasMultipleDiscs && t.disc_number && t.disc_number !== lastDisc) {
-        lastDisc = t.disc_number;
-        trackParts.push(`<div class="disc-header">Disc ${t.disc_number}</div>`);
+    const loadAndRender = async () => {
+      let d;
+      try {
+        const url = '/api/albums/' + encodeURIComponent(albumId)
+          + (selectedVariantId != null ? '?variant_id=' + selectedVariantId : '');
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        d = await resp.json();
+      } catch (err) {
+        screen.innerHTML = `<div class="placeholder-screen">
+          <p class="placeholder-body">Album not found.</p>
+          <button class="legacy-link" onclick="history.back()">← Back</button>
+        </div>`;
+        return;
       }
-      const sub = [
-        t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
-        t.bpm ? Math.round(t.bpm) + ' bpm' : null,
-      ].filter(Boolean).join(' · ');
-      trackParts.push(`
-        <button class="track-row" type="button"
-                data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}">
-          <span class="track-rank">${t.track_number || ''}</span>
-          <div class="track-info">
-            <div class="track-title-line">${escapeHtml(t.title || '')}</div>
-            ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
+
+      const c = coverPlaceholderColors(d.title || d.id);
+      const heroUrl = coverUrl(d);
+      const heroImg = heroUrl
+        ? `<img src="${heroUrl}" alt="" onerror="this.style.display='none'">`
+        : `<div class="album-hero-fallback"
+              style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};"></div>`;
+
+      const qual = d.quality || 'lossy';
+      const qualLabel = qual === 'hi-res' ? 'Hi-Res'
+        : qual === 'lossless' ? 'Lossless' : 'Lossy';
+      const qualClass = qual === 'hi-res' ? 'is-hires'
+        : qual === 'lossless' ? 'is-lossless' : 'is-lossy';
+
+      const genresHtml = (d.genres || [])
+        .map(g => `<button class="tag-chip" type="button"
+                           data-genre-id="${escapeHtml(g.id)}">${escapeHtml(g.name)}</button>`)
+        .join('');
+
+      const tracksList = d.tracks || [];
+      const hasMultipleDiscs = tracksList.some(t => t.disc_number && t.disc_number > 1);
+      let lastDisc = null;
+      const trackParts = [];
+      for (const t of tracksList) {
+        if (hasMultipleDiscs && t.disc_number && t.disc_number !== lastDisc) {
+          lastDisc = t.disc_number;
+          trackParts.push(`<div class="disc-header">Disc ${t.disc_number}</div>`);
+        }
+        const sub = [
+          t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
+          t.bpm ? Math.round(t.bpm) + ' bpm' : null,
+        ].filter(Boolean).join(' · ');
+        trackParts.push(`
+          <button class="track-row" type="button"
+                  data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}">
+            <span class="track-rank">${t.track_number || ''}</span>
+            <div class="track-info">
+              <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+              ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
+            </div>
+            <span class="track-dur">${fmtDuration(t.duration)}</span>
+            <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
+          </button>
+        `);
+      }
+      const tracksHtml = trackParts.join('');
+
+      const artistName = d.primary_artist ? d.primary_artist.name : '';
+      const artistId = d.primary_artist ? d.primary_artist.id : '';
+      const totalDuration = fmtDurationLong(d.total_duration);
+
+      // Variant selector — render only when >1 variant. variants[] is
+      // pre-sorted by the API (lossless/highest-resolution first), so
+      // variants[0] is the natural default when no variant is pinned.
+      const variants = d.variants || [];
+      let variantHtml = '';
+      if (variants.length > 1) {
+        const activeVid = selectedVariantId ?? variants[0].variant_id;
+        const active = variants.find(v => v.variant_id === activeVid) || variants[0];
+        variantHtml = `
+          <button class="album-variant-toggle" type="button" data-action="pick-variant">
+            <span class="variant-label">${escapeHtml(variantLabel(active))}</span>
+            <span class="variant-chevron">▾</span>
+          </button>
+        `;
+      }
+
+      screen.innerHTML = `
+        <div class="album-hero">
+          ${heroImg}
+          <div class="album-hero-scrim"></div>
+          <div class="album-hero-controls">
+            <button class="icon-btn" type="button" data-action="back" aria-label="Back">${SVG_BACK}</button>
           </div>
-          <span class="track-dur">${fmtDuration(t.duration)}</span>
-          <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
-        </button>
-      `);
-    }
-    const tracksHtml = trackParts.join('');
-
-    const artistName = d.primary_artist ? d.primary_artist.name : '';
-    const artistId = d.primary_artist ? d.primary_artist.id : '';
-    const totalDuration = fmtDurationLong(d.total_duration);
-
-    screen.innerHTML = `
-      <div class="album-hero">
-        ${heroImg}
-        <div class="album-hero-scrim"></div>
-        <div class="album-hero-controls">
-          <button class="icon-btn" type="button" data-action="back" aria-label="Back">${SVG_BACK}</button>
         </div>
-      </div>
-      <div class="album-meta-block">
-        <h1 class="album-title-line">${escapeHtml(d.title || '')}</h1>
-        ${artistName ? `<button class="album-artist-line"
-                                style="background:none;border:0;padding:0;cursor:pointer;text-align:left;"
-                                data-artist-id="${escapeHtml(artistId)}">${escapeHtml(artistName)}</button>` : ''}
-        <div class="album-meta-row">
-          ${d.year ? `<span class="am-year">${d.year}</span><span class="am-dot"></span>` : ''}
-          <span class="am-dur" style="margin-left: 0;">${totalDuration}</span>
-          <span class="am-hires ${qualClass}" style="margin-left: auto;">${qualLabel}</span>
+        <div class="album-meta-block">
+          <h1 class="album-title-line">${escapeHtml(d.title || '')}</h1>
+          ${artistName ? `<button class="album-artist-line"
+                                  style="background:none;border:0;padding:0;cursor:pointer;text-align:left;"
+                                  data-artist-id="${escapeHtml(artistId)}">${escapeHtml(artistName)}</button>` : ''}
+          ${variantHtml}
+          <div class="album-meta-row">
+            ${d.year ? `<span class="am-year">${d.year}</span><span class="am-dot"></span>` : ''}
+            <span class="am-dur" style="margin-left: 0;">${totalDuration}</span>
+            <span class="am-hires ${qualClass}" style="margin-left: auto;">${qualLabel}</span>
+          </div>
+          ${genresHtml ? `<div class="tag-row" style="padding: calc(12 * var(--px)) 0 0;">${genresHtml}</div>` : ''}
         </div>
-        ${genresHtml ? `<div class="tag-row" style="padding: calc(12 * var(--px)) 0 0;">${genresHtml}</div>` : ''}
-      </div>
-      <div class="album-actions">
-        <button class="btn-primary" type="button" data-action="play-all">${SVG_PLAY} Play all</button>
-        <button class="btn-secondary album-queue-btn" type="button" data-action="queue-album">
-          <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
-        </button>
-      </div>
-      <div class="album-tracklist">${tracksHtml}</div>
-      <div style="height: calc(24 * var(--px));"></div>
-    `;
+        <div class="album-actions">
+          <button class="btn-primary" type="button" data-action="play-all">${SVG_PLAY} Play all</button>
+          <button class="btn-secondary album-queue-btn" type="button" data-action="queue-album">
+            <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
+          </button>
+        </div>
+        <div class="album-tracklist">${tracksHtml}</div>
+        <div style="height: calc(24 * var(--px));"></div>
+      `;
 
-    wireDetailHandlers(screen, { albumId, tracks: d.tracks });
-    updatePlayingHighlight();
+      const pickBtn = screen.querySelector('[data-action="pick-variant"]');
+      if (pickBtn) {
+        pickBtn.addEventListener('click', () => {
+          const currentVid = selectedVariantId ?? variants[0].variant_id;
+          openVariantPicker(variants, currentVid, (newVid) => {
+            if (newVid !== currentVid) {
+              selectedVariantId = newVid;
+              loadAndRender();
+            }
+          });
+        });
+      }
+
+      wireDetailHandlers(screen, { albumId, tracks: d.tracks });
+      updatePlayingHighlight();
+    };
+
+    await loadAndRender();
   }
 
   function wireDetailHandlers(screen, ctx = {}) {
