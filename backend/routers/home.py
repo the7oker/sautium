@@ -8,19 +8,89 @@ on-readiness instead of waiting for the slowest block to load, and so
 Favourite artists rank by total listening time (not play count): a
 single 90-minute ambient track should outweigh ten 5-minute pop plays.
 
-Recommendation strategy is intentionally simple for the first
-iteration (random unplayed albums); a CLAP-similarity-driven
-algorithm lands in a later step once the visual surface is proven.
+Recommendations are CLAP-similarity-driven from recent listening
+(see get_recommendations for the full pipeline). Cold start
+(no listening_history) falls back to newest-by-file_modified_at.
 """
 
+import logging
 from datetime import datetime
 from typing import Any
+
+import psycopg2.extras
 from fastapi import APIRouter, HTTPException, Query
 
-from db_pool import db_query
+from db_pool import db_query, get_conn
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/api/home", tags=["home"])
+
+
+# ─── Recommendation tuning ────────────────────────────────────────────────
+# Recency decay τ: weight(t) = exp(-hours_since_play / τ).
+# 168h → today=1.0, week-ago=0.37, two-weeks=0.14. Matches "session every
+# week or two" listening rhythm; raise to 336 for slower drift, lower to 72
+# to make recommendations track today's mood more aggressively.
+RECENCY_TAU_HOURS = 168
+# Hard cap on listening_history events that may seed the centroid.
+# A play from 4 months ago has tiny exp-weight anyway, but the cap keeps
+# the seed-pool query bounded and skips cold-cache reads.
+SEED_WINDOW_DAYS = 60
+# Events shorter than this are treated as skips, not listens.
+SEED_MIN_DURATION_SEC = 30
+# Top-N seed tracks by recency-weight. Beyond ~50 tracks every additional
+# seed dilutes the centroid more than it adds signal.
+SEED_TOP_N = 50
+# HNSW kNN pull: how many nearest tracks to the centroid we examine.
+# Stays in lockstep with HNSW_EF_SEARCH below — pgvector's index only
+# returns up to ef_search candidates regardless of LIMIT, so a higher
+# LIMIT without raising ef_search yields zero benefit. 500 over 35k
+# embeddings hits ~80-150 unique albums, plenty for a 20-item row;
+# going above 500 climbs into 200ms+ territory for marginal gains.
+KNN_CANDIDATE_TRACKS = 500
+# Session-local hnsw.ef_search override for the kNN query. pgvector's
+# default (40) is calibrated for "find the single nearest match" use
+# cases; for recommendation aggregation we need a wider net.
+HNSW_EF_SEARCH = 500
+# Per-album score = avg cosine over the top-K closest tracks of that
+# album. Top-3 favours albums where multiple tracks (not just one outlier)
+# match the seed direction.
+ALBUM_SCORE_TOP_K = 3
+# Tier 1 ("forgotten") threshold: albums whose last play was longer than
+# this ago — eligible to resurface once tier 0 (never played) is exhausted.
+FORGOTTEN_THRESHOLD_DAYS = 90
+
+
+def _vec_literal(vec) -> str:
+    """Format a Python iterable of floats as a pgvector text literal."""
+    return "[" + ",".join(str(float(x)) for x in vec) + "]"
+
+
+def _db_query_with_ef_search(sql: str, params: dict, ef_search: int) -> list[dict]:
+    """
+    Run a SELECT with hnsw.ef_search raised for the statement.
+
+    db_pool's connections are autocommit; SET LOCAL only takes effect
+    inside an explicit transaction, so we toggle autocommit off, set
+    the GUC, run the query, commit, and restore the pooled connection
+    to its expected autocommit state for the next caller.
+    """
+    with get_conn() as conn:
+        conn.autocommit = False
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SET LOCAL hnsw.ef_search = %s", (ef_search,))
+                cur.execute(sql, params)
+                rows = [dict(r) for r in cur.fetchall()]
+            conn.commit()
+            return rows
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.autocommit = True
 
 
 # Subqueries shared by new-in-library and recommendations to fetch the
@@ -174,26 +244,194 @@ def get_new_in_library(
 def get_recommendations(
     limit: int = Query(20, ge=1, le=50),
 ) -> dict[str, list[dict[str, Any]]]:
-    """Random unplayed albums — placeholder until CLAP-similarity lands."""
+    """
+    CLAP-similarity recommendations from recent listening.
 
-    albums = db_query(f"""
-        WITH album_plays AS (
+    Pipeline:
+      1. Top-N seed tracks from listening_history within SEED_WINDOW_DAYS,
+         weighted by exp(-hours_since_play / RECENCY_TAU_HOURS); events
+         shorter than SEED_MIN_DURATION_SEC count as skips.
+      2. Weighted centroid in Python (pgvector has no weighted-avg op).
+      3. HNSW kNN: top KNN_CANDIDATE_TRACKS embeddings nearest to centroid.
+      4. Album aggregation, score = avg cosine over top-K tracks per album.
+      5. Two-tier ordering — never-played (tier 0) before forgotten albums
+         whose last play is older than FORGOTTEN_THRESHOLD_DAYS (tier 1).
+      6. Random fill from the whole library if tier 0+1 came up short
+         (every album touched and not yet forgotten).
+      7. Cold start (empty seed pool) → newest-by-file_modified_at, which
+         on a fresh import degrades to random — acceptable until the first
+         listen lands.
+    """
+    seeds = _fetch_seed_vectors()
+    if not seeds:
+        return {"albums": _cold_start_albums(limit)}
+
+    centroid = _weighted_centroid(seeds)
+    albums = _knn_recommend(centroid, limit)
+
+    if len(albums) < limit:
+        existing = {a["id"] for a in albums}
+        albums.extend(_random_fill(limit - len(albums), exclude=existing))
+
+    return {"albums": albums}
+
+
+def _fetch_seed_vectors() -> list[dict[str, Any]]:
+    """Top-N recent tracks with their CLAP vectors and recency weight."""
+
+    return db_query(
+        f"""
+        WITH recent AS (
+            SELECT lh.track_id,
+                   SUM(
+                       lh.duration_listened *
+                       EXP(-EXTRACT(EPOCH FROM (NOW() - lh.started_at))
+                           / %(tau_sec)s)
+                   ) AS weight
+            FROM listening_history lh
+            WHERE lh.started_at >= NOW() - INTERVAL '{SEED_WINDOW_DAYS} days'
+              AND lh.duration_listened >= {SEED_MIN_DURATION_SEC}
+            GROUP BY lh.track_id
+        )
+        SELECT r.track_id::text AS track_id,
+               r.weight::float AS weight,
+               e.vector::text  AS vector
+        FROM recent r
+        JOIN embeddings e ON e.track_id = r.track_id
+        ORDER BY r.weight DESC
+        LIMIT {SEED_TOP_N}
+        """,
+        {"tau_sec": RECENCY_TAU_HOURS * 3600},
+    )
+
+
+def _weighted_centroid(seeds: list[dict[str, Any]]) -> list[float]:
+    """Weighted mean of 512-d CLAP vectors keyed by recency weight."""
+
+    total_w = sum(s["weight"] for s in seeds)
+    if total_w <= 0:
+        return _parse_vector(seeds[0]["vector"])
+
+    dim = 512
+    accum = [0.0] * dim
+    for s in seeds:
+        w = s["weight"]
+        v = _parse_vector(s["vector"])
+        for i in range(dim):
+            accum[i] += w * v[i]
+    return [x / total_w for x in accum]
+
+
+def _parse_vector(v_text: str) -> list[float]:
+    """Parse a pgvector text literal '[1.0,2.0,...]' into a list of floats."""
+
+    return [float(x) for x in v_text.strip("[]").split(",")]
+
+
+def _knn_recommend(centroid: list[float], limit: int) -> list[dict[str, Any]]:
+    """HNSW kNN + album aggregation + tiered ordering."""
+
+    qvec = _vec_literal(centroid)
+
+    rows = _db_query_with_ef_search(
+        f"""
+        WITH similar_tracks AS (
+            SELECT e.track_id,
+                   1 - (e.vector <=> %(qvec)s::vector) AS sim
+            FROM embeddings e
+            ORDER BY e.vector <=> %(qvec)s::vector
+            LIMIT {KNN_CANDIDATE_TRACKS}
+        ),
+        candidate_albums AS (
             SELECT av.album_id,
-                   SUM(COALESCE(lps.play_count, 0)) AS total_plays
+                   st.sim,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY av.album_id ORDER BY st.sim DESC
+                   ) AS rn
+            FROM similar_tracks st
+            JOIN media_files mf ON mf.track_id = st.track_id
+            JOIN album_variants av ON av.id = mf.album_variant_id
+        ),
+        album_state AS (
+            SELECT av.album_id,
+                   MAX(lps.last_played_at) AS last_touch,
+                   COALESCE(SUM(lps.play_count), 0) AS total_plays
             FROM album_variants av
             JOIN media_files mf ON mf.album_variant_id = av.id
             LEFT JOIN local_play_stats lps ON lps.track_id = mf.track_id
+            WHERE av.album_id IN (SELECT album_id FROM candidate_albums)
             GROUP BY av.album_id
+        ),
+        scored AS (
+            SELECT ca.album_id,
+                   AVG(ca.sim) AS score,
+                   CASE
+                       WHEN als.total_plays = 0 THEN 0
+                       WHEN als.last_touch < NOW() - INTERVAL '{FORGOTTEN_THRESHOLD_DAYS} days' THEN 1
+                       ELSE 2
+                   END AS tier
+            FROM candidate_albums ca
+            JOIN album_state als ON als.album_id = ca.album_id
+            WHERE ca.rn <= {ALBUM_SCORE_TOP_K}
+            GROUP BY ca.album_id, als.total_plays, als.last_touch
         )
         SELECT al.id::text AS id,
                al.title,
                al.release_year AS year,
                {_ALBUM_TILE_SUBQUERIES}
-        FROM albums al
-        LEFT JOIN album_plays ap ON ap.album_id = al.id
-        WHERE COALESCE(ap.total_plays, 0) = 0
-        ORDER BY RANDOM()
+        FROM scored s
+        JOIN albums al ON al.id = s.album_id
+        WHERE s.tier <= 1
+        ORDER BY s.tier ASC, s.score DESC
         LIMIT %(limit)s
-    """, {"limit": limit})
+        """,
+        {"qvec": qvec, "limit": limit},
+        ef_search=HNSW_EF_SEARCH,
+    )
+    return rows
 
-    return {"albums": albums}
+
+def _random_fill(needed: int, exclude: set[str]) -> list[dict[str, Any]]:
+    """Tier-2 fallback: random albums from the whole library, minus exclude."""
+
+    if needed <= 0:
+        return []
+
+    return db_query(
+        f"""
+        SELECT al.id::text AS id,
+               al.title,
+               al.release_year AS year,
+               {_ALBUM_TILE_SUBQUERIES}
+        FROM albums al
+        WHERE al.id::text != ALL(%(exclude)s::text[])
+        ORDER BY RANDOM()
+        LIMIT %(needed)s
+        """,
+        {"exclude": list(exclude), "needed": needed},
+    )
+
+
+def _cold_start_albums(limit: int) -> list[dict[str, Any]]:
+    """No listening history yet — newest imports first."""
+
+    return db_query(
+        f"""
+        WITH album_keys AS (
+            SELECT al.id AS album_id,
+                   MAX(av.file_modified_at) AS newest_added
+            FROM albums al
+            JOIN album_variants av ON av.album_id = al.id
+            GROUP BY al.id
+        )
+        SELECT al.id::text AS id,
+               al.title,
+               al.release_year AS year,
+               {_ALBUM_TILE_SUBQUERIES}
+        FROM album_keys ak
+        JOIN albums al ON al.id = ak.album_id
+        ORDER BY ak.newest_added DESC NULLS LAST, RANDOM()
+        LIMIT %(limit)s
+        """,
+        {"limit": limit},
+    )
