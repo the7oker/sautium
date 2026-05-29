@@ -20,7 +20,7 @@ from typing import Any
 import psycopg2.extras
 from fastapi import APIRouter, HTTPException, Query
 
-from db_pool import db_query, get_conn
+from db_pool import db_query, db_query_one, get_conn
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +274,75 @@ def get_recommendations(
         albums.extend(_random_fill(limit - len(albums), exclude=existing))
 
     return {"albums": albums}
+
+
+@router.get("/listening-history")
+def get_listening_history(
+    limit: int = Query(20, ge=1, le=50),
+) -> dict[str, list[dict[str, Any]]]:
+    """Archived listening sessions (queue-lifetime snapshots), newest first.
+
+    Only completed sessions — the active queue lives in Now Playing / Queue,
+    not here. cover_id is denormalised onto the session row so the shelf
+    renders without joining session_tracks.
+    """
+    sessions = db_query("""
+        SELECT id::text AS id,
+               title,
+               subtitle,
+               cover_id::text AS cover_id,
+               origin,
+               track_count
+        FROM listening_sessions
+        WHERE ended_at IS NOT NULL
+        ORDER BY ended_at DESC
+        LIMIT %(limit)s
+    """, {"limit": limit})
+
+    return {"sessions": sessions}
+
+
+@router.get("/listening-history/{session_id}")
+def get_listening_session(session_id: str) -> dict[str, Any]:
+    """Session header + ordered track list for the session-detail view."""
+
+    session = db_query_one("""
+        SELECT id::text AS id,
+               title,
+               subtitle,
+               cover_id::text AS cover_id,
+               origin,
+               track_count
+        FROM listening_sessions
+        WHERE id = %(id)s::uuid AND ended_at IS NOT NULL
+    """, {"id": session_id})
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session["tracks"] = db_query("""
+        SELECT st.media_file_id,
+               t.title,
+               a.name AS artist,
+               mf.duration_seconds::float AS duration_seconds,
+               mf.cover_id::text AS cover_id,
+               af.key,
+               af.mode,
+               af.bpm::float AS bpm
+        FROM session_tracks st
+        JOIN media_files mf ON mf.id = st.media_file_id
+        JOIN tracks t ON t.id = mf.track_id
+        LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+        LEFT JOIN artists a ON a.id = ta.artist_id
+        LEFT JOIN audio_features af ON af.track_id = t.id
+        WHERE st.session_id = %(id)s::uuid
+        ORDER BY st.position
+    """, {"id": session_id})
+
+    session["total_duration"] = sum(
+        t["duration_seconds"] or 0 for t in session["tracks"]
+    )
+
+    return session
 
 
 def _fetch_seed_vectors() -> list[dict[str, Any]]:

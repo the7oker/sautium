@@ -19,6 +19,10 @@ DO $$ BEGIN
     CREATE TYPE artist_vocalist AS ENUM ('unknown', 'vocal', 'instrumental');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+DO $$ BEGIN
+    CREATE TYPE session_origin AS ENUM ('album', 'track', 'radio', 'mix');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- ============================================================
 -- Embedding models (shared metadata)
 -- ============================================================
@@ -453,6 +457,45 @@ CREATE TABLE IF NOT EXISTS local_play_stats (
     CONSTRAINT chk_lps_avg_pct CHECK (avg_percent_listened >= 0 AND avg_percent_listened <= 100)
 );
 
+-- ============================================================
+-- Listening sessions (queue-lifetime snapshots for the Home shelf)
+-- ============================================================
+-- A session is one queue lifetime. Each destructive play endpoint
+-- (play-track / play-album / play-similar / play-tracks / radio-start)
+-- archives the previous queue as an immutable snapshot and opens a new
+-- active session. ended_at IS NULL ⇔ active; the partial unique index
+-- enforces at most one active session at a time. cover_id is
+-- denormalised from the first snapshot track so the Home shelf renders
+-- without a join. origin records how the queue started — the one fact
+-- HQPlayer (source of truth for the live queue) does not know.
+CREATE TABLE IF NOT EXISTS listening_sessions (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    origin             session_origin NOT NULL,
+    title              TEXT,
+    subtitle           TEXT,
+    cover_id           UUID REFERENCES covers(id) ON DELETE SET NULL,
+    origin_album_id    UUID REFERENCES albums(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    seed_media_file_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
+    track_count        INTEGER NOT NULL DEFAULT 0,
+    started_at         TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ended_at           TIMESTAMPTZ,
+    created_at         TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_listening_sessions_track_count CHECK (track_count >= 0)
+);
+
+-- Immutable per-session track snapshot, written when the session is
+-- archived. media_file_id (not track_id): the queue is physical files,
+-- consistent with the playback domain. ON DELETE CASCADE on media_files
+-- so a removed file drops from old snapshots; the session row survives
+-- with a smaller list (track_count is the stored snapshot, intentionally
+-- not re-derived).
+CREATE TABLE IF NOT EXISTS session_tracks (
+    session_id     UUID NOT NULL REFERENCES listening_sessions(id) ON DELETE CASCADE,
+    position       INTEGER NOT NULL,
+    media_file_id  INTEGER NOT NULL REFERENCES media_files(id) ON DELETE CASCADE,
+    PRIMARY KEY (session_id, position)
+);
+
 CREATE TABLE IF NOT EXISTS track_lyrics (
     id SERIAL PRIMARY KEY,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -644,6 +687,18 @@ CREATE INDEX IF NOT EXISTS idx_listening_history_track_started ON listening_hist
 -- Local play stats indexes
 CREATE INDEX IF NOT EXISTS idx_local_play_stats_last_played ON local_play_stats(last_played_at);
 CREATE INDEX IF NOT EXISTS idx_local_play_stats_play_count ON local_play_stats(play_count);
+
+-- Listening sessions indexes
+-- At most one active session (ended_at IS NULL). Index a constant
+-- expression over the partial set — UNIQUE(ended_at) WHERE ended_at IS
+-- NULL would NOT work, since NULLs are distinct in a unique index.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_listening_sessions_one_active
+    ON listening_sessions((ended_at IS NULL)) WHERE ended_at IS NULL;
+-- Home shelf: archived sessions, newest first.
+CREATE INDEX IF NOT EXISTS idx_listening_sessions_archived
+    ON listening_sessions(ended_at DESC) WHERE ended_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_session_tracks_media_file
+    ON session_tracks(media_file_id);
 
 -- ============================================================
 -- Trigger function for updated_at

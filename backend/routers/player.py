@@ -18,7 +18,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from config import settings
-from db_pool import db_query as _db_query, db_query_one as _db_query_one, get_conn as _get_conn
+from db_pool import (
+    db_query as _db_query,
+    db_query_one as _db_query_one,
+    db_execute as _db_execute,
+    get_conn as _get_conn,
+)
 from hqplayer_client import HQPlayerClient, PlaybackState, format_time, file_path_to_uri
 from lrclib import LrclibService
 
@@ -333,6 +338,58 @@ def _hqp_cmd(func):
             return func(hqp)
 
 
+def _add_uris_with_retry(uris: list[str], *, clear_first: bool = False) -> int:
+    """Append URIs to the HQPlayer playlist, surviving a mid-batch
+    connection drop. MUST be called while holding `_hqp_lock`.
+
+    `playlist_add` returns False (it does not raise) when the control
+    socket is down, so a plain `for` loop silently drops tracks while the
+    endpoint still reports success — exactly the failure that made a Queue
+    action add only the one track that landed before HQPlayer stalled.
+    Here every add is verified: on a falsey result or a dropped socket we
+    reset the connection and retry that one URI once. Returns the count
+    actually added so the caller can surface a short count instead of a
+    fake 'ok'.
+
+    `clear_first=True` issues clear=True on the first URI (replace-queue
+    semantics); the rest append. The clear only ever fires on i == 0, so a
+    mid-batch reconnect never re-clears already-added tracks.
+    """
+    added = 0
+    for i, uri in enumerate(uris):
+        clear = clear_first and i == 0
+        ok = False
+        for attempt in (1, 2):
+            try:
+                ok = _get_hqp().playlist_add(uri, clear=clear)
+            except (BrokenPipeError, ConnectionError, OSError):
+                ok = False
+            if ok:
+                break
+            if attempt == 1:
+                _reset_hqp()  # force a fresh socket before the single retry
+        if ok:
+            added += 1
+        else:
+            logger.warning(f"playlist_add failed after reconnect: {uri}")
+    return added
+
+
+def _hqp_safe(action) -> None:
+    """Run one HQPlayer command (stop / play / clear / select_track)
+    tolerantly inside an existing `_hqp_lock`: one reconnect-and-retry,
+    never raises. Frames a resilient multi-add so a churning control port
+    can't abort the whole operation at its stop()/play() bookends before
+    the add even runs."""
+    for attempt in (1, 2):
+        try:
+            action(_get_hqp())
+            return
+        except (BrokenPipeError, ConnectionError, OSError):
+            if attempt == 1:
+                _reset_hqp()
+
+
 
 
 def _register_playlist(track_ids: list[int]) -> bool:
@@ -350,6 +407,251 @@ def _register_playlist(track_ids: list[int]) -> bool:
     except Exception as e:
         logger.warning(f"Failed to register playlist with tracker: {e}")
         return False
+
+
+# -- Listening sessions (queue-lifetime snapshots) ----------------------------
+#
+# Each destructive play endpoint archives the live queue as an immutable
+# snapshot and opens a new active session. HQPlayer stays the single source
+# of truth for the live queue — we never duplicate it; we only persist
+# archived snapshots, captured at the instant the queue is replaced. `origin`
+# (how the queue started) is the one fact HQPlayer doesn't know, so it rides
+# on the active-session marker.
+
+_SESSION_ORIGINS = ("album", "track", "radio", "mix")
+
+
+def _rotate_session(
+    origin: str,
+    *,
+    seed_media_file_id: Optional[int] = None,
+    origin_album_id: Optional[str] = None,
+) -> None:
+    """Archive the live queue as a session snapshot, then open a new active
+    session. Called at the TOP of every destructive play endpoint, BEFORE
+    stop()/clear(), so the OLD queue is captured intact.
+
+    Reads the old queue fresh from HQPlayer under the STATUS lock — a
+    different connection + lock from the cmd path the caller is about to use,
+    so it never nests with the caller's _hqp_lock block (same split `reorder`
+    already relies on). A read miss degrades to an empty snapshot; never
+    retried/slept on (project rule)."""
+    old_media_ids: list[int] = []
+    try:
+        with _hqp_status_lock:
+            hqp = _get_hqp_status()
+            hqp_tracks = hqp.get_playlist()
+        payload = _build_playlist_payload(hqp_tracks)  # pure transform, no socket I/O
+        old_media_ids = [t["id"] for t in payload["tracks"] if t.get("id")]
+    except Exception as e:
+        logger.warning(f"_rotate_session: could not read old queue: {e}")
+        old_media_ids = []
+
+    archived_mix_id = _archive_and_open_session(
+        old_media_ids, origin, seed_media_file_id, origin_album_id,
+    )
+    if archived_mix_id is not None:
+        _schedule_mix_title(archived_mix_id)
+
+
+def _archive_and_open_session(
+    old_media_ids: list[int],
+    origin: str,
+    seed_media_file_id: Optional[int],
+    origin_album_id: Optional[str],
+) -> Optional[str]:
+    """Archive the current active session against `old_media_ids` and open a
+    new one — atomically. db_pool connections are autocommit, so toggle it
+    off for this multi-statement transaction (mirrors
+    routers.home._db_query_with_ef_search). Returns the archived session id
+    IFF it was a mix needing a background title, else None."""
+    import psycopg2.extras
+
+    archived_mix_id: Optional[str] = None
+    with _get_conn() as conn:
+        conn.autocommit = False
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT id::text AS id, origin, "
+                    "origin_album_id::text AS origin_album_id, seed_media_file_id "
+                    "FROM listening_sessions WHERE ended_at IS NULL FOR UPDATE"
+                )
+                active = cur.fetchone()
+
+                # Idempotent re-play: a repeated destructive play of the same
+                # thing (double-tapped "Play all", a retried/duplicated
+                # request) must NOT archive the just-opened session against
+                # the still-old HQPlayer queue and spawn a duplicate — that
+                # produced history cards whose title (from origin) disagreed
+                # with their snapshot tracks/cover. Same origin identity as the
+                # current active session ⇒ no-op rotation. FOR UPDATE above
+                # serialises concurrent calls so the second one sees the first
+                # one's freshly-inserted active row here.
+                if active is not None and (
+                    active["origin"] == origin
+                    and active["origin_album_id"] == origin_album_id
+                    and active["seed_media_file_id"] == seed_media_file_id
+                ):
+                    conn.commit()
+                    return None
+
+                if active is not None:
+                    if old_media_ids:
+                        psycopg2.extras.execute_values(
+                            cur,
+                            "INSERT INTO session_tracks "
+                            "(session_id, position, media_file_id) VALUES %s",
+                            [(active["id"], i, mid)
+                             for i, mid in enumerate(old_media_ids)],
+                        )
+                        title, subtitle, cover_id = _compute_session_card(
+                            cur, active, old_media_ids,
+                        )
+                        cur.execute(
+                            "UPDATE listening_sessions SET ended_at = now(), "
+                            "track_count = %s, title = %s, subtitle = %s, "
+                            "cover_id = %s::uuid WHERE id = %s::uuid",
+                            (len(old_media_ids), title, subtitle,
+                             cover_id, active["id"]),
+                        )
+                        if active["origin"] == "mix":
+                            archived_mix_id = active["id"]
+                    else:
+                        # Dangling empty active row — never show an empty card.
+                        cur.execute(
+                            "DELETE FROM listening_sessions WHERE id = %s::uuid",
+                            (active["id"],),
+                        )
+
+                cur.execute(
+                    "INSERT INTO listening_sessions "
+                    "(origin, seed_media_file_id, origin_album_id) "
+                    "VALUES (%s, %s, %s::uuid)",
+                    (origin, seed_media_file_id, origin_album_id),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.autocommit = True
+    return archived_mix_id
+
+
+def _compute_session_card(cur, active: dict, old_media_ids: list[int]):
+    """Title / subtitle / cover_id for an archived session, derived from its
+    origin (NOT the snapshot's first row — album/track/radio titles come from
+    the stored origin columns; only mix uses the snapshot). Per-row label
+    formatting — the Python-side case the project allows; the lookups are SQL.
+    Uses the cursor already inside the archive transaction."""
+    origin = active["origin"]
+    first_mid = old_media_ids[0] if old_media_ids else None
+
+    def _cover_of(mid):
+        if mid is None:
+            return None
+        cur.execute(
+            "SELECT cover_id::text AS cover_id FROM media_files WHERE id = %s",
+            (mid,),
+        )
+        r = cur.fetchone()
+        return r["cover_id"] if r else None
+
+    if origin == "album" and active["origin_album_id"]:
+        cur.execute("""
+            SELECT al.title,
+                   (SELECT a.name
+                    FROM artists a
+                    JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
+                    JOIN tracks t ON t.id = ta.track_id
+                    JOIN media_files mf ON mf.track_id = t.id
+                    JOIN album_variants av ON av.id = mf.album_variant_id
+                    WHERE av.album_id = al.id
+                    GROUP BY a.id, a.name
+                    ORDER BY COUNT(*) DESC
+                    LIMIT 1) AS artist
+            FROM albums al WHERE al.id = %s::uuid
+        """, (active["origin_album_id"],))
+        r = cur.fetchone()
+        return (
+            r["title"] if r else "Album",
+            r["artist"] if r else None,
+            _cover_of(first_mid),
+        )
+
+    if origin in ("track", "radio") and active["seed_media_file_id"]:
+        cur.execute("""
+            SELECT t.title, a.name AS artist, mf.cover_id::text AS cover_id
+            FROM media_files mf
+            JOIN tracks t ON t.id = mf.track_id
+            JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+            JOIN artists a ON a.id = ta.artist_id
+            WHERE mf.id = %s
+        """, (active["seed_media_file_id"],))
+        r = cur.fetchone()
+        title = r["title"] if r else "Track"
+        subtitle = "Radio" if origin == "radio" else (r["artist"] if r else None)
+        cover = (r["cover_id"] if r else None) or _cover_of(first_mid)
+        return (title, subtitle, cover)
+
+    # mix — or album/track/radio with a NULL seed (degrade gracefully).
+    n = len(old_media_ids)
+    return ("Mix", f"{n} track{'s' if n != 1 else ''}", _cover_of(first_mid))
+
+
+def _schedule_mix_title(session_id: str) -> None:
+    """Generate an AI title for an archived mix in a background daemon thread
+    (the codebase's background-work idiom — chat-stream-worker, status poller).
+    Graceful no-op when no AI provider is configured: the card stays 'Mix'."""
+    def _worker():
+        try:
+            from routers.chat import (
+                _resolve_provider, _title_via_provider,
+                _title_via_claude_code, _clean_title,
+            )
+            try:
+                provider = _resolve_provider(None)
+            except Exception:
+                return  # no provider → leave 'Mix'
+
+            rows = _db_query("""
+                SELECT a.name AS artist, t.title AS title
+                FROM session_tracks st
+                JOIN media_files mf ON mf.id = st.media_file_id
+                JOIN tracks t ON t.id = mf.track_id
+                JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+                JOIN artists a ON a.id = ta.artist_id
+                WHERE st.session_id = %(sid)s::uuid
+                ORDER BY st.position
+                LIMIT 30
+            """, {"sid": str(session_id)})
+            if not rows:
+                return
+
+            lines = "\n".join(f"{r['artist']} — {r['title']}" for r in rows)
+            prompt = (
+                "Below is a playlist of tracks. Produce a short, evocative "
+                "playlist name — 2-4 words, max 6 — in the same language as the "
+                "track titles. No quotes, no trailing punctuation, do not use "
+                "the words 'playlist' or 'mix'. Output ONLY the name.\n\n" + lines
+            )
+            title = (
+                _title_via_claude_code(prompt) if provider == "claude_code"
+                else _title_via_provider(provider, prompt)
+            )
+            title = _clean_title(title) if title else None
+            if title:
+                # Only overwrite the placeholder — a later user edit wins.
+                _db_execute(
+                    "UPDATE listening_sessions SET title = %(t)s "
+                    "WHERE id = %(id)s::uuid AND title = 'Mix'",
+                    {"t": title, "id": str(session_id)},
+                )
+        except Exception as e:
+            logger.warning(f"mix title generation failed for {session_id}: {e}")
+
+    threading.Thread(target=_worker, daemon=True, name="mix-title-worker").start()
 
 
 # -- Request models -----------------------------------------------------------
@@ -374,6 +676,10 @@ class PlaySimilarRequest(BaseModel):
 
 class PlayTracksRequest(BaseModel):
     track_ids: list[int]
+    # Session origin hint: album "Play all" sends 'album' (+ origin_album_id)
+    # so a played-whole-album isn't labelled "Mix". Defaults to 'mix'.
+    origin: Optional[str] = None
+    origin_album_id: Optional[str] = None
 
 class QueueNextRequest(BaseModel):
     track_id: int
@@ -1133,27 +1439,36 @@ def play_track(req: PlayTrackRequest):
     if not row:
         raise HTTPException(status_code=404, detail="Track not found")
 
+    _rotate_session('track', seed_media_file_id=req.track_id)
+
     try:
         uri = file_path_to_uri(row["file_path"])
         with _hqp_lock:
-            hqp = _get_hqp()
-            hqp.stop()
-            hqp.playlist_add(uri, clear=True)
+            _hqp_safe(lambda h: h.stop())
+            added = _add_uris_with_retry([uri], clear_first=True)
             # Register BEFORE play() so the tracker has the index→track_id
             # map by the time HQPlayer emits its first status update —
             # otherwise the now-playing scrobble is silently dropped.
             _register_playlist([req.track_id])
-            hqp.play()
+            if added:
+                _hqp_safe(lambda h: h.play())
         _invalidate_playlist()
         _exit_radio_mode()
         _notify_update()
 
+        if not added:
+            raise HTTPException(
+                status_code=503,
+                detail="HQPlayer unavailable — track not queued. Try again.",
+            )
         return {
             "ok": True,
             "artist": row["artist"],
             "title": row["title"],
             "album": row["album"],
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -1211,21 +1526,32 @@ def play_album(req: PlayAlbumRequest):
     if not rows:
         raise HTTPException(status_code=404, detail="Album has no tracks")
 
+    _rotate_session(
+        'album',
+        origin_album_id=str(best_album["id"]),
+        seed_media_file_id=rows[0]["id"],
+    )
+
     try:
+        uris = [file_path_to_uri(r["file_path"]) for r in rows]
         with _hqp_lock:
-            hqp = _get_hqp()
-            hqp.stop()
-            hqp.playlist_add(file_path_to_uri(rows[0]["file_path"]), clear=True)
-            for row in rows[1:]:
-                hqp.playlist_add(file_path_to_uri(row["file_path"]))
+            _hqp_safe(lambda h: h.stop())
+            added = _add_uris_with_retry(uris, clear_first=True)
             track_ids = [r["id"] for r in rows]
             _register_playlist(track_ids)
-            hqp.play()
+            if added:
+                _hqp_safe(lambda h: h.play())
 
         _invalidate_playlist()
         _exit_radio_mode()
         _notify_update()
 
+        if added < len(rows):
+            raise HTTPException(
+                status_code=503,
+                detail=f"HQPlayer added {added} of {len(rows)} tracks "
+                       "(connection unstable). Try again.",
+            )
         return {
             "ok": True,
             "artist": rows[0]["artist"],
@@ -1236,6 +1562,8 @@ def play_album(req: PlayAlbumRequest):
                 for r in rows
             ],
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -1286,21 +1614,28 @@ def play_similar(req: PlaySimilarRequest):
     if not rows:
         raise HTTPException(status_code=404, detail="No similar tracks found")
 
+    _rotate_session('radio', seed_media_file_id=req.track_id)
+
     try:
+        uris = [file_path_to_uri(r["file_path"]) for r in rows]
         with _hqp_lock:
-            hqp = _get_hqp()
-            hqp.stop()
-            hqp.playlist_add(file_path_to_uri(rows[0]["file_path"]), clear=True)
-            for row in rows[1:]:
-                hqp.playlist_add(file_path_to_uri(row["file_path"]))
+            _hqp_safe(lambda h: h.stop())
+            added = _add_uris_with_retry(uris, clear_first=True)
             track_ids = [r["id"] for r in rows]
             _register_playlist(track_ids)
-            hqp.play()
+            if added:
+                _hqp_safe(lambda h: h.play())
 
         _invalidate_playlist()
         _exit_radio_mode()
         _notify_update()
 
+        if added < len(rows):
+            raise HTTPException(
+                status_code=503,
+                detail=f"HQPlayer added {added} of {len(rows)} tracks "
+                       "(connection unstable). Try again.",
+            )
         return {
             "ok": True,
             "count": len(rows),
@@ -1315,6 +1650,8 @@ def play_similar(req: PlaySimilarRequest):
                 for r in rows
             ],
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -1324,6 +1661,8 @@ def play_tracks(req: PlayTracksRequest):
     """Play multiple tracks by IDs."""
     if not req.track_ids:
         raise HTTPException(status_code=400, detail="No track IDs provided")
+    if req.origin is not None and req.origin not in _SESSION_ORIGINS:
+        raise HTTPException(status_code=400, detail=f"invalid origin: {req.origin}")
 
     rows = _db_query("""
         SELECT mf.id, mf.file_path, t.title, a.name as artist, al.title as album
@@ -1340,42 +1679,55 @@ def play_tracks(req: PlayTracksRequest):
     if not rows:
         raise HTTPException(status_code=404, detail="No tracks found")
 
+    _rotate_session(
+        req.origin or 'mix',
+        origin_album_id=req.origin_album_id,
+        seed_media_file_id=rows[0]["id"],
+    )
+
     try:
+        uris = [file_path_to_uri(r["file_path"]) for r in rows]
         with _hqp_lock:
-            hqp = _get_hqp()
-            logger.info(f"play-tracks: stopping playback")
-            hqp.stop()
-            first_path = file_path_to_uri(rows[0]["file_path"])
-            logger.info(f"play-tracks: adding first track (clear=True): {first_path}")
-            result = hqp.playlist_add(first_path, clear=True)
-            logger.info(f"play-tracks: playlist_add result: {result}")
-            for i, row in enumerate(rows[1:], 2):
-                path = file_path_to_uri(row["file_path"])
-                hqp.playlist_add(path)
-            logger.info(f"play-tracks: added {len(rows)} tracks total")
+            logger.info("play-tracks: stopping playback")
+            _hqp_safe(lambda h: h.stop())
+            added = _add_uris_with_retry(uris, clear_first=True)
+            logger.info(f"play-tracks: added {added} of {len(rows)} tracks")
             track_ids = [r["id"] for r in rows]
             _register_playlist(track_ids)
-            hqp.play()
+            if added:
+                _hqp_safe(lambda h: h.play())
 
-            # Verify playback started; if first track fails (e.g. [Vinyl] path),
-            # try skipping to next tracks until one plays
-            time.sleep(0.5)
-            status = hqp.get_status()
-            if status and status.state == PlaybackState.STOPPED and len(rows) > 1:
-                logger.warning("play-tracks: first track didn't start, trying next tracks")
-                for skip_idx in range(2, min(len(rows) + 1, 6)):  # try up to 5 tracks
-                    hqp.select_track(skip_idx)
-                    hqp.play()
+                # Verify playback started; if the first track fails (e.g. a
+                # [Vinyl] path) skip ahead until one plays. Best-effort —
+                # the tracks are already queued, so a status-read miss here
+                # must not fail the whole call.
+                try:
+                    hqp = _get_hqp()
                     time.sleep(0.5)
                     status = hqp.get_status()
-                    if status and status.state != PlaybackState.STOPPED:
-                        logger.info(f"play-tracks: track {skip_idx} started successfully")
-                        break
+                    if status and status.state == PlaybackState.STOPPED and added > 1:
+                        logger.warning("play-tracks: first track didn't start, skipping ahead")
+                        for skip_idx in range(2, min(added + 1, 6)):
+                            hqp.select_track(skip_idx)
+                            hqp.play()
+                            time.sleep(0.5)
+                            status = hqp.get_status()
+                            if status and status.state != PlaybackState.STOPPED:
+                                logger.info(f"play-tracks: track {skip_idx} started")
+                                break
+                except (BrokenPipeError, ConnectionError, OSError):
+                    pass
 
         _invalidate_playlist()
         _exit_radio_mode()
         _notify_update()
 
+        if added < len(rows):
+            raise HTTPException(
+                status_code=503,
+                detail=f"HQPlayer added {added} of {len(rows)} tracks "
+                       "(connection unstable). Try again.",
+            )
         return {
             "ok": True,
             "count": len(rows),
@@ -1384,6 +1736,8 @@ def play_tracks(req: PlayTracksRequest):
                 for r in rows
             ],
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"play-tracks failed: {e}")
         raise HTTPException(status_code=503, detail=str(e))
@@ -1414,19 +1768,26 @@ def queue_tracks(req: QueueTracksRequest):
         raise HTTPException(status_code=404, detail="No tracks found")
 
     try:
+        uris = [file_path_to_uri(r["file_path"]) for r in rows]
         with _hqp_lock:
-            hqp = _get_hqp()
-            for row in rows:
-                hqp.playlist_add(file_path_to_uri(row["file_path"]))
+            added = _add_uris_with_retry(uris)
         _invalidate_playlist()
+        if added < len(rows):
+            raise HTTPException(
+                status_code=503,
+                detail=f"HQPlayer added {added} of {len(rows)} tracks "
+                       "(connection unstable). Try again.",
+            )
         return {
             "ok": True,
-            "count": len(rows),
+            "count": added,
             "tracks": [
                 {"id": r["id"], "title": r["title"], "artist": r["artist"], "album": r["album"]}
                 for r in rows
             ],
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -1481,16 +1842,17 @@ def queue_next(req: QueueNextRequest):
         return {"ok": True, "count": 0, "tracks": []}
 
     try:
+        uris = [file_path_to_uri(r["file_path"]) for r in rows]
         with _hqp_lock:
-            hqp = _get_hqp()
-            for row in rows:
-                hqp.playlist_add(file_path_to_uri(row["file_path"]))
+            added = _add_uris_with_retry(uris)
 
         _invalidate_playlist()
 
+        # Best-effort radio fill: report the real count rather than 503 on a
+        # short add — the queue still grows and the next track-end re-fills.
         return {
-            "ok": True,
-            "count": len(rows),
+            "ok": added > 0,
+            "count": added,
             "tracks": [
                 {"id": r["id"], "title": r["title"], "artist": r["artist"], "album": r["album"]}
                 for r in rows
@@ -1585,9 +1947,11 @@ def radio_start(req: RadioStartRequest):
         )
     )
 
+    _rotate_session('radio', seed_media_file_id=req.track_id)
+
     try:
+        uris = [file_path_to_uri(r["file_path"]) for r in similar_rows]
         with _hqp_lock:
-            hqp = _get_hqp()
             # Seamless seed handling. The seed is whatever's playing
             # right now, so we don't re-add it or restart anything —
             # restarting would cut the user's listen mid-song.
@@ -1597,9 +1961,8 @@ def radio_start(req: RadioStartRequest):
             # the seed keeps playing untouched. Then we append CLAP-
             # similar picks; HQPlayer flows into them when the seed
             # ends, no `play()` needed.
-            hqp.playlist_clear()
-            for row in similar_rows:
-                hqp.playlist_add(file_path_to_uri(row["file_path"]))
+            _hqp_safe(lambda h: h.playlist_clear())
+            added = _add_uris_with_retry(uris)
         _invalidate_playlist()
         _radio_mode = True
         # Wake SSE so the UI's Radio toggle flips amber without
@@ -1610,7 +1973,7 @@ def radio_start(req: RadioStartRequest):
         return {
             "ok": True,
             "seed_id": source["id"],
-            "similar_count": len(similar_rows),
+            "similar_count": added,
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))

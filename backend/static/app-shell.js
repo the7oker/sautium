@@ -442,6 +442,13 @@
         window.scrollTo(0, 0);
         return;
       }
+      if (kind === 'session') {
+        renderSession(app, id);
+        updateNavActive(route);
+        updateFabVisibility(route);
+        window.scrollTo(0, 0);
+        return;
+      }
     }
 
     const renderer = routes[route] || routes.home;
@@ -2254,6 +2261,34 @@
     return tile;
   }
 
+  // A listening-history tile. Reuses the album-tile visual (cover + two
+  // lines) but maps title/subtitle from the session and routes to the
+  // session-detail view instead of an album.
+  function renderSessionTile(item) {
+    const { id, title, subtitle } = item;
+    const tile = document.createElement('button');
+    tile.type = 'button';
+    tile.className = 'album-tile';
+    const c = coverPlaceholderColors(title || subtitle || 'x');
+    const url = coverUrl(item);
+    const cover = url
+      ? `<img src="${url}" alt="" loading="lazy"
+              onerror="this.style.display='none'"
+              style="width:100%;height:100%;object-fit:cover;display:block;">`
+      : `<div class="placeholder-badge">${escapeHtml(title || '')}</div>`;
+    tile.innerHTML = `
+      <div class="album-cover" style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">
+        ${cover}
+      </div>
+      <div class="album-title">${escapeHtml(title || '')}</div>
+      <div class="album-artist">${escapeHtml(subtitle || '')}</div>
+    `;
+    if (id) {
+      tile.addEventListener('click', () => navigateToEntity('session', id));
+    }
+    return tile;
+  }
+
   // Renders an empty Home section shell (title + horizontally-scrolling
   // row container) and returns the row so callers can append tiles as
   // their fetches resolve. Splitting creation from population lets the
@@ -2284,10 +2319,8 @@
       row.appendChild(empty);
       return;
     }
-    for (const item of items) {
-      if (kind === 'artist') row.appendChild(renderArtistTile(item));
-      else row.appendChild(renderAlbumTile(item));
-    }
+    const renderer = _tileRendererFor(kind);
+    for (const item of items) row.appendChild(renderer(item));
   }
 
   // Resolves a "tile kind" — either a string id ('artist'/'album') for the
@@ -2381,8 +2414,9 @@
     root.appendChild(screen);
 
     const favSec = createHomeSection(screen, 'Favourite artists');
-    const newSec = createHomeSection(screen, 'New in library');
     const recSec = createHomeSection(screen, 'Recommendations');
+    const newSec = createHomeSection(screen, 'New in library');
+    const histSec = createHomeSection(screen, 'Listening history');
 
     const sectionFailure = (section, label) => (err) => {
       console.warn(`Home/${label} failed:`, err);
@@ -2393,6 +2427,11 @@
       empty.textContent = '—';
       section.row.appendChild(empty);
     };
+
+    fetch('/api/home/listening-history?limit=20')
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(data => fillHomeRow(histSec.row, data.sessions, renderSessionTile))
+      .catch(sectionFailure(histSec, 'listening-history'));
 
     fetch('/api/home/favourite-artists?limit=100')
       .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
@@ -3620,11 +3659,116 @@
         });
       }
 
-      wireDetailHandlers(screen, { albumId, tracks: d.tracks });
+      wireDetailHandlers(screen, {
+        albumId, tracks: d.tracks,
+        playOrigin: 'album', originAlbumId: albumId,
+      });
       updatePlayingHighlight();
     };
 
     await loadAndRender();
+  }
+
+  // Listening-history session detail. Modelled on renderAlbum's
+  // .detail-screen, but the hero/title come from the session snapshot and
+  // "Play" replays the stored tracks (which opens a fresh 'mix' session).
+  async function renderSession(root, sessionId) {
+    root.innerHTML = '';
+    const screen = document.createElement('div');
+    screen.className = 'detail-screen';
+    root.appendChild(screen);
+
+    let d;
+    try {
+      const resp = await fetch('/api/home/listening-history/'
+        + encodeURIComponent(sessionId));
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      d = await resp.json();
+    } catch (err) {
+      screen.innerHTML = `<div class="placeholder-screen">
+        <p class="placeholder-body">Session not found.</p>
+        <button class="legacy-link" onclick="history.back()">← Back</button>
+      </div>`;
+      return;
+    }
+
+    const c = coverPlaceholderColors(d.title || d.id);
+    const heroUrl = coverUrl(d);
+    const heroImg = heroUrl
+      ? `<img src="${heroUrl}" alt="" onerror="this.style.display='none'">`
+      : `<div class="album-hero-fallback"
+            style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};"></div>`;
+
+    const tracksList = d.tracks || [];
+    const trackParts = [];
+    let n = 0;
+    for (const t of tracksList) {
+      n += 1;
+      // Match the album screen: key + tempo under the title, not the artist.
+      const sub = [
+        t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
+        t.bpm ? Math.round(t.bpm) + ' bpm' : null,
+      ].filter(Boolean).join(' · ');
+      trackParts.push(`
+        <button class="track-row" type="button"
+                data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}">
+          <span class="track-rank">${n}</span>
+          <div class="track-info">
+            <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+            ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
+          </div>
+          <span class="track-dur">${fmtDuration(t.duration_seconds)}</span>
+          <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
+        </button>
+      `);
+    }
+
+    const count = tracksList.length;
+    screen.innerHTML = `
+      <div class="album-hero">
+        ${heroImg}
+        <div class="album-hero-scrim"></div>
+        <div class="album-hero-controls">
+          <button class="icon-btn" type="button" data-action="back" aria-label="Back">${SVG_BACK}</button>
+        </div>
+      </div>
+      <div class="album-meta-block">
+        <h1 class="album-title-line">${escapeHtml(d.title || '')}</h1>
+        ${d.subtitle ? `<div class="album-artist-line" style="text-align:left;">${escapeHtml(d.subtitle)}</div>` : ''}
+        <div class="album-meta-row">
+          <span class="am-dur" style="margin-left: 0;">${count} track${count === 1 ? '' : 's'}</span>
+          ${d.total_duration ? `<span class="am-dot"></span><span class="am-dur" style="margin-left: 0;">${fmtDurationLong(d.total_duration)}</span>` : ''}
+        </div>
+      </div>
+      <div class="album-actions">
+        <button class="btn-primary" type="button" data-action="play-all">${SVG_PLAY} Play</button>
+        <button class="btn-secondary album-queue-btn" type="button" data-action="queue-album">
+          <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
+        </button>
+      </div>
+      <div class="album-tracklist">${trackParts.join('')}</div>
+      <div style="height: calc(24 * var(--px));"></div>
+    `;
+
+    wireDetailHandlers(screen, { tracks: tracksList });
+    updatePlayingHighlight();
+  }
+
+  // Surface a backend queue/play failure (HQPlayer unreachable, or a
+  // partial add the backend now reports as 503) as a styled dialog instead
+  // of a swallowed console.warn. `resp` may be null (network error / thrown
+  // fetch). Returns true on success so callers can skip follow-up work.
+  async function reportPlaybackResult(resp) {
+    if (resp && resp.ok) return true;
+    let detail = '';
+    try { if (resp) detail = (await resp.json()).detail || ''; } catch (_) {}
+    await notifyDialog({
+      title: 'Playback unavailable',
+      message: escapeProfileHtml(
+        detail || 'HQPlayer is not responding. Make sure it is running, then try again.'),
+      kind: 'error',
+    });
+    return false;
   }
 
   function wireDetailHandlers(screen, ctx = {}) {
@@ -3686,18 +3830,24 @@
         }
       });
     });
-    // Play all (album) — replaces queue with full album
+    // Play all — replaces the queue with the full track list. ctx.playOrigin
+    // lets the album screen tag the new session 'album' (+ origin_album_id);
+    // session replay sends no origin → backend defaults to 'mix'.
     screen.querySelectorAll('[data-action="play-all"]').forEach(btn => {
       btn.addEventListener('click', async () => {
         if (!ctx.tracks || !ctx.tracks.length) return;
         const ids = ctx.tracks.map(t => t.media_file_id).filter(Boolean);
-        try {
-          await fetch('/api/player/play-tracks', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ track_ids: ids }),
-          });
-        } catch (err) { console.warn('play-tracks failed', err); }
+        const body = { track_ids: ids };
+        if (ctx.playOrigin) {
+          body.origin = ctx.playOrigin;
+          if (ctx.originAlbumId) body.origin_album_id = ctx.originAlbumId;
+        }
+        const resp = await fetch('/api/player/play-tracks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }).catch(() => null);
+        await reportPlaybackResult(resp);
       });
     });
     // Queue album — opens the same inline "Add to: [Next] [End]"
@@ -3765,17 +3915,17 @@
 
     bar.querySelector('[data-confirm="end"]').addEventListener('click', async e => {
       e.stopPropagation();
-      try {
-        await fetch('/api/player/queue-tracks', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ track_ids: [mfId] }),
-        });
-      } catch (err) { console.warn('queue-tracks (end) failed', err); }
+      const resp = await fetch('/api/player/queue-tracks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ track_ids: [mfId] }),
+      }).catch(() => null);
       closeQueueConfirm(row);
+      await reportPlaybackResult(resp);
     });
     bar.querySelector('[data-confirm="next"]').addEventListener('click', async e => {
       e.stopPropagation();
+      let resp = null;
       try {
         // 1. Pull current playing index + freshest playlist so we
         //    can build the new order from a consistent snapshot.
@@ -3792,7 +3942,7 @@
           : -1;
         // 2. Append the new track so HQPlayer has it in the
         //    playlist (the protocol has no insert primitive).
-        await fetch('/api/player/queue-tracks', {
+        resp = await fetch('/api/player/queue-tracks', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ track_ids: [mfId] }),
@@ -3802,8 +3952,8 @@
         //    the FULL new order including the current slot at its
         //    original position. If we don't know the current index
         //    (stopped / no playlist), we leave it at the end — same
-        //    fallback as a plain End.
-        if (currentIdx >= 0 && currentIdx < tracks.length) {
+        //    fallback as a plain End. Skip when the append itself failed.
+        if (resp.ok && currentIdx >= 0 && currentIdx < tracks.length) {
           const newOrder = tracks.map(t => t.id);
           newOrder.push(mfId);
           newOrder.splice(currentIdx + 1, 0, newOrder.pop());
@@ -3815,6 +3965,7 @@
         }
       } catch (err) { console.warn('queue-tracks (next) failed', err); }
       closeQueueConfirm(row);
+      await reportPlaybackResult(resp);
     });
   }
 
@@ -3844,17 +3995,17 @@
 
     bar.querySelector('[data-confirm="end"]').addEventListener('click', async e => {
       e.stopPropagation();
-      try {
-        await fetch('/api/player/queue-tracks', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ track_ids: ids }),
-        });
-      } catch (err) { console.warn('queue-album (end) failed', err); }
+      const resp = await fetch('/api/player/queue-tracks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ track_ids: ids }),
+      }).catch(() => null);
       closeAlbumQueueConfirm(wrap);
+      await reportPlaybackResult(resp);
     });
     bar.querySelector('[data-confirm="next"]').addEventListener('click', async e => {
       e.stopPropagation();
+      let resp = null;
       try {
         // Same approach as single-track Next: snapshot current
         // index + playlist, append the whole album, then reorder
@@ -3869,12 +4020,12 @@
         const currentIdx = status && status.track_index
           ? status.track_index - 1
           : -1;
-        await fetch('/api/player/queue-tracks', {
+        resp = await fetch('/api/player/queue-tracks', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ track_ids: ids }),
         });
-        if (currentIdx >= 0 && currentIdx < tracks.length) {
+        if (resp.ok && currentIdx >= 0 && currentIdx < tracks.length) {
           // The new ids were just appended in `ids` order. Build the
           // full new order: existing playlist + appended block,
           // then splice the appended block out and re-insert it
@@ -3890,6 +4041,7 @@
         }
       } catch (err) { console.warn('queue-album (next) failed', err); }
       closeAlbumQueueConfirm(wrap);
+      await reportPlaybackResult(resp);
     });
   }
 
