@@ -91,8 +91,13 @@ class HQPlayerClient:
         """
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(self.timeout)
+            # Connect must be quick on LAN/localhost. A stalled HQPlayer that
+            # accepts SYN slowly would otherwise burn the full read timeout on
+            # every reconnect attempt. Cap connect at 2s, then restore the
+            # full timeout for reads (commands can legitimately take seconds).
+            self.socket.settimeout(min(self.timeout, 2.0))
             self.socket.connect((self.host, self.port))
+            self.socket.settimeout(self.timeout)
             logger.info(f"Connected to HQPlayer at {self.host}:{self.port}")
             return True
         except Exception as e:

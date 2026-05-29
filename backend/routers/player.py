@@ -238,6 +238,19 @@ def _make_client(timeout: float) -> HQPlayerClient:
     )
 
 
+# Circuit breaker for a stalled HQPlayer control port. A control-port stall
+# (HQPlayer accepts the TCP connect but never replies, or stops accepting
+# connects) makes every reconnect block for the full socket timeout. Without
+# this, one play action fans out into rotate + stop + add × retries = tens of
+# seconds of stacked connect timeouts while holding _hqp_lock, which also
+# blocks every other request queued behind that lock. After a failed connect
+# we "open" the breaker for a short cooldown: further reconnects fail fast
+# instead of stacking timeouts. The next successful connect (e.g. the status
+# poller once HQPlayer answers again) closes it.
+_hqp_unreachable_until: float = 0.0
+HQP_CIRCUIT_COOLDOWN = 6.0
+
+
 def _ensure_connected(client: Optional[HQPlayerClient], timeout: float, label: str
                       ) -> HQPlayerClient:
     """Return a healthy HQPlayer client; reconnect if the cached one is stale.
@@ -262,6 +275,10 @@ def _ensure_connected(client: Optional[HQPlayerClient], timeout: float, label: s
             need_reconnect = True
 
     if need_reconnect:
+        global _hqp_unreachable_until
+        # Breaker open — fail fast rather than eat another connect timeout.
+        if time.monotonic() < _hqp_unreachable_until:
+            raise ConnectionError("HQPlayer unreachable (circuit open)")
         if client:
             try:
                 client.disconnect()
@@ -269,9 +286,11 @@ def _ensure_connected(client: Optional[HQPlayerClient], timeout: float, label: s
                 pass
         client = _make_client(timeout=timeout)
         if not client.connect():
+            _hqp_unreachable_until = time.monotonic() + HQP_CIRCUIT_COOLDOWN
             raise ConnectionError(
                 f"Cannot connect to HQPlayer at {settings.hqplayer_host}:{settings.hqplayer_port}"
             )
+        _hqp_unreachable_until = 0.0  # connected — close the breaker
         logger.info(f"HQPlayer ({label}) connected")
     return client
 
@@ -444,8 +463,14 @@ def _rotate_session(
         payload = _build_playlist_payload(hqp_tracks)  # pure transform, no socket I/O
         old_media_ids = [t["id"] for t in payload["tracks"] if t.get("id")]
     except Exception as e:
-        logger.warning(f"_rotate_session: could not read old queue: {e}")
-        old_media_ids = []
+        # Read miss (HQPlayer stalled): skip rotation entirely. An empty
+        # old_media_ids here would otherwise be mistaken for a genuinely empty
+        # queue and DELETE the active session — losing the album the user was
+        # actually listening to. A stalled HQPlayer means the play will likely
+        # fail anyway, so leave session state untouched; the next successful
+        # play rotates normally.
+        logger.warning(f"_rotate_session: could not read old queue, skipping: {e}")
+        return
 
     archived_mix_id = _archive_and_open_session(
         old_media_ids, origin, seed_media_file_id, origin_album_id,
