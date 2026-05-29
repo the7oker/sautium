@@ -38,8 +38,6 @@ RECENCY_TAU_HOURS = 168
 # A play from 4 months ago has tiny exp-weight anyway, but the cap keeps
 # the seed-pool query bounded and skips cold-cache reads.
 SEED_WINDOW_DAYS = 60
-# Events shorter than this are treated as skips, not listens.
-SEED_MIN_DURATION_SEC = 30
 # Top-N seed tracks by recency-weight. Beyond ~50 tracks every additional
 # seed dilutes the centroid more than it adds signal.
 SEED_TOP_N = 50
@@ -249,8 +247,8 @@ def get_recommendations(
 
     Pipeline:
       1. Top-N seed tracks from listening_history within SEED_WINDOW_DAYS,
-         weighted by exp(-hours_since_play / RECENCY_TAU_HOURS); events
-         shorter than SEED_MIN_DURATION_SEC count as skips.
+         weighted by exp(-hours_since_play / RECENCY_TAU_HOURS); only
+         events flagged completed by the playback tracker count as seeds.
       2. Weighted centroid in Python (pgvector has no weighted-avg op).
       3. HNSW kNN: top KNN_CANDIDATE_TRACKS embeddings nearest to centroid.
       4. Album aggregation, score = avg cosine over top-K tracks per album.
@@ -346,7 +344,7 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
 
 
 def _fetch_seed_vectors() -> list[dict[str, Any]]:
-    """Top-N recent tracks with their CLAP vectors and recency weight."""
+    """Top-N recent completed tracks with their CLAP vectors and recency weight."""
 
     return db_query(
         f"""
@@ -359,7 +357,7 @@ def _fetch_seed_vectors() -> list[dict[str, Any]]:
                    ) AS weight
             FROM listening_history lh
             WHERE lh.started_at >= NOW() - INTERVAL '{SEED_WINDOW_DAYS} days'
-              AND lh.duration_listened >= {SEED_MIN_DURATION_SEC}
+              AND lh.completed
             GROUP BY lh.track_id
         )
         SELECT r.track_id::text AS track_id,
