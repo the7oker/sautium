@@ -55,8 +55,8 @@ See:
     fix for a race — they let the race leak into structural noise. Make
     the race impossible at the source. Defensive guards are acceptable
     only as a secondary safety net, never as the only fix.
-  - Two parallel patch sites for the same problem (e.g., `fetchPlaylist`
-    retried from both `app.js` and `app-shell.js`). One source of truth.
+  - Two parallel patch sites for the same problem (e.g., a playlist
+    refetch fired from both `player.js` and `app-shell.js`). One source of truth.
   - Catch-and-ignore (`except Exception: pass`, swallowing fetch errors)
     — that's not a fix, that's hiding the bug from logs.
   
@@ -470,15 +470,28 @@ Playing sheet state machine, URL hash routing, per-screen contents,
 Play-vs-Queue action semantics, and the queue-history concept. Read
 it before touching UI routing or screen layout.
 
-### View-layer migration strategy
+### View-layer architecture
 
-The UI is being rebuilt top-down from the old prototype
-`index.html`. Per the migration plan: **`app.js` business logic is
-preserved** (API calls, HQPlayer commands, P2P, chat). Only the
-view layer (`index.html` + `style.css`) is rewritten to match the
-new design system and information architecture. Function contracts
-in `app.js` (playerCmd, doSearch, sendChat, addFriend, etc.) stay
-stable; their DOM targets change.
+The top-down rebuild against the new design system and information
+architecture is **done**, and the legacy single-file prototype
+`app.js` is **gone**. The frontend is now three files in
+`backend/static/`, loaded by `index.html` in this order:
+
+- **`auth.js`** — HMAC `fetch` monkey-patch (see Security Posture).
+- **`app-shell.js`** — the bulk of the app: hash routing (`render`,
+  `navigateToEntity`, `registerScreen`), every screen renderer (Home,
+  Discovery, Artist/Album/Genre detail, Friends, chat, Now Playing,
+  Queue sheet), the AI overlay, and most screen-scoped `fetch` calls.
+- **`player.js`** — transport/SSE primitives shared across screens:
+  the `/api/player/status/stream` subscription plus `window.playerCmd`,
+  `window.playTrack`, `window.togglePlayPause`, `window.fetchPlaylist`,
+  `window.currentPlaylist`.
+
+Keep transport primitives in `player.js` and screen logic in
+`app-shell.js` — don't reintroduce a third catch-all module. The view
+layer proper is `index.html` + `style.css` (+ `tokens.css`). Older
+notes or commits that say `app.js` mean "now `app-shell.js` +
+`player.js`".
 
 ### Native dialogs are an anti-pattern
 
