@@ -59,6 +59,14 @@ _radio_mode: bool = False
 _playlist_dirty: bool = True   # force refresh on first poll
 PLAYLIST_REFRESH_EVERY = 5      # otherwise refresh every N status polls
 
+# A single status read can stall past the socket timeout — the WSL2→Windows
+# hop to HQPlayer routinely does. Blanking the cached status on one miss
+# tears down the whole Now Playing UI (track, progress, "Similar"), so we
+# keep serving the last-known-good status until this many polls fail in a
+# row, then surface "disconnected".
+_consecutive_status_failures: int = 0
+STATUS_FAILURE_THRESHOLD = 3
+
 
 def _wake_sse_clients():
     """Thread-safe: signal all SSE async generators to send new data."""
@@ -67,11 +75,25 @@ def _wake_sse_clients():
             loop.call_soon_threadsafe(evt.set)
 
 
+def _register_status_failure():
+    """Record a failed status poll (read timeout or socket error). Tolerate a
+    short burst — a brief HQPlayer stall must not blank Now Playing — and only
+    flip the cache to 'disconnected' once failures cross the threshold. The
+    last-known-good status keeps being served (no version bump) until then."""
+    global _latest_status, _status_version, _consecutive_status_failures
+    _consecutive_status_failures += 1
+    if (_consecutive_status_failures >= STATUS_FAILURE_THRESHOLD
+            and _latest_status.get("state") != "disconnected"):
+        _latest_status = {"state": "disconnected"}
+        _status_version += 1
+        _wake_sse_clients()
+
+
 def _status_poller():
     """Background thread: poll HQPlayer every ~1s, update cache, wake SSE clients.
     Also refreshes the playlist cache every PLAYLIST_REFRESH_EVERY ticks (or
     immediately when _playlist_dirty was set by a write endpoint)."""
-    global _latest_status, _status_version
+    global _latest_status, _status_version, _consecutive_status_failures
     tick = 0
     while _poller_running:
         try:
@@ -89,8 +111,11 @@ def _status_poller():
                     _refresh_playlist_cache()
 
             if status is None:
-                new_data = {"state": "unknown"}
+                # Transient read miss (e.g. HQPlayer stalled past the socket
+                # timeout). Keep serving the last good status; don't blank UI.
+                _register_status_failure()
             else:
+                _consecutive_status_failures = 0
                 state_names = {
                     PlaybackState.STOPPED: "stopped",
                     PlaybackState.PAUSED: "paused",
@@ -127,16 +152,13 @@ def _status_poller():
                     "radio_mode": _radio_mode,
                 }
 
-            if new_data != _latest_status:
-                _latest_status = new_data
-                _status_version += 1
-                _wake_sse_clients()
+                if new_data != _latest_status:
+                    _latest_status = new_data
+                    _status_version += 1
+                    _wake_sse_clients()
 
         except Exception:
-            if _latest_status.get("state") != "disconnected":
-                _latest_status = {"state": "disconnected"}
-                _status_version += 1
-                _wake_sse_clients()
+            _register_status_failure()
 
         # Wait longer when disconnected to avoid log spam
         poll_interval = 5.0 if _latest_status.get("state") == "disconnected" else 1.0

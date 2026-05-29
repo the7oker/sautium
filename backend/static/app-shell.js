@@ -536,8 +536,8 @@
     similar: null, similarList: null, similarCount: null,
     isOpen: false,
     lastTrackKey: null,
-    lastDetailFetchedKey: null,
-    inflightKey: null,
+    lastDetailFetchedMfId: null,
+    inflightMfId: null,
     lastDetail: null,
 
     init() {
@@ -740,8 +740,6 @@
         // Anything that doesn't get re-set by a subsequent renderDetail
         // would otherwise keep showing the previous track's values.
         this.lastTrackKey = trackKey;
-        this.lastDetailFetchedKey = null;
-        this.lastDetail = null;
         if (this.title) this.title.textContent = data.song || '—';
         if (this.artist) this.artist.textContent = data.artist || '';
         if (this.albumText) this.albumText.textContent = data.album || '';
@@ -767,41 +765,36 @@
           this.coverFallback.style.setProperty('--cover-bg-1', c.bg1);
           this.coverFallback.style.setProperty('--cover-bg-2', c.bg2);
         }
-        // Hide all detail-derived feature elements so prior track values
-        // never linger if the next renderDetail is delayed or fails.
-        if (this.qBadge) {
-          this.qBadge.className = 'np-q-badge';
-          this.qBadge.innerHTML = '';
-        }
-        if (this.keyPill) { this.keyPill.hidden = true; this.keyPill.innerHTML = ''; }
-        if (this.bpm) { this.bpm.hidden = true; }
-        if (this.bpmNum) this.bpmNum.textContent = '';
-        if (this.energy) { this.energy.hidden = true; }
-        if (this.energyDots) this.energyDots.innerHTML = '';
-        if (this.similar) { this.similar.hidden = true; }
-        if (this.similarList) this.similarList.innerHTML = '';
+        // Quality / key / BPM / energy / similar are keyed by media_file_id
+        // (the block below), NOT by song. HQPlayer bumps `song` one SSE tick
+        // before media_file_id/track_index catch up on Next; clearing them
+        // here would blank them for that tick and then — since `song` stops
+        // changing while media_file_id advances — never refetch, stranding
+        // the previous track's values. Leave them in place; renderDetail /
+        // renderSimilar replace them atomically once media_file_id moves.
       }
 
-      // The SSE payload now carries media_file_id (resolved server-side
-      // against the playlist cache), so detail fetch can proceed on the
-      // first np-update for a track — no race with playlist-loaded.
-      if (this.lastDetailFetchedKey !== trackKey && data.media_file_id) {
-        this.tryFetchDetail(trackKey, data.media_file_id);
+      // Detail + similar are keyed by media_file_id, not trackKey: on Next,
+      // `song` leads media_file_id by one SSE tick, so fetching on song-change
+      // locks onto the previous track's media_file_id and never corrects.
+      // Refetch whenever the resolved media_file_id actually changes.
+      if (data.media_file_id && this.lastDetailFetchedMfId !== data.media_file_id) {
+        this.tryFetchDetail(data.media_file_id);
       }
     },
 
-    async tryFetchDetail(trackKey, mfId) {
-      if (this.inflightKey === trackKey) return; // already fetching
+    async tryFetchDetail(mfId) {
       if (!mfId) return;  // playlist not yet loaded — retry on next status
-      this.inflightKey = trackKey;
+      if (this.inflightMfId === mfId) return; // already fetching this track
+      this.inflightMfId = mfId;
       try {
         const resp = await fetch('/api/player/now-playing-detail?media_file_id=' + mfId);
         if (!resp.ok) return;
         const detail = await resp.json();
-        // If track changed during fetch, drop this stale result.
-        if (this.lastTrackKey !== trackKey) return;
+        // Drop a stale result: the played track moved on while we fetched.
+        if (this._npMfId !== mfId) return;
         this.lastDetail = detail;
-        this.lastDetailFetchedKey = trackKey;
+        this.lastDetailFetchedMfId = mfId;
         this.renderDetail(detail);
         this.fetchSimilar(mfId);
         // Share detail with other surfaces (mini-player needs cover_id
@@ -810,7 +803,7 @@
       } catch (err) {
         console.warn('now-playing-detail failed:', err);
       } finally {
-        if (this.inflightKey === trackKey) this.inflightKey = null;
+        if (this.inflightMfId === mfId) this.inflightMfId = null;
       }
     },
 
