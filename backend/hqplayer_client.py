@@ -152,7 +152,13 @@ class HQPlayerClient:
             while b'\n' not in self.buffer:
                 chunk = self.socket.recv(4096)
                 if not chunk:
-                    break
+                    # EOF: HQPlayer closed its side. Close ours immediately so
+                    # the socket doesn't linger in CLOSE_WAIT until the next
+                    # _ensure_connected peek happens to notice it (which, with
+                    # backoff, can be up to 30s away — and on the command
+                    # socket, until the user's next action).
+                    self.disconnect()
+                    return None
                 self.buffer += chunk
 
             # Extract first complete line

@@ -160,8 +160,15 @@ def _status_poller():
         except Exception:
             _register_status_failure()
 
-        # Wait longer when disconnected to avoid log spam
-        poll_interval = 5.0 if _latest_status.get("state") == "disconnected" else 1.0
+        # Back off when HQPlayer stops answering. It accepts the TCP connect
+        # but doesn't reply to <Status/> (control thread busy under DSP load),
+        # so each retry is a connect->read-timeout->disconnect churn cycle that
+        # only piles load onto an already-struggling control port. Exponential
+        # backoff (2,4,8..30s) lets it recover; a successful poll resets to 1s.
+        if _consecutive_status_failures > 0:
+            poll_interval = min(2.0 ** _consecutive_status_failures, 30.0)
+        else:
+            poll_interval = 1.0
         _status_changed.wait(timeout=poll_interval)
         _status_changed.clear()
         tick += 1
@@ -274,7 +281,10 @@ def _get_hqp() -> HQPlayerClient:
 def _get_hqp_status() -> HQPlayerClient:
     """Get or create HQPlayer status-poller client. Must be called inside _hqp_status_lock."""
     global _hqp_status_client
-    _hqp_status_client = _ensure_connected(_hqp_status_client, timeout=2.0, label="status")
+    # 4s, not 2s: HQPlayer's control thread can lag a few seconds behind a
+    # <Status/> while busy rendering. A tight timeout turns a slow-but-alive
+    # reply into a needless disconnect + reconnect churn cycle.
+    _hqp_status_client = _ensure_connected(_hqp_status_client, timeout=4.0, label="status")
     return _hqp_status_client
 
 
