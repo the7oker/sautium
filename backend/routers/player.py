@@ -438,6 +438,12 @@ def _register_playlist(track_ids: list[int]) -> bool:
 # on the active-session marker.
 
 _SESSION_ORIGINS = ("album", "track", "radio", "mix")
+# Idempotent-replay window: a destructive play of the same origin within this
+# many seconds of the active session opening is treated as a duplicate (double-
+# tapped "Play all", a retried request) and skipped. Beyond it, replaying the
+# same album/track is a genuinely new listen and opens a fresh session — so
+# re-playing a track minutes later isn't swallowed into the stale one.
+_SESSION_DEDUP_WINDOW_SEC = 30
 
 
 def _rotate_session(
@@ -499,22 +505,25 @@ def _archive_and_open_session(
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     "SELECT id::text AS id, origin, "
-                    "origin_album_id::text AS origin_album_id, seed_media_file_id "
+                    "origin_album_id::text AS origin_album_id, seed_media_file_id, "
+                    "EXTRACT(EPOCH FROM (now() - started_at)) AS age_sec "
                     "FROM listening_sessions WHERE ended_at IS NULL FOR UPDATE"
                 )
                 active = cur.fetchone()
 
                 # Idempotent re-play: a repeated destructive play of the same
-                # thing (double-tapped "Play all", a retried/duplicated
-                # request) must NOT archive the just-opened session against
-                # the still-old HQPlayer queue and spawn a duplicate — that
-                # produced history cards whose title (from origin) disagreed
-                # with their snapshot tracks/cover. Same origin identity as the
-                # current active session ⇒ no-op rotation. FOR UPDATE above
-                # serialises concurrent calls so the second one sees the first
-                # one's freshly-inserted active row here.
+                # thing within _SESSION_DEDUP_WINDOW_SEC (double-tapped "Play
+                # all", a retried/duplicated request) must NOT archive the
+                # just-opened session against the still-old HQPlayer queue and
+                # spawn a duplicate. FOR UPDATE serialises concurrent calls so
+                # the second sees the first's freshly-inserted active row. The
+                # time window keeps this to genuine duplicates: re-playing the
+                # same album/track minutes later is a new listen and opens a
+                # fresh session instead of being swallowed into the stale one.
                 if active is not None and (
-                    active["origin"] == origin
+                    active["age_sec"] is not None
+                    and active["age_sec"] < _SESSION_DEDUP_WINDOW_SEC
+                    and active["origin"] == origin
                     and active["origin_album_id"] == origin_album_id
                     and active["seed_media_file_id"] == seed_media_file_id
                 ):
