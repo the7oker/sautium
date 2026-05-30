@@ -1792,6 +1792,7 @@ body.has-miniplayer .ai-fab {
   gap: calc(12 * var(--px));
   padding: 0 calc(20 * var(--px)) calc(4 * var(--px));
   overflow-x: auto;
+  scroll-snap-type: x proximity;
   scrollbar-width: none;
   scroll-padding-inline-start: calc(20 * var(--px));
 }
@@ -2514,6 +2515,7 @@ body.has-miniplayer .ai-fab {
   cursor: pointer;
 }
 .mosaic-cover {
+  position: relative;
   width: calc(120 * var(--px));
   height: calc(120 * var(--px));
   background:
@@ -2522,6 +2524,18 @@ body.has-miniplayer .ai-fab {
       var(--cover-bg-2, var(--color-surface-lo)));
   overflow: hidden;
   border-radius: calc(2 * var(--px));
+}
+.mosaic-score {
+  position: absolute;
+  top: calc(5 * var(--px));
+  right: calc(5 * var(--px));
+  font-family: var(--font-mono);
+  font-size: calc(10.5 * var(--px));
+  color: var(--color-blue);
+  background: rgba(0, 0, 0, 0.9);
+  padding: 0 calc(5 * var(--px));
+  border-radius: calc(4 * var(--px));
+  letter-spacing: 0.02em;
 }
 .mosaic-cover img {
   width: 100%;
@@ -4148,6 +4162,18 @@ body.has-miniplayer .more-overlay .drawer {
   0%, 100% { opacity: 0.35; }
   50% { opacity: 1; }
 }
+
+/* Similar-albums shelf skeleton (album page). Reuses .mosaic-tile sizing and
+   the profile-pulse opacity animation; shown only on an album's first-ever
+   view while the server computes its neighbours. */
+.similar-skel { animation: profile-pulse 1.4s ease-in-out infinite; pointer-events: none; }
+.similar-skel .mosaic-cover { background: var(--color-surface-hi); }
+.similar-skel-line {
+  height: calc(11 * var(--px));
+  border-radius: calc(3 * var(--px));
+  background: var(--color-surface-hi);
+}
+.similar-skel-line.short { width: 60%; }
 
 /* Filter chip rail (flat layout) */
 .filter-rail {

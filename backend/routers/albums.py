@@ -196,3 +196,95 @@ def get_album(
     album["selected_variant_id"] = variant_id
 
     return album
+
+
+@router.get("/{album_id}/similar")
+def get_similar_albums(
+    album_id: str,
+    limit: int = Query(12, ge=1, le=50),
+    exclude_same_artist: bool = Query(False),
+    min_similarity: float = Query(0.6, ge=0.0, le=1.0),
+) -> dict:
+    """Audio-similar albums (CLAP, one-to-one assignment scoring).
+
+    Read-through cache: served from `similar_albums` when present, otherwise
+    computed on first view and persisted (see backend/album_similarity.py).
+    The compute (~1s, sync → FastAPI threadpool) only happens once per album.
+    """
+    from album_similarity import SOURCE, compute_and_cache
+
+    cached = db_query_one(
+        "SELECT 1 AS ok FROM similar_albums WHERE album_id = %(id)s::uuid AND source = %(src)s LIMIT 1",
+        {"id": album_id, "src": SOURCE},
+    )
+    if not cached:
+        # Compute only when the album actually has embeddings; otherwise leave
+        # the cache empty so it recomputes once the album is analysed.
+        has_emb = db_query_one("""
+            SELECT 1 AS ok
+            FROM embeddings e
+            JOIN media_files mf ON mf.track_id = e.track_id
+            JOIN album_variants av ON av.id = mf.album_variant_id
+            WHERE av.album_id = %(id)s::uuid
+            LIMIT 1
+        """, {"id": album_id})
+        if has_emb:
+            compute_and_cache(album_id)
+
+    # Enrich the cached neighbours with display metadata + the most-frequent
+    # primary artist (album has no artist_id), excluding same-artist when asked.
+    # All ordering / filtering / trimming pushed into SQL.
+    results = db_query("""
+        WITH src_artist AS (
+            SELECT ta.artist_id
+            FROM track_artists ta
+            JOIN media_files mf ON mf.track_id = ta.track_id
+            JOIN album_variants av ON av.id = mf.album_variant_id
+            WHERE av.album_id = %(id)s::uuid AND ta.role = 'primary'
+            GROUP BY ta.artist_id
+            ORDER BY COUNT(*) DESC
+            LIMIT 1
+        )
+        SELECT sa.similar_album_id::text AS album_id,
+               al.title AS album,
+               al.release_year AS year,
+               sa.match_score AS similarity,
+               pa.name AS artist,
+               pa.artist_id::text AS artist_id,
+               (SELECT mf2.cover_id::text
+                FROM album_variants av2
+                JOIN media_files mf2 ON mf2.album_variant_id = av2.id
+                WHERE av2.album_id = sa.similar_album_id AND mf2.cover_id IS NOT NULL
+                LIMIT 1) AS cover_id,
+               (SELECT mf3.id
+                FROM album_variants av3
+                JOIN media_files mf3 ON mf3.album_variant_id = av3.id
+                WHERE av3.album_id = sa.similar_album_id
+                ORDER BY mf3.disc_number, mf3.track_number
+                LIMIT 1) AS media_file_id
+        FROM similar_albums sa
+        JOIN albums al ON al.id = sa.similar_album_id
+        JOIN LATERAL (
+            SELECT a.id AS artist_id, a.name
+            FROM track_artists ta
+            JOIN artists a ON a.id = ta.artist_id
+            JOIN media_files mf ON mf.track_id = ta.track_id
+            JOIN album_variants av ON av.id = mf.album_variant_id
+            WHERE av.album_id = sa.similar_album_id AND ta.role = 'primary'
+            GROUP BY a.id, a.name
+            ORDER BY COUNT(*) DESC
+            LIMIT 1
+        ) pa ON true
+        WHERE sa.album_id = %(id)s::uuid
+          AND sa.source = %(src)s
+          AND sa.match_score >= %(floor)s
+          AND (NOT %(excl)s OR pa.artist_id <> (SELECT artist_id FROM src_artist))
+        ORDER BY sa.match_score DESC
+        LIMIT %(limit)s
+    """, {"id": album_id, "src": SOURCE, "excl": exclude_same_artist,
+          "floor": min_similarity, "limit": limit})
+
+    for r in results:
+        r["similarity"] = round(float(r["similarity"]), 4) if r["similarity"] is not None else None
+
+    return {"results": results}

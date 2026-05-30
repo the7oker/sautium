@@ -3002,11 +3002,17 @@
         const cover = url
           ? `<img src="${url}" alt="" loading="lazy" onerror="this.style.display='none'">`
           : '';
+        // Relevance score (cosine), shown when the item carries one — e.g. the
+        // album page's "Similar albums" shelf. Mono+blue per the DS token for
+        // cosine-similarity readouts. Absent on Discovery shelves.
+        const score = (a.similarity != null)
+          ? `<span class="mosaic-score">${Number(a.similarity).toFixed(2)}</span>`
+          : '';
         return `
           <button class="mosaic-tile" type="button"
                   data-album-id="${escapeHtml(a.album_id || '')}">
             <div class="mosaic-cover"
-                 style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}</div>
+                 style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}${score}</div>
             <div class="mosaic-title">${escapeHtml(a.album || a.title || '')}</div>
             <div class="mosaic-artist">${escapeHtml(a.artist || '')}</div>
           </button>`;
@@ -3533,6 +3539,47 @@
     // a clean rebuild keeps the wiring logic in one place.
     let selectedVariantId = null;
 
+    // Similar-albums shelf — lazy, and memoized so a variant re-render reuses
+    // the result instead of asking the server to recompute. `undefined` = not
+    // yet fetched; `[]` = fetched, nothing to show.
+    let similarItems;
+
+    const SIMILAR_SKELETON = Array.from({ length: 5 }).map(() => `
+      <div class="mosaic-tile similar-skel">
+        <div class="mosaic-cover"></div>
+        <div class="similar-skel-line"></div>
+        <div class="similar-skel-line short"></div>
+      </div>`).join('');
+
+    const fillSimilar = (slot) => {
+      if (!similarItems || !similarItems.length) { slot.hidden = true; slot.innerHTML = ''; return; }
+      slot.hidden = false;
+      slot.innerHTML = `
+        <div class="section-sep"></div>
+        <div class="section-head"><h3>Similar albums</h3></div>
+        ${renderAlbumRow(similarItems)}`;
+      slot.querySelectorAll('[data-album-id]').forEach(el =>
+        el.addEventListener('click', () =>
+          navigateToEntity('album', el.getAttribute('data-album-id'))));
+    };
+
+    const loadSimilarInto = async (slot) => {
+      if (similarItems !== undefined) { fillSimilar(slot); return; }
+      // A never-viewed album computes on the server (~1s); skeleton meanwhile.
+      slot.hidden = false;
+      slot.innerHTML = `
+        <div class="section-sep"></div>
+        <div class="section-head"><h3>Similar albums</h3></div>
+        <div class="shuffle-row d-album-row">${SIMILAR_SKELETON}</div>`;
+      try {
+        const resp = await fetch('/api/albums/' + encodeURIComponent(albumId) + '/similar');
+        similarItems = resp.ok ? ((await resp.json()).results || []) : [];
+      } catch (_) {
+        similarItems = [];
+      }
+      fillSimilar(slot);
+    };
+
     const loadAndRender = async () => {
       let d;
       try {
@@ -3643,6 +3690,7 @@
           </button>
         </div>
         <div class="album-tracklist">${tracksHtml}</div>
+        <div class="album-similar" data-similar-slot hidden></div>
         <div style="height: calc(24 * var(--px));"></div>
       `;
 
@@ -3664,6 +3712,9 @@
         playOrigin: 'album', originAlbumId: albumId,
       });
       updatePlayingHighlight();
+
+      const simSlot = screen.querySelector('[data-similar-slot]');
+      if (simSlot) loadSimilarInto(simSlot);
     };
 
     await loadAndRender();

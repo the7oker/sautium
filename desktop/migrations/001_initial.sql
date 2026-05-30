@@ -316,6 +316,22 @@ CREATE TABLE IF NOT EXISTS similar_artists (
     CONSTRAINT chk_not_self_similar CHECK (artist_id != similar_artist_id)
 );
 
+-- Audio-similar albums (CLAP). Precomputed neighbours cached per album so the
+-- album page is a plain indexed read. Filled lazily on first view (see
+-- backend/album_similarity.py) and rebuildable via the CLI. Mirrors
+-- similar_artists; `source` carries the scoring method for provenance.
+CREATE TABLE IF NOT EXISTS similar_albums (
+    id SERIAL PRIMARY KEY,
+    album_id         UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    similar_album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    match_score NUMERIC(5, 4) NOT NULL CHECK (match_score >= 0 AND match_score <= 1),
+    source VARCHAR(50) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_similar_albums UNIQUE (album_id, similar_album_id, source),
+    CONSTRAINT chk_not_self_similar_album CHECK (album_id != similar_album_id)
+);
+
 CREATE TABLE IF NOT EXISTS album_info (
     id SERIAL PRIMARY KEY,
     album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -664,6 +680,7 @@ CREATE INDEX IF NOT EXISTS idx_artist_tags_weight ON artist_tags(weight);
 CREATE INDEX IF NOT EXISTS idx_similar_artists_similar ON similar_artists(similar_artist_id);
 CREATE INDEX IF NOT EXISTS idx_similar_artists_source ON similar_artists(source);
 CREATE INDEX IF NOT EXISTS idx_similar_artists_match ON similar_artists(match_score);
+CREATE INDEX IF NOT EXISTS idx_similar_albums_lookup ON similar_albums(album_id, match_score DESC);
 CREATE INDEX IF NOT EXISTS idx_album_info_source ON album_info(source);
 CREATE INDEX IF NOT EXISTS idx_album_info_listeners ON album_info(listeners) WHERE listeners IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_album_info_playcount ON album_info(playcount) WHERE playcount IS NOT NULL;
@@ -841,6 +858,10 @@ DO $$ BEGIN CREATE TRIGGER trg_artist_tags_updated_at BEFORE UPDATE ON artist_ta
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN CREATE TRIGGER trg_similar_artists_updated_at BEFORE UPDATE ON similar_artists
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN CREATE TRIGGER trg_similar_albums_updated_at BEFORE UPDATE ON similar_albums
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
