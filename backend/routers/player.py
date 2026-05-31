@@ -157,6 +157,21 @@ def _status_poller():
                     "radio_mode": _radio_mode,
                 }
 
+                # Natural end-of-queue: HQPlayer stopped on the last track.
+                # Archive the active session so a fully-listened album/queue
+                # lands in history without a follow-up play. Only when the
+                # previous tick was PLAYING the last track (track_index ==
+                # playlist length) — a manual stop mid-queue is left alone so
+                # resume doesn't fragment the session.
+                if (new_data["state"] == "stopped"
+                        and _latest_status.get("state") == "playing"
+                        and len(pl_tracks) > 0
+                        and _latest_status.get("track_index") == len(pl_tracks)):
+                    try:
+                        _close_active_session()
+                    except Exception as e:
+                        logger.warning(f"end-of-queue archive failed: {e}")
+
                 if new_data != _latest_status:
                     _latest_status = new_data
                     _status_version += 1
@@ -485,17 +500,44 @@ def _rotate_session(
         _schedule_mix_title(archived_mix_id)
 
 
+def _close_active_session() -> None:
+    """Archive the active session on a natural end-of-queue (HQPlayer stopped
+    on the last track) WITHOUT opening a new one, so a fully-listened album
+    lands in history without a follow-up play. Reads the queue under the
+    status lock; a read miss skips (the session stays active and the next play
+    rotates it normally)."""
+    old_media_ids: list[int] = []
+    try:
+        with _hqp_status_lock:
+            hqp = _get_hqp_status()
+            hqp_tracks = hqp.get_playlist()
+        payload = _build_playlist_payload(hqp_tracks)
+        old_media_ids = [t["id"] for t in payload["tracks"] if t.get("id")]
+    except Exception as e:
+        logger.warning(f"_close_active_session: could not read queue: {e}")
+        return
+    archived_mix_id = _archive_and_open_session(
+        old_media_ids, "mix", None, None, open_new=False,
+    )
+    if archived_mix_id is not None:
+        _schedule_mix_title(archived_mix_id)
+
+
 def _archive_and_open_session(
     old_media_ids: list[int],
     origin: str,
     seed_media_file_id: Optional[int],
     origin_album_id: Optional[str],
+    *,
+    open_new: bool = True,
 ) -> Optional[str]:
     """Archive the current active session against `old_media_ids` and open a
     new one — atomically. db_pool connections are autocommit, so toggle it
     off for this multi-statement transaction (mirrors
-    routers.home._db_query_with_ef_search). Returns the archived session id
-    IFF it was a mix needing a background title, else None."""
+    routers.home._db_query_with_ef_search). With open_new=False (end-of-queue
+    completion) the active session is archived but no new one is opened.
+    Returns the archived session id IFF it was a mix needing a background
+    title, else None."""
     import psycopg2.extras
 
     archived_mix_id: Optional[str] = None
@@ -520,7 +562,7 @@ def _archive_and_open_session(
                 # time window keeps this to genuine duplicates: re-playing the
                 # same album/track minutes later is a new listen and opens a
                 # fresh session instead of being swallowed into the stale one.
-                if active is not None and (
+                if open_new and active is not None and (
                     active["age_sec"] is not None
                     and active["age_sec"] < _SESSION_DEDUP_WINDOW_SEC
                     and active["origin"] == origin
@@ -531,22 +573,23 @@ def _archive_and_open_session(
                     return None
 
                 if active is not None:
-                    if old_media_ids:
+                    snapshot_ids = _snapshot_ids_for(cur, active, old_media_ids)
+                    if snapshot_ids:
                         psycopg2.extras.execute_values(
                             cur,
                             "INSERT INTO session_tracks "
                             "(session_id, position, media_file_id) VALUES %s",
                             [(active["id"], i, mid)
-                             for i, mid in enumerate(old_media_ids)],
+                             for i, mid in enumerate(snapshot_ids)],
                         )
                         title, subtitle, cover_id = _compute_session_card(
-                            cur, active, old_media_ids,
+                            cur, active, snapshot_ids,
                         )
                         cur.execute(
                             "UPDATE listening_sessions SET ended_at = now(), "
                             "track_count = %s, title = %s, subtitle = %s, "
                             "cover_id = %s::uuid WHERE id = %s::uuid",
-                            (len(old_media_ids), title, subtitle,
+                            (len(snapshot_ids), title, subtitle,
                              cover_id, active["id"]),
                         )
                         if active["origin"] == "mix":
@@ -558,12 +601,13 @@ def _archive_and_open_session(
                             (active["id"],),
                         )
 
-                cur.execute(
-                    "INSERT INTO listening_sessions "
-                    "(origin, seed_media_file_id, origin_album_id) "
-                    "VALUES (%s, %s, %s::uuid)",
-                    (origin, seed_media_file_id, origin_album_id),
-                )
+                if open_new:
+                    cur.execute(
+                        "INSERT INTO listening_sessions "
+                        "(origin, seed_media_file_id, origin_album_id) "
+                        "VALUES (%s, %s, %s::uuid)",
+                        (origin, seed_media_file_id, origin_album_id),
+                    )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -571,6 +615,42 @@ def _archive_and_open_session(
         finally:
             conn.autocommit = True
     return archived_mix_id
+
+
+def _snapshot_ids_for(cur, active: dict, old_media_ids: list[int]) -> list[int]:
+    """Resolve which media_file_ids to snapshot into the archived session.
+
+    For album/track sessions the content is deterministic from the origin, so
+    guard against the live queue being replaced out-of-band (e.g. HQPlayer
+    reopened with a different album, leaving a foreign queue): if the captured
+    queue no longer overlaps the origin's own tracks, snapshot the origin's
+    tracks so the card's cover/tracks match its title. A queue that still
+    overlaps is trusted — it reflects in-app edits (queued/removed tracks).
+    radio/mix content is dynamic (similar picks / an explicit list) with no
+    origin reference, so the captured queue is the only source."""
+    origin = active["origin"]
+
+    if origin == "album" and active["origin_album_id"]:
+        cur.execute(
+            "SELECT mf.id FROM media_files mf "
+            "JOIN album_variants av ON av.id = mf.album_variant_id "
+            "WHERE av.album_id = %s::uuid "
+            "ORDER BY mf.disc_number, mf.track_number",
+            (active["origin_album_id"],),
+        )
+        album_ids = [r["id"] for r in cur.fetchall()]
+        if album_ids and not (set(old_media_ids) & set(album_ids)):
+            return album_ids
+        return old_media_ids
+
+    if origin == "track" and active["seed_media_file_id"]:
+        # A single-track session is exactly its seed; don't let an out-of-band
+        # queue swap put a foreign track in it.
+        if active["seed_media_file_id"] not in old_media_ids:
+            return [active["seed_media_file_id"]]
+        return old_media_ids
+
+    return old_media_ids
 
 
 def _compute_session_card(cur, active: dict, old_media_ids: list[int]):
