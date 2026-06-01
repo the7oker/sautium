@@ -6,9 +6,12 @@ We fetch the dedicated images page (`/music/<artist>/+images`) and pull
 the og:image URL — that's the photo Last.fm itself shows as the
 artist's primary image, chosen by community votes.
 
-robots.txt allows /music/<artist>/+images. Called from the lazy
-/api/covers/by-artist/{id} resolver, so requests are naturally
-distributed across user actions — no artificial rate limit needed.
+robots.txt allows /music/<artist>/+images. This is the *fallback*
+source — `deezer_photos` (clean JSON API) is tried first. Last.fm
+aggressively rate-limits scraping (serves a 406 "Rate Limited" page
+once an IP fires too many requests), so the caller serializes every
+external photo lookup behind a global throttle + cooldown (see
+`routers/covers.py`). Unthrottled concurrent scrapes ban the whole IP.
 
 Two failure modes the resolver must distinguish, because the cost of
 conflating them is permanent: transient network errors leave the
@@ -32,6 +35,13 @@ class TransientFetchError(Exception):
     """Raised when the Last.fm fetch failed for a network reason
     (timeout, connection reset, etc). The caller leaves the artist's
     photo_cover_id NULL so the next request retries."""
+
+
+class RateLimitError(TransientFetchError):
+    """The source actively rate-limited us — HTTP 429, or Last.fm's
+    'Rate Limited' interstitial served as HTTP 406. Distinct from a
+    generic transient error so the caller can enter a global cooldown
+    instead of hammering the already-throttled source on every retry."""
 
 
 _USER_AGENT = (
@@ -76,6 +86,11 @@ def fetch_lastfm_photo_url(artist_name: str) -> Optional[str]:
 
     if resp.status_code == 404:
         return None
+    if resp.status_code in (406, 429):
+        # Last.fm serves its "Rate Limited" interstitial as 406; 429 is
+        # the standard signal. Either way, back off globally — retrying
+        # immediately only digs the IP deeper into the ban.
+        raise RateLimitError(f"HTTP {resp.status_code}")
     if resp.status_code != 200:
         # 5xx and other non-200 are likely transient (server overload,
         # CDN hiccup) — retry next time rather than giving up forever.

@@ -28,6 +28,7 @@ Public entry points:
 
 import hashlib
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from io import BytesIO
@@ -48,6 +49,28 @@ from uuid_utils import NAMESPACE
 SENTINEL_COVER_ID = uuid.UUID("00000000-0000-0000-0000-000000000000")
 
 logger = logging.getLogger(__name__)
+
+# Global cooldown shared by the (threadpool) photo resolver and the
+# (async) endpoint. When an external source rate-limits us, the resolver
+# arms the cooldown and the endpoint stops queuing lookups until it
+# clears — backing off lets the source recover instead of digging the
+# IP deeper into the ban. Plain module float: GIL makes the read/write
+# atomic enough, and monotonic-clock skew of a few ms is irrelevant.
+_PHOTO_COOLDOWN_SEC = 120.0
+_photo_cooldown_until = 0.0
+
+
+def photo_cooldown_active() -> bool:
+    return time.monotonic() < _photo_cooldown_until
+
+
+def note_photo_rate_limit() -> None:
+    global _photo_cooldown_until
+    _photo_cooldown_until = time.monotonic() + _PHOTO_COOLDOWN_SEC
+    logger.warning(
+        f"external artist-photo source rate-limited; "
+        f"global cooldown for {_PHOTO_COOLDOWN_SEC:.0f}s"
+    )
 
 # Album booklets scanned for print can reach ~50 MP — raise default bomb guard.
 Image.MAX_IMAGE_PIXELS = 200_000_000
@@ -407,19 +430,30 @@ def resolve_artist_photo(db: Session, artist_id: str) -> Optional[uuid.UUID]:
     """Resolve and cache an artist photo, returning the cover_id.
 
     Fast path is owned by the endpoint (it checks artists.photo_cover_id
-    first). This function runs only when no photo has been resolved
-    yet. Scrapes the Last.fm public images page, downloads the
-    og:image, ingests it through the existing covers pipeline (BLAKE2
-    dedup + WebP encode + max-1024 resize, AR preserved).
+    first). This runs only when no photo has been resolved yet. Tries
+    Deezer's JSON API first, then the Last.fm scrape as fallback;
+    downloads the image and ingests it through the covers pipeline
+    (BLAKE2 dedup + WebP encode + max-1024 resize, AR preserved).
 
-    Permanent failures (artist absent from Last.fm, page has no usable
-    image) pin SENTINEL_COVER_ID so we don't re-scrape on every page
-    load. Transient network failures (timeout, 5xx, DNS hiccup) leave
-    photo_cover_id NULL and return None — the next request will
-    retry. Without that distinction one bad network moment would
-    permanently mark a real artist as photo-less.
+    Three outcomes:
+      - photo found  → cache the cover_id.
+      - every source definitively reports "no photo" → pin
+        SENTINEL_COVER_ID so we don't re-fetch on every page load.
+      - a source errored (rate-limit, timeout, 5xx) → leave
+        photo_cover_id NULL and return None so a later request retries.
+        Rate-limit errors additionally arm the global cooldown. Without
+        this distinction one bad moment would permanently mark a real
+        artist as photo-less.
+
+    The endpoint serializes calls to this function behind a global
+    throttle — see `routers/covers.py`. Do not call it in a tight loop.
     """
-    from lastfm_photos import fetch_lastfm_photo_url, TransientFetchError
+    from lastfm_photos import (
+        fetch_lastfm_photo_url,
+        TransientFetchError,
+        RateLimitError,
+    )
+    from deezer_photos import fetch_deezer_photo_url
 
     row = db.execute(
         text("SELECT id, name, photo_cover_id FROM artists WHERE id = :id"),
@@ -432,21 +466,37 @@ def resolve_artist_photo(db: Session, artist_id: str) -> Optional[uuid.UUID]:
     if existing is not None:
         return existing
 
-    try:
-        photo_url = fetch_lastfm_photo_url(name)
-    except TransientFetchError as e:
-        logger.warning(f"last.fm photo transient error for {name!r}: {e}")
-        # Leave photo_cover_id NULL → next user request retries.
-        return None
+    photo_url: Optional[str] = None
+    any_source_errored = False
+    for fetch in (fetch_deezer_photo_url, fetch_lastfm_photo_url):
+        try:
+            photo_url = fetch(name)
+        except RateLimitError as e:
+            logger.warning(f"artist photo rate-limited via {fetch.__module__} for {name!r}: {e}")
+            note_photo_rate_limit()
+            any_source_errored = True
+            continue
+        except TransientFetchError as e:
+            logger.warning(f"artist photo transient via {fetch.__module__} for {name!r}: {e}")
+            any_source_errored = True
+            continue
+        if photo_url:
+            break
+        # photo_url is None: this source has no photo → try the next.
 
     cover_id: Optional[uuid.UUID] = None
     if photo_url:
-        cover_id = ingest_cover_from_url(
-            db, photo_url,
-            source_path=f"lastfm-artist:{name}",
-        )
+        cover_id = ingest_cover_from_url(db, photo_url, source_path=f"artist-photo:{name}")
 
-    final = cover_id if cover_id is not None else SENTINEL_COVER_ID
+    if cover_id is not None:
+        final = cover_id
+    elif any_source_errored:
+        # Don't pin SENTINEL on a transient/rate-limit error — leave NULL
+        # so a later request retries once the cooldown clears.
+        return None
+    else:
+        final = SENTINEL_COVER_ID
+
     db.execute(
         text("UPDATE artists SET photo_cover_id = :c WHERE id = :a"),
         {"c": final, "a": a_id},
