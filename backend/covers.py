@@ -570,14 +570,16 @@ def resolve_cover_for_folder(db: Session, media_file_id: int) -> Optional[uuid.U
     if still_unresolved:
         meta = _lookup_album_artist(db, media_file_id)
         lastfm_cover_id: Optional[uuid.UUID] = None
+        transient = False
         if meta and settings.lastfm_api_key:
+            from lastfm import LastFmService
+            from lastfm_photos import TransientFetchError
             try:
-                from lastfm import LastFmService
-                svc = LastFmService()
-                url = svc.get_album_cover_url(meta[0], meta[1])
-            except Exception as e:
-                logger.warning(f"Last.fm cover lookup raised: {e}")
+                url = LastFmService().get_album_cover_url(meta[0], meta[1])
+            except TransientFetchError as e:
+                logger.warning(f"Last.fm album cover transient for {meta[0]} - {meta[1]}: {e}")
                 url = None
+                transient = True
             if url:
                 lastfm_cover_id = ingest_cover_from_url(
                     db, url, source_path=f"lastfm:{meta[0]}/{meta[1]}",
@@ -591,6 +593,11 @@ def resolve_cover_for_folder(db: Session, media_file_id: int) -> Optional[uuid.U
                 )
                 if mid == media_file_id:
                     requested_cover = lastfm_cover_id
+        elif transient:
+            # Transient Last.fm failure — leave cover_id NULL so a later
+            # request retries, instead of pinning SENTINEL permanently.
+            # requested_cover stays None → endpoint serves a deferred 404.
+            pass
         else:
             for mid in still_unresolved:
                 db.execute(

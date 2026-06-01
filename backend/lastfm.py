@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from decimal import Decimal
 
 from config import settings
+from lastfm_photos import TransientFetchError
 from models import (
     ExternalMetadata, Artist, SimilarArtist, Genre, GenreDescription,
     ArtistBio, Tag, ArtistTag, Album, AlbumInfo, AlbumTag, TrackArtist
@@ -944,29 +945,36 @@ class LastFmService:
         small/medium/large/extralarge/mega — pylast addresses them by
         integer index (pylast.SIZE_*). We default to SIZE_MEGA so the
         downstream WebP encoder (1024px max) gets the highest-detail
-        source available. Returns None when the album is unknown or
-        has no cover registered on Last.fm.
+        source available.
+
+        Returns None only when the album is genuinely unknown to Last.fm
+        or has no cover registered — the caller pins SENTINEL on None, so
+        a transient failure must NOT collapse to None. Network errors and
+        rate limits (which `_with_retry` already retries with backoff)
+        raise TransientFetchError after exhausting retries, so the caller
+        leaves the cover unresolved and retries on a later request rather
+        than permanently marking the album cover-less.
         """
         try:
-            album = self.network.get_album(artist_name, album_title)
-            url = album.get_cover_image(size=size)
-            if not url:
-                return None
-            url = str(url).strip()
-            return url or None
+            url = self._with_retry(
+                lambda: self.network.get_album(artist_name, album_title).get_cover_image(size=size)
+            )
         except pylast.WSError as e:
             err = str(e).lower()
             if "not found" in err or "could not be found" in err:
                 return None
-            logger.warning(
-                f"Last.fm cover lookup error for {artist_name} - {album_title}: {e}"
-            )
-            return None
+            # Rate limit (code 29) survived the backoff, or some other
+            # API-level error — transient, not "no cover".
+            raise TransientFetchError(f"WSError: {e}") from e
         except Exception as e:
-            logger.warning(
-                f"Last.fm cover lookup failed for {artist_name} - {album_title}: {e}"
-            )
+            # NetworkError / timeout / connection reset that outlived
+            # _with_retry's backoff.
+            raise TransientFetchError(f"{type(e).__name__}: {e}") from e
+
+        if not url:
             return None
+        url = str(url).strip()
+        return url or None
 
     def enrich_album(self, db: Session, album_id: int, artist_name: str, album_title: str) -> Dict[str, Any]:
         """

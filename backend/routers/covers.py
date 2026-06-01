@@ -67,11 +67,12 @@ _PHOTO_WAIT_BUDGET = 2.5
 _photo_last_call = 0.0
 
 
-def _defer_photo() -> Response:
-    """No photo served this time (cooldown active or queue busy). Short
-    cache so the lazy <img> retries on a later render rather than every
-    frame. The frontend overlays the photo on an initials placeholder
-    and removes the <img> on 404, so the user sees initials meanwhile."""
+def _defer_cover() -> Response:
+    """Cover/photo not resolved this time — cooldown active, throttle
+    queue busy, or a transient external failure. Short cache so the lazy
+    <img> retries on a later render rather than every frame. The frontend
+    overlays art on a placeholder and removes the <img> on 404, so the
+    user sees the placeholder meanwhile."""
     return Response(
         status_code=404,
         content=b"",
@@ -187,14 +188,9 @@ async def get_cover_by_media(media_file_id: int):
             raise HTTPException(status_code=500, detail="cover resolution failed")
 
     if resolved is None:
-        # Shouldn't happen — resolve_cover_for_folder always returns
-        # at least SENTINEL_COVER_ID. Defensive 404 with short cache
-        # so a retry can recover after a code fix.
-        return Response(
-            status_code=404,
-            content=b"",
-            headers={"Cache-Control": "public, max-age=60"},
-        )
+        # A transient Last.fm failure left the cover unresolved (NULL, not
+        # SENTINEL). Defer so the next request retries once Last.fm recovers.
+        return _defer_cover()
 
     return _serve_cover_bytes(str(resolved))
 
@@ -228,7 +224,7 @@ async def get_cover_by_artist(artist_id: str = FPath(..., min_length=36, max_len
 
     # A source recently rate-limited us — don't queue more work, defer.
     if photo_cooldown_active():
-        return _defer_photo()
+        return _defer_cover()
 
     lock = await _get_artist_lock(artist_id)
     async with lock:
@@ -245,11 +241,11 @@ async def get_cover_by_artist(artist_id: str = FPath(..., min_length=36, max_len
         try:
             await asyncio.wait_for(_photo_sem.acquire(), timeout=_PHOTO_WAIT_BUDGET)
         except asyncio.TimeoutError:
-            return _defer_photo()
+            return _defer_cover()
         try:
             if photo_cooldown_active():
                 # Cooldown was armed while we queued — don't fire.
-                return _defer_photo()
+                return _defer_cover()
             global _photo_last_call
             gap = time.monotonic() - _photo_last_call
             if gap < _PHOTO_MIN_INTERVAL:
@@ -265,7 +261,7 @@ async def get_cover_by_artist(artist_id: str = FPath(..., min_length=36, max_len
             _photo_sem.release()
 
     if resolved is None:
-        return _defer_photo()
+        return _defer_cover()
     return _serve_cover_bytes(str(resolved))
 
 
