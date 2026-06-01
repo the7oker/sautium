@@ -3531,6 +3531,20 @@ body.has-miniplayer .more-overlay .drawer {
   font-family: var(--font-mono);
   color: var(--color-blue);
 }
+/* Dim hint line under a row (e.g. the active filter's description).
+   Right edge aligns with the filter name, not the section edge: the
+   row's name column ends 44px in (14 row padding + 18 chevron + 12
+   gap), so match that as padding-right. Negative top margin eats into
+   the row's 12px bottom padding to pull the hint tight under the name;
+   bottom padding keeps it detached from the next control. */
+.hqp-row-hint {
+  margin: calc(-8 * var(--px)) 0 0;
+  padding: 0 calc(44 * var(--px)) calc(12 * var(--px)) calc(16 * var(--px));
+  font-size: var(--text-caption);
+  line-height: var(--lh-normal);
+  color: var(--color-text-dim);
+  text-align: right;
+}
 .hqp-volume-ctrl {
   display: inline-flex;
   align-items: center;
@@ -3747,7 +3761,8 @@ body.has-miniplayer .more-overlay .drawer {
 .hqp-sheet-row:last-child { border-bottom: 0; }
 .hqp-sheet-row.is-current { background: var(--color-amber-weak); }
 .hqp-sheet-row-name {
-  display: flex; align-items: center; gap: calc(8 * var(--px));
+  display: flex; flex-direction: column; align-items: flex-start;
+  gap: calc(3 * var(--px));
   width: 100%;
   padding: calc(12 * var(--px)) calc(16 * var(--px));
   background: transparent;
@@ -3757,6 +3772,14 @@ body.has-miniplayer .more-overlay .drawer {
   font-size: calc(13 * var(--px));
   color: var(--color-text);
   cursor: pointer;
+}
+.hqp-sheet-row-head {
+  display: flex; align-items: center; gap: calc(8 * var(--px));
+}
+.hqp-sheet-row-desc {
+  font-size: var(--text-caption);
+  line-height: var(--lh-normal);
+  color: var(--color-text-dim);
 }
 .hqp-sheet-row.is-current .hqp-sheet-row-name { color: var(--color-amber); }
 .hqp-sheet-dot {

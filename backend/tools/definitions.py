@@ -762,7 +762,9 @@ def _h_hqplayer_get_settings() -> str:
         if filters:
             lines.append(f"Available filters ({len(filters)}):")
             for f in filters:
-                lines.append(f"  [{f['index']}] {f['name']}")
+                desc = f.get("description", "")
+                suffix = f" — {desc}" if desc else ""
+                lines.append(f"  [{f['index']}] {f['name']}{suffix}")
         shapers = hqp.get_shapers()
         if shapers:
             lines.append(f"\nAvailable dither/shapers ({len(shapers)}):")
@@ -804,7 +806,10 @@ def _h_hqplayer_set_filter(filter_name: str) -> str:
             available = ", ".join(f["name"] for f in filters)
             return f"Filter '{filter_name}' not found. Available filters: {available}"
         ok = hqp.set_filter(match["index"])
-        return f"Filter set to: {match['name']}" if ok else f"Failed to set filter to {match['name']}."
+        if not ok:
+            return f"Failed to set filter to {match['name']}."
+        desc = match.get("description", "")
+        return f"Filter set to: {match['name']}" + (f" — {desc}" if desc else "")
     except Exception as e:
         return f"Error setting filter: {e}"
 
@@ -893,13 +898,22 @@ def _h_hqplayer_set_matrix_profile(profile_name: str) -> str:
 
 def _h_hqplayer_get_dsp_state() -> str:
     try:
-        state = _get_hqp().get_state()
+        hqp = _get_hqp()
+        state = hqp.get_state()
         if not state:
             return "Could not get DSP state."
+        active_filter = next(
+            (f for f in hqp.get_filters() if f["index"] == state["filter"]), None
+        )
+        filter_line = f"  Active filter index: {state['filter']}"
+        if active_filter:
+            filter_line += f" ({active_filter['name']})"
+            if active_filter.get("description"):
+                filter_line += f" — {active_filter['description']}"
         lines = ["Current DSP state:"]
         lines.append(f"  Convolution: {'ON' if state['convolution'] else 'OFF'}")
         lines.append(f"  Matrix profile: '{state['matrix_profile']}'" if state['matrix_profile'] else "  Matrix profile: (none)")
-        lines.append(f"  Active filter index: {state['filter']}")
+        lines.append(filter_line)
         lines.append(f"  Active shaper index: {state['shaper']}")
         lines.append(f"  Active mode index: {state['mode']}")
         lines.append(f"  Phase invert: {'ON' if state['invert'] else 'OFF'}")

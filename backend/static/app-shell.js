@@ -5058,6 +5058,19 @@
     return name;
   }
 
+  // Keep the HQPlayer screen's DSP readout current straight off the player
+  // status SSE — no refetch, no poll. No-ops unless that screen is mounted
+  // (the [data-hqp-dsp] row only exists while connected and speed > 0); a
+  // transient 0 is ignored so the last good value stays put between ticks.
+  function updateHqpDspReadout(status) {
+    const speed = status && status.process_speed;
+    if (!(speed > 0)) return;
+    const el = document.querySelector('[data-hqp-dsp] .hqp-row-value');
+    if (!el) return;
+    const next = speed.toFixed(1) + '×';
+    if (el.textContent !== next) el.textContent = next;
+  }
+
   async function renderHqplayerSettings(root) {
     root.innerHTML = '';
     const screen = document.createElement('div');
@@ -5121,10 +5134,20 @@
       const modeName = modeNameFromState(st, s.modes);
       const rateName = rateNameFromState(st, s.rates);
       const filterName = filterNameFromIndex(st.filter, s.filters);
+      const activeFilter = (s.filters || []).find(f => f.index === st.filter);
+      const filterDescription = (activeFilter && activeFilter.description) || '';
       const shaperName = shaperNameFromIndex(st.shaper, s.shapers);
       const matrixActive = st.matrix_profile || '';
       const profiles = s.matrix_profiles || [];
       const favourites = s.favorite_filters || [];
+      // process_speed is HQPlayer's realtime DSP factor, delivered on the
+      // player status SSE (player.js mirrors the latest status onto
+      // window.currentStatus). Read it live here for the initial paint; the
+      // np-update listener below keeps the readout current without a refetch.
+      // Only meaningful while the control connection is up and HQP reports
+      // a non-zero value (0.0 = unknown / idle).
+      const processSpeed = (s.connected && window.currentStatus)
+        ? (window.currentStatus.process_speed || 0) : 0;
       // HQP Desktop labels the same Shaper control differently
       // depending on output mode: "Dither" in PCM mode, "Modulator"
       // in SDM. Mirror the language so the screen feels native to
@@ -5222,6 +5245,11 @@
               <button class="hqp-vol-btn" type="button" data-vol="+1" aria-label="Volume +1 dB">+</button>
             </div>
           </div>
+          ${processSpeed > 0 ? `
+          <div class="hqp-row" data-hqp-dsp>
+            <span class="hqp-row-label">DSP</span>
+            <span class="hqp-row-value mono">${processSpeed.toFixed(1)}×</span>
+          </div>` : ''}
         </section>
 
         <section class="hqp-section">
@@ -5235,6 +5263,9 @@
               <path d="M9 6l6 6-6 6"/>
             </svg>
           </button>
+          ${filterDescription
+            ? `<p class="hqp-row-hint">${escapeProfileHtml(filterDescription)}</p>`
+            : ''}
           ${favouritesStrip}
           <div class="hqp-row">
             <label class="hqp-row-label" for="hqpShaper">${escapeHtml(shaperLabel)}</label>
@@ -5393,8 +5424,13 @@
             <div class="hqp-sheet-row${
               r.index === currentIdx ? ' is-current' : ''}" data-idx="${r.index}">
               <button class="hqp-sheet-row-name" type="button" data-pick="${r.index}">
-                ${r.index === currentIdx ? '<span class="hqp-sheet-dot"></span>' : ''}
-                ${escapeHtml(r.name)}
+                <span class="hqp-sheet-row-head">
+                  ${r.index === currentIdx ? '<span class="hqp-sheet-dot"></span>' : ''}
+                  ${escapeHtml(r.name)}
+                </span>
+                ${r.description
+                  ? `<span class="hqp-sheet-row-desc">${escapeHtml(r.description)}</span>`
+                  : ''}
               </button>
               <button class="hqp-sheet-star${
                 favs.has(r.name) ? ' is-on' : ''}" type="button"
@@ -8206,6 +8242,7 @@
       mp.update(d);
       sheet.onStatus(d);
       updatePlayingHighlight();
+      updateHqpDspReadout(d);
     });
     document.addEventListener('np-detail', e => {
       mp.setCover(e.detail);

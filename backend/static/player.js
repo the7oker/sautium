@@ -35,6 +35,13 @@
   // detail on np-update; this is a fallback for synchronous callers).
   window.currentPlaylist = [];
 
+  // Latest player status object as delivered by the SSE stream. Screens
+  // that mount mid-stream (e.g. the HQPlayer settings screen reading
+  // process_speed) read this synchronously for an initial value, then
+  // stay current via the np-update event. Same fallback role as
+  // currentPlaylist above.
+  window.currentStatus = null;
+
   // --- SSE -------------------------------------------------------------
   function connectStatusSSE() {
     if (_sseSource) _sseSource.abort();
@@ -71,6 +78,10 @@
 
   async function processStatusEvent(data) {
     currentState = data.state;
+    // process_speed is HQPlayer's realtime DSP processing factor (0.0 when
+    // unknown). Carried straight through on the status object so any screen
+    // can read it off window.currentStatus or the np-update detail.
+    window.currentStatus = data;
     if (data.playlist_version !== undefined &&
         data.playlist_version !== lastPlaylistVersion) {
       // Update marker first so a duplicate event doesn't trigger a

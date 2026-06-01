@@ -1,8 +1,12 @@
-# HQPlayer Desktop 5 Integration
+# HQPlayer Desktop 5 / 6 Integration
 
 ## Overview
 
-Integration with HQPlayer Desktop 5.16.3 Control API for playback control and status monitoring.
+Integration with the HQPlayer Desktop Control API for playback control and status
+monitoring. Supports **HQPlayer Desktop 5 and 6** — the XML-over-TCP control protocol is
+forward-compatible between the two releases, and Sautium discovers all DSP options
+(filters, shapers, modes, rates) dynamically at runtime, so the same code drives either
+version with no version switch.
 
 **Status**: ✅ Working - Basic implementation complete
 
@@ -14,13 +18,28 @@ Integration with HQPlayer Desktop 5.16.3 Control API for playback control and st
 - **Authentication**: Not required for basic commands (optional for advanced features)
 
 ### SDK Version
-Based on HQPlayer SDK (engine version 5.29.2) from Signalyst
+Based on the HQPlayer SDK from Signalyst. Both SDK generations are supported:
+- **HQP5**: engine version 5.29.2 (`sdk/hqp-control-5292-src/`)
+- **HQP6**: SDK 6.0.1 (`sdk/hqp-control-601-src/`)
+
+The control protocol is the same on both, so a single client implementation talks to
+either desktop version.
 
 ### Tested Configuration
-- **HQPlayer**: Desktop 5.16.3
+- **HQPlayer**: Desktop 5.16.3 (also runs against HQPlayer Desktop 6)
 - **Engine**: 5.34.14
 - **Platform**: Windows
 - **Connection**: WSL2 → Windows (172.26.80.1:4321)
+
+### HQP6-only additions
+HQPlayer 6 exposes two extra fields that Sautium now uses when present. Both degrade
+gracefully to absent on HQP5 — the integration reads them opportunistically and works
+unchanged without them.
+
+- **Per-filter `description`** — a human-readable blurb returned alongside each filter in
+  the discovery response. Sautium surfaces it live in the HQPlayer settings screen and
+  passes it to the AI DJ, so filter choices are explained in the player's own words.
+- **`process_speed` in Status** — a DSP load readout reported by `GetStatus`.
 
 ## Files
 
@@ -68,6 +87,7 @@ Based on HQPlayer SDK (engine version 5.29.2) from Signalyst
   - Position and length
   - Volume level
   - Metadata (artist, album, song, genre)
+  - `process_speed` - DSP load readout (HQP6 only; absent on HQP5)
 - `get_info()` - Get HQPlayer info
   - Product name
   - Version
@@ -339,5 +359,5 @@ class TrackStatus:
 ## Credits
 
 - **HQPlayer Desktop**: Signalyst (https://www.signalyst.com/)
-- **SDK**: HQPlayer Control API SDK v5.29.2
+- **SDK**: HQPlayer Control API SDK v5.29.2 (HQP5) / v6.0.1 (HQP6)
 - **License**: MIT (for our integration code)

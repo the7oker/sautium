@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-HQPlayer Desktop 5 Control API Client
-Based on HQPlayer SDK (engine version 5.29.2)
+HQPlayer Desktop 5/6 Control API Client
+Based on HQPlayer SDK (engine version 5.29.2); wire-compatible with HQPlayer 6.
 
 Protocol: XML over TCP
 Default port: 4321
@@ -47,6 +47,7 @@ class TrackStatus:
     genre: str = ""
     convolution: bool = False
     matrix_profile: str = ""
+    process_speed: float = 0.0  # HQP6 realtime-processing factor; 0.0 on HQP5
 
     @property
     def is_playing(self) -> bool:
@@ -61,7 +62,7 @@ class TrackStatus:
 
 class HQPlayerClient:
     """
-    HQPlayer Desktop 5 Control API Client
+    HQPlayer Desktop 5/6 Control API Client
 
     Implements basic control functions without authentication.
     For full feature set including encrypted commands, authentication would be needed.
@@ -389,6 +390,7 @@ class HQPlayerClient:
                 position=float(response.get("position", 0.0)),
                 length=float(response.get("length", 0.0)),
                 volume=float(response.get("volume", 0.0)),
+                process_speed=float(response.get("process_speed", 0.0)),
             )
 
             # Parse metadata if present
@@ -504,8 +506,10 @@ class HQPlayerClient:
         Get available filters (PCM and SDM/DSD)
 
         Returns:
-            List of dicts with: index, name, value, arg
-            Example: [{"index": 0, "name": "poly-sinc-ext2", "value": 0, "arg": 1}, ...]
+            List of dicts with: index, name, value, arg, description
+            `description` is the HQP6 per-filter blurb; empty string on HQP5.
+            Example: [{"index": 0, "name": "poly-sinc-ext2", "value": 0, "arg": 1,
+                       "description": "Closed form interpolation with 16 million taps"}, ...]
         """
         response = self._execute_command("GetFilters")
         if response is None or response.tag != "GetFilters":
@@ -519,6 +523,7 @@ class HQPlayerClient:
                 "name": item.get("name", ""),
                 "value": int(item.get("value", 0)),
                 "arg": int(item.get("arg", 0)),
+                "description": item.get("description", ""),
             })
 
         return filters
