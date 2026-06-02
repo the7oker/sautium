@@ -44,6 +44,61 @@ ArtistVocalistEnum = ENUM(
     name="artist_vocalist",
     create_type=False,
 )
+ArtistTypeEnum = ENUM(
+    "unknown", "solo", "band", "collaboration", "orchestra", "other",
+    name="artist_type",
+    create_type=False,
+)
+VerificationStatusEnum = ENUM(
+    "unverified", "suspicious", "verified_band", "verified_split", "verified_collab",
+    name="verification_status",
+    create_type=False,
+)
+CreditRoleEnum = ENUM(
+    "primary", "featured", "member",
+    name="credit_role",
+    create_type=False,
+)
+MusicalKeyEnum = ENUM(
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    name="musical_key",
+    create_type=False,
+)
+MusicalModeEnum = ENUM(
+    "major", "minor",
+    name="musical_mode",
+    create_type=False,
+)
+VocalClassEnum = ENUM(
+    "vocal", "instrumental", "mixed",
+    name="vocal_class",
+    create_type=False,
+)
+AudioFileFormatEnum = ENUM(
+    "FLAC", "APE", "WAV", "AIFF", "WV", "TTA", "DSF", "DFF", "MP3", "OGG", "M4A",
+    name="audio_file_format",
+    create_type=False,
+)
+CoverSourceTypeEnum = ENUM(
+    "external", "embedded", "sentinel",
+    name="cover_source_type",
+    create_type=False,
+)
+MetadataEntityTypeEnum = ENUM(
+    "artist", "album", "track", "genre",
+    name="metadata_entity_type",
+    create_type=False,
+)
+MetadataKindEnum = ENUM(
+    "bio", "info", "stats", "lyrics", "description",
+    name="metadata_kind",
+    create_type=False,
+)
+FetchStatusEnum = ENUM(
+    "success", "error", "not_found",
+    name="fetch_status",
+    create_type=False,
+)
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -80,15 +135,15 @@ class Artist(Base):
     name = Column(String(500), nullable=False, unique=True)
 
     # Normalization metadata
-    artist_type = Column(String(20), default="unknown")       # unknown/solo/band/collaboration/orchestra/other
-    verification_status = Column(String(20), default="unverified")  # unverified/suspicious/verified_band/verified_split/verified_collab
+    artist_type = Column(ArtistTypeEnum, default="unknown")
+    verification_status = Column(VerificationStatusEnum, default="unverified")
     gender = Column(ArtistGenderEnum, default="unknown")        # unknown/female/male/mixed
     is_vocalist = Column(ArtistVocalistEnum, default="unknown") # unknown/vocal/instrumental
     raw_name = Column(String(500))                             # original tag value before normalization
 
-    # External service IDs
-    lastfm_id = Column(String(100))
-    musicbrainz_id = Column(String(100))
+    # External service IDs — Last.fm exposes the MusicBrainz MBID as its id
+    lastfm_id = Column(UUID(as_uuid=False))
+    musicbrainz_id = Column(UUID(as_uuid=False))
     deezer_id = Column(BigInteger)                             # cached Deezer artist id (integer; discography sync)
 
     last_album_sync = Column(DateTime(timezone=True))          # freshness gate for new-album discovery
@@ -112,14 +167,6 @@ class Artist(Base):
         Index("idx_artists_artist_type", "artist_type"),
         Index("idx_artists_gender", "gender"),
         Index("idx_artists_is_vocalist", "is_vocalist"),
-        CheckConstraint(
-            "artist_type IN ('unknown', 'solo', 'band', 'collaboration', 'orchestra', 'other')",
-            name="chk_artist_type",
-        ),
-        CheckConstraint(
-            "verification_status IN ('unverified', 'suspicious', 'verified_band', 'verified_split', 'verified_collab')",
-            name="chk_verification_status",
-        ),
     )
 
     def __repr__(self):
@@ -138,9 +185,9 @@ class Album(Base):
     catalog_number = Column(String(100))
     total_tracks = Column(Integer)
 
-    # External service IDs
-    musicbrainz_id = Column(String(100))
-    lastfm_id = Column(String(100))
+    # External service IDs — Last.fm exposes the MusicBrainz MBID as its id
+    musicbrainz_id = Column(UUID(as_uuid=False))
+    lastfm_id = Column(UUID(as_uuid=False))
     cover_url = Column(Text)                  # external cover (Deezer) for phantom albums with no local files
 
     user_rating = Column(Numeric(3, 2))
@@ -201,7 +248,7 @@ class TrackArtist(Base):
 
     track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
     artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
-    role = Column(String(50), primary_key=True, default="primary")
+    role = Column(CreditRoleEnum, primary_key=True, default="primary")
 
     track = relationship("Track", back_populates="artist_associations")
     artist = relationship("Artist", back_populates="track_associations")
@@ -238,7 +285,7 @@ class AlbumArtist(Base):
 
     album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
     artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
-    role = Column(String(50), primary_key=True, default="primary")
+    role = Column(CreditRoleEnum, primary_key=True, default="primary")
 
     album = relationship("Album", back_populates="artist_associations")
     artist = relationship("Artist", back_populates="album_associations")
@@ -261,7 +308,7 @@ class ArtistMember(Base):
 
     compound_artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
     member_artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
-    role = Column(String(50), nullable=False, default="member")  # primary, featured, member
+    role = Column(CreditRoleEnum, nullable=False, default="member")
 
     compound_artist = relationship("Artist", foreign_keys=[compound_artist_id], back_populates="members_as_compound")
     member_artist = relationship("Artist", foreign_keys=[member_artist_id], back_populates="member_of")
@@ -287,7 +334,7 @@ class ArtistAlias(Base):
     alias_normalized = Column(Text, primary_key=True)  # normalize(variant name)
     artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     alias_name = Column(String(500), nullable=False)   # variant as seen
-    mbid = Column(String(100))                          # MB authority for the mapping
+    mbid = Column(UUID(as_uuid=False))                  # MB authority for the mapping
     source = Column(String(50), nullable=False)         # clean | mb | normalization | manual
     confidence = Column(Numeric(4, 3))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -344,7 +391,7 @@ class MediaFile(Base):
 
     # File information
     file_path = Column(Text, nullable=False, unique=True)
-    file_format = Column(String(10), default="FLAC")
+    file_format = Column(AudioFileFormatEnum, default="FLAC")
     is_lossless = Column(Boolean, default=True)
     file_size_bytes = Column(BigInteger)
     file_modified_at = Column(DateTime(timezone=True))
@@ -408,7 +455,7 @@ class Cover(Base):
     content_hash = Column(BYTEA, nullable=False, unique=True)
     perceptual_hash = Column(BigInteger)             # imagehash.phash, 64-bit
 
-    source_type = Column(String(16), nullable=False)  # 'external' | 'embedded'
+    source_type = Column(CoverSourceTypeEnum, nullable=False)
     source_path = Column(Text)                        # fs path or 'flac:{path}#{idx}'
     source_mtime = Column(DateTime(timezone=True))
 
@@ -428,10 +475,6 @@ class Cover(Base):
     __table_args__ = (
         Index("idx_covers_phash", "perceptual_hash",
               postgresql_where="perceptual_hash IS NOT NULL"),
-        CheckConstraint(
-            "source_type IN ('external', 'embedded')",
-            name="chk_covers_source_type",
-        ),
     )
 
     def __repr__(self):
@@ -623,8 +666,8 @@ class AudioFeature(Base):
 
     # librosa DSP features
     bpm = Column(Float)
-    key = Column(String(3))
-    mode = Column(String(5))
+    key = Column(MusicalKeyEnum)
+    mode = Column(MusicalModeEnum)
     key_confidence = Column(Float)
     energy = Column(Float)
     energy_db = Column(Float)
@@ -635,7 +678,7 @@ class AudioFeature(Base):
     # CLAP zero-shot classifications
     instruments = Column(JSONB)
     moods = Column(JSONB)
-    vocal_instrumental = Column(String(20))
+    vocal_instrumental = Column(VocalClassEnum)
     vocal_score = Column(Float)
     danceability = Column(Float)
 
@@ -990,16 +1033,16 @@ class ExternalMetadata(Base):
 
     id = Column(Integer, primary_key=True)
 
-    entity_type = Column(String(50), nullable=False)  # 'artist', 'album', 'track', 'genre'
+    entity_type = Column(MetadataEntityTypeEnum, nullable=False)
     entity_id = Column(Text, nullable=False)  # UUID as string for artist/album/track, int as string for genre
 
     source = Column(String(50), nullable=False)
-    metadata_type = Column(String(50), nullable=False)
+    metadata_type = Column(MetadataKindEnum, nullable=False)
     data = Column(JSONB, nullable=False)
 
     fetched_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
-    fetch_status = Column(String(20), default='success')
+    fetch_status = Column(FetchStatusEnum, default='success')
     error_message = Column(Text)
 
     __table_args__ = (

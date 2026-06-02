@@ -23,6 +23,70 @@ DO $$ BEGIN
     CREATE TYPE session_origin AS ENUM ('album', 'track', 'radio', 'mix');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+DO $$ BEGIN
+    CREATE TYPE artist_type AS ENUM ('unknown', 'solo', 'band', 'collaboration', 'orchestra', 'other');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE verification_status AS ENUM ('unverified', 'suspicious', 'verified_band', 'verified_split', 'verified_collab');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE credit_role AS ENUM ('primary', 'featured', 'member');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE musical_key AS ENUM ('C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE musical_mode AS ENUM ('major', 'minor');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE vocal_class AS ENUM ('vocal', 'instrumental', 'mixed');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE audio_file_format AS ENUM ('FLAC', 'APE', 'WAV', 'AIFF', 'WV', 'TTA', 'DSF', 'DFF', 'MP3', 'OGG', 'M4A');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE cover_source_type AS ENUM ('external', 'embedded', 'sentinel');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE metadata_entity_type AS ENUM ('artist', 'album', 'track', 'genre');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE metadata_kind AS ENUM ('bio', 'info', 'stats', 'lyrics', 'description');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE fetch_status AS ENUM ('success', 'error', 'not_found');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE chat_role AS ENUM ('user', 'assistant');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE message_direction AS ENUM ('in', 'out');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE gear_category AS ENUM ('headphones', 'iems', 'dac', 'amp', 'player', 'streamer', 'power', 'cable');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE gear_polarity AS ENUM ('praise', 'criticism');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE spec_value_type AS ENUM ('number', 'string', 'enum', 'boolean');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- ============================================================
 -- Embedding models (shared metadata)
 -- ============================================================
@@ -43,20 +107,18 @@ CREATE TABLE IF NOT EXISTS embedding_models (
 CREATE TABLE IF NOT EXISTS artists (
     id UUID PRIMARY KEY,
     name VARCHAR(500) NOT NULL UNIQUE,
-    artist_type VARCHAR(20) DEFAULT 'unknown',
+    artist_type artist_type DEFAULT 'unknown',
     gender artist_gender DEFAULT 'unknown',
     is_vocalist artist_vocalist DEFAULT 'unknown',
-    verification_status VARCHAR(20) DEFAULT 'unverified',
+    verification_status verification_status DEFAULT 'unverified',
     raw_name VARCHAR(500),
-    lastfm_id VARCHAR(100),
-    musicbrainz_id VARCHAR(100),
+    lastfm_id UUID,                         -- Last.fm exposes the MusicBrainz MBID as its id
+    musicbrainz_id UUID,
     deezer_id BIGINT,                       -- cached Deezer artist id (integer; discography sync)
     last_album_sync TIMESTAMPTZ,            -- freshness gate for new-album discovery
     last_mb_sync TIMESTAMPTZ,              -- freshness gate for MB canonicalization pass
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_artist_type CHECK (artist_type IN ('unknown', 'solo', 'band', 'collaboration', 'orchestra', 'other')),
-    CONSTRAINT chk_verification_status CHECK (verification_status IN ('unverified', 'suspicious', 'verified_band', 'verified_split', 'verified_collab'))
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS albums (
@@ -66,8 +128,8 @@ CREATE TABLE IF NOT EXISTS albums (
     label VARCHAR(200),
     catalog_number VARCHAR(100),
     total_tracks INTEGER,
-    musicbrainz_id VARCHAR(100),
-    lastfm_id VARCHAR(100),
+    musicbrainz_id UUID,
+    lastfm_id UUID,                         -- Last.fm exposes the MusicBrainz MBID as its id
     cover_url TEXT,                         -- external cover (Deezer) for phantom albums with no local files
     user_rating NUMERIC(3, 2) CHECK (user_rating >= 0 AND user_rating <= 5),
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -103,21 +165,21 @@ CREATE TABLE IF NOT EXISTS tags (
 CREATE TABLE IF NOT EXISTS track_artists (
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    role VARCHAR(50) DEFAULT 'primary',
+    role credit_role DEFAULT 'primary',
     PRIMARY KEY (track_id, artist_id, role)
 );
 
 CREATE TABLE IF NOT EXISTS album_artists (
     album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
     artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    role VARCHAR(50) DEFAULT 'primary',
+    role credit_role DEFAULT 'primary',
     PRIMARY KEY (album_id, artist_id, role)
 );
 
 CREATE TABLE IF NOT EXISTS artist_members (
     compound_artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     member_artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    role VARCHAR(50) NOT NULL DEFAULT 'member',
+    role credit_role NOT NULL DEFAULT 'member',
     PRIMARY KEY (compound_artist_id, member_artist_id)
 );
 
@@ -130,7 +192,7 @@ CREATE TABLE IF NOT EXISTS artist_aliases (
     alias_normalized TEXT PRIMARY KEY,       -- normalize("H. Mancini") = "h. mancini"
     artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     alias_name VARCHAR(500) NOT NULL,        -- variant as seen (display/debug)
-    mbid VARCHAR(100),                       -- MB authority that justified the mapping
+    mbid UUID,                               -- MB authority that justified the mapping
     source VARCHAR(50) NOT NULL,             -- 'clean' | 'mb' | 'normalization' | 'manual'
     confidence NUMERIC(4, 3),                -- 0..1
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -167,7 +229,7 @@ CREATE TABLE IF NOT EXISTS covers (
     id UUID PRIMARY KEY,                             -- uuid5(NS, 'cover:' || hash_hex)
     content_hash BYTEA NOT NULL UNIQUE,              -- BLAKE2b-256 of original bytes
     perceptual_hash BIGINT,                          -- pHash (64-bit), nullable
-    source_type VARCHAR(16) NOT NULL,                -- 'external' | 'embedded'
+    source_type cover_source_type NOT NULL,
     source_path TEXT,                                -- fs path or 'flac:{path}#{idx}'
     source_mtime TIMESTAMPTZ,
     orig_width INTEGER,
@@ -179,8 +241,7 @@ CREATE TABLE IF NOT EXISTS covers (
     data BYTEA NOT NULL,                             -- WebP q=85 bytes
     bytes INTEGER NOT NULL,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_covers_source_type CHECK (source_type IN ('external', 'embedded', 'sentinel'))
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Sentinel cover row. Referenced by media_files.cover_id when lazy
@@ -220,7 +281,7 @@ CREATE TABLE IF NOT EXISTS media_files (
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     album_variant_id INTEGER NOT NULL REFERENCES album_variants(id) ON DELETE CASCADE ON UPDATE CASCADE,
     file_path TEXT NOT NULL UNIQUE,
-    file_format VARCHAR(10) DEFAULT 'FLAC',
+    file_format audio_file_format DEFAULT 'FLAC',
     is_lossless BOOLEAN DEFAULT TRUE,
     file_size_bytes BIGINT,
     file_modified_at TIMESTAMPTZ,
@@ -276,8 +337,8 @@ CREATE TABLE IF NOT EXISTS audio_features (
     id SERIAL PRIMARY KEY,
     track_id UUID NOT NULL UNIQUE REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     bpm DOUBLE PRECISION,
-    key VARCHAR(3),
-    mode VARCHAR(5),
+    key musical_key,
+    mode musical_mode,
     key_confidence DOUBLE PRECISION,
     energy DOUBLE PRECISION,
     energy_db DOUBLE PRECISION,
@@ -286,7 +347,7 @@ CREATE TABLE IF NOT EXISTS audio_features (
     zero_crossing_rate DOUBLE PRECISION,
     instruments JSONB,
     moods JSONB,
-    vocal_instrumental VARCHAR(20),
+    vocal_instrumental vocal_class,
     vocal_score DOUBLE PRECISION,
     danceability DOUBLE PRECISION,
     source_media_file_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
@@ -423,14 +484,14 @@ CREATE TABLE IF NOT EXISTS track_stats (
 
 CREATE TABLE IF NOT EXISTS external_metadata (
     id SERIAL PRIMARY KEY,
-    entity_type VARCHAR(50) NOT NULL,
-    entity_id TEXT NOT NULL,
+    entity_type metadata_entity_type NOT NULL,
+    entity_id TEXT NOT NULL,                          -- polymorphic: UUID for artist/album/track, int for genre
     source VARCHAR(50) NOT NULL,
-    metadata_type VARCHAR(50) NOT NULL,
+    metadata_type metadata_kind NOT NULL,
     data JSONB NOT NULL,
     fetched_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    fetch_status VARCHAR(20) DEFAULT 'success',
+    fetch_status fetch_status DEFAULT 'success',
     error_message TEXT,
     CONSTRAINT uq_external_metadata UNIQUE (entity_type, entity_id, source, metadata_type)
 );
@@ -450,7 +511,7 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
 CREATE TABLE IF NOT EXISTS chat_messages (
     id SERIAL PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    role VARCHAR(20) NOT NULL,
+    role chat_role NOT NULL,
     content TEXT NOT NULL,
     tracks_data JSONB,
     blocks_data JSONB,
@@ -978,7 +1039,7 @@ CREATE TABLE IF NOT EXISTS friends (
 CREATE TABLE IF NOT EXISTS p2p_messages (
     id SERIAL PRIMARY KEY,
     friend_id INTEGER NOT NULL REFERENCES friends(id) ON DELETE CASCADE,
-    direction VARCHAR(3) NOT NULL CHECK (direction IN ('in', 'out')),
+    direction message_direction NOT NULL,
     content TEXT NOT NULL,
     timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     delivered BOOLEAN DEFAULT FALSE,
@@ -1086,7 +1147,7 @@ CREATE TABLE IF NOT EXISTS gear_models (
     id                     UUID PRIMARY KEY,
     brand_id               UUID NOT NULL REFERENCES gear_brands(id) ON DELETE RESTRICT,
     model                  VARCHAR(300) NOT NULL,
-    category               VARCHAR(50) NOT NULL,
+    category               gear_category NOT NULL,
     research_state         gear_research_state NOT NULL DEFAULT 'queued',
     research_summary       TEXT,
     researched_at          TIMESTAMPTZ,
@@ -1095,8 +1156,6 @@ CREATE TABLE IF NOT EXISTS gear_models (
     sentiment_updated_at   TIMESTAMPTZ,
     created_at             TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at             TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_gear_category CHECK (category IN
-        ('headphones', 'iems', 'dac', 'amp', 'player', 'streamer', 'power', 'cable')),
     UNIQUE (brand_id, model, category)
 );
 
@@ -1144,13 +1203,12 @@ CREATE TABLE IF NOT EXISTS gear_spec_attributes (
     label        VARCHAR(100) NOT NULL,
     description  TEXT NOT NULL,
     unit         VARCHAR(20),
-    value_type   VARCHAR(20) NOT NULL,
+    value_type   spec_value_type NOT NULL,
     enum_values  TEXT[],
     applies_to   TEXT[] NOT NULL,
     seeded       BOOLEAN NOT NULL DEFAULT TRUE,
     created_at   TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at   TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_spec_value_type CHECK (value_type IN ('number', 'string', 'enum', 'boolean'))
+    updated_at   TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_gear_spec_attributes_applies_to ON gear_spec_attributes USING GIN(applies_to);
@@ -1210,11 +1268,10 @@ CREATE INDEX IF NOT EXISTS idx_gear_model_technologies_tech ON gear_model_techno
 -- gets 'organic timbre' praise?").
 CREATE TABLE IF NOT EXISTS gear_sentiment_terms (
     gear_model_id  UUID NOT NULL REFERENCES gear_models(id) ON DELETE CASCADE,
-    polarity       VARCHAR(10) NOT NULL,
+    polarity       gear_polarity NOT NULL,
     term           VARCHAR(80) NOT NULL,
     weight         REAL,
-    PRIMARY KEY (gear_model_id, polarity, term),
-    CONSTRAINT chk_polarity CHECK (polarity IN ('praise', 'criticism'))
+    PRIMARY KEY (gear_model_id, polarity, term)
 );
 
 CREATE INDEX IF NOT EXISTS idx_gear_sentiment_term_lookup ON gear_sentiment_terms(polarity, term);
