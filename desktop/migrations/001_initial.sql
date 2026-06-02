@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS artists (
     raw_name VARCHAR(500),
     lastfm_id VARCHAR(100),
     musicbrainz_id VARCHAR(100),
-    deezer_id VARCHAR(50),                  -- cached Deezer artist id (discography sync)
+    deezer_id BIGINT,                       -- cached Deezer artist id (integer; discography sync)
     last_album_sync TIMESTAMPTZ,            -- freshness gate for new-album discovery
     last_mb_sync TIMESTAMPTZ,              -- freshness gate for MB canonicalization pass
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -210,7 +210,7 @@ ALTER TABLE artists ADD COLUMN IF NOT EXISTS photo_cover_id UUID
 
 -- Idempotent column-adds for existing installs that pre-date phantom-album
 -- discovery (Phantom Discovery, Phase 1: new albums for local artists).
-ALTER TABLE artists ADD COLUMN IF NOT EXISTS deezer_id VARCHAR(50);
+ALTER TABLE artists ADD COLUMN IF NOT EXISTS deezer_id BIGINT;
 ALTER TABLE artists ADD COLUMN IF NOT EXISTS last_album_sync TIMESTAMPTZ;
 ALTER TABLE artists ADD COLUMN IF NOT EXISTS last_mb_sync TIMESTAMPTZ;
 ALTER TABLE albums  ADD COLUMN IF NOT EXISTS cover_url TEXT;

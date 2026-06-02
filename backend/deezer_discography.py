@@ -60,7 +60,7 @@ def _get_json(client: httpx.Client, url: str, params: Optional[dict] = None) -> 
     return payload
 
 
-def resolve_deezer_artist_id(artist_name: str) -> Optional[str]:
+def resolve_deezer_artist_id(artist_name: str) -> Optional[int]:
     """Return the best-match Deezer artist id for a name, or None.
 
     Raises RateLimitError / TransientFetchError so the caller backs off
@@ -74,8 +74,8 @@ def resolve_deezer_artist_id(artist_name: str) -> Optional[str]:
     data = payload.get("data") or []
     if not data:
         return None
-    did = data[0].get("id")
-    return str(did) if did else None
+    did = data[0].get("id")           # Deezer ids are integers
+    return int(did) if did else None
 
 
 def _parse_year(release_date: Optional[str]) -> Optional[int]:
@@ -86,7 +86,7 @@ def _parse_year(release_date: Optional[str]) -> Optional[int]:
     return int(head) if head.isdigit() else None
 
 
-def fetch_artist_albums(deezer_id: str) -> List[dict]:
+def fetch_artist_albums(deezer_id: int) -> List[dict]:
     """Return the artist's releases as
     ``[{deezer_album_id, title, year, cover_url, record_type}, ...]``.
 

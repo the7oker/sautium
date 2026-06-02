@@ -89,7 +89,7 @@ class Artist(Base):
     # External service IDs
     lastfm_id = Column(String(100))
     musicbrainz_id = Column(String(100))
-    deezer_id = Column(String(50))                             # cached Deezer artist id (discography sync)
+    deezer_id = Column(BigInteger)                             # cached Deezer artist id (integer; discography sync)
 
     last_album_sync = Column(DateTime(timezone=True))          # freshness gate for new-album discovery
     last_mb_sync = Column(DateTime(timezone=True))             # freshness gate for MB canonicalization pass
