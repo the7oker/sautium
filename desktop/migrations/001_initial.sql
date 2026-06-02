@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS artists (
     raw_name VARCHAR(500),
     lastfm_id VARCHAR(100),
     musicbrainz_id VARCHAR(100),
+    deezer_id VARCHAR(50),                  -- cached Deezer artist id (discography sync)
+    last_album_sync TIMESTAMPTZ,            -- freshness gate for new-album discovery
+    last_mb_sync TIMESTAMPTZ,              -- freshness gate for MB canonicalization pass
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_artist_type CHECK (artist_type IN ('unknown', 'solo', 'band', 'collaboration', 'orchestra', 'other')),
@@ -65,6 +68,7 @@ CREATE TABLE IF NOT EXISTS albums (
     total_tracks INTEGER,
     musicbrainz_id VARCHAR(100),
     lastfm_id VARCHAR(100),
+    cover_url TEXT,                         -- external cover (Deezer) for phantom albums with no local files
     user_rating NUMERIC(3, 2) CHECK (user_rating >= 0 AND user_rating <= 5),
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
@@ -115,6 +119,22 @@ CREATE TABLE IF NOT EXISTS artist_members (
     member_artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     role VARCHAR(50) NOT NULL DEFAULT 'member',
     PRIMARY KEY (compound_artist_id, member_artist_id)
+);
+
+-- Persistent 1:1 alias map (dirty/variant name → canonical artist).
+-- Consulted at every ingestion chokepoint (scanner, Last.fm similar, P2P
+-- import) so a rescan of an already-normalized name converges instead of
+-- re-fragmenting. Collaboration 1:many decomposition is handled by
+-- artist_members above; this table is strictly 1:1 rename/dedup.
+CREATE TABLE IF NOT EXISTS artist_aliases (
+    alias_normalized TEXT PRIMARY KEY,       -- normalize("H. Mancini") = "h. mancini"
+    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    alias_name VARCHAR(500) NOT NULL,        -- variant as seen (display/debug)
+    mbid VARCHAR(100),                       -- MB authority that justified the mapping
+    source VARCHAR(50) NOT NULL,             -- 'clean' | 'mb' | 'normalization' | 'manual'
+    confidence NUMERIC(4, 3),                -- 0..1
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS track_genres (
@@ -187,6 +207,13 @@ ON CONFLICT (id) DO NOTHING;
 -- after artists in this file.
 ALTER TABLE artists ADD COLUMN IF NOT EXISTS photo_cover_id UUID
     REFERENCES covers(id) ON DELETE SET NULL;
+
+-- Idempotent column-adds for existing installs that pre-date phantom-album
+-- discovery (Phantom Discovery, Phase 1: new albums for local artists).
+ALTER TABLE artists ADD COLUMN IF NOT EXISTS deezer_id VARCHAR(50);
+ALTER TABLE artists ADD COLUMN IF NOT EXISTS last_album_sync TIMESTAMPTZ;
+ALTER TABLE artists ADD COLUMN IF NOT EXISTS last_mb_sync TIMESTAMPTZ;
+ALTER TABLE albums  ADD COLUMN IF NOT EXISTS cover_url TEXT;
 
 CREATE TABLE IF NOT EXISTS media_files (
     id SERIAL PRIMARY KEY,
@@ -620,9 +647,12 @@ CREATE INDEX IF NOT EXISTS idx_artists_verification_status ON artists(verificati
 CREATE INDEX IF NOT EXISTS idx_artists_artist_type ON artists(artist_type);
 CREATE INDEX IF NOT EXISTS idx_artists_gender ON artists(gender);
 CREATE INDEX IF NOT EXISTS idx_artists_is_vocalist ON artists(is_vocalist);
+CREATE INDEX IF NOT EXISTS idx_artists_last_album_sync ON artists(last_album_sync);
+CREATE INDEX IF NOT EXISTS idx_artists_last_mb_sync ON artists(last_mb_sync);
 
 -- Artist members indexes
 CREATE INDEX IF NOT EXISTS idx_artist_members_member ON artist_members(member_artist_id);
+CREATE INDEX IF NOT EXISTS idx_artist_aliases_artist ON artist_aliases(artist_id);
 CREATE INDEX IF NOT EXISTS idx_albums_title ON albums(title);
 CREATE INDEX IF NOT EXISTS idx_albums_title_trgm ON albums USING gin (title gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_albums_release_year ON albums(release_year);

@@ -1844,6 +1844,37 @@ body.has-miniplayer .ai-fab {
   color: var(--color-text-dim);
 }
 
+/* Phantom (unowned) album tile — discovered from the artist's external
+   discography, not in the library. Dimmed so it reads as "you don't own
+   this" after the solid owned tiles; tapping buys it on Bandcamp (amber
+   = CTA). The cover carries an amber "Buy ↗" chip bottom-left. */
+.detail-screen .album-tile.is-unowned .album-cover {
+  opacity: 0.55;
+  transition: opacity var(--dur-fast) var(--ease-standard);
+}
+.detail-screen .album-tile.is-unowned:active .album-cover {
+  opacity: 0.8;
+}
+.detail-screen .album-tile.is-unowned .album-tile-title {
+  color: var(--color-text-muted);
+}
+.detail-screen .album-tile.is-unowned .album-tile-year {
+  color: var(--color-text-dim);
+}
+.album-tile-buy {
+  position: absolute;
+  left: calc(6 * var(--px));
+  bottom: calc(6 * var(--px));
+  padding: calc(2 * var(--px)) calc(6 * var(--px));
+  background: rgba(0, 0, 0, 0.62);
+  color: var(--color-amber);
+  font-family: var(--font-mono);
+  font-size: calc(9.5 * var(--px));
+  letter-spacing: 0.04em;
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+}
+
 /* Sort trigger on the Albums section header (Artist screen). The
    `.section-head` flex container aligns by baseline, so a fixed
    height on the trigger would push its text below the h3 baseline.
@@ -3655,7 +3686,19 @@ body.has-miniplayer .more-overlay .drawer {
   border-color: var(--color-amber);
   color: var(--color-amber);
 }
+.hqp-fav-chip.is-unavailable {
+  opacity: 0.4;
+  cursor: default;
+}
+.hqp-fav-chip.is-unavailable .hqp-fav-star { color: var(--color-text-dim); }
 .hqp-fav-star { color: var(--color-amber); font-size: calc(11 * var(--px)); }
+.hqp-fav-note {
+  margin: calc(-8 * var(--px)) 0 0;
+  padding: 0 calc(14 * var(--px)) calc(14 * var(--px));
+  font-size: var(--text-caption);
+  line-height: var(--lh-normal);
+  color: var(--color-text-dim);
+}
 
 .hqp-advanced {
   margin: 0 calc(16 * var(--px)) calc(16 * var(--px));

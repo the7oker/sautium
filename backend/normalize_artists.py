@@ -25,6 +25,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from uuid_utils import artist_uuid, track_uuid, album_uuid
+from artist_aliases import record_alias
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +216,81 @@ def _update_album_uuid(db: Session, old_id, new_id) -> str:
         db.execute(text("DELETE FROM albums WHERE id = :old"), {"old": old_str})
 
     return new_str
+
+
+def recanonicalize_artist(db: Session, source_id, source_name: str,
+                          canonical_name: str, mbid: Optional[str] = None) -> str:
+    """Move an artist (and its primary tracks/albums) onto a canonical name.
+
+    Generalises the clean-pass rename/merge to an arbitrary target name
+    (e.g. an MB-canonical "Björk" / "Jean‐Michel Jarre"). Target row absent
+    → rename via CASCADE; present → merge into it (track/album UUIDs are
+    recomputed and merged, preserving listening_history + play stats via
+    _update_track_uuid). Records a durable alias source→canonical and
+    stamps the MBID + last_mb_sync. Returns the canonical artist id.
+
+    Similar/bio/tag rows pointing at the deleted source fall away by
+    CASCADE — same as the existing clean-pass merge; they re-derive on
+    enrichment of the canonical artist.
+    """
+    source_str = str(source_id)
+    canonical_id = str(_ensure_artist(db, canonical_name))
+
+    def _stamp():
+        if mbid:
+            db.execute(text(
+                "UPDATE artists SET musicbrainz_id = :m WHERE id = :id AND musicbrainz_id IS NULL"
+            ), {"m": mbid, "id": canonical_id})
+        db.execute(text("UPDATE artists SET last_mb_sync = now() WHERE id = :id"),
+                   {"id": canonical_id})
+
+    if source_str == canonical_id:
+        _stamp()
+        return canonical_id
+
+    # Recompute primary tracks/albums under the canonical name (merges if
+    # the canonical-named UUID already exists).
+    tracks = db.execute(text("""
+        SELECT t.id::text, t.title FROM tracks t
+        JOIN track_artists ta ON ta.track_id = t.id
+        WHERE ta.artist_id = :aid AND ta.role = 'primary'
+    """), {"aid": source_str}).fetchall()
+    for tid, title in tracks:
+        _update_track_uuid(db, tid, str(track_uuid(title, canonical_name)))
+
+    albums = db.execute(text("""
+        SELECT a.id::text, a.title FROM albums a
+        JOIN album_artists aa ON aa.album_id = a.id
+        WHERE aa.artist_id = :aid AND aa.role = 'primary'
+    """), {"aid": source_str}).fetchall()
+    for aid_, title in albums:
+        _update_album_uuid(db, aid_, str(album_uuid(title, canonical_name)))
+
+    # Repoint every association (any role) source → canonical, skipping
+    # rows that would duplicate an existing (entity, canonical, role).
+    db.execute(text("""
+        UPDATE track_artists SET artist_id = :t WHERE artist_id = :s
+        AND NOT EXISTS (SELECT 1 FROM track_artists x
+            WHERE x.track_id = track_artists.track_id AND x.artist_id = :t
+              AND x.role = track_artists.role)
+    """), {"t": canonical_id, "s": source_str})
+    db.execute(text("DELETE FROM track_artists WHERE artist_id = :s"), {"s": source_str})
+    db.execute(text("""
+        UPDATE album_artists SET artist_id = :t WHERE artist_id = :s
+        AND NOT EXISTS (SELECT 1 FROM album_artists x
+            WHERE x.album_id = album_artists.album_id AND x.artist_id = :t
+              AND x.role = album_artists.role)
+    """), {"t": canonical_id, "s": source_str})
+    db.execute(text("DELETE FROM album_artists WHERE artist_id = :s"), {"s": source_str})
+
+    # Aliases that pointed at the source now point at the canonical.
+    db.execute(text("UPDATE artist_aliases SET artist_id = :t WHERE artist_id = :s"),
+               {"t": canonical_id, "s": source_str})
+    db.execute(text("DELETE FROM artists WHERE id = :s"), {"s": source_str})
+
+    record_alias(db, source_name, canonical_id, source="mb", mbid=mbid)
+    _stamp()
+    return canonical_id
 
 
 # ─── Core normalization logic ─────────────────────────────────────────────
@@ -468,6 +544,9 @@ def _clean_all_artist_names(db: Session, dry_run: bool = False) -> Dict:
                 db.execute(text(
                     "DELETE FROM artists WHERE id = :id"
                 ), {"id": artist_id})
+                # Durable mapping so a rescan of the dirty name resolves to
+                # the canonical artist instead of re-creating the fragment.
+                record_alias(db, name, target_id, source="clean")
                 merged_count += 1
                 logger.info(f"Merged: '{name}' -> existing '{cleaned}' ({len(tracks)} tracks, {len(albums)} albums)")
                 continue
@@ -500,6 +579,9 @@ def _clean_all_artist_names(db: Session, dry_run: bool = False) -> Dict:
                 db.execute(text(
                     "UPDATE artists SET id = :new_id, name = :name WHERE id = :old_id"
                 ), {"new_id": new_artist_id, "name": cleaned, "old_id": artist_id})
+                # Durable mapping for the dirty name (now that the canonical
+                # row exists under new_artist_id).
+                record_alias(db, name, new_artist_id, source="clean")
             else:
                 # UUID unchanged (e.g. only whitespace diff) — just update name
                 db.execute(text(

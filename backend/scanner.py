@@ -239,8 +239,13 @@ class LibraryScanner:
 
     @staticmethod
     def get_or_create_artist(db: Session, artist_name: str) -> Artist:
-        """Get existing artist or create new one. Uses deterministic UUID."""
-        uid = artist_uuid(artist_name)
+        """Get existing artist or create new one. Uses deterministic UUID,
+        but resolves known aliases first so a rescan of a previously-
+        normalized variant ("H. Mancini" → "Henry Mancini") converges on the
+        canonical artist instead of re-fragmenting."""
+        from artist_aliases import resolve_alias
+
+        uid = resolve_alias(db, artist_name) or artist_uuid(artist_name)
         artist = db.query(Artist).filter(Artist.id == uid).first()
 
         if not artist:

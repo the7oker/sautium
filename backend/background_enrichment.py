@@ -48,6 +48,15 @@ _ALBUMS_PER_BATCH = 50            # Last.fm album.getInfo calls per batch
 _GENRES_PER_BATCH = 20            # Last.fm tag.getInfo calls per batch
 _LASTFM_DELAY_S = 0.2             # ~5 req/sec, the Last.fm published limit
 
+_DISCOGRAPHY_PER_BATCH = 20       # Deezer discographies synced per batch
+_DISCOGRAPHY_DELAY_S = 1.0        # Deezer is generous, but shares an IP budget with photo lookups
+_DISCOGRAPHY_SCOPE_MONTHS = 6     # only artists listened-to this recently
+_DISCOGRAPHY_STALE_DAYS = 30      # re-sync an artist's discography at most monthly
+
+_MB_CANON_PER_BATCH = 25          # MB canonicalization artists per cycle — small on purpose:
+                                  # MB IP-throttles on *sustained* volume (not just >1 req/s), so
+                                  # a ~25-request burst once per 30-min cycle stays far below it.
+
 _PRIORITY_SQL = text("""
     WITH artist_listen AS (
         SELECT ta.artist_id, SUM(lh.duration_listened) AS sec
@@ -118,6 +127,8 @@ _state: Dict[str, Any] = {
         "artists": 0,
         "albums": 0,
         "genres": 0,
+        "discography": 0,
+        "mb_canon": 0,
     },
 }
 _thread: Optional[threading.Thread] = None
@@ -397,13 +408,117 @@ def _step_missing_genres(limit: int) -> Dict[str, int]:
     return stats
 
 
+def _step_sync_discographies(limit: int) -> Dict[str, int]:
+    """Sync Deezer discographies for recently-listened local artists whose
+    new-album data is stale, persisting unowned releases as phantom albums.
+
+    Scope is deliberately narrow (artists listened to in the last
+    `_DISCOGRAPHY_SCOPE_MONTHS`, re-synced at most every
+    `_DISCOGRAPHY_STALE_DAYS`) so the run is bounded — a full library of
+    similar artists would be tens of thousands of requests. Artists the
+    user browses but hasn't listened to are covered by the fetch-on-view
+    path on the artist screen instead.
+    """
+    from covers import photo_cooldown_active
+    from discography import sync_artist_discography
+
+    stats = {"processed": 0, "new_albums": 0, "not_found": 0, "errors": 0}
+
+    # A Deezer rate-limit cooldown is shared with photo lookups (same IP
+    # budget). If it's armed, skip the batch rather than pile on.
+    if photo_cooldown_active():
+        return stats
+
+    sql = text(f"""
+        SELECT a.id, a.name
+        FROM artists a
+        JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
+        JOIN listening_history lh ON lh.track_id = ta.track_id
+        WHERE lh.started_at > now() - interval '{_DISCOGRAPHY_SCOPE_MONTHS} months'
+          AND (a.last_album_sync IS NULL
+               OR a.last_album_sync < now() - interval '{_DISCOGRAPHY_STALE_DAYS} days')
+        GROUP BY a.id, a.name
+        ORDER BY MAX(lh.started_at) DESC
+        LIMIT :batch
+    """)
+
+    with get_db_context() as db:
+        rows = db.execute(sql, {"batch": int(limit)}).fetchall()
+    if not rows:
+        return stats
+    logger.info(f"Background: {len(rows)} artists queued for Deezer discography")
+
+    # sync_artist_discography owns its own pool connections; the
+    # get_db_context session above is closed before the network loop so
+    # no DB session is held open across Deezer I/O.
+    for row in rows:
+        if _cancel_flag():
+            break
+        stats["processed"] += 1
+        try:
+            result = sync_artist_discography(row.id, row.name)
+            status = result.get("status")
+            if status == "rate_limited":
+                logger.info("Background discography: Deezer cooldown — ending batch")
+                break
+            if status == "not_found":
+                stats["not_found"] += 1
+            elif status in ("error", "transient"):
+                stats["errors"] += 1
+            stats["new_albums"] += result.get("new", 0)
+        except Exception as e:
+            logger.error(f"Background discography failed for {row.name}: {e}")
+            stats["errors"] += 1
+        time.sleep(_DISCOGRAPHY_DELAY_S)
+
+    return stats
+
+
+def _step_mb_canonicalize(limit: int) -> Dict[str, int]:
+    """Politely drain the MB canonicalization queue — a small batch per cycle.
+
+    Reuses the streaming canonicalizer. Skips entirely while an MB cooldown is
+    armed (MB IP-throttles on sustained volume, so we stay well below it with a
+    ~`limit`-request burst once per 30-min cycle, not a bulk blast). Stops on a
+    fresh cooldown or a cancel so the loop shuts down promptly.
+    """
+    from musicbrainz import cooldown_active
+    from mb_canonicalize import _select_batch, canonicalize_one
+
+    stats = {"processed": 0, "keep": 0, "rename": 0, "split": 0, "unsure": 0}
+    if cooldown_active():
+        return stats
+
+    batch = _select_batch(limit)
+    if not batch:
+        return stats
+    logger.info(f"Background: {len(batch)} artists queued for MB canonicalization")
+
+    for a in batch:
+        if _cancel_flag() or cooldown_active():
+            break
+        try:
+            d = canonicalize_one(a["id"], a["name"])
+        except Exception as e:
+            logger.error(f"Background MB canon failed for {a['name']}: {e}")
+            continue
+        if "cooldown" in d.get("note", ""):
+            break
+        stats["processed"] += 1
+        act = d.get("action", "")
+        if act in stats:
+            stats[act] += 1
+    return stats
+
+
 # ============================================================
 # Loop
 # ============================================================
 
 def _run_once() -> Dict[str, Any]:
     """Run one full batch (all five steps). Honours cancel between steps."""
-    summary = {"track_stats": {}, "lyrics": {}, "artists": {}, "albums": {}, "genres": {}}
+    summary = {"track_stats": {}, "lyrics": {}, "artists": {}, "albums": {},
+               "genres": {}, "discography": {}, "mb_canon": {}}
 
     if _cancel_flag():
         return summary
@@ -439,6 +554,20 @@ def _run_once() -> Dict[str, Any]:
     _set(current_step="genres")
     summary["genres"] = _step_missing_genres(_GENRES_PER_BATCH)
     _bump("genres", summary["genres"].get("success", 0))
+
+    if _cancel_flag():
+        return summary
+
+    _set(current_step="discography")
+    summary["discography"] = _step_sync_discographies(_DISCOGRAPHY_PER_BATCH)
+    _bump("discography", summary["discography"].get("new_albums", 0))
+
+    if _cancel_flag():
+        return summary
+
+    _set(current_step="mb_canon")
+    summary["mb_canon"] = _step_mb_canonicalize(_MB_CANON_PER_BATCH)
+    _bump("mb_canon", summary["mb_canon"].get("processed", 0))
 
     return summary
 

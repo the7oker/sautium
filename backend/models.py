@@ -89,6 +89,10 @@ class Artist(Base):
     # External service IDs
     lastfm_id = Column(String(100))
     musicbrainz_id = Column(String(100))
+    deezer_id = Column(String(50))                             # cached Deezer artist id (discography sync)
+
+    last_album_sync = Column(DateTime(timezone=True))          # freshness gate for new-album discovery
+    last_mb_sync = Column(DateTime(timezone=True))             # freshness gate for MB canonicalization pass
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -137,6 +141,7 @@ class Album(Base):
     # External service IDs
     musicbrainz_id = Column(String(100))
     lastfm_id = Column(String(100))
+    cover_url = Column(Text)                  # external cover (Deezer) for phantom albums with no local files
 
     user_rating = Column(Numeric(3, 2))
 
@@ -267,6 +272,35 @@ class ArtistMember(Base):
 
     def __repr__(self):
         return f"<ArtistMember(compound={self.compound_artist_id}, member={self.member_artist_id}, role='{self.role}')>"
+
+
+class ArtistAlias(Base):
+    """1:1 alias map: a dirty/variant artist name → its canonical artist.
+
+    Consulted at every ingestion chokepoint (scanner, Last.fm similar, P2P
+    import) so a rescan of an already-normalized name converges on the
+    canonical artist instead of re-creating a fragment. Collaboration
+    1:many decomposition lives in artist_members, not here.
+    """
+    __tablename__ = "artist_aliases"
+
+    alias_normalized = Column(Text, primary_key=True)  # normalize(variant name)
+    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    alias_name = Column(String(500), nullable=False)   # variant as seen
+    mbid = Column(String(100))                          # MB authority for the mapping
+    source = Column(String(50), nullable=False)         # clean | mb | normalization | manual
+    confidence = Column(Numeric(4, 3))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    artist = relationship("Artist", foreign_keys=[artist_id])
+
+    __table_args__ = (
+        Index("idx_artist_aliases_artist", "artist_id"),
+    )
+
+    def __repr__(self):
+        return f"<ArtistAlias('{self.alias_normalized}' -> {self.artist_id})>"
 
 
 # ───────────────────────────────────────────────────────────────────────────

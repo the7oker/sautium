@@ -80,6 +80,8 @@
 
   function coverUrl(item) {
     if (!item) return '';
+    // External cover (Deezer) for phantom albums with no local file.
+    if (item.cover_url) return item.cover_url;
     if (item.cover_id) return '/api/covers/' + encodeURIComponent(item.cover_id);
     if (item.media_file_id != null) {
       return '/api/covers/by-media/' + encodeURIComponent(item.media_file_id);
@@ -3333,6 +3335,32 @@
         </button>`;
     }).join('');
 
+    // New albums the user doesn't own — phantom albums from the artist's
+    // Deezer discography. Same tile as owned albums but dimmed
+    // (.is-unowned) with a Bandcamp buy affordance instead of navigation.
+    function newAlbumTileHtml(a) {
+      const c = coverPlaceholderColors(a.title || a.id);
+      const url = coverUrl(a);
+      const inner = url
+        ? `<img src="${url}" alt="" loading="lazy" onerror="this.style.display='none'">`
+        : `<div class="placeholder-badge"
+              style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${
+                escapeHtml(a.title || '')}</div>`;
+      const year = a.year ? String(a.year) : '';
+      const buyUrl = 'https://bandcamp.com/search?q='
+        + encodeURIComponent(((d.name || '') + ' ' + (a.title || '')).trim())
+        + '&item_type=a';  // a = albums only
+      return `
+        <button class="album-tile is-unowned" type="button"
+                data-buy-url="${escapeHtml(buyUrl)}">
+          <div class="album-cover"
+               style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${inner}<span class="album-tile-buy">Buy ↗</span></div>
+          <div class="album-tile-title">${escapeHtml(a.title || '')}</div>
+          <div class="album-tile-year${year ? '' : ' unavailable'}">${year || '—'}</div>
+        </button>`;
+    }
+    const newAlbumsHtml = (d.new_albums || []).map(newAlbumTileHtml).join('');
+
     const bioSummary = trimLastFmTail(stripHtml(d.bio_summary || ''));
     const bioFull = trimLastFmTail(stripHtml(d.bio || ''));
     const initialBio = bioSummary || bioFull;
@@ -3371,6 +3399,12 @@
         </div>
         <div class="h-scroll">${albumsHtml}</div>
       ` : ''}
+      <div class="new-albums-section" data-new-albums
+           style="${newAlbumsHtml ? '' : 'display:none'}">
+        <div class="section-sep"></div>
+        <div class="section-head"><h3>Missing albums</h3></div>
+        <div class="h-scroll" data-new-albums-scroll>${newAlbumsHtml}</div>
+      </div>
       ${tracksHtml ? `
         <div class="section-sep"></div>
         <div class="section-head"><h3>Popular tracks</h3></div>
@@ -3424,6 +3458,34 @@
 
     wireDetailHandlers(screen);
     updatePlayingHighlight();
+
+    // Fetch-on-view: if this artist's new-album data is stale (>1 day or
+    // never synced), refresh it from Deezer in the background and patch
+    // the shelf in place — no "Loading…" flash, no full re-render.
+    if (d.new_albums_stale) {
+      fetch('/api/artists/' + encodeURIComponent(artistId) + '/sync-discography',
+            { method: 'POST' })
+        .then(r => r.ok ? r.json() : null)
+        .then(res => {
+          if (!res || !res.new_albums) return;
+          const sec = screen.querySelector('[data-new-albums]');
+          const scroll = screen.querySelector('[data-new-albums-scroll]');
+          if (!sec || !scroll) return;
+          if (!res.new_albums.length) { sec.style.display = 'none'; return; }
+          scroll.innerHTML = res.new_albums.map(newAlbumTileHtml).join('');
+          sec.style.display = '';
+          // Wire only the freshly-built buy tiles — re-running the full
+          // wireDetailHandlers would double-bind every other handler.
+          scroll.querySelectorAll('[data-buy-url]').forEach(el => {
+            el.addEventListener('click', e => {
+              e.stopPropagation();
+              const url = el.getAttribute('data-buy-url');
+              if (url) window.open(url, '_blank', 'noopener');
+            });
+          });
+        })
+        .catch(() => {});
+    }
   }
 
   function openAlbumsSortPicker(currentSort, onPick) {
@@ -3841,6 +3903,15 @@
         e.stopPropagation();
         const id = el.getAttribute('data-album-id');
         if (id) navigateToEntity('album', id);
+      });
+    });
+    // Phantom (unowned) album tile — no local screen to open, so tapping
+    // opens a Bandcamp search to buy it instead.
+    screen.querySelectorAll('[data-buy-url]').forEach(el => {
+      el.addEventListener('click', e => {
+        e.stopPropagation();
+        const url = el.getAttribute('data-buy-url');
+        if (url) window.open(url, '_blank', 'noopener');
       });
     });
     // Genre chip — drills into the genre detail screen.
@@ -5205,15 +5276,29 @@
 
       // Active filter row + the favourites strip below it. Tap on the
       // active filter or the [All filters] button opens the modal.
+      //
+      // Favourites are stored by name and persist across mode/rate
+      // changes, but HQPlayer only offers a subset of filters for the
+      // current output chain (e.g. closed-form-16M isn't available in
+      // PCM 48k). A favourite missing from the live filter list is
+      // dimmed and inert — the chip stays so the user sees it's still
+      // saved, just not selectable here right now.
+      const availableNames = new Set((s.filters || []).map(f => f.name));
+      const hasUnavailableFav = favourites.some(name => !availableNames.has(name));
       const favouritesStrip = favourites.length
         ? `<div class="hqp-fav-strip">${favourites.map(name => {
             const isCurrent = name === filterName;
+            const available = availableNames.has(name);
             return `<button type="button" class="hqp-fav-chip${
-              isCurrent ? ' is-current' : ''}" data-fav="${escapeHtml(name)}">
+              isCurrent ? ' is-current' : ''}${available ? '' : ' is-unavailable'}"${
+              available ? '' : ' title="Not available in the current output mode/rate"'} data-fav="${escapeHtml(name)}">
               <span class="hqp-fav-star">★</span>
               <span class="hqp-fav-name">${escapeHtml(name)}</span>
             </button>`;
-          }).join('')}</div>`
+          }).join('')}</div>${
+            hasUnavailableFav
+              ? `<p class="hqp-fav-note">Dimmed filters aren't available in the current output mode/rate.</p>`
+              : ''}`
         : '';
 
       // Bits aren't directly exposed by the Control Protocol — leave
