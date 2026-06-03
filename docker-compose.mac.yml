@@ -83,6 +83,7 @@ services:
       OPENAI_COMPAT_MODEL: ${OPENAI_COMPAT_MODEL:-}
       OPENAI_COMPAT_NAME: ${OPENAI_COMPAT_NAME:-}
       DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-claude_code}
+      MB_DUMP_DIR: /app/data/mbdump        # writable mount for the MusicBrainz dump
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -90,6 +91,7 @@ services:
       - ./mcp:/app/mcp
       - ./data/cache:/root/.cache
       - ./data/generated_eq:/app/generated_eq
+      - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)
       # Mount music library as read-only
       # Mac path example: /Users/username/Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/Users/Shared/Music}:/music:ro

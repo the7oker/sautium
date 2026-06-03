@@ -265,6 +265,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Background enrichment autostart failed: {e}")
 
+    # MusicBrainz dump auto-update (opt-in toggle in More → Library).
+    try:
+        from routers.settings import maybe_auto_update
+        maybe_auto_update()
+    except Exception as e:
+        logger.warning(f"MusicBrainz auto-update check failed: {e}")
+
     yield
 
     # Shutdown

@@ -44,6 +44,8 @@ data/cache/*
 data/tls/
 # Claude Code session storage — bind-mounted so chat history survives rebuilds
 data/claude_sessions/
+# MusicBrainz dump (~7GB tarball + extracted TSVs) — re-downloadable, loaded into pg
+data/mbdump/
 
 # HMAC API secret — generated per-instance at backend startup
 backend/data/

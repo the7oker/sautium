@@ -482,7 +482,7 @@ def _step_mb_canonicalize(limit: int) -> Dict[str, int]:
     ~`limit`-request burst once per 30-min cycle, not a bulk blast). Stops on a
     fresh cooldown or a cancel so the loop shuts down promptly.
     """
-    from musicbrainz import cooldown_active
+    from mb_backend import cooldown_active  # local dump → no MB web, no cooldown
     from mb_canonicalize import _select_batch, canonicalize_one
 
     stats = {"processed": 0, "keep": 0, "rename": 0, "split": 0, "unsure": 0}
@@ -558,16 +558,23 @@ def _run_once() -> Dict[str, Any]:
     if _cancel_flag():
         return summary
 
-    _set(current_step="discography")
-    summary["discography"] = _step_sync_discographies(_DISCOGRAPHY_PER_BATCH)
-    _bump("discography", summary["discography"].get("new_albums", 0))
+    # Deezer discography sync DISABLED in the background loop (Valerii, 2026-06-02)
+    # — no automatic Deezer crawling. Phantom "Missing albums" still sync on-view
+    # via the daily-gated endpoint; re-enable here for the background sweep later.
+    # _set(current_step="discography")
+    # summary["discography"] = _step_sync_discographies(_DISCOGRAPHY_PER_BATCH)
+    # _bump("discography", summary["discography"].get("new_albums", 0))
 
     if _cancel_flag():
         return summary
 
-    _set(current_step="mb_canon")
-    summary["mb_canon"] = _step_mb_canonicalize(_MB_CANON_PER_BATCH)
-    _bump("mb_canon", summary["mb_canon"].get("processed", 0))
+    # MB canonicalization is DISABLED in the background loop while the local-dump
+    # canonicalizer is being finalized — it ran against the throttled MB web API
+    # and risks an IP ban. canonicalize_one now routes through mb_backend (local
+    # dump, web-free), so re-enable this once the full manual canon re-run lands.
+    # _set(current_step="mb_canon")
+    # summary["mb_canon"] = _step_mb_canonicalize(_MB_CANON_PER_BATCH)
+    # _bump("mb_canon", summary["mb_canon"].get("processed", 0))
 
     return summary
 

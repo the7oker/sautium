@@ -107,6 +107,7 @@ def fetch_album_release_groups(mbid: str) -> List[dict]:
                 "title": g.get("title") or "",
                 "primary_type": g.get("primary-type"),
                 "secondary_types": g.get("secondary-types") or [],
+                "release_titles": [],  # local-dump-only signal (see mb_local)
                 "first_year": year,
             })
         total = payload.get("release-group-count", 0)

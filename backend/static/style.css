@@ -5105,6 +5105,18 @@ select.add-gear-input {
   background: var(--color-amber);
   transition: width var(--dur-base) var(--ease-standard);
 }
+/* Indeterminate variant — a stripe sweeping across, for phases with no
+   measurable percent (checking the mirror, ANALYZE). */
+.enrich-bar.indeterminate .fill {
+  width: 40%;
+  transition: none;
+  animation: mb-indeterminate 1.1s var(--ease-standard) infinite;
+}
+@keyframes mb-indeterminate {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(275%); }
+}
+.action-progress.mb-error { color: var(--color-negative, #C46552); }
 
 /* In-flight scan / enrichment progress strip — replaces the primary
    action button while the worker is running. */

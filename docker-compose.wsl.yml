@@ -83,6 +83,7 @@ services:
       DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-claude_code}
       SAUTIUM_HOST_IPS: ${SAUTIUM_HOST_IPS:-}
       BACKEND_URL: https://localhost:8000
+      MB_DUMP_DIR: /app/data/mbdump        # writable mount for the MusicBrainz dump
       # Disable uvicorn auto-reload — see docker-compose.yml for rationale
       # (drvfs inotify EIO crashes watchfiles).
       UVICORN_RELOAD: "false"
@@ -94,6 +95,7 @@ services:
       - ./data/cache:/root/.cache
       - ./data/generated_eq:/app/generated_eq
       - ./data/tls:/app/data/tls
+      - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)
       - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro
       # Claude Code OAuth credentials from WSL home — refreshed by `claude`
       # running inside WSL. We can't use ${HOME} here: when compose is

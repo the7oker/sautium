@@ -176,6 +176,10 @@ _DEFAULTS: Dict[str, Any] = {
     # completes; surfaced in the "Last sync · N new items" row.
     "sync.last_at":              None,
     "sync.last_items_received":  None,
+    # MusicBrainz local dump — optional auxiliary layer for artist
+    # canonicalization. version/last-update written by the loader.
+    "musicbrainz.auto_update":   False,
+    "musicbrainz.last_update_at": None,
 }
 
 
@@ -196,6 +200,111 @@ def _write(key: str, value: Any) -> None:
         """,
         (key, json.dumps(value)),
     )
+
+
+# ============================================================
+# MusicBrainz local dump (optional auxiliary layer)
+# ============================================================
+
+# In-memory progress for the (single) running download/load job. Surfaced in
+# the Library payload and woken over the shared library SSE channel.
+_mb_state: Dict[str, Any] = {"running": False, "phase": "", "progress": "",
+                             "pct": None, "error": None}
+_mb_lock = threading.Lock()
+
+
+def _mb_progress(update: Dict) -> None:
+    """Loader callback → human progress line + numeric pct (None = indeterminate)
+    for the bar + SSE wake."""
+    phase = update.get("phase")
+    pct = None
+    if phase == "checking":
+        _mb_state["progress"] = "Checking for updates…"
+    elif phase == "downloading":
+        pct = update.get("pct")
+        _mb_state["progress"] = (f"Downloading… {pct or 0}% "
+                                 f"({update.get('downloaded_mb', 0)}/{update.get('total_mb', 0)} MB)")
+    elif phase == "loading":
+        pct = update.get("pct", 0)  # byte-weighted, smooth (loader-computed)
+        _mb_state["progress"] = f"Loading database… {pct}%"
+    elif phase == "analyzing":
+        _mb_state["progress"] = "Analyzing…"
+    elif phase == "done":
+        pct = 100
+        _mb_state["progress"] = "Up to date"
+    if phase:
+        _mb_state["phase"] = phase
+    _mb_state["pct"] = pct
+    notify_library_subscribers()
+
+
+def _mb_worker(force: bool) -> None:
+    try:
+        import mb_dump_load
+        result = mb_dump_load.download_and_load(_mb_progress, force=force)
+        from datetime import datetime, timezone
+        _write("musicbrainz.last_update_at", datetime.now(timezone.utc).isoformat())
+        logger.info(f"MusicBrainz dump loaded: {result}")
+    except Exception as e:
+        _mb_state["error"] = str(e)
+        _mb_state["progress"] = f"Failed: {e}"
+        logger.error(f"MusicBrainz update failed: {e}", exc_info=True)
+    finally:
+        _mb_state["running"] = False
+        notify_library_subscribers()
+
+
+def _mb_section() -> Dict[str, Any]:
+    """Stats + settings + live job state for the MusicBrainz block."""
+    try:
+        import mb_dump_load
+        st = mb_dump_load.stats()
+    except Exception as e:
+        logger.warning(f"MB stats failed: {e}")
+        st = {"loaded": False, "version": None, "total_records": 0, "size_bytes": 0}
+    return {
+        "loaded":          bool(st.get("loaded")),
+        "version":         st.get("version"),
+        "total_records":   st.get("total_records", 0),
+        "size_bytes":      st.get("size_bytes", 0),
+        "auto_update":     bool(_read("musicbrainz.auto_update")),
+        "last_update_at":  _read("musicbrainz.last_update_at"),
+        "update": {
+            "running":  bool(_mb_state["running"]),
+            "phase":    _mb_state["phase"],
+            "progress": _mb_state["progress"],
+            "pct":      _mb_state["pct"],
+            "error":    _mb_state["error"],
+        },
+    }
+
+
+def maybe_auto_update() -> None:
+    """Called at backend startup. If the user enabled auto-update, check the
+    mirror in a background thread and load a newer dump (or the first one).
+    Non-blocking: the network check + ~7 GB download never gate startup."""
+    if not bool(_read("musicbrainz.auto_update")):
+        return
+
+    def _check() -> None:
+        try:
+            import mb_dump_load
+            latest = mb_dump_load.latest_version()
+            if not latest:
+                return
+            current = mb_dump_load.loaded_version() == latest and mb_dump_load.stats().get("loaded")
+            if current:
+                return
+            with _mb_lock:
+                if _mb_state["running"]:
+                    return
+                _mb_state.update(running=True, phase="checking",
+                                 progress="Auto-update…", pct=None, error=None)
+            _mb_worker(False)
+        except Exception as e:
+            logger.warning(f"MusicBrainz auto-update check failed: {e}")
+
+    threading.Thread(target=_check, daemon=True).start()
 
 
 # ============================================================
@@ -254,6 +363,7 @@ async def _library_state() -> Dict[str, Any]:
         "last_scan_at":       _read("library.last_scan_at"),
         "scan":               scan,
         "enrich":             enrich,
+        "musicbrainz":        _mb_section(),
     }
 
 
@@ -862,6 +972,30 @@ def put_sync_prefs(req: SyncPrefs) -> Dict[str, Any]:
         except Exception as e:
             logger.warning(f"background_enrichment toggle failed: {e}")
     return _sync_state()
+
+
+class MbPrefs(BaseModel):
+    auto_update: Optional[bool] = None
+
+
+@router.put("/musicbrainz")
+def put_mb_prefs(req: MbPrefs) -> Dict[str, Any]:
+    if req.auto_update is not None:
+        _write("musicbrainz.auto_update", bool(req.auto_update))
+    return _mb_section()
+
+
+@router.post("/musicbrainz/update")
+def mb_update(force: bool = False) -> Dict[str, Any]:
+    """Download (if newer) + stream-load the MusicBrainz dump in the background."""
+    with _mb_lock:
+        if _mb_state["running"]:
+            raise HTTPException(status_code=409, detail="MusicBrainz update already running")
+        _mb_state.update(running=True, phase="checking",
+                         progress="Starting…", pct=None, error=None)
+    threading.Thread(target=_mb_worker, args=(bool(force),), daemon=True).start()
+    notify_library_subscribers()
+    return {"success": True}
 
 
 @router.post("/sync/force")

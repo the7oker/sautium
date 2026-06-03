@@ -7807,6 +7807,51 @@
   }
 
   /* ============ Library screen — #more/library ============ */
+  // MusicBrainz block — extracted so it can be re-rendered IN PLACE (no full
+  // render() → no scroll jump) on click / toggle / job completion.
+  function _mbBlockHTML(mb) {
+    mb = mb || {};
+    const running = !!(mb.update && mb.update.running);
+    const progress = String((mb.update && mb.update.progress) || '');
+    const pct = (mb.update && typeof mb.update.pct === 'number') ? mb.update.pct : null;
+    const err = (!running && mb.update && mb.update.error) ? mb.update.error : '';
+    const actions = running ? `
+      <div class="action-progress" data-progress-for="mb">${escapeProfileHtml(progress || 'Working…')}</div>
+      <div class="enrich-bar${pct == null ? ' indeterminate' : ''}" data-mb-bar><div class="fill"${pct == null ? '' : ` style="width:${pct}%;"`}></div></div>
+    ` : `
+      ${err ? `<div class="action-progress mb-error">${escapeProfileHtml('Failed: ' + err)}</div>` : ''}
+      <div class="btn-row single">
+        <button class="btn ${mb.loaded ? 'btn-secondary' : 'btn-primary'}" data-action="mb-update">${mb.loaded ? 'Update' : 'Download'}</button>
+      </div>`;
+    return `
+      <div class="profile-group-label">MusicBrainz database</div>
+      <div class="form-group">
+        <div class="form-row stacked"><div class="row-stack-sub">Local copy of the MusicBrainz artist data — improves artist normalization. Optional (~9 GB).</div></div>
+        <div class="form-row"><span class="form-label">Status</span><span class="form-value">${mb.loaded ? `${fmtNum(mb.total_records)} records · ${escapeProfileHtml(fmtBytes(mb.size_bytes))}` : 'Not downloaded'}</span></div>
+        ${mb.version ? `<div class="form-row"><span class="form-label">Version</span><span class="form-value mono">${escapeProfileHtml(mb.version)}</span></div>` : ''}
+        ${mb.last_update_at ? `<div class="form-row"><span class="form-label">Last update</span><span class="form-value">${escapeProfileHtml(fmtRelative(mb.last_update_at))}</span></div>` : ''}
+        <div class="form-row"><span class="form-label">Automatic update</span><button class="toggle ${mb.auto_update ? 'on' : ''}" data-action="mb-auto" aria-pressed="${mb.auto_update ? 'true' : 'false'}"><span class="knob"></span></button></div>
+      </div>
+      <div data-mb-actions>${actions}</div>`;
+  }
+
+  function _wireMb(root) {
+    const onA = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
+    onA('[data-action="mb-update"]', async () => {
+      // Button → progress UI in place; SSE animates from here. No render().
+      const wrap = root.querySelector('[data-mb-actions]');
+      if (wrap) wrap.innerHTML = `<div class="action-progress" data-progress-for="mb">Starting…</div><div class="enrich-bar indeterminate" data-mb-bar><div class="fill"></div></div>`;
+      await fetch('/api/settings/musicbrainz/update', { method: 'POST' });
+    });
+    onA('[data-action="mb-auto"]', async (e) => {
+      const btn = e.currentTarget;
+      const want = !btn.classList.contains('on');
+      btn.classList.toggle('on', want);                 // optimistic flip, no render
+      btn.setAttribute('aria-pressed', want ? 'true' : 'false');
+      await fetch('/api/settings/musicbrainz', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auto_update: want }) });
+    });
+  }
+
   async function renderLibrary(root) {
     let lib = null;
     try {
@@ -7936,6 +7981,7 @@
         </div>
 
         ${libraryStats}
+        <div data-mb-block>${_mbBlockHTML(lib.musicbrainz)}</div>
         ${emptyState}
         ${actions}
       </section>
@@ -7948,6 +7994,7 @@
     onAction('[data-action="enrich"]',     async () => { await fetch('/api/settings/library/enrich',        { method: 'POST' }); render(); });
     onAction('[data-cancel-scan]',         async () => { await fetch('/api/settings/library/scan/cancel',   { method: 'POST' }); render(); });
     onAction('[data-cancel-enrich]',       async () => { await fetch('/api/settings/library/enrich/cancel', { method: 'POST' }); render(); });
+    _wireMb(root);
 
     _subscribeLibraryStream(root);
   }
@@ -7996,11 +8043,31 @@
       _refreshEnrichRow(root, 'lastfm',     lib.lastfm_done,     lib.lastfm_total);
       _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.total_tracks);
 
-      // When workers finish (or hit terminal progress), full
-      // re-render once to flip Cancel button back to normal row.
-      const wasRunning = !!root.querySelector('[data-cancel-scan], [data-cancel-enrich]');
-      if (wasRunning && !scanRunning && !enrichRunning) {
+      const mb = lib.musicbrainz || {};
+      const mbRunning  = !!(mb.update && mb.update.running);
+      const mbProgress = String((mb.update && mb.update.progress) || '');
+      const mbLine = root.querySelector('[data-progress-for="mb"]');
+      if (mbLine && mbProgress && mbLine.textContent !== mbProgress) mbLine.textContent = mbProgress;
+      const mbBar = root.querySelector('[data-mb-bar]');
+      if (mbBar) {
+        const pct = (mb.update && typeof mb.update.pct === 'number') ? mb.update.pct : null;
+        const fill = mbBar.querySelector('.fill');
+        if (pct == null) { mbBar.classList.add('indeterminate'); if (fill) fill.style.width = ''; }
+        else { mbBar.classList.remove('indeterminate'); if (fill) fill.style.width = pct + '%'; }
+      }
+
+      // Completion. Scan/enrich finishing → full re-render (flips the Cancel
+      // row back). MB finishing → re-render only its block IN PLACE so the page
+      // doesn't scroll to the top.
+      const scanEnrichWasRunning = !!root.querySelector('[data-cancel-scan], [data-cancel-enrich]');
+      if (scanEnrichWasRunning && !scanRunning && !enrichRunning) {
         if (parseHash().startsWith('more/library')) render();
+      } else {
+        const mbBlockEl = root.querySelector('[data-mb-block]');
+        if (mbBlockEl && root.querySelector('[data-progress-for="mb"]') && !mbRunning) {
+          mbBlockEl.innerHTML = _mbBlockHTML(mb);
+          _wireMb(root);
+        }
       }
     }
 

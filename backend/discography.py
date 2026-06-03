@@ -59,19 +59,32 @@ _EDITION_SUFFIX_RE = re.compile(
 )
 _ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+")
 _NONALNUM_RE = re.compile(r"[^a-z0-9]+")
+# Multi-disc rip suffixes — "disc 1", "(Disc 2)", "cd1", "CD 2". A per-disc
+# directory split is the same album: without this, "Catch a Fire … disc 1"
+# never match-keys onto MB's "Catch a Fire" and overlap-verification silently
+# misses every multi-disc release. 'disc one' (word) is rarer; digits only.
+_DISC_RE = re.compile(
+    r"\s*[\(\[]?\s*\b(?:disc|disk|cd)\s*\.?\s*\d+\s*[\)\]]?",
+    re.IGNORECASE,
+)
 
 
 def release_match_key(title: str) -> str:
     """Canonical comparison key for collapsing reissues and for matching
     a Deezer release against an owned album.
 
-    lowercase + NFC → drop bracketed/trailing edition markers → strip a
-    leading article → collapse punctuation to spaces. 'Live'/'remix'/etc.
-    are not edition markers, so they survive and stay distinct.
+    lowercase + NFC → drop bracketed/trailing edition markers → drop multi-disc
+    suffixes → strip a leading article → collapse punctuation to spaces.
+    'Live'/'remix'/etc. are not edition markers, so they survive and stay
+    distinct.
     """
     s = unicodedata.normalize("NFC", (title or "").strip().lower())
     s = _EDITION_BRACKET_RE.sub("", s)
     s = _EDITION_SUFFIX_RE.sub("", s)
+    s = _DISC_RE.sub(" ", s)
+    # "&" vs "and": dirty tags use "Hunting High & Low", MB stores "… and …".
+    # Normalise to the spelled-out form on both sides so they overlap-match.
+    s = s.replace("&", " and ")
     s = _ARTICLE_RE.sub("", s)
     s = _NONALNUM_RE.sub(" ", s)
     return re.sub(r"\s+", " ", s).strip()

@@ -31,6 +31,13 @@ DO $$ BEGIN
     CREATE TYPE verification_status AS ENUM ('unverified', 'suspicious', 'verified_band', 'verified_split', 'verified_collab');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- How an artist's musicbrainz_id was matched, ascending confidence. Set by
+-- backend/mb_match.py (name/alias exact, against the local MB dump) and the
+-- overlap-verified canon (mb_canonicalize). NULL = no MBID assigned.
+DO $$ BEGIN
+    CREATE TYPE mb_match_confidence AS ENUM ('lastfm', 'name_fuzzy', 'sort_name_exact', 'alias_exact', 'name_exact', 'overlap_verified');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 DO $$ BEGIN
     CREATE TYPE credit_role AS ENUM ('primary', 'featured', 'member');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -114,6 +121,7 @@ CREATE TABLE IF NOT EXISTS artists (
     raw_name VARCHAR(500),
     lastfm_id UUID,                         -- Last.fm exposes the MusicBrainz MBID as its id
     musicbrainz_id UUID,
+    mb_match_confidence mb_match_confidence, -- how musicbrainz_id was matched (NULL = none)
     deezer_id BIGINT,                       -- cached Deezer artist id (integer; discography sync)
     last_album_sync TIMESTAMPTZ,            -- freshness gate for new-album discovery
     last_mb_sync TIMESTAMPTZ,              -- freshness gate for MB canonicalization pass
@@ -710,6 +718,7 @@ CREATE INDEX IF NOT EXISTS idx_artists_gender ON artists(gender);
 CREATE INDEX IF NOT EXISTS idx_artists_is_vocalist ON artists(is_vocalist);
 CREATE INDEX IF NOT EXISTS idx_artists_last_album_sync ON artists(last_album_sync);
 CREATE INDEX IF NOT EXISTS idx_artists_last_mb_sync ON artists(last_mb_sync);
+CREATE INDEX IF NOT EXISTS idx_artists_mb_match_confidence ON artists(mb_match_confidence);
 
 -- Artist members indexes
 CREATE INDEX IF NOT EXISTS idx_artist_members_member ON artist_members(member_artist_id);
@@ -1275,6 +1284,146 @@ CREATE TABLE IF NOT EXISTS gear_sentiment_terms (
 );
 
 CREATE INDEX IF NOT EXISTS idx_gear_sentiment_term_lookup ON gear_sentiment_terms(polarity, term);
+
+-- ============================================================
+-- MusicBrainz data-dump subset (Etap 1: artist + album canon)
+-- ============================================================
+-- Loaded from the fullexport mbdump.tar.bz2 by backend/mb_dump_load.py. These
+-- are read-only reference tables: the MB internal `id` is kept as the join key
+-- (no sequences), and column order mirrors the dump's headerless TSV (= MB
+-- CreateTables.sql order) so a default COPY round-trips it. Empty on a fresh
+-- install until the loader runs; the canonicalization layer degrades to the MB
+-- API when they are empty. `recording` (35M rows) is deliberately NOT loaded.
+
+CREATE TABLE IF NOT EXISTS mb_artist (
+    id              INTEGER PRIMARY KEY,
+    gid             UUID,
+    name            TEXT,
+    sort_name       TEXT,
+    begin_date_year SMALLINT, begin_date_month SMALLINT, begin_date_day SMALLINT,
+    end_date_year   SMALLINT, end_date_month   SMALLINT, end_date_day   SMALLINT,
+    type            INTEGER,
+    area            INTEGER,
+    gender          INTEGER,
+    comment         TEXT,
+    edits_pending   INTEGER,
+    last_updated    TIMESTAMPTZ,
+    ended           BOOLEAN,
+    begin_area      INTEGER,
+    end_area        INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS mb_artist_credit (
+    id            INTEGER PRIMARY KEY,
+    name          TEXT,
+    artist_count  SMALLINT,
+    ref_count     INTEGER,
+    created       TIMESTAMPTZ,
+    edits_pending INTEGER,
+    gid           UUID
+);
+
+CREATE TABLE IF NOT EXISTS mb_artist_credit_name (
+    artist_credit INTEGER,
+    position      SMALLINT,
+    artist        INTEGER,
+    name          TEXT,
+    join_phrase   TEXT,
+    PRIMARY KEY (artist_credit, position)
+);
+
+CREATE TABLE IF NOT EXISTS mb_release_group (
+    id            INTEGER PRIMARY KEY,
+    gid           UUID,
+    name          TEXT,
+    artist_credit INTEGER,
+    type          INTEGER,
+    comment       TEXT,
+    edits_pending INTEGER,
+    last_updated  TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS mb_release_group_primary_type (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT,
+    parent      INTEGER,
+    child_order INTEGER,
+    description TEXT,
+    gid         UUID
+);
+
+CREATE TABLE IF NOT EXISTS mb_release_group_secondary_type (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT,
+    parent      INTEGER,
+    child_order INTEGER,
+    description TEXT,
+    gid         UUID
+);
+
+CREATE TABLE IF NOT EXISTS mb_release_group_secondary_type_join (
+    release_group  INTEGER,
+    secondary_type INTEGER,
+    created        TIMESTAMPTZ,
+    PRIMARY KEY (release_group, secondary_type)
+);
+
+CREATE TABLE IF NOT EXISTS mb_release (
+    id            INTEGER PRIMARY KEY,
+    gid           UUID,
+    name          TEXT,
+    artist_credit INTEGER,
+    release_group INTEGER,
+    status        INTEGER,
+    packaging     INTEGER,
+    language      INTEGER,
+    script        INTEGER,
+    barcode       TEXT,
+    comment       TEXT,
+    edits_pending INTEGER,
+    quality       SMALLINT,
+    last_updated  TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS mb_artist_alias (
+    id                 INTEGER PRIMARY KEY,
+    artist             INTEGER,
+    name               TEXT,
+    locale             TEXT,
+    edits_pending      INTEGER,
+    last_updated       TIMESTAMPTZ,
+    type               INTEGER,
+    sort_name          TEXT,
+    begin_date_year    SMALLINT, begin_date_month SMALLINT, begin_date_day SMALLINT,
+    end_date_year      SMALLINT, end_date_month   SMALLINT, end_date_day   SMALLINT,
+    primary_for_locale BOOLEAN,
+    ended              BOOLEAN
+);
+
+CREATE TABLE IF NOT EXISTS mb_area (
+    id              INTEGER PRIMARY KEY,
+    gid             UUID,
+    name            TEXT,
+    type            INTEGER,
+    edits_pending   INTEGER,
+    last_updated    TIMESTAMPTZ,
+    begin_date_year SMALLINT, begin_date_month SMALLINT, begin_date_day SMALLINT,
+    end_date_year   SMALLINT, end_date_month   SMALLINT, end_date_day   SMALLINT,
+    ended           BOOLEAN,
+    comment         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_mb_artist_gid            ON mb_artist(gid);
+CREATE INDEX IF NOT EXISTS idx_mb_artist_name_trgm      ON mb_artist     USING gin (lower(name) gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_mb_artist_sortname_trgm  ON mb_artist     USING gin (lower(sort_name) gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_artist   ON mb_artist_alias(artist);
+CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_name_trgm ON mb_artist_alias USING gin (lower(name) gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_mb_acn_artist            ON mb_artist_credit_name(artist);
+CREATE INDEX IF NOT EXISTS idx_mb_rg_credit             ON mb_release_group(artist_credit);
+CREATE INDEX IF NOT EXISTS idx_mb_rg_type               ON mb_release_group(type);
+CREATE INDEX IF NOT EXISTS idx_mb_rg_name_trgm          ON mb_release_group USING gin (lower(name) gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_mb_release_rg            ON mb_release(release_group);
+CREATE INDEX IF NOT EXISTS idx_mb_rgstj_secondary       ON mb_release_group_secondary_type_join(secondary_type);
 
 -- ============================================================
 -- Views

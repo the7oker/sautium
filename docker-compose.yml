@@ -89,6 +89,7 @@ services:
       SAUTIUM_HOST_IPS: ${SAUTIUM_HOST_IPS:-}
       # Intra-container backend self-calls (Claude Code tools, MCP server).
       BACKEND_URL: https://localhost:8000
+      MB_DUMP_DIR: /app/data/mbdump        # writable mount for the MusicBrainz dump
       # Disable uvicorn auto-reload in Docker. The bind-mounted ./backend
       # lives on WSL2 drvfs (or macOS osxfs); inotify periodically returns
       # EIO (errno 5) on those filesystems, which crashes the Rust-based
@@ -106,6 +107,7 @@ services:
       # Self-signed TLS cert (generated on first start by entrypoint.py).
       # Persists across rebuilds so the phone doesn't need to re-accept it.
       - ./data/tls:/app/data/tls
+      - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)
       # Mount music library as read-only
       # Windows path: E:\Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro

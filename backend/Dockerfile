@@ -65,6 +65,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Optional: libtorrent for P2P DHT peer discovery (graceful degradation if unavailable)
 RUN pip install --no-cache-dir libtorrent || echo "WARNING: libtorrent not available — DHT peer discovery disabled"
 
+# Parallel bzip2 — fast MusicBrainz dump decompression (mb_dump_load). Kept in a
+# late, standalone layer so it never busts the expensive pip-install cache above.
+RUN apt-get update && apt-get install -y lbzip2 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # Copy application code
 COPY . .
 

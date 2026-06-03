@@ -16,7 +16,7 @@ Proposed actions:
 import logging
 from typing import Dict, List, Optional
 
-import musicbrainz as mb
+import mb_backend as mb
 from db_pool import db_query, db_query_one
 from discography import release_match_key
 from normalize_artists import detect_compound_type
@@ -24,12 +24,32 @@ from uuid_utils import normalize
 
 logger = logging.getLogger(__name__)
 
-# MB secondary-types that disqualify a release-group as a "studio album"
-# for the overlap check (we still want overlap on real albums only).
-_NON_STUDIO = {"Compilation", "DJ-mix", "Mixtape/Street", "Live", "Remix",
-               "Soundtrack", "Demo", "Interview", "Audiobook", "Spokenword"}
+# MB secondary-types that disqualify a release-group as a clean first-party
+# release for the overlap check — these are cross-artist-noisy / generic
+# (a "Greatest Hits", a live set, a remix package).
+_NOISY_SECONDARY = {"Compilation", "DJ-mix", "Mixtape/Street", "Live", "Remix",
+                    "Soundtrack", "Demo", "Interview", "Audiobook", "Spokenword"}
 
 _SCORE_OK = 88        # MB top-candidate score considered a strong name match
+_FUZZY_FLOOR = 60     # overlap-scan floor: typos/encoding-corruption score lower
+                      # than _SCORE_OK ("Davis Gilmour"→"David Gilmour" ~75), but
+                      # owned-album OVERLAP is the real gate, so it's safe to
+                      # check them — overlap rejects the wrong ones for free.
+
+
+def _prefix_related(a: str, b: str) -> bool:
+    """True if one name is a token-prefix of the other — i.e. MB's canonical
+    name EXTENDS the library tag (or vice-versa): "Bob Marley" ↔ "Bob Marley &
+    The Wailers", "Percy Faith" ↔ "Percy Faith and His Orchestra". Such a suffix
+    dilutes the trigram score below the gate even though it's the same entity,
+    so this bridges the gap for the overlap scan. Token-wise (not substring) so
+    "Bob Marley" does not match "Not Bob Marley" / "Bo Marley".
+    """
+    ta, tb = normalize(a).split(), normalize(b).split()
+    if not ta or not tb:
+        return False
+    n = min(len(ta), len(tb))
+    return ta[:n] == tb[:n]
 
 
 def _owned_match_keys(artist_id: str) -> set:
@@ -45,15 +65,41 @@ def _owned_match_keys(artist_id: str) -> set:
     return {release_match_key(r["title"]) for r in rows}
 
 
-def _studio_keys(mbid: str) -> set:
+def _release_keys(mbid: str) -> set:
+    """Match-keys for an artist's first-party releases (Album/EP/Single, minus
+    noisy secondary types) — the candidate side of the overlap check."""
     keys = set()
     for rg in mb.fetch_album_release_groups(mbid):
-        if set(rg["secondary_types"]) & _NON_STUDIO:
+        if set(rg["secondary_types"]) & _NOISY_SECONDARY:
             continue
-        k = release_match_key(rg["title"])
-        if k:
-            keys.add(k)
+        # RG canonical title + every release variant title (local-only): a dirty
+        # owned tag frequently matches a regional/alternate release name, not the
+        # group's canonical name.
+        for title in (rg["title"], *rg.get("release_titles", ())):
+            k = release_match_key(title)
+            if k:
+                keys.add(k)
     return keys
+
+
+def _overlap(owned: set, candidate: set) -> set:
+    """Candidate release-keys that verify against the owned albums: an exact key
+    match, OR — to absorb the catalog/label/region/format cruft libraries append
+    to folder names — a candidate key (≥5 chars) that is a token-prefix of an
+    owned key ("mirrors" ⊑ "mirrors victor vil 28062 japan"). The clean MB title
+    leads, the junk trails, so the asymmetric prefix is safe; the ≥5 guard keeps
+    tiny keys ("era", "boy") from prefixing unrelated owned titles, and the whole
+    check is already scoped to a name-corroborated candidate."""
+    matched = set(owned & candidate)
+    owned_tokens = [o.split() for o in owned if o]
+    for ck in candidate - matched:
+        if len(ck) < 5:
+            continue
+        ct = ck.split()
+        n = len(ct)
+        if any(ot[:n] == ct for ot in owned_tokens):
+            matched.add(ck)
+    return matched
 
 
 def audit_artist(artist_id: str, name: str) -> Dict:
@@ -66,7 +112,7 @@ def audit_artist(artist_id: str, name: str) -> Dict:
     compound = detect_compound_type(name)  # ('safe'|'suspicious', sep, parts) | None
 
     try:
-        candidates = mb.search_artist(name, limit=3)
+        candidates = mb.search_artist(name, limit=8)
     except mb.MBRateLimited:
         row["note"] = "mb-cooldown"
         return row
@@ -74,32 +120,56 @@ def audit_artist(artist_id: str, name: str) -> Dict:
         row["note"] = f"mb-error: {e}"
         return row
 
-    top = candidates[0] if candidates and (candidates[0].get("score") or 0) >= _SCORE_OK else None
-
-    # 1) Overlap-verify the top full-name candidate FIRST. Overlap is the
-    #    anchor, not an exact name string — this catches real "&"-entities
-    #    and canonical variations the name check would miss, e.g. MB stores
-    #    "Percy Faith and His Orchestra" while the tag says "… & His
-    #    Orchestra" (& vs and), or diacritic/abbreviation/transliteration.
-    if top and owned:
+    strong = [c for c in candidates if (c.get("score") or 0) >= _SCORE_OK]
+    top = strong[0] if strong else None
+    if top:
         row.update(mbid=top["mbid"], canonical=top["name"], score=top["score"])
-        try:
-            studio = _studio_keys(top["mbid"])
-        except mb.MBRateLimited:
-            row["note"] = "mb-cooldown"
-            return row
-        except Exception as e:
-            row["note"] = f"mb-rg-error: {e}"
-            return row
-        ov = owned & studio
-        row["overlap"] = len(ov)
-        if ov:
-            row["action"] = "keep" if normalize(top["name"]) == normalize(name) else "rename"
-            return row
-        # Full name didn't overlap-verify — maybe an ad-hoc compound to split.
 
-    # 2) Compound with no overlap-verified full-name entity → split attempt.
-    if compound:
+    # 1) Overlap-verify candidates best-first. Overlap — not the name-similarity
+    #    score — is the trust anchor (it can't be faked), so eligibility is gated
+    #    LOOSELY and overlap decides. A candidate is checked if it scores highly
+    #    OR if the names are token-prefix related. That second clause is the key
+    #    local fix: when MB's canonical name EXTENDS the library tag ("Bob
+    #    Marley" → "Bob Marley & The Wailers", "Percy Faith" → "Percy Faith and
+    #    His Orchestra"), the suffix dilutes the trigram score below the gate
+    #    even though it's the right entity that owns the albums — the MB API
+    #    ranked these by relevance, local trigram can't. Overlap ALSO
+    #    disambiguates same-name ties (several "Adele"): the candidate whose
+    #    studio discography overlaps the owned albums wins. Best-first order
+    #    means an exact entity that DOES overlap is taken before any extended
+    #    name, so junk namesakes ("Not Bob Marley") never win — and they have no
+    #    overlap anyway. (API path: only eligible candidates cost a fetch.)
+    #    The floor is _FUZZY_FLOOR (not _SCORE_OK): a typo / encoding corruption
+    #    ("Davis Gilmour", "Mel Tormй") scores below _SCORE_OK yet overlap-
+    #    verifies to the right entity — overlap, the anchor, makes that safe.
+    if owned:
+        for c in candidates:
+            if (c.get("score") or 0) < _FUZZY_FLOOR and not _prefix_related(name, c["name"]):
+                continue
+            try:
+                releases = _release_keys(c["mbid"])
+            except mb.MBRateLimited:
+                row["note"] = "mb-cooldown"
+                return row
+            except Exception as e:
+                row["note"] = f"mb-rg-error: {e}"
+                return row
+            ov = _overlap(owned, releases)
+            if ov:
+                row.update(mbid=c["mbid"], canonical=c["name"],
+                           score=c["score"], overlap=len(ov))
+                row["action"] = "keep" if normalize(c["name"]) == normalize(name) else "rename"
+                return row
+        row["overlap"] = 0
+        # Nothing overlap-verified — maybe an ad-hoc compound to split.
+
+    # 2) Compound → split attempt, but ONLY when the whole name has no strong MB
+    #    entity. The split gate is "MB-empty whole-name + all components resolve"
+    #    (e.g. "GMO & Dense", "DJ Snake & Lil Jon"). A real band that happens to
+    #    contain "&" ("Bob Marley & The Wailers", "Simon & Garfunkel") strongly
+    #    matches an MB Group, so it must be kept whole, not fragmented — even
+    #    when the owned albums didn't overlap-verify it (empty/compilation-only).
+    if compound and not top:
         parts = compound[2]
         resolved = []
         for p in parts:

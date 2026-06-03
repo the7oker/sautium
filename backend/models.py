@@ -54,6 +54,11 @@ VerificationStatusEnum = ENUM(
     name="verification_status",
     create_type=False,
 )
+MbMatchConfidenceEnum = ENUM(
+    "lastfm", "name_fuzzy", "sort_name_exact", "alias_exact", "name_exact", "overlap_verified",
+    name="mb_match_confidence",
+    create_type=False,
+)
 CreditRoleEnum = ENUM(
     "primary", "featured", "member",
     name="credit_role",
@@ -144,6 +149,7 @@ class Artist(Base):
     # External service IDs — Last.fm exposes the MusicBrainz MBID as its id
     lastfm_id = Column(UUID(as_uuid=False))
     musicbrainz_id = Column(UUID(as_uuid=False))
+    mb_match_confidence = Column(MbMatchConfidenceEnum)        # how musicbrainz_id was matched (NULL = none)
     deezer_id = Column(BigInteger)                             # cached Deezer artist id (integer; discography sync)
 
     last_album_sync = Column(DateTime(timezone=True))          # freshness gate for new-album discovery
@@ -167,6 +173,7 @@ class Artist(Base):
         Index("idx_artists_artist_type", "artist_type"),
         Index("idx_artists_gender", "gender"),
         Index("idx_artists_is_vocalist", "is_vocalist"),
+        Index("idx_artists_mb_match_confidence", "mb_match_confidence"),
     )
 
     def __repr__(self):

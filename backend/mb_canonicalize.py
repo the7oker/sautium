@@ -23,7 +23,7 @@ from typing import Dict, Optional, Tuple
 from sqlalchemy import text
 
 import mb_audit
-import musicbrainz as mb
+import mb_backend as mb
 from database import get_db_context
 from db_pool import db_query
 from normalize_artists import (
