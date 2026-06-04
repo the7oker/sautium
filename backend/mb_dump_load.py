@@ -292,21 +292,23 @@ def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> D
     if not version:
         raise RuntimeError("could not reach the MusicBrainz mirror")
 
-    have = loaded_version()
-    archive_ok = os.path.exists(DUMP_PATH)
-    skip_dl = archive_ok and have == version and not force
-
-    # Already current AND the DB holds it → nothing to do. Only re-load when a
-    # new archive was fetched, the DB is empty, or the caller forces it.
-    if skip_dl and stats().get("loaded"):
+    # "Up to date" keys on the VERSION marker + DB contents, NOT the archive —
+    # which is deleted after each successful load — so a re-"Update" on the
+    # current version does nothing instead of re-downloading 7 GB.
+    if not force and loaded_version() == version and stats().get("loaded"):
         progress_cb({"phase": "done", "version": version})
         return {"version": version, "loaded": True, "up_to_date": True}
 
-    if not skip_dl:
-        download(version, progress_cb)
+    download(version, progress_cb)  # resumes a partial; a complete archive → 416, instant
     stream_load(progress_cb)
     with open(VERSION_PATH, "w") as f:
         f.write(version)
+    # Reclaim the ~7 GB archive — the data now lives in the DB, and a future
+    # update re-downloads the (newer) version anyway.
+    try:
+        os.remove(DUMP_PATH)
+    except OSError:
+        pass
     progress_cb({"phase": "done", "version": version})
     return {"version": version, "loaded": True, "up_to_date": False}
 

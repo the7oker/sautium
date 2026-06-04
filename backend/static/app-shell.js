@@ -7826,7 +7826,7 @@
     return `
       <div class="profile-group-label">MusicBrainz database</div>
       <div class="form-group">
-        <div class="form-row stacked"><div class="row-stack-sub">Local copy of the MusicBrainz artist data — improves artist normalization. Optional (~9 GB).</div></div>
+        <div class="form-row stacked"><div class="row-stack-sub">Local copy of MusicBrainz artist data — improves artist normalization. Optional · needs ~11 GB free to install (7 GB download + ~4 GB in DB), settles to ~4 GB after.</div></div>
         <div class="form-row"><span class="form-label">Status</span><span class="form-value">${mb.loaded ? `${fmtNum(mb.total_records)} records · ${escapeProfileHtml(fmtBytes(mb.size_bytes))}` : 'Not downloaded'}</span></div>
         ${mb.version ? `<div class="form-row"><span class="form-label">Version</span><span class="form-value mono">${escapeProfileHtml(mb.version)}</span></div>` : ''}
         ${mb.last_update_at ? `<div class="form-row"><span class="form-label">Last update</span><span class="form-value">${escapeProfileHtml(fmtRelative(mb.last_update_at))}</span></div>` : ''}
