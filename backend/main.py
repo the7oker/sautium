@@ -807,6 +807,13 @@ def _enrich_worker(limit: Optional[int], skip_embeddings: bool,
         state["result"] = {"success": False, "detail": str(e)}
         state["progress"] = f"Error: {str(e)[:100]}"
     finally:
+        # Models stay resident by design (clap_model/instrument_tagger/
+        # text_embedder singletons), but the per-batch tensors enrichment
+        # allocated linger in PyTorch's caching allocator — nvidia-smi keeps
+        # reporting them as held VRAM long after the run. Return the free
+        # blocks to the driver at the session boundary; weights are untouched.
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.empty_cache()
         state["running"] = False
         state["step"] = "done"
         _notify_library_subs_safe()

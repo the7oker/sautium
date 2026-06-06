@@ -7,12 +7,20 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Set Python version
 ENV PYTHON_VERSION=3.11
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    # Python and pip
+# Install system dependencies.
+# deadsnakes PPA is mandatory: Ubuntu 22.04's stock python3.11 package is frozen
+# at 3.11.0rc1, whose stdlib lacks sys.get_int_max_str_digits. torch._dynamo's
+# polyfills reference that symbol at import time, so on rc1 every transformers
+# model load (CLAP, BGE-M3) crashes — silently killing all embedding generation.
+# deadsnakes ships a proper 3.11.x final.
+RUN apt-get update && apt-get install -y software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y \
+    # Python (final, from deadsnakes — not jammy's rc1)
     python${PYTHON_VERSION} \
     python${PYTHON_VERSION}-dev \
-    python3-pip \
+    python${PYTHON_VERSION}-venv \
+    python${PYTHON_VERSION}-distutils \
     # Audio processing libraries
     ffmpeg \
     libsndfile1 \
@@ -50,8 +58,10 @@ RUN useradd -m -s /bin/bash claudeuser \
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1
 
-# Upgrade pip
-RUN python3 -m pip install --upgrade pip setuptools wheel
+# Bootstrap pip for the deadsnakes interpreter (it ships without pip; the jammy
+# python3-pip package would target the system python3.10 instead).
+RUN curl -fsSL https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && python${PYTHON_VERSION} -m pip install --upgrade pip setuptools wheel
 
 # Set working directory
 WORKDIR /app
