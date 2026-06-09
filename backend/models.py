@@ -22,7 +22,7 @@ from typing import Optional, List
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, Numeric, BigInteger, Float,
     Boolean, ForeignKey, CheckConstraint, Index, ARRAY, UniqueConstraint,
-    LargeBinary, func,
+    LargeBinary, func, text,
 )
 from sqlalchemy.dialects.postgresql import BYTEA, ENUM, JSONB, UUID
 from sqlalchemy.ext.declarative import declarative_base
@@ -55,7 +55,7 @@ VerificationStatusEnum = ENUM(
     create_type=False,
 )
 MbMatchConfidenceEnum = ENUM(
-    "lastfm", "name_fuzzy", "sort_name_exact", "alias_exact", "name_exact", "overlap_verified",
+    "name_fuzzy", "alias_exact", "name_exact", "overlap_verified",
     name="mb_match_confidence",
     create_type=False,
 )
@@ -146,10 +146,7 @@ class Artist(Base):
     is_vocalist = Column(ArtistVocalistEnum, default="unknown") # unknown/vocal/instrumental
     raw_name = Column(String(500))                             # original tag value before normalization
 
-    # External service IDs — Last.fm exposes the MusicBrainz MBID as its id
-    lastfm_id = Column(UUID(as_uuid=False))
-    musicbrainz_id = Column(UUID(as_uuid=False))
-    mb_match_confidence = Column(MbMatchConfidenceEnum)        # how musicbrainz_id was matched (NULL = none)
+    # MB identity lives in artist_mbids (1:N — name-UUID may conflate namesakes).
     deezer_id = Column(BigInteger)                             # cached Deezer artist id (integer; discography sync)
 
     last_album_sync = Column(DateTime(timezone=True))          # freshness gate for new-album discovery
@@ -173,7 +170,6 @@ class Artist(Base):
         Index("idx_artists_artist_type", "artist_type"),
         Index("idx_artists_gender", "gender"),
         Index("idx_artists_is_vocalist", "is_vocalist"),
-        Index("idx_artists_mb_match_confidence", "mb_match_confidence"),
     )
 
     def __repr__(self):
@@ -192,9 +188,8 @@ class Album(Base):
     catalog_number = Column(String(100))
     total_tracks = Column(Integer)
 
-    # External service IDs — Last.fm exposes the MusicBrainz MBID as its id
-    musicbrainz_id = Column(UUID(as_uuid=False))
-    lastfm_id = Column(UUID(as_uuid=False))
+    musicbrainz_id = Column(UUID(as_uuid=False))              # MusicBrainz release-GROUP MBID (canonical album)
+    mb_match_confidence = Column(MbMatchConfidenceEnum)       # how musicbrainz_id was matched (NULL = none)
     cover_url = Column(Text)                  # external cover (Deezer) for phantom albums with no local files
 
     user_rating = Column(Numeric(3, 2))
@@ -212,7 +207,6 @@ class Album(Base):
         CheckConstraint("user_rating >= 0 AND user_rating <= 5", name="check_album_rating"),
         Index("idx_albums_title", "title"),
         Index("idx_albums_release_year", "release_year"),
-        Index("idx_albums_lastfm_id", "lastfm_id"),
     )
 
     def __repr__(self):
@@ -293,12 +287,14 @@ class AlbumArtist(Base):
     album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
     artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
     role = Column(CreditRoleEnum, primary_key=True, default="primary")
+    mbid = Column(UUID(as_uuid=False))  # materialized MB artist MBID for THIS album (which namesake); NULL = MB unavailable
 
     album = relationship("Album", back_populates="artist_associations")
     artist = relationship("Artist", back_populates="album_associations")
 
     __table_args__ = (
         Index("idx_album_artists_artist_id", "artist_id"),
+        Index("idx_album_artists_mbid", "mbid", postgresql_where=text("mbid IS NOT NULL")),
     )
 
     def __repr__(self):
@@ -328,33 +324,54 @@ class ArtistMember(Base):
         return f"<ArtistMember(compound={self.compound_artist_id}, member={self.member_artist_id}, role='{self.role}')>"
 
 
-class ArtistAlias(Base):
-    """1:1 alias map: a dirty/variant artist name → its canonical artist.
+class ArtistMbid(Base):
+    """MB entities a name-derived Sautium artist maps to (1:N).
 
-    Consulted at every ingestion chokepoint (scanner, Last.fm similar, P2P
-    import) so a rescan of an already-normalized name converges on the
-    canonical artist instead of re-creating a fragment. Collaboration
-    1:many decomposition lives in artist_members, not here.
+    The artist UUID is name-derived, so it conflates namesakes and
+    case-variants — one Sautium artist may correspond to several real MB
+    entities. `mbid` is the PK (one MB entity → one artist; the inverse is the
+    1:N). MB-verified sources only — Last.fm is out of the MBID contour.
     """
-    __tablename__ = "artist_aliases"
+    __tablename__ = "artist_mbids"
 
-    alias_normalized = Column(Text, primary_key=True)  # normalize(variant name)
+    mbid = Column(UUID(as_uuid=False), primary_key=True)
     artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
-    alias_name = Column(String(500), nullable=False)   # variant as seen
-    mbid = Column(UUID(as_uuid=False))                  # MB authority for the mapping
-    source = Column(String(50), nullable=False)         # clean | mb | normalization | manual
-    confidence = Column(Numeric(4, 3))
+    confidence = Column(MbMatchConfidenceEnum, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     artist = relationship("Artist", foreign_keys=[artist_id])
 
     __table_args__ = (
-        Index("idx_artist_aliases_artist", "artist_id"),
+        Index("idx_artist_mbids_artist", "artist_id"),
     )
 
     def __repr__(self):
-        return f"<ArtistAlias('{self.alias_normalized}' -> {self.artist_id})>"
+        return f"<ArtistMbid({self.mbid} -> {self.artist_id} [{self.confidence}])>"
+
+
+class TrackMbid(Base):
+    """MB recordings a track (song) maps to (1:N).
+
+    Our `tracks` is a song (release-independent, same UUID across albums) = MB's
+    `recording`. One song can have several recordings (studio/live/remaster);
+    `recording_mbid` is the PK (one recording → one song; the inverse is the
+    1:N). The per-file recording is materialized on `media_files.recording_mbid`.
+    """
+    __tablename__ = "track_mbids"
+
+    recording_mbid = Column(UUID(as_uuid=False), primary_key=True)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    confidence = Column(MbMatchConfidenceEnum)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    track = relationship("Track", foreign_keys=[track_id])
+
+    __table_args__ = (
+        Index("idx_track_mbids_track", "track_id"),
+    )
+
+    def __repr__(self):
+        return f"<TrackMbid({self.recording_mbid} -> {self.track_id})>"
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -368,6 +385,8 @@ class AlbumVariant(Base):
     id = Column(Integer, primary_key=True)
     album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     directory_path = Column(Text, nullable=False, unique=True)
+    edition = Column(Text)  # named edition extracted from a dirty title on canon; NULL = standard
+    release_mbid = Column(UUID(as_uuid=False))  # MB release MBID (specific edition); best-effort, often NULL
 
     sample_rate = Column(Integer)
     bit_depth = Column(Integer)
@@ -423,6 +442,14 @@ class MediaFile(Base):
 
     # External IDs
     isrc = Column(String(20))
+
+    # Original tags as read from the file — ground truth for re-normalization / correction
+    raw_track_name = Column(Text)
+    raw_artist = Column(Text)
+    raw_album_artist = Column(Text)
+    raw_album = Column(Text)
+    raw_year = Column(Text)
+    recording_mbid = Column(UUID(as_uuid=False))  # materialized MB recording for THIS file's performance
 
     # Cover art (resolved by background worker)
     cover_id = Column(UUID(as_uuid=True), ForeignKey("covers.id", ondelete="SET NULL"))

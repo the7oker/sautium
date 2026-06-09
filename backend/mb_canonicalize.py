@@ -104,8 +104,7 @@ def canonicalize_one(artist_id: str, name: str) -> Dict:
 
     with get_db_context() as db:
         if act in ("keep", "rename"):
-            recanonicalize_artist(db, artist_id, name,
-                                  decision["canonical"], decision["mbid"])
+            recanonicalize_artist(db, artist_id, decision["canonical"])
         elif act == "split":
             ct = detect_compound_type(name)
             if ct:

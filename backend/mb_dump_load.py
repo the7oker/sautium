@@ -47,6 +47,11 @@ TABLES = [
     ("mb_release_group", "release_group"),
     ("mb_release_group_secondary_type_join", "release_group_secondary_type_join"),
     ("mb_release", "release"),
+    ("mb_medium_format", "medium_format"),
+    ("mb_medium", "medium"),
+    ("mb_recording", "recording"),
+    ("mb_track", "track"),
+    ("mb_release_label", "release_label"),
 ]
 _MEMBER_TABLE = {f"mbdump/{m}": t for t, m in TABLES}
 
@@ -55,11 +60,13 @@ _MEMBER_TABLE = {f"mbdump/{m}": t for t, m in TABLES}
 # unevenly: a 13 MB table and a 750 MB table are NOT each 10% of the work).
 # Stable across dump versions (tables grow together); sums to ~1.0.
 _LOAD_WEIGHT = {
-    "mb_artist": 0.18, "mb_artist_credit": 0.17, "mb_release": 0.31,
-    "mb_release_group": 0.20, "mb_artist_credit_name": 0.10,
+    "mb_track": 0.40, "mb_recording": 0.25, "mb_release": 0.08,
+    "mb_artist": 0.07, "mb_release_group": 0.05, "mb_artist_credit_name": 0.04,
+    "mb_artist_credit": 0.03, "mb_medium": 0.03, "mb_release_label": 0.02,
     "mb_artist_alias": 0.02, "mb_area": 0.01,
-    "mb_release_group_secondary_type_join": 0.01,
+    "mb_release_group_secondary_type_join": 0.0,
     "mb_release_group_primary_type": 0.0, "mb_release_group_secondary_type": 0.0,
+    "mb_medium_format": 0.0,
 }
 
 # progress_cb(update: dict). Phases: checking|downloading|loading|analyzing|done|error.

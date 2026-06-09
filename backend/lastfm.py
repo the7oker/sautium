@@ -543,7 +543,7 @@ class LastFmService:
                     "stored": {},
                 }
 
-            # Store in database (also updates lastfm_id)
+            # Store bio/tags/similar in normalized tables
             stored = self.store_artist_metadata(
                 db, artist_id, artist_name, data, store_similar=fetch_similar
             )

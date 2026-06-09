@@ -25,7 +25,6 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from uuid_utils import artist_uuid, track_uuid, album_uuid
-from artist_aliases import record_alias
 
 logger = logging.getLogger(__name__)
 
@@ -218,16 +217,15 @@ def _update_album_uuid(db: Session, old_id, new_id) -> str:
     return new_str
 
 
-def recanonicalize_artist(db: Session, source_id, source_name: str,
-                          canonical_name: str, mbid: Optional[str] = None) -> str:
+def recanonicalize_artist(db: Session, source_id, canonical_name: str) -> str:
     """Move an artist (and its primary tracks/albums) onto a canonical name.
 
     Generalises the clean-pass rename/merge to an arbitrary target name
     (e.g. an MB-canonical "Björk" / "Jean‐Michel Jarre"). Target row absent
     → rename via CASCADE; present → merge into it (track/album UUIDs are
     recomputed and merged, preserving listening_history + play stats via
-    _update_track_uuid). Records a durable alias source→canonical and
-    stamps the MBID + last_mb_sync. Returns the canonical artist id.
+    _update_track_uuid). Stamps last_mb_sync. Returns the canonical artist id.
+    The MB merge primitive (reused by merge-on-MBID-collision).
 
     Similar/bio/tag rows pointing at the deleted source fall away by
     CASCADE — same as the existing clean-pass merge; they re-derive on
@@ -237,10 +235,7 @@ def recanonicalize_artist(db: Session, source_id, source_name: str,
     canonical_id = str(_ensure_artist(db, canonical_name))
 
     def _stamp():
-        if mbid:
-            db.execute(text(
-                "UPDATE artists SET musicbrainz_id = :m WHERE id = :id AND musicbrainz_id IS NULL"
-            ), {"m": mbid, "id": canonical_id})
+        # MBID lives in artist_mbids now — name-normalization no longer assigns it.
         db.execute(text("UPDATE artists SET last_mb_sync = now() WHERE id = :id"),
                    {"id": canonical_id})
 
@@ -282,15 +277,45 @@ def recanonicalize_artist(db: Session, source_id, source_name: str,
               AND x.role = album_artists.role)
     """), {"t": canonical_id, "s": source_str})
     db.execute(text("DELETE FROM album_artists WHERE artist_id = :s"), {"s": source_str})
-
-    # Aliases that pointed at the source now point at the canonical.
-    db.execute(text("UPDATE artist_aliases SET artist_id = :t WHERE artist_id = :s"),
-               {"t": canonical_id, "s": source_str})
     db.execute(text("DELETE FROM artists WHERE id = :s"), {"s": source_str})
 
-    record_alias(db, source_name, canonical_id, source="mb", mbid=mbid)
     _stamp()
     return canonical_id
+
+
+def recanonicalize_album(db: Session, album_id, canonical_title: str,
+                         edition: Optional[str] = None) -> str:
+    """Move an album onto a canonical title — editions collapse onto one album.
+
+    The album axis of recanonicalize_artist: recompute the album UUID from
+    (canonical_title, primary artist) and rename via CASCADE, or merge into the
+    canonical album if it already exists (its variants are re-pointed by
+    _update_album_uuid). The extracted edition is stamped onto THIS album's
+    variant(s) BEFORE the move, so "Super Deluxe" / "Remaster" survive the
+    collapse as named variants of the one album. Returns the final album id
+    (unchanged when the title was already canonical). MB-independent (Tier-0).
+    """
+    aid = str(album_id)
+    row = db.execute(text("""
+        SELECT ar.name FROM album_artists aa
+        JOIN artists ar ON ar.id = aa.artist_id
+        WHERE aa.album_id = :aid AND aa.role = 'primary'
+        LIMIT 1
+    """), {"aid": aid}).fetchone()
+    if not row:
+        return aid  # no primary artist → album UUID isn't recomputable; leave as-is
+    new_id = str(album_uuid(canonical_title, row[0]))
+
+    if edition:
+        db.execute(text(
+            "UPDATE album_variants SET edition = :ed "
+            "WHERE album_id = :aid AND edition IS NULL"
+        ), {"ed": edition, "aid": aid})
+
+    final_id = _update_album_uuid(db, aid, new_id)  # rename, or merge if canonical exists
+    db.execute(text("UPDATE albums SET title = :t WHERE id = :id"),
+               {"t": canonical_title, "id": final_id})
+    return final_id
 
 
 # ─── Core normalization logic ─────────────────────────────────────────────
@@ -544,9 +569,6 @@ def _clean_all_artist_names(db: Session, dry_run: bool = False) -> Dict:
                 db.execute(text(
                     "DELETE FROM artists WHERE id = :id"
                 ), {"id": artist_id})
-                # Durable mapping so a rescan of the dirty name resolves to
-                # the canonical artist instead of re-creating the fragment.
-                record_alias(db, name, target_id, source="clean")
                 merged_count += 1
                 logger.info(f"Merged: '{name}' -> existing '{cleaned}' ({len(tracks)} tracks, {len(albums)} albums)")
                 continue
@@ -579,9 +601,6 @@ def _clean_all_artist_names(db: Session, dry_run: bool = False) -> Dict:
                 db.execute(text(
                     "UPDATE artists SET id = :new_id, name = :name WHERE id = :old_id"
                 ), {"new_id": new_artist_id, "name": cleaned, "old_id": artist_id})
-                # Durable mapping for the dirty name (now that the canonical
-                # row exists under new_artist_id).
-                record_alias(db, name, new_artist_id, source="clean")
             else:
                 # UUID unchanged (e.g. only whitespace diff) — just update name
                 db.execute(text(

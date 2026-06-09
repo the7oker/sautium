@@ -31,11 +31,11 @@ DO $$ BEGIN
     CREATE TYPE verification_status AS ENUM ('unverified', 'suspicious', 'verified_band', 'verified_split', 'verified_collab');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
--- How an artist's musicbrainz_id was matched, ascending confidence. Set by
--- backend/mb_match.py (name/alias exact, against the local MB dump) and the
--- overlap-verified canon (mb_canonicalize). NULL = no MBID assigned.
+-- How an MBID was matched (artist_mbids / albums.musicbrainz_id), ascending
+-- confidence. MB-verified only — Last.fm is out of the MBID contour.
+-- NULL = no MBID assigned.
 DO $$ BEGIN
-    CREATE TYPE mb_match_confidence AS ENUM ('lastfm', 'name_fuzzy', 'sort_name_exact', 'alias_exact', 'name_exact', 'overlap_verified');
+    CREATE TYPE mb_match_confidence AS ENUM ('name_fuzzy', 'alias_exact', 'name_exact', 'overlap_verified');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
@@ -119,9 +119,7 @@ CREATE TABLE IF NOT EXISTS artists (
     is_vocalist artist_vocalist DEFAULT 'unknown',
     verification_status verification_status DEFAULT 'unverified',
     raw_name VARCHAR(500),
-    lastfm_id UUID,                         -- Last.fm exposes the MusicBrainz MBID as its id
-    musicbrainz_id UUID,
-    mb_match_confidence mb_match_confidence, -- how musicbrainz_id was matched (NULL = none)
+    -- MB identity lives in artist_mbids (1:N — name-UUID may conflate namesakes)
     deezer_id BIGINT,                       -- cached Deezer artist id (integer; discography sync)
     last_album_sync TIMESTAMPTZ,            -- freshness gate for new-album discovery
     last_mb_sync TIMESTAMPTZ,              -- freshness gate for MB canonicalization pass
@@ -136,8 +134,8 @@ CREATE TABLE IF NOT EXISTS albums (
     label VARCHAR(200),
     catalog_number VARCHAR(100),
     total_tracks INTEGER,
-    musicbrainz_id UUID,
-    lastfm_id UUID,                         -- Last.fm exposes the MusicBrainz MBID as its id
+    musicbrainz_id UUID,                    -- MusicBrainz release-GROUP MBID (canonical album)
+    mb_match_confidence mb_match_confidence, -- how musicbrainz_id was matched (NULL = none)
     cover_url TEXT,                         -- external cover (Deezer) for phantom albums with no local files
     user_rating NUMERIC(3, 2) CHECK (user_rating >= 0 AND user_rating <= 5),
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -181,6 +179,7 @@ CREATE TABLE IF NOT EXISTS album_artists (
     album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
     artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     role credit_role DEFAULT 'primary',
+    mbid UUID,  -- materialized MB artist MBID for THIS album (which namesake); NULL = MB unavailable
     PRIMARY KEY (album_id, artist_id, role)
 );
 
@@ -191,20 +190,25 @@ CREATE TABLE IF NOT EXISTS artist_members (
     PRIMARY KEY (compound_artist_id, member_artist_id)
 );
 
--- Persistent 1:1 alias map (dirty/variant name → canonical artist).
--- Consulted at every ingestion chokepoint (scanner, Last.fm similar, P2P
--- import) so a rescan of an already-normalized name converges instead of
--- re-fragmenting. Collaboration 1:many decomposition is handled by
--- artist_members above; this table is strictly 1:1 rename/dedup.
-CREATE TABLE IF NOT EXISTS artist_aliases (
-    alias_normalized TEXT PRIMARY KEY,       -- normalize("H. Mancini") = "h. mancini"
+-- MB entities a name-derived Sautium artist maps to (1:N — the name-UUID
+-- conflates namesakes/case-variants). mbid PK = one MB entity → one artist;
+-- the inverse (one artist → many MBIDs) is the 1:N. MB-verified sources only.
+CREATE TABLE IF NOT EXISTS artist_mbids (
+    mbid UUID PRIMARY KEY,
     artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    alias_name VARCHAR(500) NOT NULL,        -- variant as seen (display/debug)
-    mbid UUID,                               -- MB authority that justified the mapping
-    source VARCHAR(50) NOT NULL,             -- 'clean' | 'mb' | 'normalization' | 'manual'
-    confidence NUMERIC(4, 3),                -- 0..1
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    confidence mb_match_confidence NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 1:N: our track (a song) → MB recordings it conflates (studio/live/remaster of
+-- the same song). recording_mbid PK = one recording → one song; the inverse is
+-- the 1:N. Per-file recording lives on media_files.recording_mbid (the concrete
+-- performance for that file), aggregated here.
+CREATE TABLE IF NOT EXISTS track_mbids (
+    recording_mbid UUID PRIMARY KEY,
+    track_id       UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    confidence     mb_match_confidence,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS track_genres (
@@ -221,6 +225,8 @@ CREATE TABLE IF NOT EXISTS album_variants (
     id SERIAL PRIMARY KEY,
     album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
     directory_path TEXT NOT NULL UNIQUE,
+    edition TEXT,                          -- named edition ("Super Deluxe Edition") extracted from a dirty title on canon; NULL = standard
+    release_mbid UUID,                     -- MB release MBID (specific edition under albums.musicbrainz_id RG); best-effort, often NULL
     sample_rate INTEGER,
     bit_depth INTEGER,
     is_lossless BOOLEAN DEFAULT TRUE,
@@ -304,6 +310,13 @@ CREATE TABLE IF NOT EXISTS media_files (
     play_count INTEGER DEFAULT 0,
     last_played_at TIMESTAMPTZ,
     isrc VARCHAR(20),
+    -- Original tags as read from the file — ground truth for re-normalization / correction
+    raw_track_name TEXT,
+    raw_artist TEXT,
+    raw_album_artist TEXT,
+    raw_album TEXT,
+    raw_year TEXT,
+    recording_mbid UUID,                            -- materialized MB recording for THIS file (its concrete performance)
     cover_id UUID REFERENCES covers(id) ON DELETE SET NULL,
     cover_processed_at TIMESTAMPTZ,                  -- NULL = pending cover resolution
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -718,15 +731,14 @@ CREATE INDEX IF NOT EXISTS idx_artists_gender ON artists(gender);
 CREATE INDEX IF NOT EXISTS idx_artists_is_vocalist ON artists(is_vocalist);
 CREATE INDEX IF NOT EXISTS idx_artists_last_album_sync ON artists(last_album_sync);
 CREATE INDEX IF NOT EXISTS idx_artists_last_mb_sync ON artists(last_mb_sync);
-CREATE INDEX IF NOT EXISTS idx_artists_mb_match_confidence ON artists(mb_match_confidence);
 
 -- Artist members indexes
 CREATE INDEX IF NOT EXISTS idx_artist_members_member ON artist_members(member_artist_id);
-CREATE INDEX IF NOT EXISTS idx_artist_aliases_artist ON artist_aliases(artist_id);
+CREATE INDEX IF NOT EXISTS idx_artist_mbids_artist ON artist_mbids(artist_id);
+CREATE INDEX IF NOT EXISTS idx_track_mbids_track ON track_mbids(track_id);
 CREATE INDEX IF NOT EXISTS idx_albums_title ON albums(title);
 CREATE INDEX IF NOT EXISTS idx_albums_title_trgm ON albums USING gin (title gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_albums_release_year ON albums(release_year);
-CREATE INDEX IF NOT EXISTS idx_albums_lastfm_id ON albums(lastfm_id);
 CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
 CREATE INDEX IF NOT EXISTS idx_tracks_title_trgm ON tracks USING gin (title gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_tags_name_lower ON tags(name text_pattern_ops);
@@ -734,6 +746,8 @@ CREATE INDEX IF NOT EXISTS idx_tags_name_lower ON tags(name text_pattern_ops);
 -- Association indexes
 CREATE INDEX IF NOT EXISTS idx_track_artists_artist_id ON track_artists(artist_id);
 CREATE INDEX IF NOT EXISTS idx_album_artists_artist_id ON album_artists(artist_id);
+CREATE INDEX IF NOT EXISTS idx_album_artists_mbid ON album_artists(mbid) WHERE mbid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_media_files_recording_mbid ON media_files(recording_mbid) WHERE recording_mbid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_track_genres_genre_id ON track_genres(genre_id);
 
 -- Physical entity indexes
@@ -1413,17 +1427,84 @@ CREATE TABLE IF NOT EXISTS mb_area (
     comment         TEXT
 );
 
+-- Etap 2: tracklist (release-ID by content + track normalization).
+-- Column order MUST match MB CreateTables.sql exactly (positional COPY).
+CREATE TABLE IF NOT EXISTS mb_recording (
+    id            INTEGER PRIMARY KEY,
+    gid           UUID,
+    name          TEXT,
+    artist_credit INTEGER,
+    length        INTEGER,
+    comment       TEXT,
+    edits_pending INTEGER,
+    last_updated  TIMESTAMPTZ,
+    video         BOOLEAN
+);
+
+CREATE TABLE IF NOT EXISTS mb_track (
+    id            INTEGER,
+    gid           UUID,
+    recording     INTEGER,
+    medium        INTEGER,
+    position      INTEGER,
+    number        TEXT,
+    name          TEXT,
+    artist_credit INTEGER,
+    length        INTEGER,
+    edits_pending INTEGER,
+    last_updated  TIMESTAMPTZ,
+    is_data_track BOOLEAN
+);
+
+CREATE TABLE IF NOT EXISTS mb_medium (
+    id            INTEGER PRIMARY KEY,
+    release       INTEGER,
+    position      INTEGER,
+    format        INTEGER,
+    name          TEXT,
+    edits_pending INTEGER,
+    last_updated  TIMESTAMPTZ,
+    track_count   INTEGER,
+    gid           UUID
+);
+
+CREATE TABLE IF NOT EXISTS mb_medium_format (
+    id            INTEGER PRIMARY KEY,
+    name          TEXT,
+    parent        INTEGER,
+    child_order   INTEGER,
+    year          SMALLINT,
+    has_discids   BOOLEAN,
+    description   TEXT,
+    gid           UUID
+);
+
+CREATE TABLE IF NOT EXISTS mb_release_label (
+    id             INTEGER,
+    release        INTEGER,
+    label          INTEGER,
+    catalog_number TEXT,
+    last_updated   TIMESTAMPTZ
+);
+
 CREATE INDEX IF NOT EXISTS idx_mb_artist_gid            ON mb_artist(gid);
 CREATE INDEX IF NOT EXISTS idx_mb_artist_name_trgm      ON mb_artist     USING gin (lower(name) gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_mb_artist_sortname_trgm  ON mb_artist     USING gin (lower(sort_name) gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_artist   ON mb_artist_alias(artist);
 CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_name_trgm ON mb_artist_alias USING gin (lower(name) gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_mb_artist_name_lower      ON mb_artist(lower(name));
+CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_name_lower ON mb_artist_alias(lower(name));
 CREATE INDEX IF NOT EXISTS idx_mb_acn_artist            ON mb_artist_credit_name(artist);
 CREATE INDEX IF NOT EXISTS idx_mb_rg_credit             ON mb_release_group(artist_credit);
 CREATE INDEX IF NOT EXISTS idx_mb_rg_type               ON mb_release_group(type);
 CREATE INDEX IF NOT EXISTS idx_mb_rg_name_trgm          ON mb_release_group USING gin (lower(name) gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_mb_release_rg            ON mb_release(release_group);
 CREATE INDEX IF NOT EXISTS idx_mb_rgstj_secondary       ON mb_release_group_secondary_type_join(secondary_type);
+CREATE INDEX IF NOT EXISTS idx_mb_track_medium          ON mb_track(medium);
+CREATE INDEX IF NOT EXISTS idx_mb_medium_release        ON mb_medium(release);
+CREATE INDEX IF NOT EXISTS idx_mb_release_label_rel     ON mb_release_label(release);
+CREATE INDEX IF NOT EXISTS idx_mb_recording_ac          ON mb_recording(artist_credit);
+CREATE INDEX IF NOT EXISTS idx_mb_track_recording       ON mb_track(recording);
 
 -- ============================================================
 -- Views

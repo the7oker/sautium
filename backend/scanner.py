@@ -239,13 +239,12 @@ class LibraryScanner:
 
     @staticmethod
     def get_or_create_artist(db: Session, artist_name: str) -> Artist:
-        """Get existing artist or create new one. Uses deterministic UUID,
-        but resolves known aliases first so a rescan of a previously-
-        normalized variant ("H. Mancini" → "Henry Mancini") converges on the
-        canonical artist instead of re-fragmenting."""
-        from artist_aliases import resolve_alias
+        """Get existing artist or create new one (deterministic name-UUID).
 
-        uid = resolve_alias(db, artist_name) or artist_uuid(artist_name)
+        Non-pure variants ("H. Mancini" → "Henry Mancini") may fragment on
+        ingestion; the idempotent MB canon pass re-merges them (MB aliases +
+        merge-on-MBID-collision), so no per-ingestion alias lookup is kept."""
+        uid = artist_uuid(artist_name)
         artist = db.query(Artist).filter(Artist.id == uid).first()
 
         if not artist:
@@ -676,6 +675,12 @@ class LibraryScanner:
                             track_number=metadata.get("track_number"),
                             disc_number=metadata.get("disc_number", 1),
                             isrc=metadata.get("isrc"),
+                            # Original tags — ground truth for re-normalization / correction
+                            raw_track_name=metadata.get("title"),
+                            raw_artist=metadata.get("artist"),
+                            raw_album_artist=metadata.get("album_artist"),
+                            raw_album=metadata.get("album"),
+                            raw_year=metadata.get("date"),
                         )
                         db.add(media_file)
                         db.flush()

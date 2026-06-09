@@ -16,7 +16,7 @@ confidence gates (``_SCORE_OK``) need no retuning.
 """
 
 import logging
-from typing import List
+from typing import Dict, List
 
 from db_pool import db_query
 from uuid_utils import normalize
@@ -44,15 +44,37 @@ def search_artist(name: str, limit: int = 5) -> List[dict]:
 
     The score is ``round(100 * best_trgm_similarity)`` over the artist's own
     name and all its aliases, forced to 100 on an exact normalized-name match.
+
+    EXACT-FIRST: most owned names are an MB artist's exact name, so an indexed
+    equality on ``lower(name)`` / alias (~1 ms) short-circuits the ~250-1400 ms
+    trgm scan, which is kept only for genuinely dirty/variant names.
     """
     q = (name or "").strip()
     if not q:
         return []
     qn = q.lower()
 
-    # Candidate gen leans on the gin_trgm `%` operator (similarity_threshold,
-    # default 0.3) so only plausibly-similar names/aliases are scanned; the
-    # canonical artist is the join target either way (alias hits resolve to it).
+    exact = db_query("""
+        SELECT a.gid::text AS mbid, a.name, a.type AS type_id,
+               a.comment AS disambiguation, ar.name AS country
+        FROM mb_artist a
+        LEFT JOIN mb_area ar ON ar.id = a.area
+        WHERE a.id IN (
+            SELECT id FROM mb_artist WHERE lower(name) = %(qn)s
+            UNION
+            SELECT artist FROM mb_artist_alias WHERE lower(name) = %(qn)s
+        )
+        ORDER BY a.id
+        LIMIT %(lim)s
+    """, {"qn": qn, "lim": int(limit)})
+    if exact:
+        return [{"mbid": r["mbid"], "name": r["name"], "score": 100,
+                 "type": _ARTIST_TYPE.get(r["type_id"]), "country": r["country"],
+                 "disambiguation": r["disambiguation"] or ""} for r in exact]
+
+    # Fuzzy fallback: gin_trgm `%` operator (similarity_threshold, default 0.3)
+    # so only plausibly-similar names/aliases are scanned; the canonical artist
+    # is the join target either way (alias hits resolve to it).
     rows = db_query("""
         WITH hits AS (
             SELECT a.id, similarity(lower(a.name), %(qn)s) AS sim
@@ -110,7 +132,7 @@ def fetch_album_release_groups(mbid: str) -> List[dict]:
     returns an empty list there.
     """
     rows = db_query("""
-        SELECT rg.name AS title, pt.name AS primary_type,
+        SELECT rg.gid::text AS rg_mbid, rg.name AS title, pt.name AS primary_type,
                array_remove(array_agg(DISTINCT st.name), NULL) AS secondary_types,
                array_remove(array_agg(DISTINCT r.name), NULL) AS release_titles
         FROM mb_artist a
@@ -122,12 +144,44 @@ def fetch_album_release_groups(mbid: str) -> List[dict]:
         LEFT JOIN mb_release_group_secondary_type st ON st.id = j.secondary_type
         LEFT JOIN mb_release r ON r.release_group = rg.id
         WHERE a.gid = %(mbid)s::uuid
-        GROUP BY rg.id, rg.name, pt.name
+        GROUP BY rg.id, rg.gid, rg.name, pt.name
     """, {"mbid": str(mbid)})
     return [{
+        "rg_mbid": r["rg_mbid"],
         "title": r["title"] or "",
         "primary_type": r["primary_type"],
         "secondary_types": list(r["secondary_types"] or []),
         "release_titles": list(r["release_titles"] or []),
         "first_year": None,
     } for r in rows]
+
+
+def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
+    """Every release of a release-group with its full tracklist — the content
+    fingerprint for release-ID (name-independent) + per-track recording MBID
+    (track normalization). Tens of releases × ~10-15 tracks; one indexed join.
+
+    Returns ``[{release_mbid, tracks: [{title, length_ms, recording_mbid,
+    disc, position}, …]}, …]``, releases best-tracklist-first is the caller's job.
+    Local-only (the MB API can't page tracklists of every release cheaply).
+    """
+    rows = db_query("""
+        SELECT r.gid::text AS release_mbid, t.name AS title, t.length AS length_ms,
+               rec.gid::text AS recording_mbid, m.position AS disc, t.position AS pos
+        FROM mb_release r
+        JOIN mb_medium m ON m.release = r.id
+        JOIN mb_track t ON t.medium = m.id
+        JOIN mb_recording rec ON rec.id = t.recording
+        WHERE r.release_group = (SELECT id FROM mb_release_group WHERE gid = %(rg)s::uuid)
+        ORDER BY r.id, m.position, t.position
+    """, {"rg": str(rg_mbid)})
+    rels: Dict[str, list] = {}
+    for r in rows:
+        rels.setdefault(r["release_mbid"], []).append({
+            "title": r["title"] or "",
+            "length_ms": r["length_ms"],
+            "recording_mbid": r["recording_mbid"],
+            "disc": r["disc"],
+            "position": r["pos"],
+        })
+    return [{"release_mbid": rid, "tracks": tracks} for rid, tracks in rels.items()]

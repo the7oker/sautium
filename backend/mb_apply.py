@@ -47,7 +47,7 @@ def apply_decisions(jsonl_path: str, do_merge=True, do_rename=True,
             for mbid, rs in merges.items():
                 canonical = rs[0]["canonical"]
                 for r in rs:
-                    recanonicalize_artist(db, r["artist_id"], r["name"], canonical, mbid)
+                    recanonicalize_artist(db, r["artist_id"], canonical)
                     stats["merge_rows"] += 1
                 stats["merge_groups"] += 1
                 logger.info(f"Merged → {canonical}: {[r['name'] for r in rs]}")
@@ -56,8 +56,7 @@ def apply_decisions(jsonl_path: str, do_merge=True, do_rename=True,
             for r in rows:
                 if r["action"] != "rename" or r["artist_id"] in merged_ids:
                     continue
-                recanonicalize_artist(db, r["artist_id"], r["name"],
-                                      r["canonical"], r["mbid"])
+                recanonicalize_artist(db, r["artist_id"], r["canonical"])
                 stats["rename"] += 1
                 logger.info(f"Renamed: {r['name']} → {r['canonical']}")
 

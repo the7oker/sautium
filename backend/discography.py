@@ -90,6 +90,73 @@ def release_match_key(title: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def _clean_edition(raw: str) -> str:
+    """Edition name from a matched bracket/suffix chunk: drop the wrapping
+    brackets / leading separator, keep the original case for display."""
+    return raw.strip().strip("()[]").lstrip("-–—: ").strip()
+
+
+def split_edition(title: str) -> tuple[str, Optional[str]]:
+    """Split a dirty album title into ``(canonical_title, edition)``.
+
+    Extracts only a BRACKETED or dash/colon-suffix edition marker, so an inline
+    edition word survives ("Hellbilly Deluxe" → no split). Disc suffixes are
+    stripped from the canonical part but are NOT an edition (a disc is a
+    position, captured by ``media_files.disc_number``) → edition stays None for
+    those. Case/spacing of the canonical part is preserved — this is the rename
+    target, not the lowercase match-key.
+
+        "Forever Young (Super Deluxe Edition)" -> ("Forever Young", "Super Deluxe Edition")
+        "I Am The Night [Remaster]"            -> ("I Am The Night", "Remaster")
+        "Quadrophenia (Disc 1)"                -> ("Quadrophenia", None)
+        "Hellbilly Deluxe"                     -> ("Hellbilly Deluxe", None)
+    """
+    s = (title or "").strip()
+    edition = None
+    m = _EDITION_BRACKET_RE.search(s)
+    if m:
+        edition = _clean_edition(m.group(0))
+        s = _EDITION_BRACKET_RE.sub("", s)
+    else:
+        m = _EDITION_SUFFIX_RE.search(s)
+        if m:
+            edition = _clean_edition(m.group(0))
+            s = _EDITION_SUFFIX_RE.sub("", s)
+    s = _DISC_RE.sub(" ", s)
+    s = re.sub(r"\s+", " ", s).strip(" -–—:")
+    return (s or title.strip()), edition
+
+
+def _plain_key(s: str) -> str:
+    return _NONALNUM_RE.sub(" ", unicodedata.normalize("NFC", (s or "").strip().lower())).strip()
+
+
+# Trailing pressing/edition markers split_edition's keyword list misses: a bracketed
+# group, then a separator-suffix (separator must be space-padded so "Candy-O" keeps its
+# "-O"). Used only with a known canonical name to validate the cut (see title_residual).
+_TRAIL_MARKER_RES = (
+    re.compile(r"\s*[\(\[]([^\)\]]+)[\)\]]\s*$"),
+    re.compile(r"\s*[-–—:]\s+(.+?)\s*$"),
+)
+
+
+def title_residual(dirty: str, canonical: str) -> Optional[str]:
+    """The pressing/edition marker a dirty title carries BEYOND its canonical name —
+    catalog number, region, format, bare year — the non-keyword cases split_edition
+    leaves on the title. Returns the trailing bracket/suffix ONLY when removing it
+    leaves exactly the canonical (so a regional retitle or pure typography yields None,
+    never a spurious edition): "Animals (2011, 50999 028951 2 3)" vs "Animals" ->
+    "2011, 50999 028951 2 3"; "It's a Heartache" vs "Natural Force" -> None."""
+    d = (dirty or "").strip()
+    if not d or _plain_key(d) == _plain_key(canonical):
+        return None
+    for rx in _TRAIL_MARKER_RES:
+        m = rx.search(d)
+        if m and _plain_key(rx.sub("", d)) == _plain_key(canonical):
+            return m.group(1).strip()
+    return None
+
+
 def _earlier(a: dict, b: dict) -> bool:
     """True if release `a` is older than `b` (None year sorts last)."""
     return (a.get("year") or 99999) < (b.get("year") or 99999)
