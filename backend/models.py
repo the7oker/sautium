@@ -12,7 +12,6 @@ Schema overview:
     audio_features ──→ track_id
     text_embeddings ──→ track_id
     artist_bio_embeddings ──→ artist_id
-    album_info_embeddings ──→ album_id
     genre_desc_embeddings ──→ genre_id
 """
 
@@ -200,8 +199,6 @@ class Album(Base):
     # Relationships
     variants = relationship("AlbumVariant", back_populates="album", cascade="all, delete-orphan")
     artist_associations = relationship("AlbumArtist", back_populates="album", cascade="all, delete-orphan")
-    info_records = relationship("AlbumInfo", back_populates="album", cascade="all, delete-orphan")
-    tag_associations = relationship("AlbumTag", back_populates="album", cascade="all, delete-orphan")
 
     __table_args__ = (
         CheckConstraint("user_rating >= 0 AND user_rating <= 5", name="check_album_rating"),
@@ -639,33 +636,6 @@ class ArtistBioEmbedding(Base):
     )
 
 
-class AlbumInfoEmbedding(Base):
-    """Album info embeddings (384-dimensional, chunked). One or more per album."""
-    __tablename__ = "album_info_embeddings"
-
-    id = Column(Integer, primary_key=True)
-    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
-    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
-    vector = Column(Vector(1024), nullable=False)
-    chunk_index = Column(Integer, nullable=False, default=0)
-    chunk_text = Column(Text)
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now())
-
-    model = relationship("EmbeddingModel")
-    album = relationship("Album")
-
-    __table_args__ = (
-        UniqueConstraint("album_id", "model_id", "chunk_index", name="uq_album_info_emb_album_model_chunk"),
-        Index("idx_album_info_emb_vector", "vector",
-              postgresql_using="hnsw",
-              postgresql_with={"m": 16, "ef_construction": 64},
-              postgresql_ops={"vector": "vector_cosine_ops"}),
-        Index("idx_album_info_emb_model", "model_id"),
-    )
-
-
 class GenreDescEmbedding(Base):
     """Genre description embeddings (384-dimensional, chunked). One or more per genre."""
     __tablename__ = "genre_desc_embeddings"
@@ -808,7 +778,6 @@ class Tag(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
     artist_associations = relationship("ArtistTag", back_populates="tag", cascade="all, delete-orphan")
-    album_associations = relationship("AlbumTag", back_populates="tag", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("idx_tags_name_lower", "name", postgresql_ops={"name": "text_pattern_ops"}),
@@ -913,69 +882,6 @@ class SimilarArtist(Base):
 
 # ───────────────────────────────────────────────────────────────────────────
 # Album metadata tables (UUID FKs)
-# ───────────────────────────────────────────────────────────────────────────
-
-class AlbumInfo(Base):
-    """Normalized album information from multiple sources."""
-    __tablename__ = "album_info"
-
-    id = Column(Integer, primary_key=True)
-    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
-    source = Column(String(50), nullable=False)
-
-    summary = Column(Text)
-    content = Column(Text)
-    url = Column(Text)
-    listeners = Column(Integer)
-    playcount = Column(BigInteger)
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now())
-
-    album = relationship("Album", back_populates="info_records")
-
-    __table_args__ = (
-        Index("idx_album_info_source", "source"),
-        Index("idx_album_info_listeners", "listeners", postgresql_where=(Column("listeners") != None)),
-        Index("idx_album_info_playcount", "playcount", postgresql_where=(Column("playcount") != None)),
-        UniqueConstraint("album_id", "source", name="uq_album_info"),
-        CheckConstraint("summary IS NOT NULL OR content IS NOT NULL OR listeners IS NOT NULL OR playcount IS NOT NULL", name="chk_has_album_info"),
-    )
-
-    def __repr__(self):
-        return f"<AlbumInfo(album_id={self.album_id}, source='{self.source}')>"
-
-
-class AlbumTag(Base):
-    """Many-to-many relationship between albums and tags with weight."""
-    __tablename__ = "album_tags"
-
-    id = Column(Integer, primary_key=True)
-    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
-    tag_id = Column(UUID(as_uuid=True), ForeignKey("tags.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
-    weight = Column(Integer, nullable=False)
-    source = Column(String(50), nullable=False)
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now())
-
-    album = relationship("Album", back_populates="tag_associations")
-    tag = relationship("Tag", back_populates="album_associations")
-
-    __table_args__ = (
-        Index("idx_album_tags_tag", "tag_id"),
-        Index("idx_album_tags_source", "source"),
-        Index("idx_album_tags_weight", "weight"),
-        UniqueConstraint("album_id", "tag_id", "source", name="uq_album_tags"),
-        CheckConstraint("weight >= 0 AND weight <= 100", name="chk_album_tag_weight_range"),
-    )
-
-    def __repr__(self):
-        return f"<AlbumTag(album_id={self.album_id}, tag_id={self.tag_id}, weight={self.weight})>"
-
-
-# ───────────────────────────────────────────────────────────────────────────
-# Statistics & External metadata
 # ───────────────────────────────────────────────────────────────────────────
 
 class LocalPlayStats(Base):

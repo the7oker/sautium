@@ -1,11 +1,11 @@
 """
-Enrichment embedding generation for artist bios, album info, and genre descriptions.
+Enrichment embedding generation for artist bios and genre descriptions.
 
 Generates 1024-dimensional text embeddings at entity level (not track level).
 Uses chunking to handle texts longer than the model's 128-token limit.
 
 Pipeline:
-  1. Fetch text from artist_bios / album_info / genre_descriptions
+  1. Fetch text from artist_bios / genre_descriptions
   2. Strip HTML tags, clean whitespace
   3. Prepend entity context ("Artist: Name. ...")
   4. Chunk if text exceeds model token limit
@@ -26,7 +26,6 @@ from tqdm import tqdm
 from config import settings
 from database import get_db_context
 from models import (
-    AlbumInfoEmbedding,
     ArtistBioEmbedding,
     EmbeddingModel,
     GenreDescEmbedding,
@@ -242,128 +241,6 @@ class ArtistBioEmbeddingGenerator(_BaseEnrichmentGenerator):
         return stats
 
 
-class AlbumInfoEmbeddingGenerator(_BaseEnrichmentGenerator):
-    """Generate embeddings from album information."""
-
-    def generate_all(
-        self,
-        db: Session,
-        limit: Optional[int] = None,
-        force: bool = False,
-    ) -> Dict[str, int]:
-        stats = {"processed": 0, "success": 0, "skipped": 0, "failed": 0, "chunks": 0}
-        start = time.time()
-
-        where_parts = ["(ai.content IS NOT NULL OR ai.summary IS NOT NULL)"]
-        if not force:
-            where_parts.append(
-                "al.id NOT IN (SELECT DISTINCT aie.album_id FROM album_info_embeddings aie)"
-            )
-        where_clause = "WHERE " + " AND ".join(where_parts)
-
-        query_sql = f"""
-            SELECT DISTINCT ON (al.id) al.id as album_id, al.title, al.release_year,
-                   (SELECT a.name FROM album_artists aa
-                    JOIN artists a ON aa.artist_id = a.id
-                    WHERE aa.album_id = al.id AND aa.role = 'primary'
-                    LIMIT 1) as artist_name,
-                   ai.content, ai.summary
-            FROM albums al
-            JOIN album_info ai ON ai.album_id = al.id AND ai.source = 'lastfm'
-            {where_clause}
-            ORDER BY al.id, ai.content IS NOT NULL DESC
-        """
-        if limit:
-            query_sql += f" LIMIT {limit}"
-
-        rows = db.execute(sa_text(query_sql)).fetchall()
-        if not rows:
-            logger.info("No albums pending info embedding generation")
-            return stats
-
-        logger.info(f"Processing {len(rows)} album infos for embeddings")
-        self.load_model()
-        model_record = self._get_or_create_model_record(db)
-
-        if force:
-            album_ids = [r.album_id for r in rows]
-            db.execute(
-                sa_text("DELETE FROM album_info_embeddings WHERE album_id = ANY(:ids)"),
-                {"ids": album_ids},
-            )
-            db.flush()
-
-        for batch_start in tqdm(
-            range(0, len(rows), self.batch_size),
-            desc="Album info embeddings",
-            unit="batch",
-        ):
-            batch_rows = rows[batch_start:batch_start + self.batch_size]
-            all_chunks = []
-
-            for row in batch_rows:
-                raw = row.content or row.summary or ""
-                cleaned = strip_html(raw)
-                if not cleaned:
-                    stats["skipped"] += 1
-                    continue
-
-                # Build context prefix
-                prefix = f"Album: {row.title}"
-                if row.artist_name:
-                    prefix += f" by {row.artist_name}"
-                if row.release_year:
-                    prefix += f" ({row.release_year})"
-                text_with_context = f"{prefix}. {cleaned}"
-
-                chunks = split_into_chunks(text_with_context)
-                for ci, chunk in enumerate(chunks):
-                    all_chunks.append((row.album_id, ci, chunk))
-
-            if not all_chunks:
-                stats["processed"] += len(batch_rows)
-                continue
-
-            try:
-                embeddings = self.encode([c[2] for c in all_chunks])
-            except Exception as e:
-                logger.error(f"Encoding failed: {e}")
-                stats["failed"] += len(batch_rows)
-                continue
-
-            batch_failed = set()
-            for (album_id, chunk_index, chunk_text), vector in zip(all_chunks, embeddings):
-                if album_id in batch_failed:
-                    continue
-                try:
-                    db.add(AlbumInfoEmbedding(
-                        album_id=album_id,
-                        model_id=model_record.id,
-                        vector=vector.tolist(),
-                        chunk_index=chunk_index,
-                        chunk_text=chunk_text[:500],
-                    ))
-                    db.flush()
-                    stats["chunks"] += 1
-                except Exception as e:
-                    logger.error(f"Failed to save album info embedding for {album_id}: {e}")
-                    db.rollback()
-                    batch_failed.add(album_id)
-
-            batch_albums = {c[0] for c in all_chunks}
-            stats["failed"] += len(batch_failed)
-            stats["success"] += len(batch_albums) - len(batch_failed)
-            stats["processed"] += len(batch_rows)
-            db.commit()
-
-        elapsed = time.time() - start
-        logger.info(
-            f"Album info embeddings done: {stats['success']} albums, "
-            f"{stats['chunks']} chunks ({elapsed:.1f}s)"
-        )
-        return stats
-
-
 class GenreDescEmbeddingGenerator(_BaseEnrichmentGenerator):
     """Generate embeddings from genre descriptions."""
 
@@ -485,14 +362,6 @@ def generate_artist_bio_embeddings(
         return gen.generate_all(db, limit=limit, force=force)
 
 
-def generate_album_info_embeddings(
-    limit: Optional[int] = None, batch_size: Optional[int] = None, force: bool = False,
-) -> Dict[str, int]:
-    gen = AlbumInfoEmbeddingGenerator(batch_size=batch_size)
-    with get_db_context() as db:
-        return gen.generate_all(db, limit=limit, force=force)
-
-
 def generate_genre_desc_embeddings(
     limit: Optional[int] = None, batch_size: Optional[int] = None, force: bool = False,
 ) -> Dict[str, int]:
@@ -508,7 +377,6 @@ def generate_all_enrichment_embeddings(
     results: Dict[str, Dict[str, int]] = {}
     for cls, key in (
         (ArtistBioEmbeddingGenerator, "artist_bios"),
-        (AlbumInfoEmbeddingGenerator, "album_info"),
         (GenreDescEmbeddingGenerator, "genre_descs"),
     ):
         gen = cls(batch_size=batch_size)

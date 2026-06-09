@@ -9,8 +9,7 @@ Each batch, in order:
   1. Last.fm track_stats (listeners + playcount) — priority-ordered
   2. Lyrics (lrclib/genius) for tracks missing them
   3. Last.fm artist bios for new artists
-  4. Last.fm album info for new albums
-  5. Last.fm genre wiki for new genres
+  4. Last.fm genre wiki for new genres
 
 Track-stats priority (Tier 1 → 3):
   1. Tracks whose primary artist has the most accumulated listen-time
@@ -19,7 +18,7 @@ Track-stats priority (Tier 1 → 3):
 
 One-shot per entity: a track already in `track_stats` (source='lastfm')
 or marked `not_found`/`error` in `external_metadata` is skipped. Same
-pattern for artists/albums/genres against their respective tables.
+pattern for artists/genres against their respective tables.
 """
 
 from __future__ import annotations
@@ -44,7 +43,6 @@ _BATCH_INTERVAL_MIN = 30          # sleep between batches
 _TRACK_STATS_PER_BATCH = 100      # Last.fm track.getInfo calls per batch
 _LYRICS_PER_BATCH = 50            # lrclib/genius calls per batch
 _ARTISTS_PER_BATCH = 30           # Last.fm artist.getInfo calls per batch
-_ALBUMS_PER_BATCH = 50            # Last.fm album.getInfo calls per batch
 _GENRES_PER_BATCH = 20            # Last.fm tag.getInfo calls per batch
 _LASTFM_DELAY_S = 0.2             # ~5 req/sec, the Last.fm published limit
 
@@ -125,7 +123,6 @@ _state: Dict[str, Any] = {
         "track_stats": 0,
         "lyrics": 0,
         "artists": 0,
-        "albums": 0,
         "genres": 0,
         "discography": 0,
         "mb_canon": 0,
@@ -252,84 +249,6 @@ def _step_missing_artists(limit: int) -> Dict[str, int]:
                     stats["errors"] += 1
             except Exception as e:
                 logger.error(f"Background artist failed for {row.name}: {e}")
-                stats["errors"] += 1
-                db.rollback()
-            time.sleep(_LASTFM_DELAY_S)
-
-    return stats
-
-
-def _step_missing_albums(limit: int) -> Dict[str, int]:
-    """Fetch Last.fm info for albums that don't have it yet."""
-    from lastfm import LastFmService
-
-    stats = {"processed": 0, "success": 0, "not_found": 0, "errors": 0}
-    lastfm = LastFmService()
-
-    # Need primary artist name to call Last.fm album.getInfo. Pick the
-    # most common artist across tracks on the album as the canonical
-    # one (handles compilations + features gracefully).
-    sql = text("""
-        WITH album_primary AS (
-            SELECT al.id AS album_id, al.title,
-                   (
-                       SELECT a.name
-                       FROM track_artists ta
-                       JOIN artists a ON a.id = ta.artist_id
-                       JOIN album_variants av ON av.album_id = al.id
-                       JOIN media_files mf ON mf.album_variant_id = av.id
-                       WHERE ta.track_id = mf.track_id
-                         AND ta.role = 'primary'
-                       GROUP BY a.name
-                       ORDER BY COUNT(*) DESC, MIN(a.name)
-                       LIMIT 1
-                   ) AS artist_name
-            FROM albums al
-        )
-        SELECT ap.album_id, ap.title, ap.artist_name
-        FROM album_primary ap
-        WHERE ap.artist_name IS NOT NULL
-        AND NOT EXISTS (
-            SELECT 1 FROM album_info ai
-            WHERE ai.album_id = ap.album_id AND ai.source = 'lastfm'
-        )
-        AND NOT EXISTS (
-            SELECT 1 FROM external_metadata em
-            WHERE em.entity_type = 'album'
-              AND em.entity_id = ap.album_id::text
-              AND em.source = 'lastfm'
-              AND em.metadata_type = 'info'
-              AND em.fetch_status IN ('not_found', 'error')
-        )
-        ORDER BY ap.title
-        LIMIT :batch
-    """)
-
-    with get_db_context() as db:
-        rows = db.execute(sql, {"batch": int(limit)}).fetchall()
-        if not rows:
-            return stats
-        logger.info(f"Background: {len(rows)} albums queued for Last.fm info")
-
-        for row in rows:
-            if _cancel_flag():
-                break
-            stats["processed"] += 1
-            try:
-                result = lastfm.enrich_album(
-                    db, row.album_id, row.artist_name, row.title,
-                )
-                if result["status"] == "success":
-                    stats["success"] += 1
-                elif result["status"] == "not_found":
-                    stats["not_found"] += 1
-                else:
-                    stats["errors"] += 1
-            except Exception as e:
-                logger.error(
-                    f"Background album failed for "
-                    f"{row.artist_name} - {row.title}: {e}"
-                )
                 stats["errors"] += 1
                 db.rollback()
             time.sleep(_LASTFM_DELAY_S)
@@ -517,7 +436,7 @@ def _step_mb_canonicalize(limit: int) -> Dict[str, int]:
 
 def _run_once() -> Dict[str, Any]:
     """Run one full batch (all five steps). Honours cancel between steps."""
-    summary = {"track_stats": {}, "lyrics": {}, "artists": {}, "albums": {},
+    summary = {"track_stats": {}, "lyrics": {}, "artists": {},
                "genres": {}, "discography": {}, "mb_canon": {}}
 
     if _cancel_flag():
@@ -540,13 +459,6 @@ def _run_once() -> Dict[str, Any]:
     _set(current_step="artists")
     summary["artists"] = _step_missing_artists(_ARTISTS_PER_BATCH)
     _bump("artists", summary["artists"].get("success", 0))
-
-    if _cancel_flag():
-        return summary
-
-    _set(current_step="albums")
-    summary["albums"] = _step_missing_albums(_ALBUMS_PER_BATCH)
-    _bump("albums", summary["albums"].get("success", 0))
 
     if _cancel_flag():
         return summary

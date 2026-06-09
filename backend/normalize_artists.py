@@ -1,24 +1,23 @@
 """
-Artist normalization with two-pass algorithm and cascading UUID updates.
+Artist normalization (deterministic, offline) with cascading UUID updates.
 
-Pass 1 (offline, safe): Split on feat./ft./featuring/vs. patterns — never band names.
-Pass 2 (Last.fm):       Verify suspicious patterns (&, comma, and, with, /)
-                         by checking if compound name exists on Last.fm.
+Splits a compound artist ONLY on always-collaboration separators (feat./ft./
+featuring/vs./pres./aka/meets) — never band names. '&', ',', 'and', 'with', '/'
+are kept WHOLE: telling "Simon & Garfunkel" (band) from "Beth Hart & Joe Bonamassa"
+(collab) needed a Last.fm lookup, which is non-deterministic across nodes/time and
+silently forks the artist (hence track/album) UUID, breaking P2P convergence.
 
-After splitting, track and album UUIDs are recalculated based on the
-normalized primary artist name, and cascaded to all FK references via
-ON UPDATE CASCADE constraints.
+After splitting, track and album UUIDs are recalculated from the normalized primary
+artist name and cascaded to all FK references via ON UPDATE CASCADE constraints.
 
 Usage:
-    # Inside Docker container:
-    python normalize_artists.py                  # Pass 1 only (safe)
-    python normalize_artists.py --pass2          # Pass 1 + Last.fm verification
-    python normalize_artists.py --dry-run        # Preview only
-    python normalize_artists.py --pass2 --dry-run
+    python normalize_artists.py                  # run
+    python normalize_artists.py --dry-run        # preview only
 """
 
 import logging
 import re
+from collections import defaultdict
 from typing import List, Tuple, Optional, Dict
 
 from sqlalchemy import text
@@ -41,14 +40,10 @@ SAFE_SEPARATORS = [
     (r'\s+meets\s+',     'meets'),
 ]
 
-# Patterns that MIGHT be band names — need Last.fm verification
-SUSPICIOUS_SEPARATORS = [
-    (r'\s+&\s+',   '&'),
-    (r',\s+',      ','),
-    (r'\s+and\s+', 'and'),
-    (r'\s+with\s+','with'),
-    (r'\s*/\s*',   '/'),      # slash with or without spaces (BORIS BREJCHA/VARIOUS)
-]
+# '&', ',', 'and', 'with', '/' are NOT split: a compound under them ("Simon & Garfunkel",
+# "Hootie & the Blowfish") is just as often a single band as a collaboration, and the only
+# way to tell was a Last.fm lookup — non-deterministic across nodes/time, which silently
+# forks the artist (hence the track/album) UUID and breaks P2P convergence. Kept WHOLE.
 
 
 def _clean_artist_name(name: str) -> str:
@@ -83,28 +78,19 @@ def detect_compound_type(name: str) -> Optional[Tuple[str, str, List[str]]]:
     Detect if artist name is compound and classify separator type.
 
     Returns:
-        ('safe', separator_label, [parts]) — guaranteed collaboration
-        ('suspicious', separator_label, [parts]) — needs verification
-        None — not compound
+        ('safe', separator_label, [parts]) — guaranteed collaboration (feat./vs./…)
+        None — not a safe compound (incl. '&'/','/'and' forms, kept whole — see SAFE note)
     """
     # Pre-clean the name
     cleaned = _clean_artist_name(name)
 
-    # Check safe patterns first (higher priority)
+    # Only the ALWAYS-collaboration separators split — deterministic, no external lookup
     for pattern, label in SAFE_SEPARATORS:
         if re.search(pattern, cleaned, re.IGNORECASE):
             parts = re.split(pattern, cleaned, flags=re.IGNORECASE)
             parts = _filter_parts([p.strip() for p in parts if p.strip()])
             if len(parts) > 1:
                 return ('safe', label, parts)
-
-    # Check suspicious patterns
-    for pattern, label in SUSPICIOUS_SEPARATORS:
-        if re.search(pattern, cleaned, re.IGNORECASE):
-            parts = re.split(pattern, cleaned, flags=re.IGNORECASE)
-            parts = _filter_parts([p.strip() for p in parts if p.strip()])
-            if len(parts) > 1:
-                return ('suspicious', label, parts)
 
     return None
 
@@ -644,7 +630,6 @@ def normalize_pass1(db: Session, dry_run: bool = False) -> Dict:
     total = {
         'artists_scanned': len(all_artists),
         'safe_found': 0,
-        'suspicious_marked': 0,
         'split': 0,
         'tracks_updated': 0,
         'albums_updated': 0,
@@ -673,185 +658,167 @@ def normalize_pass1(db: Session, dry_run: bool = False) -> Dict:
             total['tracks_merged'] += stats['tracks_merged']
             total['albums_merged'] += stats['albums_merged']
 
-        elif compound_type == 'suspicious':
-            total['suspicious_marked'] += 1
-            if not dry_run:
-                db.execute(text("""
-                    UPDATE artists SET verification_status = 'suspicious'
-                    WHERE id = :id AND verification_status = 'unverified'
-                """), {"id": artist_id})
-            logger.debug(f"Marked suspicious: '{name}' (separator: {separator})")
-
     if not dry_run:
         db.commit()
 
     logger.info(
-        f"Pass 1 done: scanned {total['artists_scanned']}, "
-        f"safe splits {total['split']}, suspicious marked {total['suspicious_marked']}"
+        f"Artist split done: scanned {total['artists_scanned']}, safe splits {total['split']}"
     )
     return total
 
 
-def normalize_pass2(db: Session, dry_run: bool = False) -> Dict:
+def unsplit_pass2_compounds(db: Session, dry_run: bool = False) -> Dict:
+    """Collapse legacy Pass-2 splits back into whole compound artists.
+
+    Pass 2 (Last.fm-verified '&'/','/'and'/'with'/'/' splitting) was removed: it
+    was non-deterministic across nodes and silently forked artist (hence track/
+    album) UUIDs, breaking P2P convergence. This is its data-migration inverse —
+    one-shot on any node that carries pre-removal data, so its identities match
+    what a fresh scan now produces (split only on feat./vs./… — never '&').
+
+    Authoritative source is media_files.raw_artist/raw_album_artist (immutable
+    scan-time ground truth) re-run through the scanner's exact identity formula
+    `album_artist or artist`. That is what disambiguates pairs a member-set
+    reverse cannot: '&' vs 'and' duplicates ("Trent Reznor & Atticus Ross" /
+    "Trent Reznor and Atticus Ross") and swapped names ("A & B" / "B & A").
+    Idempotent: a compound already whole maps current==target and is a no-op.
     """
-    Pass 2: Verify suspicious artists via Last.fm.
+    stale = {}  # compound_id (== artist_uuid(whole name)) -> display name
+    for aid, name, probe in db.execute(text("""
+        SELECT id::text, name, COALESCE(raw_name, name) AS probe
+        FROM artists WHERE verification_status = 'verified_split'
+    """)).fetchall():
+        if detect_compound_type(probe) is None:
+            stale[aid] = name
 
-    If compound name is found on Last.fm -> it's a band, keep as-is.
-    If not found -> split into individual artists.
-    """
-    import time
-    logger.info("=== Pass 2: Last.fm verification ===")
+    stats = {"compounds": len(stale), "tracks_moved": 0, "tracks_merged": 0,
+             "albums_moved": 0, "albums_merged": 0, "members_removed": 0}
+    if not stale:
+        logger.info("No legacy Pass-2 splits to collapse")
+        return stats
 
-    suspicious = db.execute(text("""
-        SELECT id::text, name FROM artists
-        WHERE verification_status = 'suspicious'
-        ORDER BY name
-    """)).fetchall()
-
-    total = {
-        'suspicious_count': len(suspicious),
-        'verified_band': 0,
-        'verified_split': 0,
-        'errors': 0,
-        'tracks_updated': 0,
-        'albums_updated': 0,
-        'tracks_merged': 0,
-        'albums_merged': 0,
+    member_ids = {
+        mid for (mid,) in db.execute(text("""
+            SELECT DISTINCT member_artist_id::text FROM artist_members
+            WHERE compound_artist_id::text = ANY(:ids)
+        """), {"ids": list(stale)}).fetchall()
     }
 
-    if not suspicious:
-        logger.info("No suspicious artists to verify")
-        return total
+    # Match every file to its scanner identity; keep those landing on a stale compound.
+    # Tracks never collide (track_uuid embeds the title). Albums in shared
+    # compilation directories can map to >1 compound — those are skipped (albums
+    # are local-only, never synced, so their UUID needn't converge), leaving the
+    # dedicated single-collab albums ("Beth Hart & Joe Bonamassa") to move cleanly.
+    track_targets: Dict[str, str] = {}        # current track id -> whole compound name
+    album_names: Dict[str, set] = defaultdict(set)
+    for cur_track, cur_album, raw_artist, raw_album_artist in db.execute(text("""
+        SELECT mf.track_id::text, av.album_id::text, mf.raw_artist, mf.raw_album_artist
+        FROM media_files mf
+        JOIN album_variants av ON av.id = mf.album_variant_id
+        WHERE mf.raw_artist IS NOT NULL OR mf.raw_album_artist IS NOT NULL
+    """)).fetchall():
+        name = (raw_album_artist or raw_artist or "").strip()
+        if name and str(artist_uuid(name)) in stale:
+            track_targets[cur_track] = name
+            album_names[cur_album].add(name)
+    album_targets = {aid: next(iter(names)) for aid, names in album_names.items()
+                     if len(names) == 1}
+    ambiguous_albums = sum(1 for names in album_names.values() if len(names) > 1)
 
-    from lastfm import LastFmService
-    try:
-        lastfm = LastFmService()
-    except Exception as e:
-        logger.error(f"Cannot initialize Last.fm service: {e}")
-        return total
+    if dry_run:
+        logger.info(
+            f"[dry-run] would collapse {len(stale)} compounds: "
+            f"{len(track_targets)} tracks, {len(album_targets)} albums "
+            f"({ambiguous_albums} compilation albums skipped), "
+            f"up to {len(member_ids)} member artists GC'd"
+        )
+        return stats
 
-    for artist_id, name in suspicious:
-        result = detect_compound_type(name)
-        if not result:
+    def _reset_assoc(table: str, entity_col: str, entity_id: str, artist_id: str):
+        db.execute(text(f"DELETE FROM {table} WHERE {entity_col} = :e"), {"e": entity_id})
+        db.execute(text(f"""
+            INSERT INTO {table} ({entity_col}, artist_id, role)
+            VALUES (:e, :a, 'primary') ON CONFLICT DO NOTHING
+        """), {"e": entity_id, "a": artist_id})
+
+    for cur_track, name in track_targets.items():
+        row = db.execute(text("SELECT title FROM tracks WHERE id = :id"),
+                         {"id": cur_track}).fetchone()
+        if not row:
+            continue  # already merged away by an earlier move
+        target = str(track_uuid(row[0], name))
+        merged = target != cur_track and db.execute(
+            text("SELECT 1 FROM tracks WHERE id = :id"), {"id": target}).fetchone() is not None
+        final = _update_track_uuid(db, cur_track, target)
+        _reset_assoc("track_artists", "track_id", final, str(artist_uuid(name)))
+        if merged:
+            stats["tracks_merged"] += 1
+        elif final != cur_track:
+            stats["tracks_moved"] += 1
+
+    for cur_album, name in album_targets.items():
+        row = db.execute(text("SELECT title FROM albums WHERE id = :id"),
+                         {"id": cur_album}).fetchone()
+        if not row:
             continue
+        target = str(album_uuid(row[0], name))
+        merged = target != cur_album and db.execute(
+            text("SELECT 1 FROM albums WHERE id = :id"), {"id": target}).fetchone() is not None
+        final = _update_album_uuid(db, cur_album, target)
+        _reset_assoc("album_artists", "album_id", final, str(artist_uuid(name)))
+        if merged:
+            stats["albums_merged"] += 1
+        elif final != cur_album:
+            stats["albums_moved"] += 1
 
-        _, separator, parts = result
-        logger.info(f"Verifying: '{name}' ...")
+    # Drop membership links; demote compounds to plain whole artists (local-only
+    # metadata — not part of any synced UUID, reset purely so the row matches a
+    # fresh scan and a future Pass-1 leaves it alone).
+    db.execute(text("DELETE FROM artist_members WHERE compound_artist_id::text = ANY(:ids)"),
+               {"ids": list(stale)})
+    db.execute(text("""
+        UPDATE artists SET verification_status = 'unverified',
+                           artist_type = 'unknown', raw_name = NULL
+        WHERE id::text = ANY(:ids)
+    """), {"ids": list(stale)})
 
-        try:
-            compound_info = lastfm.get_artist_info(name, fetch_similar=False)
-            time.sleep(0.25)
-        except Exception as e:
-            logger.warning(f"  Last.fm lookup failed for '{name}': {e} — treating as not found")
-            compound_info = None
+    # GC member artists that existed only because of the split (nothing left now).
+    for mid in member_ids - set(stale):
+        leftover = db.execute(text("""
+            SELECT (SELECT count(*) FROM track_artists WHERE artist_id = :m)
+                 + (SELECT count(*) FROM album_artists WHERE artist_id = :m)
+                 + (SELECT count(*) FROM artist_members WHERE member_artist_id = :m)
+        """), {"m": mid}).scalar()
+        if leftover == 0:
+            db.execute(text("DELETE FROM artists WHERE id = :m"), {"m": mid})
+            stats["members_removed"] += 1
 
-        if compound_info:
-            # Found on Last.fm — but is it a real band or just a collaboration page?
-            compound_listeners = compound_info.get('stats', {}).get('listeners', 0)
-            if isinstance(compound_listeners, str):
-                compound_listeners = int(compound_listeners) if compound_listeners.isdigit() else 0
-
-            # Always check individual parts — collaboration if ANY part
-            # is a known artist with more listeners than the compound name
-            is_collaboration = False
-            parts_listeners = []
-            for part in parts:
-                try:
-                    part_info = lastfm.get_artist_info(part, fetch_similar=False)
-                    time.sleep(0.25)
-                    pl = 0
-                    if part_info:
-                        pl = part_info.get('stats', {}).get('listeners', 0)
-                        if isinstance(pl, str):
-                            pl = int(pl) if pl.isdigit() else 0
-                    parts_listeners.append((part, pl))
-                except Exception:
-                    parts_listeners.append((part, 0))
-
-            for _, pl in parts_listeners:
-                if pl > compound_listeners and pl >= 1000:
-                    is_collaboration = True
-                    parts_str = ', '.join(f"{p} ({l})" for p, l in parts_listeners)
-                    logger.info(
-                        f"  Collaboration detected: '{name}' ({compound_listeners}) "
-                        f"vs parts: {parts_str} -> splitting"
-                    )
-                    break
-
-            if not is_collaboration:
-                logger.info(f"  Found on Last.fm: '{name}' ({compound_listeners} listeners) -> verified_band")
-
-                if not dry_run:
-                    db.execute(text("""
-                        UPDATE artists SET
-                            verification_status = 'verified_band',
-                            artist_type = 'band',
-                            raw_name = COALESCE(raw_name, name)
-                        WHERE id = :id
-                    """), {"id": artist_id})
-
-                total['verified_band'] += 1
-            else:
-                if not dry_run:
-                    stats = normalize_compound_artist(
-                        db, artist_id, name, parts, 'verified_split'
-                    )
-                    total['tracks_updated'] += stats['tracks_updated']
-                    total['albums_updated'] += stats['albums_updated']
-                    total['tracks_merged'] += stats['tracks_merged']
-                    total['albums_merged'] += stats['albums_merged']
-
-                total['verified_split'] += 1
-        else:
-            # Not found on Last.fm — split into individual artists
-            logger.info(f"  Not on Last.fm: '{name}' -> splitting into {parts}")
-
-            if not dry_run:
-                stats = normalize_compound_artist(
-                    db, artist_id, name, parts, 'verified_split'
-                )
-                total['tracks_updated'] += stats['tracks_updated']
-                total['albums_updated'] += stats['albums_updated']
-                total['tracks_merged'] += stats['tracks_merged']
-                total['albums_merged'] += stats['albums_merged']
-
-            total['verified_split'] += 1
-
-        # Periodic commit — Last.fm lookups are slow, protect against crashes
-        processed = total['verified_band'] + total['verified_split'] + total['errors']
-        if not dry_run and processed > 0 and processed % 50 == 0:
-            db.commit()
-            logger.info(f"Pass 2 checkpoint: {processed} artists processed")
-
-    if not dry_run:
-        db.commit()
-
+    db.commit()
+    stats["albums_skipped"] = ambiguous_albums
     logger.info(
-        f"Pass 2 done: {total['verified_band']} bands, "
-        f"{total['verified_split']} splits, {total['errors']} errors"
+        f"Un-split done: {stats['compounds']} compounds collapsed, "
+        f"{stats['tracks_moved']} tracks moved ({stats['tracks_merged']} merged), "
+        f"{stats['albums_moved']} albums moved ({stats['albums_merged']} merged, "
+        f"{ambiguous_albums} compilation albums left local), "
+        f"{stats['members_removed']} orphan members removed"
     )
-    return total
+    return stats
 
-
-# ─── Main entry point ─────────────────────────────────────────────────────
 
 def normalize_artists(
     db: Session,
     pass1: bool = True,
-    pass2: bool = False,
     dry_run: bool = False,
 ) -> Dict:
     """
-    Run artist normalization.
+    Run artist normalization — deterministic, offline. Splits only ALWAYS-collaboration
+    separators (feat./ft./featuring/vs./pres./aka/meets); '&'/','/'and' are kept whole
+    (splitting them needed a non-deterministic Last.fm lookup that forked UUIDs across nodes).
 
     Args:
         db: Database session
-        pass1: Run offline safe splitting (feat./ft./featuring/vs.)
-        pass2: Run Last.fm verification for suspicious patterns (&, comma, and, with, /)
+        pass1: Run the safe splitting pass
         dry_run: Only show what would be done, no DB changes
-
-    Returns:
-        Dict with pass1/pass2 stats
     """
     stats = {}
 
@@ -877,9 +844,6 @@ def normalize_artists(
             if pass1_stats['split'] == 0 or dry_run:
                 break
 
-    if pass2:
-        stats['pass2'] = normalize_pass2(db, dry_run=dry_run)
-
     return stats
 
 
@@ -892,16 +856,26 @@ if __name__ == "__main__":
     )
 
     dry_run = '--dry-run' in sys.argv
-    run_pass2 = '--pass2' in sys.argv or '--lastfm' in sys.argv
 
     from database import get_db_context
+
+    if '--unsplit' in sys.argv:
+        with get_db_context() as db:
+            logger.info("=== Collapse legacy Pass-2 splits ===")
+            if dry_run:
+                logger.info("[DRY RUN MODE]")
+            stats = unsplit_pass2_compounds(db, dry_run=dry_run)
+            print("\n=== Results ===")
+            for key, value in stats.items():
+                print(f"  {key}: {value}")
+        sys.exit(0)
 
     with get_db_context() as db:
         logger.info("=== Artist Normalization ===")
         if dry_run:
             logger.info("[DRY RUN MODE]")
 
-        stats = normalize_artists(db, pass1=True, pass2=run_pass2, dry_run=dry_run)
+        stats = normalize_artists(db, pass1=True, dry_run=dry_run)
 
         print("\n=== Results ===")
         for pass_name, pass_stats in stats.items():

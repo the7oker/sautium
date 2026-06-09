@@ -671,12 +671,10 @@ class LauncherApp(ctk.CTk):
         features = int(data.get("tracks_with_features", 0))
         lib_artists = int(data.get("library_artists", 0))
         lastfm_artists = int(data.get("artists_with_lastfm", 0))
-        lib_albums = int(data.get("library_albums", 0))
-        lastfm_albums = int(data.get("albums_with_lastfm", 0))
         lyrics = int(data.get("tracks_with_lyrics", 0))
 
-        lastfm_total = lib_artists + lib_albums
-        lastfm_done = lastfm_artists + lastfm_albums
+        lastfm_total = lib_artists
+        lastfm_done = lastfm_artists
 
         enrichment = {
             "embeddings": ("Embeddings", embeddings, total_tracks),

@@ -479,7 +479,7 @@ async def get_stats() -> Dict[str, Any]:
         # Enrichment coverage
         "tracks_with_features": 0,
         "library_artists": 0, "artists_with_lastfm": 0,
-        "library_albums": 0, "albums_with_lastfm": 0,
+        "library_albums": 0,
     }
     try:
         with get_db_context() as db:
@@ -503,12 +503,7 @@ async def get_stats() -> Dict[str, Any]:
                 ) as artists_with_lastfm,
                 (SELECT COUNT(DISTINCT av.album_id) FROM album_variants av
                  JOIN media_files mf ON mf.album_variant_id = av.id
-                ) as library_albums,
-                (SELECT COUNT(DISTINCT al.id) FROM albums al
-                 JOIN album_variants av ON av.album_id = al.id
-                 JOIN media_files mf ON mf.album_variant_id = av.id
-                 WHERE EXISTS (SELECT 1 FROM album_info ai WHERE ai.album_id = al.id AND ai.source = 'lastfm')
-                ) as albums_with_lastfm
+                ) as library_albums
             """
             enr = db.execute(text(enrichment_sql)).fetchone()
             if enr:
@@ -567,7 +562,7 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                 from normalize_artists import normalize_artists as do_normalize
                 from database import get_db_context
                 with get_db_context() as db:
-                    norm_stats = do_normalize(db, pass1=True, pass2=False)
+                    norm_stats = do_normalize(db, pass1=True)
                     if norm_stats.get('pass1', {}).get('split', 0) > 0:
                         logger.info(f"Post-scan normalization: {norm_stats}")
             except Exception as e:
@@ -708,21 +703,15 @@ async def scan_library_endpoint(
 
 @app.post("/normalize-artists")
 async def normalize_artists_endpoint(
-    pass2: bool = False,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """
-    Run artist normalization.
-
-    Pass 1 (always): Split safe patterns (feat./vs.) — no external API.
-    Pass 2 (optional): Verify suspicious patterns (&, comma) via Last.fm.
-    """
+    """Run artist normalization — deterministic, offline (splits feat./vs. only)."""
     from normalize_artists import normalize_artists as do_normalize
     from database import get_db_context
 
     try:
         with get_db_context() as db:
-            stats = do_normalize(db, pass1=True, pass2=pass2, dry_run=dry_run)
+            stats = do_normalize(db, pass1=True, dry_run=dry_run)
         return {"success": True, "statistics": stats}
     except Exception as e:
         logger.error(f"Normalization failed: {e}")
@@ -1066,27 +1055,6 @@ async def api_search_artists(
             )
     except Exception as e:
         logger.error(f"Artist search failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/search/albums")
-async def api_search_albums(
-    query: str,
-    limit: int = 10,
-    min_similarity: Optional[float] = None,
-) -> Dict[str, Any]:
-    """Search albums by description similarity."""
-    from database import get_db_context
-    from search import search_albums_by_info
-
-    try:
-        with get_db_context() as db:
-            return search_albums_by_info(
-                db, query, limit=limit,
-                min_similarity=min_similarity or 0.3,
-            )
-    except Exception as e:
-        logger.error(f"Album search failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

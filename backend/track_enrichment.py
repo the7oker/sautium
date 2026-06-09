@@ -4,9 +4,8 @@ Comprehensive track enrichment pipeline.
 Orchestrates all data aggregation steps in the correct order:
 1. Audio Embedding (CLAP) - base audio feature
 2. Last.fm Artist Info - artist metadata
-3. Last.fm Album Info - album metadata
-4. Last.fm Track Stats - track popularity
-5. Audio Analysis - DSP features + CLAP classification
+3. Last.fm Track Stats - track popularity
+4. Audio Analysis - DSP features + CLAP classification
 
 Each step is conditional - only runs if data is missing.
 Supports filters, limits, time constraints, and graceful error handling.
@@ -29,7 +28,7 @@ from config import settings
 from database import get_db_context
 from models import (
     Track, MediaFile, Album, AlbumVariant, Artist, TrackArtist,
-    AudioFeature, Embedding, SimilarArtist, ArtistBio, AlbumInfo,
+    AudioFeature, Embedding, SimilarArtist, ArtistBio,
     TrackStats, ExternalMetadata,
 )
 from embeddings import AudioEmbeddingGenerator
@@ -94,7 +93,7 @@ def run_parallel_enrichment(
     try:
         from normalize_artists import normalize_artists as do_normalize
         with get_db_context() as db:
-            norm_stats = do_normalize(db, pass1=True, pass2=True)
+            norm_stats = do_normalize(db, pass1=True)  # pass2 (Last.fm split) removed — non-deterministic, forks UUIDs
             splits = norm_stats.get('pass1', {}).get('split', 0)
             if splits > 0:
                 logger.info(f"Pre-enrich normalization: {splits} artists split")
@@ -145,7 +144,7 @@ def run_parallel_enrichment(
 
         from lastfm import LastFmService
         lastfm = LastFmService()
-        stats = {"artists_processed": 0, "artists_success": 0, "albums_processed": 0, "albums_success": 0, "errors": 0}
+        stats = {"artists_processed": 0, "artists_success": 0, "errors": 0}
         start_time = time.time()
 
         with get_db_context() as db:
@@ -194,55 +193,8 @@ def run_parallel_enrichment(
                     stats["errors"] += 1
                     db.rollback()
 
-            # --- Enrich albums (only library albums with tracks) ---
-            album_sql = """
-                SELECT DISTINCT al.id, al.title, a.name as artist_name
-                FROM albums al
-                JOIN album_variants av ON av.album_id = al.id
-                JOIN media_files mf ON mf.album_variant_id = av.id
-                JOIN track_artists ta ON ta.track_id = mf.track_id AND ta.role = 'primary'
-                JOIN artists a ON a.id = ta.artist_id
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM album_info ai
-                    WHERE ai.album_id = al.id AND ai.source = 'lastfm'
-                )
-                AND NOT EXISTS (
-                    SELECT 1 FROM external_metadata em
-                    WHERE em.entity_type = 'album'
-                    AND em.entity_id = al.id::text
-                    AND em.source = 'lastfm'
-                    AND em.metadata_type = 'info'
-                    AND em.fetch_status = 'not_found'
-                )
-                ORDER BY a.name, al.title
-            """
-            albums = db.execute(text(album_sql)).fetchall()
-            total_albums = len(albums)
-            logger.info(f"Last.fm: {total_albums} albums to enrich")
 
-            for i, (album_id, album_title, artist_name) in enumerate(albums):
-                if cancel_flag and cancel_flag():
-                    break
-                if max_duration_seconds:
-                    if time.time() - start_time >= max_duration_seconds:
-                        logger.info("Last.fm: time limit reached")
-                        break
-
-                pipeline_progress["lastfm"] = f"album {i+1}/{total_albums}: {artist_name} - {album_title}"
-                _update_progress()
-
-                try:
-                    result = lastfm.enrich_album(db, album_id, artist_name, album_title)
-                    stats["albums_processed"] += 1
-                    if result.get("status") == "success":
-                        stats["albums_success"] += 1
-                    time.sleep(lastfm_delay)
-                except Exception as e:
-                    logger.error(f"Last.fm album failed {artist_name} - {album_title}: {e}")
-                    stats["errors"] += 1
-                    db.rollback()
-
-        pipeline_progress["lastfm"] = f"Last.fm: done ({stats['artists_success']} artists, {stats['albums_success']} albums)"
+        pipeline_progress["lastfm"] = f"Last.fm: done ({stats['artists_success']} artists)"
         _update_progress()
         return stats
 
@@ -516,19 +468,12 @@ class TrackEnrichmentPipeline:
             mf = db.query(MediaFile).filter(MediaFile.track_id == track.id).first()
         return mf
 
-    def _get_album_id(self, db: Session, track: Track):
-        """Get album UUID for a track via its representative media_file → album_variant."""
-        row = db.query(AlbumVariant.album_id).join(
-            MediaFile, MediaFile.album_variant_id == AlbumVariant.id
-        ).filter(MediaFile.track_id == track.id).first()
-        return row[0] if row else None
-
     def _check_track_status(self, db: Session, track: Track) -> Dict[str, bool]:
         """
         Check what data is missing for a track.
 
         Returns dict with keys: needs_audio_embedding, needs_artist_info,
-        needs_album_info, needs_audio_features
+        needs_audio_features
         """
         status = {}
 
@@ -572,31 +517,8 @@ class TrackEnrichmentPipeline:
             else:
                 status['needs_artist_info'] = False
 
-            # Album info — get album_id through media_file → album_variant
-            album_id = self._get_album_id(db, track)
-            status['album_id'] = album_id
-
-            if album_id:
-                album_info = db.query(AlbumInfo).filter(
-                    AlbumInfo.album_id == album_id,
-                    AlbumInfo.source == 'lastfm'
-                ).first()
-                if album_info:
-                    status['needs_album_info'] = False
-                else:
-                    album_meta = db.query(ExternalMetadata).filter(
-                        ExternalMetadata.entity_type == 'album',
-                        ExternalMetadata.entity_id == str(album_id),
-                        ExternalMetadata.source == 'lastfm',
-                        ExternalMetadata.metadata_type == 'info',
-                    ).first()
-                    status['needs_album_info'] = album_meta is None
-            else:
-                status['needs_album_info'] = False
-
         else:
             status['needs_artist_info'] = False
-            status['needs_album_info'] = False
 
         return status
 
@@ -695,25 +617,6 @@ class TrackEnrichmentPipeline:
                     db.rollback()
             else:
                 results['lastfm_artist'] = 'skipped'
-
-            # Album info
-            if status.get('needs_album_info'):
-                if progress_callback:
-                    progress_callback("Last.fm album")
-                try:
-                    album_id = status.get('album_id')
-                    album = db.query(Album).get(album_id)
-                    result = lastfm.enrich_album(
-                        db, album_id, status.get('artist_name', ''), album.title
-                    )
-                    results['lastfm_album'] = result['status']
-                    time.sleep(self.lastfm_delay)
-                except Exception as e:
-                    logger.error(f"Last.fm album enrichment failed: {e}")
-                    results['lastfm_album'] = 'error'
-                    db.rollback()
-            else:
-                results['lastfm_album'] = 'skipped'
 
             results['lastfm_track'] = 'skipped'
 
@@ -827,35 +730,6 @@ class TrackEnrichmentPipeline:
                                 ExternalMetadata.metadata_type == 'bio',
                                 TrackArtist.track_id == Track.id,
                                 TrackArtist.role == 'primary',
-                            )
-                        )
-                    ),
-                )
-            )
-
-            # Album: needs enrichment if no AlbumInfo AND no ExternalMetadata record
-            # Get album_id via media_files → album_variants
-            album_id_subq = select(AlbumVariant.album_id).join(
-                MediaFile, MediaFile.album_variant_id == AlbumVariant.id
-            ).where(MediaFile.track_id == Track.id).correlate(Track).limit(1).scalar_subquery()
-
-            conditions.append(
-                and_(
-                    ~exists(
-                        select(AlbumInfo.id).where(
-                            and_(
-                                AlbumInfo.album_id == album_id_subq,
-                                AlbumInfo.source == 'lastfm',
-                            )
-                        )
-                    ),
-                    ~exists(
-                        select(ExternalMetadata.id).where(
-                            and_(
-                                ExternalMetadata.entity_type == 'album',
-                                ExternalMetadata.entity_id == cast(album_id_subq, String),
-                                ExternalMetadata.source == 'lastfm',
-                                ExternalMetadata.metadata_type == 'info',
                             )
                         )
                     ),

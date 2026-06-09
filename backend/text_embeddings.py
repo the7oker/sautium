@@ -3,7 +3,7 @@ Text embedding generation using sentence-transformers.
 Generates 1024-dimensional text embeddings from track metadata for semantic search.
 
 Operates on tracks (one embedding per track). Uses track_artists, track_genres,
-and enrichment data (artist_bios, album_info, tags) to compose descriptive text.
+and enrichment data (artist_bios, tags) to compose descriptive text.
 """
 
 import logging
@@ -83,9 +83,9 @@ class TextEmbeddingGenerator:
         if not track_ids:
             return {}
 
-        # NOTE: artist bios, album info, and genre descriptions are now in separate
-        # embedding tables (artist_bio_embeddings, album_info_embeddings,
-        # genre_desc_embeddings) to avoid exceeding the 128-token model limit.
+        # NOTE: artist bios and genre descriptions are now in separate embedding
+        # tables (artist_bio_embeddings, genre_desc_embeddings) to avoid exceeding
+        # the 128-token model limit.
         query = sa_text("""
             SELECT
                 t.id as track_id,
@@ -95,8 +95,7 @@ class TextEmbeddingGenerator:
                 mf_rep.release_year,
                 mf_rep.is_lossless,
                 g_agg.genres,
-                at_agg.artist_tags,
-                alt_agg.album_tags
+                at_agg.artist_tags
             FROM tracks t
             JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
             JOIN artists a ON ta.artist_id = a.id
@@ -128,16 +127,6 @@ class TextEmbeddingGenerator:
                 ) at2
                 JOIN tags tg ON at2.tag_id = tg.id
             ) at_agg ON true
-            -- Aggregated album tags (top 10 by weight)
-            LEFT JOIN LATERAL (
-                SELECT STRING_AGG(tg.name, ', ' ORDER BY alt2.weight DESC) as album_tags
-                FROM (
-                    SELECT tag_id, weight FROM album_tags
-                    WHERE album_id = mf_rep.album_id
-                    ORDER BY weight DESC LIMIT 10
-                ) alt2
-                JOIN tags tg ON alt2.tag_id = tg.id
-            ) alt_agg ON true
             WHERE t.id = ANY(:track_ids)
         """)
 
@@ -164,9 +153,6 @@ class TextEmbeddingGenerator:
             # Tags
             if row.artist_tags:
                 parts.append(f"Artist style: {row.artist_tags}")
-
-            if row.album_tags:
-                parts.append(f"Album style: {row.album_tags}")
 
             result[row.track_id] = "\n".join(parts)
 

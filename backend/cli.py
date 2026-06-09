@@ -635,155 +635,6 @@ def enrich_lastfm(limit, artist, genres, no_skip, delay):
         sys.exit(1)
 
 
-@cli.command("enrich-albums")
-@click.option("--limit", "-l", type=int, default=None, help="Limit number of albums to enrich")
-@click.option("--album", "-a", type=str, default=None, help="Enrich specific album by title")
-@click.option("--no-skip", is_flag=True, help="Re-fetch data that already exists")
-@click.option("--delay", type=float, default=0.2, help="Delay between requests (seconds)")
-def enrich_albums(limit, album, no_skip, delay):
-    """Enrich albums with Last.fm data (wiki, tags, stats)."""
-    from lastfm import LastFmService
-
-    if not settings.lastfm_api_key:
-        click.echo("❌ LASTFM_API_KEY is not configured. Set it in .env file.", err=True)
-        sys.exit(1)
-
-    try:
-        service = LastFmService()
-
-        with get_db_context() as db:
-            if album:
-                # Enrich specific album
-                click.echo(f"🔍 Looking for album: {album}")
-                result = db.execute(
-                    text("""
-                        SELECT DISTINCT
-                            al.id,
-                            al.title,
-                            STRING_AGG(DISTINCT a.name, ', ') as artist_names
-                        FROM albums al
-                        JOIN album_artists aa ON al.id = aa.album_id AND aa.role = 'primary'
-                        JOIN artists a ON aa.artist_id = a.id
-                        WHERE al.title ILIKE :title
-                        GROUP BY al.id, al.title
-                        LIMIT 1
-                    """),
-                    {"title": f"%{album}%"}
-                ).fetchone()
-
-                if not result:
-                    click.echo(f"❌ Album '{album}' not found in database", err=True)
-                    sys.exit(1)
-
-                album_id, album_title, artist_names = result
-                # Take first artist if multiple
-                artist_name = artist_names.split(', ')[0]
-
-                click.echo(f"✓ Found: {album_title} by {artist_name} (ID: {album_id})")
-                click.echo()
-
-                enrichment_result = service.enrich_album(db, album_id, artist_name, album_title)
-
-                if enrichment_result["status"] == "success":
-                    click.echo(f"\n✅ Successfully enriched {album_title}:")
-                    click.echo(f"   • Wiki: {'✓' if enrichment_result.get('has_wiki') else '✗'}")
-                    click.echo(f"   • Tags: {enrichment_result.get('tags_count', 0)} tags")
-                    if enrichment_result.get('listeners'):
-                        click.echo(f"   • Listeners: {enrichment_result['listeners']:,}")
-                    if enrichment_result.get('playcount'):
-                        click.echo(f"   • Playcount: {enrichment_result['playcount']:,}")
-                elif enrichment_result["status"] == "not_found":
-                    click.echo(f"\n⚠️  Album not found on Last.fm: {album_title}")
-                else:
-                    click.echo(f"\n❌ Error enriching album: {enrichment_result.get('error')}")
-                    sys.exit(1)
-
-            else:
-                # Enrich multiple albums
-                skip_existing = not no_skip
-                click.echo("💿 Enriching albums with Last.fm data...")
-                click.echo(f"{'⚠️  Re-fetching all albums' if no_skip else '✓ Skipping albums with existing data'}")
-                click.echo(f"⏱️  Rate limit: {delay}s between requests")
-                if limit:
-                    click.echo(f"⚠️  Limited to {limit} albums")
-
-                click.echo()
-
-                # Get albums to enrich
-                if skip_existing:
-                    query = text("""
-                        SELECT DISTINCT
-                            al.id,
-                            al.title,
-                            STRING_AGG(DISTINCT a.name, ', ') as artist_names
-                        FROM albums al
-                        JOIN album_artists aa ON al.id = aa.album_id AND aa.role = 'primary'
-                        JOIN artists a ON aa.artist_id = a.id
-                        WHERE NOT EXISTS (
-                            SELECT 1 FROM album_info ai
-                            WHERE ai.album_id = al.id AND ai.source = 'lastfm'
-                        )
-                        GROUP BY al.id, al.title
-                        ORDER BY al.title
-                    """)
-                else:
-                    query = text("""
-                        SELECT DISTINCT
-                            al.id,
-                            al.title,
-                            STRING_AGG(DISTINCT a.name, ', ') as artist_names
-                        FROM albums al
-                        JOIN album_artists aa ON al.id = aa.album_id AND aa.role = 'primary'
-                        JOIN artists a ON aa.artist_id = a.id
-                        GROUP BY al.id, al.title
-                        ORDER BY al.title
-                    """)
-
-                if limit:
-                    query = text(str(query) + f" LIMIT {limit}")
-
-                albums = db.execute(query).fetchall()
-
-                if not albums:
-                    click.echo("✓ No albums to enrich")
-                    return
-
-                click.echo(f"Found {len(albums)} albums to enrich\n")
-
-                stats = {"processed": 0, "success": 0, "not_found": 0, "errors": 0}
-
-                for album_id, album_title, artist_names in albums:
-                    # Take first artist if multiple
-                    artist_name = artist_names.split(', ')[0]
-
-                    result = service.enrich_album(db, album_id, artist_name, album_title)
-
-                    stats["processed"] += 1
-
-                    if result["status"] == "success":
-                        stats["success"] += 1
-                    elif result["status"] == "not_found":
-                        stats["not_found"] += 1
-                    elif result["status"] == "error":
-                        stats["errors"] += 1
-
-                    # Rate limiting
-                    if delay > 0:
-                        time.sleep(delay)
-
-                click.echo("\n✅ Last.fm album enrichment complete!")
-                click.echo(f"📊 Statistics:")
-                click.echo(f"   • Processed: {stats['processed']} albums")
-                click.echo(f"   • Success: {stats['success']}")
-                click.echo(f"   • Not found: {stats['not_found']}")
-                click.echo(f"   • Errors: {stats['errors']}")
-
-    except Exception as e:
-        click.echo(f"\n❌ Error: {e}", err=True)
-        logger.exception("Album enrichment failed")
-        sys.exit(1)
-
-
 @cli.command("analyze-audio")
 @click.option("--limit", "-l", type=int, default=None, help="Limit number of tracks to process")
 @click.option("--batch-size", "-b", type=int, default=None, help="Override batch size (default from config)")
@@ -1566,13 +1417,12 @@ def generate_text_embeddings_cmd(limit, batch_size, force, max_duration, worker_
 @click.option("--limit", "-l", type=int, default=None, help="Limit number of entities per type")
 @click.option("--batch-size", "-b", type=int, default=None, help="Override batch size")
 @click.option("--force", is_flag=True, help="Regenerate even if already exists")
-@click.option("--type", "-t", "emb_type", type=click.Choice(["all", "artist-bios", "album-info", "genre-descs"]),
+@click.option("--type", "-t", "emb_type", type=click.Choice(["all", "artist-bios", "genre-descs"]),
               default="all", help="Which enrichment type to generate")
 def generate_enrichment_embeddings_cmd(limit, batch_size, force, emb_type):
     """Generate embeddings for artist bios, album info, genre descriptions."""
     from enrichment_embeddings import (
         generate_all_enrichment_embeddings,
-        generate_album_info_embeddings,
         generate_artist_bio_embeddings,
         generate_genre_desc_embeddings,
     )
@@ -1593,9 +1443,6 @@ def generate_enrichment_embeddings_cmd(limit, batch_size, force, emb_type):
         elif emb_type == "artist-bios":
             stats = generate_artist_bio_embeddings(limit=limit, batch_size=batch_size, force=force)
             click.echo(f"\n📊 Artist bios: {stats['success']} ok, {stats['chunks']} chunks")
-        elif emb_type == "album-info":
-            stats = generate_album_info_embeddings(limit=limit, batch_size=batch_size, force=force)
-            click.echo(f"\n📊 Album info: {stats['success']} ok, {stats['chunks']} chunks")
         elif emb_type == "genre-descs":
             stats = generate_genre_desc_embeddings(limit=limit, batch_size=batch_size, force=force)
             click.echo(f"\n📊 Genre descs: {stats['success']} ok, {stats['chunks']} chunks")

@@ -77,7 +77,6 @@ Query: `WHERE af.instruments ? 'piano'` (key present) or \
 **text_embeddings** (id, track_id UUID, vector[1024]) - one text embedding per track (metadata: title, artist, album, genres, tags)
 **lyrics_embeddings** (id, track_id UUID, vector[1024], chunk_index) - lyrics content embeddings (multiple chunks per track)
 **artist_bio_embeddings** (id, artist_id UUID, vector[1024], chunk_index) - artist biography embeddings (chunked)
-**album_info_embeddings** (id, album_id UUID, vector[1024], chunk_index) - album info embeddings (chunked)
 **genre_desc_embeddings** (id, genre_id UUID, vector[1024], chunk_index) - genre description embeddings (chunked)
 
 ## External metadata (Last.fm)
@@ -85,9 +84,7 @@ Query: `WHERE af.instruments ? 'piano'` (key present) or \
 **artist_bios** (artist_id UUID, bio, summary) - artist biographies
 **artist_tags** (artist_id UUID, tag_id, weight, source) - artist tags/genres from Last.fm
 **similar_artists** (artist_id UUID, similar_artist_id UUID, match_score, source)
-**album_info** (album_id UUID, summary, listeners, playcount) - album popularity
-**album_tags** (album_id UUID, tag_id, weight, source)
-**tags** (id, name) - shared tag names for artist_tags and album_tags
+**tags** (id, name) - shared tag names for artist_tags
 
 ## Listening history
 

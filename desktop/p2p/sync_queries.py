@@ -59,7 +59,6 @@ EMPTY_INVENTORY = {
     "artists": [], "artist_bios": [],
     "artist_tags": [], "similar_artists": [],
     "artist_members": [],
-    "albums": [], "album_info": [], "album_tags": [],
     "genres": [], "genre_descriptions": [],
 }
 
@@ -128,28 +127,6 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
         "artist_id",
     )
 
-    # -- Related albums (track -> media_files -> album_variants -> album) --
-    albums = _uuid_list(
-        q("""SELECT DISTINCT av.album_id FROM album_variants av
-             INNER JOIN media_files mf ON mf.album_variant_id = av.id
-             WHERE mf.track_id = ANY(%s::uuid[])"""),
-        "album_id",
-    )
-    album_info = _uuid_list(
-        q("""SELECT DISTINCT ai.album_id FROM album_info ai
-             INNER JOIN album_variants av ON av.album_id = ai.album_id
-             INNER JOIN media_files mf ON mf.album_variant_id = av.id
-             WHERE mf.track_id = ANY(%s::uuid[])"""),
-        "album_id",
-    )
-    album_tags = _uuid_list(
-        q("""SELECT DISTINCT at2.album_id FROM album_tags at2
-             INNER JOIN album_variants av ON av.album_id = at2.album_id
-             INNER JOIN media_files mf ON mf.album_variant_id = av.id
-             WHERE mf.track_id = ANY(%s::uuid[])"""),
-        "album_id",
-    )
-
     # -- Related genres (via track_genres) --
     genres = _uuid_list(
         q("SELECT DISTINCT genre_id FROM track_genres WHERE track_id = ANY(%s::uuid[])"),
@@ -173,9 +150,6 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
         "artist_tags": artist_tags,
         "similar_artists": similar_artists,
         "artist_members": artist_members,
-        "albums": albums,
-        "album_info": album_info,
-        "album_tags": album_tags,
         "genres": genres,
         "genre_descriptions": genre_descriptions,
     }
@@ -377,33 +351,6 @@ def pull_artist_members(conn, uuids: list[str]) -> dict:
     )
 
 
-def pull_album_info(conn, uuids: list[str]) -> dict:
-    return _pull_simple(
-        conn, "album_info",
-        """SELECT ai.album_id::text AS album_uuid, al.title AS album_title,
-                  ai.source, ai.summary, ai.content, ai.url,
-                  ai.listeners, ai.playcount
-           FROM album_info ai
-           INNER JOIN albums al ON al.id = ai.album_id
-           WHERE ai.album_id = ANY(%s::uuid[])""",
-        uuids,
-    )
-
-
-def pull_album_tags(conn, uuids: list[str]) -> dict:
-    return _pull_simple(
-        conn, "album_tags",
-        """SELECT at2.album_id::text AS album_uuid, al.title AS album_title,
-                  t.id::text AS tag_uuid, t.name AS tag_name,
-                  at2.weight, at2.source
-           FROM album_tags at2
-           INNER JOIN tags t ON t.id = at2.tag_id
-           INNER JOIN albums al ON al.id = at2.album_id
-           WHERE at2.album_id = ANY(%s::uuid[])""",
-        uuids,
-    )
-
-
 def pull_genre_descriptions(conn, uuids: list[str]) -> dict:
     return _pull_simple(
         conn, "genre_descriptions",
@@ -433,10 +380,6 @@ PULL_HANDLERS = {
     "similar_artists": pull_similar_artists,
     "artist-members": pull_artist_members,
     "artist_members": pull_artist_members,
-    "album-info": pull_album_info,
-    "album_info": pull_album_info,
-    "album-tags": pull_album_tags,
-    "album_tags": pull_album_tags,
     "genre-descriptions": pull_genre_descriptions,
     "genre_descriptions": pull_genre_descriptions,
 }
@@ -514,8 +457,7 @@ def get_incomplete_artist_uuids(conn) -> list[str]:
     a wide trigger here is cheap when there's nothing new to pull.
 
     Not included: artist_members (compound-artist-only — would trigger
-    every solo artist forever), album_info/album_tags (per-album, not
-    per-artist), genre_descriptions (per-genre).
+    every solo artist forever), genre_descriptions (per-genre).
     """
     rows = db_query(
         conn,

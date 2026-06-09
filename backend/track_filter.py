@@ -100,33 +100,18 @@ def get_filtered_track_ids(
         where_clauses.append("mf.file_path ILIKE :path")
         params["path"] = f"%{path}%"
 
-    # Tag filter: search artist_tags and album_tags via tags table
+    # Tag filter: search artist_tags via tags table (album tags removed)
     if tag:
-        # Need album join for album_tags if not already joined
-        if not need_album_join and not need_mf_join:
-            joins.append("JOIN media_files mf ON mf.track_id = t.id")
-            joins.append("JOIN album_variants av ON mf.album_variant_id = av.id")
-            joins.append("JOIN albums al ON av.album_id = al.id")
-        elif not need_album_join:
-            joins.append("JOIN album_variants av ON mf.album_variant_id = av.id")
-            joins.append("JOIN albums al ON av.album_id = al.id")
-
         # Need artist join for artist_tags if not already joined
         if not artist:
             joins.append("JOIN track_artists ta ON t.id = ta.track_id")
 
-        where_clauses.append("""(
+        where_clauses.append("""
             EXISTS (
                 SELECT 1 FROM artist_tags at2
                 JOIN tags tg2 ON at2.tag_id = tg2.id
                 WHERE at2.artist_id = ta.artist_id AND tg2.name ILIKE :tag
-            )
-            OR EXISTS (
-                SELECT 1 FROM album_tags alt2
-                JOIN tags tg3 ON alt2.tag_id = tg3.id
-                WHERE alt2.album_id = al.id AND tg3.name ILIKE :tag
-            )
-        )""")
+            )""")
         params["tag"] = f"%{tag}%"
 
     # Track number filter

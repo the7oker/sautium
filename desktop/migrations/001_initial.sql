@@ -442,32 +442,6 @@ CREATE TABLE IF NOT EXISTS similar_albums (
     CONSTRAINT chk_not_self_similar_album CHECK (album_id != similar_album_id)
 );
 
-CREATE TABLE IF NOT EXISTS album_info (
-    id SERIAL PRIMARY KEY,
-    album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    source VARCHAR(50) NOT NULL,
-    summary TEXT,
-    content TEXT,
-    url TEXT,
-    listeners INTEGER,
-    playcount BIGINT,
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_album_info UNIQUE (album_id, source),
-    CONSTRAINT chk_has_album_info CHECK (summary IS NOT NULL OR content IS NOT NULL OR listeners IS NOT NULL OR playcount IS NOT NULL)
-);
-
-CREATE TABLE IF NOT EXISTS album_tags (
-    id SERIAL PRIMARY KEY,
-    album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    tag_id UUID NOT NULL REFERENCES tags(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    weight INTEGER NOT NULL CHECK (weight >= 0 AND weight <= 100),
-    source VARCHAR(50) NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_album_tags UNIQUE (album_id, tag_id, source)
-);
-
 CREATE TABLE IF NOT EXISTS genre_descriptions (
     id SERIAL PRIMARY KEY,
     genre_id UUID NOT NULL REFERENCES genres(id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -659,18 +633,6 @@ CREATE TABLE IF NOT EXISTS artist_bio_embeddings (
     UNIQUE (artist_id, model_id, chunk_index)
 );
 
-CREATE TABLE IF NOT EXISTS album_info_embeddings (
-    id SERIAL PRIMARY KEY,
-    album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    vector vector(1024) NOT NULL,
-    chunk_index INTEGER NOT NULL DEFAULT 0,
-    chunk_text TEXT,
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (album_id, model_id, chunk_index)
-);
-
 CREATE TABLE IF NOT EXISTS genre_desc_embeddings (
     id SERIAL PRIMARY KEY,
     genre_id UUID NOT NULL REFERENCES genres(id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -709,12 +671,6 @@ CREATE INDEX IF NOT EXISTS idx_lyrics_embeddings_vector ON lyrics_embeddings
 -- Artist bio embedding indexes
 CREATE INDEX IF NOT EXISTS idx_artist_bio_emb_model ON artist_bio_embeddings(model_id);
 CREATE INDEX IF NOT EXISTS idx_artist_bio_emb_vector ON artist_bio_embeddings
-    USING hnsw (vector vector_cosine_ops)
-    WITH (m = 16, ef_construction = 64);
-
--- Album info embedding indexes
-CREATE INDEX IF NOT EXISTS idx_album_info_emb_model ON album_info_embeddings(model_id);
-CREATE INDEX IF NOT EXISTS idx_album_info_emb_vector ON album_info_embeddings
     USING hnsw (vector vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
@@ -796,12 +752,6 @@ CREATE INDEX IF NOT EXISTS idx_similar_artists_similar ON similar_artists(simila
 CREATE INDEX IF NOT EXISTS idx_similar_artists_source ON similar_artists(source);
 CREATE INDEX IF NOT EXISTS idx_similar_artists_match ON similar_artists(match_score);
 CREATE INDEX IF NOT EXISTS idx_similar_albums_lookup ON similar_albums(album_id, match_score DESC);
-CREATE INDEX IF NOT EXISTS idx_album_info_source ON album_info(source);
-CREATE INDEX IF NOT EXISTS idx_album_info_listeners ON album_info(listeners) WHERE listeners IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_album_info_playcount ON album_info(playcount) WHERE playcount IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_album_tags_tag ON album_tags(tag_id);
-CREATE INDEX IF NOT EXISTS idx_album_tags_source ON album_tags(source);
-CREATE INDEX IF NOT EXISTS idx_album_tags_weight ON album_tags(weight);
 CREATE INDEX IF NOT EXISTS idx_genre_descriptions_source ON genre_descriptions(source);
 CREATE INDEX IF NOT EXISTS idx_track_stats_source ON track_stats(source);
 CREATE INDEX IF NOT EXISTS idx_track_stats_listeners ON track_stats(listeners);
@@ -980,14 +930,6 @@ DO $$ BEGIN CREATE TRIGGER trg_similar_albums_updated_at BEFORE UPDATE ON simila
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-DO $$ BEGIN CREATE TRIGGER trg_album_info_updated_at BEFORE UPDATE ON album_info
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN CREATE TRIGGER trg_album_tags_updated_at BEFORE UPDATE ON album_tags
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
 DO $$ BEGIN CREATE TRIGGER trg_genre_descriptions_updated_at BEFORE UPDATE ON genre_descriptions
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -1009,10 +951,6 @@ DO $$ BEGIN CREATE TRIGGER trg_lyrics_embeddings_updated_at BEFORE UPDATE ON lyr
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN CREATE TRIGGER trg_artist_bio_emb_updated_at BEFORE UPDATE ON artist_bio_embeddings
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN CREATE TRIGGER trg_album_info_emb_updated_at BEFORE UPDATE ON album_info_embeddings
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 

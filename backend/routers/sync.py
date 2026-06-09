@@ -48,7 +48,6 @@ _EMPTY_INVENTORY = {
     "artists": [], "artist_bios": [],
     "artist_tags": [], "similar_artists": [],
     "artist_members": [],
-    "albums": [], "album_info": [], "album_tags": [],
     "genres": [], "genre_descriptions": [],
 }
 
@@ -108,20 +107,6 @@ async def get_inventory(req: InventoryRequest) -> dict:
                       WHERE am.compound_artist_id IN (SELECT artist_id FROM rel)) AS artist_members
         """, {"u": uuids})
 
-        # Query 3: Album data (3 categories, 1 round-trip)
-        album_row = _db_query_one("""
-            WITH uuids AS (SELECT unnest(%(u)s::uuid[]) AS id),
-                 rel AS (SELECT DISTINCT av.album_id FROM album_variants av
-                         JOIN media_files mf ON mf.album_variant_id = av.id
-                         WHERE mf.track_id IN (SELECT id FROM uuids))
-            SELECT
-                ARRAY(SELECT album_id::text FROM rel) AS albums,
-                ARRAY(SELECT DISTINCT ai.album_id::text FROM album_info ai
-                      WHERE ai.album_id IN (SELECT album_id FROM rel)) AS album_info,
-                ARRAY(SELECT DISTINCT at2.album_id::text FROM album_tags at2
-                      WHERE at2.album_id IN (SELECT album_id FROM rel)) AS album_tags
-        """, {"u": uuids})
-
         return {
             "tracks": track_row["tracks"],
             "lyrics": track_row["lyrics"],
@@ -133,9 +118,6 @@ async def get_inventory(req: InventoryRequest) -> dict:
             "artist_tags": artist_row["artist_tags"],
             "similar_artists": artist_row["similar_artists"],
             "artist_members": artist_row["artist_members"],
-            "albums": album_row["albums"],
-            "album_info": album_row["album_info"],
-            "album_tags": album_row["album_tags"],
             "genres": track_row["genres"],
             "genre_descriptions": track_row["genre_descriptions"],
         }
@@ -394,37 +376,6 @@ async def pull_artist_members(req: PullRequest) -> dict:
            INNER JOIN artists c ON c.id = am.compound_artist_id
            INNER JOIN artists m ON m.id = am.member_artist_id
            WHERE am.compound_artist_id = ANY(%s::uuid[])""",
-        req.uuids,
-    )
-
-
-@router.post("/pull/album-info")
-async def pull_album_info(req: PullRequest) -> dict:
-    """Pull album information."""
-    return _pull_handler(
-        "album_info",
-        """SELECT ai.album_id::text AS album_uuid, al.title AS album_title,
-                  ai.source, ai.summary, ai.content, ai.url,
-                  ai.listeners, ai.playcount
-           FROM album_info ai
-           INNER JOIN albums al ON al.id = ai.album_id
-           WHERE ai.album_id = ANY(%s::uuid[])""",
-        req.uuids,
-    )
-
-
-@router.post("/pull/album-tags")
-async def pull_album_tags(req: PullRequest) -> dict:
-    """Pull album tags with tag names and weights."""
-    return _pull_handler(
-        "album_tags",
-        """SELECT at2.album_id::text AS album_uuid, al.title AS album_title,
-                  t.id::text AS tag_uuid, t.name AS tag_name,
-                  at2.weight, at2.source
-           FROM album_tags at2
-           INNER JOIN tags t ON t.id = at2.tag_id
-           INNER JOIN albums al ON al.id = at2.album_id
-           WHERE at2.album_id = ANY(%s::uuid[])""",
         req.uuids,
     )
 

@@ -355,10 +355,8 @@ async def _library_state() -> Dict[str, Any]:
         "embeddings_done":    stats.get("tracks_with_embeddings", 0),
         "features_done":      stats.get("tracks_with_features", 0),
         "lyrics_done":        stats.get("tracks_with_lyrics", 0),
-        "lastfm_done":        (stats.get("artists_with_lastfm", 0)
-                               + stats.get("albums_with_lastfm", 0)),
-        "lastfm_total":       (stats.get("library_artists", 0)
-                               + stats.get("library_albums", 0)),
+        "lastfm_done":        stats.get("artists_with_lastfm", 0),
+        "lastfm_total":       stats.get("library_artists", 0),
         # Last scan + runtime workers
         "last_scan_at":       _read("library.last_scan_at"),
         "scan":               scan,

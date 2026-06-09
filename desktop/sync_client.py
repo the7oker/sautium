@@ -32,8 +32,6 @@ CATEGORIES = [
     ("artist_tags", "artist-tags", "artist"),
     ("similar_artists", "similar-artists", "artist"),
     ("artist_members", "artist-members", "artist"),
-    ("album_info", "album-info", "album"),
-    ("album_tags", "album-tags", "album"),
     ("genre_descriptions", "genre-descriptions", "genre"),
 ]
 
@@ -193,17 +191,12 @@ class SyncClient:
             "artist_tags": ("artist_tags", "artist_id"),
             "similar_artists": ("similar_artists", "artist_id"),
             "artist_members": ("artist_members", "compound_artist_id"),
-            "album_info": ("album_info", "album_id"),
-            "album_tags": ("album_tags", "album_id"),
             "genre_descriptions": ("genre_descriptions", "genre_id"),
         }
 
         # Parent entity filters: only request enrichment for entities
         # that actually exist in our library (prevents orphaned records)
-        parent_filters = {
-            "album_info": ("albums", "id"),
-            "album_tags": ("albums", "id"),
-        }
+        parent_filters = {}
 
         needed = {}
         for cat_key, (table, uuid_col) in local_check.items():
@@ -636,74 +629,6 @@ class SyncClient:
                        role = EXCLUDED.role""",
                 values,
                 template="(%s, %s, %s)",
-                page_size=500,
-            )
-        return len(items)
-
-    def _import_album_info(self, conn, items: list[dict]) -> int:
-        with conn.cursor() as cur:
-            values = [
-                (
-                    item["album_uuid"], item.get("source", "sync"),
-                    item.get("summary"), item.get("content"),
-                    item.get("url"), item.get("listeners"),
-                    item.get("playcount"),
-                )
-                for item in items
-            ]
-            psycopg2.extras.execute_values(
-                cur,
-                """INSERT INTO album_info
-                   (album_id, source, summary, content, url, listeners, playcount)
-                   VALUES %s
-                   ON CONFLICT (album_id, source) DO UPDATE SET
-                       summary = EXCLUDED.summary,
-                       content = EXCLUDED.content,
-                       url = EXCLUDED.url,
-                       listeners = EXCLUDED.listeners,
-                       playcount = EXCLUDED.playcount,
-                       updated_at = CURRENT_TIMESTAMP""",
-                values,
-                template="(%s, %s, %s, %s, %s, %s, %s)",
-                page_size=500,
-            )
-        return len(items)
-
-    def _import_album_tags(self, conn, items: list[dict]) -> int:
-        with conn.cursor() as cur:
-            # Batch upsert tags (deduplicated)
-            tags_seen = {}
-            for item in items:
-                tid = item["tag_uuid"]
-                if tid not in tags_seen:
-                    tags_seen[tid] = (tid, item["tag_name"])
-            if tags_seen:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """INSERT INTO tags (id, name)
-                       VALUES %s ON CONFLICT (id) DO NOTHING""",
-                    list(tags_seen.values()),
-                    template="(%s, %s)",
-                )
-
-            # Batch upsert album_tags
-            values = [
-                (
-                    item["album_uuid"], item["tag_uuid"],
-                    item["weight"], item.get("source", "sync"),
-                )
-                for item in items
-            ]
-            psycopg2.extras.execute_values(
-                cur,
-                """INSERT INTO album_tags
-                   (album_id, tag_id, weight, source)
-                   VALUES %s
-                   ON CONFLICT (album_id, tag_id, source) DO UPDATE SET
-                       weight = EXCLUDED.weight,
-                       updated_at = CURRENT_TIMESTAMP""",
-                values,
-                template="(%s, %s, %s, %s)",
                 page_size=500,
             )
         return len(items)

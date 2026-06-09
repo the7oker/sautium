@@ -531,52 +531,8 @@ def discovery_albums(
     q: str = Query(..., min_length=1),
     limit: int = Query(10, ge=1, le=30),
 ):
-    """Album matches by title trigram + (when warm) wiki embedding.
-
-    Same two-tier strategy as /artists:
-      1. Trigram on `albums.title` — instant, always available.
-      2. BGE-M3 wiki similarity — runs only when model is loaded;
-         picks up descriptive queries ("concept album about war").
-    """
-    title_results = _trigram_albums(q, limit)
-
-    if not model_cache.is_loaded("enrichment"):
-        if title_results:
-            return {"status": "ok", "results": title_results}
-        return _loading("enrichment", "text", _enrichment_loader)
-
-    from search import search_albums_by_info
-    wiki_results: list[dict] = []
-    try:
-        with get_db_context() as db:
-            res = search_albums_by_info(db, q, limit=limit, min_similarity=0.5)
-            wiki_results = res.get("results", [])
-    except Exception:
-        wiki_results = []
-
-    by_id: dict[str, dict] = {}
-    for r in wiki_results:
-        by_id[r["album_id"]] = r
-    for r in title_results:
-        existing = by_id.get(r["album_id"])
-        if existing is None:
-            by_id[r["album_id"]] = r
-        else:
-            if r["similarity"] > existing.get("similarity", 0):
-                existing["similarity"] = r["similarity"]
-                existing["match_source"] = "title+wiki"
-            # Title-trigram row already carries cover/mfid; wiki path
-            # may not — back-fill to keep tile rendering populated.
-            existing.setdefault("cover_id", r.get("cover_id"))
-            existing.setdefault("media_file_id", r.get("media_file_id"))
-
-    merged = sorted(
-        by_id.values(),
-        key=lambda r: r.get("similarity", 0),
-        reverse=True,
-    )[:limit]
-
-    return {"status": "ok", "results": merged}
+    """Album matches by title trigram (album-description/wiki embeddings removed)."""
+    return {"status": "ok", "results": _trigram_albums(q, limit)}
 
 
 @router.get("/sound")
