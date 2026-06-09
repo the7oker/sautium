@@ -603,8 +603,8 @@ class SyncClient:
                 psycopg2.extras.execute_values(
                     cur,
                     """UPDATE artists SET
-                           artist_type = data.artist_type,
-                           verification_status = data.verification_status
+                           artist_type = data.artist_type::artist_type,
+                           verification_status = data.verification_status::verification_status
                        FROM (VALUES %s) AS data(id, artist_type, verification_status)
                        WHERE artists.id = data.id::uuid""",
                     compound_updates,
