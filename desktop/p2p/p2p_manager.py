@@ -32,6 +32,11 @@ from desktop.sync_client import SyncClient
 
 logger = logging.getLogger(__name__)
 
+# DHT artist sync searches in slices, not all-at-once: a productive seed found
+# in one slice is drained for ALL remaining artists (Step B), so the rest never
+# pay the per-artist get_peers timeout. Sized ~ DHT batch concurrency (20).
+_DHT_SEARCH_SLICE = 25
+
 
 class P2PManager:
     """Orchestrates P2P sync server + DHT + LAN discovery + UPnP."""
@@ -702,24 +707,35 @@ class P2PManager:
             logger.debug(f"DHT skip list: {skip_dht_addrs}")
 
         if self._dht_service and self._dht_service.is_available:
+            # A slice artist still unenriched after this round's peers were all
+            # drained has no productive announcer in the current DHT view → retire
+            # it (don't re-pay its get_peers timeout); a DHT-flaky-absent seed is
+            # caught by the next sync run (`unreachable` is per-run). This resolves
+            # every slice artist each round (enriched or retired), so `pending`
+            # shrinks by ≥ one slice per round — strict, fast termination.
+            unreachable: set[str] = set()
             while True:
-                still_unenriched = await self._get_unenriched_artists()
-                if not still_unenriched:
+                pending = [
+                    a for a in await self._get_unenriched_artists()
+                    if a not in unreachable
+                ]
+                if not pending:
                     break
 
+                # Search only a slice. A productive seed found here is drained
+                # for ALL of `pending` by Step B below, so the rest of pending
+                # is enriched without ever hitting the DHT — and a peer already
+                # in `synced_peers` is skipped, so its other artist
+                # announcements are correctly ignored (we asked it everything).
+                search_slice = pending[:_DHT_SEARCH_SLICE]
                 _progress(
-                    f"Searching DHT for {len(still_unenriched)} "
-                    f"remaining artists..."
+                    f"Searching DHT ({len(search_slice)} of {len(pending)} "
+                    f"remaining artists)..."
                 )
                 peer_map = await self._dht_service.lookup_artists_batch(
-                    still_unenriched
+                    search_slice
                 )
-                if not peer_map:
-                    _progress("No peers found in DHT")
-                    break
 
-                # Collect unique NEW peers (skip already-queried and
-                # self/LAN peers visible via external IP)
                 new_peers: dict[tuple, list[str]] = {}
                 for artist_uuid, peers in peer_map.items():
                     for ip, port in peers:
@@ -731,15 +747,9 @@ class P2PManager:
                         ).append(artist_uuid)
 
                 if not new_peers:
-                    _progress("No new DHT peers to try")
-                    break
+                    unreachable.update(search_slice)
+                    continue
 
-                _progress(
-                    f"Found {len(new_peers)} new DHT peers "
-                    f"for {len(peer_map)} artists"
-                )
-
-                found_any = False
                 for (ip, port), artist_uuids in new_peers.items():
                     peer_addr = f"{ip}:{port}"
 
@@ -763,11 +773,10 @@ class P2PManager:
                     if peer_items == 0:
                         continue  # not a Sautium peer, skip
 
-                    found_any = True
                     synced_peers.add(peer_addr)
 
-                    # Step B: this peer has data — ask it about ALL
-                    # remaining unenriched tracks too
+                    # Step B: this peer has data — ask it about ALL remaining
+                    # unenriched tracks (the whole point: one seed drains many)
                     remaining = await self._get_unenriched_artists()
                     if not remaining:
                         break
@@ -785,12 +794,12 @@ class P2PManager:
                         )
                         for k, v in synced2.items():
                             if isinstance(v, int):
-                                total_stats[k] = (
-                                    total_stats.get(k, 0) + v
-                                )
+                                total_stats[k] = total_stats.get(k, 0) + v
 
-                if not found_any:
-                    break  # no new data from any peer, stop
+                # Every peer this round's search pointed to is now drained; any
+                # slice artist still unenriched can't be had now → retire it.
+                after = set(await self._get_unenriched_artists())
+                unreachable.update(a for a in search_slice if a in after)
 
         # Re-announce newly enriched artists
         if total_stats and self._dht_service:
