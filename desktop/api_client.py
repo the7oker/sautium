@@ -186,10 +186,9 @@ class BackendAPIClient:
         """Complete Last.fm OAuth flow. Returns {"session_key": "..."}."""
         return self._post_json("/lastfm/auth/complete", timeout=10)
 
-    def normalize_artists(self, pass2: bool = False) -> Optional[dict]:
-        """Run artist normalization (Pass 1 by default, Pass 2 if pass2=True)."""
-        params = f"pass2={str(pass2).lower()}"
-        return self._post_json(f"/normalize-artists?{params}", timeout=120)
+    def normalize_artists(self) -> Optional[dict]:
+        """Run artist normalization (deterministic Pass 1 — feat./vs. splits only)."""
+        return self._post_json("/normalize-artists", timeout=120)
 
     # -- Sync API ----------------------------------------------------------
 

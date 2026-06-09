@@ -51,10 +51,6 @@ _DISCOGRAPHY_DELAY_S = 1.0        # Deezer is generous, but shares an IP budget 
 _DISCOGRAPHY_SCOPE_MONTHS = 6     # only artists listened-to this recently
 _DISCOGRAPHY_STALE_DAYS = 30      # re-sync an artist's discography at most monthly
 
-_MB_CANON_PER_BATCH = 25          # MB canonicalization artists per cycle — small on purpose:
-                                  # MB IP-throttles on *sustained* volume (not just >1 req/s), so
-                                  # a ~25-request burst once per 30-min cycle stays far below it.
-
 _PRIORITY_SQL = text("""
     WITH artist_listen AS (
         SELECT ta.artist_id, SUM(lh.duration_listened) AS sec
@@ -125,7 +121,6 @@ _state: Dict[str, Any] = {
         "artists": 0,
         "genres": 0,
         "discography": 0,
-        "mb_canon": 0,
     },
 }
 _thread: Optional[threading.Thread] = None
@@ -393,43 +388,6 @@ def _step_sync_discographies(limit: int) -> Dict[str, int]:
     return stats
 
 
-def _step_mb_canonicalize(limit: int) -> Dict[str, int]:
-    """Politely drain the MB canonicalization queue — a small batch per cycle.
-
-    Reuses the streaming canonicalizer. Skips entirely while an MB cooldown is
-    armed (MB IP-throttles on sustained volume, so we stay well below it with a
-    ~`limit`-request burst once per 30-min cycle, not a bulk blast). Stops on a
-    fresh cooldown or a cancel so the loop shuts down promptly.
-    """
-    from mb_backend import cooldown_active  # local dump → no MB web, no cooldown
-    from mb_canonicalize import _select_batch, canonicalize_one
-
-    stats = {"processed": 0, "keep": 0, "rename": 0, "split": 0, "unsure": 0}
-    if cooldown_active():
-        return stats
-
-    batch = _select_batch(limit)
-    if not batch:
-        return stats
-    logger.info(f"Background: {len(batch)} artists queued for MB canonicalization")
-
-    for a in batch:
-        if _cancel_flag() or cooldown_active():
-            break
-        try:
-            d = canonicalize_one(a["id"], a["name"])
-        except Exception as e:
-            logger.error(f"Background MB canon failed for {a['name']}: {e}")
-            continue
-        if "cooldown" in d.get("note", ""):
-            break
-        stats["processed"] += 1
-        act = d.get("action", "")
-        if act in stats:
-            stats[act] += 1
-    return stats
-
-
 # ============================================================
 # Loop
 # ============================================================
@@ -437,7 +395,7 @@ def _step_mb_canonicalize(limit: int) -> Dict[str, int]:
 def _run_once() -> Dict[str, Any]:
     """Run one full batch (all five steps). Honours cancel between steps."""
     summary = {"track_stats": {}, "lyrics": {}, "artists": {},
-               "genres": {}, "discography": {}, "mb_canon": {}}
+               "genres": {}, "discography": {}}
 
     if _cancel_flag():
         return summary
@@ -477,16 +435,10 @@ def _run_once() -> Dict[str, Any]:
     # summary["discography"] = _step_sync_discographies(_DISCOGRAPHY_PER_BATCH)
     # _bump("discography", summary["discography"].get("new_albums", 0))
 
-    if _cancel_flag():
-        return summary
-
-    # MB canonicalization is DISABLED in the background loop while the local-dump
-    # canonicalizer is being finalized — it ran against the throttled MB web API
-    # and risks an IP ban. canonicalize_one now routes through mb_backend (local
-    # dump, web-free), so re-enable this once the full manual canon re-run lands.
-    # _set(current_step="mb_canon")
-    # summary["mb_canon"] = _step_mb_canonicalize(_MB_CANON_PER_BATCH)
-    # _bump("mb_canon", summary["mb_canon"].get("processed", 0))
+    # MB canonicalization is NOT a background step — it runs at its real trigger
+    # points (post-scan, post-MB-dump-load) against the local dump. The background
+    # loop is reserved for the future P2P-carrier canon (a node without the dump
+    # asking a carrier peer); add it here when that lands.
 
     return summary
 

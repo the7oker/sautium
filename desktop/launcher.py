@@ -891,7 +891,7 @@ class LauncherApp(ctk.CTk):
             # Normalize local artists before sync
             self.after(0, lambda: self._progress_text.configure(
                 text="Normalizing artists..."))
-            norm_result = self.api_client.normalize_artists(pass2=True)
+            norm_result = self.api_client.normalize_artists()
             if norm_result:
                 p1 = norm_result.get("statistics", {}).get("pass1", {})
                 if p1.get("split", 0) > 0:

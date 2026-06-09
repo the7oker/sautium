@@ -245,6 +245,19 @@ def _mb_worker(force: bool) -> None:
         from datetime import datetime, timezone
         _write("musicbrainz.last_update_at", datetime.now(timezone.utc).isoformat())
         logger.info(f"MusicBrainz dump loaded: {result}")
+
+        # The freshly-loaded dump makes every owned artist canon-pending
+        # (last_mb_sync IS NULL) — canonicalize now so the EXISTING library gets
+        # MBIDs + RG titles without waiting for a re-scan. Incremental on later
+        # dump refreshes (only artists with new content since their last canon).
+        _mb_state["phase"] = "canonicalizing"
+        _mb_state["progress"] = "Canonicalizing library (MusicBrainz)…"
+        _mb_state["pct"] = None
+        notify_library_subscribers()
+        from mb_normalize import canonicalize_pending
+        canon = canonicalize_pending()
+        logger.info(f"Post-load MB canon: {canon}")
+        _mb_progress({"phase": "done"})
     except Exception as e:
         _mb_state["error"] = str(e)
         _mb_state["progress"] = f"Failed: {e}"
