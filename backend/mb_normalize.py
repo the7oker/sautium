@@ -26,7 +26,7 @@ from sqlalchemy import text as _sql
 
 import mb_backend as mb
 from database import SessionLocal
-from db_pool import db_query, get_conn
+from db_pool import db_execute, db_query, get_conn
 from discography import split_edition, title_residual
 from normalize_artists import recanonicalize_album, recanonicalize_artist
 from uuid_utils import album_uuid, artist_uuid, normalize
@@ -398,24 +398,31 @@ def merge_collisions(dry_run: bool = True) -> list:
     return plan
 
 
-def rename_albums(dry_run: bool = True) -> dict:
+def rename_albums(dry_run: bool = True, artist_ids: list = None) -> dict:
     """APPLY increment 2b — rename owned albums to their MB-canonical release-group
     title (the RG name), collapsing editions onto one album with named variants.
     For each album with musicbrainz_id whose title differs from the RG name,
     recanonicalize_album renames (or merges if the canonical UUID exists) and tags
-    the variant's edition (from split_edition of the dirty title). dry_run=True
-    returns the scope without mutating."""
+    the variant's edition. The original title survives on album_variants.raw_title
+    (set at scan) so a wrong rename is reversible — albums are local, never synced.
+    artist_ids scopes the pass to those primary artists' albums (incremental canon);
+    None = whole library. dry_run=True returns the scope without mutating."""
     from collections import Counter
     db = SessionLocal()
     try:
-        rows = db.execute(_sql("""
+        sql = """
             SELECT a.id::text AS album_id, a.title, rg.name AS canonical, ar.name AS artist
             FROM albums a
             JOIN mb_release_group rg ON rg.gid = a.musicbrainz_id
             JOIN album_artists aa ON aa.album_id = a.id AND aa.role = 'primary'
             JOIN artists ar ON ar.id = aa.artist_id
             WHERE a.musicbrainz_id IS NOT NULL
-        """)).fetchall()
+        """
+        params = {}
+        if artist_ids:
+            sql += " AND aa.artist_id::text = ANY(:ids)"
+            params["ids"] = [str(a) for a in artist_ids]
+        rows = db.execute(_sql(sql), params).fetchall()
         new_ids = Counter(str(album_uuid(c, ar)) for _, _, c, ar in rows)
         changes = [(aid, title, canon, ar) for aid, title, canon, ar in rows
                    if str(album_uuid(canon, ar)) != aid]
@@ -431,4 +438,50 @@ def rename_albums(dry_run: bool = True) -> dict:
             db.rollback()
     finally:
         db.close()
+    return st
+
+
+def canonicalize_pending(limit: int = None) -> dict:
+    """Incremental canon stage — the post-scan / post-import entry point. For every OWNED
+    artist whose content is newer than its last canon (the `artists.last_mb_sync` watermark
+    vs `media_files.created_at`): resolve + materialize (apply_artist) + scoped rename/edition-
+    collapse, then merge any MBID collisions surfaced across the batch.
+
+    MB-OPTIONAL — a NO-OP without the local dump (sync/enrich proceed on tier-3 deterministic
+    names; MB never blocks). Idempotent: bumps last_mb_sync so a stable re-scan is free, and a
+    crash mid-run leaves un-bumped artists to retry. Album renames are reversible (raw_title)
+    and local (albums are not synced), so this auto-applies without a review gate."""
+    if not mb.LOCAL_DUMP:
+        return {"skipped": "no local MB dump", "artists": 0}
+
+    pending = db_query("""
+        SELECT ar.id::text AS id, ar.name
+        FROM artists ar
+        WHERE EXISTS (
+            SELECT 1 FROM album_artists aa
+            JOIN album_variants av ON av.album_id = aa.album_id
+            JOIN media_files mf ON mf.album_variant_id = av.id
+            WHERE aa.artist_id = ar.id AND aa.role = 'primary'
+              AND (ar.last_mb_sync IS NULL OR mf.created_at > ar.last_mb_sync))
+        ORDER BY ar.last_mb_sync NULLS FIRST, ar.name
+        LIMIT %(lim)s
+    """, {"lim": limit or 1_000_000})
+
+    st = {"pending": len(pending), "artists": 0, "errors": 0}
+    done = []
+    for a in pending:
+        try:
+            apply_artist(a["id"], a["name"])   # resolve + materialize (atomic per artist)
+            done.append(a["id"])
+            st["artists"] += 1
+        except Exception as e:
+            st["errors"] += 1
+            logger.error("canon failed for %r: %s", a["name"], e)
+    if done:
+        rename_albums(dry_run=False, artist_ids=done)   # scoped rename + edition-collapse
+        # watermark BEFORE merge: rename leaves artist ids intact, merge re-ids the rare
+        # collision survivors (they simply re-canon next scan — idempotent, cheap)
+        db_execute("UPDATE artists SET last_mb_sync = now() WHERE id::text = ANY(%(ids)s)",
+                   {"ids": done})
+        merge_collisions(dry_run=False)   # cross-artist MBID collisions (a near-instant no-op at 0)
     return st

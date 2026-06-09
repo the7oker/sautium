@@ -22,7 +22,12 @@ def _dump_loaded() -> bool:
         return False  # tables not yet created (fresh install) → API
 
 
-if _dump_loaded():
+# True = the offline twin is active → BULK canon (mb_normalize) is safe (no IP-ban risk).
+# When False, callers that bulk-canon must NO-OP, not fall back to the HTTP API (MB is an
+# optional layer; sync/enrich proceed on tier-3 deterministic names without it).
+LOCAL_DUMP = _dump_loaded()
+
+if LOCAL_DUMP:
     import mb_local as _b
     logger.info("MB canonicalization using LOCAL dump (mb_* tables)")
 else:

@@ -573,6 +573,23 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
             except Exception as e:
                 logger.error(f"Post-scan normalization failed: {e}")
 
+            # MB canonicalization (local dump): resolve RG/MBID + collapse editions for
+            # artists with new content since their last canon. No-op without the dump.
+            # Runs HERE — after scan, before sync (peers get canonical content) and before
+            # enrich (dedup + correction cut wasted fetches). Renames are local + reversible
+            # (album_variants.raw_title), so it auto-applies without a review gate.
+            if not state["cancel_requested"]:
+                state["progress"] = "Canonicalizing (MusicBrainz)..."
+                notify_library_subscribers()
+                try:
+                    from mb_normalize import canonicalize_pending
+                    canon_stats = canonicalize_pending()
+                    if canon_stats.get("artists"):
+                        result["mb_canon"] = canon_stats
+                        logger.info(f"Post-scan MB canon: {canon_stats}")
+                except Exception as e:
+                    logger.error(f"Post-scan MB canonicalization failed: {e}")
+
             if prune and not state["cancel_requested"]:
                 state["progress"] = "Pruning missing files..."
                 try:

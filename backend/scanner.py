@@ -310,6 +310,7 @@ class LibraryScanner:
             variant = AlbumVariant(
                 album_id=album.id,
                 directory_path=directory_path,
+                raw_title=metadata.get("album"),  # pre-canon title — source of truth for reversible rename
                 sample_rate=metadata.get("sample_rate"),
                 bit_depth=metadata.get("bit_depth"),
                 is_lossless=metadata.get("is_lossless", True),

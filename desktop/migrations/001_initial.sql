@@ -225,6 +225,7 @@ CREATE TABLE IF NOT EXISTS album_variants (
     id SERIAL PRIMARY KEY,
     album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
     directory_path TEXT NOT NULL UNIQUE,
+    raw_title TEXT,                        -- original (pre-canon) album title for this variant — source of truth; makes album rename/merge reversible (albums are local, not synced)
     edition TEXT,                          -- named edition ("Super Deluxe Edition") extracted from a dirty title on canon; NULL = standard
     release_mbid UUID,                     -- MB release MBID (specific edition under albums.musicbrainz_id RG); best-effort, often NULL
     sample_rate INTEGER,
