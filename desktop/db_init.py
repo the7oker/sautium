@@ -683,8 +683,17 @@ def create_database(
                 "SELECT 1 FROM pg_database WHERE datname = 'sautium'"
             )
             if not cur.fetchone():
-                cur.execute("CREATE DATABASE sautium OWNER sautium")
-                logger.info("Created database 'sautium'")
+                # ICU collation (not the cluster's C locale) so lower()/sort fold
+                # Unicode. Under LC_CTYPE=C, lower() only touches ASCII — Cyrillic/
+                # diacritic/CJK artist names then fail MB name-matching (search_artist
+                # does `lower(name) = lower(query)`), so non-ASCII artists never
+                # canonicalize. ICU is per-database, so the C cluster is left as-is.
+                cur.execute(
+                    "CREATE DATABASE sautium OWNER sautium "
+                    "LOCALE_PROVIDER icu ICU_LOCALE 'und' LOCALE 'C' "
+                    "TEMPLATE template0 ENCODING UTF8"
+                )
+                logger.info("Created database 'sautium' (ICU collation)")
 
             # Grant privileges
             cur.execute("GRANT ALL PRIVILEGES ON DATABASE sautium TO sautium")
