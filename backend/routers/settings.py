@@ -254,6 +254,11 @@ def _mb_worker(force: bool) -> None:
         _mb_state["progress"] = "Canonicalizing library (MusicBrainz)…"
         _mb_state["pct"] = None
         notify_library_subscribers()
+        # The dump tables exist only now — re-evaluate the data source so this
+        # process (which may have started dump-less, LOCAL_DUMP=False) actually
+        # canonicalizes instead of silently skipping. No backend restart needed.
+        import mb_backend as mb
+        mb.refresh()
         from mb_normalize import canonicalize_pending
         canon = canonicalize_pending()
         logger.info(f"Post-load MB canon: {canon}")

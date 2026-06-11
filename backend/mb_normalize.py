@@ -604,7 +604,9 @@ def canonicalize_pending(limit: int = None) -> dict:
     crash mid-run leaves un-bumped artists to retry. Album renames are reversible (raw_title)
     and local (albums are not synced), so this auto-applies without a review gate."""
     if not mb.LOCAL_DUMP:
-        return {"skipped": "no local MB dump", "artists": 0}
+        mb.refresh()   # the dump may have been loaded since this process started
+        if not mb.LOCAL_DUMP:
+            return {"skipped": "no local MB dump", "artists": 0}
 
     pending = db_query("""
         SELECT ar.id::text AS id, ar.name
