@@ -28,7 +28,9 @@ import mb_backend as mb
 from database import SessionLocal
 from db_pool import db_execute, db_query, get_conn
 from discography import split_edition, title_residual
-from normalize_artists import recanonicalize_album, recanonicalize_artist
+from normalize_artists import (
+    normalize_compound_artist, recanonicalize_album, recanonicalize_artist,
+)
 from uuid_utils import album_uuid, artist_uuid, normalize
 
 logger = logging.getLogger(__name__)
@@ -441,6 +443,156 @@ def rename_albums(dry_run: bool = True, artist_ids: list = None) -> dict:
     return st
 
 
+def rename_to_canonical(artist_ids: list = None, dry_run: bool = False) -> dict:
+    """Rename every single-MBID artist to its MB-canonical name (`mb_artist.name`).
+
+    This is what makes MB convergence hold across nodes. `apply_artist` assigns the
+    MBID but keeps the SCANNED name; `merge_collisions` renames only when two local
+    variants collide on one MBID. So a node that scanned just "Beach Boys" keeps it
+    while a node that also had "The Beach Boys" (collision → merge) ends up canonical
+    — same MBID, different name, hence a different artist (and track) UUID. Pinning
+    the name to the MBID's canonical form makes it a pure function of the MBID, so any
+    two nodes that resolve the same artist converge regardless of source-tag spelling.
+
+    Multi-MBID artists (namesakes conflated under one name) are skipped — there's no
+    single canonical name; merge_collisions / manual review own those. recanonicalize_
+    artist recomputes the artist + its track/album UUIDs and merges if the canonical
+    name already exists (history preserved). Idempotent: a name already equal to its
+    canonical form is not in the worklist. Pass artist_ids to scope (post-canon batch),
+    or None to sweep the whole library (one-shot retrofit of pre-existing matches).
+    """
+    db = SessionLocal()
+    out = {"renamed": 0, "plan": []}
+    scope, params = "", {}
+    if artist_ids is not None:
+        if not artist_ids:
+            return out
+        scope = "AND a.id::text = ANY(:ids)"
+        params["ids"] = list(artist_ids)
+    try:
+        rows = db.execute(_sql(f"""
+            SELECT a.id::text, a.name, mba.name AS canonical
+            FROM artists a
+            JOIN artist_mbids am ON am.artist_id = a.id
+            JOIN mb_artist mba ON mba.gid = am.mbid
+            WHERE a.name <> mba.name
+              AND (SELECT count(*) FROM artist_mbids x WHERE x.artist_id = a.id) = 1
+              {scope}
+        """), params).fetchall()
+        for aid, cur, canonical in rows:
+            # Skip case/normalize-only differences ("SATeN" -> "Saten"): normalize()
+            # already collapses them to the same UUID, so there's nothing to converge
+            # and recanonicalize would no-op anyway.
+            if artist_uuid(cur) == artist_uuid(canonical):
+                continue
+            out["plan"].append({"from": cur, "to": canonical})
+            if not dry_run:
+                recanonicalize_artist(db, aid, canonical)
+                out["renamed"] += 1
+        db.commit() if not dry_run else db.rollback()
+    finally:
+        db.close()
+    return out
+
+
+def _collab_members(artist_id, name: str, plan: dict) -> list:
+    """The MB-deterministic 'split this collaboration' signal, or [].
+
+    MB models a collaboration as an `artist_credit` of N entities (Bei Bei [&]
+    Shawn Lee), NOT a single artist — while a real band (Simon & Garfunkel) IS a
+    single `mb_artist`. So: if the artist's matched recordings predominantly carry
+    a multi-artist credit AND no single `mb_artist` bears this name (not a band),
+    the credit's ordered members [(name, mbid)] are returned for splitting. This is
+    the deterministic, content-verified replacement for the removed Last.fm Pass 2.
+    """
+    recs = [r for alb in plan["albums"] for r in alb["recordings"].values()]
+    if not recs:
+        return []
+    # a real band with this exact name → keep whole (its recordings may still carry
+    # a 2-artist "member & member" credit on some releases; the band wins).
+    if db_query("SELECT 1 FROM mb_artist WHERE lower(name) = lower(%(n)s) LIMIT 1",
+                {"n": name}):
+        return []
+    top = db_query("""
+        SELECT rec.artist_credit AS cid, ac.artist_count AS n
+        FROM mb_recording rec JOIN mb_artist_credit ac ON ac.id = rec.artist_credit
+        WHERE rec.gid = ANY(%(recs)s::uuid[])
+        GROUP BY rec.artist_credit, ac.artist_count
+        ORDER BY count(*) DESC LIMIT 1
+    """, {"recs": recs})
+    if not top or top[0]["n"] < 2:
+        return []
+    return [(m["name"], m["mbid"]) for m in db_query("""
+        SELECT mba.name AS name, mba.gid::text AS mbid
+        FROM mb_artist_credit_name acn JOIN mb_artist mba ON mba.id = acn.artist
+        WHERE acn.artist_credit = %(c)s ORDER BY acn.position
+    """, {"c": top[0]["cid"]})]
+
+
+def _split_collab(artist_id, name: str, members: list) -> tuple:
+    """Split a collaboration into its MB credit members (primary = position 0),
+    each stamped with its own MBID. Reuses the deterministic compound-split
+    primitive (tracks move to the primary, members recorded in artist_members).
+    Returns (primary_id, primary_name) so the caller re-resolves the primary's
+    albums; the featured members carry no primary album, only their MBID."""
+    db = SessionLocal()
+    try:
+        parts = [m[0] for m in members]
+        normalize_compound_artist(db, artist_id, name, parts, status='verified_split')
+        # The compound is now just a split marker; its single-member MBID (assigned
+        # by an earlier apply_artist) must move OFF it onto the real member — hence
+        # DELETE first, then DO UPDATE to re-point any MBID already held elsewhere.
+        db.execute(_sql("DELETE FROM artist_mbids WHERE artist_id::text = :c"),
+                   {"c": str(artist_id)})
+        for mname, mmbid in members:
+            db.execute(_sql("INSERT INTO artist_mbids (mbid, artist_id, confidence) "
+                            "VALUES (:m, :a, 'overlap_verified') "
+                            "ON CONFLICT (mbid) DO UPDATE SET artist_id = EXCLUDED.artist_id"),
+                       {"m": mmbid, "a": str(artist_uuid(mname))})
+        db.commit()
+        return str(artist_uuid(parts[0])), parts[0]
+    finally:
+        db.close()
+
+
+def split_collaborations(dry_run: bool = False) -> dict:
+    """One-shot retrofit: split every owned collaboration into its MB credit members.
+
+    canonicalize_pending does this inline for freshly-scanned artists; this sweeps
+    PRE-EXISTING data (already past their last_mb_sync watermark) without disturbing
+    the rename/merge machinery. Scoped to compound-named owned artists (the only
+    split candidates) so it resolves a few hundred, not the whole library. Returns
+    the plan either way (dry_run shows it without mutating).
+    """
+    if not mb.LOCAL_DUMP:
+        return {"skipped": "no local MB dump", "split": 0, "plan": []}
+    owned = db_query("""
+        SELECT DISTINCT a.id::text AS id, a.name FROM artists a
+        WHERE (a.name ~ ' & ' OR a.name ~ ', ' OR a.name ~ ' and '
+               OR a.name ~ ' with ' OR a.name ~ ' / ')
+          AND EXISTS (SELECT 1 FROM album_artists aa
+                JOIN album_variants av ON av.album_id = aa.album_id
+                JOIN media_files mf ON mf.album_variant_id = av.id
+                WHERE aa.artist_id = a.id AND aa.role = 'primary')
+    """)
+    out = {"candidates": len(owned), "split": 0, "errors": 0, "plan": []}
+    for r in owned:
+        try:
+            plan = resolve_artist(r["id"], r["name"])
+            members = _collab_members(r["id"], r["name"], plan)
+            if not members:
+                continue
+            out["plan"].append({"from": r["name"], "to": [m[0] for m in members]})
+            if not dry_run:
+                pid, pname = _split_collab(r["id"], r["name"], members)
+                apply_artist(pid, pname)   # materialize the primary member's albums/MBID
+                out["split"] += 1
+        except Exception as e:
+            out["errors"] += 1
+            logger.error("split failed for %r: %s", r["name"], e)
+    return out
+
+
 def canonicalize_pending(limit: int = None) -> dict:
     """Incremental canon stage — the post-scan / post-import entry point. For every OWNED
     artist whose content is newer than its last canon (the `artists.last_mb_sync` watermark
@@ -467,16 +619,31 @@ def canonicalize_pending(limit: int = None) -> dict:
         LIMIT %(lim)s
     """, {"lim": limit or 1_000_000})
 
-    st = {"pending": len(pending), "artists": 0, "errors": 0}
+    st = {"pending": len(pending), "artists": 0, "split": 0, "errors": 0}
     done = []
-    for a in pending:
+    # Worklist (not a flat for): a collaboration is split into its members, and the
+    # primary member is re-queued so its albums resolve under the now-split identity.
+    worklist = [(a["id"], a["name"]) for a in pending]
+    seen = set()
+    while worklist:
+        aid, aname = worklist.pop(0)
+        if aid in seen:
+            continue
+        seen.add(aid)
         try:
-            apply_artist(a["id"], a["name"])   # resolve + materialize (atomic per artist)
-            done.append(a["id"])
+            plan = resolve_artist(aid, aname)
+            members = _collab_members(aid, aname, plan)
+            if members:
+                primary = _split_collab(aid, aname, members)   # → (id, name) of pos-0
+                st["split"] += 1
+                worklist.append(primary)
+                continue
+            apply_artist(aid, aname, plan)   # materialize (reuses the resolve, atomic)
+            done.append(aid)
             st["artists"] += 1
         except Exception as e:
             st["errors"] += 1
-            logger.error("canon failed for %r: %s", a["name"], e)
+            logger.error("canon failed for %r: %s", aname, e)
     if done:
         rename_albums(dry_run=False, artist_ids=done)   # scoped rename + edition-collapse
         # watermark BEFORE merge: rename leaves artist ids intact, merge re-ids the rare
@@ -484,4 +651,8 @@ def canonicalize_pending(limit: int = None) -> dict:
         db_execute("UPDATE artists SET last_mb_sync = now() WHERE id::text = ANY(%(ids)s)",
                    {"ids": done})
         merge_collisions(dry_run=False)   # cross-artist MBID collisions (a near-instant no-op at 0)
+        # name → MB-canonical for the matched single-MBID artists (re-stamps via
+        # recanonicalize), so the artist/track UUIDs are a pure function of the MBID
+        # and converge across nodes regardless of how the source tags were spelled.
+        st["renamed"] = rename_to_canonical(artist_ids=done)["renamed"]
     return st
