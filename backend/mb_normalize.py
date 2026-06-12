@@ -691,11 +691,15 @@ def _collab_members(artist_id, name: str, plan: dict) -> list:
     if len(parts) < 2:
         return []
     # "Kaji, Meiko" is a REORDERED person ("Meiko Kaji"), not a collaboration —
-    # a comma-only 2-part name whose swap is an MB artist must not be split.
+    # a comma-only 2-part name whose swap is an MB artist OR ALIAS must not be
+    # split (梶芽衣子 carries "Meiko Kaji" only as an alias, not the name).
     if (len(parts) == 2 and "," in name
             and not re.search(r" & | and | with | / ", name)
-            and db_query("SELECT 1 FROM mb_artist WHERE lower(name) = lower(%(s)s) LIMIT 1",
-                         {"s": f"{parts[1]} {parts[0]}"})):
+            and db_query("""
+                SELECT 1 FROM mb_artist WHERE lower(name) = lower(%(s)s)
+                UNION ALL
+                SELECT 1 FROM mb_artist_alias WHERE lower(name) = lower(%(s)s)
+                LIMIT 1""", {"s": f"{parts[1]} {parts[0]}"})):
         return []
     members = []
     for p in parts:
@@ -720,7 +724,10 @@ def _split_collab(artist_id, name: str, members: list) -> tuple:
     db = SessionLocal()
     try:
         parts = [m[0] for m in members]
-        normalize_compound_artist(db, artist_id, name, parts, status='verified_split')
+        # 'verified_collab', NOT 'verified_split': the latter marks legacy Pass-1/2
+        # splits and is what unsplit_pass2_compounds targets — MB-evidence splits
+        # must be distinguishable so a future --unsplit can't destroy them.
+        normalize_compound_artist(db, artist_id, name, parts, status='verified_collab')
         # The compound is now just a split marker; its single-member MBID (assigned
         # by an earlier apply_artist) must move OFF it onto the real member — hence
         # DELETE first, then DO UPDATE to re-point any MBID already held elsewhere.
