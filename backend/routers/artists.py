@@ -343,7 +343,22 @@ def get_artist(
     # (0..1). No cap — the row is a horizontal scroll, so showing the
     # full set lets the user explore beyond the obvious top-5 without
     # a separate "see all" screen.
+    #
+    # SYMMETRIC read: edges are stored directed (Last.fm getSimilar is a
+    # per-artist top-20, so A→B often exists while B's own list truncates
+    # A away — e.g. Submotion Orchestra→Hidden Orchestra at 0.95 with no
+    # reverse edge). Similarity is mutual, so both screens must surface
+    # the pair; max(score) wins when both directions exist.
     artist["similar_artists"] = db_query("""
+        WITH edges AS (
+            SELECT sa.similar_artist_id AS other_id, sa.match_score
+            FROM similar_artists sa
+            WHERE sa.artist_id = %(id)s::uuid
+            UNION ALL
+            SELECT sa.artist_id, sa.match_score
+            FROM similar_artists sa
+            WHERE sa.similar_artist_id = %(id)s::uuid
+        )
         SELECT a.id::text AS id,
                a.name,
                (SELECT mf.cover_id::text
@@ -358,10 +373,10 @@ def get_artist(
                 JOIN track_artists ta2 ON ta2.track_id = t2.id AND ta2.role = 'primary'
                 WHERE ta2.artist_id = a.id
                 LIMIT 1) AS media_file_id
-        FROM similar_artists sa
-        JOIN artists a ON a.id = sa.similar_artist_id
-        WHERE sa.artist_id = %(id)s::uuid
-        ORDER BY sa.match_score DESC NULLS LAST, a.name
+        FROM (SELECT other_id, MAX(match_score) AS match_score
+              FROM edges GROUP BY other_id) e
+        JOIN artists a ON a.id = e.other_id
+        ORDER BY e.match_score DESC NULLS LAST, a.name
     """, {"id": artist_id})
 
     # New albums the user doesn't own — phantom albums derived from the

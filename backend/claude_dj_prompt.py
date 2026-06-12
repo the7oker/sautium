@@ -165,14 +165,17 @@ WHERE a.name ILIKE '%artist_name%'
 ORDER BY at2.weight DESC
 ```
 
-Similar artists (from Last.fm):
+Similar artists (from Last.fm). Edges are stored directed (per-artist
+top-20), but similarity is mutual — always read BOTH directions:
 ```sql
-SELECT a2.name as similar_artist, sa.match_score
-FROM similar_artists sa
-JOIN artists a ON a.id = sa.artist_id
-JOIN artists a2 ON a2.id = sa.similar_artist_id
+SELECT a2.name as similar_artist, MAX(sa.match_score) as match_score
+FROM artists a
+JOIN similar_artists sa ON a.id IN (sa.artist_id, sa.similar_artist_id)
+JOIN artists a2 ON a2.id = CASE WHEN sa.artist_id = a.id
+                                THEN sa.similar_artist_id ELSE sa.artist_id END
 WHERE a.name ILIKE '%artist_name%'
-ORDER BY sa.match_score DESC
+GROUP BY a2.name
+ORDER BY match_score DESC
 ```
 
 Find artists in library by tag/genre:
