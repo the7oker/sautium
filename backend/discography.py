@@ -308,7 +308,9 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
 
     track_rows, artist_rows, slot_rows = [], [], []
     for tr in best["tracks"]:
-        title = (tr["title"] or "").strip()
+        # MB has pathological titles past the column's 500 chars; clamp
+        # BEFORE the UUID so identity keys on the stored value.
+        title = (tr["title"] or "").strip()[:500]
         if not title:
             continue
         tid = str(track_uuid(title, artist_name))
@@ -440,6 +442,9 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
                     continue
                 if not rg["title"]:
                     continue
+                # same 500-char clamp as tracks: identity keys on the
+                # stored value (albums.title is VARCHAR(500))
+                rg["title"] = rg["title"][:500]
                 candidates.setdefault(rg["rg_mbid"], (rg, mbid))
     except mb.MBRateLimited:
         logger.warning(f"MB API rate-limited on discography for {artist_name}")
@@ -598,10 +603,17 @@ def backfill_tracklists(limit: Optional[int] = None) -> Dict[str, int]:
         {f"LIMIT {int(limit)}" if limit else ""}
     """)
 
-    totals = {"processed": 0, "tracks": 0}
+    totals = {"processed": 0, "tracks": 0, "errors": 0}
     for row in rows:
-        totals["tracks"] += _persist_phantom_tracklist(
-            row["album_id"], row["artist_id"], row["artist_name"], row["rg_mbid"])
+        try:
+            totals["tracks"] += _persist_phantom_tracklist(
+                row["album_id"], row["artist_id"], row["artist_name"], row["rg_mbid"])
+        except Exception as e:
+            # per-album isolation (enrichment convention): one pathological
+            # tracklist must not kill the remaining tens of thousands
+            totals["errors"] += 1
+            logger.error(f"Tracklist backfill failed for album {row['album_id']} "
+                         f"({row['artist_name']}, rg {row['rg_mbid']}): {e}")
         totals["processed"] += 1
         if totals["processed"] % 2000 == 0:
             logger.info(f"Tracklist backfill: {totals['processed']}/{len(rows)} albums, "
