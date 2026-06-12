@@ -239,6 +239,24 @@ CREATE TABLE IF NOT EXISTS album_variants (
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Phantom-album tracklists (Phantom Discovery, Stage B). Owned albums keep
+-- the authoritative albums → album_variants → media_files → tracks chain;
+-- this junction links a PHANTOM album (no variants/files) to its canonical
+-- MB tracklist. A track is "owned" iff it has media_files — a later rip of
+-- a phantom track collapses onto the same UUID v5 row and simply gains
+-- files, no migration.
+CREATE TABLE IF NOT EXISTS album_tracks (
+    album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    disc INTEGER NOT NULL DEFAULT 1,
+    position INTEGER NOT NULL,
+    recording_mbid UUID,                   -- MB recording gid (dedup / future preview)
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (album_id, disc, position)
+);
+CREATE INDEX IF NOT EXISTS idx_album_tracks_track ON album_tracks(track_id);
+
 CREATE TABLE IF NOT EXISTS covers (
     id UUID PRIMARY KEY,                             -- uuid5(NS, 'cover:' || hash_hex)
     content_hash BYTEA NOT NULL UNIQUE,              -- BLAKE2b-256 of original bytes
@@ -1484,12 +1502,14 @@ SELECT
     (SELECT COUNT(*) FROM artists a
       WHERE EXISTS (SELECT 1 FROM track_artists ta
                     WHERE ta.artist_id = a.id AND ta.role = 'primary')) as total_artists,
-    -- owned albums only: phantom rows (MB missing-album discovery, no
-    -- variants/files) are discovery data, not library contents
+    -- owned albums/tracks only: phantom rows (MB missing-album discovery,
+    -- no variants/files) are discovery data, not library contents
     (SELECT COUNT(*) FROM albums al
       WHERE EXISTS (SELECT 1 FROM album_variants av
                     WHERE av.album_id = al.id)) as total_albums,
-    (SELECT COUNT(*) FROM tracks) as total_tracks,
+    (SELECT COUNT(*) FROM tracks t
+      WHERE EXISTS (SELECT 1 FROM media_files mf
+                    WHERE mf.track_id = t.id)) as total_tracks,
     (SELECT COUNT(*) FROM media_files) as total_media_files,
     (SELECT COUNT(*) FROM embeddings) as tracks_with_embeddings,
     (SELECT COUNT(*) FROM track_lyrics) as tracks_with_lyrics,

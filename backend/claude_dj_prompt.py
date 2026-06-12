@@ -470,7 +470,11 @@ def _describe_library_size() -> str:
     indexed COUNT) and stops that class of hallucination."""
     try:
         from db_pool import db_query_one
-        row = db_query_one("SELECT COUNT(*) AS n FROM tracks")
+        # playable tracks only — phantom tracklist rows have no files
+        row = db_query_one("""
+            SELECT COUNT(*) AS n FROM tracks t
+            WHERE EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
+        """)
         n = int(row["n"]) if row and row.get("n") is not None else 0
     except Exception:
         return "size unknown — query the tracks table for the real count"

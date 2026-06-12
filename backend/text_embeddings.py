@@ -204,8 +204,12 @@ class TextEmbeddingGenerator:
         stats = {"processed": 0, "success": 0, "failed": 0}
         start_time = time.time()
 
-        # Query tracks to process
-        where_parts = []
+        # Query tracks to process. Owned tracks only: phantom tracklist
+        # rows (no media_files) have no genre/feature context and must not
+        # occupy the GPU batch.
+        where_parts = [
+            "EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)"
+        ]
         params: Dict[str, Any] = {}
 
         if not force:

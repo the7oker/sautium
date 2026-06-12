@@ -77,7 +77,12 @@ _PRIORITY_SQL = text("""
         LEFT JOIN artist_listen al ON al.artist_id = ta.artist_id
         LEFT JOIN track_genres tg  ON tg.track_id = t.id
         LEFT JOIN genre_listen gl  ON gl.genre_id = tg.genre_id
-        WHERE NOT EXISTS (
+        -- owned tracks only: phantom tracklist rows (no media_files) must
+        -- not burn the Last.fm budget
+        WHERE EXISTS (
+            SELECT 1 FROM media_files mf WHERE mf.track_id = t.id
+        )
+        AND NOT EXISTS (
             SELECT 1 FROM track_stats ts
             WHERE ts.track_id = t.id AND ts.source = 'lastfm'
         )
@@ -354,8 +359,8 @@ def _step_sync_discographies(limit: int) -> Dict[str, int]:
         stats["processed"] += 1
         try:
             result = sync_artist_discography(row.id, row.name)
-            if result.get("status") == "rate_limited":
-                logger.info("Background discography: MB API rate-limited — ending batch")
+            if result.get("status") in ("rate_limited", "mb_loading"):
+                logger.info(f"Background discography: {result['status']} — ending batch")
                 break
             stats["new_albums"] += result.get("new", 0)
         except Exception as e:

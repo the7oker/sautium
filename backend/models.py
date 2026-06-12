@@ -404,6 +404,33 @@ class AlbumVariant(Base):
         return f"<AlbumVariant(id={self.id}, album_id={self.album_id})>"
 
 
+class AlbumTrack(Base):
+    """Phantom-album tracklist slot (Phantom Discovery, Stage B).
+
+    Owned albums keep the authoritative albums → album_variants →
+    media_files → tracks chain; this junction links a PHANTOM album (no
+    variants/files) to its canonical MB tracklist. A track is "owned" iff
+    it has media_files — a later rip collapses onto the same UUID v5 row.
+    """
+    __tablename__ = "album_tracks"
+
+    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    disc = Column(Integer, primary_key=True, default=1)
+    position = Column(Integer, primary_key=True)
+    recording_mbid = Column(UUID(as_uuid=False))  # MB recording gid (dedup / future preview)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_album_tracks_track", "track_id"),
+    )
+
+    def __repr__(self):
+        return f"<AlbumTrack(album_id={self.album_id}, disc={self.disc}, position={self.position})>"
+
+
 class MediaFile(Base):
     """A physical audio file on disk."""
     __tablename__ = "media_files"

@@ -337,6 +337,41 @@ Deezer-era phantom rows purged), discography now derives from
   *derived* dump archive the loader doesn't stream — checked against
   `ExportAllTables`).
 
+**Stage B — phantom tracklists — shipped (2026-06-12).** Phantom albums
+now carry their canonical MB tracklist as first-class `tracks` +
+`track_artists` rows linked through the new **`album_tracks`** junction
+(album_id, track_id, disc, position, recording_mbid; PK = album/disc/
+position slot). Owned albums keep the authoritative
+`album_variants → media_files` chain — a track is *owned* iff it has
+`media_files`, mirroring the album discriminator, and a later rip
+collapses onto the same `track_uuid` row (gains files, no migration).
+
+- **Canonical release pick:** among `fetch_release_tracklists(rg)` —
+  Official status first, then most complete tracklist, then lowest gid
+  (deterministic re-pick). `mb_local.fetch_release_tracklists` now
+  returns per-release `status`.
+- **Idempotent persist:** `execute_values` batches; tracks ON CONFLICT
+  DO NOTHING (never clobber an owned title), slot upsert on the PK.
+  Re-syncs skip albums that already have a tracklist.
+- **Reconcile extended:** orphan phantom tracks of the artist (album
+  GC'd, no files, no remaining album_tracks ref) are deleted;
+  enrichment rows cascade.
+- **Reload guard:** a pg advisory lock (`MB_LOAD_LOCK_KEY`) is held by
+  `stream_load` for the whole TRUNCATE+COPY loop; the sync try-locks it
+  and returns `status="mb_loading"` (not stamped) — without this, a
+  view mid-reload would derive an empty discography and strip the
+  artist's shelf. Cross-process by design (DB-level).
+- **Flood gates** (the albums-leak lesson applied to ~770k phantom
+  tracks): Last.fm track-stats candidates, lyrics batch (already
+  media-joined), BGE-M3 text-embedding candidates, DJ-prompt library
+  count, `library_stats.total_tracks` — all gated on
+  `EXISTS media_files`. P2P sync inventory is safe by construction
+  (tracks rows are never synced; enrichment is requested for the
+  importer's local tracks only).
+- **Index drift fixed live:** `idx_track_artists_artist_id`,
+  `idx_album_artists_artist_id`, `idx_similar_artists_similar` (001
+  declared them; the live DB pre-dated the lines).
+
 ## Artist canonicalization (MB-anchored) — a foundation this feature needs
 
 Surfaced while hardening discography (2026-06-01). The discography

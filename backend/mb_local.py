@@ -166,12 +166,15 @@ def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
     fingerprint for release-ID (name-independent) + per-track recording MBID
     (track normalization). Tens of releases × ~10-15 tracks; one indexed join.
 
-    Returns ``[{release_mbid, tracks: [{title, length_ms, recording_mbid,
-    disc, position}, …]}, …]``, releases best-tracklist-first is the caller's job.
-    Local-only (the MB API can't page tracklists of every release cheaply).
+    Returns ``[{release_mbid, status, tracks: [{title, length_ms,
+    recording_mbid, disc, position}, …]}, …]``, releases best-tracklist-first
+    is the caller's job (``status`` 1 = Official — the canonical-release pick
+    prefers it). Local-only (the MB API can't page tracklists of every
+    release cheaply).
     """
     rows = db_query("""
-        SELECT r.gid::text AS release_mbid, t.name AS title, t.length AS length_ms,
+        SELECT r.gid::text AS release_mbid, r.status, t.name AS title,
+               t.length AS length_ms,
                rec.gid::text AS recording_mbid, m.position AS disc, t.position AS pos
         FROM mb_release r
         JOIN mb_medium m ON m.release = r.id
@@ -180,13 +183,16 @@ def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
         WHERE r.release_group = (SELECT id FROM mb_release_group WHERE gid = %(rg)s::uuid)
         ORDER BY r.id, m.position, t.position
     """, {"rg": str(rg_mbid)})
-    rels: Dict[str, list] = {}
+    rels: Dict[str, dict] = {}
     for r in rows:
-        rels.setdefault(r["release_mbid"], []).append({
+        rel = rels.setdefault(r["release_mbid"],
+                              {"release_mbid": r["release_mbid"],
+                               "status": r["status"], "tracks": []})
+        rel["tracks"].append({
             "title": r["title"] or "",
             "length_ms": r["length_ms"],
             "recording_mbid": r["recording_mbid"],
             "disc": r["disc"],
             "position": r["pos"],
         })
-    return [{"release_mbid": rid, "tracks": tracks} for rid, tracks in rels.items()]
+    return list(rels.values())

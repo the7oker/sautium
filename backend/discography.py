@@ -44,8 +44,11 @@ import unicodedata
 from typing import Dict, List, Optional
 
 import mb_backend as mb  # module-attr access only — refresh() rebinds the source
-from db_pool import db_execute, db_query, db_query_one
-from uuid_utils import album_uuid
+from psycopg2.extras import execute_values
+
+from db_pool import db_execute, db_query, db_query_one, get_conn
+from mb_dump_load import MB_LOAD_LOCK_KEY
+from uuid_utils import album_uuid, track_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +194,20 @@ def _stamp_sync(artist_id: str) -> None:
     )
 
 
+def _mb_load_in_progress() -> bool:
+    """True while mb_dump_load.stream_load holds the reload lock. The
+    reconcile must not run against half-TRUNCATEd mb_* tables — it would
+    read an empty discography and strip the artist's phantom shelf.
+    try-lock + unlock must happen on the SAME pooled connection."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (MB_LOAD_LOCK_KEY,))
+            got = cur.fetchone()[0]
+            if got:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (MB_LOAD_LOCK_KEY,))
+            return not got
+
+
 def _artist_mbids(artist_id: str) -> List[str]:
     """All MB artist MBIDs for a library artist (>1 = conflated namesakes;
     their discographies are unioned). Empty = not canonized."""
@@ -201,9 +218,10 @@ def _artist_mbids(artist_id: str) -> List[str]:
 
 
 def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
-                          artist_mbid: str) -> bool:
+                          artist_mbid: str) -> tuple[Optional[str], bool]:
     """Persist one missing release-group as a phantom album + artist link.
-    Returns True if a new album row was created.
+    Returns ``(album_id, inserted)``; album_id is None when the UUID
+    collided with an owned row (the guard suppressed the upsert).
 
     A release-group already in the DB under another UUID (a collaboration
     synced from the other member first) only gains the artist link — the
@@ -222,7 +240,7 @@ def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
             VALUES (%(al)s::uuid, %(ar)s::uuid, 'primary', %(mbid)s::uuid)
             ON CONFLICT DO NOTHING
         """, {"al": existing["id"], "ar": artist_id, "mbid": artist_mbid})
-        return False
+        return existing["id"], False
 
     aid = str(album_uuid(rg["title"], artist_name))
     res = db_execute("""
@@ -248,13 +266,80 @@ def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
     """, {
         "id": aid,
         "title": rg["title"],
-        "year": rg.get("first_year"),  # None until a dump refresh loads mb_release_group_meta
+        "year": rg.get("first_year"),  # None until a dump refresh loads mb_release_country
         "rg": rg["rg_mbid"],
         "cover": _CAA_FRONT_URL.format(rg=rg["rg_mbid"]),
         "ar": artist_id,
         "mbid": artist_mbid,
     })
-    return bool(res and res.get("inserted"))
+    if not res:
+        return None, False
+    return aid, bool(res.get("inserted"))
+
+
+# mb_release.status id (MB InsertDefaultRows): 1 = Official.
+_MB_RELEASE_STATUS_OFFICIAL = 1
+
+
+def _pick_canonical_release(releases: List[dict]) -> Optional[dict]:
+    """The release whose tracklist represents the phantom album: Official
+    first, then the most complete tracklist, then lowest gid (determinism —
+    a re-sync must pick the same release)."""
+    if not releases:
+        return None
+    official = [r for r in releases
+                if r.get("status") == _MB_RELEASE_STATUS_OFFICIAL]
+    pool = official or releases
+    return sorted(pool, key=lambda r: (-len(r["tracks"]), r["release_mbid"]))[0]
+
+
+def _persist_phantom_tracklist(album_id: str, artist_id: str,
+                               artist_name: str, rg_mbid: str) -> int:
+    """Persist the canonical MB tracklist of one phantom album as
+    tracks + track_artists + album_tracks rows — deliberately NO
+    media_files (that is the owned/phantom discriminator; a later rip
+    collapses onto the same `track_uuid` row and simply gains files).
+    Idempotent: slot upserts on the (album, disc, position) PK; track
+    rows never clobber existing titles. Returns slots written.
+    """
+    best = _pick_canonical_release(mb.fetch_release_tracklists(rg_mbid))
+    if not best:
+        return 0
+
+    track_rows, artist_rows, slot_rows = [], [], []
+    for tr in best["tracks"]:
+        title = (tr["title"] or "").strip()
+        if not title:
+            continue
+        tid = str(track_uuid(title, artist_name))
+        track_rows.append((tid, title))
+        artist_rows.append((tid, artist_id))
+        slot_rows.append((album_id, tid, tr["disc"] or 1, tr["position"],
+                          tr["recording_mbid"]))
+    if not slot_rows:
+        return 0
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            execute_values(cur, """
+                INSERT INTO tracks (id, title) VALUES %s
+                ON CONFLICT (id) DO NOTHING
+            """, track_rows, template="(%s::uuid, %s)")
+            execute_values(cur, """
+                INSERT INTO track_artists (track_id, role, artist_id) VALUES %s
+                ON CONFLICT DO NOTHING
+            """, artist_rows, template="(%s::uuid, 'primary', %s::uuid)")
+            execute_values(cur, """
+                INSERT INTO album_tracks
+                    (album_id, track_id, disc, position, recording_mbid)
+                VALUES %s
+                ON CONFLICT (album_id, disc, position)
+                DO UPDATE SET track_id = EXCLUDED.track_id,
+                              recording_mbid = EXCLUDED.recording_mbid,
+                              updated_at = now()
+            """, slot_rows, template="(%s::uuid, %s::uuid, %s, %s, %s::uuid)")
+        conn.commit()
+    return len(slot_rows)
 
 
 def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
@@ -297,6 +382,18 @@ def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
                       WHERE aa.album_id = al.id AND aa.artist_id = %(id)s::uuid)
     """, {"id": artist_id})
 
+    # Orphan phantom tracks of this artist: their album was GC'd above and
+    # no file ever materialized (a ripped phantom track has media_files and
+    # is protected). Enrichment rows cascade with the track.
+    db_execute("""
+        DELETE FROM tracks t
+        USING track_artists ta
+        WHERE ta.track_id = t.id
+          AND ta.artist_id = %(id)s::uuid
+          AND NOT EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
+          AND NOT EXISTS (SELECT 1 FROM album_tracks at WHERE at.track_id = t.id)
+    """, {"id": artist_id})
+
 
 def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
     """Derive `artist_name`'s missing albums from the MB dump and reconcile
@@ -305,10 +402,12 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
 
     Returns a stats dict: ``{status, found, new, skipped_owned}``.
     `status` is success / not_canonized (no `artist_mbids` row — gate, not
-    stamped) / rate_limited (dump-less nodes on the MB HTTP API).
+    stamped) / mb_loading (dump reload in flight — skipped, not stamped) /
+    rate_limited (dump-less nodes on the MB HTTP API).
     """
     artist_id = str(artist_id)
-    stats = {"status": "success", "found": 0, "new": 0, "skipped_owned": 0}
+    stats = {"status": "success", "found": 0, "new": 0, "skipped_owned": 0,
+             "tracks": 0}
 
     mbids = _artist_mbids(artist_id)
     if not mbids:
@@ -323,6 +422,12 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
         """, {"id": artist_id}):
             _reconcile_phantoms(artist_id, [])
         stats["status"] = "not_canonized"
+        return stats
+
+    if _mb_load_in_progress():
+        # Dump reload in flight — candidates would come from TRUNCATEd
+        # tables. Not stamped: retried on the next view/batch.
+        stats["status"] = "mb_loading"
         return stats
 
     try:
@@ -384,9 +489,25 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
             stats["skipped_owned"] += 1
 
     stats["found"] = len(missing)
+    phantoms: List[tuple] = []  # (album_id, rg_mbid)
     for rg, mbid in missing.values():
-        if _upsert_phantom_album(artist_id, artist_name, rg, mbid):
+        album_id, inserted = _upsert_phantom_album(artist_id, artist_name, rg, mbid)
+        if inserted:
             stats["new"] += 1
+        if album_id:
+            phantoms.append((album_id, rg["rg_mbid"]))
+
+    # Tracklists — only for phantom albums that don't have one yet, so a
+    # monthly re-sync doesn't re-read tens of releases per album.
+    if phantoms:
+        have = {r["album_id"] for r in db_query("""
+            SELECT DISTINCT album_id::text AS album_id FROM album_tracks
+            WHERE album_id = ANY(%(ids)s::uuid[])
+        """, {"ids": [a for a, _ in phantoms]})}
+        for album_id, rg_mbid in phantoms:
+            if album_id not in have:
+                stats["tracks"] += _persist_phantom_tracklist(
+                    album_id, artist_id, artist_name, rg_mbid)
 
     _reconcile_phantoms(artist_id, list(missing.keys()))
     _stamp_sync(artist_id)
@@ -435,9 +556,9 @@ def run_backfill(limit: Optional[int] = None, stale_days: int = 30) -> Dict[str,
     for row in rows:
         result = sync_artist_discography(row["id"], row["name"])
         totals["processed"] += 1
-        if result["status"] == "rate_limited":
+        if result["status"] in ("rate_limited", "mb_loading"):
             totals["rate_limited"] += 1
-            logger.warning("Backfill: MB API rate-limited — stopping early")
+            logger.warning(f"Backfill: {result['status']} — stopping early")
             break
         totals["found"] += result["found"]
         totals["new"] += result["new"]
@@ -449,6 +570,46 @@ def run_backfill(limit: Optional[int] = None, stale_days: int = 30) -> Dict[str,
     return totals
 
 
+def backfill_tracklists(limit: Optional[int] = None) -> Dict[str, int]:
+    """One-shot sweep: persist tracklists for phantom albums that lack one
+    (albums created before Stage B, or whose fetch failed). The track-UUID
+    namespace keys on the album's first-linked artist name — the same
+    artist whose sync minted the album row for non-collabs."""
+    if _mb_load_in_progress():
+        logger.warning("Tracklist backfill: dump reload in flight — aborting")
+        return {"processed": 0, "tracks": 0}
+
+    rows = db_query(f"""
+        SELECT al.id::text AS album_id, al.musicbrainz_id::text AS rg_mbid,
+               a.id::text AS artist_id, a.name AS artist_name
+        FROM albums al
+        JOIN LATERAL (
+            SELECT ar.id, ar.name
+            FROM album_artists aa
+            JOIN artists ar ON ar.id = aa.artist_id
+            WHERE aa.album_id = al.id
+            ORDER BY ar.name
+            LIMIT 1
+        ) a ON true
+        WHERE al.musicbrainz_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
+          AND NOT EXISTS (SELECT 1 FROM album_tracks at WHERE at.album_id = al.id)
+        ORDER BY al.id
+        {f"LIMIT {int(limit)}" if limit else ""}
+    """)
+
+    totals = {"processed": 0, "tracks": 0}
+    for row in rows:
+        totals["tracks"] += _persist_phantom_tracklist(
+            row["album_id"], row["artist_id"], row["artist_name"], row["rg_mbid"])
+        totals["processed"] += 1
+        if totals["processed"] % 2000 == 0:
+            logger.info(f"Tracklist backfill: {totals['processed']}/{len(rows)} albums, "
+                        f"{totals['tracks']} tracks")
+    logger.info(f"Tracklist backfill done: {totals}")
+    return totals
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -456,8 +617,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Backfill missing-album discovery for canonized artists")
     parser.add_argument("--limit", type=int, default=None,
-                        help="max artists to process (default: all stale)")
+                        help="max artists/albums to process (default: all)")
     parser.add_argument("--stale-days", type=int, default=30,
                         help="re-sync artists older than this (default 30)")
+    parser.add_argument("--tracklists", action="store_true",
+                        help="persist tracklists for phantom albums lacking one")
     args = parser.parse_args()
-    print(run_backfill(limit=args.limit, stale_days=args.stale_days))
+    if args.tracklists:
+        print(backfill_tracklists(limit=args.limit))
+    else:
+        print(run_backfill(limit=args.limit, stale_days=args.stale_days))

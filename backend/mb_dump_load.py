@@ -214,6 +214,14 @@ def verify_md5(version: str) -> bool:
 
 # ── streaming load ───────────────────────────────────────────────────────────
 
+# Cross-process "reload in flight" signal: stream_load holds this advisory
+# lock for the whole TRUNCATE+COPY loop; the discography reconcile try-locks
+# it and skips while held (half-loaded mb_* tables would read as an empty
+# discography and strip phantom shelves). DB-level so it works no matter
+# which process (backend thread, docker exec, launcher) runs the load.
+MB_LOAD_LOCK_KEY = 0x6D626C64  # "mbld"
+
+
 def _ensure_schema(cur) -> None:
     for table, _ in TABLES:
         cur.execute("SELECT to_regclass(%s)", (table,))
@@ -243,32 +251,39 @@ def stream_load(progress_cb: ProgressCb = _noop) -> Dict[str, int]:
             conn.autocommit = True
             with conn.cursor() as cur:
                 _ensure_schema(cur)
-            cum_w = 0.0  # byte-weighted progress accumulated over completed tables
-            for member in tar:
-                table = _MEMBER_TABLE.get(member.name)
-                if not table:
-                    continue
-                fh = tar.extractfile(member)
-                if fh is None:
-                    continue
-                w = _LOAD_WEIGHT.get(table, 1.0 / len(TABLES))
-                size = member.size or 0
-                # overall pct = (completed weight + this table's weight × byte frac)
-                def _on_bytes(read_bytes, _w=w, _c=cum_w, _s=size, _t=table):
-                    frac = (read_bytes / _s) if _s else 0.0
-                    progress_cb({"phase": "loading", "table": _t,
-                                 "pct": min(99, round((_c + _w * frac) * 100))})
-                reader = _ProgressReader(fh, _on_bytes)
+                # Session-level lock on a POOLED connection — must be
+                # released explicitly (finally below), not on conn close.
+                cur.execute("SELECT pg_advisory_lock(%s)", (MB_LOAD_LOCK_KEY,))
+            try:
+                cum_w = 0.0  # byte-weighted progress accumulated over completed tables
+                for member in tar:
+                    table = _MEMBER_TABLE.get(member.name)
+                    if not table:
+                        continue
+                    fh = tar.extractfile(member)
+                    if fh is None:
+                        continue
+                    w = _LOAD_WEIGHT.get(table, 1.0 / len(TABLES))
+                    size = member.size or 0
+                    # overall pct = (completed weight + this table's weight × byte frac)
+                    def _on_bytes(read_bytes, _w=w, _c=cum_w, _s=size, _t=table):
+                        frac = (read_bytes / _s) if _s else 0.0
+                        progress_cb({"phase": "loading", "table": _t,
+                                     "pct": min(99, round((_c + _w * frac) * 100))})
+                    reader = _ProgressReader(fh, _on_bytes)
+                    with conn.cursor() as cur:
+                        cur.execute(f"TRUNCATE {table}")
+                        cur.copy_expert(f"COPY {table} FROM STDIN", reader)
+                    cum_w += w
+                    counts[table] = len(counts) + 1
+                    progress_cb({"phase": "loading", "table": table,
+                                 "pct": min(99, round(cum_w * 100))})
+                    logger.info("loaded %s (%d/%d)", table, len(counts), len(TABLES))
+                    if len(counts) == len(TABLES):
+                        break  # everything we need is in — skip the (huge) tail
+            finally:
                 with conn.cursor() as cur:
-                    cur.execute(f"TRUNCATE {table}")
-                    cur.copy_expert(f"COPY {table} FROM STDIN", reader)
-                cum_w += w
-                counts[table] = len(counts) + 1
-                progress_cb({"phase": "loading", "table": table,
-                             "pct": min(99, round(cum_w * 100))})
-                logger.info("loaded %s (%d/%d)", table, len(counts), len(TABLES))
-                if len(counts) == len(TABLES):
-                    break  # everything we need is in — skip the (huge) tail
+                    cur.execute("SELECT pg_advisory_unlock_all()")
     finally:
         try:
             tar.close()
