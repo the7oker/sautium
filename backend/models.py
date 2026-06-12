@@ -146,8 +146,6 @@ class Artist(Base):
     raw_name = Column(String(500))                             # original tag value before normalization
 
     # MB identity lives in artist_mbids (1:N — name-UUID may conflate namesakes).
-    deezer_id = Column(BigInteger)                             # cached Deezer artist id (integer; discography sync)
-
     last_album_sync = Column(DateTime(timezone=True))          # freshness gate for new-album discovery
     last_mb_sync = Column(DateTime(timezone=True))             # freshness gate for MB canonicalization pass
 
@@ -189,7 +187,7 @@ class Album(Base):
 
     musicbrainz_id = Column(UUID(as_uuid=False))              # MusicBrainz release-GROUP MBID (canonical album)
     mb_match_confidence = Column(MbMatchConfidenceEnum)       # how musicbrainz_id was matched (NULL = none)
-    cover_url = Column(Text)                  # external cover (Deezer) for phantom albums with no local files
+    cover_url = Column(Text)                  # external cover (Cover Art Archive) for phantom albums with no local files
 
     user_rating = Column(Numeric(3, 2))
 

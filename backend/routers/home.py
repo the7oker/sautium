@@ -472,6 +472,9 @@ def _random_fill(needed: int, exclude: set[str]) -> list[dict[str, Any]]:
                {_ALBUM_TILE_SUBQUERIES}
         FROM albums al
         WHERE al.id::text != ALL(%(exclude)s::text[])
+          -- owned only: phantom rows (MB missing-album discovery) have no
+          -- variants/files and would fill the shelf with dead tiles
+          AND EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
         ORDER BY RANDOM()
         LIMIT %(needed)s
         """,

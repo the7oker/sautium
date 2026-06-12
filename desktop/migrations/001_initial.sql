@@ -120,7 +120,6 @@ CREATE TABLE IF NOT EXISTS artists (
     verification_status verification_status DEFAULT 'unverified',
     raw_name VARCHAR(500),
     -- MB identity lives in artist_mbids (1:N — name-UUID may conflate namesakes)
-    deezer_id BIGINT,                       -- cached Deezer artist id (integer; discography sync)
     last_album_sync TIMESTAMPTZ,            -- freshness gate for new-album discovery
     last_mb_sync TIMESTAMPTZ,              -- freshness gate for MB canonicalization pass
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -136,7 +135,7 @@ CREATE TABLE IF NOT EXISTS albums (
     total_tracks INTEGER,
     musicbrainz_id UUID,                    -- MusicBrainz release-GROUP MBID (canonical album)
     mb_match_confidence mb_match_confidence, -- how musicbrainz_id was matched (NULL = none)
-    cover_url TEXT,                         -- external cover (Deezer) for phantom albums with no local files
+    cover_url TEXT,                         -- external cover (Cover Art Archive) for phantom albums with no local files
     user_rating NUMERIC(3, 2) CHECK (user_rating >= 0 AND user_rating <= 5),
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
@@ -286,10 +285,12 @@ ALTER TABLE artists ADD COLUMN IF NOT EXISTS photo_cover_id UUID
 
 -- Idempotent column-adds for existing installs that pre-date phantom-album
 -- discovery (Phantom Discovery, Phase 1: new albums for local artists).
-ALTER TABLE artists ADD COLUMN IF NOT EXISTS deezer_id BIGINT;
 ALTER TABLE artists ADD COLUMN IF NOT EXISTS last_album_sync TIMESTAMPTZ;
 ALTER TABLE artists ADD COLUMN IF NOT EXISTS last_mb_sync TIMESTAMPTZ;
 ALTER TABLE albums  ADD COLUMN IF NOT EXISTS cover_url TEXT;
+-- Discography moved from Deezer to the local MB dump (2026-06-12) — the
+-- cached Deezer artist id is gone; converge installs that pre-date the move.
+ALTER TABLE artists DROP COLUMN IF EXISTS deezer_id;
 
 CREATE TABLE IF NOT EXISTS media_files (
     id SERIAL PRIMARY KEY,
@@ -696,6 +697,9 @@ CREATE INDEX IF NOT EXISTS idx_track_mbids_track ON track_mbids(track_id);
 CREATE INDEX IF NOT EXISTS idx_albums_title ON albums(title);
 CREATE INDEX IF NOT EXISTS idx_albums_title_trgm ON albums USING gin (title gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_albums_release_year ON albums(release_year);
+-- release-group MBID lookups: phantom upsert/reconcile and cross-artist
+-- owned checks key on it (~70k phantom rows carry one)
+CREATE INDEX IF NOT EXISTS idx_albums_mbid ON albums(musicbrainz_id) WHERE musicbrainz_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
 CREATE INDEX IF NOT EXISTS idx_tracks_title_trgm ON tracks USING gin (title gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_tags_name_lower ON tags(name text_pattern_ops);
@@ -1246,7 +1250,7 @@ CREATE INDEX IF NOT EXISTS idx_gear_sentiment_term_lookup ON gear_sentiment_term
 -- (no sequences), and column order mirrors the dump's headerless TSV (= MB
 -- CreateTables.sql order) so a default COPY round-trips it. Empty on a fresh
 -- install until the loader runs; the canonicalization layer degrades to the MB
--- API when they are empty. `recording` (35M rows) is deliberately NOT loaded.
+-- API when they are empty.
 
 CREATE TABLE IF NOT EXISTS mb_artist (
     id              INTEGER PRIMARY KEY,
@@ -1336,6 +1340,25 @@ CREATE TABLE IF NOT EXISTS mb_release (
     edits_pending INTEGER,
     quality       SMALLINT,
     last_updated  TIMESTAMPTZ
+);
+
+-- Release dates (the release-group's first_year for missing-album discovery
+-- = MIN over both). In the dump since 2026-06-12 — empty until the next
+-- "Update MB data" run; consumers must tolerate NULL first_year meanwhile.
+CREATE TABLE IF NOT EXISTS mb_release_country (
+    release    INTEGER,
+    country    INTEGER,
+    date_year  SMALLINT,
+    date_month SMALLINT,
+    date_day   SMALLINT,
+    PRIMARY KEY (release, country)
+);
+
+CREATE TABLE IF NOT EXISTS mb_release_unknown_country (
+    release    INTEGER PRIMARY KEY,
+    date_year  SMALLINT,
+    date_month SMALLINT,
+    date_day   SMALLINT
 );
 
 CREATE TABLE IF NOT EXISTS mb_artist_alias (
@@ -1440,6 +1463,7 @@ CREATE INDEX IF NOT EXISTS idx_mb_rg_credit             ON mb_release_group(arti
 CREATE INDEX IF NOT EXISTS idx_mb_rg_type               ON mb_release_group(type);
 CREATE INDEX IF NOT EXISTS idx_mb_rg_name_trgm          ON mb_release_group USING gin (lower(name) gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_mb_release_rg            ON mb_release(release_group);
+CREATE INDEX IF NOT EXISTS idx_mb_release_country_rel   ON mb_release_country(release);
 CREATE INDEX IF NOT EXISTS idx_mb_rgstj_secondary       ON mb_release_group_secondary_type_join(secondary_type);
 CREATE INDEX IF NOT EXISTS idx_mb_track_medium          ON mb_track(medium);
 CREATE INDEX IF NOT EXISTS idx_mb_medium_release        ON mb_medium(release);
@@ -1460,7 +1484,11 @@ SELECT
     (SELECT COUNT(*) FROM artists a
       WHERE EXISTS (SELECT 1 FROM track_artists ta
                     WHERE ta.artist_id = a.id AND ta.role = 'primary')) as total_artists,
-    (SELECT COUNT(*) FROM albums) as total_albums,
+    -- owned albums only: phantom rows (MB missing-album discovery, no
+    -- variants/files) are discovery data, not library contents
+    (SELECT COUNT(*) FROM albums al
+      WHERE EXISTS (SELECT 1 FROM album_variants av
+                    WHERE av.album_id = al.id)) as total_albums,
     (SELECT COUNT(*) FROM tracks) as total_tracks,
     (SELECT COUNT(*) FROM media_files) as total_media_files,
     (SELECT COUNT(*) FROM embeddings) as tracks_with_embeddings,

@@ -10,6 +10,7 @@ Each batch, in order:
   2. Lyrics (lrclib/genius) for tracks missing them
   3. Last.fm artist bios for new artists
   4. Last.fm genre wiki for new genres
+  5. Missing-album reconcile for canonized artists (local MB dump, DB-only)
 
 Track-stats priority (Tier 1 → 3):
   1. Tracks whose primary artist has the most accumulated listen-time
@@ -46,9 +47,7 @@ _ARTISTS_PER_BATCH = 30           # Last.fm artist.getInfo calls per batch
 _GENRES_PER_BATCH = 20            # Last.fm tag.getInfo calls per batch
 _LASTFM_DELAY_S = 0.2             # ~5 req/sec, the Last.fm published limit
 
-_DISCOGRAPHY_PER_BATCH = 20       # Deezer discographies synced per batch
-_DISCOGRAPHY_DELAY_S = 1.0        # Deezer is generous, but shares an IP budget with photo lookups
-_DISCOGRAPHY_SCOPE_MONTHS = 6     # only artists listened-to this recently
+_DISCOGRAPHY_PER_BATCH = 50       # canonized artists reconciled per batch (local MB dump — DB-only)
 _DISCOGRAPHY_STALE_DAYS = 30      # re-sync an artist's discography at most monthly
 
 _PRIORITY_SQL = text("""
@@ -323,36 +322,23 @@ def _step_missing_genres(limit: int) -> Dict[str, int]:
 
 
 def _step_sync_discographies(limit: int) -> Dict[str, int]:
-    """Sync Deezer discographies for recently-listened local artists whose
-    new-album data is stale, persisting unowned releases as phantom albums.
-
-    Scope is deliberately narrow (artists listened to in the last
-    `_DISCOGRAPHY_SCOPE_MONTHS`, re-synced at most every
-    `_DISCOGRAPHY_STALE_DAYS`) so the run is bounded — a full library of
-    similar artists would be tens of thousands of requests. Artists the
-    user browses but hasn't listened to are covered by the fetch-on-view
-    path on the artist screen instead.
+    """Reconcile missing-album discovery for canonized artists whose data
+    is stale (`_DISCOGRAPHY_STALE_DAYS`), oldest first. With the MB dump
+    loaded this is pure local-DB work — no network, no cooldowns;
+    `rate_limited` only fires on dump-less nodes that fall back to the MB
+    HTTP API, and ends the batch early there.
     """
-    from covers import photo_cooldown_active
     from discography import sync_artist_discography
 
-    stats = {"processed": 0, "new_albums": 0, "not_found": 0, "errors": 0}
-
-    # A Deezer rate-limit cooldown is shared with photo lookups (same IP
-    # budget). If it's armed, skip the batch rather than pile on.
-    if photo_cooldown_active():
-        return stats
+    stats = {"processed": 0, "new_albums": 0, "errors": 0}
 
     sql = text(f"""
         SELECT a.id, a.name
         FROM artists a
-        JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
-        JOIN listening_history lh ON lh.track_id = ta.track_id
-        WHERE lh.started_at > now() - interval '{_DISCOGRAPHY_SCOPE_MONTHS} months'
+        WHERE EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
           AND (a.last_album_sync IS NULL
                OR a.last_album_sync < now() - interval '{_DISCOGRAPHY_STALE_DAYS} days')
-        GROUP BY a.id, a.name
-        ORDER BY MAX(lh.started_at) DESC
+        ORDER BY a.last_album_sync ASC NULLS FIRST
         LIMIT :batch
     """)
 
@@ -360,30 +346,21 @@ def _step_sync_discographies(limit: int) -> Dict[str, int]:
         rows = db.execute(sql, {"batch": int(limit)}).fetchall()
     if not rows:
         return stats
-    logger.info(f"Background: {len(rows)} artists queued for Deezer discography")
+    logger.info(f"Background: {len(rows)} canonized artists queued for discography reconcile")
 
-    # sync_artist_discography owns its own pool connections; the
-    # get_db_context session above is closed before the network loop so
-    # no DB session is held open across Deezer I/O.
     for row in rows:
         if _cancel_flag():
             break
         stats["processed"] += 1
         try:
             result = sync_artist_discography(row.id, row.name)
-            status = result.get("status")
-            if status == "rate_limited":
-                logger.info("Background discography: Deezer cooldown — ending batch")
+            if result.get("status") == "rate_limited":
+                logger.info("Background discography: MB API rate-limited — ending batch")
                 break
-            if status == "not_found":
-                stats["not_found"] += 1
-            elif status in ("error", "transient"):
-                stats["errors"] += 1
             stats["new_albums"] += result.get("new", 0)
         except Exception as e:
             logger.error(f"Background discography failed for {row.name}: {e}")
             stats["errors"] += 1
-        time.sleep(_DISCOGRAPHY_DELAY_S)
 
     return stats
 
@@ -428,12 +405,13 @@ def _run_once() -> Dict[str, Any]:
     if _cancel_flag():
         return summary
 
-    # Deezer discography sync DISABLED in the background loop (Valerii, 2026-06-02)
-    # — no automatic Deezer crawling. Phantom "Missing albums" still sync on-view
-    # via the daily-gated endpoint; re-enable here for the background sweep later.
-    # _set(current_step="discography")
-    # summary["discography"] = _step_sync_discographies(_DISCOGRAPHY_PER_BATCH)
-    # _bump("discography", summary["discography"].get("new_albums", 0))
+    # Re-enabled 2026-06-12: discography moved from Deezer to the local MB
+    # dump — the "no automatic crawling" reason for the 2026-06-02 disable is
+    # gone (reconcile is DB-only; dump-less nodes end the batch on the first
+    # MB API rate limit).
+    _set(current_step="discography")
+    summary["discography"] = _step_sync_discographies(_DISCOGRAPHY_PER_BATCH)
+    _bump("discography", summary["discography"].get("new_albums", 0))
 
     # MB canonicalization is NOT a background step — it runs at its real trigger
     # points (post-scan, post-MB-dump-load) against the local dump. The background

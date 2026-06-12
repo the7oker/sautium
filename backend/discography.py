@@ -1,26 +1,41 @@
-"""New-album discovery for local artists (Phantom Discovery, Phase 1).
+"""Missing-album discovery for canonized local artists (Phantom Discovery).
 
-Fetches a *local* artist's full Deezer discography, drops releases the
-user already owns, collapses reissues/editions of the same album, and
-persists the rest as **phantom album rows** — `albums` + `album_artists`
-with an external `cover_url` and NO `album_variants`/`media_files`. The
-artist screen surfaces them in a "New albums" shelf.
+Derives a *canonized* artist's missing albums from the local MusicBrainz
+dump: every Album/EP release-group the artist is credited on that the
+user doesn't own becomes a **phantom album row** — `albums` +
+`album_artists` with a Cover Art Archive `cover_url` and NO
+`album_variants`/`media_files`. The artist screen surfaces them in a
+"Missing albums" shelf.
+
+Canonized = has a row in `artist_mbids` (set by the MB canonicalization
+pass). Non-canonized artists get no shelf — and deliberately no
+`last_album_sync` stamp, so the first screen view after canonization
+lands syncs immediately.
+
+Each sync is a full **reconcile**, not an append: newly-missing groups
+are upserted, rows that stopped being missing (ripped since, MB
+reclassified, pre-MB legacy) are unlinked and garbage-collected, and a
+stale external cover on an album that became owned is cleared (the
+frontend prefers `cover_url` over the local file cover).
 
 Two callers share `sync_artist_discography`:
   - the background enrichment step (monthly per artist), and
   - the fetch-on-view endpoint (daily gate on `artists.last_album_sync`).
 
 Both go through `db_pool` (own connection per call) so neither needs to
-thread a session in. Deezer rate-limits arm the shared cooldown in
-`covers.py` so the photo and discography consumers back off together.
+thread a session in. With the dump loaded this is pure local-DB work —
+no network, no cooldowns; dump-less nodes fall back to the MB HTTP API
+via `mb_backend` and surface its rate limit as `status="rate_limited"`.
 
-Matching is heuristic, by design (Deezer-only first iteration). The
-deterministic `album_uuid` can't be the match key: Deezer titles and
-local tags differ in articles, punctuation and edition suffixes, so the
-same album yields different UUIDs on each side. `release_match_key`
-canonicalises both sides for the own-check and the reissue-collapse;
-the stored UUID stays `album_uuid(title, artist)` so a later local rip
-can still collapse onto it.
+The own-check is two-channel: precise release-group MBID equality
+(`albums.musicbrainz_id`, set by canonicalization for most owned albums)
+plus `release_match_key` title matching for the rest. The deterministic
+`album_uuid` can't be the match key: MB titles and local tags differ in
+articles, punctuation and edition suffixes, so the same album yields
+different UUIDs on each side. The stored UUID stays
+`album_uuid(title, artist)` so a later local rip can still collapse onto
+it; across artists the rg MBID is the real identity (a collaboration
+synced from the other side only gains an `album_artists` link).
 """
 
 import logging
@@ -28,17 +43,29 @@ import re
 import unicodedata
 from typing import Dict, List, Optional
 
-import covers
-import deezer_discography
+import mb_backend as mb  # module-attr access only — refresh() rebinds the source
 from db_pool import db_execute, db_query, db_query_one
-from lastfm_photos import RateLimitError, TransientFetchError
 from uuid_utils import album_uuid
 
 logger = logging.getLogger(__name__)
 
-# Deezer record_type values we treat as albums for the "new albums"
-# shelf. Singles/EPs/compilations add too much noise in Phase 1.
-_ALBUM_RECORD_TYPES = {"album"}
+# Release-group primary types surfaced on the "Missing albums" shelf.
+# Singles add too much noise (pre-release duplicates of album tracks).
+_ALLOWED_PRIMARY = {"Album", "EP"}
+
+# Secondary types that disqualify a release-group from the shelf — not part
+# of the artist's core studio discography. `Soundtrack` is deliberately
+# absent: an artist-credited film score is a first-class studio release
+# (VA soundtracks never appear here — the fetch is per artist credit).
+_DISQUALIFYING_SECONDARY = {
+    "Compilation", "Live", "Remix", "DJ-mix", "Mixtape/Street",
+    "Demo", "Interview", "Audiobook", "Spokenword", "Field recording",
+}
+
+# Cover Art Archive front image by release-group MBID, written verbatim into
+# `albums.cover_url`. The CAA image API has no rate limit, so the browser
+# resolves it directly (the tile's onerror hides a 404's broken image).
+_CAA_FRONT_URL = "https://coverartarchive.org/release-group/{rg}/front-500"
 
 # Edition/reissue markers — same album, different packaging; stripped so
 # variants collapse. Deliberately EXCLUDES 'live', 'remix', 'acoustic',
@@ -71,7 +98,7 @@ _DISC_RE = re.compile(
 
 def release_match_key(title: str) -> str:
     """Canonical comparison key for collapsing reissues and for matching
-    a Deezer release against an owned album.
+    an MB release-group against an owned album.
 
     lowercase + NFC → drop bracketed/trailing edition markers → drop multi-disc
     suffixes → strip a leading article → collapse punctuation to spaces.
@@ -157,11 +184,6 @@ def title_residual(dirty: str, canonical: str) -> Optional[str]:
     return None
 
 
-def _earlier(a: dict, b: dict) -> bool:
-    """True if release `a` is older than `b` (None year sorts last)."""
-    return (a.get("year") or 99999) < (b.get("year") or 99999)
-
-
 def _stamp_sync(artist_id: str) -> None:
     db_execute(
         "UPDATE artists SET last_album_sync = now() WHERE id = %(id)s::uuid",
@@ -169,22 +191,48 @@ def _stamp_sync(artist_id: str) -> None:
     )
 
 
-def _upsert_phantom_album(artist_id: str, artist_name: str, rel: dict) -> bool:
-    """Persist one release as a phantom album + artist link. Returns True
-    if a new album row was created (vs refreshing an existing phantom).
+def _artist_mbids(artist_id: str) -> List[str]:
+    """All MB artist MBIDs for a library artist (>1 = conflated namesakes;
+    their discographies are unioned). Empty = not canonized."""
+    return [r["mbid"] for r in db_query(
+        "SELECT mbid::text FROM artist_mbids WHERE artist_id = %(id)s::uuid",
+        {"id": artist_id},
+    )]
 
+
+def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
+                          artist_mbid: str) -> bool:
+    """Persist one missing release-group as a phantom album + artist link.
+    Returns True if a new album row was created.
+
+    A release-group already in the DB under another UUID (a collaboration
+    synced from the other member first) only gains the artist link — the
+    rg MBID is the real identity, the name-keyed UUID is just the row key.
     The ON CONFLICT guard (`WHERE NOT EXISTS album_variants`) makes the
     upsert a no-op on an owned album, so an owned record's data can never
     be clobbered even if a UUID somehow collides.
     """
-    aid = str(album_uuid(rel["title"], artist_name))
+    existing = db_query_one(
+        "SELECT id::text FROM albums WHERE musicbrainz_id = %(rg)s::uuid LIMIT 1",
+        {"rg": rg["rg_mbid"]},
+    )
+    if existing:
+        db_execute("""
+            INSERT INTO album_artists (album_id, artist_id, role, mbid)
+            VALUES (%(al)s::uuid, %(ar)s::uuid, 'primary', %(mbid)s::uuid)
+            ON CONFLICT DO NOTHING
+        """, {"al": existing["id"], "ar": artist_id, "mbid": artist_mbid})
+        return False
+
+    aid = str(album_uuid(rg["title"], artist_name))
     res = db_execute("""
         WITH up AS (
-            INSERT INTO albums (id, title, release_year, cover_url)
-            VALUES (%(id)s::uuid, %(title)s, %(year)s, %(cover)s)
+            INSERT INTO albums (id, title, release_year, musicbrainz_id, cover_url)
+            VALUES (%(id)s::uuid, %(title)s, %(year)s, %(rg)s::uuid, %(cover)s)
             ON CONFLICT (id) DO UPDATE
-                SET cover_url = EXCLUDED.cover_url,
-                    release_year = COALESCE(albums.release_year, EXCLUDED.release_year),
+                SET musicbrainz_id = EXCLUDED.musicbrainz_id,
+                    cover_url = EXCLUDED.cover_url,
+                    release_year = COALESCE(EXCLUDED.release_year, albums.release_year),
                     updated_at = now()
                 WHERE NOT EXISTS (
                     SELECT 1 FROM album_variants av WHERE av.album_id = albums.id
@@ -192,103 +240,155 @@ def _upsert_phantom_album(artist_id: str, artist_name: str, rel: dict) -> bool:
             RETURNING id, (xmax = 0) AS inserted
         ),
         link AS (
-            INSERT INTO album_artists (album_id, artist_id, role)
-            SELECT id, %(ar)s::uuid, 'primary' FROM up
+            INSERT INTO album_artists (album_id, artist_id, role, mbid)
+            SELECT id, %(ar)s::uuid, 'primary', %(mbid)s::uuid FROM up
             ON CONFLICT DO NOTHING
         )
         SELECT inserted FROM up
     """, {
         "id": aid,
-        "title": rel["title"],
-        "year": rel["year"],
-        "cover": rel["cover_url"],
+        "title": rg["title"],
+        "year": rg.get("first_year"),  # None until a dump refresh loads mb_release_group_meta
+        "rg": rg["rg_mbid"],
+        "cover": _CAA_FRONT_URL.format(rg=rg["rg_mbid"]),
         "ar": artist_id,
+        "mbid": artist_mbid,
     })
     return bool(res and res.get("inserted"))
 
 
+def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
+    """Drop this artist's phantom links that no longer correspond to a
+    missing release-group (ripped since the last sync, MB reclassified,
+    pre-MB legacy), garbage-collect phantom albums nobody links to, and
+    clear a stale external cover on albums that became owned — the
+    frontend prefers `cover_url` over the local file cover."""
+    if missing_rgs:
+        db_execute("""
+            DELETE FROM album_artists aa
+            USING albums al
+            WHERE al.id = aa.album_id
+              AND aa.artist_id = %(id)s::uuid
+              AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
+              AND (al.musicbrainz_id IS NULL
+                   OR NOT (al.musicbrainz_id::text = ANY(%(rgs)s)))
+        """, {"id": artist_id, "rgs": missing_rgs})
+    else:
+        db_execute("""
+            DELETE FROM album_artists aa
+            USING albums al
+            WHERE al.id = aa.album_id
+              AND aa.artist_id = %(id)s::uuid
+              AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
+        """, {"id": artist_id})
+
+    db_execute("""
+        DELETE FROM albums al
+        WHERE NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
+          AND NOT EXISTS (SELECT 1 FROM album_artists aa WHERE aa.album_id = al.id)
+    """)
+
+    db_execute("""
+        UPDATE albums al
+        SET cover_url = NULL, updated_at = now()
+        WHERE al.cover_url IS NOT NULL
+          AND EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
+          AND EXISTS (SELECT 1 FROM album_artists aa
+                      WHERE aa.album_id = al.id AND aa.artist_id = %(id)s::uuid)
+    """, {"id": artist_id})
+
+
 def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
-    """Fetch `artist_name`'s Deezer discography and persist the albums the
-    user doesn't own as phantom rows. Idempotent; stamps `last_album_sync`.
+    """Derive `artist_name`'s missing albums from the MB dump and reconcile
+    the phantom rows. Canonized artists only; idempotent; stamps
+    `last_album_sync`.
 
     Returns a stats dict: ``{status, found, new, skipped_owned}``.
-    `status` is success / not_found (artist not on Deezer) / rate_limited
-    / transient / error.
+    `status` is success / not_canonized (no `artist_mbids` row — gate, not
+    stamped) / rate_limited (dump-less nodes on the MB HTTP API).
     """
     artist_id = str(artist_id)
     stats = {"status": "success", "found": 0, "new": 0, "skipped_owned": 0}
 
-    row = db_query_one(
-        "SELECT deezer_id FROM artists WHERE id = %(id)s::uuid",
-        {"id": artist_id},
-    )
-    if row is None:
-        return {"status": "error", "found": 0, "new": 0, "skipped_owned": 0}
-    deezer_id = row.get("deezer_id")
+    mbids = _artist_mbids(artist_id)
+    if not mbids:
+        # Not canonized (yet): no shelf. Self-heal a revoked canonization —
+        # phantom rows minted under a former MBID must not linger.
+        if db_query_one("""
+            SELECT 1 FROM album_artists aa
+            WHERE aa.artist_id = %(id)s::uuid
+              AND NOT EXISTS (SELECT 1 FROM album_variants av
+                              WHERE av.album_id = aa.album_id)
+            LIMIT 1
+        """, {"id": artist_id}):
+            _reconcile_phantoms(artist_id, [])
+        stats["status"] = "not_canonized"
+        return stats
 
     try:
-        if not deezer_id:
-            deezer_id = deezer_discography.resolve_deezer_artist_id(artist_name)
-            if deezer_id:
-                db_execute(
-                    "UPDATE artists SET deezer_id = %(d)s WHERE id = %(id)s::uuid",
-                    {"d": deezer_id, "id": artist_id},
-                )
-        if not deezer_id:
-            # Not on Deezer — stamp so the gate doesn't retry every batch.
-            _stamp_sync(artist_id)
-            stats["status"] = "not_found"
-            return stats
-        releases = deezer_discography.fetch_artist_albums(deezer_id)
-    except RateLimitError as e:
-        covers.note_photo_rate_limit()
-        logger.warning(f"Deezer rate-limited on discography for {artist_name}: {e}")
+        candidates: Dict[str, tuple] = {}
+        for mbid in mbids:
+            for rg in mb.fetch_album_release_groups(mbid):
+                if rg["primary_type"] not in _ALLOWED_PRIMARY:
+                    continue
+                if set(rg["secondary_types"]) & _DISQUALIFYING_SECONDARY:
+                    continue
+                if not rg["title"]:
+                    continue
+                candidates.setdefault(rg["rg_mbid"], (rg, mbid))
+    except mb.MBRateLimited:
+        logger.warning(f"MB API rate-limited on discography for {artist_name}")
         stats["status"] = "rate_limited"
-        return stats
-    except TransientFetchError as e:
-        logger.info(f"Deezer transient failure on discography for {artist_name}: {e}")
-        stats["status"] = "transient"
         return stats
 
     owned = db_query("""
-        SELECT DISTINCT al.title
+        SELECT DISTINCT al.title, al.musicbrainz_id::text AS rg_mbid
         FROM albums al
         JOIN album_variants av ON av.album_id = al.id
         JOIN media_files mf ON mf.album_variant_id = av.id
-        JOIN tracks t ON t.id = mf.track_id
-        JOIN track_artists ta ON ta.track_id = t.id
+        JOIN track_artists ta ON ta.track_id = mf.track_id
         WHERE ta.artist_id = %(id)s::uuid
     """, {"id": artist_id})
+    owned_rg = {r["rg_mbid"] for r in owned if r["rg_mbid"]}
     owned_keys = {release_match_key(r["title"]) for r in owned}
 
-    # Collapse reissues by match-key (earliest year is the canonical
-    # release; carry a cover from whichever variant has one), drop
-    # non-albums and anything already owned.
-    best: Dict[str, dict] = {}
-    for rel in releases:
-        if rel["record_type"] not in _ALBUM_RECORD_TYPES:
-            continue
-        key = release_match_key(rel["title"])
-        if not key:
-            continue
-        if key in owned_keys:
-            stats["skipped_owned"] += 1
-            continue
-        cur = best.get(key)
-        if cur is None:
-            best[key] = rel
-        elif _earlier(rel, cur):
-            if not rel.get("cover_url"):
-                rel["cover_url"] = cur.get("cover_url")
-            best[key] = rel
-        elif not cur.get("cover_url") and rel.get("cover_url"):
-            cur["cover_url"] = rel["cover_url"]
+    def _is_owned(rg: dict) -> bool:
+        if rg["rg_mbid"] in owned_rg:
+            return True
+        if release_match_key(rg["title"]) in owned_keys:
+            return True
+        # A dirty owned tag often matches a regional/alternate RELEASE
+        # title, not the RG's canonical name (same channel mb_audit
+        # overlap-verifies through).
+        return any(release_match_key(rt) in owned_keys
+                   for rt in rg["release_titles"])
 
-    stats["found"] = len(best)
-    for rel in best.values():
-        if _upsert_phantom_album(artist_id, artist_name, rel):
+    missing = {}
+    for rg_mbid, (rg, mbid) in candidates.items():
+        if _is_owned(rg):
+            stats["skipped_owned"] += 1
+        else:
+            missing[rg_mbid] = (rg, mbid)
+
+    # Cross-artist ownership: a collaboration album owned through the other
+    # member's credit carries the same rg MBID on its owned row.
+    if missing:
+        rows = db_query("""
+            SELECT musicbrainz_id::text AS rg_mbid
+            FROM albums
+            WHERE musicbrainz_id::text = ANY(%(rgs)s)
+              AND EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = albums.id)
+        """, {"rgs": list(missing.keys())})
+        for r in rows:
+            missing.pop(r["rg_mbid"], None)
+            stats["skipped_owned"] += 1
+
+    stats["found"] = len(missing)
+    for rg, mbid in missing.values():
+        if _upsert_phantom_album(artist_id, artist_name, rg, mbid):
             stats["new"] += 1
 
+    _reconcile_phantoms(artist_id, list(missing.keys()))
     _stamp_sync(artist_id)
     return stats
 
@@ -310,3 +410,54 @@ def fetch_new_albums(artist_id) -> List[dict]:
           )
         ORDER BY al.release_year DESC NULLS LAST, al.title
     """, {"id": str(artist_id)})
+
+
+def run_backfill(limit: Optional[int] = None, stale_days: int = 30) -> Dict[str, int]:
+    """One-shot sweep: reconcile every canonized artist whose new-album data
+    is missing or older than `stale_days`. Pure local-DB work with the dump
+    loaded. Returns aggregate stats."""
+    sql = """
+        SELECT a.id::text AS id, a.name
+        FROM artists a
+        WHERE EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
+          AND (a.last_album_sync IS NULL
+               OR a.last_album_sync < now() - make_interval(days => %(days)s))
+        ORDER BY a.last_album_sync ASC NULLS FIRST, a.name
+    """
+    params: Dict = {"days": stale_days}
+    if limit:
+        sql += " LIMIT %(lim)s"
+        params["lim"] = int(limit)
+    rows = db_query(sql, params)
+
+    totals = {"processed": 0, "found": 0, "new": 0, "skipped_owned": 0,
+              "rate_limited": 0}
+    for row in rows:
+        result = sync_artist_discography(row["id"], row["name"])
+        totals["processed"] += 1
+        if result["status"] == "rate_limited":
+            totals["rate_limited"] += 1
+            logger.warning("Backfill: MB API rate-limited — stopping early")
+            break
+        totals["found"] += result["found"]
+        totals["new"] += result["new"]
+        totals["skipped_owned"] += result["skipped_owned"]
+        if totals["processed"] % 200 == 0:
+            logger.info(f"Backfill: {totals['processed']}/{len(rows)} artists, "
+                        f"{totals['new']} phantom albums so far")
+    logger.info(f"Backfill done: {totals}")
+    return totals
+
+
+if __name__ == "__main__":
+    import argparse
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    parser = argparse.ArgumentParser(
+        description="Backfill missing-album discovery for canonized artists")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="max artists to process (default: all stale)")
+    parser.add_argument("--stale-days", type=int, default=30,
+                        help="re-sync artists older than this (default 30)")
+    args = parser.parse_args()
+    print(run_backfill(limit=args.limit, stale_days=args.stale_days))

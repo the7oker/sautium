@@ -121,8 +121,10 @@ def fetch_album_release_groups(mbid: str) -> List[dict]:
     yet a same-name namesake sharing the exact owned title is near-impossible,
     so they disambiguate just as well. Broadcast/Other/untyped are left out as
     noisier. Secondary-typed groups (Compilation/Live/Remix/…) are filtered by
-    the caller via ``secondary_types``. ``first_year`` is None — the dump's
-    ``release_group_meta`` is not loaded and overlap keys on title, not year.
+    the caller via ``secondary_types``. ``first_year`` is the earliest date
+    across the group's releases (``mb_release_country`` +
+    ``mb_release_unknown_country``); None until a dump refresh loads those
+    tables — overlap keys on title, not year, so canon is unaffected.
 
     ``release_titles`` is the extra local-only signal: every variant title of
     every release under the group. A dirty owned tag often matches a regional/
@@ -134,7 +136,8 @@ def fetch_album_release_groups(mbid: str) -> List[dict]:
     rows = db_query("""
         SELECT rg.gid::text AS rg_mbid, rg.name AS title, pt.name AS primary_type,
                array_remove(array_agg(DISTINCT st.name), NULL) AS secondary_types,
-               array_remove(array_agg(DISTINCT r.name), NULL) AS release_titles
+               array_remove(array_agg(DISTINCT r.name), NULL) AS release_titles,
+               LEAST(MIN(rc.date_year), MIN(ruc.date_year)) AS first_year
         FROM mb_artist a
         JOIN mb_artist_credit_name acn ON acn.artist = a.id
         JOIN mb_release_group rg ON rg.artist_credit = acn.artist_credit
@@ -143,6 +146,8 @@ def fetch_album_release_groups(mbid: str) -> List[dict]:
         LEFT JOIN mb_release_group_secondary_type_join j ON j.release_group = rg.id
         LEFT JOIN mb_release_group_secondary_type st ON st.id = j.secondary_type
         LEFT JOIN mb_release r ON r.release_group = rg.id
+        LEFT JOIN mb_release_country rc ON rc.release = r.id
+        LEFT JOIN mb_release_unknown_country ruc ON ruc.release = r.id
         WHERE a.gid = %(mbid)s::uuid
         GROUP BY rg.id, rg.gid, rg.name, pt.name
     """, {"mbid": str(mbid)})
@@ -152,7 +157,7 @@ def fetch_album_release_groups(mbid: str) -> List[dict]:
         "primary_type": r["primary_type"],
         "secondary_types": list(r["secondary_types"] or []),
         "release_titles": list(r["release_titles"] or []),
-        "first_year": None,
+        "first_year": r["first_year"],
     } for r in rows]
 
 

@@ -47,6 +47,8 @@ TABLES = [
     ("mb_release_group", "release_group"),
     ("mb_release_group_secondary_type_join", "release_group_secondary_type_join"),
     ("mb_release", "release"),
+    ("mb_release_country", "release_country"),
+    ("mb_release_unknown_country", "release_unknown_country"),
     ("mb_medium_format", "medium_format"),
     ("mb_medium", "medium"),
     ("mb_recording", "recording"),
@@ -64,6 +66,7 @@ _LOAD_WEIGHT = {
     "mb_artist": 0.07, "mb_release_group": 0.05, "mb_artist_credit_name": 0.04,
     "mb_artist_credit": 0.03, "mb_medium": 0.03, "mb_release_label": 0.02,
     "mb_artist_alias": 0.02, "mb_area": 0.01,
+    "mb_release_country": 0.01, "mb_release_unknown_country": 0.0,
     "mb_release_group_secondary_type_join": 0.0,
     "mb_release_group_primary_type": 0.0, "mb_release_group_secondary_type": 0.0,
     "mb_medium_format": 0.0,
@@ -308,6 +311,12 @@ def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> D
 
     download(version, progress_cb)  # resumes a partial; a complete archive → 416, instant
     stream_load(progress_cb)
+    # Fresh MB data invalidates missing-album discovery: un-stamp so the
+    # background reconcile re-derives every canonized artist's phantom
+    # shelf against the new dump (incl. release years once
+    # mb_release_country is populated).
+    from db_pool import db_execute
+    db_execute("UPDATE artists SET last_album_sync = NULL")
     with open(VERSION_PATH, "w") as f:
         f.write(version)
     # Reclaim the ~7 GB archive — the data now lives in the DB, and a future

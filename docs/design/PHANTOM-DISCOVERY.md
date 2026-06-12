@@ -301,6 +301,42 @@ not for dedup (Deezer match-key handles that) but for *classification*.
 This is the concrete, evidence-backed case for adding MusicBrainz as the
 next iteration, deferred until we decide it's worth the second client.
 
+**Phase 1 rebuilt on the MB dump — shipped (2026-06-12).** The "next
+iteration" above landed as a full source swap once the local MusicBrainz
+dump + canonicalization (`artist_mbids`) matured: Deezer dismantled
+(`deezer_discography.py` deleted, `artists.deezer_id` dropped, 2994
+Deezer-era phantom rows purged), discography now derives from
+`mb_local.fetch_album_release_groups` for **canonized artists only**.
+
+- **Classification solved at the source:** primary type ∈ {Album, EP};
+  any disqualifying secondary type (Compilation/Live/Remix/DJ-mix/…)
+  drops the group. `Soundtrack` deliberately passes — an artist-credited
+  film score is a first-class studio release (VA soundtracks never enter:
+  the fetch is per artist credit).
+- **Own-check is two-channel:** release-group MBID equality
+  (`albums.musicbrainz_id`, exact) + `release_match_key` title fallback,
+  including MB *release* (regional/variant) titles — the same channel
+  `mb_audit` overlap-verifies through.
+- **Sync is a reconcile, not an append:** upsert newly-missing groups,
+  unlink rows that stopped being missing (ripped since / MB reclassified
+  / revoked canonization), GC unlinked phantoms, clear a stale external
+  `cover_url` once an album becomes owned. Phantom rows now carry
+  `albums.musicbrainz_id` = the rg MBID; across artists the rg MBID is
+  the identity (a collaboration synced from the other member only gains
+  an `album_artists` link).
+- **Covers: Cover Art Archive, zero server-side fetching.** The CAA
+  image API is explicitly unlimited, so `cover_url` stores the canonical
+  `…/release-group/{mbid}/front-500` URL and the browser resolves it
+  (tile `onerror` hides a 404). No throttle apparatus at all.
+- **Background step re-enabled** (`_step_sync_discographies`): pure
+  local-DB work now, 50 canonized artists per batch, oldest-stale first.
+  `python /app/discography.py` backfills the whole canonized set.
+- **Year:** `release_year` is NULL until a dump refresh loads the newly
+  staged `mb_release_country`/`mb_release_unknown_country` tables
+  (`first_year` = MIN release date; `release_group_meta` lives in the
+  *derived* dump archive the loader doesn't stream — checked against
+  `ExportAllTables`).
+
 ## Artist canonicalization (MB-anchored) — a foundation this feature needs
 
 Surfaced while hardening discography (2026-06-01). The discography

@@ -19,8 +19,9 @@ from discography import fetch_new_albums, sync_artist_discography
 
 router = APIRouter(prefix="/api/artists", tags=["artists"])
 
-# Fetch-on-view gate: the artist screen triggers a Deezer refresh at most
-# once a day per artist; the monthly background sync handles the rest.
+# Fetch-on-view gate: the artist screen triggers a missing-album reconcile
+# (local MB dump) at most once a day per artist; the monthly background
+# sync handles the rest.
 _DISCOGRAPHY_VIEW_STALE_HOURS = 24
 
 
@@ -363,9 +364,9 @@ def get_artist(
         ORDER BY sa.match_score DESC NULLS LAST, a.name
     """, {"id": artist_id})
 
-    # New albums the user doesn't own — phantom albums discovered from the
-    # artist's Deezer discography. `stale` lets the screen fire a
-    # fetch-on-view refresh (once a day) after rendering what's cached.
+    # New albums the user doesn't own — phantom albums derived from the
+    # MB-dump discography (canonized artists only). `stale` lets the screen
+    # fire a fetch-on-view refresh (once a day) after rendering what's cached.
     artist["new_albums"] = fetch_new_albums(artist_id)
     artist["new_albums_stale"] = _is_discography_stale(last_album_sync)
 
@@ -377,10 +378,11 @@ def sync_discography(artist_id: str) -> dict:
     """Fetch-on-view refresh of an artist's new-album discovery.
 
     Gated to once a day per artist (`last_album_sync`): if fresh, returns
-    the cached phantom albums without touching Deezer. Otherwise runs the
-    sync inline — a light 1-3 request hit behind the shared Deezer
-    cooldown — and returns the refreshed list for an in-place shelf
-    update on the client (no full re-render)."""
+    the cached phantom albums as-is. Otherwise runs the MB-dump reconcile
+    inline — pure local-DB work, a few indexed joins — and returns the
+    refreshed list for an in-place shelf update on the client (no full
+    re-render). Non-canonized artists reconcile to an empty shelf and stay
+    unstamped, so the first view after canonization syncs immediately."""
     row = db_query_one("""
         SELECT a.name, a.last_album_sync
         FROM artists a

@@ -507,10 +507,13 @@ def _trigram_albums(q: str, limit: int) -> list[dict]:
                 ORDER BY mf3.disc_number, mf3.track_number
                 LIMIT 1) AS media_file_id
         FROM albums al
-        WHERE similarity(al.title, %(q)s) >= 0.5
+        WHERE (similarity(al.title, %(q)s) >= 0.5
            OR lower(al.title) LIKE lower(%(prefix)s)
            OR levenshtein_less_equal(
-                lower(al.title), lower(%(q)s), 1) <= 1
+                lower(al.title), lower(%(q)s), 1) <= 1)
+          -- owned only: phantom rows (MB missing-album discovery) have no
+          -- variants/files and would render as dead tiles here
+          AND EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
         ORDER BY sim DESC, al.title
         LIMIT %(limit)s
     """, {"q": q, "prefix": q + "%", "limit": limit})

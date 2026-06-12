@@ -80,7 +80,7 @@
 
   function coverUrl(item) {
     if (!item) return '';
-    // External cover (Deezer) for phantom albums with no local file.
+    // External cover (Cover Art Archive) for phantom albums with no local file.
     if (item.cover_url) return item.cover_url;
     if (item.cover_id) return '/api/covers/' + encodeURIComponent(item.cover_id);
     if (item.media_file_id != null) {
@@ -3335,9 +3335,10 @@
         </button>`;
     }).join('');
 
-    // New albums the user doesn't own — phantom albums from the artist's
-    // Deezer discography. Same tile as owned albums but dimmed
-    // (.is-unowned) with a Bandcamp buy affordance instead of navigation.
+    // New albums the user doesn't own — phantom albums from the MB-dump
+    // discography (canonized artists only; covers hotlink Cover Art
+    // Archive). Same tile as owned albums but dimmed (.is-unowned) with a
+    // Bandcamp buy affordance instead of navigation.
     function newAlbumTileHtml(a) {
       const c = coverPlaceholderColors(a.title || a.id);
       const url = coverUrl(a);
@@ -3460,8 +3461,9 @@
     updatePlayingHighlight();
 
     // Fetch-on-view: if this artist's new-album data is stale (>1 day or
-    // never synced), refresh it from Deezer in the background and patch
-    // the shelf in place — no "Loading…" flash, no full re-render.
+    // never synced), reconcile it against the local MB dump in the
+    // background and patch the shelf in place — no "Loading…" flash, no
+    // full re-render.
     if (d.new_albums_stale) {
       fetch('/api/artists/' + encodeURIComponent(artistId) + '/sync-discography',
             { method: 'POST' })
