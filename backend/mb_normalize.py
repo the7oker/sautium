@@ -20,6 +20,7 @@ Read-only `resolve_artist`; apply is separate. Indexes: `mb_recording(artist_cre
 `mb_track(recording)`, `mb_artist(lower(name))`.
 """
 import logging
+import re
 
 import psycopg2.extras
 from sqlalchemy import text as _sql
@@ -101,6 +102,42 @@ cand AS (   -- recording candidates per owned track within the pass's duration t
 SELECT DISTINCT ON (album_id, track_id) album_id, track_id, rec_mbid, artist_mbid
 FROM cand
 ORDER BY album_id, track_id, exact DESC, dd
+"""
+
+
+# Track-centric match — the layer for artists owning TRACKS but no albums (a
+# single or two on a compilation owned by someone else). They are invisible to
+# the album-centric resolve, which walks album_artists. Same trust chain (name
+# candidates → content verification) and the same _recs scoping; grouping is per
+# track instead of per album. Single-edit suffixes that MB recordings never
+# carry ("(Original Mix)", "(Radio Edit)") are stripped before normalization.
+_TRACK_STRIP = (r"\s*[\(\[](original mix|extended mix|radio edit|club mix|"
+                r"original version|album version|original|"
+                r"remaster(ed)?( \d{4})?)[\)\]]\s*$")
+_TRACK_MATCH_SQL = f"""
+WITH owned AS (
+    SELECT t.id::text AS track_id,
+           {_norm("regexp_replace(t.title, %(strip)s, '', 'i')")} AS ntitle,
+           min(mf.duration_seconds::float) AS dur
+    FROM tracks t
+    JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+        AND ta.artist_id = %(artist)s::uuid
+    JOIN media_files mf ON mf.track_id = t.id
+    GROUP BY t.id, t.title
+),
+cand AS (
+    SELECT o.track_id, r.rec_mbid, r.artist_mbid, TRUE AS exact,
+           abs(coalesce(r.length, o.dur*1000)/1000.0 - o.dur) AS dd
+    FROM owned o JOIN _recs r ON r.rname = o.ntitle
+        AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= %(durtol)s)
+    UNION ALL
+    SELECT o.track_id, r.rec_mbid, r.artist_mbid, FALSE,
+           abs(coalesce(r.length, o.dur*1000)/1000.0 - o.dur)
+    FROM owned o JOIN _recs r ON r.rname %% o.ntitle
+        AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= %(durtol)s)
+)
+SELECT DISTINCT ON (track_id) track_id, rec_mbid, artist_mbid, exact
+FROM cand ORDER BY track_id, exact DESC, dd
 """
 
 
@@ -348,6 +385,103 @@ def apply_artist(artist_id, name: str, plan: dict = None) -> dict:
     return st
 
 
+def canonicalize_trackonly(artist_id, name: str) -> dict:
+    """Track-centric canon — resolve + materialize for an artist with no owned
+    albums. Oracle-validated on the legacy set (17/17 correct when assigned, 0
+    wrong). Gates: dominant artist must carry >=60% of the matched tracks, and a
+    single lone match counts only when it is an EXACT title hit (a lone fuzzy hit
+    proves nothing). Materializes artist_mbids + media_files.recording_mbid +
+    track_mbids for the dominant artist's tracks; albums/RG don't apply here."""
+    cands = mb.search_artist(name, limit=8)
+    strong = [c for c in cands if (c.get("score") or 0) >= _CAND_SCORE] or cands[:1]
+    cand_mbids = [c["mbid"] for c in strong]
+    st = {"total": 0, "matched": 0, "artist_mbid": None, "files": 0}
+    if not cand_mbids:
+        return st
+    aid = str(artist_id)
+    with get_conn() as conn:
+        conn.autocommit = False
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("DROP TABLE IF EXISTS _recs")
+                cur.execute(_RECS_SQL, {"cands": cand_mbids})
+                cur.execute("CREATE INDEX ON _recs (rname)")
+                cur.execute("CREATE INDEX ON _recs USING gin (rname gin_trgm_ops)")
+                cur.execute("SET pg_trgm.similarity_threshold = 0.55")
+                cur.execute(_TRACK_MATCH_SQL,
+                            {"artist": aid, "strip": _TRACK_STRIP, "durtol": 10})
+                hits = cur.fetchall()
+                cur.execute("""
+                    SELECT count(DISTINCT ta.track_id) AS n FROM track_artists ta
+                    WHERE ta.artist_id = %s::uuid AND ta.role = 'primary'
+                """, (aid,))
+                st["total"] = cur.fetchone()["n"]
+                st["matched"] = len(hits)
+
+                counts: dict = {}
+                for h in hits:
+                    counts[h["artist_mbid"]] = counts.get(h["artist_mbid"], 0) + 1
+                dom = max(counts, key=counts.get) if counts else None
+                dom_hits = [h for h in hits if h["artist_mbid"] == dom]
+                ok = (dom is not None
+                      and len(dom_hits) * 10 >= 6 * len(hits)        # >=60% dominance
+                      and (len(dom_hits) > 1 or dom_hits[0]["exact"]))
+                if ok:
+                    st["artist_mbid"] = dom
+                    # Stamp files FIRST (before any rename/merge): recording_mbid
+                    # rides the media_files row, which survives a track-UUID move.
+                    for h in dom_hits:
+                        cur.execute(
+                            "UPDATE media_files SET recording_mbid = %s WHERE track_id = %s::uuid",
+                            (h["rec_mbid"], h["track_id"]))
+                        st["files"] += cur.rowcount
+                # inside the txn on purpose: commit clears them; a rollback
+                # reverts the SET and the temp table along with the work
+                cur.execute("RESET pg_trgm.similarity_threshold")
+                cur.execute("DROP TABLE IF EXISTS _recs")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.autocommit = True
+    if not st["artist_mbid"]:
+        return st
+
+    # Identity step. The mbid PK is one-MB-entity-one-artist: if another local row
+    # already holds dom (a name-variant of the same entity — "UR" vs "Underground
+    # Resistance"), plain INSERT silently no-ops and the artist stays orphaned. So
+    # converge onto the MB-canonical name: rename (or merge into the holder, which
+    # recanonicalize does when the canonical UUID exists) and re-point the mbid.
+    canonical = db_query("SELECT name FROM mb_artist WHERE gid = %(g)s",
+                         {"g": st["artist_mbid"]})[0]["name"]
+    db = SessionLocal()
+    try:
+        canon_id = aid
+        if str(artist_uuid(canonical)) != aid:
+            canon_id = recanonicalize_artist(db, aid, canonical)
+            st["canonical"] = canonical
+        db.execute(_sql(
+            "INSERT INTO artist_mbids (mbid, artist_id, confidence) "
+            "VALUES (:m, :a, 'overlap_verified') "
+            "ON CONFLICT (mbid) DO UPDATE SET artist_id = EXCLUDED.artist_id"),
+            {"m": st["artist_mbid"], "a": canon_id})
+        db.commit()
+    finally:
+        db.close()
+    # track_mbids re-derived from the stamped files: track UUIDs may have just
+    # moved in the rename/merge, media_files.track_id followed by CASCADE.
+    db_execute("""
+        INSERT INTO track_mbids (recording_mbid, track_id, confidence)
+        SELECT DISTINCT mf.recording_mbid, mf.track_id, 'overlap_verified'::mb_match_confidence
+        FROM media_files mf
+        JOIN track_artists ta ON ta.track_id = mf.track_id AND ta.role = 'primary'
+        WHERE ta.artist_id = %(a)s::uuid AND mf.recording_mbid IS NOT NULL
+        ON CONFLICT (recording_mbid) DO NOTHING
+    """, {"a": canon_id})
+    return st
+
+
 def merge_collisions(dry_run: bool = True) -> list:
     """APPLY increment 2 — merge-on-collision. Sautium artists that resolved to the
     SAME MBID are un-merged name-variants (diacritics/typos/articles/sort-order/
@@ -487,7 +621,21 @@ def rename_to_canonical(artist_ids: list = None, dry_run: bool = False) -> dict:
                 continue
             out["plan"].append({"from": cur, "to": canonical})
             if not dry_run:
-                recanonicalize_artist(db, aid, canonical)
+                # recanonicalize DELETEs the source row, and artist_mbids is ON
+                # DELETE CASCADE — carry the rows to the canonical id (the same
+                # dance merge_collisions does). Without this the rename orphans
+                # the artist from its own MBID, and since recanonicalize stamps
+                # last_mb_sync, later canon runs skip it as "done" forever.
+                kept = db.execute(_sql(
+                    "SELECT mbid::text, confidence::text FROM artist_mbids "
+                    "WHERE artist_id::text = :a"), {"a": aid}).fetchall()
+                canon_id = recanonicalize_artist(db, aid, canonical)
+                for m, conf in kept:
+                    db.execute(_sql(
+                        "INSERT INTO artist_mbids (mbid, artist_id, confidence) "
+                        "VALUES (:m, :a, :c::mb_match_confidence) "
+                        "ON CONFLICT (mbid) DO UPDATE SET artist_id = EXCLUDED.artist_id"),
+                        {"m": m, "a": canon_id, "c": conf})
                 out["renamed"] += 1
         db.commit() if not dry_run else db.rollback()
     finally:
@@ -505,28 +653,60 @@ def _collab_members(artist_id, name: str, plan: dict) -> list:
     the credit's ordered members [(name, mbid)] are returned for splitting. This is
     the deterministic, content-verified replacement for the removed Last.fm Pass 2.
     """
-    recs = [r for alb in plan["albums"] for r in alb["recordings"].values()]
-    if not recs:
-        return []
     # a real band with this exact name → keep whole (its recordings may still carry
     # a 2-artist "member & member" credit on some releases; the band wins).
     if db_query("SELECT 1 FROM mb_artist WHERE lower(name) = lower(%(n)s) LIMIT 1",
                 {"n": name}):
         return []
-    top = db_query("""
-        SELECT rec.artist_credit AS cid, ac.artist_count AS n
-        FROM mb_recording rec JOIN mb_artist_credit ac ON ac.id = rec.artist_credit
-        WHERE rec.gid = ANY(%(recs)s::uuid[])
-        GROUP BY rec.artist_credit, ac.artist_count
-        ORDER BY count(*) DESC LIMIT 1
-    """, {"recs": recs})
-    if not top or top[0]["n"] < 2:
+
+    # Content path: the matched recordings' dominant credit (strongest evidence —
+    # proven by the artist's own audio, immune to name-order differences).
+    recs = [r for alb in plan["albums"] for r in alb["recordings"].values()]
+    if recs:
+        top = db_query("""
+            SELECT rec.artist_credit AS cid, ac.artist_count AS n
+            FROM mb_recording rec JOIN mb_artist_credit ac ON ac.id = rec.artist_credit
+            WHERE rec.gid = ANY(%(recs)s::uuid[])
+            GROUP BY rec.artist_credit, ac.artist_count
+            ORDER BY count(*) DESC LIMIT 1
+        """, {"recs": recs})
+        if top and top[0]["n"] >= 2:
+            return [(m["name"], m["mbid"]) for m in db_query("""
+                SELECT mba.name AS name, mba.gid::text AS mbid
+                FROM mb_artist_credit_name acn JOIN mb_artist mba ON mba.id = acn.artist
+                WHERE acn.artist_credit = %(c)s ORDER BY acn.position
+            """, {"c": top[0]["cid"]})]
+        return []   # content spoke and said single-artist credit → not a collab
+
+    # Name fallback — no recordings matched (tracks not in MB / on unmatched
+    # compilations), so the credit can't testify. Deterministic name evidence
+    # instead: the whole is NOT an mb_artist (guard above) AND every separator
+    # part IS one (exact name/alias). Then the parts are the members, source
+    # order = credit order (position 0 = primary). A part whose exact name is
+    # ambiguous (several MB namesakes) still splits but gets NO mbid — identity
+    # by name stays deterministic, the MBID waits for content evidence.
+    parts = [p.strip() for p in re.split(r' & | and | with | / |,', name) if p.strip()]
+    if len(parts) < 2:
         return []
-    return [(m["name"], m["mbid"]) for m in db_query("""
-        SELECT mba.name AS name, mba.gid::text AS mbid
-        FROM mb_artist_credit_name acn JOIN mb_artist mba ON mba.id = acn.artist
-        WHERE acn.artist_credit = %(c)s ORDER BY acn.position
-    """, {"c": top[0]["cid"]})]
+    # "Kaji, Meiko" is a REORDERED person ("Meiko Kaji"), not a collaboration —
+    # a comma-only 2-part name whose swap is an MB artist must not be split.
+    if (len(parts) == 2 and "," in name
+            and not re.search(r" & | and | with | / ", name)
+            and db_query("SELECT 1 FROM mb_artist WHERE lower(name) = lower(%(s)s) LIMIT 1",
+                         {"s": f"{parts[1]} {parts[0]}"})):
+        return []
+    members = []
+    for p in parts:
+        gids = {r["gid"] for r in db_query("""
+            SELECT a.gid::text AS gid FROM mb_artist a WHERE lower(a.name) = lower(%(p)s)
+            UNION
+            SELECT a.gid::text FROM mb_artist a
+            JOIN mb_artist_alias al ON al.artist = a.id WHERE lower(al.name) = lower(%(p)s)
+        """, {"p": p})}
+        if not gids:
+            return []   # any unknown part → don't split on name evidence
+        members.append((p, gids.pop() if len(gids) == 1 else None))
+    return members
 
 
 def _split_collab(artist_id, name: str, members: list) -> tuple:
@@ -545,6 +725,8 @@ def _split_collab(artist_id, name: str, members: list) -> tuple:
         db.execute(_sql("DELETE FROM artist_mbids WHERE artist_id::text = :c"),
                    {"c": str(artist_id)})
         for mname, mmbid in members:
+            if not mmbid:   # name-fallback member with ambiguous MB namesakes
+                continue
             db.execute(_sql("INSERT INTO artist_mbids (mbid, artist_id, confidence) "
                             "VALUES (:m, :a, 'overlap_verified') "
                             "ON CONFLICT (mbid) DO UPDATE SET artist_id = EXCLUDED.artist_id"),
@@ -570,10 +752,9 @@ def split_collaborations(dry_run: bool = False) -> dict:
         SELECT DISTINCT a.id::text AS id, a.name FROM artists a
         WHERE (a.name ~ ' & ' OR a.name ~ ', ' OR a.name ~ ' and '
                OR a.name ~ ' with ' OR a.name ~ ' / ')
-          AND EXISTS (SELECT 1 FROM album_artists aa
-                JOIN album_variants av ON av.album_id = aa.album_id
-                JOIN media_files mf ON mf.album_variant_id = av.id
-                WHERE aa.artist_id = a.id AND aa.role = 'primary')
+          AND EXISTS (SELECT 1 FROM track_artists ta
+                JOIN media_files mf ON mf.track_id = ta.track_id
+                WHERE ta.artist_id = a.id AND ta.role = 'primary')
     """)
     out = {"candidates": len(owned), "split": 0, "errors": 0, "plan": []}
     for r in owned:
@@ -608,20 +789,22 @@ def canonicalize_pending(limit: int = None) -> dict:
         if not mb.LOCAL_DUMP:
             return {"skipped": "no local MB dump", "artists": 0}
 
+    # Track-owned, not album-owned: an artist whose only presence is a track or
+    # two on someone else's compilation has no album_artists row at all, yet is
+    # exactly who the track-centric layer exists for.
     pending = db_query("""
         SELECT ar.id::text AS id, ar.name
         FROM artists ar
         WHERE EXISTS (
-            SELECT 1 FROM album_artists aa
-            JOIN album_variants av ON av.album_id = aa.album_id
-            JOIN media_files mf ON mf.album_variant_id = av.id
-            WHERE aa.artist_id = ar.id AND aa.role = 'primary'
+            SELECT 1 FROM track_artists ta
+            JOIN media_files mf ON mf.track_id = ta.track_id
+            WHERE ta.artist_id = ar.id AND ta.role = 'primary'
               AND (ar.last_mb_sync IS NULL OR mf.created_at > ar.last_mb_sync))
         ORDER BY ar.last_mb_sync NULLS FIRST, ar.name
         LIMIT %(lim)s
     """, {"lim": limit or 1_000_000})
 
-    st = {"pending": len(pending), "artists": 0, "split": 0, "errors": 0}
+    st = {"pending": len(pending), "artists": 0, "track_only": 0, "split": 0, "errors": 0}
     done = []
     # Worklist (not a flat for): a collaboration is split into its members, and the
     # primary member is re-queued so its albums resolve under the now-split identity.
@@ -640,7 +823,11 @@ def canonicalize_pending(limit: int = None) -> dict:
                 st["split"] += 1
                 worklist.append(primary)
                 continue
-            apply_artist(aid, aname, plan)   # materialize (reuses the resolve, atomic)
+            if plan["albums"]:
+                apply_artist(aid, aname, plan)   # materialize (reuses the resolve, atomic)
+            else:
+                canonicalize_trackonly(aid, aname)   # track-centric layer (no owned albums)
+                st["track_only"] += 1
             done.append(aid)
             st["artists"] += 1
         except Exception as e:
