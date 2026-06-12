@@ -328,27 +328,20 @@ def _step_missing_genres(limit: int) -> Dict[str, int]:
 
 def _step_sync_discographies(limit: int) -> Dict[str, int]:
     """Reconcile missing-album discovery for canonized artists whose data
-    is stale (`_DISCOGRAPHY_STALE_DAYS`), oldest first. With the MB dump
-    loaded this is pure local-DB work — no network, no cooldowns;
-    `rate_limited` only fires on dump-less nodes that fall back to the MB
-    HTTP API, and ends the batch early there.
+    is stale (`_DISCOGRAPHY_STALE_DAYS`), in `stale_canonized_artists`
+    priority order: listened artists first, then artists similar to them,
+    then the rest — relevant shelves refresh first after a dump reload
+    un-stamps everyone. With the MB dump loaded this is pure local-DB
+    work — no network, no cooldowns; `rate_limited` only fires on
+    dump-less nodes (MB HTTP API) and ends the batch early, `mb_loading`
+    while a dump reload holds the advisory lock.
     """
-    from discography import sync_artist_discography
+    from discography import stale_canonized_artists, sync_artist_discography
 
     stats = {"processed": 0, "new_albums": 0, "errors": 0}
 
-    sql = text(f"""
-        SELECT a.id, a.name
-        FROM artists a
-        WHERE EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
-          AND (a.last_album_sync IS NULL
-               OR a.last_album_sync < now() - interval '{_DISCOGRAPHY_STALE_DAYS} days')
-        ORDER BY a.last_album_sync ASC NULLS FIRST
-        LIMIT :batch
-    """)
-
-    with get_db_context() as db:
-        rows = db.execute(sql, {"batch": int(limit)}).fetchall()
+    rows = stale_canonized_artists(limit=int(limit),
+                                   stale_days=_DISCOGRAPHY_STALE_DAYS)
     if not rows:
         return stats
     logger.info(f"Background: {len(rows)} canonized artists queued for discography reconcile")
@@ -358,13 +351,13 @@ def _step_sync_discographies(limit: int) -> Dict[str, int]:
             break
         stats["processed"] += 1
         try:
-            result = sync_artist_discography(row.id, row.name)
+            result = sync_artist_discography(row["id"], row["name"])
             if result.get("status") in ("rate_limited", "mb_loading"):
                 logger.info(f"Background discography: {result['status']} — ending batch")
                 break
             stats["new_albums"] += result.get("new", 0)
         except Exception as e:
-            logger.error(f"Background discography failed for {row.name}: {e}")
+            logger.error(f"Background discography failed for {row['name']}: {e}")
             stats["errors"] += 1
 
     return stats

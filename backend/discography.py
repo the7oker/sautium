@@ -538,23 +538,64 @@ def fetch_new_albums(artist_id) -> List[dict]:
     """, {"id": str(artist_id)})
 
 
-def run_backfill(limit: Optional[int] = None, stale_days: int = 30) -> Dict[str, int]:
-    """One-shot sweep: reconcile every canonized artist whose new-album data
-    is missing or older than `stale_days`. Pure local-DB work with the dump
-    loaded. Returns aggregate stats."""
-    sql = """
+# Listening recency window that defines "artists I listen to" for the
+# update priority (same 6 months the Deezer-era step used).
+_LISTENED_MONTHS = 6
+
+
+def stale_canonized_artists(limit: Optional[int] = None,
+                            stale_days: int = 30) -> List[dict]:
+    """Canonized artists whose new-album data is missing or older than
+    `stale_days`, in update-priority order:
+
+      tier 0 — artists actually listened to in the last 6 months,
+      tier 1 — artists similar to those (both edge directions — Last.fm
+               similarity is stored directed, see the artist-screen note),
+      tier 2 — the rest (so a post-dump-refresh re-derive eventually
+               covers everyone, relevant shelves first).
+
+    Within a tier: oldest data first. Shared by the background step and
+    the CLI backfill — one source of truth for the priority.
+    """
+    sql = f"""
+        WITH listened AS (
+            SELECT DISTINCT ta.artist_id
+            FROM track_artists ta
+            JOIN listening_history lh ON lh.track_id = ta.track_id
+            WHERE ta.role = 'primary'
+              AND lh.started_at > now() - interval '{_LISTENED_MONTHS} months'
+        ),
+        similar_of_listened AS (
+            SELECT sa.similar_artist_id AS artist_id
+            FROM similar_artists sa JOIN listened l ON l.artist_id = sa.artist_id
+            UNION
+            SELECT sa.artist_id
+            FROM similar_artists sa JOIN listened l ON l.artist_id = sa.similar_artist_id
+        )
         SELECT a.id::text AS id, a.name
         FROM artists a
         WHERE EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
           AND (a.last_album_sync IS NULL
                OR a.last_album_sync < now() - make_interval(days => %(days)s))
-        ORDER BY a.last_album_sync ASC NULLS FIRST, a.name
+        ORDER BY
+          CASE WHEN a.id IN (SELECT artist_id FROM listened) THEN 0
+               WHEN a.id IN (SELECT artist_id FROM similar_of_listened) THEN 1
+               ELSE 2 END,
+          a.last_album_sync ASC NULLS FIRST,
+          a.name
     """
     params: Dict = {"days": stale_days}
     if limit:
         sql += " LIMIT %(lim)s"
         params["lim"] = int(limit)
-    rows = db_query(sql, params)
+    return db_query(sql, params)
+
+
+def run_backfill(limit: Optional[int] = None, stale_days: int = 30) -> Dict[str, int]:
+    """One-shot sweep: reconcile every canonized artist whose new-album data
+    is missing or older than `stale_days`, listened-first. Pure local-DB
+    work with the dump loaded. Returns aggregate stats."""
+    rows = stale_canonized_artists(limit=limit, stale_days=stale_days)
 
     totals = {"processed": 0, "found": 0, "new": 0, "skipped_owned": 0,
               "rate_limited": 0}
