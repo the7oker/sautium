@@ -1451,7 +1451,13 @@ CREATE INDEX IF NOT EXISTS idx_mb_track_recording       ON mb_track(recording);
 
 CREATE OR REPLACE VIEW library_stats AS
 SELECT
-    (SELECT COUNT(*) FROM artists) as total_artists,
+    -- track-owning artists only: split markers (verified_split/verified_collab
+    -- compounds, 0 tracks) and featured-only members are bookkeeping rows whose
+    -- count varies with each node's split/merge history — they made the stat
+    -- diverge across nodes while track identity was in fact converged
+    (SELECT COUNT(*) FROM artists a
+      WHERE EXISTS (SELECT 1 FROM track_artists ta
+                    WHERE ta.artist_id = a.id AND ta.role = 'primary')) as total_artists,
     (SELECT COUNT(*) FROM albums) as total_albums,
     (SELECT COUNT(*) FROM tracks) as total_tracks,
     (SELECT COUNT(*) FROM media_files) as total_media_files,
