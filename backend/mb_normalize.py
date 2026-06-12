@@ -72,6 +72,7 @@ FROM mb_recording rec JOIN cand_credit cc ON cc.artist_credit = rec.artist_credi
 """
 
 # Match owned tracks (scoped to %(albums)s) against the temp _recs.
+# ta2: only the artist's own tracks — a mixed directory must not dilute coverage.
 _MATCH_SQL = f"""
 WITH owned AS (
     SELECT a.id::text AS album_id, t.id::text AS track_id,
@@ -82,6 +83,8 @@ WITH owned AS (
     JOIN album_variants av ON av.album_id=a.id
     JOIN media_files mf ON mf.album_variant_id=av.id
     JOIN tracks t ON t.id=mf.track_id
+    JOIN track_artists ta2 ON ta2.track_id=t.id AND ta2.role='primary'
+        AND ta2.artist_id=%(artist)s::uuid
     WHERE a.id = ANY(%(albums)s::uuid[])
     GROUP BY a.id, t.id, t.title, mf.duration_seconds
 ),
@@ -166,6 +169,8 @@ WITH owned AS (
     JOIN album_variants av ON av.album_id=a.id
     JOIN media_files mf ON mf.album_variant_id=av.id
     JOIN tracks t ON t.id=mf.track_id
+    JOIN track_artists ta2 ON ta2.track_id=t.id AND ta2.role='primary'
+        AND ta2.artist_id=%(artist)s::uuid
     WHERE a.id = ANY(%(albums)s::uuid[])
     GROUP BY a.id, t.id, t.title, mf.duration_seconds
 ),
@@ -243,6 +248,9 @@ SELECT album_id, rg_mbid FROM (   -- among content-valid releases, the one whose
 
 
 def _owned_counts(artist_id):
+    # Count only THIS artist's tracks (ta2): a shared/mixed album directory
+    # otherwise inflates the denominator and the coverage gates become
+    # unpassable — Alanis' 18 tracks inside a 38-file dir = 0.47 < every frac.
     rows = db_query("""
         SELECT a.id::text AS album_id, a.title, count(DISTINCT t.id) AS ntracks
         FROM albums a
@@ -251,6 +259,8 @@ def _owned_counts(artist_id):
         JOIN album_variants av ON av.album_id=a.id
         JOIN media_files mf ON mf.album_variant_id=av.id
         JOIN tracks t ON t.id=mf.track_id
+        JOIN track_artists ta2 ON ta2.track_id=t.id AND ta2.role='primary'
+            AND ta2.artist_id=%(id)s::uuid
         GROUP BY a.id, a.title
     """, {"id": str(artist_id)})
     return {r["album_id"]: (r["title"], r["ntracks"]) for r in rows}
