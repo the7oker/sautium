@@ -21,6 +21,7 @@ Read-only `resolve_artist`; apply is separate. Indexes: `mb_recording(artist_cre
 """
 import logging
 import re
+import unicodedata
 
 import psycopg2.extras
 from sqlalchemy import text as _sql
@@ -101,6 +102,17 @@ cand AS (   -- recording candidates per owned track within the pass's duration t
            abs(coalesce(r.length, o.dur*1000)/1000.0 - o.dur)
     FROM owned o JOIN _recs r ON r.rname %% o.ntitle
         AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= %(durtol)s)
+    UNION ALL
+    -- timing arm: dirty owned title CONTAINS the recording's full name
+    -- ("artist - fever" ⊃ "fever"); the weakest name evidence, so duration
+    -- corroboration is REQUIRED and tight (never loosened by the pass durtol —
+    -- on drifted vinyl rips this arm simply stays silent)
+    SELECT o.album_id, o.track_id, r.rec_mbid, r.artist_mbid, FALSE,
+           abs(r.length/1000.0 - o.dur)
+    FROM owned o JOIN _recs r ON length(r.rname) >= 10
+        AND position(r.rname in o.ntitle) > 0 AND r.rname <> o.ntitle
+        AND r.length IS NOT NULL AND o.dur IS NOT NULL
+        AND abs(r.length/1000.0 - o.dur) <= 5
 )
 SELECT DISTINCT ON (album_id, track_id) album_id, track_id, rec_mbid, artist_mbid
 FROM cand
@@ -138,6 +150,14 @@ cand AS (
            abs(coalesce(r.length, o.dur*1000)/1000.0 - o.dur)
     FROM owned o JOIN _recs r ON r.rname %% o.ntitle
         AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= %(durtol)s)
+    UNION ALL
+    -- timing arm (see _MATCH_SQL): containment + REQUIRED tight duration
+    SELECT o.track_id, r.rec_mbid, r.artist_mbid, FALSE,
+           abs(r.length/1000.0 - o.dur)
+    FROM owned o JOIN _recs r ON length(r.rname) >= 10
+        AND position(r.rname in o.ntitle) > 0 AND r.rname <> o.ntitle
+        AND r.length IS NOT NULL AND o.dur IS NOT NULL
+        AND abs(r.length/1000.0 - o.dur) <= 5
 )
 SELECT DISTINCT ON (track_id) track_id, rec_mbid, artist_mbid, exact
 FROM cand ORDER BY track_id, exact DESC, dd
@@ -276,13 +296,69 @@ def _group(rows):
     return by_album
 
 
+def _exact_mbids(q: str) -> list:
+    """All MB artists whose name or alias equals q (lower, indexed — ~1-2 ms)."""
+    return [r["gid"] for r in db_query("""
+        SELECT a.gid::text AS gid FROM mb_artist a WHERE lower(a.name) = lower(%(q)s)
+        UNION
+        SELECT a.gid::text FROM mb_artist a
+        JOIN mb_artist_alias al ON al.artist = a.id WHERE lower(al.name) = lower(%(q)s)
+    """, {"q": q})]
+
+
+def _probe_variants(name: str) -> list:
+    """Cheap deterministic query transforms — the candidate-generation layer.
+    Each output is exact-probed against mb_artist/alias; hits only ADD candidates,
+    content verification still gates everything, so recall grows while precision
+    stays content-bound. Covers: "Surname, First" reorder, DJ/The/ВИА prefix
+    strip & add, diacritic fold (owned-accented → MB-plain), cp1251↔latin1
+    mojibake round-trips ('Andrй Sobota' → 'André Sobota')."""
+    n = name.strip()
+    out = []
+    if n.count(",") == 1 and not re.search(r" & | and | with | / ", n):
+        a, b = (p.strip() for p in n.split(","))
+        if a and b:
+            out.append(f"{b} {a}")
+    m = re.match(r"(?i)^(dj|the|via|виа|віа)\s+(.+)$", n)
+    if m:
+        out.append(m.group(2))
+    else:
+        out.extend((f"DJ {n}", f"The {n}"))
+    folded = "".join(c for c in unicodedata.normalize("NFKD", n)
+                     if not unicodedata.combining(c))
+    if folded != n:
+        out.append(folded)
+    for enc, dec in (("cp1251", "latin1"), ("latin1", "cp1251")):
+        try:
+            v = n.encode(enc).decode(dec)
+            if v != n and v.isprintable():
+                out.append(v)
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+    return out
+
+
+def _candidates(name: str) -> list:
+    """Candidate mbids for content verification: the primary search (exact-first
+    + trgm fuzzy) plus exact hits of the probe variants."""
+    cands = mb.search_artist(name, limit=8)
+    strong = [c["mbid"] for c in cands if (c.get("score") or 0) >= _CAND_SCORE]
+    if not strong and cands:
+        strong = [cands[0]["mbid"]]
+    seen = set(strong)
+    for v in _probe_variants(name):
+        for g in _exact_mbids(v):
+            if g not in seen:
+                seen.add(g)
+                strong.append(g)
+    return strong
+
+
 def resolve_artist(artist_id, name: str) -> dict:
     """Read-only cascaded recording-centric resolve. Materialises the candidate
     recordings once (TEMP _recs), then each cascade pass re-matches only the
     unverified residue with looser parameters; the pass that verifies wins."""
-    candidates = mb.search_artist(name, limit=8)
-    strong = [c for c in candidates if (c.get("score") or 0) >= _CAND_SCORE] or candidates[:1]
-    cands = [c["mbid"] for c in strong]
+    cands = _candidates(name)
     owned = _owned_counts(artist_id)
 
     resolved: dict = {}
@@ -402,9 +478,7 @@ def canonicalize_trackonly(artist_id, name: str) -> dict:
     single lone match counts only when it is an EXACT title hit (a lone fuzzy hit
     proves nothing). Materializes artist_mbids + media_files.recording_mbid +
     track_mbids for the dominant artist's tracks; albums/RG don't apply here."""
-    cands = mb.search_artist(name, limit=8)
-    strong = [c for c in cands if (c.get("score") or 0) >= _CAND_SCORE] or cands[:1]
-    cand_mbids = [c["mbid"] for c in strong]
+    cand_mbids = _candidates(name)
     st = {"total": 0, "matched": 0, "artist_mbid": None, "files": 0}
     if not cand_mbids:
         return st
@@ -620,6 +694,7 @@ def rename_to_canonical(artist_ids: list = None, dry_run: bool = False) -> dict:
             JOIN artist_mbids am ON am.artist_id = a.id
             JOIN mb_artist mba ON mba.gid = am.mbid
             WHERE a.name <> mba.name
+              AND am.confidence <> 'name_exact'   -- name-only evidence never renames
               AND (SELECT count(*) FROM artist_mbids x WHERE x.artist_id = a.id) = 1
               {scope}
         """), params).fetchall()
@@ -793,6 +868,75 @@ def split_collaborations(dry_run: bool = False) -> dict:
     return out
 
 
+_VA_GID = "89ad4ac3-39f7-470e-963a-56509c546377"   # MB's special-purpose Various Artists
+_VA_NAMES = ["various artists", "various", "va", "various artist"]
+
+
+def _canonicalize_va() -> int:
+    """Cheapest layer: placeholder VA rows ('Various', 'VA', …) ARE MB's official
+    Various Artists entity — assign its mbid and merge the placeholders onto the
+    canonical name. Deterministic; converges the 'Various'/'Various Artists'
+    track-UUID fork across nodes. Per-track attribution of comp tracks to their
+    real artists is a separate (timing) layer."""
+    row = db_query("SELECT name FROM mb_artist WHERE gid = %(g)s", {"g": _VA_GID})
+    if not row:
+        return 0
+    canonical = row[0]["name"]
+    canon_id = str(artist_uuid(canonical))
+    rows = db_query("""
+        SELECT id::text AS id FROM artists
+        WHERE lower(btrim(name)) = ANY(%(names)s)
+          AND (last_mb_sync IS NULL
+               OR NOT EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = artists.id))
+    """, {"names": _VA_NAMES})
+    if not rows:
+        return 0
+    db = SessionLocal()
+    try:
+        for r in rows:
+            if r["id"] != canon_id:
+                recanonicalize_artist(db, r["id"], canonical)   # merge + watermark
+            else:
+                db.execute(_sql("UPDATE artists SET last_mb_sync = now() WHERE id = :i"),
+                           {"i": canon_id})
+        db.execute(_sql(
+            "INSERT INTO artist_mbids (mbid, artist_id, confidence) "
+            "VALUES (:m, :a, 'name_exact') "
+            "ON CONFLICT (mbid) DO UPDATE SET artist_id = EXCLUDED.artist_id"),
+            {"m": _VA_GID, "a": canon_id})
+        db.commit()
+    finally:
+        db.close()
+    return len(rows)
+
+
+def assign_name_exact(artist_ids: list) -> int:
+    """Slowest tier, runs LAST on the residue the content layers left mbid-less:
+    when the name (or alias) exact-matches exactly ONE MB entity in the whole
+    base, assign its mbid at confidence 'name_exact'. No rename, no stealing an
+    mbid another artist holds (DO NOTHING) — name-only evidence stays humble.
+    Replicates the legitimate part of the legacy name-matching experiments with
+    a uniqueness guard against their failure mode (namesake/alias collisions)."""
+    if not artist_ids:
+        return 0
+    rows = db_query("""
+        SELECT a.id::text AS id, a.name FROM artists a
+        WHERE a.id::text = ANY(%(ids)s)
+          AND NOT EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
+    """, {"ids": list(artist_ids)})
+    n = 0
+    for r in rows:
+        gids = _exact_mbids(r["name"])
+        if len(gids) == 1:
+            ins = db_query(
+                "INSERT INTO artist_mbids (mbid, artist_id, confidence) "
+                "VALUES (%(m)s, %(a)s, 'name_exact') "
+                "ON CONFLICT (mbid) DO NOTHING RETURNING 1",
+                {"m": gids[0], "a": r["id"]})
+            n += len(ins)
+    return n
+
+
 def canonicalize_pending(limit: int = None) -> dict:
     """Incremental canon stage — the post-scan / post-import entry point. For every OWNED
     artist whose content is newer than its last canon (the `artists.last_mb_sync` watermark
@@ -807,6 +951,8 @@ def canonicalize_pending(limit: int = None) -> dict:
         mb.refresh()   # the dump may have been loaded since this process started
         if not mb.LOCAL_DUMP:
             return {"skipped": "no local MB dump", "artists": 0}
+
+    va = _canonicalize_va()   # cheapest layer first — drops VA rows out of pending
 
     # Track-owned, not album-owned: an artist whose only presence is a track or
     # two on someone else's compilation has no album_artists row at all, yet is
@@ -823,7 +969,8 @@ def canonicalize_pending(limit: int = None) -> dict:
         LIMIT %(lim)s
     """, {"lim": limit or 1_000_000})
 
-    st = {"pending": len(pending), "artists": 0, "track_only": 0, "split": 0, "errors": 0}
+    st = {"pending": len(pending), "artists": 0, "track_only": 0, "split": 0,
+          "va": va, "errors": 0}
     done = []
     # Worklist (not a flat for): a collaboration is split into its members, and the
     # primary member is re-queued so its albums resolve under the now-split identity.
@@ -863,4 +1010,6 @@ def canonicalize_pending(limit: int = None) -> dict:
         # recanonicalize), so the artist/track UUIDs are a pure function of the MBID
         # and converge across nodes regardless of how the source tags were spelled.
         st["renamed"] = rename_to_canonical(artist_ids=done)["renamed"]
+        # slowest tier last — only the residue the content layers left mbid-less
+        st["name_exact"] = assign_name_exact(done)
     return st
