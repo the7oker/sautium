@@ -41,20 +41,25 @@ _CAND_SCORE = 70   # candidate name-score floor — drops generic partial namesa
 _NO_DUR = 9999     # duration tolerance that effectively ignores duration (title-only)
 
 # Cascade passes (cheap→specialised), each re-tried only on the prior residue:
-#   (label, dur_tol_seconds, fuzzy_sim, min_matched, coverage_frac, cap_min_to_ntracks)
+#   (label, exact_dur_tol, fuzzy_dur_tol, fuzzy_sim, min_matched, coverage_frac, cap_min_to_ntracks)
 # cap=True lets a single tight (title+duration) match verify a 1-track album
 # (min(minm, ntracks)); cap=False keeps minm as a hard floor so the loosest
 # title-only pass never verifies a 1-track album on one unanchored match.
+# Exact and fuzzy carry SEPARATE duration tolerances — "weaker name ⇒ tighter
+# timing" (Valerii): an exact title plus edition/remaster drift is safe at ±25,
+# a fuzzy title is not; duration tolerances serve CLEAN material (edition drift,
+# MB's own length imprecision — measured: only 89% of accepted matches sit
+# within ±2s), never vinyl.
 _CASCADE = [
-    ("strict",   8,       0.50, 3, 0.60, True),   # bulk: exact-ish title + tight duration
-    ("short",    8,       0.50, 2, 0.60, True),   # short ambient/EP vs the min-3 gate (reuses strict)
-    ("wide-dur", 25,      0.45, 2, 0.55, True),   # live / remaster / vinyl duration drift
-    ("title",    _NO_DUR, 0.58, 2, 0.55, False),  # title-only → need >=2 (no 1-track on one loose match)
+    ("strict",   8,       8,       0.50, 3, 0.60, True),   # bulk: exact-ish title + tight duration
+    ("short",    8,       8,       0.50, 2, 0.60, True),   # short ambient/EP vs the min-3 gate (reuses strict)
+    ("wide-dur", 25,      10,      0.45, 2, 0.55, True),   # edition/remaster drift: exact ±25, fuzzy ±10
+    ("title",    _NO_DUR, _NO_DUR, 0.58, 2, 0.55, False),  # title-only → need >=2 (no 1-track on one loose match)
     # guest-heavy: OSTs/splits where vocal cuts are credited to OTHER artists in
     # MB while the tags credit the composer — his coverage ceiling sits below the
     # fracs above (Terminator: 6 scoreable of 11 = 0.545). Low frac, but a HARD
     # min of 4 duration-anchored matches (cap=False) — never verifies small albums.
-    ("guest-heavy", 10,   0.50, 4, 0.40, False),
+    ("guest-heavy", 10,   10,      0.50, 4, 0.40, False),
 ]
 
 
@@ -116,7 +121,7 @@ cand AS (   -- recording candidates per owned track within the pass's duration t
     SELECT o.album_id, o.track_id, r.rec_mbid, r.artist_mbid, FALSE,
            abs(coalesce(r.length, o.dur*1000)/1000.0 - o.dur)
     FROM owned o JOIN _recs r ON r.rname %% o.ntitle
-        AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= %(durtol)s)
+        AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= %(fdurtol)s)
     UNION ALL
     -- timing arm, BIDIRECTIONAL containment: dirty owned title CONTAINS the
     -- recording's full name ("artist - fever" ⊃ "fever"), or the recording
@@ -401,14 +406,15 @@ def resolve_artist(artist_id, name: str) -> dict:
             cur.execute("ANALYZE _recs")
             try:
                 cache: dict = {}
-                for label, dur, sim, minm, frac, cap in _CASCADE:
+                for label, dur, fdur, sim, minm, frac, cap in _CASCADE:
                     if not pending:
                         break
-                    key = (dur, sim)
+                    key = (dur, fdur, sim)
                     if key not in cache:
                         cur.execute("SET pg_trgm.similarity_threshold = %s", (sim,))
                         cur.execute(_MATCH_SQL, {"artist": str(artist_id),
-                                                 "albums": list(pending), "durtol": dur})
+                                                 "albums": list(pending),
+                                                 "durtol": dur, "fdurtol": fdur})
                         cache[key] = _group(cur.fetchall())
                     for aid in list(pending):
                         m = cache[key].get(aid)
