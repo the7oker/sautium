@@ -805,6 +805,75 @@ def unsplit_pass2_compounds(db: Session, dry_run: bool = False) -> Dict:
     return stats
 
 
+def reidentify_per_track_artists(db: Session, dry_run: bool = False) -> Dict:
+    """One-shot migration for the scanner identity fix: TRACK identity now comes
+    from the per-track artist tag (the old `album_artist or artist` formula let
+    album_artist win, collapsing every compilation cut under 'Various Artists'
+    and guest tracks under the album artist — the real artist sat unused in
+    media_files.raw_artist).
+
+    Re-derives each affected track's primary artist from raw tags (only files
+    where BOTH raw fields are non-empty AND differ — everything else is identical
+    under both formulas, so canon renames are untouched), recomputes the track
+    UUID and moves/merges via _update_track_uuid. Albums and album_artists stay —
+    album identity still follows album_artist, so compilations remain one album.
+    Deterministic (raw-driven): every node converges to the same result. Tracks
+    whose files disagree on the new identity would need a per-file track split —
+    skipped and counted instead (expected ~0).
+    """
+    rows = db.execute(text("""
+        SELECT t.id::text AS tid, t.title, a.id::text AS cur_id,
+               count(*) AS nfiles,
+               count(*) FILTER (WHERE q.new_name IS NOT NULL) AS nqual,
+               array_agg(DISTINCT q.new_name) FILTER (WHERE q.new_name IS NOT NULL) AS new_names
+        FROM tracks t
+        JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+        JOIN artists a ON a.id = ta.artist_id
+        JOIN media_files mf ON mf.track_id = t.id
+        CROSS JOIN LATERAL (
+            SELECT CASE WHEN nullif(btrim(mf.raw_artist), '') IS NOT NULL
+                         AND nullif(btrim(mf.raw_album_artist), '') IS NOT NULL
+                         AND lower(btrim(mf.raw_artist)) <> lower(btrim(mf.raw_album_artist))
+                        THEN btrim(mf.raw_artist) END AS new_name
+        ) q
+        GROUP BY t.id, t.title, a.id
+        HAVING count(*) FILTER (WHERE q.new_name IS NOT NULL) > 0
+    """)).fetchall()
+
+    stats = {"affected": len(rows), "moved": 0, "merged": 0, "noop": 0, "skipped_mixed": 0}
+    for tid, title, cur_id, nfiles, nqual, new_names in rows:
+        if nqual < nfiles or len(new_names) > 1:
+            stats["skipped_mixed"] += 1
+            logger.warning(f"  mixed identity, skipping track {title!r}: {new_names}")
+            continue
+        new_name = new_names[0]
+        new_aid = str(artist_uuid(new_name))
+        if new_aid == cur_id:
+            stats["noop"] += 1
+            continue
+        if dry_run:
+            stats["moved"] += 1
+            continue
+        _ensure_artist(db, new_name)
+        new_tid = str(track_uuid(title, new_name))
+        merged = new_tid != tid and db.execute(
+            text("SELECT 1 FROM tracks WHERE id = :id"), {"id": new_tid}).fetchone() is not None
+        final = _update_track_uuid(db, tid, new_tid)
+        db.execute(text(
+            "DELETE FROM track_artists WHERE track_id = :t AND artist_id = :a AND role = 'primary'"
+        ), {"t": final, "a": cur_id})
+        db.execute(text(
+            "INSERT INTO track_artists (track_id, artist_id, role) "
+            "VALUES (:t, :a, 'primary') ON CONFLICT DO NOTHING"
+        ), {"t": final, "a": new_aid})
+        stats["merged" if merged else "moved"] += 1
+
+    if not dry_run:
+        db.commit()
+    logger.info(f"Re-identify per-track artists: {stats}")
+    return stats
+
+
 def normalize_artists(
     db: Session,
     pass1: bool = True,
@@ -865,6 +934,17 @@ if __name__ == "__main__":
             if dry_run:
                 logger.info("[DRY RUN MODE]")
             stats = unsplit_pass2_compounds(db, dry_run=dry_run)
+            print("\n=== Results ===")
+            for key, value in stats.items():
+                print(f"  {key}: {value}")
+        sys.exit(0)
+
+    if '--reidentify' in sys.argv:
+        with get_db_context() as db:
+            logger.info("=== Re-identify tracks by per-track artist tag ===")
+            if dry_run:
+                logger.info("[DRY RUN MODE]")
+            stats = reidentify_per_track_artists(db, dry_run=dry_run)
             print("\n=== Results ===")
             for key, value in stats.items():
                 print(f"  {key}: {value}")

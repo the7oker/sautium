@@ -516,8 +516,14 @@ class LibraryScanner:
                         stats["errors"] += 1
                         continue
 
-                    artist_name = metadata.get("album_artist") or metadata.get("artist")
-                    if not artist_name:
+                    # Per-track artist owns the TRACK identity — compilation cuts
+                    # belong to their real artists, not 'Various Artists'; the
+                    # album_artist owns the ALBUM identity, so the compilation
+                    # still groups as one album (Album has no artist_id — both
+                    # credits coexist via track_artists/album_artists).
+                    track_artist_name = metadata.get("artist") or metadata.get("album_artist")
+                    album_artist_name = metadata.get("album_artist") or metadata.get("artist")
+                    if not track_artist_name:
                         logger.warning(f"Missing artist for {file_path}, skipping")
                         stats["errors"] += 1
                         continue
@@ -534,20 +540,34 @@ class LibraryScanner:
 
                     savepoint = db.begin_nested()
                     try:
-                        # ── Artist ──
-                        a_uid = artist_uuid(artist_name)
+                        # ── Artist (track credit) ──
+                        a_uid = artist_uuid(track_artist_name)
                         if a_uid in caches["artist"]:
                             artist = caches["artist"][a_uid]
                         else:
                             artist = db.query(Artist).filter(Artist.id == a_uid).first()
                             if not artist:
-                                artist = Artist(id=a_uid, name=artist_name)
+                                artist = Artist(id=a_uid, name=track_artist_name)
                                 db.add(artist)
                                 db.flush()
                             pending_cache.append(("artist", a_uid, artist))
 
+                        # ── Artist (album credit — e.g. 'Various Artists' on comps) ──
+                        aa_uid = artist_uuid(album_artist_name)
+                        if aa_uid == a_uid:
+                            album_artist = artist
+                        elif aa_uid in caches["artist"]:
+                            album_artist = caches["artist"][aa_uid]
+                        else:
+                            album_artist = db.query(Artist).filter(Artist.id == aa_uid).first()
+                            if not album_artist:
+                                album_artist = Artist(id=aa_uid, name=album_artist_name)
+                                db.add(album_artist)
+                                db.flush()
+                            pending_cache.append(("artist", aa_uid, album_artist))
+
                         # ── Track ──
-                        t_uid = track_uuid(metadata["title"], artist_name)
+                        t_uid = track_uuid(metadata["title"], track_artist_name)
                         if t_uid in caches["track"]:
                             track = caches["track"][t_uid]
                         else:
@@ -559,7 +579,7 @@ class LibraryScanner:
                             pending_cache.append(("track", t_uid, track))
 
                         # ── Album ──
-                        al_uid = album_uuid(album_title, artist_name)
+                        al_uid = album_uuid(album_title, album_artist_name)
                         if al_uid in caches["album"]:
                             album = caches["album"][al_uid]
                         else:
@@ -612,18 +632,18 @@ class LibraryScanner:
                                 ))
                             assoc_ta.add(ta_key)
 
-                        # ── Album-Artist association ──
-                        aa_key = (album.id, artist.id, "primary")
+                        # ── Album-Artist association (album credit) ──
+                        aa_key = (album.id, album_artist.id, "primary")
                         if aa_key not in assoc_aa:
                             existing_aa = db.query(AlbumArtist).filter(
                                 AlbumArtist.album_id == album.id,
-                                AlbumArtist.artist_id == artist.id,
+                                AlbumArtist.artist_id == album_artist.id,
                                 AlbumArtist.role == "primary",
                             ).first()
                             if not existing_aa:
                                 db.add(AlbumArtist(
                                     album_id=album.id,
-                                    artist_id=artist.id,
+                                    artist_id=album_artist.id,
                                     role="primary",
                                 ))
                             assoc_aa.add(aa_key)
