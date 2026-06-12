@@ -50,6 +50,11 @@ _CASCADE = [
     ("short",    8,       0.50, 2, 0.60, True),   # short ambient/EP vs the min-3 gate (reuses strict)
     ("wide-dur", 25,      0.45, 2, 0.55, True),   # live / remaster / vinyl duration drift
     ("title",    _NO_DUR, 0.58, 2, 0.55, False),  # title-only → need >=2 (no 1-track on one loose match)
+    # guest-heavy: OSTs/splits where vocal cuts are credited to OTHER artists in
+    # MB while the tags credit the composer — his coverage ceiling sits below the
+    # fracs above (Terminator: 6 scoreable of 11 = 0.545). Low frac, but a HARD
+    # min of 4 duration-anchored matches (cap=False) — never verifies small albums.
+    ("guest-heavy", 10,   0.50, 4, 0.40, False),
 ]
 
 
@@ -70,6 +75,16 @@ cand_credit AS (
 SELECT rec.id, rec.gid::text AS rec_mbid, cc.artist_mbid,
        {_norm('rec.name')} AS rname, rec.length
 FROM mb_recording rec JOIN cand_credit cc ON cc.artist_credit = rec.artist_credit
+UNION
+-- per-release TRACK name variants (regional/romanized retitles): identity stays
+-- the recording, only the matchable NAME comes from the track; the differs-filter
+-- keeps just the rows that add information (most track names equal the recording's)
+SELECT rec.id, rec.gid::text, cc.artist_mbid,
+       {_norm('mt.name')}, coalesce(mt.length, rec.length)
+FROM mb_track mt
+JOIN cand_credit cc ON cc.artist_credit = mt.artist_credit
+JOIN mb_recording rec ON rec.id = mt.recording
+WHERE {_norm('mt.name')} <> {_norm('rec.name')}
 """
 
 # Match owned tracks (scoped to %(albums)s) against the temp _recs.
@@ -103,14 +118,17 @@ cand AS (   -- recording candidates per owned track within the pass's duration t
     FROM owned o JOIN _recs r ON r.rname %% o.ntitle
         AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= %(durtol)s)
     UNION ALL
-    -- timing arm: dirty owned title CONTAINS the recording's full name
-    -- ("artist - fever" ⊃ "fever"); the weakest name evidence, so duration
-    -- corroboration is REQUIRED and tight (never loosened by the pass durtol —
-    -- on drifted vinyl rips this arm simply stays silent)
+    -- timing arm, BIDIRECTIONAL containment: dirty owned title CONTAINS the
+    -- recording's full name ("artist - fever" ⊃ "fever"), or the recording
+    -- name contains the owned title — MB names OST cues with the album prefix
+    -- ("The Terminator: Tunnel Chase" ⊃ owned "Tunnel Chase"). The weakest
+    -- name evidence, so duration corroboration is REQUIRED and tight (never
+    -- loosened by the pass durtol — on drifted vinyl rips the arm stays silent)
     SELECT o.album_id, o.track_id, r.rec_mbid, r.artist_mbid, FALSE,
            abs(r.length/1000.0 - o.dur)
-    FROM owned o JOIN _recs r ON length(r.rname) >= 10
-        AND position(r.rname in o.ntitle) > 0 AND r.rname <> o.ntitle
+    FROM owned o JOIN _recs r ON r.rname <> o.ntitle
+        AND ((length(r.rname) >= 10 AND position(r.rname in o.ntitle) > 0)
+             OR (length(o.ntitle) >= 10 AND position(o.ntitle in r.rname) > 0))
         AND r.length IS NOT NULL AND o.dur IS NOT NULL
         AND abs(r.length/1000.0 - o.dur) <= 5
 )
@@ -151,11 +169,12 @@ cand AS (
     FROM owned o JOIN _recs r ON r.rname %% o.ntitle
         AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= %(durtol)s)
     UNION ALL
-    -- timing arm (see _MATCH_SQL): containment + REQUIRED tight duration
+    -- timing arm (see _MATCH_SQL): bidirectional containment + REQUIRED tight duration
     SELECT o.track_id, r.rec_mbid, r.artist_mbid, FALSE,
            abs(r.length/1000.0 - o.dur)
-    FROM owned o JOIN _recs r ON length(r.rname) >= 10
-        AND position(r.rname in o.ntitle) > 0 AND r.rname <> o.ntitle
+    FROM owned o JOIN _recs r ON r.rname <> o.ntitle
+        AND ((length(r.rname) >= 10 AND position(r.rname in o.ntitle) > 0)
+             OR (length(o.ntitle) >= 10 AND position(o.ntitle in r.rname) > 0))
         AND r.length IS NOT NULL AND o.dur IS NOT NULL
         AND abs(r.length/1000.0 - o.dur) <= 5
 )
@@ -351,6 +370,15 @@ def _candidates(name: str) -> list:
             if g not in seen:
                 seen.add(g)
                 strong.append(g)
+    # comma-named artists: mb_artist.sort_name IS the "Surname, First" form
+    # ("Kaji, Meiko" exactly) — indexed exact probe
+    if "," in name:
+        for r in db_query(
+                "SELECT gid::text AS gid FROM mb_artist WHERE lower(sort_name) = lower(%(q)s)",
+                {"q": name.strip()}):
+            if r["gid"] not in seen:
+                seen.add(r["gid"])
+                strong.append(r["gid"])
     return strong
 
 
