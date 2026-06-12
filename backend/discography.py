@@ -240,6 +240,18 @@ def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
             VALUES (%(al)s::uuid, %(ar)s::uuid, 'primary', %(mbid)s::uuid)
             ON CONFLICT DO NOTHING
         """, {"al": existing["id"], "ar": artist_id, "mbid": artist_mbid})
+        # Refresh phantom metadata that arrived after the row was minted —
+        # e.g. release years appear only once a dump reload fills
+        # mb_release_country. Owned rows stay untouched (same guard).
+        db_execute("""
+            UPDATE albums SET
+                release_year = COALESCE(%(year)s, release_year),
+                updated_at = now()
+            WHERE id = %(al)s::uuid
+              AND COALESCE(%(year)s, release_year) IS DISTINCT FROM release_year
+              AND NOT EXISTS (SELECT 1 FROM album_variants av
+                              WHERE av.album_id = albums.id)
+        """, {"al": existing["id"], "year": rg.get("first_year")})
         return existing["id"], False
 
     aid = str(album_uuid(rg["title"], artist_name))
