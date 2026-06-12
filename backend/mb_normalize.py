@@ -631,9 +631,11 @@ def rename_to_canonical(artist_ids: list = None, dry_run: bool = False) -> dict:
                     "WHERE artist_id::text = :a"), {"a": aid}).fetchall()
                 canon_id = recanonicalize_artist(db, aid, canonical)
                 for m, conf in kept:
+                    # CAST(:c AS ...), not :c::... — SQLAlchemy's bind regex
+                    # rejects a parameter immediately followed by '::'
                     db.execute(_sql(
                         "INSERT INTO artist_mbids (mbid, artist_id, confidence) "
-                        "VALUES (:m, :a, :c::mb_match_confidence) "
+                        "VALUES (:m, :a, CAST(:c AS mb_match_confidence)) "
                         "ON CONFLICT (mbid) DO UPDATE SET artist_id = EXCLUDED.artist_id"),
                         {"m": m, "a": canon_id, "c": conf})
                 out["renamed"] += 1
