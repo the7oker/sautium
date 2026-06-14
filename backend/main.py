@@ -1312,6 +1312,9 @@ app.include_router(artists_router)
 from routers.albums import router as albums_router
 app.include_router(albums_router)
 
+from routers.release_groups import router as release_groups_router
+app.include_router(release_groups_router)
+
 from routers.discovery import router as discovery_router
 app.include_router(discovery_router)
 

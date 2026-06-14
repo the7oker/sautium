@@ -89,12 +89,13 @@ _EDITION_SUFFIX_RE = re.compile(
 )
 _ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+")
 _NONALNUM_RE = re.compile(r"[^a-z0-9]+")
-# Multi-disc rip suffixes — "disc 1", "(Disc 2)", "cd1", "CD 2". A per-disc
-# directory split is the same album: without this, "Catch a Fire … disc 1"
-# never match-keys onto MB's "Catch a Fire" and overlap-verification silently
-# misses every multi-disc release. 'disc one' (word) is rarer; digits only.
+# Multi-disc rip suffixes — "disc 1", "(Disc 2)", "cd1", "CD 2", "(LP03)". A
+# per-disc directory split is the same album: without this, "Catch a Fire … disc
+# 1" never match-keys onto MB's "Catch a Fire" and overlap-verification silently
+# misses every multi-disc release. 'disc one' (word) is rarer; digits only. 'lp'
+# needs the digit too, so a title ending in "Help" never trips it.
 _DISC_RE = re.compile(
-    r"\s*[\(\[]?\s*\b(?:disc|disk|cd)\s*\.?\s*\d+\s*[\)\]]?",
+    r"\s*[\(\[]?\s*\b(?:disc|disk|cd|lp)\s*\.?\s*\d+\s*[\)\]]?",
     re.IGNORECASE,
 )
 

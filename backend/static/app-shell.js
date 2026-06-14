@@ -430,6 +430,13 @@
         window.scrollTo(0, 0);
         return;
       }
+      if (kind === 'release-group') {
+        renderReleaseGroup(app, id);
+        updateNavActive(route);
+        updateFabVisibility(route);
+        window.scrollTo(0, 0);
+        return;
+      }
       if (kind === 'chat') {
         renderChatThread(app, id);
         updateNavActive(route);
@@ -3290,6 +3297,9 @@
       // so the discography is honest without splitting into sections.
       const featBadge = a.is_primary === false
         ? '<span class="album-tile-feat">feat.</span>' : '';
+      // Multi-edition release group — one tile, tapping opens the editions screen.
+      const editionsBadge = (a.edition_count > 1)
+        ? `<span class="album-tile-editions">${a.edition_count}</span>` : '';
       const prev = i > 0 ? albumsList[i - 1] : null;
       const gap = prev && prev.is_primary !== false && a.is_primary === false
         ? '<span class="group-gap" aria-hidden="true"></span>'
@@ -3301,9 +3311,11 @@
         : `${glyphHtml}—`;
       return `
         ${gap}
-        <button class="album-tile" type="button" data-album-id="${escapeHtml(a.id)}">
+        <button class="album-tile" type="button" data-album-id="${escapeHtml(a.id)}"
+                data-group-id="${escapeHtml(a.group_id || a.id)}"
+                data-edition-count="${a.edition_count || 1}">
           <div class="album-cover"
-               style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${inner}${featBadge}</div>
+               style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${inner}${featBadge}${editionsBadge}</div>
           <div class="album-tile-title">${escapeHtml(a.title || '')}</div>
           <div class="album-tile-year${hasMetric ? '' : ' unavailable'}">${metricLine}</div>
         </button>`;
@@ -3784,6 +3796,82 @@
     await loadAndRender();
   }
 
+  // Release-group screen — the intermediate page for an album that exists in
+  // several editions (distinct tracklists sharing one MusicBrainz release
+  // group). Mirrors renderAlbum's hero + meta, then an "Editions" shelf reusing
+  // renderAlbumRow with the track count as each card's subline.
+  async function renderReleaseGroup(root, groupId) {
+    root.innerHTML = '';
+    const screen = document.createElement('div');
+    screen.className = 'detail-screen';
+    root.appendChild(screen);
+
+    let d;
+    try {
+      const resp = await fetch('/api/release-groups/' + encodeURIComponent(groupId));
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      d = await resp.json();
+    } catch (err) {
+      screen.innerHTML = `<div class="placeholder-screen">
+        <p class="placeholder-body">Release group not found.</p>
+        <button class="legacy-link" onclick="history.back()">← Back</button>
+      </div>`;
+      return;
+    }
+
+    const c = coverPlaceholderColors(d.name || d.id);
+    const heroUrl = coverUrl(d.cover || {});
+    const heroImg = heroUrl
+      ? `<img src="${heroUrl}" alt="" onerror="this.style.display='none'">`
+      : `<div class="album-hero-fallback"
+            style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};"></div>`;
+
+    const artistName = d.artist ? d.artist.name : '';
+    const artistId = d.artist ? d.artist.id : '';
+    const editions = d.editions || [];
+    // Map to renderAlbumRow's shape: edition name as the title, track count as
+    // the subline (the `.mosaic-artist` slot).
+    const cards = editions.map(e => ({
+      album_id: e.album_id,
+      title: e.edition_name,
+      artist: (e.track_count === 1 ? '1 track' : `${e.track_count} tracks`),
+      cover_id: e.cover_id,
+      media_file_id: e.media_file_id,
+    }));
+
+    screen.innerHTML = `
+      <div class="album-hero">
+        ${heroImg}
+        <div class="album-hero-scrim"></div>
+        <div class="album-hero-controls">
+          <button class="icon-btn" type="button" data-action="back" aria-label="Back">${SVG_BACK}</button>
+        </div>
+      </div>
+      <div class="album-meta-block">
+        <h1 class="album-title-line">${escapeHtml(d.name || '')}</h1>
+        ${artistName ? `<button class="album-artist-line"
+                                style="background:none;border:0;padding:0;cursor:pointer;text-align:left;"
+                                data-artist-id="${escapeHtml(artistId)}">${escapeHtml(artistName)}</button>` : ''}
+        <div class="album-meta-row">
+          <span class="am-dur" style="margin-left: 0;">${editions.length} editions</span>
+        </div>
+      </div>
+      <div class="section-sep"></div>
+      <div class="section-head"><h3>Editions</h3></div>
+      ${renderAlbumRow(cards)}
+      <div style="height: calc(24 * var(--px));"></div>
+    `;
+
+    screen.querySelector('[data-action="back"]')
+      .addEventListener('click', () => history.back());
+    const artistBtn = screen.querySelector('[data-artist-id]');
+    if (artistBtn) artistBtn.addEventListener('click', () =>
+      navigateToEntity('artist', artistBtn.getAttribute('data-artist-id')));
+    screen.querySelectorAll('.shuffle-row [data-album-id]').forEach(el =>
+      el.addEventListener('click', () =>
+        navigateToEntity('album', el.getAttribute('data-album-id'))));
+  }
+
   // Listening-history session detail. Modelled on renderAlbum's
   // .detail-screen, but the hero/title come from the session snapshot and
   // "Play" replays the stored tracks (which opens a fresh 'mix' session).
@@ -3899,12 +3987,16 @@
         if (id) navigateToEntity('artist', id);
       });
     });
-    // Album tile
+    // Album tile — a multi-edition group opens the release-group screen, a
+    // single album opens straight to the album.
     screen.querySelectorAll('[data-album-id]').forEach(el => {
       el.addEventListener('click', e => {
         e.stopPropagation();
         const id = el.getAttribute('data-album-id');
-        if (id) navigateToEntity('album', id);
+        const eds = parseInt(el.getAttribute('data-edition-count') || '1', 10);
+        const gid = el.getAttribute('data-group-id');
+        if (eds > 1 && gid) navigateToEntity('release-group', gid);
+        else if (id) navigateToEntity('album', id);
       });
     });
     // Phantom (unowned) album tile — no local screen to open, so tapping

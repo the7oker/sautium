@@ -253,6 +253,27 @@ body.has-miniplayer #app {
   color: var(--color-text);
   pointer-events: none;
 }
+/* Edition count on a collapsed release-group tile. Amber (a CTA to explore the
+   editions); the offset shadow hints at a stack of releases. */
+.album-tile-editions {
+  position: absolute;
+  top: calc(6 * var(--px));
+  right: calc(6 * var(--px));
+  min-width: calc(15 * var(--px));
+  height: calc(15 * var(--px));
+  padding: 0 calc(4 * var(--px));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: calc(9.5 * var(--px));
+  font-weight: 600;
+  border-radius: calc(3 * var(--px));
+  background: rgba(0, 0, 0, 0.62);
+  color: var(--color-amber);
+  box-shadow: calc(2 * var(--px)) calc(-2 * var(--px)) 0 calc(-1 * var(--px)) rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
 .album-cover .placeholder-badge {
   position: absolute;
   inset: 0;

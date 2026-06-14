@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from db_pool import db_query, db_query_one
 from discography import fetch_new_albums, sync_artist_discography
+from release_groups import collapse_to_groups
 
 
 router = APIRouter(prefix="/api/artists", tags=["artists"])
@@ -221,6 +222,7 @@ def get_artist(
         )
         SELECT al.id::text AS id,
                al.title,
+               al.musicbrainz_id::text AS musicbrainz_id,
                al.release_year AS year,
                al.created_at AS added_at,
                (SELECT mf.cover_id::text
@@ -260,7 +262,7 @@ def get_artist(
             JOIN track_artists ta2 ON ta2.track_id = t2.id
             WHERE ta2.artist_id = %(id)s::uuid
         )
-        GROUP BY al.id, al.title, al.release_year, al.created_at,
+        GROUP BY al.id, al.title, al.musicbrainz_id, al.release_year, al.created_at,
                  m.time_listened_seconds, m.popularity
         ORDER BY role_priority, {sort_expr}
     """, {"id": artist_id})
@@ -285,7 +287,10 @@ def get_artist(
         r.pop("popularity", None)
         r.pop("added_at", None)
 
-    artist["albums"] = rows
+    # Collapse multi-edition release groups to one tile (the primary edition),
+    # tagged with edition_count + group_id so the UI routes a group through the
+    # release-group screen and a single album straight to the album.
+    artist["albums"] = collapse_to_groups(rows, artist_id=str(artist_id))
     artist["albums_sort"] = sort
 
     # Popular tracks — hybrid rank:

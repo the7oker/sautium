@@ -29,10 +29,11 @@ from sqlalchemy import text as _sql
 import mb_backend as mb
 from database import SessionLocal
 from db_pool import db_execute, db_query, get_conn
-from discography import split_edition, title_residual
+from discography import release_match_key, title_residual
 from normalize_artists import (
-    normalize_compound_artist, recanonicalize_album, recanonicalize_artist,
+    normalize_compound_artist, recanonicalize_album_variants, recanonicalize_artist,
 )
+from release_groups import release_group_cluster, simplify_edition_name
 from uuid_utils import album_uuid, artist_uuid, normalize
 
 logger = logging.getLogger(__name__)
@@ -219,8 +220,14 @@ WITH owned AS (
     GROUP BY a.id, t.id, t.title, mf.duration_seconds
 ),
 nt AS (SELECT album_id, count(DISTINCT track_id) AS total FROM owned GROUP BY album_id),
-atitle AS (SELECT a.id::text AS album_id, {_norm('a.title')} AS atitle
-           FROM albums a WHERE a.id = ANY(%(albums)s::uuid[])),
+atitle AS (   -- atitle = normalized title; abase = the same with edition/disc suffixes
+              -- stripped (release_match_key, built in _abase) so "X (Deluxe Edition)" and
+              -- "X - Esper Definitive Edition - The Score" still corroborate RG "X" by name.
+    SELECT a.id::text AS album_id, {_norm('a.title')} AS atitle,
+           coalesce(ab.base, {_norm('a.title')}) AS abase
+    FROM albums a
+    LEFT JOIN _abase ab ON ab.album_id = a.id::text
+    WHERE a.id = ANY(%(albums)s::uuid[])),
 cand AS (   -- title candidates within a GENEROUS duration band (the band is a perf bound on
             -- mega-bootlegged artists, not a correctness lever — studio recordings sit within
             -- seconds of the owned file); exact (=) and fuzzy (%%) each use their _recs index
@@ -268,16 +275,16 @@ valid AS (   -- candidates passing the FULL bidirectional gate BEFORE ranking, s
              -- picks the best-named VALID release and a high-name-sim near-miss that fails the gate
              -- can't shadow a real lower-named match (which would wrongly NULL the album).
     SELECT rc.album_id, rc.rg_mbid, rc.owned_cov, rc.total, rt.n AS rel_total,
-           similarity(rc.rgn, at.atitle) AS namesim, rc.is_comp
+           GREATEST(similarity(rc.rgn, at.atitle), similarity(rc.rgn, at.abase)) AS namesim, rc.is_comp
     FROM rel_cov rc
     JOIN rel_total rt ON rt.rel_id = rc.rel_id
     JOIN atitle at ON at.album_id = rc.album_id
     WHERE rc.owned_cov::float >= 0.5 * rt.n   -- release-half: R is not mostly other tracks (owned-half pre-cut)
       AND ((rc.owned_cov::float >= {_RG_OWNED_STRONG} * rc.total   -- strong content (>= a few tracks), OR
             AND rc.owned_cov >= {_RG_MIN_CONTENT})
-           OR similarity(rc.rgn, at.atitle) >= {_RG_NAME_MIN})     -- the name agrees (same album, imperfect match)
+           OR GREATEST(similarity(rc.rgn, at.atitle), similarity(rc.rgn, at.abase)) >= {_RG_NAME_MIN})  -- name agrees (edition-stripped too)
       AND (NOT rc.is_comp                                         -- a comp ALSO needs the name (fuzzy tracklists
-           OR similarity(rc.rgn, at.atitle) >= {_RG_NAME_MIN})    -- overlap many studio albums by content alone)
+           OR GREATEST(similarity(rc.rgn, at.atitle), similarity(rc.rgn, at.abase)) >= {_RG_NAME_MIN})  -- overlap studio albums by content
 )
 SELECT album_id, rg_mbid FROM (   -- among content-valid releases, the one whose RG NAME is most like the
                                   -- owned title (tie-break, never a gate: a regional retitle with a lone
@@ -426,6 +433,13 @@ def resolve_artist(artist_id, name: str) -> dict:
                             pending.discard(aid)
                 # RG once over the verified albums — decoupled from the verifying pass
                 if resolved:
+                    # edition-stripped titles for the RG name gate (single source of
+                    # truth = release_match_key; SQL can't strip the edition word list)
+                    cur.execute("DROP TABLE IF EXISTS _abase")
+                    cur.execute("CREATE TEMP TABLE _abase (album_id text PRIMARY KEY, base text)")
+                    psycopg2.extras.execute_values(cur,
+                        "INSERT INTO _abase (album_id, base) VALUES %s",
+                        [(aid, release_match_key(owned[aid][0])) for aid in resolved])
                     cur.execute("SET pg_trgm.similarity_threshold = %s", (_RG_SIM,))
                     cur.execute(_RG_SQL, {"artist": str(artist_id), "albums": list(resolved)})
                     rg = {r["album_id"]: r["rg_mbid"] for r in cur.fetchall()}
@@ -434,6 +448,7 @@ def resolve_artist(artist_id, name: str) -> dict:
             finally:
                 cur.execute("RESET pg_trgm.similarity_threshold")  # don't leak to the pool
                 cur.execute("DROP TABLE IF EXISTS _recs")
+                cur.execute("DROP TABLE IF EXISTS _abase")
 
     albums = []
     for aid, (title, ntr) in owned.items():
@@ -652,44 +667,277 @@ def merge_collisions(dry_run: bool = True) -> list:
     return plan
 
 
-def rename_albums(dry_run: bool = True, artist_ids: list = None) -> dict:
-    """APPLY increment 2b — rename owned albums to their MB-canonical release-group
-    title (the RG name), collapsing editions onto one album with named variants.
-    For each album with musicbrainz_id whose title differs from the RG name,
-    recanonicalize_album renames (or merges if the canonical UUID exists) and tags
-    the variant's edition. The original title survives on album_variants.raw_title
-    (set at scan) so a wrong rename is reversible — albums are local, never synced.
-    artist_ids scopes the pass to those primary artists' albums (incremental canon);
-    None = whole library. dry_run=True returns the scope without mutating."""
-    from collections import Counter
+# Edition-grouping knobs.
+_EDITION_MATCH_MIN = 0.5    # min Jaccard for a variant to claim a specific MB release
+_EDITION_SAME_MIN = 0.8     # tracklist Jaccard above which two variants are ONE edition (drift)
+# Trailing bracketed disc/channel marker — a per-disc rip of one edition ("The
+# Fragile (Right)" = disc 2, "(LP03)"). Local to edition-folding: only ever
+# compared between two siblings of the same album, so unlike the global
+# release_match_key it can safely strip bare "left"/"right".
+_CHANNEL_DISC_RE = re.compile(
+    r"\s*[\(\[]\s*(?:left|right|side\s*[a-d]|disc|disk|cd|lp)\s*\.?\s*\d*\s*[\)\]]\s*$",
+    re.IGNORECASE)
+
+
+def _jaccard(a: set, b: set) -> float:
+    return len(a & b) / len(a | b) if (a and b) else 0.0
+
+
+def _disc_base(raw_title: str) -> str:
+    return _CHANNEL_DISC_RE.sub("", (raw_title or "").strip()).strip().lower()
+
+
+def _variant_fingerprints(album_id: str) -> list:
+    """Per variant: its recording-MBID set (the name-independent tracklist
+    fingerprint, stamped by apply_artist), normalized track-title set (fallback
+    when recordings are sparse), raw_title and track count."""
+    rows = db_query("""
+        SELECT av.id AS vid, av.raw_title,
+               array_remove(array_agg(DISTINCT mf.recording_mbid::text), NULL) AS recs,
+               array_agg(DISTINCT lower(btrim(t.title))) AS titles,
+               count(DISTINCT mf.track_id) AS ntracks
+        FROM album_variants av
+        JOIN media_files mf ON mf.album_variant_id = av.id
+        JOIN tracks t ON t.id = mf.track_id
+        WHERE av.album_id = %(a)s::uuid
+        GROUP BY av.id, av.raw_title
+    """, {"a": str(album_id)})
+    return [{"vid": r["vid"], "raw_title": r["raw_title"] or "",
+             "recs": set(r["recs"] or []),
+             "titles": {t for t in (r["titles"] or []) if t},
+             "ntracks": r["ntracks"], "rel": None} for r in rows]
+
+
+def _prep_releases(rg_mbid: str, cache: dict) -> list:
+    """All releases of the RG (bootlegs included — that is how a "Deck Art" /
+    "Esper" edition gets its clean MB name), each with its recording-MBID and
+    normalized-title sets precomputed for variant matching. Memoized per run."""
+    if rg_mbid not in cache:
+        rels = mb.fetch_release_tracklists(rg_mbid)
+        for rel in rels:
+            rel["recset"] = {t["recording_mbid"] for t in rel["tracks"] if t["recording_mbid"]}
+            rel["titleset"] = {(t["title"] or "").strip().lower()
+                               for t in rel["tracks"] if t["title"]}
+        cache[rg_mbid] = rels
+    return cache[rg_mbid]
+
+
+def _best_release(v: dict, releases: list) -> tuple:
+    """The RG release whose tracklist best matches variant ``v`` — recording-MBID
+    Jaccard when the variant is well-canonized, else track-title Jaccard.
+    Returns (release | None, score)."""
+    use_recs = len(v["recs"]) >= max(1, v["ntracks"] // 2)
+    best, bscore = None, 0.0
+    for rel in releases:
+        score = _jaccard(v["recs"], rel["recset"]) if use_recs \
+            else _jaccard(v["titles"], rel["titleset"])
+        if score > bscore:
+            best, bscore = rel, score
+    return best, bscore
+
+
+def _group_editions(variants: list) -> list:
+    """Cluster variants into editions: same matched release, OR near-identical
+    tracklist (drift / different-tag true rips), OR a bare disc/channel marker
+    apart (a multi-disc edition). Returns lists of variants."""
+    parent = list(range(len(variants)))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(len(variants)):
+        for j in range(i + 1, len(variants)):
+            a, b = variants[i], variants[j]
+            # Identical scan tag = the same edition by the user's own labelling —
+            # the decisive signal (matching runs AFTER grouping, so rel isn't known
+            # here; this is what folds 3 rips tagged "X (Deluxe)" into one edition).
+            same_raw = (a["raw_title"].strip() != ""
+                        and a["raw_title"].strip().lower() == b["raw_title"].strip().lower())
+            jac = _jaccard(a["recs"], b["recs"]) if (a["recs"] and b["recs"]) \
+                else _jaccard(a["titles"], b["titles"])
+            disc = (_disc_base(a["raw_title"]) == _disc_base(b["raw_title"])
+                    and (_CHANNEL_DISC_RE.search(a["raw_title"])
+                         or _CHANNEL_DISC_RE.search(b["raw_title"])))
+            if same_raw or jac >= _EDITION_SAME_MIN or disc:
+                parent[find(i)] = find(j)
+
+    groups: dict = {}
+    for i, v in enumerate(variants):
+        groups.setdefault(find(i), []).append(v)
+    return list(groups.values())
+
+
+def _cluster_rg(album_id: str) -> str:
+    """The release-group MBID of any owned sibling edition of this album (its
+    cluster), so a scattered NULL-rg edition can attach to the group MB rejected
+    on name/status grounds. None when no sibling carries an RG."""
+    ids = release_group_cluster(album_id)
+    rows = db_query("""
+        SELECT musicbrainz_id::text AS mb FROM albums
+        WHERE id = ANY(%(i)s::uuid[]) AND musicbrainz_id IS NOT NULL
+        LIMIT 1
+    """, {"i": ids}) if ids else []
+    return rows[0]["mb"] if rows else None
+
+
+def _album_is_owned(db, album_id: str) -> bool:
+    return db.execute(_sql("SELECT 1 FROM album_variants WHERE album_id = :a LIMIT 1"),
+                      {"a": album_id}).fetchone() is not None
+
+
+def _split_album_editions(db, album_id: str, dry_run: bool, st: dict, rel_cache: dict) -> None:
+    """Resolve one owned album into editions and (unless dry_run) apply the split.
+
+    A single-edition rg'd album just adopts the RG name (the old rename). A
+    conflated album splits its differing-tracklist variants onto their own rows.
+    A scattered NULL-rg album attaches to its cluster's RG when its content (or
+    base title) proves membership. Each non-primary edition is named from its
+    matched MB release; the primary (the bare-named release) keeps the RG name.
+    """
+    arow = db.execute(_sql("""
+        SELECT a.musicbrainz_id::text, a.title, ar.name
+        FROM albums a
+        JOIN album_artists aa ON aa.album_id = a.id AND aa.role = 'primary'
+        JOIN artists ar ON ar.id = aa.artist_id
+        WHERE a.id = :a
+        ORDER BY ar.id LIMIT 1
+    """), {"a": album_id}).fetchone()
+    if not arow:
+        return  # no primary artist → album UUID isn't recomputable; leave as-is
+    rg, atitle, artist_name = arow
+    attaching = rg is None
+    if attaching:
+        rg = _cluster_rg(album_id)
+        if not rg:
+            return  # standalone album with no release group — nothing to do
+    rgrow = db.execute(_sql("SELECT name FROM mb_release_group WHERE gid = :g"),
+                       {"g": rg}).fetchone()
+    if not rgrow or not rgrow[0]:
+        return
+    rg_name = rgrow[0]
+
+    variants = _variant_fingerprints(album_id)
+    if not variants:
+        return
+    editions = _group_editions(variants)   # release-independent (recs / titles / disc)
+    multi = len(editions) > 1
+    rg_base = release_match_key(rg_name)
+    bare_id = str(album_uuid(rg_name, artist_name))   # the standard-edition row
+    # A row needs an edition qualifier when it is NOT the plain standard album:
+    # attaching (cluster-borrowed RG), a multi-edition split, OR a lone row whose
+    # bare RG name is already owned by another edition (a split edition seen on its
+    # own — without this it would rename back to bare and re-merge every run). The
+    # qualifier always comes from the matched MB release, so the result is STABLE
+    # across re-runs. A true single album takes the bare name and skips the fetch.
+    bare_taken = (bare_id != album_id) and _album_is_owned(db, bare_id)
+    needs_qualifier = attaching or multi or bare_taken
+
+    if needs_qualifier:
+        releases = _prep_releases(rg, rel_cache)
+        for v in variants:
+            rel, score = _best_release(v, releases)
+            v["rel"] = rel if score >= _EDITION_MATCH_MIN else None
+
+    plan = []   # (canon_title, qualifier, variant_ids, release_mbid)
+    used: set = set()
+    for ed in editions:
+        raw = ed[0]["raw_title"]
+        matched = next((v["rel"] for v in ed if v["rel"]), None)
+        if not needs_qualifier:
+            qualifier = None   # true single-edition album → the bare RG name (no churn)
+        else:
+            # Membership is only uncertain for an attached (cluster-borrowed) RG or a
+            # multi-edition variant that could be foreign content mis-tagged into the
+            # album — gate those on a content match, the RG base as a title prefix, or
+            # a bracket/dash edition suffix; a failing variant is left in place, never
+            # minted as a junk edition. An already-rg'd single edition is trusted.
+            if attaching or multi:
+                rk = release_match_key(raw)
+                if not (matched or rk == rg_base or rk.startswith(rg_base + " ")
+                        or title_residual(raw, rg_name)):
+                    st["anomalies"] += 1
+                    logger.warning("edition anomaly on %s: variant %r not part of RG %r",
+                                   album_id, raw, rg_name)
+                    continue
+            qualifier = simplify_edition_name(matched["name"] if matched else raw, rg_name)
+        # The primary edition stays bare only when it owns the bare row; if another
+        # row already holds it, this is a distinct edition and must keep a qualifier.
+        if qualifier is None and bare_taken:
+            qualifier = simplify_edition_name(matched["name"] if matched else raw, rg_name) or "Alt"
+        canon = rg_name if qualifier is None else f"{rg_name} ({qualifier})"
+        if canon in used:   # two distinct editions must not collapse back together
+            qualifier = simplify_edition_name(matched["name"] if matched else raw, rg_name) or f"Alt {len(used)}"
+            canon = f"{rg_name} ({qualifier})"
+        used.add(canon)
+        plan.append((canon, qualifier, [v["vid"] for v in ed],
+                     matched["release_mbid"] if matched else None))
+
+    # Skip pure no-ops: one edition already titled the RG name (the common case).
+    if not plan or not (attaching or len(plan) > 1
+                        or any(p[0] != atitle for p in plan)):
+        return
+    st["albums"] += 1
+    if len(plan) > 1:
+        st["editions_split"] += 1
+    if attaching:
+        st["attached"] += 1
+    if dry_run:
+        for canon, _q, vids, rel in plan:
+            logger.info("[dry] %s -> edition %r (%d variants, rel=%s)",
+                        album_id, canon, len(vids), rel)
+        return
+
+    if attaching:
+        db.execute(_sql("UPDATE albums SET musicbrainz_id = :rg, "
+                        "mb_match_confidence = 'overlap_verified' "
+                        "WHERE id = :a AND musicbrainz_id IS NULL"),
+                   {"rg": rg, "a": album_id})
+    for canon, qualifier, vids, release_mbid in plan:
+        if release_mbid:
+            db.execute(_sql("UPDATE album_variants SET release_mbid = :r WHERE id = ANY(:v)"),
+                       {"r": release_mbid, "v": vids})
+        recanonicalize_album_variants(db, album_id, vids, canon, qualifier)
+
+
+def apply_editions(dry_run: bool = True, artist_ids: list = None) -> dict:
+    """APPLY increment 2b — resolve owned albums into editions.
+
+    Supersedes the flat rename-to-RG: differing-tracklist variants wrongly
+    collapsed as one album split onto their own rows (sharing the RG), scattered
+    NULL-rg editions attach to their cluster's RG, and each edition is named from
+    its matched MB release (the primary keeps the bare RG name) — while true rips
+    (one tracklist) stay folded as the variants of an edition. Per-album commit
+    (isolation: one pathological album can't abort the batch); reversible via
+    album_variants.raw_title; local-only. artist_ids scopes to those primary
+    artists; None = whole library. dry_run logs the plan without mutating."""
     db = SessionLocal()
+    st = {"albums": 0, "editions_split": 0, "attached": 0, "anomalies": 0}
+    rel_cache: dict = {}
     try:
         sql = """
-            SELECT a.id::text AS album_id, a.title, rg.name AS canonical, ar.name AS artist
+            SELECT DISTINCT a.id::text
             FROM albums a
-            JOIN mb_release_group rg ON rg.gid = a.musicbrainz_id
             JOIN album_artists aa ON aa.album_id = a.id AND aa.role = 'primary'
-            JOIN artists ar ON ar.id = aa.artist_id
-            WHERE a.musicbrainz_id IS NOT NULL
+            WHERE EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = a.id)
         """
         params = {}
-        if artist_ids:
+        if artist_ids is not None:
+            if not artist_ids:
+                return st
             sql += " AND aa.artist_id::text = ANY(:ids)"
             params["ids"] = [str(a) for a in artist_ids]
-        rows = db.execute(_sql(sql), params).fetchall()
-        new_ids = Counter(str(album_uuid(c, ar)) for _, _, c, ar in rows)
-        changes = [(aid, title, canon, ar) for aid, title, canon, ar in rows
-                   if str(album_uuid(canon, ar)) != aid]
-        st = {"rg_albums": len(rows), "changes": len(changes),
-              "merge_groups": sum(1 for v in new_ids.values() if v > 1),
-              "samples": [(t[:34], c[:34]) for _, t, c, _ in changes[:18]]}
-        if not dry_run:
-            for aid, title, canon, _ in changes:
-                edition = split_edition(title)[1] or title_residual(title, canon)
-                recanonicalize_album(db, aid, canon, edition)
-            db.commit()
-        else:
-            db.rollback()
+        album_ids = [r[0] for r in db.execute(_sql(sql), params).fetchall()]
+        for album_id in album_ids:
+            try:
+                _split_album_editions(db, album_id, dry_run, st, rel_cache)
+                db.commit() if not dry_run else db.rollback()
+            except Exception as e:
+                db.rollback()
+                st["anomalies"] += 1
+                logger.error("apply_editions failed for album %s: %s", album_id, e)
     finally:
         db.close()
     return st
@@ -1034,7 +1282,7 @@ def canonicalize_pending(limit: int = None) -> dict:
             st["errors"] += 1
             logger.error("canon failed for %r: %s", aname, e)
     if done:
-        rename_albums(dry_run=False, artist_ids=done)   # scoped rename + edition-collapse
+        apply_editions(dry_run=False, artist_ids=done)   # scoped edition split + RG rename
         # watermark BEFORE merge: rename leaves artist ids intact, merge re-ids the rare
         # collision survivors (they simply re-canon next scan — idempotent, cheap)
         db_execute("UPDATE artists SET last_mb_sync = now() WHERE id::text = ANY(%(ids)s)",

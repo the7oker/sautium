@@ -304,6 +304,67 @@ def recanonicalize_album(db: Session, album_id, canonical_title: str,
     return final_id
 
 
+def recanonicalize_album_variants(db: Session, src_album_id, variant_ids: List[int],
+                                  canonical_title: str,
+                                  edition: Optional[str] = None) -> str:
+    """Move a SUBSET of an album's variants onto their own edition row.
+
+    The per-variant sibling of recanonicalize_album. When one album row holds
+    several *editions* (different tracklists wrongly collapsed as variants), this
+    splits the named variants off onto `album_uuid(canonical_title, primary
+    artist)` — a fresh row that inherits the source's release group — while the
+    rest stay put. Each edition keeps its own tracklist; true rips (the variants
+    sharing one tracklist) are exactly what's left together. Returns the
+    destination album id; it EQUALS the source when `canonical_title` is already
+    the source's identity (the primary edition stays in place, only relabelled).
+    `album_variants.raw_title` is the immutable scan-time title, so the split
+    reverses; albums are local-only, never synced.
+    """
+    src = str(src_album_id)
+    vids = [int(v) for v in variant_ids]
+    if not vids:
+        return src
+    row = db.execute(text("""
+        SELECT ar.name FROM album_artists aa JOIN artists ar ON ar.id = aa.artist_id
+        WHERE aa.album_id = :a AND aa.role = 'primary'
+        ORDER BY ar.id LIMIT 1
+    """), {"a": src}).fetchone()
+    if not row:
+        return src  # no primary artist → album UUID isn't recomputable; leave as-is
+    new_id = str(album_uuid(canonical_title, row[0]))
+
+    if new_id == src:
+        # Primary edition stays in place — just (re)label its variants and pin the title.
+        db.execute(text("UPDATE album_variants SET edition = :ed WHERE id = ANY(:v)"),
+                   {"ed": edition, "v": vids})
+        db.execute(text("UPDATE albums SET title = :t WHERE id = :a"),
+                   {"t": canonical_title, "a": src})
+        return src
+
+    # Materialize the destination edition row, inheriting the release group.
+    db.execute(text("""
+        INSERT INTO albums (id, title, release_year, musicbrainz_id, mb_match_confidence)
+        SELECT :nid, :t, a.release_year, a.musicbrainz_id, a.mb_match_confidence
+        FROM albums a WHERE a.id = :a
+        ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title
+    """), {"nid": new_id, "t": canonical_title, "a": src})
+    db.execute(text("""
+        INSERT INTO album_artists (album_id, artist_id, role, mbid)
+        SELECT :nid, artist_id, role, mbid FROM album_artists WHERE album_id = :a
+        ON CONFLICT DO NOTHING
+    """), {"nid": new_id, "a": src})
+    # ON UPDATE CASCADE carries media_files; the variant id itself is unchanged.
+    db.execute(text(
+        "UPDATE album_variants SET album_id = :nid, edition = :ed WHERE id = ANY(:v)"
+    ), {"nid": new_id, "ed": edition, "v": vids})
+    # GC the source if every edition moved out (no bare primary edition remained).
+    db.execute(text("""
+        DELETE FROM albums WHERE id = :a
+          AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = :a)
+    """), {"a": src})
+    return new_id
+
+
 # ─── Core normalization logic ─────────────────────────────────────────────
 
 def normalize_compound_artist(

@@ -166,15 +166,16 @@ def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
     fingerprint for release-ID (name-independent) + per-track recording MBID
     (track normalization). Tens of releases × ~10-15 tracks; one indexed join.
 
-    Returns ``[{release_mbid, status, tracks: [{title, length_ms,
+    Returns ``[{release_mbid, name, status, tracks: [{title, length_ms,
     recording_mbid, disc, position}, …]}, …]``, releases best-tracklist-first
     is the caller's job (``status`` 1 = Official — the canonical-release pick
-    prefers it). Local-only (the MB API can't page tracklists of every
-    release cheaply).
+    prefers it). ``name`` is the MB release title — the clean label an owned
+    edition adopts once its tracklist matches this release. Local-only (the MB
+    API can't page tracklists of every release cheaply).
     """
     rows = db_query("""
-        SELECT r.gid::text AS release_mbid, r.status, t.name AS title,
-               t.length AS length_ms,
+        SELECT r.gid::text AS release_mbid, r.name AS release_name, r.status,
+               t.name AS title, t.length AS length_ms,
                rec.gid::text AS recording_mbid, m.position AS disc, t.position AS pos
         FROM mb_release r
         JOIN mb_medium m ON m.release = r.id
@@ -187,6 +188,7 @@ def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
     for r in rows:
         rel = rels.setdefault(r["release_mbid"],
                               {"release_mbid": r["release_mbid"],
+                               "name": r["release_name"] or "",
                                "status": r["status"], "tracks": []})
         rel["tracks"].append({
             "title": r["title"] or "",
