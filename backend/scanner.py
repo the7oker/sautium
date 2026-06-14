@@ -8,6 +8,7 @@ and physical entities (AlbumVariant, MediaFile) per file on disk.
 import logging
 import os
 import re
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -25,12 +26,57 @@ from models import (
     AlbumVariant, MediaFile, Genre,
 )
 from database import get_db_context
+from db_pool import db_query
 from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, is_lossless as check_lossless
+from album_identity import folder_album_artist, has_duplicate_positions, is_reshapeable_mix
 
 logger = logging.getLogger(__name__)
 
 # Supported audio extensions
 AUDIO_EXTENSIONS = {'.flac', '.ape', '.wav', '.aiff', '.wv', '.tta', '.dsf', '.dff', '.mp3', '.ogg', '.m4a'}
+
+
+def _classify_mix_dirs(metadata_results):
+    """Per directory, decide if it is a reshapeable MIX (see album_identity).
+
+    Returns ``{host_dir: (album_artist_name, album_title, ordinal | None)}`` for
+    mix directories only. Classification unions this batch with the directory's
+    existing media_files, so an incremental scan that sees only part of a folder
+    still classifies the whole folder. ``ordinal`` (filename order, spanning the
+    union) is set only when the disc/track numbers collide — otherwise existing
+    numbers are kept.
+    """
+    by_dir = defaultdict(list)
+    for fp, md in metadata_results:
+        by_dir[settings.translate_to_host_path(str(fp.parent))].append(md)
+
+    existing = defaultdict(list)
+    if by_dir:
+        for r in db_query("""
+            SELECT av.directory_path AS d, mf.raw_album, mf.disc_number, mf.track_number,
+                   mf.raw_album_artist, mf.raw_artist, mf.file_path
+            FROM album_variants av JOIN media_files mf ON mf.album_variant_id = av.id
+            WHERE av.directory_path = ANY(%(d)s)
+        """, {"d": list(by_dir)}):
+            existing[r["d"]].append(r)
+
+    mix_dirs = {}
+    for hd, mds in by_dir.items():
+        rows = [(md.get("album"), md.get("disc_number"), md.get("track_number"),
+                 md.get("album_artist") or md.get("artist"), md.get("file_path")) for md in mds]
+        rows += [(e["raw_album"], e["disc_number"], e["track_number"],
+                  e["raw_album_artist"] or e["raw_artist"], e["file_path"]) for e in existing[hd]]
+        tracks = [(a, d, t) for a, d, t, _ak, _fp in rows]
+        akeys = [ak for _a, _d, _t, ak, _fp in rows]
+        if not is_reshapeable_mix(tracks, akeys):
+            continue
+        ordinal = None
+        if has_duplicate_positions([(d, t) for _a, d, t, _ak, _fp in rows]):
+            ordinal = {fp: i for i, (_a, _d, _t, _ak, fp) in enumerate(
+                sorted(rows, key=lambda x: os.path.basename((x[4] or "").replace("\\", "/")).lower()), 1)}
+        mix_dirs[hd] = (folder_album_artist(akeys),
+                        os.path.basename(hd.replace("\\", "/").rstrip("/")), ordinal)
+    return mix_dirs
 
 
 class LibraryScanner:
@@ -500,6 +546,9 @@ class LibraryScanner:
         assoc_aa: set = set()   # (album_id, artist_id, role)
         assoc_tg: set = set()   # (track_id, genre_id)
 
+        # Folder-album pre-pass: classify mix directories once (album_identity).
+        mix_dirs = _classify_mix_dirs(metadata_results)
+
         with get_db_context() as db:
             for file_path, metadata in tqdm(
                 metadata_results, desc="Importing", unit="file"
@@ -532,6 +581,14 @@ class LibraryScanner:
                     if not album_title:
                         album_title = metadata["title"]
                         logger.info(f"No album tag, using title as album: {album_title}")
+
+                    # MIX folder → one album titled by the folder, credited to
+                    # Various Artists (or the sole artist). The per-track artist
+                    # (track_artist_name) is untouched, so track identity stands.
+                    mix_info = mix_dirs.get(
+                        settings.translate_to_host_path(str(file_path.parent)))
+                    if mix_info:
+                        album_artist_name, album_title = mix_info[0], mix_info[1]
 
                     # Collect cache entries created inside the savepoint;
                     # only commit them to the long-lived caches after the
@@ -693,8 +750,12 @@ class LibraryScanner:
                             bitrate=metadata.get("bitrate"),
                             channels=metadata.get("channels"),
                             duration_seconds=metadata.get("duration_seconds"),
-                            track_number=metadata.get("track_number"),
-                            disc_number=metadata.get("disc_number", 1),
+                            track_number=(mix_info[2].get(metadata["file_path"],
+                                                          metadata.get("track_number"))
+                                          if mix_info and mix_info[2]
+                                          else metadata.get("track_number")),
+                            disc_number=(1 if mix_info and mix_info[2]
+                                         else metadata.get("disc_number", 1)),
                             isrc=metadata.get("isrc"),
                             # Original tags — ground truth for re-normalization / correction
                             raw_track_name=metadata.get("title"),
