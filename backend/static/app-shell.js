@@ -3829,15 +3829,24 @@
     const artistName = d.artist ? d.artist.name : '';
     const artistId = d.artist ? d.artist.id : '';
     const editions = d.editions || [];
-    // Map to renderAlbumRow's shape: edition name as the title, track count as
-    // the subline (the `.mosaic-artist` slot).
-    const cards = editions.map(e => ({
-      album_id: e.album_id,
-      title: e.edition_name,
-      artist: (e.track_count === 1 ? '1 track' : `${e.track_count} tracks`),
-      cover_id: e.cover_id,
-      media_file_id: e.media_file_id,
-    }));
+    // Reuse the artist discography's album-tile (104×104) so the Editions shelf
+    // matches that screen exactly — both render under .detail-screen .h-scroll.
+    const editionsHtml = editions.map(e => {
+      const ec = coverPlaceholderColors(e.edition_name || e.album_id);
+      const eurl = coverUrl(e);
+      const inner = eurl
+        ? `<img src="${eurl}" alt="" loading="lazy" onerror="this.style.display='none'">`
+        : `<div class="placeholder-badge"
+              style="--cover-bg-1: ${ec.bg1}; --cover-bg-2: ${ec.bg2};">${escapeHtml(e.edition_name || '')}</div>`;
+      const tc = e.track_count === 1 ? '1 track' : `${e.track_count} tracks`;
+      return `
+        <button class="album-tile" type="button" data-album-id="${escapeHtml(e.album_id)}">
+          <div class="album-cover"
+               style="--cover-bg-1: ${ec.bg1}; --cover-bg-2: ${ec.bg2};">${inner}</div>
+          <div class="album-tile-title">${escapeHtml(e.edition_name || '')}</div>
+          <div class="album-tile-year">${escapeHtml(tc)}</div>
+        </button>`;
+    }).join('');
 
     screen.innerHTML = `
       <div class="album-hero">
@@ -3858,7 +3867,7 @@
       </div>
       <div class="section-sep"></div>
       <div class="section-head"><h3>Editions</h3></div>
-      ${renderAlbumRow(cards)}
+      <div class="h-scroll">${editionsHtml}</div>
       <div style="height: calc(24 * var(--px));"></div>
     `;
 
@@ -3867,7 +3876,7 @@
     const artistBtn = screen.querySelector('[data-artist-id]');
     if (artistBtn) artistBtn.addEventListener('click', () =>
       navigateToEntity('artist', artistBtn.getAttribute('data-artist-id')));
-    screen.querySelectorAll('.shuffle-row [data-album-id]').forEach(el =>
+    screen.querySelectorAll('.h-scroll [data-album-id]').forEach(el =>
       el.addEventListener('click', () =>
         navigateToEntity('album', el.getAttribute('data-album-id'))));
   }
