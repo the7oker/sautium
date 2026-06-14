@@ -379,7 +379,7 @@ class AlbumVariant(Base):
 
     id = Column(Integer, primary_key=True)
     album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
-    directory_path = Column(Text, nullable=False, unique=True)
+    directory_path = Column(Text, nullable=False)  # one variant per (directory, album) — a box set is many albums in one folder
     raw_title = Column(Text)  # original (pre-canon) album title for this variant — source of truth;
                               # makes album rename/merge reversible (albums are local, not synced)
     edition = Column(Text)  # named edition extracted from a dirty title on canon; NULL = standard
@@ -398,6 +398,7 @@ class AlbumVariant(Base):
 
     __table_args__ = (
         Index("idx_album_variants_album_id", "album_id"),
+        UniqueConstraint("directory_path", "album_id", name="album_variants_dir_album_key"),
     )
 
     def __repr__(self):

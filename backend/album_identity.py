@@ -1,30 +1,68 @@
 """Folder-aware album identity for recovering a loosely-organized catalog.
 
-A directory is a **MIX** when its files don't form clean albums: grouped by album
-tag, at least one group's track numbers aren't a contiguous per-disc 1..N (each
-track pulled from a different source album, or numbers missing). A mix collapses
-to ONE album titled by the folder, credited to Various Artists (or the sole
-artist), with tracks renumbered by filename **only when** the existing disc/track
-numbers actually collide. A folder whose every album group IS a clean sequence is
-left alone — those are real albums (one, or a box set), and MB canon owns their
-canonical titles.
+A directory's files are grouped by ``release_match_key(album_tag)``; how the
+directory maps to albums depends on its shape (``assign_dir_albums``):
 
-This handles single-artist mixes (a personal "favourites" folder) that an
-artist-count test alone would miss, and is best-effort: deluxe editions with
-continuous cross-disc numbering, or two editions dumped in one folder, classify
-as mix — acceptable for catalog recovery, and canon re-derives real titles
-downstream. Per-track artist/title stay from each file's own tags, so track
-identity and dedupe are unchanged. Shared by the scanner and
-``migrate_folder_albums``.
+* **FOLD** to ONE album titled by the folder, credited to Various Artists (or the
+  sole artist), when the directory is a *reshapeable mix* (some group's track
+  numbers aren't a contiguous per-disc 1..N — fragments of different sources —
+  AND it isn't merely one real album by one artist) or a *loose per-track dump*
+  (>=2 groups, each a single track — a genre/favourites pile or per-track
+  mistagging). Tracks are renumbered by filename only when positions collide.
+* **SPLIT** into one album per group when there are >=2 clean groups and it isn't
+  a fold — a box set (each disc a real album) or a singles collection. A group
+  sitting on a single non-1 disc is renormalised to disc 1 so a split-out
+  sub-album looks like a standalone release.
+* Otherwise (one group, not a fold) the directory is a plain single album and is
+  left to the caller's default per-file path.
+
+Per-track artist/title stay from each file's own tags, so track identity and
+dedupe are unchanged; a VA-credited fold falls out of the MB release-group canon,
+which is what stops a mix from stealing a real album's identity. Best-effort:
+deluxe editions with continuous cross-disc numbering classify as a fold —
+acceptable for recovery, and canon re-derives real titles downstream. Shared by
+the scanner and ``migrate_folder_albums``.
 """
 
-from collections import defaultdict
-from typing import List, Optional, Tuple
+import os
+import re
+from collections import Counter, defaultdict
+from typing import Dict, List, Optional, Tuple
 
 from discography import release_match_key
 from uuid_utils import normalize
 
 VARIOUS_ARTISTS = "Various Artists"
+
+# A disc/CD/part marker plus the descriptive subtitle and catalog junk that
+# trails it, to END of string: "Ummagumma CD1 Live Album (2011, 50999…)",
+# "Here Lies Love - Disc Two", "The Maze To Nowhere / Part 2" all reduce to the
+# base album. release_match_key only strips a bare "CD1"/"(Disc 2)" token, so on
+# its own it would split a real multi-disc album into separate albums. A *volume*
+# marker is deliberately NOT here — "Vol.1"/"Vol.2" denote separate releases in a
+# series (Ambient Highway), which must stay distinct.
+# No word boundary after the marker — "CD1" has none between "cd" and "1".
+_DISC_TAIL_RE = re.compile(
+    r"[\s\-–—/.,:]*[\(\[]?\s*\b(?:cd|disc|disk|lp|pt|part)\s*\.?\s*"
+    r"(?:\d+|[ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten)\b.*$",
+    re.IGNORECASE,
+)
+_DVD_TAIL_RE = re.compile(
+    r"[\s\-–—/.,:]*[\(\[]\s*(?:dvd|blu-?ray|bonus\s+dvd)\s*[\)\]]\s*$",
+    re.IGNORECASE,
+)
+
+
+def _album_key(title: Optional[str]) -> str:
+    """Stricter sibling of ``release_match_key`` for deciding whether two files
+    in one folder are the same album: also folds any disc/part marker (digit,
+    roman, or spelled-out) and the subtitle trailing it, so a real multi-disc
+    release groups as one album rather than splitting. Used only here; the canon
+    keeps the plain ``release_match_key``."""
+    t = (title or "").strip()
+    t = _DVD_TAIL_RE.sub("", t)
+    t = _DISC_TAIL_RE.sub("", t)
+    return release_match_key(t)
 
 
 def folder_album_artist(artist_keys: List[Optional[str]]) -> str:
@@ -48,7 +86,7 @@ def folder_is_mix(tracks: List[Tuple[Optional[str], Optional[int], Optional[int]
     Every group clean → real album(s), not a mix."""
     groups: dict = defaultdict(lambda: defaultdict(list))
     for album, disc, track in tracks:
-        groups[release_match_key((album or "").strip())][disc or 1].append(track or 1)
+        groups[_album_key(album)][disc or 1].append(track or 1)
     for per_disc in groups.values():
         for nums in per_disc.values():
             if sorted(nums) != list(range(1, len(nums) + 1)):
@@ -67,8 +105,7 @@ def is_reshapeable_mix(tracks: List[Tuple[Optional[str], Optional[int], Optional
         return False
     if folder_album_artist(artist_keys) == VARIOUS_ARTISTS:
         return True
-    return len({release_match_key((a or "").strip())
-                for a, _d, _t in tracks if (a or "").strip()}) >= 2
+    return len({_album_key(a) for a, _d, _t in tracks if (a or "").strip()}) >= 2
 
 
 def has_duplicate_positions(positions: List[tuple]) -> bool:
@@ -81,3 +118,64 @@ def has_duplicate_positions(positions: List[tuple]) -> bool:
             return True
         seen.add(p)
     return False
+
+
+def _basename(path: Optional[str]) -> str:
+    return os.path.basename((path or "").replace("\\", "/").rstrip("/"))
+
+
+def _rep_title(group: List[dict]) -> str:
+    """The group's representative album title: most common raw tag, ties broken
+    lexicographically so the choice is deterministic across runs."""
+    counts = Counter((f["album"] or "").strip() for f in group if (f["album"] or "").strip())
+    if not counts:
+        return ""
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+
+
+def assign_dir_albums(
+    folder_name: str, files: List[dict]
+) -> Optional[Dict[str, Tuple[str, str, Optional[int], Optional[int]]]]:
+    """Map each file in a directory to ``(album_title, album_artist,
+    track_override, disc_override)``, or ``None`` when the directory is a plain
+    single album that needs no reshaping (the caller keeps each file's own tags).
+
+    ``files`` is a list of ``{album, disc, track, artist_key, path}``. A
+    ``track``/``disc`` override of ``None`` means "keep the file's own value".
+    See the module docstring for the FOLD vs SPLIT decision.
+    """
+    groups: Dict[str, List[dict]] = defaultdict(list)
+    for f in files:
+        groups[_album_key(f["album"])].append(f)
+
+    tracks = [(f["album"], f["disc"], f["track"]) for f in files]
+    akeys = [f["artist_key"] for f in files]
+    all_singleton = len(groups) >= 2 and all(len(g) == 1 for g in groups.values())
+    fold = is_reshapeable_mix(tracks, akeys) or all_singleton
+
+    if not fold and len(groups) < 2:
+        return None
+
+    if fold:
+        artist = folder_album_artist(akeys)
+        renumber = has_duplicate_positions([(f["disc"], f["track"]) for f in files])
+        order: Dict[str, int] = {}
+        if renumber:
+            for i, f in enumerate(sorted(files, key=lambda x: _basename(x["path"]).lower()), 1):
+                order[f["path"]] = i
+        return {f["path"]: (folder_name, artist,
+                            order.get(f["path"]) if renumber else None,
+                            1 if renumber else None)
+                for f in files}
+
+    out: Dict[str, Tuple[str, str, Optional[int], Optional[int]]] = {}
+    for g in groups.values():
+        title = _rep_title(g) or folder_name
+        artist = folder_album_artist([f["artist_key"] for f in g])
+        # A sub-album that occupies one non-1 disc within the box reads as disc 1
+        # once it stands alone; a genuinely multi-disc group keeps its numbering.
+        discs = {(f["disc"] or 1) for f in g}
+        flatten_disc = 1 if (len(discs) == 1 and discs != {1}) else None
+        for f in g:
+            out[f["path"]] = (title, artist, None, flatten_disc)
+    return out

@@ -223,7 +223,7 @@ CREATE TABLE IF NOT EXISTS track_genres (
 CREATE TABLE IF NOT EXISTS album_variants (
     id SERIAL PRIMARY KEY,
     album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    directory_path TEXT NOT NULL UNIQUE,
+    directory_path TEXT NOT NULL,          -- NOT unique: a box set is many albums in one folder, so the key is (directory_path, album_id) below
     raw_title TEXT,                        -- original (pre-canon) album title for this variant — source of truth; makes album rename/merge reversible (albums are local, not synced)
     edition TEXT,                          -- named edition ("Super Deluxe Edition") extracted from a dirty title on canon; NULL = standard
     release_mbid UUID,                     -- MB release MBID (specific edition under albums.musicbrainz_id RG); best-effort, often NULL
@@ -236,7 +236,8 @@ CREATE TABLE IF NOT EXISTS album_variants (
     -- runtime GROUP BY across 30k media_files on every request.
     file_modified_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT album_variants_dir_album_key UNIQUE (directory_path, album_id)
 );
 
 -- Phantom-album tracklists (Phantom Discovery, Stage B). Owned albums keep
