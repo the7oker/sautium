@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS artists (
     -- MB identity lives in artist_mbids (1:N — name-UUID may conflate namesakes)
     last_album_sync TIMESTAMPTZ,            -- freshness gate for new-album discovery
     last_mb_sync TIMESTAMPTZ,              -- freshness gate for MB canonicalization pass
+    last_similar_sync TIMESTAMPTZ,         -- freshness gate for Last.fm similar-artists backfill (incl. out-of-catalog phantoms)
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
@@ -306,6 +307,7 @@ ALTER TABLE artists ADD COLUMN IF NOT EXISTS photo_cover_id UUID
 -- discovery (Phantom Discovery, Phase 1: new albums for local artists).
 ALTER TABLE artists ADD COLUMN IF NOT EXISTS last_album_sync TIMESTAMPTZ;
 ALTER TABLE artists ADD COLUMN IF NOT EXISTS last_mb_sync TIMESTAMPTZ;
+ALTER TABLE artists ADD COLUMN IF NOT EXISTS last_similar_sync TIMESTAMPTZ;
 ALTER TABLE albums  ADD COLUMN IF NOT EXISTS cover_url TEXT;
 -- Discography moved from Deezer to the local MB dump (2026-06-12) — the
 -- cached Deezer artist id is gone; converge installs that pre-date the move.
@@ -708,6 +710,7 @@ CREATE INDEX IF NOT EXISTS idx_artists_gender ON artists(gender);
 CREATE INDEX IF NOT EXISTS idx_artists_is_vocalist ON artists(is_vocalist);
 CREATE INDEX IF NOT EXISTS idx_artists_last_album_sync ON artists(last_album_sync);
 CREATE INDEX IF NOT EXISTS idx_artists_last_mb_sync ON artists(last_mb_sync);
+CREATE INDEX IF NOT EXISTS idx_artists_last_similar_sync ON artists(last_similar_sync);
 
 -- Artist members indexes
 CREATE INDEX IF NOT EXISTS idx_artist_members_member ON artist_members(member_artist_id);
@@ -1468,6 +1471,34 @@ CREATE TABLE IF NOT EXISTS mb_release_label (
     last_updated   TIMESTAMPTZ
 );
 
+-- Folksonomy tags (mb_tag, mb_artist_tag) come from the mbdump-derived archive
+-- (column order MIRRORS the MB dump exactly — default COPY round-trips). The
+-- curated genre vocabulary (mb_genre) is NOT in the streamed archives; it's
+-- populated name-only from the MB API (mb_dump_load.load_genre_list). Genres are
+-- the curated subset of tags: an artist's genres = artist_tag ⋈ tag ⋈ genre on
+-- lower(name), count > 0 — raw folksonomy tags (e.g. "uk") never participate.
+CREATE TABLE IF NOT EXISTS mb_genre (
+    id            INTEGER,
+    gid           UUID,
+    name          TEXT,
+    comment       TEXT,
+    edits_pending INTEGER,
+    last_updated  TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS mb_tag (
+    id        INTEGER,
+    name      TEXT,
+    ref_count INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS mb_artist_tag (
+    artist       INTEGER,
+    tag          INTEGER,
+    count        INTEGER,
+    last_updated TIMESTAMPTZ
+);
+
 CREATE INDEX IF NOT EXISTS idx_mb_artist_gid            ON mb_artist(gid);
 CREATE INDEX IF NOT EXISTS idx_mb_artist_name_trgm      ON mb_artist     USING gin (lower(name) gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_mb_artist_sortname_trgm  ON mb_artist     USING gin (lower(sort_name) gin_trgm_ops);
@@ -1489,6 +1520,9 @@ CREATE INDEX IF NOT EXISTS idx_mb_medium_release        ON mb_medium(release);
 CREATE INDEX IF NOT EXISTS idx_mb_release_label_rel     ON mb_release_label(release);
 CREATE INDEX IF NOT EXISTS idx_mb_recording_ac          ON mb_recording(artist_credit);
 CREATE INDEX IF NOT EXISTS idx_mb_track_recording       ON mb_track(recording);
+CREATE INDEX IF NOT EXISTS idx_mb_artist_tag_artist     ON mb_artist_tag(artist);
+CREATE INDEX IF NOT EXISTS idx_mb_tag_id                ON mb_tag(id);
+CREATE INDEX IF NOT EXISTS idx_mb_genre_name_lower      ON mb_genre(lower(name));
 
 -- ============================================================
 -- Views

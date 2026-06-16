@@ -148,6 +148,7 @@ class Artist(Base):
     # MB identity lives in artist_mbids (1:N — name-UUID may conflate namesakes).
     last_album_sync = Column(DateTime(timezone=True))          # freshness gate for new-album discovery
     last_mb_sync = Column(DateTime(timezone=True))             # freshness gate for MB canonicalization pass
+    last_similar_sync = Column(DateTime(timezone=True))        # freshness gate for Last.fm similar-artists backfill (incl. phantoms)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())

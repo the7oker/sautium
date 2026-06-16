@@ -224,7 +224,8 @@ class LastFmService:
         else:
             stored["tags"] = False
 
-        # Store similar artists in normalized table (only for library artists)
+        # Store similar artists (fetched only when the SEED is a library artist;
+        # the stored set now includes out-of-catalog phantoms — see _store_similar_artists)
         if store_similar and data.get("similar"):
             similar_count = self._store_similar_artists(db, artist_id, artist_name, data["similar"])
             stored["similar_artists"] = similar_count > 0
@@ -321,65 +322,99 @@ class LastFmService:
         )
 
     def _store_similar_artists(
-        self, db: Session, artist_id: int, artist_name: str, similar_data: List[Dict[str, Any]]
+        self, db: Session, artist_id, artist_name: str, similar_data: List[Dict[str, Any]]
     ) -> int:
-        """
-        Store similar artists in normalized similar_artists table.
-        Only links to artists that already exist in the library (have tracks).
-        Never creates new artist records — prevents unbounded DB growth.
+        """Store Last.fm similar artists as edges, minting a phantom artist row
+        (no media_files) for any not yet in the library — those become the
+        out-of-catalog recommendations and accumulate enrichment to share.
 
-        Returns number of similar artists stored.
+        A guaranteed-collaboration name (feat./vs./pres./…) is split via
+        detect_compound_type and each member becomes its own edge; '&'/',' duos
+        stay whole — they are real entities with their own discography.
+
+        Phantom artists are never enriched themselves (enrichment only targets
+        artists with tracks), so this never cascades into similar-of-similar.
+        Returns the number of new edges stored.
         """
         from uuid_utils import artist_uuid
+        from normalize_artists import detect_compound_type
 
+        seed = str(artist_id)
+        seen: set = set()   # sids already handled this batch — pending db.add()s
+                            # aren't visible to the existence query, so without this
+                            # a name that recurs (collab split, spelling variant)
+                            # would double-insert and trip uq_similar_artists.
         stored_count = 0
-        skipped_count = 0
 
         for similar in similar_data:
-            similar_name = similar.get("name")
+            raw_name = (similar.get("name") or "").strip()
+            if not raw_name:
+                continue
             match_score = similar.get("match", 0.0)
 
-            if not similar_name:
-                continue
+            detected = detect_compound_type(raw_name)
+            names = detected[2] if detected else [raw_name]
 
-            # Only link to artists that exist in our library with tracks
-            normalized_name = similar_name.strip()
-            sid = artist_uuid(normalized_name)
-            library_artist = db.execute(text("""
-                SELECT a.id FROM artists a
-                JOIN track_artists ta ON ta.artist_id = a.id
-                WHERE a.id = :id
-                LIMIT 1
-            """), {"id": str(sid)}).first()
+            for name in names:
+                name = name.strip()
+                if not name:
+                    continue
+                sid = artist_uuid(name)
+                if str(sid) == seed or sid in seen:
+                    continue   # self-loop (chk_not_self_similar) or already this batch
+                seen.add(sid)
 
-            if not library_artist:
-                skipped_count += 1
-                continue
+                # Mint the phantom row if absent. id derives from normalize(name),
+                # so a namesake collapses to the same bucket — intended.
+                db.execute(text(
+                    "INSERT INTO artists (id, name) VALUES (:id, :name) "
+                    "ON CONFLICT (id) DO NOTHING"
+                ), {"id": str(sid), "name": name})
 
-            # Check if relationship already exists
-            existing = db.query(SimilarArtist).filter(
-                SimilarArtist.artist_id == artist_id,
-                SimilarArtist.similar_artist_id == sid,
-                SimilarArtist.source == "lastfm"
-            ).first()
-
-            if existing:
-                if abs(float(existing.match_score) - match_score) > 0.0001:
-                    existing.match_score = Decimal(str(match_score))
-            else:
-                similar_rel = SimilarArtist(
-                    artist_id=artist_id,
-                    similar_artist_id=sid,
-                    match_score=Decimal(str(match_score)),
-                    source="lastfm"
-                )
-                db.add(similar_rel)
-                stored_count += 1
-
-        if skipped_count > 0:
-            logger.debug(f"Similar artists for {artist_name}: {stored_count} linked, {skipped_count} skipped (not in library)")
+                existing = db.query(SimilarArtist).filter(
+                    SimilarArtist.artist_id == artist_id,
+                    SimilarArtist.similar_artist_id == sid,
+                    SimilarArtist.source == "lastfm",
+                ).first()
+                if existing:
+                    if abs(float(existing.match_score) - match_score) > 0.0001:
+                        existing.match_score = Decimal(str(match_score))
+                else:
+                    db.add(SimilarArtist(
+                        artist_id=artist_id,
+                        similar_artist_id=sid,
+                        match_score=Decimal(str(match_score)),
+                        source="lastfm",
+                    ))
+                    stored_count += 1
 
         return stored_count
+
+    def fetch_and_store_similar(self, db: Session, artist_id, artist_name: str) -> Dict[str, Any]:
+        """Re-fetch ONLY Last.fm similar artists for a library artist and store
+        them (minting phantoms, splitting collaborations), then stamp
+        `last_similar_sync`. The backfill primitive: bio/tags are already cached,
+        so this is a getSimilar-only call. Idempotent."""
+        result = {"status": "success", "stored": 0}
+        try:
+            artist = self.network.get_artist(artist_name)
+            similar = self._with_retry(lambda: artist.get_similar(limit=20))
+            similar_data = [
+                {"name": s.item.get_name(), "match": float(s.match)} for s in similar
+            ]
+        except pylast.WSError as e:
+            err = str(e).lower()
+            if "not found" in err or "could not be found" in err:
+                result["status"] = "not_found"
+                similar_data = []
+            else:
+                raise
+        result["stored"] = self._store_similar_artists(db, artist_id, artist_name, similar_data)
+        # Stamp even on not_found so we don't re-query a dead name every batch.
+        db.execute(text("UPDATE artists SET last_similar_sync = NOW() WHERE id = :id"),
+                   {"id": str(artist_id)})
+        db.commit()
+        return result
 
     def _store_artist_tags(
         self, db: Session, artist_id: int, artist_name: str, tags_data: List[Dict[str, Any]]
@@ -1049,3 +1084,48 @@ class LastFmService:
             )
             db.add(track_stats)
             logger.debug(f"Created track stats for track {track_id}")
+
+
+def backfill_similar(limit: Optional[int] = None, delay: float = 0.2,
+                     force: bool = False) -> Dict[str, int]:
+    """One-shot backfill of Last.fm similar artists for library artists.
+
+    The pre-phantom code discarded out-of-catalog similars without caching them,
+    so they must be re-fetched once after deploying the phantom-creating
+    ``_store_similar_artists``. Processes library artists (those with track
+    credits) whose ``last_similar_sync`` is unset — oldest/never first — minting
+    phantom rows and splitting collaborations, one commit per artist for
+    resumability. Incremental + idempotent; ``force=True`` re-fetches everyone.
+    New artists need no backfill — their similars are stored on first bio
+    enrichment.
+    """
+    from database import get_db_context
+
+    svc = LastFmService()
+    where = "" if force else "AND a.last_similar_sync IS NULL"
+    lim = "LIMIT :lim" if limit else ""
+    sql = text(f"""
+        SELECT a.id, a.name
+        FROM artists a
+        WHERE EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = a.id)
+          {where}
+        ORDER BY a.last_similar_sync NULLS FIRST, a.name
+        {lim}
+    """)
+    stats = {"processed": 0, "stored": 0, "not_found": 0, "errors": 0}
+    with get_db_context() as db:
+        rows = db.execute(sql, {"lim": limit} if limit else {}).fetchall()
+    logger.info(f"backfill_similar: {len(rows)} library artists queued")
+    for row in rows:
+        try:
+            with get_db_context() as db:
+                r = svc.fetch_and_store_similar(db, row.id, row.name)
+            stats["processed"] += 1
+            stats["stored"] += r["stored"]
+            if r["status"] == "not_found":
+                stats["not_found"] += 1
+        except Exception as e:
+            stats["errors"] += 1
+            logger.error(f"backfill_similar failed for {row.name}: {e}")
+        time.sleep(delay)
+    return stats

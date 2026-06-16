@@ -34,6 +34,8 @@ DUMP_PATH = os.path.join(_DATA, "mbdump.tar.bz2")
 VERSION_PATH = os.path.join(_DATA, "VERSION")
 
 _MIRROR = "https://data.metabrainz.org/pub/musicbrainz/data/fullexport"
+_MB_WS = "https://musicbrainz.org/ws/2"   # genre vocabulary — not in the dump archives
+_MB_UA = "Sautium/1.0 ( https://sautium.net )"
 
 # mb_* table -> dump member basename (under mbdump/ in the tarball).
 TABLES = [
@@ -54,8 +56,47 @@ TABLES = [
     ("mb_recording", "recording"),
     ("mb_track", "track"),
     ("mb_release_label", "release_label"),
+    # Folksonomy tags ship in the smaller mbdump-derived archive, not core
+    # mbdump (see _ARCHIVE). The curated genre vocabulary (mb_genre) is NOT in
+    # the streamed archives — it lives in the 7 GB core, not worth re-fetching
+    # for a ~2k-row static list, so it's populated from the MB API
+    # (load_genre_list). Genres are the curated subset of tags — overlap is
+    # computed on tag.name ∈ genre.name, never on raw folksonomy tags.
+    ("mb_tag", "tag"),
+    ("mb_artist_tag", "artist_tag"),
 ]
 _MEMBER_TABLE = {f"mbdump/{m}": t for t, m in TABLES}
+
+# The full export is split across archives; each table lives in exactly one.
+# Tables not listed default to the 7 GB core "mbdump"; the *_tag/genre tables are
+# in the ~480 MB "mbdump-derived", so they (re)load without re-fetching the core.
+_DEFAULT_ARCHIVE = "mbdump"
+_ARCHIVE = {
+    "mb_tag": "mbdump-derived",
+    "mb_artist_tag": "mbdump-derived",
+}
+
+
+def _archive_of(table: str) -> str:
+    return _ARCHIVE.get(table, _DEFAULT_ARCHIVE)
+
+
+def _archive_tables(archive: str) -> list:
+    return [(t, m) for t, m in TABLES if _archive_of(t) == archive]
+
+
+def _archives() -> list:
+    """Distinct archives in load order (core first, then derived)."""
+    out: list = []
+    for t, _ in TABLES:
+        a = _archive_of(t)
+        if a not in out:
+            out.append(a)
+    return out
+
+
+def _dump_path(archive: str) -> str:
+    return os.path.join(_DATA, f"{archive}.tar.bz2")
 
 # Approx fraction of total load each table represents (by TSV size) — so the bar
 # is byte-weighted (smooth) instead of one even 1/10 step per table (which jumps
@@ -70,6 +111,9 @@ _LOAD_WEIGHT = {
     "mb_release_group_secondary_type_join": 0.0,
     "mb_release_group_primary_type": 0.0, "mb_release_group_secondary_type": 0.0,
     "mb_medium_format": 0.0,
+    # derived archive — weights are per-archive (each stream_load sums only its
+    # own tables), so these sum to ~1 on their own; artist_tag dominates.
+    "mb_artist_tag": 0.95, "mb_tag": 0.05,
 }
 
 # progress_cb(update: dict). Phases: checking|downloading|loading|analyzing|done|error.
@@ -141,17 +185,19 @@ def loaded_version() -> Optional[str]:
 
 # ── download (resumable) ─────────────────────────────────────────────────────
 
-def download(version: str, progress_cb: ProgressCb = _noop) -> None:
-    """Resumable streaming download of mbdump.tar.bz2 for ``version``. Retries on
-    transport/timeout errors, RESUMING from the bytes already on disk (Range) —
-    the mirror intermittently drops the TLS handshake or stalls mid-stream, and
-    a 7 GB transfer must survive a blip instead of restarting from zero."""
+def download(version: str, archive: str = _DEFAULT_ARCHIVE,
+             progress_cb: ProgressCb = _noop) -> None:
+    """Resumable streaming download of ``{archive}.tar.bz2`` for ``version``.
+    Retries on transport/timeout errors, RESUMING from the bytes already on disk
+    (Range) — the mirror intermittently drops the TLS handshake or stalls mid-
+    stream, and a multi-GB transfer must survive a blip instead of restarting."""
     import httpx
-    url = f"{_MIRROR}/{version}/mbdump.tar.bz2"
+    url = f"{_MIRROR}/{version}/{archive}.tar.bz2"
+    path = _dump_path(archive)
     os.makedirs(_DATA, exist_ok=True)
     t0 = time.monotonic()
     for attempt in range(5):
-        have = os.path.getsize(DUMP_PATH) if os.path.exists(DUMP_PATH) else 0
+        have = os.path.getsize(path) if os.path.exists(path) else 0
         headers = {"Range": f"bytes={have}-"} if have else {}
         try:
             with httpx.stream("GET", url, headers=headers,
@@ -164,7 +210,7 @@ def download(version: str, progress_cb: ProgressCb = _noop) -> None:
                 total = (have if resuming else 0) + int(r.headers.get("Content-Length", 0))
                 done = have if resuming else 0
                 a_start, a_bytes = time.monotonic(), 0
-                with open(DUMP_PATH, "ab" if resuming else "wb") as fh:
+                with open(path, "ab" if resuming else "wb") as fh:
                     last = 0.0
                     for chunk in r.iter_bytes(1 << 20):
                         fh.write(chunk)
@@ -183,8 +229,8 @@ def download(version: str, progress_cb: ProgressCb = _noop) -> None:
                             progress_cb({"phase": "downloading", "pct": pct,
                                          "downloaded_mb": round(done / 1e6),
                                          "total_mb": round(total / 1e6)})
-            logger.info("download done in %.0fs (%.1f GB)", time.monotonic() - t0,
-                        os.path.getsize(DUMP_PATH) / 1e9)
+            logger.info("download %s done in %.0fs (%.2f GB)", archive,
+                        time.monotonic() - t0, os.path.getsize(path) / 1e9)
             return
         except (httpx.TransportError, httpx.TimeoutException) as e:
             logger.warning("MB download interrupted at %d bytes (try %d/5): %s",
@@ -222,27 +268,34 @@ def verify_md5(version: str) -> bool:
 MB_LOAD_LOCK_KEY = 0x6D626C64  # "mbld"
 
 
-def _ensure_schema(cur) -> None:
-    for table, _ in TABLES:
+def _ensure_schema(cur, tables) -> None:
+    for table, _ in tables:
         cur.execute("SELECT to_regclass(%s)", (table,))
         if cur.fetchone()[0] is None:
             raise RuntimeError(f"table {table} missing — apply mb_* DDL from 001_initial.sql")
 
 
-def stream_load(progress_cb: ProgressCb = _noop) -> Dict[str, int]:
-    """Decompress the archive once and pipe each needed member straight into
-    ``COPY`` — no extracted files. Returns ``{table: rowcount_estimate}``."""
+def stream_load(archive: str = _DEFAULT_ARCHIVE,
+                progress_cb: ProgressCb = _noop) -> Dict[str, int]:
+    """Decompress ``{archive}.tar.bz2`` once and pipe each member belonging to
+    that archive straight into ``COPY`` — no extracted files. Returns
+    ``{table: rowcount_estimate}``."""
     from db_pool import get_conn
-    if not os.path.exists(DUMP_PATH):
-        raise RuntimeError(f"dump not found: {DUMP_PATH}")
+    path = _dump_path(archive)
+    if not os.path.exists(path):
+        raise RuntimeError(f"dump not found: {path}")
+
+    tables = _archive_tables(archive)
+    member_table = {f"mbdump/{m}": t for t, m in tables}
+    expected = len(tables)
 
     decomp = _decompressor()
     proc = None
     if decomp:
-        proc = subprocess.Popen(decomp + [DUMP_PATH], stdout=subprocess.PIPE)
+        proc = subprocess.Popen(decomp + [path], stdout=subprocess.PIPE)
         tar = tarfile.open(fileobj=proc.stdout, mode="r|")
     else:
-        tar = tarfile.open(DUMP_PATH, mode="r:bz2")  # Python bz2, single-thread
+        tar = tarfile.open(path, mode="r:bz2")  # Python bz2, single-thread
 
     counts: Dict[str, int] = {}
     t0 = time.monotonic()
@@ -250,20 +303,20 @@ def stream_load(progress_cb: ProgressCb = _noop) -> Dict[str, int]:
         with get_conn() as conn:
             conn.autocommit = True
             with conn.cursor() as cur:
-                _ensure_schema(cur)
+                _ensure_schema(cur, tables)
                 # Session-level lock on a POOLED connection — must be
                 # released explicitly (finally below), not on conn close.
                 cur.execute("SELECT pg_advisory_lock(%s)", (MB_LOAD_LOCK_KEY,))
             try:
                 cum_w = 0.0  # byte-weighted progress accumulated over completed tables
                 for member in tar:
-                    table = _MEMBER_TABLE.get(member.name)
+                    table = member_table.get(member.name)
                     if not table:
                         continue
                     fh = tar.extractfile(member)
                     if fh is None:
                         continue
-                    w = _LOAD_WEIGHT.get(table, 1.0 / len(TABLES))
+                    w = _LOAD_WEIGHT.get(table, 1.0 / max(expected, 1))
                     size = member.size or 0
                     # overall pct = (completed weight + this table's weight × byte frac)
                     def _on_bytes(read_bytes, _w=w, _c=cum_w, _s=size, _t=table):
@@ -278,9 +331,9 @@ def stream_load(progress_cb: ProgressCb = _noop) -> Dict[str, int]:
                     counts[table] = len(counts) + 1
                     progress_cb({"phase": "loading", "table": table,
                                  "pct": min(99, round(cum_w * 100))})
-                    logger.info("loaded %s (%d/%d)", table, len(counts), len(TABLES))
-                    if len(counts) == len(TABLES):
-                        break  # everything we need is in — skip the (huge) tail
+                    logger.info("loaded %s (%d/%d)", table, len(counts), expected)
+                    if len(counts) == expected:
+                        break  # everything in this archive is in — skip the tail
             finally:
                 with conn.cursor() as cur:
                     cur.execute("SELECT pg_advisory_unlock_all()")
@@ -295,15 +348,15 @@ def stream_load(progress_cb: ProgressCb = _noop) -> Dict[str, int]:
             proc.terminate()
             proc.wait()
 
-    if len(counts) != len(TABLES):
-        raise RuntimeError(f"loaded only {len(counts)}/{len(TABLES)} tables")
+    if len(counts) != expected:
+        raise RuntimeError(f"loaded only {len(counts)}/{expected} tables from {archive}")
 
     progress_cb({"phase": "analyzing"})
     with get_conn() as conn:
         conn.autocommit = True
         with conn.cursor() as cur:
-            cur.execute("ANALYZE " + ", ".join(t for t, _ in TABLES))
-    logger.info("stream_load done in %.0fs", time.monotonic() - t0)
+            cur.execute("ANALYZE " + ", ".join(t for t, _ in tables))
+    logger.info("stream_load %s done in %.0fs", archive, time.monotonic() - t0)
     return counts
 
 
@@ -324,8 +377,22 @@ def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> D
         progress_cb({"phase": "done", "version": version})
         return {"version": version, "loaded": True, "up_to_date": True}
 
-    download(version, progress_cb)  # resumes a partial; a complete archive → 416, instant
-    stream_load(progress_cb)
+    for archive in _archives():
+        download(version, archive, progress_cb)  # resumes a partial; complete → 416, instant
+        stream_load(archive, progress_cb)
+        # Reclaim the archive — the data now lives in the DB, and a future
+        # update re-downloads the (newer) version anyway.
+        try:
+            os.remove(_dump_path(archive))
+        except OSError:
+            pass
+    # Genres aren't in the dump archives — refresh the curated vocabulary too so a
+    # full update keeps mb_genre in sync with the dumped tags. Non-fatal: a dump
+    # reload shouldn't fail just because the MB API blipped.
+    try:
+        load_genre_list(progress_cb)
+    except Exception as e:
+        logger.warning("genre vocabulary refresh failed (kept previous): %s", e)
     # Fresh MB data invalidates missing-album discovery: un-stamp so the
     # background reconcile re-derives every canonized artist's phantom
     # shelf against the new dump (incl. release years once
@@ -334,14 +401,54 @@ def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> D
     db_execute("UPDATE artists SET last_album_sync = NULL")
     with open(VERSION_PATH, "w") as f:
         f.write(version)
-    # Reclaim the ~7 GB archive — the data now lives in the DB, and a future
-    # update re-downloads the (newer) version anyway.
+    progress_cb({"phase": "done", "version": version})
+    return {"version": version, "loaded": True, "up_to_date": False}
+
+
+def load_archive(archive: str, version: Optional[str] = None,
+                 progress_cb: ProgressCb = _noop) -> Dict:
+    """Download + stream-load ONE archive at ``version`` (default: the currently
+    loaded core version, so a derived add lines up with the core's entity ids).
+    Removes the tarball after; leaves the VERSION marker alone (the core owns it).
+    Used to add the *_tag/genre tables without re-fetching the 7 GB core."""
+    version = version or loaded_version() or latest_version()
+    if not version:
+        raise RuntimeError("could not determine an MB version to load")
+    progress_cb({"phase": "checking", "version": version})
+    download(version, archive, progress_cb)
+    counts = stream_load(archive, progress_cb)
     try:
-        os.remove(DUMP_PATH)
+        os.remove(_dump_path(archive))
     except OSError:
         pass
     progress_cb({"phase": "done", "version": version})
-    return {"version": version, "loaded": True, "up_to_date": False}
+    return {"version": version, "archive": archive, "loaded": counts}
+
+
+def load_genre_list(progress_cb: ProgressCb = _noop) -> int:
+    """Populate mb_genre from MusicBrainz's curated genre vocabulary
+    (ws/2/genre/all). Genres aren't in the streamed dump archives (they live in
+    the 7 GB core, not worth re-fetching for a ~2k-row static list). Names only —
+    that's all the genre filter needs (tag.name ∈ genre.name). Idempotent."""
+    import httpx
+    from psycopg2.extras import execute_values
+    from db_pool import get_conn
+    r = httpx.get(f"{_MB_WS}/genre/all?fmt=txt", headers={"User-Agent": _MB_UA},
+                  timeout=120.0, follow_redirects=True)
+    r.raise_for_status()
+    names = sorted({ln.strip() for ln in r.text.splitlines() if ln.strip()})
+    if not names:
+        raise RuntimeError("MB genre list came back empty")
+    with get_conn() as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE mb_genre")
+            execute_values(cur, "INSERT INTO mb_genre (name) VALUES %s",
+                           [(n,) for n in names])
+            cur.execute("ANALYZE mb_genre")
+    logger.info("loaded %d genres from MB", len(names))
+    progress_cb({"phase": "genres", "count": len(names)})
+    return len(names)
 
 
 # ── stats (cheap, for the UI) ────────────────────────────────────────────────
@@ -376,7 +483,8 @@ def main() -> None:
     args = ap.parse_args()
     cb = lambda u: logger.info("progress %s", u)
     if args.load_only:
-        stream_load(cb)
+        for a in _archives():
+            stream_load(a, cb)
     else:
         print(download_and_load(cb, force=args.force))
 
