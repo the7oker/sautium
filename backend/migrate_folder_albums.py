@@ -28,7 +28,7 @@ from collections import defaultdict
 
 from sqlalchemy import text as _sql
 
-from album_identity import assign_dir_albums
+from album_identity import assign_dir_albums, dir_group_count, is_reshapeable_mix
 from database import SessionLocal
 from db_pool import db_execute, db_query
 from uuid_utils import album_uuid, artist_uuid
@@ -115,6 +115,14 @@ def migrate(dry_run: bool = True) -> dict:
             af = [{"album": f["raw_album"], "disc": f["disc_number"], "track": f["track_number"],
                    "artist_key": f["raw_album_artist"] or f["raw_artist"], "path": f["file_path"]}
                   for f in files]
+            # Only restructure real box sets / singles / mixes. A single
+            # release-group folder is left to the scanner (which unifies its
+            # variant on import) and to canon — recomputing its identity here from
+            # raw tags would fight canon's renames.
+            tracks = [(f["album"], f["disc"], f["track"]) for f in af]
+            akeys = [f["artist_key"] for f in af]
+            if dir_group_count(af) < 2 and not is_reshapeable_mix(tracks, akeys):
+                continue
             assignment = assign_dir_albums(_basename(dir_path), af)
             if assignment is None:
                 continue

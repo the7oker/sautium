@@ -133,6 +133,34 @@ def _rep_title(group: List[dict]) -> str:
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
 
 
+def _rep_artist(group: List[dict]) -> str:
+    """The group's album-credit: the credit that holds a strict majority of the
+    files, else Various Artists. A release inconsistently credited ("Lemonchill"
+    5× vs "Kota & Lemonchill" 4×) is one album by its dominant credit; a genuine
+    compilation (every track a different artist, no album_artist) has no majority
+    and is Various Artists. ``artist_key`` is matched by normalized identity, the
+    original spelling returned."""
+    counts: Counter = Counter()
+    spelling: dict = {}
+    for f in group:
+        k = (f["artist_key"] or "").strip()
+        if k:
+            nk = normalize(k)
+            counts[nk] += 1
+            spelling.setdefault(nk, k)
+    if not counts:
+        return VARIOUS_ARTISTS
+    nk, n = counts.most_common(1)[0]
+    return spelling[nk] if n * 2 > sum(counts.values()) else VARIOUS_ARTISTS
+
+
+def dir_group_count(files: List[dict]) -> int:
+    """Number of distinct release-key groups in a directory (``files`` as for
+    ``assign_dir_albums``). The retrofit uses it to leave single-group folders to
+    the scanner + canon and only restructure real box sets / singles / mixes."""
+    return len({_album_key(f["album"]) for f in files})
+
+
 def assign_dir_albums(
     folder_name: str, files: List[dict]
 ) -> Optional[Dict[str, Tuple[str, str, Optional[int], Optional[int]]]]:
@@ -153,8 +181,17 @@ def assign_dir_albums(
     all_singleton = len(groups) >= 2 and all(len(g) == 1 for g in groups.values())
     fold = is_reshapeable_mix(tracks, akeys) or all_singleton
 
-    if not fold and len(groups) < 2:
-        return None
+    # A plain single album the scanner's per-file path already gets right — one
+    # release key, one non-empty title, one credit — needs no override. Anything
+    # else falls through: >=2 groups, a fold, or intra-group title/credit variance
+    # that would otherwise fragment one folder into several albums (a collab
+    # tagged two ways, a multi-disc release with per-disc titles, untagged files).
+    if not fold and len(groups) == 1:
+        g = next(iter(groups.values()))
+        titles = {(f["album"] or "").strip() for f in g}
+        artists = {normalize(f["artist_key"] or "") for f in g}
+        if len(titles) == 1 and "" not in titles and len(artists) == 1:
+            return None
 
     if fold:
         artist = folder_album_artist(akeys)
@@ -171,7 +208,7 @@ def assign_dir_albums(
     out: Dict[str, Tuple[str, str, Optional[int], Optional[int]]] = {}
     for g in groups.values():
         title = _rep_title(g) or folder_name
-        artist = folder_album_artist([f["artist_key"] for f in g])
+        artist = _rep_artist(g)
         # A sub-album that occupies one non-1 disc within the box reads as disc 1
         # once it stands alone; a genuinely multi-disc group keeps its numbering.
         discs = {(f["disc"] or 1) for f in g}

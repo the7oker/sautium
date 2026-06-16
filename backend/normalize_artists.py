@@ -172,6 +172,42 @@ def _update_track_uuid(db: Session, old_id, new_id) -> str:
     return new_str
 
 
+def _merge_album_variants(db: Session, new_album_id: str, *,
+                          from_album: str = None, variant_ids: List[int] = None,
+                          edition: str = None) -> None:
+    """Repoint variants onto ``new_album_id`` honouring the
+    UNIQUE(directory_path, album_id) key. When a variant's directory already
+    holds a variant of the target album (a box-split sibling, or a folder whose
+    files canon now unifies), fold the moving variant's media_files into that
+    keeper and drop it instead of colliding; otherwise repoint in place.
+
+    Source is either every variant of ``from_album`` or an explicit
+    ``variant_ids`` list. ``edition`` is stamped on the repoint path."""
+    if from_album is not None:
+        rows = db.execute(text(
+            "SELECT id, directory_path FROM album_variants WHERE album_id = :a ORDER BY id"
+        ), {"a": from_album}).fetchall()
+    else:
+        rows = db.execute(text(
+            "SELECT id, directory_path FROM album_variants WHERE id = ANY(:v) ORDER BY id"
+        ), {"v": list(variant_ids)}).fetchall()
+    for vid, dir_path in rows:
+        keeper = db.execute(text(
+            "SELECT id FROM album_variants "
+            "WHERE directory_path = :d AND album_id = :a AND id <> :v"
+        ), {"d": dir_path, "a": new_album_id, "v": vid}).fetchone()
+        if keeper:
+            db.execute(text("UPDATE media_files SET album_variant_id = :k WHERE album_variant_id = :v"),
+                       {"k": keeper[0], "v": vid})
+            db.execute(text("DELETE FROM album_variants WHERE id = :v"), {"v": vid})
+        elif edition is None:
+            db.execute(text("UPDATE album_variants SET album_id = :a WHERE id = :v"),
+                       {"a": new_album_id, "v": vid})
+        else:
+            db.execute(text("UPDATE album_variants SET album_id = :a, edition = :e WHERE id = :v"),
+                       {"a": new_album_id, "e": edition, "v": vid})
+
+
 def _update_album_uuid(db: Session, old_id, new_id) -> str:
     """
     Update album UUID via ON UPDATE CASCADE, or merge if target exists.
@@ -193,11 +229,9 @@ def _update_album_uuid(db: Session, old_id, new_id) -> str:
             {"new_id": new_str, "old_id": old_str},
         )
     else:
-        # Merge: move album variants to target, delete old
-        db.execute(
-            text("UPDATE album_variants SET album_id = :new WHERE album_id = :old"),
-            {"new": new_str, "old": old_str},
-        )
+        # Merge: move album variants to target (folding same-directory siblings),
+        # delete old.
+        _merge_album_variants(db, new_str, from_album=old_str)
         db.execute(text("DELETE FROM albums WHERE id = :old"), {"old": old_str})
 
     return new_str
@@ -353,10 +387,9 @@ def recanonicalize_album_variants(db: Session, src_album_id, variant_ids: List[i
         SELECT :nid, artist_id, role, mbid FROM album_artists WHERE album_id = :a
         ON CONFLICT DO NOTHING
     """), {"nid": new_id, "a": src})
-    # ON UPDATE CASCADE carries media_files; the variant id itself is unchanged.
-    db.execute(text(
-        "UPDATE album_variants SET album_id = :nid, edition = :ed WHERE id = ANY(:v)"
-    ), {"nid": new_id, "ed": edition, "v": vids})
+    # Move the edition's variants onto the destination album, folding any that
+    # would collide with an existing variant of it in the same directory.
+    _merge_album_variants(db, new_id, variant_ids=vids, edition=edition)
     # GC the source if every edition moved out (no bare primary edition remained).
     db.execute(text("""
         DELETE FROM albums WHERE id = :a
