@@ -51,6 +51,7 @@ class LauncherApp(ctk.CTk):
         self.tray = None
         self._update_thread = None
         self._stats_timer = None
+        self._shutting_down = False   # gates the stats worker from touching Tk after the loop is torn down
 
         # Check first run
         if not self.config.get("first_run_complete"):
@@ -641,13 +642,26 @@ class LauncherApp(ctk.CTk):
 
         def _fetch():
             data = self.api_client.get_stats()
-            if data:
-                self.after(0, lambda: self._update_stats_labels(data))
-            # Schedule next refresh in 60 seconds (only if not called from polling)
-            if schedule_next:
-                self._stats_timer = self.after(60_000, self._fetch_and_display_stats)
+            # Marshal back to the Tk main thread — including the reschedule, which
+            # must not run off-thread. Guard the shutdown window: the loop can be
+            # torn down while this worker is blocked on the network call.
+            if self._shutting_down:
+                return
+            try:
+                self.after(0, lambda: self._apply_stats(data, schedule_next))
+            except RuntimeError:
+                pass   # main loop gone between the check and the call
 
         threading.Thread(target=_fetch, daemon=True).start()
+
+    def _apply_stats(self, data: dict, schedule_next: bool):
+        """Apply fetched stats and (re)arm the timer — always on the main thread."""
+        if self._shutting_down:
+            return
+        if data:
+            self._update_stats_labels(data)
+        if schedule_next:
+            self._stats_timer = self.after(60_000, self._fetch_and_display_stats)
 
     def _update_stats_labels(self, data: dict):
         """Update stats labels from API response."""
@@ -1130,6 +1144,7 @@ class LauncherApp(ctk.CTk):
 
     def _quit(self):
         """Full quit: stop services and exit."""
+        self._shutting_down = True   # stop the stats worker from rescheduling onto a dying loop
         self._set_status("starting", "Shutting down...")
         self._progress_text.configure(text="Stopping services...")
         self.update()
