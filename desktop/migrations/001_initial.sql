@@ -35,7 +35,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- confidence. MB-verified only — Last.fm is out of the MBID contour.
 -- NULL = no MBID assigned.
 DO $$ BEGIN
-    CREATE TYPE mb_match_confidence AS ENUM ('name_fuzzy', 'alias_exact', 'name_exact', 'overlap_verified');
+    CREATE TYPE mb_match_confidence AS ENUM ('phantom', 'name_fuzzy', 'alias_exact', 'name_exact', 'overlap_verified');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
@@ -192,11 +192,14 @@ CREATE TABLE IF NOT EXISTS artist_members (
 
 -- MB entities a name-derived Sautium artist maps to (1:N — the name-UUID
 -- conflates namesakes/case-variants). mbid PK = one MB entity → one artist;
--- the inverse (one artist → many MBIDs) is the 1:N. MB-verified sources only.
+-- the inverse (one artist → many MBIDs) is the 1:N. Mostly MB-content-verified;
+-- confidence='phantom' rows are name+genre-derived for out-of-catalog artists
+-- (no owned tracks to verify) — re-verify before trusting over P2P.
 CREATE TABLE IF NOT EXISTS artist_mbids (
     mbid UUID PRIMARY KEY,
     artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     confidence mb_match_confidence NOT NULL,
+    about TEXT,   -- namesake disambiguation caption (phantom canon): mb_artist comment, else type · area · year
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
