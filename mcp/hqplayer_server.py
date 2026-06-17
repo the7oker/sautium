@@ -373,7 +373,9 @@ def search_tracks(
             SELECT * FROM (
                 SELECT DISTINCT ON (mf.id)
                        mf.id, t.title, a.name as artist, al.title as album,
-                       g.name as genre, mf.is_lossless,
+                       (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
+                        WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre,
+                       mf.is_lossless,
                        mf.duration_seconds, mf.track_number,
                        {score_expr} as _score
                 FROM media_files mf
@@ -382,8 +384,6 @@ def search_tracks(
                 JOIN artists a ON ta.artist_id = a.id
                 JOIN album_variants av ON mf.album_variant_id = av.id
                 JOIN albums al ON av.album_id = al.id
-                LEFT JOIN track_genres tg ON t.id = tg.track_id
-                LEFT JOIN genres g ON tg.genre_id = g.id
                 WHERE {where}
                 ORDER BY mf.id, _score DESC
             ) sub
@@ -432,7 +432,9 @@ def search_similar(track_id: int, limit: int = 15) -> str:
             FROM nn
             JOIN LATERAL (
                 SELECT mf.id, mf.duration_seconds, mf.is_lossless,
-                       a.name as artist, al.title as album, g.name as genre,
+                       a.name as artist, al.title as album,
+                       (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
+                        WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre,
                        t.title
                 FROM media_files mf
                 JOIN tracks t ON mf.track_id = nn.track_id
@@ -440,8 +442,6 @@ def search_similar(track_id: int, limit: int = 15) -> str:
                 JOIN artists a ON ta.artist_id = a.id
                 JOIN album_variants av ON mf.album_variant_id = av.id
                 JOIN albums al ON av.album_id = al.id
-                LEFT JOIN track_genres tg ON nn.track_id = tg.track_id
-                LEFT JOIN genres g ON tg.genre_id = g.id
                 WHERE mf.track_id = nn.track_id
                 ORDER BY mf.id LIMIT 1
             ) sub ON true
@@ -676,15 +676,14 @@ def get_track_info(track_id: int) -> str:
                    mf.file_path, mf.is_lossless,
                    a.name as artist, al.title as album,
                    al.release_year,
-                   g.name as genre
+                   (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
+                    WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre
             FROM media_files mf
             JOIN tracks t ON mf.track_id = t.id
             JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
             JOIN artists a ON ta.artist_id = a.id
             JOIN album_variants av ON mf.album_variant_id = av.id
             JOIN albums al ON av.album_id = al.id
-            LEFT JOIN track_genres tg ON t.id = tg.track_id
-            LEFT JOIN genres g ON tg.genre_id = g.id
             WHERE mf.id = %(track_id)s
         """, {"track_id": track_id})
 
@@ -911,7 +910,9 @@ def play_similar(track_id: int, limit: int = 10) -> str:
             FROM nn
             JOIN LATERAL (
                 SELECT mf.id, mf.file_path, mf.duration_seconds,
-                       a.name as artist, al.title as album, g.name as genre,
+                       a.name as artist, al.title as album,
+                       (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
+                        WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre,
                        t.title
                 FROM media_files mf
                 JOIN tracks t ON mf.track_id = nn.track_id
@@ -919,8 +920,6 @@ def play_similar(track_id: int, limit: int = 10) -> str:
                 JOIN artists a ON ta.artist_id = a.id
                 JOIN album_variants av ON mf.album_variant_id = av.id
                 JOIN albums al ON av.album_id = al.id
-                LEFT JOIN track_genres tg ON nn.track_id = tg.track_id
-                LEFT JOIN genres g ON tg.genre_id = g.id
                 WHERE mf.track_id = nn.track_id
                 ORDER BY mf.id LIMIT 1
             ) sub ON true

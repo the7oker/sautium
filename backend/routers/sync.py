@@ -83,11 +83,15 @@ async def get_inventory(req: InventoryRequest) -> dict:
                       WHERE tl.track_id IN (SELECT id FROM uuids)) AS lyrics,
                 ARRAY(SELECT DISTINCT ts.track_id::text FROM track_stats ts
                       WHERE ts.track_id IN (SELECT id FROM uuids)) AS track_stats,
-                ARRAY(SELECT DISTINCT tg.genre_id::text FROM track_genres tg
-                      WHERE tg.track_id IN (SELECT id FROM uuids)) AS genres,
+                ARRAY(SELECT DISTINCT ag.genre_id::text FROM album_genres ag
+                      JOIN album_variants av ON av.album_id = ag.album_id
+                      JOIN media_files mf ON mf.album_variant_id = av.id
+                      WHERE mf.track_id IN (SELECT id FROM uuids)) AS genres,
                 ARRAY(SELECT DISTINCT gd.genre_id::text FROM genre_descriptions gd
-                      JOIN track_genres tg ON tg.genre_id = gd.genre_id
-                      WHERE tg.track_id IN (SELECT id FROM uuids)) AS genre_descriptions
+                      JOIN album_genres ag ON ag.genre_id = gd.genre_id
+                      JOIN album_variants av ON av.album_id = ag.album_id
+                      JOIN media_files mf ON mf.album_variant_id = av.id
+                      WHERE mf.track_id IN (SELECT id FROM uuids)) AS genre_descriptions
         """, {"u": uuids})
 
         # Query 2: Artist data (5 categories, 1 round-trip)
@@ -170,7 +174,7 @@ def _pull_handler(category: str, sql: str, uuids: list[str], post_process=None) 
 
 @router.post("/pull/tracks")
 async def pull_tracks(req: PullRequest) -> dict:
-    """Pull track metadata with associated artists and genres."""
+    """Pull track metadata with associated artists."""
     if not req.uuids:
         return {"category": "tracks", "items": []}
 
@@ -192,16 +196,7 @@ async def pull_tracks(req: PullRequest) -> dict:
             [req.uuids],
         )
 
-        # Get genres for these tracks
-        genres = _db_query(
-            """SELECT tg.track_id::text, g.id::text AS genre_uuid, g.name AS genre_name
-               FROM track_genres tg
-               INNER JOIN genres g ON g.id = tg.genre_id
-               WHERE tg.track_id = ANY(%s::uuid[])""",
-            [req.uuids],
-        )
-
-        # Group artists and genres by track
+        # Group artists by track
         artists_by_track: dict[str, list] = {}
         for a in artists:
             tid = str(a["track_id"])
@@ -211,14 +206,6 @@ async def pull_tracks(req: PullRequest) -> dict:
                 "role": a["role"],
             })
 
-        genres_by_track: dict[str, list] = {}
-        for g in genres:
-            tid = str(g["track_id"])
-            genres_by_track.setdefault(tid, []).append({
-                "genre_uuid": g["genre_uuid"],
-                "name": g["genre_name"],
-            })
-
         items = []
         for t in tracks:
             uuid = t["track_uuid"]
@@ -226,7 +213,6 @@ async def pull_tracks(req: PullRequest) -> dict:
                 "track_uuid": uuid,
                 "title": t["title"],
                 "artists": artists_by_track.get(uuid, []),
-                "genres": genres_by_track.get(uuid, []),
             })
 
         return {"category": "tracks", "items": items}

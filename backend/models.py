@@ -7,7 +7,7 @@ Schema overview:
     artists  ←── track_artists ──→ tracks   album_variants (edition of album)
     albums   ←── album_artists              media_files (file on disk)
                                                ↑ track_id    ↑ album_variant_id
-    genres ←── track_genres
+    albums ←── album_genres ──→ genres   (genre is album-grain, not track)
     embeddings ──→ track_id
     audio_features ──→ track_id
     text_embeddings ──→ track_id
@@ -198,6 +198,7 @@ class Album(Base):
     # Relationships
     variants = relationship("AlbumVariant", back_populates="album", cascade="all, delete-orphan")
     artist_associations = relationship("AlbumArtist", back_populates="album", cascade="all, delete-orphan")
+    genre_associations = relationship("AlbumGenre", back_populates="album", cascade="all, delete-orphan")
 
     __table_args__ = (
         CheckConstraint("user_rating >= 0 AND user_rating <= 5", name="check_album_rating"),
@@ -221,7 +222,6 @@ class Track(Base):
 
     # Relationships
     artist_associations = relationship("TrackArtist", back_populates="track", cascade="all, delete-orphan")
-    genre_associations = relationship("TrackGenre", back_populates="track", cascade="all, delete-orphan")
     media_files = relationship("MediaFile", back_populates="track", cascade="all, delete-orphan")
     embedding = relationship("Embedding", back_populates="track", uselist=False, cascade="all, delete-orphan")
     text_embedding = relationship("TextEmbedding", back_populates="track", uselist=False, cascade="all, delete-orphan")
@@ -258,22 +258,27 @@ class TrackArtist(Base):
         return f"<TrackArtist(track_id={self.track_id}, artist_id={self.artist_id}, role='{self.role}')>"
 
 
-class TrackGenre(Base):
-    """Track-Genre association (many-to-many)."""
-    __tablename__ = "track_genres"
+class AlbumGenre(Base):
+    """Album-Genre association (many-to-many). Genre is album-grain, not
+    track-grain — see album_genres in the schema. `source` is part of the PK
+    so 'filetag' (count = media-file occurrences in the album) and 'mb'
+    (count = release-group tag votes) coexist; readers dedup by genre_id."""
+    __tablename__ = "album_genres"
 
-    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
+    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
     genre_id = Column(UUID(as_uuid=True), ForeignKey("genres.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
+    source = Column(String(20), primary_key=True)
+    count = Column(Integer)
 
-    track = relationship("Track", back_populates="genre_associations")
-    genre = relationship("Genre", back_populates="track_associations")
+    album = relationship("Album", back_populates="genre_associations")
+    genre = relationship("Genre", back_populates="album_associations")
 
     __table_args__ = (
-        Index("idx_track_genres_genre_id", "genre_id"),
+        Index("idx_album_genres_genre_id", "genre_id"),
     )
 
     def __repr__(self):
-        return f"<TrackGenre(track_id={self.track_id}, genre_id={self.genre_id})>"
+        return f"<AlbumGenre(album_id={self.album_id}, genre_id={self.genre_id}, source='{self.source}')>"
 
 
 class AlbumArtist(Base):
@@ -756,7 +761,7 @@ class Genre(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    track_associations = relationship("TrackGenre", back_populates="genre", cascade="all, delete-orphan")
+    album_associations = relationship("AlbumGenre", back_populates="genre", cascade="all, delete-orphan")
     descriptions = relationship("GenreDescription", back_populates="genre", cascade="all, delete-orphan")
 
     def __repr__(self):

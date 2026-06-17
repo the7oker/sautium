@@ -34,12 +34,12 @@ _DB_SCHEMA = """\
 **artists** (id UUID, name, gender [unknown/female/male/mixed], is_vocalist [unknown/vocal/instrumental]) - unique artist names
 **albums** (id UUID, title, release_year, label, catalog_number) - canonical albums (no physical info)
 **tracks** (id UUID, title) - unique tracks (one per title+primary_artist)
-**genres** (id SERIAL, name) - e.g. Rock, Jazz, Electronic
+**genres** (id UUID, name) - e.g. Rock, Jazz, Electronic
 
 ## Associations
 
 **track_artists** (track_id UUID, artist_id UUID, role [primary/featured]) - many-to-many
-**track_genres** (track_id UUID, genre_id INT) - many-to-many
+**album_genres** (album_id UUID, genre_id UUID, source, count) - genre is album-grain, not track
 **album_artists** (album_id UUID, artist_id UUID, role) - many-to-many
 
 ## Physical entities (SERIAL primary keys)

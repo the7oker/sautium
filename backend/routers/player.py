@@ -839,8 +839,8 @@ async def search_tracks(q: str = "", limit: int = 20):
     rows = _db_query(f"""
         SELECT mf.id, t.title, mf.track_number, mf.disc_number, mf.duration_seconds,
                a.name as artist, av.id as album_id, al.title as album,
-               (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
-                WHERE tg.track_id = t.id LIMIT 1) as genre,
+               (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
+                WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre,
                mf.is_lossless, t.id as track_id
         FROM media_files mf
         JOIN tracks t ON mf.track_id = t.id
@@ -858,8 +858,8 @@ async def search_tracks(q: str = "", limit: int = 20):
         rows = _db_query("""
             SELECT mf.id, t.title, mf.track_number, mf.disc_number, mf.duration_seconds,
                    a.name as artist, av.id as album_id, al.title as album,
-                   (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
-                    WHERE tg.track_id = t.id LIMIT 1) as genre,
+                   (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
+                    WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre,
                    mf.is_lossless, t.id as track_id,
                    GREATEST(
                        similarity(a.name, %(query)s),
@@ -1189,12 +1189,13 @@ def now_playing_detail(media_file_id: int):
 
     row["genres"] = _db_query("""
         SELECT g.id::text, g.name
-        FROM track_genres tg
-        JOIN genres g ON g.id = tg.genre_id
-        WHERE tg.track_id = %(t)s::uuid
-        ORDER BY g.name
+        FROM album_genres ag
+        JOIN genres g ON g.id = ag.genre_id
+        WHERE ag.album_id = %(a)s::uuid
+        GROUP BY g.id, g.name
+        ORDER BY MAX(ag.count) DESC NULLS LAST, g.name
         LIMIT 3
-    """, {"t": row["track_id"]})
+    """, {"a": row["album_id"]})
 
     row["primary_artist"] = _db_query_one("""
         SELECT a.id::text, a.name

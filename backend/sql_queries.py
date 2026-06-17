@@ -7,7 +7,7 @@ Used by: search.py, tools/definitions.py, routers/player.py, routers/chat.py,
 All queries use the schema:
   tracks → track_artists → artists
   tracks → media_files → album_variants → albums
-  tracks → track_genres → genres
+  albums → album_genres → genres   (genre is album-grain, not track)
   tracks → embeddings (via track_id)
   tracks → audio_features (via track_id)
 """
@@ -19,8 +19,8 @@ All queries use the schema:
 
 MEDIA_FILE_SELECT = """\
     SELECT mf.id, t.title, a.name as artist, al.title as album,
-           (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
-            WHERE tg.track_id = t.id LIMIT 1) as genre,
+           (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
+            WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre,
            mf.duration_seconds, mf.track_number, mf.disc_number,
            mf.sample_rate, mf.bit_depth, mf.is_lossless,
            mf.file_path"""
@@ -40,8 +40,8 @@ MEDIA_FILE_FROM = """\
 EMBEDDING_SIMILARITY_SELECT = """\
     SELECT mf_rep.id, t.title, a.name as artist,
            mf_rep.album_title as album,
-           (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
-            WHERE tg.track_id = t.id LIMIT 1) as genre,
+           (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
+            WHERE ag.album_id = mf_rep.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre,
            mf_rep.duration_seconds, mf_rep.track_number,
            mf_rep.sample_rate, mf_rep.bit_depth, mf_rep.is_lossless"""
 
@@ -53,7 +53,7 @@ EMBEDDING_SIMILARITY_FROM = """\
     JOIN LATERAL (
         SELECT mf.id, mf.duration_seconds, mf.track_number,
                mf.sample_rate, mf.bit_depth, mf.is_lossless,
-               mf.file_path, al.title as album_title, al.release_year
+               mf.file_path, al.title as album_title, al.id as album_id, al.release_year
         FROM media_files mf
         JOIN album_variants av ON mf.album_variant_id = av.id
         JOIN albums al ON av.album_id = al.id
@@ -61,19 +61,6 @@ EMBEDDING_SIMILARITY_FROM = """\
         ORDER BY mf.is_analysis_source DESC, mf.id
         LIMIT 1
     ) mf_rep ON true"""
-
-# ---------------------------------------------------------------------------
-# Simple track info query (for track info / validation)
-# ---------------------------------------------------------------------------
-
-TRACK_INFO_SELECT = """\
-    SELECT mf.id, t.title, a.name as artist, al.title as album,
-           al.release_year, g.name as genre,
-           mf.track_number, mf.disc_number,
-           mf.duration_seconds, mf.sample_rate, mf.bit_depth,
-           mf.is_lossless, mf.file_path"""
-
-TRACK_INFO_FROM = MEDIA_FILE_FROM
 
 # ---------------------------------------------------------------------------
 # Search: trigram fuzzy search

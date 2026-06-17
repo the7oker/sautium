@@ -214,10 +214,22 @@ CREATE TABLE IF NOT EXISTS track_mbids (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS track_genres (
-    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+-- Genres live at ALBUM grain, not track: most albums are genre-homogeneous, so
+-- per-track tags were ~8x bloat (a dup of the album genre on every track) with no
+-- gain — artist/era genre evolution is already captured per-release by the album.
+-- Real per-track multi-genre signal comes from audio (CLAP), not file tags.
+--   source: 'filetag' (count = media-file occurrences of the tag in the album)
+--         | 'mb'      (count = MusicBrainz release-group tag votes)
+-- LOCAL-ONLY: albums don't sync over P2P (only tracks + artists do), so neither
+-- do their genres — only genre entities + genre_descriptions propagate. Readers
+-- dedup by genre_id across sources; ON UPDATE CASCADE carries genre-UUID rewrites
+-- (normalize_genres renames) and album merges.
+CREATE TABLE IF NOT EXISTS album_genres (
+    album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
     genre_id UUID NOT NULL REFERENCES genres(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    PRIMARY KEY (track_id, genre_id)
+    source   VARCHAR(20) NOT NULL,
+    count    INTEGER,
+    PRIMARY KEY (album_id, genre_id, source)
 );
 
 -- ============================================================
@@ -734,7 +746,7 @@ CREATE INDEX IF NOT EXISTS idx_track_artists_artist_id ON track_artists(artist_i
 CREATE INDEX IF NOT EXISTS idx_album_artists_artist_id ON album_artists(artist_id);
 CREATE INDEX IF NOT EXISTS idx_album_artists_mbid ON album_artists(mbid) WHERE mbid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_media_files_recording_mbid ON media_files(recording_mbid) WHERE recording_mbid IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_track_genres_genre_id ON track_genres(genre_id);
+CREATE INDEX IF NOT EXISTS idx_album_genres_genre_id ON album_genres(genre_id);
 
 -- Physical entity indexes
 CREATE INDEX IF NOT EXISTS idx_album_variants_album_id ON album_variants(album_id);
@@ -1502,6 +1514,15 @@ CREATE TABLE IF NOT EXISTS mb_artist_tag (
     last_updated TIMESTAMPTZ
 );
 
+-- Release-group tags = the album-genre source (release_group ⋈ tag ⋈ genre).
+-- Same mbdump-derived archive and column order as the other *_tag tables.
+CREATE TABLE IF NOT EXISTS mb_release_group_tag (
+    release_group INTEGER,
+    tag           INTEGER,
+    count         INTEGER,
+    last_updated  TIMESTAMPTZ
+);
+
 CREATE INDEX IF NOT EXISTS idx_mb_artist_gid            ON mb_artist(gid);
 CREATE INDEX IF NOT EXISTS idx_mb_artist_name_trgm      ON mb_artist     USING gin (lower(name) gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_mb_artist_sortname_trgm  ON mb_artist     USING gin (lower(sort_name) gin_trgm_ops);
@@ -1525,6 +1546,7 @@ CREATE INDEX IF NOT EXISTS idx_mb_recording_ac          ON mb_recording(artist_c
 CREATE INDEX IF NOT EXISTS idx_mb_track_recording       ON mb_track(recording);
 CREATE INDEX IF NOT EXISTS idx_mb_artist_tag_artist     ON mb_artist_tag(artist);
 CREATE INDEX IF NOT EXISTS idx_mb_tag_id                ON mb_tag(id);
+CREATE INDEX IF NOT EXISTS idx_mb_rg_tag_rg             ON mb_release_group_tag(release_group);
 CREATE INDEX IF NOT EXISTS idx_mb_genre_name_lower      ON mb_genre(lower(name));
 
 -- ============================================================

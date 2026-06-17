@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from database import get_db_context
-from models import Genre, TrackGenre
+from models import Genre
 from uuid_utils import genre_uuid
 
 logging.basicConfig(level=logging.INFO)
@@ -185,7 +185,7 @@ def normalize_genres(db: Session, dry_run: bool = False) -> dict:
     1. Find all compound genre names
     2. Split them into individual genres
     3. Create individual genres if they don't exist
-    4. Update track_genres relationships
+    4. Update album_genres relationships
     5. Delete compound genres (if not dry_run)
 
     Args:
@@ -199,7 +199,7 @@ def normalize_genres(db: Session, dry_run: bool = False) -> dict:
         'compound_genres_found': 0,
         'compound_genres_processed': 0,
         'new_genres_created': 0,
-        'track_relationships_updated': 0,
+        'album_relationships_updated': 0,
         'compound_genres_deleted': 0,
     }
 
@@ -243,37 +243,25 @@ def normalize_genres(db: Session, dry_run: bool = False) -> dict:
             logger.warning(f"No individual genres created for '{compound_genre.name}'")
             continue
 
-        # Find all tracks with this compound genre
-        track_genres = db.query(TrackGenre).filter(
-            TrackGenre.genre_id == compound_genre.id
-        ).all()
+        # Move every album tagged with the compound onto each individual genre,
+        # summing counts per source; ON CONFLICT merges where the album already
+        # carries the individual. Then drop the compound's rows and the genre.
+        moved = 0
+        for individual_genre in individual_genres:
+            if individual_genre.id == compound_genre.id:
+                continue
+            res = db.execute(text("""
+                INSERT INTO album_genres (album_id, genre_id, source, count)
+                SELECT album_id, :gid, source, count
+                FROM album_genres WHERE genre_id = :cid
+                ON CONFLICT (album_id, genre_id, source)
+                DO UPDATE SET count = COALESCE(album_genres.count, 0) + COALESCE(EXCLUDED.count, 0)
+            """), {"gid": individual_genre.id, "cid": compound_genre.id})
+            moved += res.rowcount or 0
+        stats['album_relationships_updated'] += moved
 
-        logger.info(f"  Found {len(track_genres)} tracks with genre '{compound_genre.name}'")
-
-        # Update relationships
-        for tg in track_genres:
-            track_id = tg.track_id
-
-            # Add relationships for each individual genre
-            for individual_genre in individual_genres:
-                # Check if relationship already exists
-                existing = db.query(TrackGenre).filter(
-                    TrackGenre.track_id == track_id,
-                    TrackGenre.genre_id == individual_genre.id
-                ).first()
-
-                if not existing:
-                    new_tg = TrackGenre(track_id=tg.track_id, genre_id=individual_genre.id)
-                    db.add(new_tg)
-                    stats['track_relationships_updated'] += 1
-
-            # Delete old compound relationship
-            db.delete(tg)
-
-        # Flush to make new track_genres visible to subsequent queries
-        db.flush()
-
-        # Delete compound genre
+        db.execute(text("DELETE FROM album_genres WHERE genre_id = :cid"),
+                   {"cid": compound_genre.id})
         db.delete(compound_genre)
         db.flush()
         stats['compound_genres_deleted'] += 1
@@ -300,22 +288,20 @@ def normalize_genres(db: Session, dry_run: bool = False) -> dict:
         existing = db.query(Genre).filter(Genre.id == target_id).first()
 
         if existing and existing.id != genre.id:
-            # Merge: move all track associations to existing genre
-            track_genres = db.query(TrackGenre).filter(
-                TrackGenre.genre_id == genre.id
-            ).all()
-            for tg in track_genres:
-                dup = db.query(TrackGenre).filter(
-                    TrackGenre.track_id == tg.track_id,
-                    TrackGenre.genre_id == existing.id,
-                ).first()
-                if not dup:
-                    db.add(TrackGenre(track_id=tg.track_id, genre_id=existing.id))
-                db.delete(tg)
+            # Merge album associations into the existing genre, then drop this one.
+            db.execute(text("""
+                INSERT INTO album_genres (album_id, genre_id, source, count)
+                SELECT album_id, :tid, source, count
+                FROM album_genres WHERE genre_id = :gid
+                ON CONFLICT (album_id, genre_id, source)
+                DO UPDATE SET count = COALESCE(album_genres.count, 0) + COALESCE(EXCLUDED.count, 0)
+            """), {"tid": existing.id, "gid": genre.id})
+            db.execute(text("DELETE FROM album_genres WHERE genre_id = :gid"),
+                       {"gid": genre.id})
             db.delete(genre)
             logger.info(f"  Merged into existing genre '{existing.name}'")
         else:
-            # Just rename
+            # Just rename — ON UPDATE CASCADE carries album_genres.genre_id.
             genre.id = target_id
             genre.name = normalized_name
 
@@ -336,24 +322,24 @@ def show_genre_statistics(db: Session):
         SELECT
             g.id,
             g.name,
-            COUNT(tg.track_id) as track_count
+            COUNT(ag.album_id) as album_count
         FROM genres g
-        LEFT JOIN track_genres tg ON g.id = tg.genre_id
+        LEFT JOIN album_genres ag ON g.id = ag.genre_id
         GROUP BY g.id, g.name
-        ORDER BY track_count DESC, g.name
+        ORDER BY album_count DESC, g.name
     """)).fetchall()
 
     logger.info("\n📊 Genre Statistics:")
-    logger.info(f"{'Genre':<50} {'Tracks':<10}")
+    logger.info(f"{'Genre':<50} {'Albums':<10}")
     logger.info("-" * 60)
 
-    total_tracks = 0
+    total_albums = 0
     for row in result:
-        logger.info(f"{row.name:<50} {row.track_count:<10}")
-        total_tracks += row.track_count
+        logger.info(f"{row.name:<50} {row.album_count:<10}")
+        total_albums += row.album_count
 
     logger.info("-" * 60)
-    logger.info(f"Total: {len(result)} genres, {total_tracks} track-genre relationships")
+    logger.info(f"Total: {len(result)} genres, {total_albums} album-genre relationships")
 
 
 if __name__ == "__main__":

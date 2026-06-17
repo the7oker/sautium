@@ -59,11 +59,17 @@ _PRIORITY_SQL = text("""
         GROUP BY ta.artist_id
     ),
     genre_listen AS (
-        SELECT tg.genre_id, SUM(lh.duration_listened) AS sec
+        SELECT ag.genre_id, SUM(lh.duration_listened) AS sec
         FROM listening_history lh
-        JOIN track_genres tg ON tg.track_id = lh.track_id
+        JOIN LATERAL (
+            SELECT DISTINCT ag2.genre_id
+            FROM media_files mf
+            JOIN album_variants av ON av.id = mf.album_variant_id
+            JOIN album_genres ag2 ON ag2.album_id = av.album_id
+            WHERE mf.track_id = lh.track_id
+        ) ag ON true
         WHERE lh.duration_listened > 0
-        GROUP BY tg.genre_id
+        GROUP BY ag.genre_id
     ),
     candidates AS (
         SELECT t.id           AS track_id,
@@ -75,8 +81,10 @@ _PRIORITY_SQL = text("""
         JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
         JOIN artists a        ON a.id = ta.artist_id
         LEFT JOIN artist_listen al ON al.artist_id = ta.artist_id
-        LEFT JOIN track_genres tg  ON tg.track_id = t.id
-        LEFT JOIN genre_listen gl  ON gl.genre_id = tg.genre_id
+        LEFT JOIN media_files mf_g    ON mf_g.track_id = t.id
+        LEFT JOIN album_variants av_g ON av_g.id = mf_g.album_variant_id
+        LEFT JOIN album_genres ag     ON ag.album_id = av_g.album_id
+        LEFT JOIN genre_listen gl     ON gl.genre_id = ag.genre_id
         -- owned tracks only: phantom tracklist rows (no media_files) must
         -- not burn the Last.fm budget
         WHERE EXISTS (

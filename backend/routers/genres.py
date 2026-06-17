@@ -49,10 +49,10 @@ def get_genre(genre_id: str) -> dict:
     #   * Last.fm artist-level tag for the genre carries
     #     weight >= 10 ("authoritative" signal; same source as the
     #     artist hero's chip row), OR
-    #   * the artist has at least 5 primary tracks tagged with the
-    #     genre via track_genres ("library-derived" signal — picks
-    #     up niche artists with weak Last.fm tagging but heavy
-    #     track-level genre coverage in this library).
+    #   * the artist has at least 5 primary tracks on albums tagged
+    #     with the genre (album_genres) ("library-derived" signal —
+    #     picks up niche artists with weak Last.fm tagging but heavy
+    #     genre coverage in this library).
     # Last.fm weight is the primary sort key — track-level evidence
     # is supplementary, surfaced after every weighted artist.
     artist_rows = db_query("""
@@ -82,9 +82,13 @@ def get_genre(genre_id: str) -> dict:
             JOIN track_artists ta
               ON ta.artist_id = a.id AND ta.role = 'primary'
             JOIN tracks t ON t.id = ta.track_id
-            JOIN track_genres tg ON tg.track_id = t.id
             LEFT JOIN local_play_stats lps ON lps.track_id = t.id
-            WHERE tg.genre_id = (SELECT id FROM g)
+            WHERE EXISTS (
+                SELECT 1 FROM media_files mf
+                JOIN album_variants av ON av.id = mf.album_variant_id
+                JOIN album_genres ag ON ag.album_id = av.album_id
+                WHERE mf.track_id = t.id AND ag.genre_id = (SELECT id FROM g)
+            )
             GROUP BY a.id, a.name
             HAVING COUNT(DISTINCT t.id) >= 5
         )
@@ -177,7 +181,7 @@ def get_genre(genre_id: str) -> dict:
                    a.name AS artist,
                    mf.duration_seconds AS duration,
                    GREATEST(
-                       CASE WHEN tg.track_id IS NOT NULL THEN 100 ELSE 0 END,
+                       CASE WHEN ag.album_id IS NOT NULL THEN 100 ELSE 0 END,
                        COALESCE(aw.weight, 0)
                    )::int AS relevance_pct,
                    COALESCE(lps.play_count, 0)::int AS local_plays,
@@ -188,14 +192,14 @@ def get_genre(genre_id: str) -> dict:
             JOIN media_files mf ON mf.track_id = t.id AND mf.is_analysis_source = true
             JOIN album_variants av ON av.id = mf.album_variant_id
             JOIN albums al ON al.id = av.album_id
-            LEFT JOIN track_genres tg
-                   ON tg.track_id = t.id AND tg.genre_id = (SELECT id FROM g)
+            LEFT JOIN album_genres ag
+                   ON ag.album_id = av.album_id AND ag.genre_id = (SELECT id FROM g)
             LEFT JOIN artist_weights aw ON aw.artist_id = ta.artist_id
             LEFT JOIN local_play_stats lps ON lps.track_id = t.id
             LEFT JOIN track_stats ts
                    ON ts.track_id = t.id AND ts.source = 'lastfm'
             WHERE GREATEST(
-                      CASE WHEN tg.track_id IS NOT NULL THEN 100 ELSE 0 END,
+                      CASE WHEN ag.album_id IS NOT NULL THEN 100 ELSE 0 END,
                       COALESCE(aw.weight, 0)
                   ) > 0
             ORDER BY t.id, COALESCE(ts.playcount, 0) DESC,

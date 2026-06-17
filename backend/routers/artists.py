@@ -136,7 +136,7 @@ def get_artist(
     # page (so artist-X-on-genre-Y and genre-Y-on-artist-X stay in
     # sync). An artist is "in" a genre if either the Last.fm artist-
     # tag for it carries weight >= 10 OR the artist has at least 5
-    # primary tracks tagged with that genre via track_genres.
+    # primary tracks on albums tagged with that genre (album_genres).
     # Last.fm weight wins on sort; track count is the supplementary
     # signal that surfaces niche artists whose Last.fm tagging is
     # weak but whose tracks are clearly genre-tagged in the library.
@@ -161,8 +161,10 @@ def get_artist(
             FROM tracks t
             JOIN track_artists ta
               ON ta.track_id = t.id AND ta.role = 'primary'
-            JOIN track_genres tgr ON tgr.track_id = t.id
-            JOIN genres g ON g.id = tgr.genre_id
+            JOIN media_files mf ON mf.track_id = t.id
+            JOIN album_variants av ON av.id = mf.album_variant_id
+            JOIN album_genres ag ON ag.album_id = av.album_id
+            JOIN genres g ON g.id = ag.genre_id
             WHERE ta.artist_id = %(id)s::uuid
             GROUP BY g.id, g.name
             HAVING COUNT(DISTINCT t.id) >= 5

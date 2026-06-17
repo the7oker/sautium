@@ -116,19 +116,16 @@ def get_album(
         album["quality"] = "lossy"
     album["total_duration"] = float(qrow["total_duration"] or 0)
 
-    # Top 3 genres by occurrence across the album's tracks. Genres are
-    # track-level metadata, identical across variants, so this stays
-    # album-level even when a specific variant is requested.
+    # Top 3 genres for the album, deduped across sources (filetag/mb) by
+    # genre_id and ranked by count (file occurrences or MB tag votes).
+    # Genre is album-grain, so this is a direct read — no track rollup.
     album["genres"] = db_query("""
-        SELECT g.id::text AS id, g.name, COUNT(*) AS occurrences
-        FROM albums al
-        JOIN album_variants av ON av.album_id = al.id
-        JOIN media_files mf ON mf.album_variant_id = av.id
-        JOIN track_genres tg ON tg.track_id = mf.track_id
-        JOIN genres g ON g.id = tg.genre_id
-        WHERE al.id = %(id)s::uuid
+        SELECT g.id::text AS id, g.name, MAX(ag.count) AS occurrences
+        FROM album_genres ag
+        JOIN genres g ON g.id = ag.genre_id
+        WHERE ag.album_id = %(id)s::uuid
         GROUP BY g.id, g.name
-        ORDER BY occurrences DESC, g.name
+        ORDER BY MAX(ag.count) DESC NULLS LAST, g.name
         LIMIT 3
     """, {"id": album_id})
 

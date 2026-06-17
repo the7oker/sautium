@@ -127,15 +127,22 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
         "artist_id",
     )
 
-    # -- Related genres (via track_genres) --
+    # -- Related genres (album-grain: genres of the albums containing these tracks).
+    #    album_genres is local-only (albums don't sync), so we share only the genre
+    #    entities + their descriptions, derived via the sender's own albums. --
     genres = _uuid_list(
-        q("SELECT DISTINCT genre_id FROM track_genres WHERE track_id = ANY(%s::uuid[])"),
+        q("""SELECT DISTINCT ag.genre_id FROM album_genres ag
+             INNER JOIN album_variants av ON av.album_id = ag.album_id
+             INNER JOIN media_files mf ON mf.album_variant_id = av.id
+             WHERE mf.track_id = ANY(%s::uuid[])"""),
         "genre_id",
     )
     genre_descriptions = _uuid_list(
         q("""SELECT DISTINCT gd.genre_id FROM genre_descriptions gd
-             INNER JOIN track_genres tg ON tg.genre_id = gd.genre_id
-             WHERE tg.track_id = ANY(%s::uuid[])"""),
+             INNER JOIN album_genres ag ON ag.genre_id = gd.genre_id
+             INNER JOIN album_variants av ON av.album_id = ag.album_id
+             INNER JOIN media_files mf ON mf.album_variant_id = av.id
+             WHERE mf.track_id = ANY(%s::uuid[])"""),
         "genre_id",
     )
 
@@ -172,7 +179,7 @@ def _pull_simple(conn, category: str, sql: str, uuids: list[str],
 
 
 def pull_tracks(conn, uuids: list[str]) -> dict:
-    """Pull track metadata with associated artists and genres."""
+    """Pull track metadata with associated artists."""
     if not uuids:
         return {"category": "tracks", "items": []}
 
@@ -191,15 +198,6 @@ def pull_tracks(conn, uuids: list[str]) -> dict:
            ORDER BY ta.track_id, ta.role""",
         [uuids],
     )
-    genres = db_query(
-        conn,
-        """SELECT tg.track_id::text, g.id::text AS genre_uuid, g.name AS genre_name
-           FROM track_genres tg
-           INNER JOIN genres g ON g.id = tg.genre_id
-           WHERE tg.track_id = ANY(%s::uuid[])""",
-        [uuids],
-    )
-
     artists_by_track: dict[str, list] = {}
     for a in artists:
         tid = str(a["track_id"])
@@ -209,14 +207,6 @@ def pull_tracks(conn, uuids: list[str]) -> dict:
             "role": a["role"],
         })
 
-    genres_by_track: dict[str, list] = {}
-    for g in genres:
-        tid = str(g["track_id"])
-        genres_by_track.setdefault(tid, []).append({
-            "genre_uuid": g["genre_uuid"],
-            "name": g["genre_name"],
-        })
-
     items = []
     for t in tracks:
         uuid = t["track_uuid"]
@@ -224,7 +214,6 @@ def pull_tracks(conn, uuids: list[str]) -> dict:
             "track_uuid": uuid,
             "title": t["title"],
             "artists": artists_by_track.get(uuid, []),
-            "genres": genres_by_track.get(uuid, []),
         })
 
     return {"category": "tracks", "items": items}

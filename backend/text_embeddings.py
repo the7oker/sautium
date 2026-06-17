@@ -2,7 +2,7 @@
 Text embedding generation using sentence-transformers.
 Generates 1024-dimensional text embeddings from track metadata for semantic search.
 
-Operates on tracks (one embedding per track). Uses track_artists, track_genres,
+Operates on tracks (one embedding per track). Uses track_artists, album_genres,
 and enrichment data (artist_bios, tags) to compose descriptive text.
 """
 
@@ -110,12 +110,12 @@ class TextEmbeddingGenerator:
                 ORDER BY mf.is_analysis_source DESC, mf.id
                 LIMIT 1
             ) mf_rep ON true
-            -- Aggregated genres
+            -- Aggregated genres (album-grain, via the representative album)
             LEFT JOIN LATERAL (
-                SELECT STRING_AGG(g.name, ', ' ORDER BY g.name) as genres
-                FROM track_genres tg
-                JOIN genres g ON tg.genre_id = g.id
-                WHERE tg.track_id = t.id
+                SELECT STRING_AGG(DISTINCT g.name, ', ' ORDER BY g.name) as genres
+                FROM album_genres ag
+                JOIN genres g ON g.id = ag.genre_id
+                WHERE ag.album_id = mf_rep.album_id
             ) g_agg ON true
             -- Aggregated artist tags (top 10 by weight)
             LEFT JOIN LATERAL (

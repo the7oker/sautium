@@ -59,7 +59,7 @@ def _apply_filters(filters: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
         params["f_album"] = f"%{filters['album']}%"
 
     if filters.get("genre"):
-        clauses.append("EXISTS (SELECT 1 FROM track_genres tg JOIN genres g ON tg.genre_id = g.id WHERE tg.track_id = t.id AND g.name ILIKE :f_genre)")
+        clauses.append("EXISTS (SELECT 1 FROM media_files mf2 JOIN album_variants av2 ON av2.id = mf2.album_variant_id JOIN album_genres ag ON ag.album_id = av2.album_id JOIN genres g ON g.id = ag.genre_id WHERE mf2.track_id = t.id AND g.name ILIKE :f_genre)")
         params["f_genre"] = f"%{filters['genre']}%"
 
     if filters.get("is_lossless") is not None:
@@ -172,8 +172,8 @@ def search_similar_tracks(
     # Get the source track info
     source_sql = text("""
         SELECT mf.id, t.title, a.name as artist, al.title as album,
-               (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
-                WHERE tg.track_id = t.id LIMIT 1) as genre,
+               (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
+                WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre,
                mf.duration_seconds, mf.sample_rate,
                mf.bit_depth, mf.is_lossless, t.id as track_id
         FROM media_files mf
@@ -404,8 +404,8 @@ def search_by_features(
 
     query_sql = text(f"""
         SELECT DISTINCT mf.id, t.title, a.name as artist, al.title as album,
-               (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
-                WHERE tg.track_id = t.id LIMIT 1) as genre,
+               (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
+                WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre,
                mf.is_lossless,
                mf.duration_seconds,
                af.bpm, af.key, af.mode, af.vocal_instrumental,
@@ -487,8 +487,11 @@ def search_by_lyrics(
             SELECT DISTINCT ON (matches.track_id)
                    mf_rep.id, t.title, a.name as artist,
                    mf_rep.album_title as album,
-                   (SELECT g.name FROM track_genres tg JOIN genres g ON tg.genre_id = g.id
-                    WHERE tg.track_id = t.id LIMIT 1) as genre,
+                   (SELECT g.name FROM media_files mf2
+                      JOIN album_variants av2 ON av2.id = mf2.album_variant_id
+                      JOIN album_genres ag ON ag.album_id = av2.album_id
+                      JOIN genres g ON g.id = ag.genre_id
+                    WHERE mf2.track_id = t.id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre,
                    mf_rep.duration_seconds,
                    mf_rep.sample_rate, mf_rep.bit_depth, mf_rep.is_lossless,
                    matches.similarity
@@ -659,14 +662,19 @@ def search_genres_by_description(
             g.id as genre_id,
             g.name as genre_name,
             matches.similarity,
-            (SELECT COUNT(*) FROM track_genres tg2 WHERE tg2.genre_id = g.id) as track_count,
+            (SELECT COUNT(DISTINCT mf.track_id) FROM album_genres ag2
+                JOIN album_variants av ON av.album_id = ag2.album_id
+                JOIN media_files mf ON mf.album_variant_id = av.id
+             WHERE ag2.genre_id = g.id) as track_count,
             (SELECT STRING_AGG(DISTINCT sub.name, ', ' ORDER BY sub.name)
              FROM (
                 SELECT a.name
-                FROM track_genres tg3
-                JOIN track_artists ta ON tg3.track_id = ta.track_id AND ta.role = 'primary'
+                FROM album_genres ag3
+                JOIN album_variants av ON av.album_id = ag3.album_id
+                JOIN media_files mf ON mf.album_variant_id = av.id
+                JOIN track_artists ta ON ta.track_id = mf.track_id AND ta.role = 'primary'
                 JOIN artists a ON ta.artist_id = a.id
-                WHERE tg3.genre_id = g.id
+                WHERE ag3.genre_id = g.id
                 LIMIT 5
              ) sub
             ) as sample_artists

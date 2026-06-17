@@ -17,12 +17,13 @@ from typing import Optional, Dict, Any, List, Tuple
 import mutagen
 from mutagen.flac import FLAC
 from mutagen import MutagenError
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from tqdm import tqdm
 
 from config import settings
 from models import (
-    Artist, Album, Track, TrackArtist, TrackGenre, AlbumArtist,
+    Artist, Album, Track, TrackArtist, AlbumArtist,
     AlbumVariant, MediaFile, Genre,
 )
 from database import get_db_context
@@ -31,6 +32,17 @@ from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, is_lossl
 from album_identity import assign_dir_albums
 
 logger = logging.getLogger(__name__)
+
+# Genre is album-grain: each imported media file adds +1 to its album's count
+# for every distinct genre in its file tag. A file is imported at most once
+# (skip_existing + file_path UNIQUE) and the whole file's writes share one
+# savepoint, so this never double-counts on re-scan.
+_ALBUM_GENRE_UPSERT = text("""
+    INSERT INTO album_genres (album_id, genre_id, source, count)
+    VALUES (:album_id, :genre_id, 'filetag', 1)
+    ON CONFLICT (album_id, genre_id, source)
+    DO UPDATE SET count = album_genres.count + 1
+""")
 
 # Supported audio extensions
 AUDIO_EXTENSIONS = {'.flac', '.ape', '.wav', '.aiff', '.wv', '.tta', '.dsf', '.dff', '.mp3', '.ogg', '.m4a'}
@@ -523,7 +535,6 @@ class LibraryScanner:
         # Association caches — avoid repeated DB existence checks.
         assoc_ta: set = set()   # (track_id, artist_id, role)
         assoc_aa: set = set()   # (album_id, artist_id, role)
-        assoc_tg: set = set()   # (track_id, genre_id)
 
         # Folder→albums pre-pass: resolve box-set / singles / mix directories
         # once (album_identity.assign_dir_albums).
@@ -690,11 +701,11 @@ class LibraryScanner:
                                 ))
                             assoc_aa.add(aa_key)
 
-                        # ── Track-Genre associations ──
+                        # ── Album-Genre associations (album grain) ──
                         genre_name = metadata.get("genre")
                         if genre_name and genre_name.strip():
-                            genre_names = parse_genre_string(genre_name)
-                            for gn in genre_names:
+                            file_genre_ids: set = set()
+                            for gn in parse_genre_string(genre_name):
                                 gn = normalize_genre_name(gn)
                                 g_uid = genre_uuid(gn)
 
@@ -708,18 +719,15 @@ class LibraryScanner:
                                         db.flush()
                                     pending_cache.append(("genre", g_uid, genre))
 
-                                tg_key = (track.id, genre.id)
-                                if tg_key not in assoc_tg:
-                                    existing_tg = db.query(TrackGenre).filter(
-                                        TrackGenre.track_id == track.id,
-                                        TrackGenre.genre_id == genre.id,
-                                    ).first()
-                                    if not existing_tg:
-                                        db.add(TrackGenre(
-                                            track_id=track.id,
-                                            genre_id=genre.id,
-                                        ))
-                                    assoc_tg.add(tg_key)
+                                # One +1 per genre per file (a tag may normalize
+                                # two parts to the same genre).
+                                if genre.id in file_genre_ids:
+                                    continue
+                                file_genre_ids.add(genre.id)
+                                db.execute(_ALBUM_GENRE_UPSERT, {
+                                    "album_id": album.id,
+                                    "genre_id": genre.id,
+                                })
 
                         # ── Media file ──
                         media_file = MediaFile(
