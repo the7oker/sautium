@@ -115,13 +115,17 @@ def migrate(dry_run: bool = True) -> dict:
             af = [{"album": f["raw_album"], "disc": f["disc_number"], "track": f["track_number"],
                    "artist_key": f["raw_album_artist"] or f["raw_artist"], "path": f["file_path"]}
                   for f in files]
-            # Only restructure real box sets / singles / mixes. A single
-            # release-group folder is left to the scanner (which unifies its
-            # variant on import) and to canon — recomputing its identity here from
-            # raw tags would fight canon's renames.
+            # Restructure real box sets / singles / mixes, AND consolidate a dir
+            # whose single release group fragmented across many album rows — a VA
+            # comp with no album_artist tag scanned before the per-(dir, album)
+            # unification minted one album per track. A single-group dir that is
+            # already ONE album is left to the scanner + canon (recomputing its
+            # identity here would fight canon's renames).
             tracks = [(f["album"], f["disc"], f["track"]) for f in af]
             akeys = [f["artist_key"] for f in af]
-            if dir_group_count(af) < 2 and not is_reshapeable_mix(tracks, akeys):
+            cur_albums = {f["cur_album_id"] for f in files}
+            if (dir_group_count(af) < 2 and not is_reshapeable_mix(tracks, akeys)
+                    and len(cur_albums) <= 1):
                 continue
             assignment = assign_dir_albums(_basename(dir_path), af)
             if assignment is None:
