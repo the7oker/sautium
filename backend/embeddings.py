@@ -255,21 +255,21 @@ class AudioEmbeddingGenerator:
 
             # Query tracks without embeddings OR with stale embeddings
             # (analysis source changed since embedding was generated)
+            # Driven from media_files (is_analysis_source) — the OWNED set.
+            # tracks now holds millions of trackless phantom rows; driving from
+            # tracks would scan them all to find owned ones needing an embedding.
             query_sql = """
                 SELECT t.id as track_id, mf.id as media_file_id,
                        mf.file_path, mf.bit_depth,
                        mf.sample_rate, mf.is_lossless,
                        mf.duration_seconds
-                FROM tracks t
+                FROM media_files mf
+                JOIN tracks t ON t.id = mf.track_id
                 LEFT JOIN embeddings e ON e.track_id = t.id
-                JOIN LATERAL (
-                    SELECT * FROM media_files
-                    WHERE track_id = t.id AND is_analysis_source = true
-                    ORDER BY id LIMIT 1
-                ) mf ON true
-                WHERE e.id IS NULL
-                   OR (e.source_media_file_id IS NOT NULL
-                       AND e.source_media_file_id != mf.id)
+                WHERE mf.is_analysis_source = true
+                  AND (e.id IS NULL
+                       OR (e.source_media_file_id IS NOT NULL
+                           AND e.source_media_file_id != mf.id))
             """
             params = {}
 
