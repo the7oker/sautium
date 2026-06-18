@@ -526,6 +526,11 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
             if album_id not in have:
                 stats["tracks"] += _persist_phantom_tracklist(
                     album_id, artist_id, artist_name, rg_mbid)
+        # Genres for the freshly-minted shelf (release_group_tag) — so a new
+        # phantom album carries genres at creation, not only after a dump
+        # reload runs the full refresh_album_mb_genres sweep.
+        from canon.genres import materialize_album_genres
+        materialize_album_genres([a for a, _ in phantoms])
 
     _reconcile_phantoms(artist_id, list(missing.keys()))
     _stamp_sync(artist_id)

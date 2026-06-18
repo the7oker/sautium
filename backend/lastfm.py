@@ -337,7 +337,7 @@ class LastFmService:
         Returns the number of new edges stored.
         """
         from uuid_utils import artist_uuid
-        from normalize_artists import detect_compound_type
+        from canon.split import detect_compound_type
 
         seed = str(artist_id)
         seen: set = set()   # sids already handled this batch — pending db.add()s

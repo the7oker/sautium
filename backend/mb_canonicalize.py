@@ -26,11 +26,8 @@ import mb_audit
 import mb_backend as mb
 from database import get_db_context
 from db_pool import db_query
-from normalize_artists import (
-    detect_compound_type,
-    normalize_compound_artist,
-    recanonicalize_artist,
-)
+from canon.split import detect_compound_type, normalize_compound_artist
+from canon.identity import recanonicalize_artist
 
 logger = logging.getLogger(__name__)
 

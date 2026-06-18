@@ -259,7 +259,7 @@ def _mb_worker(force: bool) -> None:
         # canonicalizes instead of silently skipping. No backend restart needed.
         import mb_backend as mb
         mb.refresh()
-        from mb_normalize import canonicalize_pending
+        from canon.content import canonicalize_pending
         canon = canonicalize_pending()
         logger.info(f"Post-load MB canon: {canon}")
         _mb_progress({"phase": "done"})

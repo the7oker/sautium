@@ -22,7 +22,7 @@ def _dump_loaded() -> bool:
         return False  # tables not yet created (fresh install) → API
 
 
-# True = the offline twin is active → BULK canon (mb_normalize) is safe (no IP-ban risk).
+# True = the offline twin is active → BULK canon (canon.content) is safe (no IP-ban risk).
 # When False, callers that bulk-canon must NO-OP, not fall back to the HTTP API (MB is an
 # optional layer; sync/enrich proceed on tier-3 deterministic names without it).
 

@@ -559,7 +559,7 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
             # Run artist normalization Pass 1 (safe patterns only)
             state["progress"] = "Normalizing artists..."
             try:
-                from normalize_artists import normalize_artists as do_normalize
+                from canon.migrations import normalize_artists as do_normalize
                 from database import get_db_context
                 with get_db_context() as db:
                     norm_stats = do_normalize(db, pass1=True)
@@ -577,7 +577,7 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                 state["progress"] = "Canonicalizing (MusicBrainz)..."
                 notify_library_subscribers()
                 try:
-                    from mb_normalize import canonicalize_pending
+                    from canon.content import canonicalize_pending
                     canon_stats = canonicalize_pending()
                     if canon_stats.get("artists"):
                         result["mb_canon"] = canon_stats
@@ -706,7 +706,7 @@ async def normalize_artists_endpoint(
     dry_run: bool = False,
 ) -> Dict[str, Any]:
     """Run artist normalization — deterministic, offline (splits feat./vs. only)."""
-    from normalize_artists import normalize_artists as do_normalize
+    from canon.migrations import normalize_artists as do_normalize
     from database import get_db_context
 
     try:

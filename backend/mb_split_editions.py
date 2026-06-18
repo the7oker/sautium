@@ -1,6 +1,6 @@
 """One-time migration: split conflated editions and attach scattered ones.
 
-``mb_normalize.apply_editions`` is the engine; this runs it across the WHOLE
+``canon.content.apply_editions`` is the engine; this runs it across the WHOLE
 owned library once, retrofitting data that predates the edition-aware canon
 (``canonicalize_pending`` only applies it to freshly-scanned artists). It splits
 the differing-tracklist variants wrongly collapsed into one album row onto their
@@ -25,8 +25,8 @@ import logging
 import mb_backend as mb
 from database import SessionLocal
 from db_pool import db_execute, db_query
-from mb_normalize import apply_editions
-from normalize_artists import recanonicalize_album_variants
+from canon.content import apply_editions
+from canon.identity import recanonicalize_album_variants
 from sqlalchemy import text as _sql
 from uuid_utils import album_uuid
 

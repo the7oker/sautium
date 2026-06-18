@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 import mb_backend as mb
 from db_pool import db_query, db_query_one
 from discography import release_match_key
-from normalize_artists import detect_compound_type
+from canon.split import detect_compound_type
 from uuid_utils import normalize
 
 logger = logging.getLogger(__name__)

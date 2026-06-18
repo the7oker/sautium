@@ -11,7 +11,7 @@ This module groups those edition rows back into the logical release group and
 labels each edition with the part of its title that distinguishes it.
 
 Grouping is `musicbrainz_id`-first (the authoritative signal — once
-`mb_normalize` relaxes RG matching, even bootleg editions carry the RG MBID),
+`canon.content` relaxes RG matching, even bootleg editions carry the RG MBID),
 with a bounded same-artist fallback so editions MB models as *separate* release
 groups (e.g. "Blade Runner (New American Orchestra)") still land together, while
 box-set members ("The Complete Pop Albums: Romanza" vs ": Mi Navidad", distinct

@@ -451,7 +451,7 @@ def search_text(query, limit, min_similarity, artist, genre, lossless):
 @click.option("--verify-lastfm", is_flag=True, help="Verify individual artists exist on Last.fm (slow)")
 def normalize_artists_cmd(dry_run, verify_lastfm):
     """Normalize compound artist names (split 'A & B' into separate artists)."""
-    from normalize_artists import normalize_artists, show_artist_statistics
+    from canon.migrations import normalize_artists, show_artist_statistics
 
     click.echo("🎵 Normalizing compound artist names...")
     if dry_run:

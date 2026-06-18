@@ -47,6 +47,7 @@ _ARTISTS_PER_BATCH = 30           # Last.fm artist.getInfo calls per batch
 _GENRES_PER_BATCH = 20            # Last.fm tag.getInfo calls per batch
 _LASTFM_DELAY_S = 0.2             # ~5 req/sec, the Last.fm published limit
 
+_CANONIZE_PER_BATCH = 50          # uncanonized artists distilled per batch (Layer 2: content + phantom)
 _DISCOGRAPHY_PER_BATCH = 50       # canonized artists reconciled per batch (local MB dump — DB-only)
 _DISCOGRAPHY_STALE_DAYS = 30      # re-sync an artist's discography at most monthly
 
@@ -334,6 +335,22 @@ def _step_missing_genres(limit: int) -> Dict[str, int]:
     return stats
 
 
+def _step_canonize(limit: int) -> Dict[str, int]:
+    """Distill the uncanonized residue (Layer 2 entry point): owned artists via
+    content overlap, trackless phantoms via genre overlap. Runs before
+    discography so freshly-canonized artists get their shelves the same batch."""
+    from canon import distill_uncanonized
+
+    try:
+        out = distill_uncanonized(limit=int(limit))
+    except Exception as e:
+        logger.error(f"Background canonize failed: {e}")
+        return {"canonized": 0, "errors": 1}
+    ph = out.get("phantom") or {}
+    out["canonized"] = ph.get("canonized", 0)
+    return out
+
+
 def _step_sync_discographies(limit: int) -> Dict[str, int]:
     """Reconcile missing-album discovery for canonized artists whose data
     is stale (`_DISCOGRAPHY_STALE_DAYS`), in `stale_canonized_artists`
@@ -378,7 +395,7 @@ def _step_sync_discographies(limit: int) -> Dict[str, int]:
 def _run_once() -> Dict[str, Any]:
     """Run one full batch (all five steps). Honours cancel between steps."""
     summary = {"track_stats": {}, "lyrics": {}, "artists": {},
-               "genres": {}, "discography": {}}
+               "genres": {}, "canonize": {}, "discography": {}}
 
     if _cancel_flag():
         return summary
@@ -407,6 +424,15 @@ def _run_once() -> Dict[str, Any]:
     _set(current_step="genres")
     summary["genres"] = _step_missing_genres(_GENRES_PER_BATCH)
     _bump("genres", summary["genres"].get("success", 0))
+
+    if _cancel_flag():
+        return summary
+
+    # Layer 2: distill uncanonized artists (content + phantom) BEFORE
+    # discography, so a freshly-canonized artist gets its shelf this batch.
+    _set(current_step="canonize")
+    summary["canonize"] = _step_canonize(_CANONIZE_PER_BATCH)
+    _bump("canonize", summary["canonize"].get("canonized", 0))
 
     if _cancel_flag():
         return summary

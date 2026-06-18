@@ -91,7 +91,7 @@ def run_parallel_enrichment(
     if progress_cb:
         progress_cb("Normalizing artists...")
     try:
-        from normalize_artists import normalize_artists as do_normalize
+        from canon.migrations import normalize_artists as do_normalize
         with get_db_context() as db:
             norm_stats = do_normalize(db, pass1=True)  # pass2 (Last.fm split) removed — non-deterministic, forks UUIDs
             splits = norm_stats.get('pass1', {}).get('split', 0)

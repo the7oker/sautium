@@ -19,11 +19,8 @@ from sqlalchemy import text
 
 import mb_audit
 from database import get_db_context
-from normalize_artists import (
-    detect_compound_type,
-    normalize_compound_artist,
-    recanonicalize_artist,
-)
+from canon.split import detect_compound_type, normalize_compound_artist
+from canon.identity import recanonicalize_artist
 
 logger = logging.getLogger(__name__)
 
