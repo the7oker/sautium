@@ -540,18 +540,23 @@ class LastFmService:
         """
         Fetch Last.fm data for an artist and store in database.
 
-        Bio/tags are always fetched. Similar artists are only fetched
-        if the artist has tracks in the catalog (prevents similar-of-similar).
+        Bio/tags are always fetched. Similar artists are only fetched for
+        OWNED artists (with a physical file) — prevents similar-of-similar.
 
         Returns summary dict with status and stored flags.
         """
         logger.info(f"Enriching artist: {artist_name} (ID: {artist_id})")
 
-        # Only fetch similar for artists with tracks in catalog
-        has_tracks = db.execute(text("""
-            SELECT 1 FROM track_artists WHERE artist_id = :id LIMIT 1
+        # Gate similars on OWNED (a physical file), NOT EXISTS(track_artists):
+        # phantom artists gained track_artists from materialized phantom
+        # tracklists, so track_artists no longer means "in catalog". Without
+        # the media_files join, ~16k phantoms would fetch similars -> blowup.
+        is_owned = db.execute(text("""
+            SELECT 1 FROM track_artists ta
+            JOIN media_files mf ON mf.track_id = ta.track_id
+            WHERE ta.artist_id = :id LIMIT 1
         """), {"id": str(artist_id)}).first() is not None
-        fetch_similar = has_tracks
+        fetch_similar = is_owned
 
         try:
             data = self._with_retry(
@@ -1107,7 +1112,9 @@ def backfill_similar(limit: Optional[int] = None, delay: float = 0.2,
     sql = text(f"""
         SELECT a.id, a.name
         FROM artists a
-        WHERE EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = a.id)
+        WHERE EXISTS (SELECT 1 FROM track_artists ta
+                      JOIN media_files mf ON mf.track_id = ta.track_id
+                      WHERE ta.artist_id = a.id)
           {where}
         ORDER BY a.last_similar_sync NULLS FIRST, a.name
         {lim}

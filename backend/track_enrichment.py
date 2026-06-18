@@ -322,22 +322,26 @@ def _fetch_lyrics_batch(
     stats = {"processed": 0, "found": 0, "not_found": 0, "errors": 0}
 
     with get_db_context() as db:
+        # Driven from media_files (is_analysis_source) — the OWNED set (~37k),
+        # NOT the tracks table, which now holds millions of trackless phantom
+        # rows from missing-album discovery. Walking tracks by title (the old
+        # ORDER BY) scanned all 2.7M to find 50 owned ones missing lyrics — the
+        # recurring multi-hour runaway query. No ORDER BY: an enrichment batch
+        # only needs to make progress; a processed track gains a lyrics row or
+        # a 'not_found' marker and drops out of the next batch.
         query_sql = """
             SELECT t.id as track_id, t.title,
                    a.name as artist,
                    al.title as album,
                    mf.duration_seconds
-            FROM tracks t
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            JOIN LATERAL (
-                SELECT * FROM media_files
-                WHERE track_id = t.id AND is_analysis_source = true
-                ORDER BY id LIMIT 1
-            ) mf ON true
-            JOIN album_variants av ON mf.album_variant_id = av.id
-            JOIN albums al ON av.album_id = al.id
-            WHERE NOT EXISTS (
+            FROM media_files mf
+            JOIN tracks t ON t.id = mf.track_id
+            JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+            JOIN artists a ON a.id = ta.artist_id
+            JOIN album_variants av ON av.id = mf.album_variant_id
+            JOIN albums al ON al.id = av.album_id
+            WHERE mf.is_analysis_source = true
+            AND NOT EXISTS (
                 SELECT 1 FROM track_lyrics tl WHERE tl.track_id = t.id
             )
             AND NOT EXISTS (
@@ -348,7 +352,6 @@ def _fetch_lyrics_batch(
                 AND em.metadata_type = 'lyrics'
                 AND em.fetch_status = 'not_found'
             )
-            ORDER BY t.title
         """
         if limit:
             query_sql += f" LIMIT {int(limit)}"
