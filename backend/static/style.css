@@ -1882,6 +1882,26 @@ body.has-miniplayer .ai-fab {
 .detail-screen .album-tile.is-unowned .album-tile-year {
   color: var(--color-text-dim);
 }
+
+/* Phantom (unowned but canonized) artist tile — surfaced from out-of-catalog
+   similar/discovery data. Dimmed like an unowned album so it reads as "not in
+   your library" beside the solid owned artists. Mirrors .album-tile.is-unowned. */
+.artist-tile.is-phantom .artist-avatar,
+.d-artist-tile.is-phantom .d-artist-avatar,
+.similar-artist.is-phantom .similar-avatar {
+  opacity: 0.55;
+  transition: opacity var(--dur-fast) var(--ease-standard);
+}
+.artist-tile.is-phantom:active .artist-avatar,
+.d-artist-tile.is-phantom:active .d-artist-avatar,
+.similar-artist.is-phantom:active .similar-avatar {
+  opacity: 0.8;
+}
+.artist-tile.is-phantom .artist-name,
+.d-artist-tile.is-phantom .d-artist-name,
+.similar-artist.is-phantom .similar-name {
+  color: var(--color-text-muted);
+}
 .album-tile-buy {
   position: absolute;
   left: calc(6 * var(--px));

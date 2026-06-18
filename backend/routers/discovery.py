@@ -383,7 +383,10 @@ def _trigram_artists(q: str, limit: int) -> list[dict]:
                a.gender AS gender,
                a.is_vocalist AS is_vocalist,
                (SELECT COUNT(*) FROM track_artists ta
-                WHERE ta.artist_id = a.id AND ta.role = 'primary') AS track_count
+                WHERE ta.artist_id = a.id AND ta.role = 'primary') AS track_count,
+               EXISTS (SELECT 1 FROM media_files mf
+                       JOIN track_artists ta2 ON ta2.track_id = mf.track_id
+                       WHERE ta2.artist_id = a.id) AS is_owned
         FROM artists a
         WHERE (similarity(a.name, %(q)s) >= 0.5
                OR lower(a.name) LIKE lower(%(prefix)s)

@@ -379,10 +379,17 @@ def get_artist(
                 JOIN tracks t2 ON t2.id = mf2.track_id
                 JOIN track_artists ta2 ON ta2.track_id = t2.id AND ta2.role = 'primary'
                 WHERE ta2.artist_id = a.id
-                LIMIT 1) AS media_file_id
+                LIMIT 1) AS media_file_id,
+               EXISTS (SELECT 1 FROM media_files mf3
+                       JOIN track_artists ta3 ON ta3.track_id = mf3.track_id
+                       WHERE ta3.artist_id = a.id) AS is_owned
         FROM (SELECT other_id, MAX(match_score) AS match_score
               FROM edges GROUP BY other_id) e
         JOIN artists a ON a.id = e.other_id
+        -- Show only owned or phantom-CANONIZED similars; hide bare phantom-
+        -- uncanonized rows (no tracks, no MBID — just a Last.fm name).
+        WHERE EXISTS (SELECT 1 FROM track_artists ta4 WHERE ta4.artist_id = a.id)
+           OR EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
         ORDER BY e.match_score DESC NULLS LAST, a.name
     """, {"id": artist_id})
 

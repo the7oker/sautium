@@ -95,7 +95,10 @@ def get_genre(genre_id: str) -> dict:
         SELECT id, name,
                MAX(lastfm_weight)::int AS weight,
                MAX(track_count)::int   AS track_count,
-               MAX(plays)::int         AS plays
+               MAX(plays)::int         AS plays,
+               EXISTS (SELECT 1 FROM media_files mf
+                       JOIN track_artists ta ON ta.track_id = mf.track_id
+                       WHERE ta.artist_id = u.id::uuid) AS is_owned
         FROM (SELECT * FROM via_tag UNION ALL SELECT * FROM via_track) u
         GROUP BY id, name
         ORDER BY weight DESC, track_count DESC, plays DESC, name

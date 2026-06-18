@@ -2226,6 +2226,7 @@
     const tile = document.createElement('button');
     tile.type = 'button';
     tile.className = 'artist-tile';
+    if (item.is_owned === false) tile.classList.add('is-phantom');
     const ph = avatarPlaceholder(name);
     const initials = `<span class="artist-avatar-initials">${escapeHtml(ph.initials)}</span>`;
     tile.innerHTML = `
@@ -2988,12 +2989,13 @@
     return `<div class="shuffle-row d-artist-row">${
       items.map(a => {
         const ph = avatarPlaceholder(a.artist || a.name || '?');
+        const phantom = a.is_owned === false ? ' is-phantom' : '';
         const url = coverUrl({cover_id: a.cover_id, media_file_id: a.media_file_id});
         const inner = url
           ? `<img src="${url}" alt="" loading="lazy" onerror="this.style.display='none'">`
           : `<span class="d-artist-initials">${escapeHtml(ph.initials)}</span>`;
         return `
-          <button class="d-artist-tile" type="button"
+          <button class="d-artist-tile${phantom}" type="button"
                   data-artist-id="${escapeHtml(a.artist_id || '')}">
             <div class="d-artist-avatar"
                  style="background: ${ph.bg};">${inner}</div>
@@ -3340,8 +3342,9 @@
               style="--cover-bg-1: ${sph.bg}; --cover-bg-2: var(--color-foundation);">${
                 escapeHtml(sph.initials)}</div>`;
       const inner = artistAvatarInner(s.id, initialsBlock, coverUrl(s));
+      const sphantom = s.is_owned === false ? ' is-phantom' : '';
       return `
-        <button class="similar-artist" type="button" data-artist-id="${escapeHtml(s.id)}">
+        <button class="similar-artist${sphantom}" type="button" data-artist-id="${escapeHtml(s.id)}">
           <div class="similar-avatar">${inner}</div>
           <div class="similar-name">${escapeHtml(s.name || '')}</div>
         </button>`;
@@ -4328,8 +4331,9 @@
       const ph = avatarPlaceholder(a.name || '?');
       const initials = `<span class="artist-avatar-initials">${
         escapeHtml(ph.initials)}</span>`;
+      const phantom = a.is_owned === false ? ' is-phantom' : '';
       return `
-        <button class="artist-tile" type="button"
+        <button class="artist-tile${phantom}" type="button"
                 data-artist-id="${escapeHtml(a.id)}">
           <div class="artist-avatar" style="background: ${ph.bg};">${
             artistAvatarInner(a.id, initials)
