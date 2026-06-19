@@ -128,10 +128,16 @@ def _candidates(name: str) -> list:
 
 
 # MB's style guide stores apostrophes as U+2019 and hyphens as U+2010, while
-# library/Last.fm names use ASCII — so 'Anita O'Day' / 'VC-118A' miss the exact
-# index against 'Anita O’Day' / 'VC‐118A'. This variant re-spells to MB's form so
-# they match off the existing lower(name) index (no fuzzy, no new index needed).
-_MB_PUNCT = str.maketrans({"'": "’", "-": "‐"})
+# library/Last.fm names use ASCII (and assorted apostrophe stand-ins: backtick,
+# acute accent) — so 'Anita O'Day' / 'Lab`s Cloud' / 'Aphrodite´s Child' / 'VC-118A'
+# miss the exact index against the MB spelling. _mb_spelling re-spells to MB's form
+# (+ collapses whitespace) so they match off the existing lower(name) index — no
+# fuzzy, no new index. Oracle-justified (canon.eval punct-bucket misses).
+_MB_PUNCT = str.maketrans({"'": "’", "`": "’", "´": "’", "-": "‐"})
+
+
+def _mb_spelling(name: str) -> str:
+    return " ".join(name.translate(_MB_PUNCT).split())
 # collaboration separators — for phantom matching, alias is trusted ONLY for
 # non-compounds (a compound's 'X and Y' alias is a credit-redirect onto a member).
 _PHANTOM_SEP = r'\s+&\s+|\s+and\s+|\s+with\s+|\s*/\s*|\s*,\s*|;'
@@ -155,7 +161,7 @@ def phantom_candidate_gids(name: str) -> list:
                 seen.add(g)
                 out.append(g)
 
-    for v in set(_whole_variants(name)) | {name.translate(_MB_PUNCT)}:
+    for v in set(_whole_variants(name)) | {_mb_spelling(name)}:
         if compound:   # name-only: a compound's alias is a member credit-redirect
             add(r["gid"] for r in db_query(
                 "SELECT gid::text AS gid FROM mb_artist WHERE lower(name) = lower(%(q)s)",
