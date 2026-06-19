@@ -124,6 +124,11 @@ def _candidates(name: str) -> list:
         if g not in seen:
             seen.add(g)
             strong.append(g)
+    # unaccent bridge: ASCII-tagged name → MB's accented canonical (content gates it)
+    for g in _unaccent_gids(name):
+        if g not in seen:
+            seen.add(g)
+            strong.append(g)
     return strong
 
 
@@ -138,6 +143,23 @@ _MB_PUNCT = str.maketrans({"'": "’", "`": "’", "´": "’", "-": "‐"})
 
 def _mb_spelling(name: str) -> str:
     return " ".join(name.translate(_MB_PUNCT).split())
+
+
+def _unaccent_gids(name: str) -> list:
+    """MBIDs whose name or alias unaccent-folds equal to `name` — bridges an
+    ASCII-tagged owned/Last.fm name to MB's accented canonical ('Tomas Dvorak' →
+    'Tomáš Dvořák', 'Manuel Gottsching' → 'Göttsching') where there is no ASCII
+    alias and a query-side NFKD fold can't help (the accents are on the MB side).
+    Indexed via f_unaccent. Latin-only — CJK/Cyrillic pass through unchanged and
+    are served by the alias path instead."""
+    return [r["gid"] for r in db_query("""
+        SELECT a.gid::text AS gid FROM mb_artist a
+        WHERE f_unaccent(a.name) = f_unaccent(%(q)s)
+        UNION
+        SELECT a.gid::text FROM mb_artist a
+        JOIN mb_artist_alias al ON al.artist = a.id
+        WHERE f_unaccent(al.name) = f_unaccent(%(q)s)
+    """, {"q": name})]
 # collaboration separators — for phantom matching, alias is trusted ONLY for
 # non-compounds (a compound's 'X and Y' alias is a credit-redirect onto a member).
 _PHANTOM_SEP = r'\s+&\s+|\s+and\s+|\s+with\s+|\s*/\s*|\s*,\s*|;'
@@ -170,6 +192,7 @@ def phantom_candidate_gids(name: str) -> list:
             add(_exact_mbids(v))                    # name + alias
     if not compound:
         add(_exact_mbids(name))                     # raw-name alias (romanizations)
+        add(_unaccent_gids(name))                   # ASCII → MB-accented (Dvorak→Dvořák)
     for v in _probe_variants(name):
         add(_exact_mbids(v))
     if "," in name:

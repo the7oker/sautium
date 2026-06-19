@@ -6,6 +6,14 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS fuzzystrmatch;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS unaccent;
+
+-- IMMUTABLE unaccent wrapper (pins the dictionary) so it can back an expression
+-- index — bridges ASCII-tagged names to MB's accented canonical in canon matching
+-- ('Tomas Dvorak' → 'Tomáš Dvořák'). See canon.match._unaccent_gids.
+CREATE OR REPLACE FUNCTION f_unaccent(text) RETURNS text
+  LANGUAGE sql IMMUTABLE PARALLEL SAFE STRICT AS
+$$ SELECT lower(unaccent('unaccent', $1)) $$;
 
 -- ============================================================
 -- Enum types (created before referencing tables)
@@ -1530,6 +1538,8 @@ CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_artist   ON mb_artist_alias(artis
 CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_name_trgm ON mb_artist_alias USING gin (lower(name) gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_mb_artist_name_lower      ON mb_artist(lower(name));
 CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_name_lower ON mb_artist_alias(lower(name));
+CREATE INDEX IF NOT EXISTS idx_mb_artist_unaccent        ON mb_artist(f_unaccent(name));
+CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_unaccent  ON mb_artist_alias(f_unaccent(name));
 CREATE INDEX IF NOT EXISTS idx_mb_artist_sortname_lower  ON mb_artist(lower(sort_name));
 CREATE INDEX IF NOT EXISTS idx_mb_track_credit           ON mb_track(artist_credit);
 CREATE INDEX IF NOT EXISTS idx_mb_acn_artist            ON mb_artist_credit_name(artist);
