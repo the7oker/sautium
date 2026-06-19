@@ -1555,12 +1555,16 @@ CREATE INDEX IF NOT EXISTS idx_mb_genre_name_lower      ON mb_genre(lower(name))
 
 CREATE OR REPLACE VIEW library_stats AS
 SELECT
-    -- track-owning artists only: split markers (verified_split/verified_collab
-    -- compounds, 0 tracks) and featured-only members are bookkeeping rows whose
-    -- count varies with each node's split/merge history — they made the stat
-    -- diverge across nodes while track identity was in fact converged
+    -- artists physically in the catalogue: primary on >=1 track that has an
+    -- audio file. The media_files join drops phantom artists (similar-artist
+    -- and missing-album discovery rows with no owned files) — same physical-
+    -- presence rule as total_albums/total_tracks below. role = 'primary' also
+    -- drops split markers (verified_split/verified_collab compounds, 0 tracks)
+    -- and featured-only members: bookkeeping rows whose count diverges across
+    -- nodes with each node's split/merge history while track identity converges.
     (SELECT COUNT(*) FROM artists a
       WHERE EXISTS (SELECT 1 FROM track_artists ta
+                    JOIN media_files mf ON mf.track_id = ta.track_id
                     WHERE ta.artist_id = a.id AND ta.role = 'primary')) as total_artists,
     -- owned albums/tracks only: phantom rows (MB missing-album discovery,
     -- no variants/files) are discovery data, not library contents
