@@ -14,6 +14,15 @@ verified -> re-verify before trusting over P2P) plus an `about` disambiguation
 caption (mb_artist.comment, else "type · area · year"). Phantom-only: never
 touches an owned artist's content-verified MBIDs. The existing missing-albums
 pipeline (stale_canonized_artists) then derives discographies for the canonized.
+
+A phantom is either canonized or DISCARDED: a phantom that can't be canonized
+(not in MB by name, or namesakes the genre couldn't disambiguate — collaborations
+like 'John Coltrane & Johnny Hartman' fall here too, being no single MB entity)
+carries no identity or discography, and every consumer (artist screen, missing-
+albums recommender) already filters to canonized artists — so it is invisible
+graph bloat. Each pass deletes the batch's failures (edges/members CASCADE); they
+re-mint from Last.fm on the next similar-sync if still relevant, and re-attempt
+then. Registered bands keep whole via the &↔and name-match and ARE canonized.
 """
 import logging
 from collections import defaultdict
@@ -37,7 +46,7 @@ def _caption(comment, atype, area, year) -> Optional[str]:
 
 def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False) -> dict:
     stats = {"phantoms": 0, "not_in_mb": 0, "unambiguous": 0,
-             "disambiguated": 0, "inconclusive": 0, "canonized": 0}
+             "disambiguated": 0, "inconclusive": 0, "canonized": 0, "discarded": 0}
 
     lim = "LIMIT %(lim)s" if limit else ""
     phantoms = db_query(f"""
@@ -155,6 +164,7 @@ def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False
 
     if dry_run:
         stats["would_canonize"] = len(chosen)
+        stats["would_discard"] = stats["not_in_mb"] + stats["inconclusive"]
         for nm, n, ov, gid in examples:
             logger.info("disambiguated e.g. %s (%d namesakes) overlaps=%s -> %r",
                         nm, n, ov, cap.get(gid))
@@ -180,5 +190,17 @@ def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False
             # execute_values' rowcount only reflects the last page; rows is the
             # deduped attempt count (ON CONFLICT skips already-mapped MBIDs).
             stats["canonized"] = len(rows)
+            # Discard the batch's failures: every phantom this pass could not give
+            # an MBID (not in MB, or namesakes genre couldn't split — collabs land
+            # here) is invisible bloat, since downstream filters to canonized
+            # artists. Edges/members CASCADE; re-minted from Last.fm next sync if
+            # still similar. The dedup conflict-losers above are swept here too.
+            cur.execute("""
+                DELETE FROM artists a
+                WHERE a.id = ANY(%s::uuid[])
+                  AND NOT EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
+                  AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = a.id)
+            """, (ph_ids,))
+            stats["discarded"] = cur.rowcount
     logger.info("phantom canon: %s", stats)
     return stats

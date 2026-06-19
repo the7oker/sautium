@@ -30,5 +30,7 @@ def distill_uncanonized(limit: int = None, dry_run: bool = False) -> dict:
         return out
 
     out["content"] = canonicalize_pending(limit=limit)
+    # phantom canon resolves each phantom to an MBID or discards it — downstream
+    # works only with canonized artists, so uncanonizable phantoms are not kept.
     out["phantom"] = canonize_phantom_similars(limit=limit, dry_run=False)
     return out
