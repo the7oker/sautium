@@ -33,4 +33,8 @@ def distill_uncanonized(limit: int = None, dry_run: bool = False) -> dict:
     # phantom canon resolves each phantom to an MBID or discards it — downstream
     # works only with canonized artists, so uncanonizable phantoms are not kept.
     out["phantom"] = canonize_phantom_similars(limit=limit, dry_run=False)
+    # name_exact lifecycle: upgrade name-derived MBIDs whose content has since
+    # caught up to the re-verifiable tier (cheap, idempotent).
+    from canon.content import promote_name_exact
+    out["promoted"] = promote_name_exact()
     return out

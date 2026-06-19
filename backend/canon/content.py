@@ -1152,6 +1152,32 @@ def assign_name_exact(artist_ids: list) -> int:
     return n
 
 
+def promote_name_exact() -> dict:
+    """name_exact lifecycle (the other end of assign_name_exact): a name-derived
+    MBID is upgraded to 'overlap_verified' once the artist's OWN tracks carry a
+    recording_mbid credited to that same MBID — content has caught up with the name
+    guess (later track stamps, or matches below the resolve coverage gate). This
+    promotes a humble name-only mapping to the re-verifiable tier P2P trusts,
+    without re-running the full resolve. Idempotent; runs each canon pass, so a
+    name_exact mapping strengthens automatically as content accrues."""
+    with get_conn() as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE artist_mbids am SET confidence = 'overlap_verified'
+                WHERE am.confidence = 'name_exact'
+                  AND EXISTS (
+                    SELECT 1 FROM track_artists ta
+                    JOIN media_files mf ON mf.track_id = ta.track_id
+                        AND mf.recording_mbid IS NOT NULL
+                    JOIN mb_recording rec ON rec.gid = mf.recording_mbid
+                    JOIN mb_artist_credit_name acn ON acn.artist_credit = rec.artist_credit
+                    JOIN mb_artist m ON m.id = acn.artist AND m.gid = am.mbid
+                    WHERE ta.artist_id = am.artist_id)
+            """)
+            return {"promoted": cur.rowcount}
+
+
 def canonicalize_pending(limit: int = None) -> dict:
     """Incremental canon stage — the post-scan / post-import entry point. For every OWNED
     artist whose content is newer than its last canon (the `artists.last_mb_sync` watermark
