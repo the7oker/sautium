@@ -216,6 +216,15 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False):
     if not provider:
         yield {"event": "done", "skipped": "no AI provider configured", "canonized": 0}
         return
+    # The AI is a constrained disambiguator over the LOCAL MB dump — candidates and
+    # the PROPOSE re-resolution both query mb_artist. Without the dump every choice
+    # would SKIP, so no-op rather than burn tokens (same gate as the other tiers).
+    import mb_backend as mb
+    if not mb.LOCAL_DUMP:
+        mb.refresh()
+    if not mb.LOCAL_DUMP:
+        yield {"event": "done", "skipped": "no local MB dump", "canonized": 0}
+        return
     model = _pick_model(provider)
     artists = _residue(limit)
     enriched = [{"n": i + 1, "id": a["id"], "name": a["name"],

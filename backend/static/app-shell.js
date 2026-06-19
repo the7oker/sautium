@@ -7633,8 +7633,12 @@
           <span class="form-label">Модель</span>
           <span class="form-value" style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(12.5*var(--px));">${escapeProfileHtml(job.model || ai.model || 'sonnet')}</span>
         </div>
+        ${c.mb_dump === false ? `
+          <div style="margin-top:calc(8*var(--px));font-size:calc(12*var(--px));color:var(--color-text-muted);">
+            Потрібен локальний дамп MusicBrainz — канонізація резолвить імена проти нього. Завантаж дамп у Sync &amp; P2P.
+          </div>` : ''}
         <div class="btn-row single" style="margin-top:calc(10*var(--px));">
-          <button class="btn ${running ? '' : 'btn-primary'}" data-action="run-canon" ${running ? 'disabled' : ''}>
+          <button class="btn ${running || c.mb_dump === false ? '' : 'btn-primary'}" data-action="run-canon" ${running || c.mb_dump === false ? 'disabled' : ''}>
             ${running ? `Виконується… ${job.processed||0}/${job.total||0}` : 'Запустити зараз'}
           </button>
         </div>

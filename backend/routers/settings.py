@@ -480,6 +480,10 @@ def _ai_state() -> Dict[str, Any]:
     canon_free = auth_state == "oauth_signed_in"
     canon_pref = _read("ai.canonization_enabled")
     canon_enabled = canon_free if canon_pref is None else bool(canon_pref)
+    try:
+        mb_dump = db_query_one("SELECT 1 FROM mb_artist LIMIT 1") is not None
+    except Exception:
+        mb_dump = False
     with _aicanon_lock:
         canon_job = dict(_aicanon)
 
@@ -495,6 +499,7 @@ def _ai_state() -> Dict[str, Any]:
             "is_default": canon_pref is None,
             "free":      canon_free,
             "available": bool(provider) and auth_state != "not_authenticated",
+            "mb_dump":   mb_dump,   # the tier resolves against the local MB dump
             "job":       canon_job,
         },
     }
