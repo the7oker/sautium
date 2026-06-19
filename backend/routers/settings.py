@@ -80,10 +80,36 @@ def _notify_aicanon() -> None:
                 continue
 
 
-def _aicanon_worker(limit: Optional[int]) -> None:
+def _aicanon_should_run() -> bool:
+    """Whether an event trigger (dump load / scan) may auto-start AI canon: a
+    provider is authed AND the tier is enabled (free default On, paid Off unless
+    the user opted in). The dump presence is enforced inside ai_canonize_stream."""
+    st = _ai_state()
+    c = st.get("canonization") or {}
+    return bool(c.get("available")) and bool(c.get("enabled"))
+
+
+def start_aicanon_job(since=None, *, force: bool = False) -> bool:
+    """Single-flight: start the background AI-canon worker. `since` scopes to
+    new-file artists (post-scan). `force` bypasses the enabled/provider gate (the
+    UI 'Run now'); event triggers pass force=False so a paid/disabled tier stays
+    quiet. Returns True if a run was started."""
+    if not force and not _aicanon_should_run():
+        return False
+    with _aicanon_lock:
+        if _aicanon["running"]:
+            return False
+        _aicanon.update(running=True, total=0, processed=0, canonized=0,
+                        skipped=0, guard_rejected=0, errors=0, items=[])
+    threading.Thread(target=_aicanon_worker, args=(None, since), daemon=True).start()
+    _notify_aicanon()
+    return True
+
+
+def _aicanon_worker(limit: Optional[int], since=None) -> None:
     from canon.ai_canon import ai_canonize_stream
     try:
-        for ev in ai_canonize_stream(limit=limit, dry_run=False):
+        for ev in ai_canonize_stream(limit=limit, dry_run=False, since=since):
             with _aicanon_lock:
                 if ev["event"] == "start":
                     _aicanon.update(running=True, total=ev["total"], model=ev.get("model"))
@@ -309,6 +335,11 @@ def _mb_worker(force: bool) -> None:
         from canon.content import canonicalize_pending
         canon = canonicalize_pending()
         logger.info(f"Post-load MB canon: {canon}")
+        # A fresh dump is the moment to run the AI judgment tier once over the
+        # whole residue (async, in the background — it's LLM-slow). Gated: no-op
+        # unless the tier is enabled + a provider is authed.
+        if start_aicanon_job():
+            logger.info("Post-load: AI canonization started")
         _mb_progress({"phase": "done"})
     except Exception as e:
         _mb_state["error"] = str(e)
@@ -686,6 +717,11 @@ def put_ai_provider(req: AiProviderUpdate) -> Dict[str, Any]:
     # providers cache — same path PUT /ai/key uses.
     _apply_api_key_to_runtime(next_key)
 
+    # Connecting the AI after a dump was already loaded is the third trigger
+    # (besides dump-load + scan): catch up the residue now. Gated + no-op without
+    # the dump / when disabled, async in the background.
+    start_aicanon_job()
+
     return {"provider": new_provider}
 
 
@@ -763,16 +799,11 @@ def put_ai_canonization(req: AiCanonUpdate) -> Dict[str, Any]:
 
 @router.post("/ai/canonization/run")
 def run_ai_canonization() -> Dict[str, Any]:
-    """Start a single-flight AI canonization run over the residue. Returns
-    immediately; progress streams over /ai/canonization/stream + GET /ai."""
-    with _aicanon_lock:
-        if _aicanon["running"]:
-            return {"started": False, "running": True}
-        _aicanon.update(running=True, total=0, processed=0, canonized=0,
-                        skipped=0, guard_rejected=0, errors=0, items=[])
-    threading.Thread(target=_aicanon_worker, args=(None,), daemon=True).start()
-    _notify_aicanon()
-    return {"started": True}
+    """Manual single-flight AI canonization run over the full residue. Returns
+    immediately; progress streams over /ai/canonization/stream + GET /ai. force=
+    True so the manual button works even if the auto-trigger gate is off."""
+    started = start_aicanon_job(force=True)
+    return {"started": started, "running": not started}
 
 
 @router.get("/ai/canonization/stream")

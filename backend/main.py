@@ -531,6 +531,8 @@ _scan_lock = threading.Lock()
 def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[str], prune: bool = False):
     """Background worker for library scanning."""
     state = _scan_state
+    from datetime import datetime, timezone
+    _scan_started = datetime.now(timezone.utc)   # AI-canon `since`: only this scan's new files
     try:
         from scanner import LibraryScanner
         from routers.settings import notify_library_subscribers
@@ -582,6 +584,11 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                     if canon_stats.get("artists"):
                         result["mb_canon"] = canon_stats
                         logger.info(f"Post-scan MB canon: {canon_stats}")
+                    # AI judgment tier on what the deterministic canon left — scoped
+                    # to THIS scan's new files (since=_scan_started), async + gated.
+                    from routers.settings import start_aicanon_job
+                    if start_aicanon_job(since=_scan_started):
+                        logger.info("Post-scan: AI canonization started (new files)")
                 except Exception as e:
                     logger.error(f"Post-scan MB canonicalization failed: {e}")
 

@@ -80,8 +80,18 @@ def _name_corresponds(library_name: str, mb_name: str) -> bool:
 
 # ─── residue + context ────────────────────────────────────────────────────
 
-def _residue(limit):
+def _residue(limit, since=None):
+    """Uncanonized owned artists, biggest first. `since` (a timestamp) scopes to
+    artists with a NEW media file after it — the post-scan trigger uses it so only
+    freshly-imported artists are re-resolved, not the whole residue every scan."""
     lim = "LIMIT %(l)s" if limit else ""
+    new_only = ("""AND EXISTS (SELECT 1 FROM track_artists tn JOIN media_files mn ON mn.track_id=tn.track_id
+                               WHERE tn.artist_id=a.id AND mn.created_at > %(since)s)""" if since else "")
+    params = {}
+    if limit:
+        params["l"] = limit
+    if since:
+        params["since"] = since
     return db_query(f"""
         SELECT a.id::text AS id, a.name,
                (SELECT count(*) FROM track_artists ta WHERE ta.artist_id=a.id AND ta.role='primary') AS trk
@@ -89,9 +99,10 @@ def _residue(limit):
         WHERE EXISTS (SELECT 1 FROM track_artists ta JOIN media_files mf ON mf.track_id=ta.track_id
                       WHERE ta.artist_id=a.id AND ta.role='primary')
           AND NOT EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id=a.id)
+          {new_only}
         ORDER BY trk DESC, a.name
         {lim}
-    """, {"l": limit} if limit else {})
+    """, params)
 
 
 def _context(artist_id, name):
@@ -206,12 +217,13 @@ def _apply(artist_id, mb_name, gid):
 
 # ─── entry point ──────────────────────────────────────────────────────────
 
-def ai_canonize_stream(limit: int = None, dry_run: bool = False):
+def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
     """Resolve the residue in batches, YIELDING a progress event per batch (so the
-    UI can show live counts + the AI's reasoning without polling). Events:
-    {event:'start', provider, model, total}, then {event:'batch', processed,
-    canonized, skipped, guard_rejected, errors, items:[{from,to,verdict,conf,why}]},
-    then {event:'done', ...totals}."""
+    UI can show live counts + the AI's reasoning without polling). `since` scopes
+    to new-file artists (post-scan trigger). Events: {event:'start', provider,
+    model, total}, then {event:'batch', processed, canonized, skipped,
+    guard_rejected, errors, items:[{from,to,verdict,conf,why}]}, then
+    {event:'done', ...totals}."""
     provider = _provider()
     if not provider:
         yield {"event": "done", "skipped": "no AI provider configured", "canonized": 0}
@@ -226,7 +238,7 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False):
         yield {"event": "done", "skipped": "no local MB dump", "canonized": 0}
         return
     model = _pick_model(provider)
-    artists = _residue(limit)
+    artists = _residue(limit, since=since)
     enriched = [{"n": i + 1, "id": a["id"], "name": a["name"],
                  **dict(zip(("ctx", "cands"), _context(a["id"], a["name"])))}
                 for i, a in enumerate(artists)]
@@ -274,10 +286,10 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False):
     yield {"event": "done", "provider": provider.name, "model": model, **st}
 
 
-def ai_canonize(limit: int = None, dry_run: bool = False) -> dict:
-    """Non-streaming wrapper (background step): drain the stream, return totals."""
+def ai_canonize(limit: int = None, dry_run: bool = False, since=None) -> dict:
+    """Non-streaming wrapper: drain the stream, return totals."""
     final = {}
-    for ev in ai_canonize_stream(limit, dry_run):
+    for ev in ai_canonize_stream(limit, dry_run, since=since):
         if ev.get("event") in ("done",):
             final = {k: v for k, v in ev.items() if k != "event"}
     return final
