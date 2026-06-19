@@ -30,7 +30,7 @@ import mb_backend as mb
 from database import SessionLocal
 from db_pool import db_execute, db_query, get_conn
 from discography import release_match_key, title_residual
-from canon.match import _candidates, _exact_mbids
+from canon.match import _candidates, _exact_mbids, match_whole_gids
 from canon.identity import recanonicalize_album_variants, recanonicalize_artist
 from canon.split import normalize_compound_artist
 from release_groups import release_group_cluster, simplify_edition_name
@@ -954,10 +954,11 @@ def _collab_members(artist_id, name: str, plan: dict) -> list:
     the credit's ordered members [(name, mbid)] are returned for splitting. This is
     the deterministic, content-verified replacement for the removed Last.fm Pass 2.
     """
-    # a real band with this exact name → keep whole (its recordings may still carry
-    # a 2-artist "member & member" credit on some releases; the band wins).
-    if db_query("SELECT 1 FROM mb_artist WHERE lower(name) = lower(%(n)s) LIMIT 1",
-                {"n": name}):
+    # a real band with this name → keep whole (its recordings may still carry a
+    # 2-artist "member & member" credit on some releases; the band wins). Separator-
+    # spelling aware: 'Jon & Vangelis' is the registered group 'Jon and Vangelis',
+    # not a collaboration to split (see canon.match.match_whole_gids).
+    if match_whole_gids(name):
         return []
 
     # Content path: the matched recordings' dominant credit (strongest evidence —

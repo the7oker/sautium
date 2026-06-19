@@ -58,12 +58,28 @@ def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False
     def lname(i):
         return (ph_name[i] or "").strip().lower()
 
-    # exact-name namesakes
-    names = list({lname(i) for i in ph_ids if lname(i)})
-    name_gids = defaultdict(list)
-    for r in db_query("SELECT lower(btrim(name)) AS ln, gid::text AS gid "
-                      "FROM mb_artist WHERE lower(btrim(name)) = ANY(%(n)s)", {"n": names}):
-        name_gids[r["ln"]].append(r["gid"])
+    # candidate MB entities per phantom — exact name OR alias, separator-spelling
+    # aware so '&'<->'and' band variants whole-match ('Jon & Vangelis' resolves to
+    # the registered group 'Jon and Vangelis', not 0 namesakes). One batched
+    # ANY-probe over every variant, mapped back to the phantom that produced it.
+    from canon.match import _whole_variants
+    variant_orig = defaultdict(set)        # variant_lower -> {phantom_lower_name}
+    for i in ph_ids:
+        if lname(i):
+            for v in _whole_variants(ph_name[i]):
+                variant_orig[v.strip().lower()].add(lname(i))
+    # NAME-only (not alias): a compound's 'and'-form is often an alias/credit-
+    # redirect on one member ('Vangelis and Irene Papas' aliases Vangelis), which
+    # would collapse a real collaboration onto a member. Registered bands carry the
+    # form as their NAME, so name-match is both the safe and the sufficient signal.
+    gid_acc = defaultdict(set)              # phantom_lower_name -> {gid}
+    if variant_orig:
+        for r in db_query("SELECT lower(btrim(name)) AS ln, gid::text AS gid "
+                          "FROM mb_artist WHERE lower(btrim(name)) = ANY(%(n)s)",
+                          {"n": list(variant_orig)}):
+            for orig in variant_orig.get(r["ln"], ()):
+                gid_acc[orig].add(r["gid"])
+    name_gids = {k: list(v) for k, v in gid_acc.items()}
 
     amb_ids = [i for i in ph_ids if len(name_gids.get(lname(i), [])) >= 2]
 

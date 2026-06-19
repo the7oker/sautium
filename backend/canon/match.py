@@ -26,6 +26,45 @@ def _exact_mbids(q: str) -> list:
     """, {"q": q})]
 
 
+def _whole_variants(name: str) -> list:
+    """`name` plus separator-spelling variants that denote the SAME entity:
+    ' & ' <-> ' and '. MB registers many bands under the 'and' spelling
+    ('Jon and Vangelis', 'Gerry and the Pacemakers', 'Nelson Riddle and His
+    Orchestra') while libraries and Last.fm tag them with '&'. Whole-entity
+    matching must see through that so a REGISTERED band is kept whole, never
+    mis-split into its tokens."""
+    n = " ".join(name.split())
+    out = [n]
+    amp = re.sub(r"\s+&\s+", " and ", n)
+    if amp != n:
+        out.append(amp)
+    a_nd = re.sub(r"\s+and\s+", " & ", n, flags=re.IGNORECASE)
+    if a_nd != n:
+        out.append(a_nd)
+    return out
+
+
+def match_whole_gids(name: str) -> list:
+    """Distinct exact whole-entity MBIDs for `name` by mb_artist.NAME (not alias),
+    separator-spelling aware (see _whole_variants). A non-empty result means MB
+    holds this as a SINGLE registered entity (band/group/orchestra), so it must be
+    kept whole rather than split into members.
+
+    NAME-only on purpose: a collaboration 'X & Y' is frequently an ALIAS / credit-
+    redirect on member X ('Vangelis and Irene Papas' aliases the Vangelis person),
+    and matching that would collapse the collaboration onto one member. Registered
+    bands carry the '&'/'and' form as their NAME (Jon and Vangelis, Gerry and the
+    Pacemakers), so name-match keeps them whole without the trap. Shared by the
+    content `_collab_members` guard and the phantom canon — the &↔and home."""
+    seen = []
+    for v in _whole_variants(name):
+        for r in db_query("SELECT gid::text AS gid FROM mb_artist "
+                          "WHERE lower(name) = lower(%(q)s)", {"q": v}):
+            if r["gid"] not in seen:
+                seen.append(r["gid"])
+    return seen
+
+
 def _probe_variants(name: str) -> list:
     """Cheap deterministic query transforms — the candidate-generation layer.
     Each output is exact-probed against mb_artist/alias; hits only ADD candidates,
@@ -80,6 +119,11 @@ def _candidates(name: str) -> list:
             if r["gid"] not in seen:
                 seen.add(r["gid"])
                 strong.append(r["gid"])
+    # &↔and whole-entity variants (registered bands spelled with the other separator)
+    for g in match_whole_gids(name):
+        if g not in seen:
+            seen.add(g)
+            strong.append(g)
     return strong
 
 
