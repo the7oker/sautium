@@ -575,7 +575,13 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
             # Runs HERE — after scan, before sync (peers get canonical content) and before
             # enrich (dedup + correction cut wasted fetches). Renames are local + reversible
             # (album_variants.raw_title), so it auto-applies without a review gate.
-            if not state["cancel_requested"]:
+            from routers.settings import mb_load_active
+            if not state["cancel_requested"] and mb_load_active():
+                # A dump op is downloading/loading concurrently — running canon now
+                # would read a stale/half-loaded dump and watermark these artists out
+                # of the dump's own fresh post-load canon. Defer; that pass covers them.
+                logger.info("Post-scan canon deferred — MB dump operation in progress")
+            elif not state["cancel_requested"]:
                 state["progress"] = "Canonicalizing (MusicBrainz)..."
                 notify_library_subscribers()
                 try:

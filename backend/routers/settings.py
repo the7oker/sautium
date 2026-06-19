@@ -286,6 +286,16 @@ _mb_state: Dict[str, Any] = {"running": False, "phase": "", "progress": "",
 _mb_lock = threading.Lock()
 
 
+def mb_load_active() -> bool:
+    """True while an MB-dump operation (download → load → post-load canon) is in
+    flight. Scan- and background-triggered canon DEFER on this: otherwise they run
+    against a stale or half-TRUNCATEd dump and then watermark those artists out of
+    the dump's fresh post-load canon. The dump worker's own post-load canon does
+    NOT consult this — it IS the fresh pass."""
+    with _mb_lock:
+        return bool(_mb_state["running"])
+
+
 def _mb_progress(update: Dict) -> None:
     """Loader callback → human progress line + numeric pct (None = indeterminate)
     for the bar + SSE wake."""

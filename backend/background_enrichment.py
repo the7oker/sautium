@@ -430,9 +430,17 @@ def _run_once() -> Dict[str, Any]:
 
     # Layer 2: distill uncanonized artists (content + phantom) BEFORE
     # discography, so a freshly-canonized artist gets its shelf this batch.
-    _set(current_step="canonize")
-    summary["canonize"] = _step_canonize(_CANONIZE_PER_BATCH)
-    _bump("canonize", summary["canonize"].get("canonized", 0))
+    # Defer canon while a dump op is downloading/loading — it would read a stale or
+    # half-TRUNCATEd dump and watermark artists out of the dump's own fresh pass.
+    try:
+        from routers.settings import mb_load_active
+        _dump_busy = mb_load_active()
+    except Exception:
+        _dump_busy = False
+    if not _dump_busy:
+        _set(current_step="canonize")
+        summary["canonize"] = _step_canonize(_CANONIZE_PER_BATCH)
+        _bump("canonize", summary["canonize"].get("canonized", 0))
 
     if _cancel_flag():
         return summary
