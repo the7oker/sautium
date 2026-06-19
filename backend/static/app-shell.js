@@ -7605,6 +7605,47 @@
     `;
   }
 
+  // AI canonization tier — toggle + "Run now" + live progress/reasoning log.
+  function _renderAiCanon(ai) {
+    const c = ai.canonization;
+    if (!c || !c.available) return '';
+    const job = c.job || {};
+    const running = !!job.running;
+    const seen = (job.processed || 0) > 0 || running;
+    const pct = job.total ? Math.round((job.processed / job.total) * 100) : 0;
+    const log = (job.items || []).slice(0, 30).map(it => {
+      const rej = it.verdict === 'guard-rejected';
+      return `<div style="display:flex;align-items:baseline;gap:calc(6*var(--px));padding:calc(4*var(--px)) 0;border-top:1px solid var(--color-border);">
+        <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeProfileHtml(it.from)}</span>
+        <span style="color:${rej ? 'var(--color-negative)' : 'var(--color-blue)'};">→</span>
+        <span style="font-size:calc(12.5*var(--px));${rej ? 'text-decoration:line-through;opacity:.6;' : 'color:var(--color-text);'}">${escapeProfileHtml(it.to)}</span>
+        <span style="margin-left:auto;color:var(--color-text-muted);font-size:calc(11*var(--px));font-style:italic;">${escapeProfileHtml(it.why || (rej ? 'guard' : ''))}</span>
+      </div>`;
+    }).join('');
+    return `
+      <div class="form-group" style="margin-top:calc(16*var(--px));">
+        <div style="font-size:calc(12*var(--px));text-transform:uppercase;letter-spacing:0.06em;color:var(--color-text-muted);margin-bottom:calc(8*var(--px));">AI канонізація</div>
+        <div class="form-row">
+          <span class="form-label">Увімкнено${c.free ? '' : ' <span style="color:var(--color-text-muted);font-size:calc(11*var(--px));">· платний API</span>'}</span>
+          <button class="toggle ${c.enabled ? 'on' : ''}" data-action="toggle-canon"><span class="knob"></span></button>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Модель</span>
+          <span class="form-value" style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(12.5*var(--px));">${escapeProfileHtml(job.model || ai.model || 'sonnet')}</span>
+        </div>
+        <div class="btn-row single" style="margin-top:calc(10*var(--px));">
+          <button class="btn ${running ? '' : 'btn-primary'}" data-action="run-canon" ${running ? 'disabled' : ''}>
+            ${running ? `Виконується… ${job.processed||0}/${job.total||0}` : 'Запустити зараз'}
+          </button>
+        </div>
+        ${seen ? `
+          <div class="enrich-bar" style="margin-top:calc(10*var(--px));"><div class="fill" style="width:${pct}%;"></div></div>
+          <div style="margin-top:calc(6*var(--px));font-size:calc(11.5*var(--px));color:var(--color-text-muted);font-family:var(--font-mono);letter-spacing:0.02em;">канонізовано <span style="color:var(--color-positive);">${job.canonized||0}</span> · пропущено ${job.skipped||0} · гард ${job.guard_rejected||0}${job.errors ? ' · помилок '+job.errors : ''}</div>` : ''}
+        ${log ? `<div style="margin-top:calc(8*var(--px));">${log}</div>` : ''}
+      </div>
+    `;
+  }
+
   function _renderClaudeCodeBlock(cc) {
     const s = cc.state;
     const installing = cc.install && cc.install.running;
@@ -8243,6 +8284,22 @@
     } catch (_) {}
     return null;
   }
+  // AI-canonization run: same wake-event SSE pattern (server pushes on each
+  // batch; client re-fetches /api/settings/ai and re-renders in place).
+  let _aiCanonStreamCtrl = null;
+  function _stopAiCanonStream() {
+    if (_aiCanonStreamCtrl) { _aiCanonStreamCtrl.abort(); _aiCanonStreamCtrl = null; }
+  }
+  function _subscribeAiCanonStream() {
+    if (_aiCanonStreamCtrl) return;
+    if (typeof window.sseStream !== 'function') return;
+    let primed = false;
+    _aiCanonStreamCtrl = window.sseStream('/api/settings/ai/canonization/stream', () => {
+      if (!primed) { primed = true; return; }
+      if (!parseHash().startsWith('more/ai')) { _stopAiCanonStream(); return; }
+      renderAI(document.getElementById('app'));
+    }, (_err) => {});
+  }
   // Pull a human-readable message out of a FastAPI error response.
   // FastAPI's HTTPException renders as `{"detail": "..."}` — showing
   // the raw JSON in an alert is the worst-case fallback.
@@ -8279,6 +8336,7 @@
       <section class="screen screen-settings">
         ${_settingsHeader('AI assistant')}
         <div style="margin-top:calc(14*var(--px));">${_renderAi(ai, claudeState)}</div>
+        ${_renderAiCanon(ai)}
       </section>
     `;
     _wireBack(root);
@@ -8331,7 +8389,23 @@
       render();
     });
 
+    // AI canonization toggle + "Run now"
+    onAction('[data-action="toggle-canon"]', async () => {
+      const enabled = !!(ai.canonization && ai.canonization.enabled);
+      await fetch('/api/settings/ai/canonization', {
+        method: 'PUT', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ enabled: !enabled }) });
+      renderAI(document.getElementById('app'));
+    });
+    onAction('[data-action="run-canon"]', async () => {
+      try {
+        await fetch('/api/settings/ai/canonization/run', { method: 'POST' });
+      } catch (_) {}
+      renderAI(document.getElementById('app'));   // picks up running state + stream
+    });
+
     if (ai.provider === 'claude_code') _subscribeClaudeStream();
+    if (ai.canonization && ai.canonization.available) _subscribeAiCanonStream();
     refreshAiAvailability();
   }
 

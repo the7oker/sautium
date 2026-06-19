@@ -49,6 +49,23 @@ _LASTFM_DELAY_S = 0.2             # ~5 req/sec, the Last.fm published limit
 
 _CANONIZE_PER_BATCH = 50          # uncanonized artists distilled per batch (Layer 2: content + phantom)
 _DISCOGRAPHY_PER_BATCH = 50       # canonized artists reconciled per batch (local MB dump — DB-only)
+_AI_CANON_PER_BATCH = 24          # residue artists the AI tier resolves per cycle (LLM-bound; gated)
+
+
+def _ai_canon_enabled() -> bool:
+    """The AI-canon toggle, with the free/paid default (mirrors settings._ai_state):
+    a stored bool wins; unset → On only when the provider is OAuth/subscription."""
+    try:
+        from db_pool import db_query_one
+        row = db_query_one("SELECT value FROM user_settings WHERE key = 'ai.canonization_enabled'")
+        if row is not None and row.get("value") is not None:
+            return bool(row["value"])
+        prov = db_query_one("SELECT value FROM user_settings WHERE key = 'ai.provider'")
+        key = db_query_one("SELECT value FROM user_settings WHERE key = 'ai.api_key'")
+        # free default = a provider is set AND no raw API key (i.e. OAuth/subscription)
+        return bool(prov and prov.get("value")) and not (key and key.get("value"))
+    except Exception:
+        return False
 _DISCOGRAPHY_STALE_DAYS = 30      # re-sync an artist's discography at most monthly
 
 _PRIORITY_SQL = text("""
@@ -433,6 +450,22 @@ def _run_once() -> Dict[str, Any]:
     _set(current_step="canonize")
     summary["canonize"] = _step_canonize(_CANONIZE_PER_BATCH)
     _bump("canonize", summary["canonize"].get("canonized", 0))
+
+    if _cancel_flag():
+        return summary
+
+    # AI canonization tier — the judgment layer over the deterministic residue.
+    # Gated on the user toggle (default On only when the AI is free/subscription;
+    # a paid API key bills per token, so it stays Off unless opted in). Small
+    # incremental batch per cycle; a one-shot "Run now" exists in the UI too.
+    if _ai_canon_enabled():
+        _set(current_step="ai_canonize")
+        try:
+            from canon.ai_canon import ai_canonize
+            summary["ai_canonize"] = ai_canonize(limit=_AI_CANON_PER_BATCH)
+            _bump("ai_canonize", summary["ai_canonize"].get("canonized", 0))
+        except Exception as e:
+            logger.error("ai_canonize step failed: %s", e)
 
     if _cancel_flag():
         return summary

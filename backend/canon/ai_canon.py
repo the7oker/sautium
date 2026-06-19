@@ -206,29 +206,35 @@ def _apply(artist_id, mb_name, gid):
 
 # ─── entry point ──────────────────────────────────────────────────────────
 
-def ai_canonize(limit: int = None, dry_run: bool = False) -> dict:
+def ai_canonize_stream(limit: int = None, dry_run: bool = False):
+    """Resolve the residue in batches, YIELDING a progress event per batch (so the
+    UI can show live counts + the AI's reasoning without polling). Events:
+    {event:'start', provider, model, total}, then {event:'batch', processed,
+    canonized, skipped, guard_rejected, errors, items:[{from,to,verdict,conf,why}]},
+    then {event:'done', ...totals}."""
     provider = _provider()
     if not provider:
-        return {"skipped": "no AI provider configured", "canonized": 0}
+        yield {"event": "done", "skipped": "no AI provider configured", "canonized": 0}
+        return
     model = _pick_model(provider)
-    st = {"provider": provider.name, "model": model, "considered": 0,
-          "canonized": 0, "skipped": 0, "guard_rejected": 0, "errors": 0, "examples": []}
-
     artists = _residue(limit)
     enriched = [{"n": i + 1, "id": a["id"], "name": a["name"],
                  **dict(zip(("ctx", "cands"), _context(a["id"], a["name"])))}
                 for i, a in enumerate(artists)]
-    st["considered"] = len(enriched)
+    total = len(enriched)
+    st = {"processed": 0, "canonized": 0, "skipped": 0, "guard_rejected": 0, "errors": 0}
+    yield {"event": "start", "provider": provider.name, "model": model, "total": total}
 
-    for s in range(0, len(enriched), _BATCH):
+    for s in range(0, total, _BATCH):
         batch = enriched[s:s + _BATCH]
         by_n = {it["n"]: it for it in batch}
+        items = []
         try:
             decisions = _ask(_prompt(batch), model, provider)
         except Exception as e:
             st["errors"] += 1
             logger.error("ai_canon batch %d failed: %s", s // _BATCH, e)
-            continue
+            decisions = []
         for d in decisions:
             it = by_n.get(d.get("n"))
             if not it:
@@ -239,19 +245,30 @@ def ai_canonize(limit: int = None, dry_run: bool = False) -> dict:
                 continue
             if not _name_corresponds(it["name"], mb_name):   # the path-confusion guard
                 st["guard_rejected"] += 1
-                logger.info("ai_canon GUARD rejected %r -> %r (%s)", it["name"], mb_name, d.get("why"))
+                items.append({"from": it["name"], "to": mb_name, "verdict": "guard-rejected",
+                              "conf": d.get("conf"), "why": d.get("why")})
                 continue
-            if dry_run:
-                st["canonized"] += 1
-                if len(st["examples"]) < 25:
-                    st["examples"].append({"from": it["name"], "to": mb_name,
-                                           "conf": d.get("conf"), "why": d.get("why")})
-                continue
-            try:
-                _apply(it["id"], mb_name, gid)
-                st["canonized"] += 1
-            except Exception as e:
-                st["errors"] += 1
-                logger.error("ai_canon apply failed for %r: %s", it["name"], e)
-    logger.info("ai_canon: %s", {k: v for k, v in st.items() if k != "examples"})
-    return st
+            if not dry_run:
+                try:
+                    _apply(it["id"], mb_name, gid)
+                except Exception as e:
+                    st["errors"] += 1
+                    logger.error("ai_canon apply failed for %r: %s", it["name"], e)
+                    continue
+            st["canonized"] += 1
+            items.append({"from": it["name"], "to": mb_name, "verdict": "canonized",
+                          "conf": d.get("conf"), "why": d.get("why")})
+        st["processed"] += len(batch)
+        yield {"event": "batch", **st, "items": items}
+
+    logger.info("ai_canon: %s", st)
+    yield {"event": "done", "provider": provider.name, "model": model, **st}
+
+
+def ai_canonize(limit: int = None, dry_run: bool = False) -> dict:
+    """Non-streaming wrapper (background step): drain the stream, return totals."""
+    final = {}
+    for ev in ai_canonize_stream(limit, dry_run):
+        if ev.get("event") in ("done",):
+            final = {k: v for k, v in ev.items() if k != "event"}
+    return final

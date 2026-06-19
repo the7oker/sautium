@@ -59,6 +59,50 @@ _library_sse_lock = threading.Lock()
 _claude_sse_clients: List[Tuple[asyncio.Event, asyncio.AbstractEventLoop]] = []
 _claude_sse_lock = threading.Lock()
 
+# AI-canonization run: a background thread resolves the residue, pushing batch
+# progress + the AI's reasoning to the More→AI screen over the same wake-event
+# SSE pattern. Single-flight (one run at a time); state is read via GET /ai.
+_aicanon_sse_clients: List[Tuple[asyncio.Event, asyncio.AbstractEventLoop]] = []
+_aicanon_sse_lock = threading.Lock()
+_aicanon: Dict[str, Any] = {
+    "running": False, "total": 0, "processed": 0, "canonized": 0,
+    "skipped": 0, "guard_rejected": 0, "errors": 0, "model": None, "items": [],
+}
+_aicanon_lock = threading.Lock()
+
+
+def _notify_aicanon() -> None:
+    with _aicanon_sse_lock:
+        for evt, loop in list(_aicanon_sse_clients):
+            try:
+                loop.call_soon_threadsafe(evt.set)
+            except RuntimeError:
+                continue
+
+
+def _aicanon_worker(limit: Optional[int]) -> None:
+    from canon.ai_canon import ai_canonize_stream
+    try:
+        for ev in ai_canonize_stream(limit=limit, dry_run=False):
+            with _aicanon_lock:
+                if ev["event"] == "start":
+                    _aicanon.update(running=True, total=ev["total"], model=ev.get("model"))
+                elif ev["event"] == "batch":
+                    _aicanon.update(processed=ev["processed"], canonized=ev["canonized"],
+                                    skipped=ev["skipped"], guard_rejected=ev["guard_rejected"],
+                                    errors=ev["errors"])
+                    # newest first, keep a bounded reasoning log for the UI
+                    _aicanon["items"] = (ev["items"] + _aicanon["items"])[:80]
+                elif ev["event"] == "done":
+                    _aicanon.update(running=False, skipped_reason=ev.get("skipped"))
+            _notify_aicanon()
+    except Exception:
+        logging.getLogger(__name__).exception("ai_canon worker crashed")
+    finally:
+        with _aicanon_lock:
+            _aicanon["running"] = False
+        _notify_aicanon()
+
 
 def notify_library_subscribers() -> None:
     """Thread-safe wake of every connected Library SSE client.
@@ -180,6 +224,9 @@ _DEFAULTS: Dict[str, Any] = {
     # canonicalization. version/last-update written by the loader.
     "musicbrainz.auto_update":   False,
     "musicbrainz.last_update_at": None,
+    # AI canonicalization (the judgment tier). null = use the computed default
+    # (On when the AI provider is free/subscription, Off when it's a paid API key).
+    "ai.canonization_enabled":   None,
 }
 
 
@@ -428,6 +475,14 @@ def _ai_state() -> Dict[str, Any]:
     # documents the shape we expect:
     usage = None  # {"spent": 3.20, "limit": 20, "days_left": 5}
 
+    # AI canonization: default On only when the AI is "free" (subscription /
+    # OAuth) — a paid API key bills per token, so default Off + the user opts in.
+    canon_free = auth_state == "oauth_signed_in"
+    canon_pref = _read("ai.canonization_enabled")
+    canon_enabled = canon_free if canon_pref is None else bool(canon_pref)
+    with _aicanon_lock:
+        canon_job = dict(_aicanon)
+
     return {
         "provider":       provider,
         "model":          model,
@@ -435,6 +490,13 @@ def _ai_state() -> Dict[str, Any]:
         "masked_key":     masked_key,
         "expires_in_days": expires_in_days,
         "usage":          usage,
+        "canonization": {
+            "enabled":   canon_enabled,
+            "is_default": canon_pref is None,
+            "free":      canon_free,
+            "available": bool(provider) and auth_state != "not_authenticated",
+            "job":       canon_job,
+        },
     }
 
 
@@ -680,6 +742,68 @@ def delete_ai_key() -> Dict[str, Any]:
         _write(f"ai.{provider}.api_key", None)
     _apply_api_key_to_runtime(None)
     return _ai_state()
+
+
+class AiCanonUpdate(BaseModel):
+    enabled: bool
+
+
+@router.put("/ai/canonization")
+def put_ai_canonization(req: AiCanonUpdate) -> Dict[str, Any]:
+    """Toggle the AI canonization tier (explicit user choice overrides the
+    free/paid default)."""
+    _write("ai.canonization_enabled", bool(req.enabled))
+    return _ai_state()
+
+
+@router.post("/ai/canonization/run")
+def run_ai_canonization() -> Dict[str, Any]:
+    """Start a single-flight AI canonization run over the residue. Returns
+    immediately; progress streams over /ai/canonization/stream + GET /ai."""
+    with _aicanon_lock:
+        if _aicanon["running"]:
+            return {"started": False, "running": True}
+        _aicanon.update(running=True, total=0, processed=0, canonized=0,
+                        skipped=0, guard_rejected=0, errors=0, items=[])
+    threading.Thread(target=_aicanon_worker, args=(None,), daemon=True).start()
+    _notify_aicanon()
+    return {"started": True}
+
+
+@router.get("/ai/canonization/stream")
+async def ai_canonization_stream() -> StreamingResponse:
+    """SSE wake channel for the AI canonization run — client re-pulls GET /ai on
+    each event. Same wake-event pattern as the library/claude channels."""
+    loop = asyncio.get_event_loop()
+    evt = asyncio.Event()
+
+    async def event_generator():
+        try:
+            with _aicanon_sse_lock:
+                _aicanon_sse_clients.append((evt, loop))
+            yield "data: {}\n\n"
+            while True:
+                try:
+                    await asyncio.wait_for(evt.wait(), timeout=20.0)
+                    evt.clear()
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                yield "data: {}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            with _aicanon_sse_lock:
+                _aicanon_sse_clients[:] = [
+                    (e, l) for e, l in _aicanon_sse_clients if e is not evt
+                ]
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
+                 "X-Accel-Buffering": "no"},
+    )
 
 
 def load_ai_credentials_from_db() -> None:
