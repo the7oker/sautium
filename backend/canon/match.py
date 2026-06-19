@@ -145,6 +145,19 @@ def _mb_spelling(name: str) -> str:
     return " ".join(name.translate(_MB_PUNCT).split())
 
 
+def _name_exact_gids(name: str) -> list:
+    """Identity-preserving deterministic matches for the name_exact tier: the name
+    spelled exactly (name or alias), in MB's punctuation, or unaccent-folded — all
+    'same entity, different spelling', NOT structural guesses (no reorder/prefix/
+    fuzzy). The caller assigns name_exact only when this is UNIQUE, so a namesake
+    collision or an accent-collapse onto two entities is skipped, not guessed
+    (André Sobota, Basil O'Glue → 1 each; Tomas Dvorak → several Dvořáks → skip)."""
+    gids = set(_exact_mbids(name))
+    gids |= set(_exact_mbids(_mb_spelling(name)))
+    gids |= set(_unaccent_gids(name))
+    return list(gids)
+
+
 def _unaccent_gids(name: str) -> list:
     """MBIDs whose name or alias unaccent-folds equal to `name` — bridges an
     ASCII-tagged owned/Last.fm name to MB's accented canonical ('Tomas Dvorak' →

@@ -30,7 +30,7 @@ import mb_backend as mb
 from database import SessionLocal
 from db_pool import db_execute, db_query, get_conn
 from discography import release_match_key, title_residual
-from canon.match import _candidates, _exact_mbids, match_whole_gids
+from canon.match import _candidates, _exact_mbids, match_whole_gids, _name_exact_gids
 from canon.identity import recanonicalize_album_variants, recanonicalize_artist
 from canon.split import normalize_compound_artist
 from release_groups import release_group_cluster, simplify_edition_name
@@ -1127,11 +1127,12 @@ def _canonicalize_va() -> int:
 
 def assign_name_exact(artist_ids: list) -> int:
     """Slowest tier, runs LAST on the residue the content layers left mbid-less:
-    when the name (or alias) exact-matches exactly ONE MB entity in the whole
-    base, assign its mbid at confidence 'name_exact'. No rename, no stealing an
-    mbid another artist holds (DO NOTHING) — name-only evidence stays humble.
-    Replicates the legitimate part of the legacy name-matching experiments with
-    a uniqueness guard against their failure mode (namesake/alias collisions)."""
+    when the name resolves to exactly ONE MB entity by identity-preserving spelling
+    (exact name/alias, MB punctuation, or unaccent fold — _name_exact_gids), assign
+    its mbid at confidence 'name_exact'. No rename, no stealing an mbid another
+    artist holds (DO NOTHING) — name-only evidence stays humble. The uniqueness
+    guard is the safety net against the legacy experiments' failure mode: a namesake
+    collision (or an accent-collapse onto two entities) is skipped, not guessed."""
     if not artist_ids:
         return 0
     rows = db_query("""
@@ -1141,7 +1142,7 @@ def assign_name_exact(artist_ids: list) -> int:
     """, {"ids": list(artist_ids)})
     n = 0
     for r in rows:
-        gids = _exact_mbids(r["name"])
+        gids = _name_exact_gids(r["name"])
         if len(gids) == 1:
             ins = db_query(
                 "INSERT INTO artist_mbids (mbid, artist_id, confidence) "
