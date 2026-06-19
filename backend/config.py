@@ -128,8 +128,13 @@ class Settings(BaseSettings):
 
     @property
     def music_library_exists(self) -> bool:
-        """Check if music library path exists."""
-        return Path(self.music_library_path).exists()
+        """Mounted and accessible? A dropped WSL drvfs mount raises OSError
+        (ENODEV/EIO), which Path.exists() re-raises instead of treating as
+        missing — catch it so /health degrades instead of 500-ing."""
+        try:
+            return Path(self.music_library_path).exists()
+        except OSError:
+            return False
 
     def translate_to_host_path(self, scanner_path: str) -> str:
         """Translate a scanner-visible path to a native OS path for DB storage.
