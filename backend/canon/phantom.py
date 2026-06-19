@@ -90,6 +90,19 @@ def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False
                 gid_acc[orig].add(r["gid"])
     name_gids = {k: list(v) for k, v in gid_acc.items()}
 
+    # Richer DETERMINISTIC resolution for the residue the batched name-match missed
+    # — exact alias (non-compound), MB-punctuation respelling, diacritic/reorder/
+    # prefix/mojibake probes, sort_name. Recovers ~30% of would-be not-in-MB
+    # (Korean romanizations, O'Day↔O’Day, VC-118A↔VC‐118A) with no fuzzy risk, so
+    # fewer real artists are wrongly discarded. Only the residue runs per-phantom;
+    # the common case stays the single batched query above.
+    from canon.match import phantom_candidate_gids
+    for i in ph_ids:
+        if not name_gids.get(lname(i)):
+            g = phantom_candidate_gids(ph_name[i])
+            if g:
+                name_gids[lname(i)] = g
+
     amb_ids = [i for i in ph_ids if len(name_gids.get(lname(i), [])) >= 2]
 
     seed_genres = defaultdict(set)

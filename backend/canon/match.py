@@ -127,3 +127,49 @@ def _candidates(name: str) -> list:
     return strong
 
 
+# MB's style guide stores apostrophes as U+2019 and hyphens as U+2010, while
+# library/Last.fm names use ASCII — so 'Anita O'Day' / 'VC-118A' miss the exact
+# index against 'Anita O’Day' / 'VC‐118A'. This variant re-spells to MB's form so
+# they match off the existing lower(name) index (no fuzzy, no new index needed).
+_MB_PUNCT = str.maketrans({"'": "’", "-": "‐"})
+# collaboration separators — for phantom matching, alias is trusted ONLY for
+# non-compounds (a compound's 'X and Y' alias is a credit-redirect onto a member).
+_PHANTOM_SEP = r'\s+&\s+|\s+and\s+|\s+with\s+|\s*/\s*|\s*,\s*|;'
+
+
+def phantom_candidate_gids(name: str) -> list:
+    """Deterministic MB candidate MBIDs for a phantom (no owned content to verify)
+    — NO trgm fuzzy, precision over recall like the rest of canon. Gathers: exact
+    name + &↔and + MB-punctuation respelling + surname/prefix/diacritic/mojibake
+    probes + sort_name; PLUS exact ALIAS for NON-compound names (a non-Latin act's
+    romanization is stored as an alias — 윈터플레이→Winterplay — recovering it safely,
+    while a collaboration's 'X and Y' alias would be a credit-redirect onto a
+    member, so alias is gated to non-compounds). The phantom canon feeds the result
+    through the same 1-namesake / genre-disambiguation logic."""
+    compound = bool(re.search(_PHANTOM_SEP, name, re.IGNORECASE))
+    out, seen = [], set()
+
+    def add(gids):
+        for g in gids:
+            if g not in seen:
+                seen.add(g)
+                out.append(g)
+
+    for v in set(_whole_variants(name)) | {name.translate(_MB_PUNCT)}:
+        if compound:   # name-only: a compound's alias is a member credit-redirect
+            add(r["gid"] for r in db_query(
+                "SELECT gid::text AS gid FROM mb_artist WHERE lower(name) = lower(%(q)s)",
+                {"q": v}))
+        else:
+            add(_exact_mbids(v))                    # name + alias
+    if not compound:
+        add(_exact_mbids(name))                     # raw-name alias (romanizations)
+    for v in _probe_variants(name):
+        add(_exact_mbids(v))
+    if "," in name:
+        add(r["gid"] for r in db_query(
+            "SELECT gid::text AS gid FROM mb_artist WHERE lower(sort_name) = lower(%(q)s)",
+            {"q": name.strip()}))
+    return out
+
+
