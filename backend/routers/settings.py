@@ -86,7 +86,10 @@ def _aicanon_should_run() -> bool:
     the user opted in). The dump presence is enforced inside ai_canonize_stream."""
     st = _ai_state()
     c = st.get("canonization") or {}
-    return bool(c.get("available")) and bool(c.get("enabled"))
+    # also defer to a dump op's data phases (mb_load_active) — AI must not read a
+    # half-TRUNCATEd dump (the dump's own post-load AI trigger fires in its
+    # 'canonicalizing' phase, where mb_load_active is already False).
+    return bool(c.get("available")) and bool(c.get("enabled")) and not mb_load_active()
 
 
 def start_aicanon_job(since=None, *, force: bool = False) -> bool:
@@ -287,13 +290,13 @@ _mb_lock = threading.Lock()
 
 
 def mb_load_active() -> bool:
-    """True while an MB-dump operation (download → load → post-load canon) is in
-    flight. Scan- and background-triggered canon DEFER on this: otherwise they run
-    against a stale or half-TRUNCATEd dump and then watermark those artists out of
-    the dump's fresh post-load canon. The dump worker's own post-load canon does
-    NOT consult this — it IS the fresh pass."""
+    """True while an MB-dump op is DOWNLOADING / LOADING (the data-mutating phases),
+    so scan/background/AI canon DEFER — otherwise they read a stale or half-TRUNCATEd
+    dump and watermark those artists out of the dump's fresh post-load canon. False
+    during the dump's own 'canonicalizing' phase, so the dump worker's OWN post-load
+    canon + AI trigger (which run THEN) are not blocked by their own op."""
     with _mb_lock:
-        return bool(_mb_state["running"])
+        return bool(_mb_state["running"]) and _mb_state["phase"] not in ("canonicalizing", "done", "")
 
 
 def _mb_progress(update: Dict) -> None:
@@ -343,7 +346,9 @@ def _mb_worker(force: bool) -> None:
         import mb_backend as mb
         mb.refresh()
         from canon.content import canonicalize_pending
-        canon = canonicalize_pending()
+        from canon import algo_canon
+        with algo_canon():   # priority over the AI tier
+            canon = canonicalize_pending()
         logger.info(f"Post-load MB canon: {canon}")
         # A fresh dump is the moment to run the AI judgment tier once over the
         # whole residue (async, in the background — it's LLM-slow). Gated: no-op

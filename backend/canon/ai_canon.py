@@ -246,39 +246,50 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
     st = {"processed": 0, "canonized": 0, "skipped": 0, "guard_rejected": 0, "errors": 0}
     yield {"event": "start", "provider": provider.name, "model": model, "total": total}
 
+    from canon import ai_mutations, ai_should_yield   # priority primitives
+
     for s in range(0, total, _BATCH):
+        # Algorithmic canon has priority — yield the run to it between batches.
+        if ai_should_yield():
+            logger.info("ai_canon yielding to algorithmic canon at %d/%d", st["processed"], total)
+            yield {"event": "done", "provider": provider.name, "model": model,
+                   "yielded": True, **st}
+            return
         batch = enriched[s:s + _BATCH]
         by_n = {it["n"]: it for it in batch}
         items = []
         try:
-            decisions = _ask(_prompt(batch), model, provider)
+            decisions = _ask(_prompt(batch), model, provider)   # LLM — lock-free
         except Exception as e:
             st["errors"] += 1
             logger.error("ai_canon batch %d failed: %s", s // _BATCH, e)
             decisions = []
-        for d in decisions:
-            it = by_n.get(d.get("n"))
-            if not it:
-                continue
-            gid, mb_name = _resolve_choice(d.get("pick"), it["cands"])
-            if not gid:
-                st["skipped"] += 1
-                continue
-            if not _name_corresponds(it["name"], mb_name):   # the path-confusion guard
-                st["guard_rejected"] += 1
-                items.append({"from": it["name"], "to": mb_name, "verdict": "guard-rejected",
-                              "conf": d.get("conf"), "why": d.get("why")})
-                continue
-            if not dry_run:
-                try:
-                    _apply(it["id"], mb_name, gid)
-                except Exception as e:
-                    st["errors"] += 1
-                    logger.error("ai_canon apply failed for %r: %s", it["name"], e)
+        # DB writes for this batch under the mutation lock (so they never overlap an
+        # algorithmic run); the lock is held for ms, never across the LLM call above.
+        with ai_mutations():
+            for d in decisions:
+                it = by_n.get(d.get("n"))
+                if not it:
                     continue
-            st["canonized"] += 1
-            items.append({"from": it["name"], "to": mb_name, "verdict": "canonized",
-                          "conf": d.get("conf"), "why": d.get("why")})
+                gid, mb_name = _resolve_choice(d.get("pick"), it["cands"])
+                if not gid:
+                    st["skipped"] += 1
+                    continue
+                if not _name_corresponds(it["name"], mb_name):   # the path-confusion guard
+                    st["guard_rejected"] += 1
+                    items.append({"from": it["name"], "to": mb_name, "verdict": "guard-rejected",
+                                  "conf": d.get("conf"), "why": d.get("why")})
+                    continue
+                if not dry_run:
+                    try:
+                        _apply(it["id"], mb_name, gid)
+                    except Exception as e:
+                        st["errors"] += 1
+                        logger.error("ai_canon apply failed for %r: %s", it["name"], e)
+                        continue
+                st["canonized"] += 1
+                items.append({"from": it["name"], "to": mb_name, "verdict": "canonized",
+                              "conf": d.get("conf"), "why": d.get("why")})
         st["processed"] += len(batch)
         yield {"event": "batch", **st, "items": items}
 

@@ -438,9 +438,11 @@ def _run_once() -> Dict[str, Any]:
     except Exception:
         _dump_busy = False
     if not _dump_busy:
-        _set(current_step="canonize")
-        summary["canonize"] = _step_canonize(_CANONIZE_PER_BATCH)
-        _bump("canonize", summary["canonize"].get("canonized", 0))
+        from canon import algo_canon
+        with algo_canon():   # priority over the AI tier (preempts a running AI batch)
+            _set(current_step="canonize")
+            summary["canonize"] = _step_canonize(_CANONIZE_PER_BATCH)
+            _bump("canonize", summary["canonize"].get("canonized", 0))
 
     if _cancel_flag():
         return summary
