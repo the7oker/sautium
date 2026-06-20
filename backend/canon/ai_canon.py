@@ -238,15 +238,20 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
         yield {"event": "done", "skipped": "no local MB dump", "canonized": 0}
         return
     model = _pick_model(provider)
-    artists = _residue(limit, since=since)
-    enriched = [{"n": i + 1, "id": a["id"], "name": a["name"],
-                 **dict(zip(("ctx", "cands"), _context(a["id"], a["name"])))}
-                for i, a in enumerate(artists)]
+    from canon import _dump_lock_held, ai_mutations, ai_should_yield
+    # Gather the residue + context under the dump lock (it reads mb_artist) — skip if
+    # a dump load currently holds it.
+    with _dump_lock_held() as _got:
+        if not _got:
+            yield {"event": "done", "skipped": "MB dump loading", "canonized": 0}
+            return
+        artists = _residue(limit, since=since)
+        enriched = [{"n": i + 1, "id": a["id"], "name": a["name"],
+                     **dict(zip(("ctx", "cands"), _context(a["id"], a["name"])))}
+                    for i, a in enumerate(artists)]
     total = len(enriched)
     st = {"processed": 0, "canonized": 0, "skipped": 0, "guard_rejected": 0, "errors": 0}
     yield {"event": "start", "provider": provider.name, "model": model, "total": total}
-
-    from canon import ai_mutations, ai_should_yield   # priority primitives
 
     for s in range(0, total, _BATCH):
         # Algorithmic canon has priority — yield the run to it between batches.
@@ -264,9 +269,15 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
             st["errors"] += 1
             logger.error("ai_canon batch %d failed: %s", s // _BATCH, e)
             decisions = []
-        # DB writes for this batch under the mutation lock (so they never overlap an
-        # algorithmic run); the lock is held for ms, never across the LLM call above.
-        with ai_mutations():
+        # DB reads+writes for this batch under the mutex (vs algorithmic) + the dump
+        # lock (vs the loader's TRUNCATE); held for ms, never across the LLM call.
+        with ai_mutations() as _ok:
+            if not _ok:   # a dump load grabbed the dump lock — abort this run
+                logger.info("ai_canon aborting at %d/%d — MB dump load started",
+                            st["processed"], total)
+                yield {"event": "done", "provider": provider.name, "model": model,
+                       "yielded": True, **st}
+                return
             for d in decisions:
                 it = by_n.get(d.get("n"))
                 if not it:

@@ -40,14 +40,49 @@ _algo_wants_lock = threading.Lock()
 
 
 @contextmanager
+def _dump_lock_held():
+    """Hold MB_LOAD_LOCK_KEY for the block on a dedicated connection, so the dump
+    loader's BLOCKING pg_advisory_lock waits for us before it TRUNCATEs the mb_*
+    tables. Yields True if acquired, False if a dump load currently holds it (the
+    caller must not read mb_* — skip/abort). Autocommit so the held connection isn't
+    idle-in-transaction."""
+    from db_pool import get_conn
+    from mb_dump_load import MB_LOAD_LOCK_KEY
+    with get_conn() as conn:
+        prev = conn.autocommit
+        conn.autocommit = True
+        got = False
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_try_advisory_lock(%s)", (MB_LOAD_LOCK_KEY,))
+                got = bool(cur.fetchone()[0])
+            yield got
+        finally:
+            if got:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT pg_advisory_unlock(%s)", (MB_LOAD_LOCK_KEY,))
+                except Exception:
+                    pass
+            try:
+                conn.autocommit = prev
+            except Exception:
+                pass
+
+
+@contextmanager
 def algo_canon():
-    """Algorithmic canon, with priority over the AI tier (preempts it)."""
+    """Algorithmic canon: priority over the AI tier (preempts it) AND holds the dump
+    lock for its whole (short) run so a dump load started mid-run waits. Yields True
+    if it may run, False if a dump load holds the lock (caller skips — the dump's
+    own post-load canon covers it)."""
     global _algo_wants
     with _algo_wants_lock:
         _algo_wants += 1
     try:
         with _mutate_lock:
-            yield
+            with _dump_lock_held() as got:
+                yield got
     finally:
         with _algo_wants_lock:
             _algo_wants -= 1
@@ -55,9 +90,13 @@ def algo_canon():
 
 @contextmanager
 def ai_mutations():
-    """Hold the mutation lock around one AI batch's DB writes (LLM call stays out)."""
+    """One AI batch's mb_* reads + DB writes, under the in-process mutex (vs
+    algorithmic) AND the dump lock (vs the loader's TRUNCATE) — held only for the
+    batch (ms), never across the LLM call. Yields True if it may proceed, False if a
+    dump load holds the dump lock (caller aborts the run)."""
     with _mutate_lock:
-        yield
+        with _dump_lock_held() as got:
+            yield got
 
 
 def ai_should_yield() -> bool:

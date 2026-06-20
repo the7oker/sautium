@@ -347,8 +347,10 @@ def _mb_worker(force: bool) -> None:
         mb.refresh()
         from canon.content import canonicalize_pending
         from canon import algo_canon
-        with algo_canon():   # priority over the AI tier
-            canon = canonicalize_pending()
+        canon = {}
+        with algo_canon() as _ok:   # priority over AI; dump lock already released here
+            if _ok:
+                canon = canonicalize_pending()
         logger.info(f"Post-load MB canon: {canon}")
         # A fresh dump is the moment to run the AI judgment tier once over the
         # whole residue (async, in the background — it's LLM-slow). Gated: no-op

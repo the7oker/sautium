@@ -587,8 +587,10 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                 try:
                     from canon.content import canonicalize_pending
                     from canon import algo_canon
-                    with algo_canon():   # priority over the AI tier
-                        canon_stats = canonicalize_pending()
+                    canon_stats = {}
+                    with algo_canon() as _ok:   # priority over AI; holds the dump lock
+                        if _ok:
+                            canon_stats = canonicalize_pending()
                     if canon_stats.get("artists"):
                         result["mb_canon"] = canon_stats
                         logger.info(f"Post-scan MB canon: {canon_stats}")
