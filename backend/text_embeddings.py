@@ -184,6 +184,7 @@ class TextEmbeddingGenerator:
         track_ids: Optional[list] = None,
         worker_id: Optional[int] = None,
         worker_count: Optional[int] = None,
+        cancel_flag=None,
     ) -> Dict[str, int]:
         """
         Generate text embeddings for all tracks (or those missing them).
@@ -269,6 +270,10 @@ class TextEmbeddingGenerator:
             desc="Generating text embeddings",
             unit="batch",
         ):
+            if cancel_flag and cancel_flag():
+                logger.info("Text embeddings cancelled by user")
+                break
+
             # Check time limit before starting new batch
             if max_duration_seconds:
                 elapsed = time.time() - start_time
@@ -343,6 +348,7 @@ def generate_text_embeddings(
     track_ids: Optional[list] = None,
     worker_id: Optional[int] = None,
     worker_count: Optional[int] = None,
+    cancel_flag=None,
 ) -> Dict[str, int]:
     """
     Convenience function to generate text embeddings.
@@ -364,4 +370,5 @@ def generate_text_embeddings(
             db, limit=limit, force=force, order_by_date=order_by_date,
             max_duration_seconds=max_duration_seconds, track_ids=track_ids,
             worker_id=worker_id, worker_count=worker_count,
+            cancel_flag=cancel_flag,
         )

@@ -135,6 +135,7 @@ class ArtistBioEmbeddingGenerator(_BaseEnrichmentGenerator):
         limit: Optional[int] = None,
         force: bool = False,
         progress_cb: Optional[Callable] = None,
+        cancel_flag: Optional[Callable] = None,
     ) -> Dict[str, int]:
         stats = {"processed": 0, "success": 0, "skipped": 0, "failed": 0, "chunks": 0}
         start = time.time()
@@ -181,6 +182,8 @@ class ArtistBioEmbeddingGenerator(_BaseEnrichmentGenerator):
             desc="Artist bio embeddings",
             unit="batch",
         ):
+            if cancel_flag and cancel_flag():
+                break
             batch_rows = rows[batch_start:batch_start + self.batch_size]
             all_chunks = []  # (artist_id, chunk_index, chunk_text)
 
@@ -254,6 +257,7 @@ class GenreDescEmbeddingGenerator(_BaseEnrichmentGenerator):
         limit: Optional[int] = None,
         force: bool = False,
         progress_cb: Optional[Callable] = None,
+        cancel_flag: Optional[Callable] = None,
     ) -> Dict[str, int]:
         stats = {"processed": 0, "success": 0, "skipped": 0, "failed": 0, "chunks": 0}
         start = time.time()
@@ -298,6 +302,8 @@ class GenreDescEmbeddingGenerator(_BaseEnrichmentGenerator):
             desc="Genre desc embeddings",
             unit="batch",
         ):
+            if cancel_flag and cancel_flag():
+                break
             batch_rows = rows[batch_start:batch_start + self.batch_size]
             all_chunks = []
 
@@ -381,6 +387,7 @@ def generate_genre_desc_embeddings(
 def generate_all_enrichment_embeddings(
     limit: Optional[int] = None, batch_size: Optional[int] = None, force: bool = False,
     progress_cb: Optional[Callable] = None,
+    cancel_flag: Optional[Callable] = None,
 ) -> Dict[str, Dict[str, int]]:
     """Generate all three enrichment embedding types."""
     results: Dict[str, Dict[str, int]] = {}
@@ -388,9 +395,12 @@ def generate_all_enrichment_embeddings(
         (ArtistBioEmbeddingGenerator, "artist_bios"),
         (GenreDescEmbeddingGenerator, "genre_descs"),
     ):
+        if cancel_flag and cancel_flag():
+            break
         gen = cls(batch_size=batch_size)
         with get_db_context() as db:
             results[key] = gen.generate_all(
                 db, limit=limit, force=force, progress_cb=progress_cb,
+                cancel_flag=cancel_flag,
             )
     return results

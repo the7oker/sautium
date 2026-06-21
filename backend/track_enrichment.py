@@ -270,7 +270,7 @@ def run_parallel_enrichment(
         from text_embeddings import generate_text_embeddings
         if progress_cb:
             progress_cb("Phase 2: text embeddings...")
-        text_stats = generate_text_embeddings(limit=None)
+        text_stats = generate_text_embeddings(limit=None, cancel_flag=cancel_flag)
         result_parts["text_embeddings"] = text_stats
         logger.info(f"Text embeddings: {text_stats}")
     except Exception as e:
@@ -286,7 +286,7 @@ def run_parallel_enrichment(
         from lyrics_embeddings import generate_lyrics_embeddings
         if progress_cb:
             progress_cb("Phase 2: lyrics embeddings...")
-        lyrics_emb_stats = generate_lyrics_embeddings(limit=None)
+        lyrics_emb_stats = generate_lyrics_embeddings(limit=None, cancel_flag=cancel_flag)
         result_parts["lyrics_embeddings"] = lyrics_emb_stats
         logger.info(f"Lyrics embeddings: {lyrics_emb_stats}")
     except Exception as e:
@@ -303,7 +303,7 @@ def run_parallel_enrichment(
         if progress_cb:
             progress_cb("Phase 2: enrichment embeddings...")
         enrich_emb_stats = generate_all_enrichment_embeddings(
-            limit=None, progress_cb=progress_cb,
+            limit=None, progress_cb=progress_cb, cancel_flag=cancel_flag,
         )
         result_parts["enrichment_embeddings"] = enrich_emb_stats
         logger.info(f"Enrichment embeddings: {enrich_emb_stats}")

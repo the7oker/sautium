@@ -198,6 +198,7 @@ class LyricsEmbeddingGenerator:
         worker_id: Optional[int] = None,
         worker_count: Optional[int] = None,
         progress_cb=None,
+        cancel_flag=None,
     ) -> Dict[str, int]:
         """
         Generate lyrics embeddings for tracks with lyrics.
@@ -304,6 +305,10 @@ class LyricsEmbeddingGenerator:
             desc="Generating lyrics embeddings",
             unit="batch",
         )):
+            if cancel_flag and cancel_flag():
+                logger.info("Lyrics embeddings cancelled by user")
+                break
+
             # Check time limit before starting new batch
             if max_duration_seconds:
                 elapsed = time.time() - start_time
@@ -411,6 +416,7 @@ def generate_lyrics_embeddings(
     worker_id: Optional[int] = None,
     worker_count: Optional[int] = None,
     progress_cb=None,
+    cancel_flag=None,
 ) -> Dict[str, int]:
     """
     Convenience function to generate lyrics embeddings.
@@ -435,4 +441,5 @@ def generate_lyrics_embeddings(
             max_duration_seconds=max_duration_seconds,
             worker_id=worker_id, worker_count=worker_count,
             progress_cb=progress_cb,
+            cancel_flag=cancel_flag,
         )
