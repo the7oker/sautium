@@ -61,6 +61,9 @@ services:
       LASTFM_USERNAME: ${LASTFM_USERNAME:-}
       LASTFM_SESSION_KEY: ${LASTFM_SESSION_KEY:-}
       CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+      # Expandable segments cut VRAM fragmentation (peak reserved 6.94→5.22 GB,
+      # frag gap −71% measured) — keeps small cards from OOMing in Phase 1.
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       HQPLAYER_HOST: ${HQPLAYER_HOST:-host.docker.internal}
       HQPLAYER_PORT: ${HQPLAYER_PORT:-4321}

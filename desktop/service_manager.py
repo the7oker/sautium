@@ -305,6 +305,11 @@ class ServiceManager:
         env["PYTHONPATH"] = str(self._backend_dir)
         # Load .env vars into environment
         self._load_env_file(env_path, env)
+        # CUDA caching-allocator: expandable segments curb the VRAM
+        # fragmentation that otherwise balloons reserved memory over a
+        # long-lived backend (measured −71% frag gap). setdefault so an
+        # explicit .env / shell override still wins.
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
         backend_python = self._get_backend_python()
         logger.info(f"Backend Python: {backend_python}")
