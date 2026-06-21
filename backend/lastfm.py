@@ -64,6 +64,15 @@ class LastFmService:
                     continue
                 raise
 
+    @staticmethod
+    def _is_genuine_not_found(e: pylast.WSError) -> bool:
+        """True only for Last.fm status 6 ("... could not be found") — the sole
+        permanent miss. Rate-limit (29), malformed/empty bodies and server errors
+        carry misleading messages, so classifying by error code (not a substring
+        of the message) is what keeps transient failures out of the negative cache
+        and stops real entities being recorded as missing forever."""
+        return str(getattr(e, "status", "")) == str(pylast.STATUS_INVALID_PARAMS)
+
     def get_artist_info(self, artist_name: str, fetch_similar: bool = True) -> Optional[Dict[str, Any]]:
         """
         Fetch artist info from Last.fm.
@@ -132,9 +141,12 @@ class LastFmService:
                 except Exception as e:
                     logger.debug(f"No similar artists for {artist_name}: {e}")
 
-            # If all API calls failed, artist doesn't exist
+            # Reaching here with every section empty but no WSError means the
+            # per-section handlers swallowed a transient failure (network/throttle):
+            # a genuinely missing artist would have raised status-6 on the bio call
+            # above. Raise so it's recorded as a retryable 'error', never not_found.
             if not bio_data and not stats_data and not tags_data and not similar_data:
-                return None
+                raise RuntimeError(f"Empty Last.fm response for {artist_name} (transient)")
 
             return {
                 "bio": bio_data,
@@ -144,13 +156,11 @@ class LastFmService:
             }
 
         except pylast.WSError as e:
-            err = str(e).lower()
-            if "not found" in err or "could not be found" in err:
+            if self._is_genuine_not_found(e):
                 logger.info(f"Artist not found on Last.fm: {artist_name}")
                 return None
-            else:
-                logger.error(f"Last.fm API error for {artist_name}: {e}")
-                raise
+            logger.error(f"Last.fm API error for {artist_name}: {e}")
+            raise
         except Exception as e:
             logger.error(f"Error fetching Last.fm data for {artist_name}: {e}")
             raise
@@ -403,8 +413,7 @@ class LastFmService:
                 {"name": s.item.get_name(), "match": float(s.match)} for s in similar
             ]
         except pylast.WSError as e:
-            err = str(e).lower()
-            if "not found" in err or "could not be found" in err:
+            if self._is_genuine_not_found(e):
                 result["status"] = "not_found"
                 similar_data = []
             else:
@@ -655,7 +664,7 @@ class LastFmService:
             }
 
         except pylast.WSError as e:
-            if "Tag not found" in str(e):
+            if self._is_genuine_not_found(e):
                 logger.info(f"Tag not found on Last.fm: {tag_name}")
                 return None
             else:
@@ -908,8 +917,7 @@ class LastFmService:
                 lambda: self.network.get_album(artist_name, album_title).get_cover_image(size=size)
             )
         except pylast.WSError as e:
-            err = str(e).lower()
-            if "not found" in err or "could not be found" in err:
+            if self._is_genuine_not_found(e):
                 return None
             # Rate limit (code 29) survived the backoff, or some other
             # API-level error — transient, not "no cover".
@@ -970,8 +978,7 @@ class LastFmService:
             }
 
         except pylast.WSError as e:
-            err = str(e).lower()
-            if "not found" in err or "could not be found" in err:
+            if self._is_genuine_not_found(e):
                 logger.info(f"Track not found on Last.fm: {artist_name} - {track_title}")
                 return None
             else:
