@@ -176,10 +176,14 @@ class PlaybackTracker:
         }
         self.db_conn: Optional[psycopg2.extensions.connection] = None
 
-        # Playlist mapping: track_index → media_files.id, derived from
-        # HQPlayer's own queue (PlaylistGet), not pushed by the backend —
+        # Playlist mapping: queue position (0-based) → media_files.id, derived
+        # from HQPlayer's own queue (PlaylistGet), not pushed by the backend —
         # stays correct no matter who filled the queue and survives restarts.
         self.playlist: Dict[int, int] = {}
+        # Total length of HQPlayer's current queue (incl. positions whose file
+        # isn't in our library) — lets us tell "past the end" from "in the
+        # queue but unresolved".
+        self.playlist_size: int = 0
 
         # Dedicated query connection to HQPlayer (separate socket from the
         # subscribe stream) for fetching the live playlist on demand.
@@ -408,16 +412,30 @@ class PlaybackTracker:
                 if self.current_session:
                     self._save_session(self.current_session)
 
-                # Rebuild the index→media_file map from HQPlayer's live queue
-                # so it always reflects what's actually playing, independent
-                # of how the queue was filled (web UI, desktop, pre-existing).
+                # Rebuild the position→media_file map from HQPlayer's live
+                # queue so it always reflects what's actually playing,
+                # independent of how the queue was filled (web UI, desktop,
+                # pre-existing).
                 await self._rebuild_playlist_from_hqplayer()
-                track_id = self.playlist.get(track_index)
+                # HQPlayer's Status 'track' is 1-based: track=1 is the first
+                # queue item; track=0 is a transient pre-play/stopped marker.
+                # The map is 0-based (enumerate over PlaylistGet), so shift by
+                # one to recover the queue position.
+                queue_pos = track_index - 1
+                track_id = self.playlist.get(queue_pos)
                 if track_id is None:
-                    logger.warning(
-                        f"Track index {track_index} not resolvable from HQPlayer "
-                        f"playlist (not in library?) — cannot track."
-                    )
+                    if 0 <= queue_pos < self.playlist_size:
+                        # In the queue, but this file isn't in our library.
+                        logger.warning(
+                            f"HQPlayer track={track_index} not in library — cannot track."
+                        )
+                    else:
+                        # track=0 pre-play marker, or HQPlayer stepped past the
+                        # end of the queue — normal lifecycle, not an anomaly.
+                        logger.debug(
+                            f"HQPlayer track={track_index} outside queue "
+                            f"(pos {queue_pos}, size {self.playlist_size}) — no session"
+                        )
                     self.current_session = None
                     self.current_track_index = track_index
                     return
@@ -432,7 +450,7 @@ class PlaybackTracker:
                 if meta:
                     logger.info(
                         f"▶️  Started tracking: {meta['artist']} - {meta['title']} "
-                        f"(track_id={track_id}, index={track_index})"
+                        f"(track_id={track_id}, pos={queue_pos})"
                     )
                     # Send "now playing" to Last.fm
                     if self.scrobbler:
@@ -500,6 +518,7 @@ class PlaybackTracker:
                 idx: path_to_id[p] for idx, p in paths.items() if p in path_to_id
             }
         self.playlist = mapping
+        self.playlist_size = len(tracks)
         resolved, total = len(mapping), len(tracks)
         msg = f"Playlist mapping rebuilt from HQPlayer: {resolved}/{total} tracks resolved"
         if total - resolved:
