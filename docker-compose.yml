@@ -58,7 +58,6 @@ services:
       # Native OS path prefix for DB-stored paths (scanner translates /music/... → this)
       # Set in .env, e.g.: MUSIC_HOST_PATH=E:/Music
       MUSIC_HOST_PATH: ${MUSIC_HOST_PATH:-}
-      TRACKER_URL: http://playback-tracker:8765
 
       # Claude Code integration
       CLAUDE_CODE_ENABLED: ${CLAUDE_CODE_ENABLED:-true}

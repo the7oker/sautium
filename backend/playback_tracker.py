@@ -6,11 +6,12 @@ Subscribes to HQPlayer events and tracks listening history:
 - Monitors playback via HQPlayer XML API (subscribe mode)
 - Records listening sessions to database
 - Updates play_count when tracks are completed (>50% listened)
-- Provides HTTP API for playlist registration from MCP/CLI
 
 Architecture:
 - Event-driven: subscribes to HQPlayer status updates (~1/sec)
-- Playlist mapping: stores track_index → track_id mapping
+- Playlist mapping: derived from HQPlayer's own PlaylistGet
+  (URI → media_file), rebuilt on every track change — no external
+  registration, so it survives tracker restarts and out-of-band queues
 - Session tracking: monitors current track progress
 - Database: writes to listening_history and updates tracks.play_count
 
@@ -35,7 +36,7 @@ from aiohttp import web
 
 # Add backend to path for imports
 sys.path.insert(0, '/app')
-from hqplayer_client import PlaybackState
+from hqplayer_client import PlaybackState, HQPlayerClient, uri_to_file_path
 
 # Logging to stderr only (never stdout in daemon)
 logging.basicConfig(
@@ -175,8 +176,16 @@ class PlaybackTracker:
         }
         self.db_conn: Optional[psycopg2.extensions.connection] = None
 
-        # Playlist mapping: track_index → track_id
+        # Playlist mapping: track_index → media_files.id, derived from
+        # HQPlayer's own queue (PlaylistGet), not pushed by the backend —
+        # stays correct no matter who filled the queue and survives restarts.
         self.playlist: Dict[int, int] = {}
+
+        # Dedicated query connection to HQPlayer (separate socket from the
+        # subscribe stream) for fetching the live playlist on demand.
+        self.hqp_query = HQPlayerClient(
+            host=hqplayer_host, port=hqplayer_port, timeout=5.0
+        )
 
         # Current session
         self.current_session: Optional[PlaybackSession] = None
@@ -399,12 +408,15 @@ class PlaybackTracker:
                 if self.current_session:
                     self._save_session(self.current_session)
 
-                # Start new session
+                # Rebuild the index→media_file map from HQPlayer's live queue
+                # so it always reflects what's actually playing, independent
+                # of how the queue was filled (web UI, desktop, pre-existing).
+                await self._rebuild_playlist_from_hqplayer()
                 track_id = self.playlist.get(track_index)
                 if track_id is None:
                     logger.warning(
-                        f"Track index {track_index} not in playlist — cannot track. "
-                        f"Playlist has {len(self.playlist)} tracks."
+                        f"Track index {track_index} not resolvable from HQPlayer "
+                        f"playlist (not in library?) — cannot track."
                     )
                     self.current_session = None
                     self.current_track_index = track_index
@@ -463,6 +475,49 @@ class PlaybackTracker:
         except Exception as e:
             logger.error(f"Error handling event: {e}")
 
+    async def _rebuild_playlist_from_hqplayer(self):
+        """Rebuild index→media_file from HQPlayer's live PlaylistGet.
+
+        HQPlayer is the single source of truth for the queue; each position
+        maps to a media_files row by the file path decoded from its URI, via
+        one batched lookup over the unique file_path index."""
+        tracks = await asyncio.to_thread(self._fetch_hqp_playlist)
+        paths = {
+            idx: uri_to_file_path(t["uri"])
+            for idx, t in enumerate(tracks)
+            if t.get("uri")
+        }
+        mapping: Dict[int, int] = {}
+        if paths:
+            conn = self._get_db()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT file_path, id FROM media_files WHERE file_path = ANY(%s)",
+                    (list(set(paths.values())),),
+                )
+                path_to_id = {fp: mid for fp, mid in cur.fetchall()}
+            mapping = {
+                idx: path_to_id[p] for idx, p in paths.items() if p in path_to_id
+            }
+        self.playlist = mapping
+        resolved, total = len(mapping), len(tracks)
+        msg = f"Playlist mapping rebuilt from HQPlayer: {resolved}/{total} tracks resolved"
+        if total - resolved:
+            msg += f" ({total - resolved} not in library)"
+        logger.info(msg)
+
+    def _fetch_hqp_playlist(self) -> list:
+        """Blocking PlaylistGet over the dedicated query socket."""
+        try:
+            if not self.hqp_query.is_connected() and not self.hqp_query.connect():
+                logger.warning("Could not connect to HQPlayer for PlaylistGet")
+                return []
+            return self.hqp_query.get_playlist()
+        except Exception as e:
+            logger.warning(f"PlaylistGet failed: {e}")
+            self.hqp_query.disconnect()  # force a clean reconnect next time
+            return []
+
     async def _event_loop(self):
         """Main event loop: connect to HQPlayer and process events"""
         while True:
@@ -499,24 +554,6 @@ class PlaybackTracker:
 
     # ========== HTTP API for playlist registration ==========
 
-    async def _http_register_playlist(self, request):
-        """HTTP endpoint: POST /playlist with track mapping"""
-        try:
-            data = await request.json()
-            playlist_mapping = data.get("playlist", {})
-
-            # Convert string keys to int
-            self.playlist = {int(k): int(v) for k, v in playlist_mapping.items()}
-
-            logger.info(f"📋 Playlist registered: {len(self.playlist)} tracks")
-            return web.json_response(
-                {"status": "ok", "tracks": len(self.playlist)}, status=200
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to register playlist: {e}")
-            return web.json_response({"status": "error", "message": str(e)}, status=400)
-
     async def _http_get_stats(self, request):
         """HTTP endpoint: GET /stats"""
         return web.json_response(
@@ -539,19 +576,11 @@ class PlaybackTracker:
             }
         )
 
-    async def _http_clear_playlist(self, request):
-        """HTTP endpoint: POST /clear"""
-        self.playlist.clear()
-        logger.info("📋 Playlist cleared")
-        return web.json_response({"status": "ok"})
-
     async def run(self):
         """Run daemon: start HTTP server + event loop"""
         # Setup HTTP server
         app = web.Application()
-        app.router.add_post("/playlist", self._http_register_playlist)
         app.router.add_get("/stats", self._http_get_stats)
-        app.router.add_post("/clear", self._http_clear_playlist)
 
         runner = web.AppRunner(app)
         await runner.setup()
@@ -559,9 +588,7 @@ class PlaybackTracker:
         await site.start()
 
         logger.info(f"🌐 HTTP API listening on port {self.http_port}")
-        logger.info(f"   POST /playlist - register playlist mapping")
         logger.info(f"   GET  /stats    - get daemon statistics")
-        logger.info(f"   POST /clear    - clear playlist")
 
         # Run event loop
         await self._event_loop()

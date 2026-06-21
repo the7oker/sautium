@@ -419,13 +419,20 @@ def _knn_recommend(centroid: list[float], limit: int) -> list[dict[str, Any]]:
             JOIN media_files mf ON mf.track_id = st.track_id
             JOIN album_variants av ON av.id = mf.album_variant_id
         ),
+        -- Tier state derives from the SAME source as the seed
+        -- (listening_history, completed plays) so an album that seeds the
+        -- centroid also counts as "played" and leaves the shelf. Reading
+        -- play state from local_play_stats here would split the source of
+        -- truth: a just-played album could shift the centroid toward itself
+        -- yet keep tier 0 and resurface instead of dropping out.
         album_state AS (
             SELECT av.album_id,
-                   MAX(lps.last_played_at) AS last_touch,
-                   COALESCE(SUM(lps.play_count), 0) AS total_plays
+                   MAX(lh.started_at) AS last_touch,
+                   COUNT(lh.id) AS total_plays
             FROM album_variants av
             JOIN media_files mf ON mf.album_variant_id = av.id
-            LEFT JOIN local_play_stats lps ON lps.track_id = mf.track_id
+            LEFT JOIN listening_history lh
+                   ON lh.media_file_id = mf.id AND lh.completed
             WHERE av.album_id IN (SELECT album_id FROM candidate_albums)
             GROUP BY av.album_id
         ),

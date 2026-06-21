@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 from enum import IntEnum
+from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
 
@@ -726,3 +727,24 @@ def file_path_to_uri(file_path: str) -> str:
             path = "file:///" + path
 
     return path
+
+
+def uri_to_file_path(uri: str) -> str:
+    """
+    Convert a file:// URI back to the stored file path (inverse of
+    file_path_to_uri).
+
+    media_files.file_path is stored with forward slashes (e.g.
+    E:/Music/.../track.flac), so we only strip the scheme and
+    percent-decode — no slash conversion. Handles both Windows drive
+    paths (file:///E:/... → E:/...) and POSIX (file:///mnt/... → /mnt/...).
+    """
+    if uri.startswith("file://"):
+        path = uri[len("file://"):]
+        # file:///E:/... carries a leading slash before the drive letter;
+        # file:///mnt/... keeps its leading slash as a real POSIX root.
+        if len(path) >= 3 and path[0] == "/" and path[2] == ":":
+            path = path[1:]
+    else:
+        path = uri
+    return unquote(path)

@@ -12,7 +12,6 @@ import threading
 import time
 from typing import Optional
 
-import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -425,23 +424,6 @@ def _hqp_safe(action) -> None:
                 _reset_hqp()
 
 
-
-
-def _register_playlist(track_ids: list[int]) -> bool:
-    """Register playlist mapping with playback tracker daemon."""
-    try:
-        playlist_mapping = {str(i): tid for i, tid in enumerate(track_ids)}
-        with httpx.Client(timeout=2.0) as client:
-            resp = client.post(
-                f"{settings.tracker_url}/playlist",
-                json={"playlist": playlist_mapping},
-            )
-            resp.raise_for_status()
-            logger.info(f"Registered playlist with tracker: {len(track_ids)} tracks")
-            return True
-    except Exception as e:
-        logger.warning(f"Failed to register playlist with tracker: {e}")
-        return False
 
 
 # -- Listening sessions (queue-lifetime snapshots) ----------------------------
@@ -1471,7 +1453,6 @@ def reorder(req: ReorderRequest):
                         cursor += 1
                     else:
                         hqp.playlist_remove(cursor)
-            _register_playlist(req.order)
             _force_refresh_playlist_after_write()
             return {
                 "ok": True,
@@ -1506,7 +1487,6 @@ def reorder(req: ReorderRequest):
                 hqp.seek(position)
             if should_resume:
                 hqp.play()
-        _register_playlist(req.order)
         _force_refresh_playlist_after_write()
         return {
             "ok": True,
@@ -1563,10 +1543,6 @@ def play_track(req: PlayTrackRequest):
         with _hqp_lock:
             _hqp_safe(lambda h: h.stop())
             added = _add_uris_with_retry([uri], clear_first=True)
-            # Register BEFORE play() so the tracker has the index→track_id
-            # map by the time HQPlayer emits its first status update —
-            # otherwise the now-playing scrobble is silently dropped.
-            _register_playlist([req.track_id])
             if added:
                 _hqp_safe(lambda h: h.play())
         _invalidate_playlist()
@@ -1654,8 +1630,6 @@ def play_album(req: PlayAlbumRequest):
         with _hqp_lock:
             _hqp_safe(lambda h: h.stop())
             added = _add_uris_with_retry(uris, clear_first=True)
-            track_ids = [r["id"] for r in rows]
-            _register_playlist(track_ids)
             if added:
                 _hqp_safe(lambda h: h.play())
 
@@ -1738,8 +1712,6 @@ def play_similar(req: PlaySimilarRequest):
         with _hqp_lock:
             _hqp_safe(lambda h: h.stop())
             added = _add_uris_with_retry(uris, clear_first=True)
-            track_ids = [r["id"] for r in rows]
-            _register_playlist(track_ids)
             if added:
                 _hqp_safe(lambda h: h.play())
 
@@ -1809,8 +1781,6 @@ def play_tracks(req: PlayTracksRequest):
             _hqp_safe(lambda h: h.stop())
             added = _add_uris_with_retry(uris, clear_first=True)
             logger.info(f"play-tracks: added {added} of {len(rows)} tracks")
-            track_ids = [r["id"] for r in rows]
-            _register_playlist(track_ids)
             if added:
                 _hqp_safe(lambda h: h.play())
 

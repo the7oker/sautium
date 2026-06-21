@@ -64,21 +64,6 @@ def _get_hqp():
     return _hqp_client
 
 
-def _register_playlist(track_ids: list[int]) -> bool:
-    try:
-        playlist_mapping = {str(i): tid for i, tid in enumerate(track_ids)}
-        with httpx.Client(timeout=2.0) as client:
-            resp = client.post(
-                f"{settings.tracker_url}/playlist",
-                json={"playlist": playlist_mapping},
-            )
-            resp.raise_for_status()
-            return True
-    except Exception as e:
-        logger.warning(f"Failed to register playlist: {e}")
-        return False
-
-
 def _format_track(row: dict) -> str:
     from hqplayer_client import format_time
     parts = []
@@ -475,10 +460,6 @@ def _h_play_track(track_id: int) -> str:
         hqp.stop()
         hqp.playlist_add(uri, clear=True)
         hqp.select_track(0)
-        # Register BEFORE play() so the tracker has the index→track_id
-        # map by the time HQPlayer emits its first status update —
-        # otherwise the now-playing scrobble is silently dropped.
-        _register_playlist([track_id])
         hqp.play()
         return f"Now playing: {row['artist']} - {row['title']}\nAlbum: {row['album']}"
     except Exception as e:
@@ -544,8 +525,6 @@ def _h_play_album(album_name: str, artist_name: str = "") -> str:
             uri = file_path_to_uri(row["file_path"])
             hqp.playlist_add(uri)
         hqp.select_track(0)
-        track_ids = [row["id"] for row in rows]
-        _register_playlist(track_ids)
         hqp.play()
 
         album_title = rows[0]["album"]
@@ -612,8 +591,6 @@ def _h_play_similar(track_id: int, limit: int = 10) -> str:
             uri = file_path_to_uri(row["file_path"])
             hqp.playlist_add(uri)
         hqp.select_track(0)
-        track_ids = [row["id"] for row in rows]
-        _register_playlist(track_ids)
         hqp.play()
 
         source = _db_query_one("""

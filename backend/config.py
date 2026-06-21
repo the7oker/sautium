@@ -76,9 +76,6 @@ class Settings(BaseSettings):
     # Launcher: not set or same as MUSIC_LIBRARY_PATH → DB stores native path as-is
     music_host_path: Optional[str] = None
 
-    # Playback tracker daemon URL
-    tracker_url: str = "http://localhost:8765"
-
     # Claude Code integration (agent-based AI DJ)
     claude_code_enabled: bool = False
 
