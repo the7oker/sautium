@@ -16,7 +16,7 @@ import logging
 import math
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 from sqlalchemy import text as sa_text
@@ -134,6 +134,7 @@ class ArtistBioEmbeddingGenerator(_BaseEnrichmentGenerator):
         db: Session,
         limit: Optional[int] = None,
         force: bool = False,
+        progress_cb: Optional[Callable] = None,
     ) -> Dict[str, int]:
         stats = {"processed": 0, "success": 0, "skipped": 0, "failed": 0, "chunks": 0}
         start = time.time()
@@ -232,6 +233,9 @@ class ArtistBioEmbeddingGenerator(_BaseEnrichmentGenerator):
             stats["success"] += len(batch_artists) - len(batch_failed)
             stats["processed"] += len(batch_rows)
             db.commit()
+            if progress_cb:
+                done = min(batch_start + self.batch_size, len(rows))
+                progress_cb(f"Phase 2: artist bios {done}/{len(rows)}")
 
         elapsed = time.time() - start
         logger.info(
@@ -249,6 +253,7 @@ class GenreDescEmbeddingGenerator(_BaseEnrichmentGenerator):
         db: Session,
         limit: Optional[int] = None,
         force: bool = False,
+        progress_cb: Optional[Callable] = None,
     ) -> Dict[str, int]:
         stats = {"processed": 0, "success": 0, "skipped": 0, "failed": 0, "chunks": 0}
         start = time.time()
@@ -343,6 +348,9 @@ class GenreDescEmbeddingGenerator(_BaseEnrichmentGenerator):
             stats["success"] += len(batch_genres) - len(batch_failed)
             stats["processed"] += len(batch_rows)
             db.commit()
+            if progress_cb:
+                done = min(batch_start + self.batch_size, len(rows))
+                progress_cb(f"Phase 2: genre descriptions {done}/{len(rows)}")
 
         elapsed = time.time() - start
         logger.info(
@@ -372,6 +380,7 @@ def generate_genre_desc_embeddings(
 
 def generate_all_enrichment_embeddings(
     limit: Optional[int] = None, batch_size: Optional[int] = None, force: bool = False,
+    progress_cb: Optional[Callable] = None,
 ) -> Dict[str, Dict[str, int]]:
     """Generate all three enrichment embedding types."""
     results: Dict[str, Dict[str, int]] = {}
@@ -381,5 +390,7 @@ def generate_all_enrichment_embeddings(
     ):
         gen = cls(batch_size=batch_size)
         with get_db_context() as db:
-            results[key] = gen.generate_all(db, limit=limit, force=force)
+            results[key] = gen.generate_all(
+                db, limit=limit, force=force, progress_cb=progress_cb,
+            )
     return results

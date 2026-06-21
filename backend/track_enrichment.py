@@ -24,6 +24,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_, exists, select, func, cast, String, text
 from tqdm import tqdm
 
+try:
+    import torch
+except ImportError:
+    torch = None
+
 from config import settings
 from database import get_db_context
 from models import (
@@ -250,6 +255,13 @@ def run_parallel_enrichment(
         result_parts["note"] = "cancelled during phase 1"
         return result_parts
 
+    # Phase 1's CLAP/instrument tensors are finished; hand their cached blocks
+    # back to the driver before Phase 2 so the text encoder isn't squeezed into
+    # a full allocator arena on the 16 GB laptop GPU. Singleton model weights
+    # stay resident — only the allocator's free cache is returned.
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     # === Phase 2: Text embeddings (sentence-transformers, needs GPU) ===
     logger.info("=== Phase 2: text embeddings ===")
 
@@ -290,7 +302,9 @@ def run_parallel_enrichment(
         from enrichment_embeddings import generate_all_enrichment_embeddings
         if progress_cb:
             progress_cb("Phase 2: enrichment embeddings...")
-        enrich_emb_stats = generate_all_enrichment_embeddings(limit=None)
+        enrich_emb_stats = generate_all_enrichment_embeddings(
+            limit=None, progress_cb=progress_cb,
+        )
         result_parts["enrichment_embeddings"] = enrich_emb_stats
         logger.info(f"Enrichment embeddings: {enrich_emb_stats}")
     except Exception as e:
