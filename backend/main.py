@@ -592,10 +592,13 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                         if _ok:
                             canon_stats = canonicalize_pending()
                             # Catch the NULL-rg owned-album residue the main matcher
-                            # rejects on its bidirectional size gate (deluxe/multi-disc
-                            # rips, thin fragments) — free, algorithmic, event-driven.
-                            from canon.content import distill_album_residue
+                            # rejects on its bidirectional size gate — first by edition-
+                            # stripped name, then the content-only studio uniques the name
+                            # pass can't reach (cross-script / reworded titles). Free,
+                            # algorithmic, event-driven.
+                            from canon.content import distill_album_residue, distill_album_coverage
                             bound = distill_album_residue().get("bound", 0)
+                            bound += distill_album_coverage().get("bound", 0)
                             if bound:
                                 canon_stats["album_residue_bound"] = bound
                     if canon_stats.get("artists") or canon_stats.get("album_residue_bound"):

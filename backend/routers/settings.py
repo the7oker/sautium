@@ -352,9 +352,11 @@ def _mb_worker(force: bool) -> None:
             if _ok:
                 canon = canonicalize_pending()
                 # A fresh dump may expose release-groups the matcher couldn't reach;
-                # catch the NULL-rg owned-album residue (deluxe/multi-disc, fragments).
-                from canon.content import distill_album_residue
-                canon["album_residue_bound"] = distill_album_residue().get("bound", 0)
+                # catch the NULL-rg owned-album residue (deluxe/multi-disc, fragments) by
+                # name, then the content-only studio uniques (cross-script / reworded).
+                from canon.content import distill_album_residue, distill_album_coverage
+                canon["album_residue_bound"] = (distill_album_residue().get("bound", 0)
+                                                + distill_album_coverage().get("bound", 0))
         logger.info(f"Post-load MB canon: {canon}")
         # A fresh dump is the moment to run the AI judgment tier once over the
         # whole residue (async, in the background — it's LLM-slow). Gated: no-op
