@@ -207,9 +207,43 @@ CREATE TABLE IF NOT EXISTS artist_mbids (
     mbid UUID PRIMARY KEY,
     artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     confidence mb_match_confidence NOT NULL,
-    about TEXT,   -- namesake disambiguation caption (phantom canon): mb_artist comment, else type · area · year
+    name TEXT,    -- the MB-canonical name of THIS entity (denormalized per mbid): when one
+                  -- name-derived Sautium artist maps to several MB entities (namesakes), this
+                  -- is how to write each one; also gives dump-less / P2P nodes the spelling
+                  -- without mb_artist. Auto-filled by fill_artist_mbid_meta().
+    about TEXT,   -- namesake disambiguation caption: mb_artist comment, else type · area · year
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Denormalize the MB entity's name + disambiguation onto every artist_mbids row,
+-- whatever canon tier inserted it (content / name_exact / split / phantom / ai) —
+-- a single trigger so no insert site can forget it. Reads the local dump; on a
+-- dump-less node it leaves the value the insert/sync supplied (the P2P-carried one).
+CREATE OR REPLACE FUNCTION fill_artist_mbid_meta() RETURNS TRIGGER AS $$
+DECLARE
+    _name text; _comment text; _type int; _area text; _year int;
+BEGIN
+    SELECT m.name, m.comment, m.type, ar.name, m.begin_date_year
+      INTO _name, _comment, _type, _area, _year
+      FROM mb_artist m LEFT JOIN mb_area ar ON ar.id = m.area
+     WHERE m.gid = NEW.mbid;
+    IF FOUND THEN
+        NEW.name  := _name;
+        NEW.about := COALESCE(
+            NULLIF(btrim(_comment), ''),
+            NULLIF(concat_ws(' · ',
+                CASE _type WHEN 1 THEN 'Person' WHEN 2 THEN 'Group' WHEN 3 THEN 'Other'
+                           WHEN 4 THEN 'Character' WHEN 5 THEN 'Orchestra' WHEN 6 THEN 'Choir' END,
+                _area, _year::text), ''));
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$ BEGIN CREATE TRIGGER fill_artist_mbid_meta_trg
+    BEFORE INSERT OR UPDATE OF mbid ON artist_mbids
+    FOR EACH ROW EXECUTE FUNCTION fill_artist_mbid_meta();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- 1:N: our track (a song) → MB recordings it conflates (studio/live/remaster of
 -- the same song). recording_mbid PK = one recording → one song; the inverse is

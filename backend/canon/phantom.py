@@ -32,17 +32,6 @@ from db_pool import db_query, get_conn
 
 logger = logging.getLogger(__name__)
 
-_ARTIST_TYPE = {1: "Person", 2: "Group", 3: "Other", 4: "Character",
-                5: "Orchestra", 6: "Choir"}
-
-
-def _caption(comment, atype, area, year) -> Optional[str]:
-    """Namesake label: MB disambiguation comment if present, else type/area/year."""
-    if comment and comment.strip():
-        return comment.strip()
-    parts = [p for p in (_ARTIST_TYPE.get(atype), area, str(year) if year else None) if p]
-    return " · ".join(parts) or None
-
 
 def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False) -> dict:
     stats = {"phantoms": 0, "not_in_mb": 0, "unambiguous": 0,
@@ -163,43 +152,33 @@ def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False
         chosen[i] = scored[0][1]
         stats["disambiguated"] += 1
         if dry_run and len(examples) < 15:
-            examples.append((ph_name[i], len(gids), [s for s, _ in scored[:4]], scored[0][1]))
-
-    cgids = list(set(chosen.values()))
-    cap = {}
-    if cgids:
-        for r in db_query("""
-            SELECT a.gid::text AS gid, a.comment, a.type, ar.name AS area, a.begin_date_year AS yr
-            FROM mb_artist a LEFT JOIN mb_area ar ON ar.id = a.area
-            WHERE a.gid = ANY(%(g)s::uuid[])
-        """, {"g": cgids}):
-            cap[r["gid"]] = _caption(r["comment"], r["type"], r["area"], r["yr"])
+            examples.append((ph_name[i], len(gids), [s for s, _ in scored[:4]]))
 
     if dry_run:
         stats["would_canonize"] = len(chosen)
         stats["would_discard"] = stats["not_in_mb"] + stats["inconclusive"]
-        for nm, n, ov, gid in examples:
-            logger.info("disambiguated e.g. %s (%d namesakes) overlaps=%s -> %r",
-                        nm, n, ov, cap.get(gid))
+        for nm, n, ov in examples:
+            logger.info("disambiguated e.g. %s (%d namesakes) overlaps=%s", nm, n, ov)
         return stats
 
     # mbid is the PK (one MB entity -> one artist); dedup so two phantom name
-    # variants resolving to the same MBID don't collide in the batch.
+    # variants resolving to the same MBID don't collide in the batch. name + about
+    # are denormalized by the fill_artist_mbid_meta trigger, not set here.
     seen, rows = set(), []
     for ph_id, gid in chosen.items():
         if gid in seen:
             continue
         seen.add(gid)
-        rows.append((gid, ph_id, cap.get(gid)))
+        rows.append((gid, ph_id))
 
     from psycopg2.extras import execute_values
     with get_conn() as conn:
         conn.autocommit = True
         with conn.cursor() as cur:
             execute_values(cur,
-                "INSERT INTO artist_mbids (mbid, artist_id, confidence, about) VALUES %s "
+                "INSERT INTO artist_mbids (mbid, artist_id, confidence) VALUES %s "
                 "ON CONFLICT (mbid) DO NOTHING",
-                rows, template="(%s, %s, 'phantom', %s)")
+                rows, template="(%s, %s, 'phantom')")
             # execute_values' rowcount only reflects the last page; rows is the
             # deduped attempt count (ON CONFLICT skips already-mapped MBIDs).
             stats["canonized"] = len(rows)

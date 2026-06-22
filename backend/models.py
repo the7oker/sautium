@@ -338,6 +338,11 @@ class ArtistMbid(Base):
     mbid = Column(UUID(as_uuid=False), primary_key=True)
     artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     confidence = Column(MbMatchConfidenceEnum, nullable=False)
+    # MB-canonical name + disambiguation for THIS entity, denormalized per mbid
+    # (namesake spelling; survives to dump-less/P2P nodes). Auto-filled by the
+    # fill_artist_mbid_meta trigger, so canon inserts don't set them.
+    name = Column(Text)
+    about = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     artist = relationship("Artist", foreign_keys=[artist_id])
