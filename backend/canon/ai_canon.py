@@ -174,8 +174,16 @@ def _provider():
 
 
 def _ask(prompt, model, provider):
-    res = provider.chat(message=prompt, system_prompt=_SYS, model=model)
-    txt = (res.answer or "").strip()
+    # Claude Code is NOT dispatched through the provider abstraction — its .chat()
+    # deliberately raises; the CLI is driven by call_claude_code (the same path the
+    # chat router uses). Other providers (anthropic/openai) implement .chat().
+    if getattr(provider, "name", "") == "claude_code":
+        from claude_code_runner import call_claude_code
+        res = call_claude_code(message=prompt, system_prompt=_SYS, model=model)
+        txt = (res.get("answer") or "").strip()
+    else:
+        res = provider.chat(message=prompt, system_prompt=_SYS, model=model)
+        txt = (res.answer or "").strip()
     m = re.search(r"\[.*\]", txt, re.DOTALL)   # strip any prose/markdown fences
     return json.loads(m.group(0)) if m else []
 
