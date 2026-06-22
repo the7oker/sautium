@@ -505,18 +505,19 @@ def _ai_state() -> Dict[str, Any]:
         if api_key:
             auth_state = "api_key_set"
             masked_key = "●" * 8 + (api_key[-4:] if len(api_key) >= 4 else api_key)
-        else:
-            # OAuth check — chat.py persists a refresh token; if present
-            # we treat the user as OAuth-signed-in. Days-to-expiry is
-            # best-effort: parse the JWT or fall back to a placeholder.
+        elif provider == "claude_code":
+            # Claude Code is OAuth (subscription). claude_code.get_state() knows
+            # where the credentials live — incl. /home/claudeuser/.claude in Docker,
+            # where the CLI runs demoted to CLAUDE_USER. (Previously this imported a
+            # non-existent routers.chat.oauth_status and swallowed the ImportError,
+            # so auth_state was ALWAYS not_authenticated — which hid Claude Code on
+            # Docker and disabled the AI-canon tier there.)
             try:
-                from routers.chat import oauth_status  # type: ignore
-                st = oauth_status()
-                if st and st.get("authenticated"):
+                import claude_code
+                if claude_code.get_state() == "ready":
                     auth_state = "oauth_signed_in"
-                    expires_in_days = st.get("expires_in_days")
             except Exception:
-                pass
+                logger.exception("claude_code auth-state check failed")
 
     # Usage is intentionally null until we wire the provider billing
     # API; UI handles "row hidden when null". Placeholder structure
