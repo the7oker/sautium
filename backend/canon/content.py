@@ -297,6 +297,104 @@ SELECT album_id, rg_mbid FROM (   -- among content-valid releases, the one whose
 """
 
 
+# Relaxed RG resolution for the NULL-rg owned-album residue (distill_album_residue).
+# _RG_SQL gates on a BIDIRECTIONAL size check (the owned album must also cover >=50%
+# of the release); that correctly rejects an album merely sharing songs with a comp,
+# but it ALSO drops every full album ripped against a deluxe/multi-disc release (12
+# owned of a 30-track deluxe = 0.4) and every thin fragment (2 tracks can't cover
+# half a 12-track release) — the bulk of the residue. Here the album's artist is
+# ALREADY canonized, so an RG *under that artist* whose edition-stripped name
+# strongly matches the owned title is corroboration enough on its own: keep the
+# owned-half (the album's own tracks are mostly present in the release — the rel_cov
+# early-cut) plus a STRONG name gate, and drop the release-half. Single-artist scope
+# + high namesim is the safety the size check otherwise provided. rel_total is kept
+# only as the closest-size rank tie-break (rejects a box-set superset over the album).
+_RG_RESIDUE_NAME_MIN = 0.55
+_RG_RESIDUE_COMP_NAME = 0.70   # comps need a STRONGER name: two different comps by one artist
+                               # share songs, so a 0.55 match binds "20 Golden Hits" onto "The
+                               # Best Of" (10/20 shared) — the name is the only disambiguator.
+_RG_RESIDUE_SQL = f"""
+WITH owned AS (
+    SELECT a.id::text AS album_id, t.id::text AS track_id, {_norm('t.title')} AS ntitle,
+           mf.duration_seconds::float AS dur
+    FROM albums a
+    JOIN album_artists aa ON aa.album_id=a.id AND aa.role='primary'
+        AND aa.artist_id=%(artist)s::uuid
+    JOIN album_variants av ON av.album_id=a.id
+    JOIN media_files mf ON mf.album_variant_id=av.id
+    JOIN tracks t ON t.id=mf.track_id
+    JOIN track_artists ta2 ON ta2.track_id=t.id AND ta2.role='primary'
+        AND ta2.artist_id=%(artist)s::uuid
+    WHERE a.id = ANY(%(albums)s::uuid[])
+    GROUP BY a.id, t.id, t.title, mf.duration_seconds
+),
+nt AS (SELECT album_id, count(DISTINCT track_id) AS total FROM owned GROUP BY album_id),
+atitle AS (
+    SELECT a.id::text AS album_id, {_norm('a.title')} AS atitle,
+           coalesce(ab.base, {_norm('a.title')}) AS abase
+    FROM albums a
+    LEFT JOIN _abase ab ON ab.album_id = a.id::text
+    WHERE a.id = ANY(%(albums)s::uuid[])),
+cand AS (
+    SELECT o.album_id, o.track_id, r.id AS rec_id FROM owned o JOIN _recs r ON r.rname = o.ntitle
+        AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= {_RG_DURTOL})
+    UNION
+    SELECT o.album_id, o.track_id, r.id FROM owned o JOIN _recs r ON r.rname %% o.ntitle
+        AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= {_RG_DURTOL})
+),
+rel_cov AS (
+    SELECT album_id, rg_mbid, rel_id, owned_cov, total, is_comp, rgn FROM (
+        SELECT c.album_id, rg.gid::text AS rg_mbid, r.id AS rel_id, nt.total,
+               {_norm('rg.name')} AS rgn,
+               count(DISTINCT c.track_id) AS owned_cov,
+               EXISTS (SELECT 1 FROM mb_release_group_secondary_type_join j
+                       JOIN mb_release_group_secondary_type st ON st.id = j.secondary_type
+                       WHERE j.release_group = rg.id
+                         AND st.name IN ('Compilation', 'DJ-mix', 'Mixtape/Street')) AS is_comp
+        FROM cand c
+        JOIN mb_track mt ON mt.recording = c.rec_id
+        JOIN mb_medium md ON md.id = mt.medium
+        JOIN mb_release r ON r.id = md.release
+            AND (r.status IS NULL OR r.status NOT IN (3, 4))
+        JOIN mb_release_group rg ON rg.id = r.release_group
+        JOIN mb_release_group_primary_type pt ON pt.id = rg.type
+            AND pt.name IN ('Album', 'EP', 'Single')
+        JOIN nt ON nt.album_id = c.album_id
+        GROUP BY c.album_id, rg.gid, rg.id, r.id, nt.total
+    ) q WHERE owned_cov::float >= {_RG_OWNED_MIN} * total
+),
+rel_total AS (
+    SELECT d.rel_id, count(*) AS n
+    FROM (SELECT DISTINCT rel_id FROM rel_cov) d
+    JOIN mb_medium md ON md.release = d.rel_id
+    JOIN mb_track mt ON mt.medium = md.id
+    GROUP BY d.rel_id
+),
+valid AS (   -- residue gate: STRONG name + release-half KEPT for comps only. The relaxation
+             -- (drop release-half) targets studio deluxe/multi-disc bloat, where the owned
+             -- album is a legit slice of a bigger Album release. For a compilation/DJ-mix/box
+             -- the same drop wrongly binds a 1-track fragment to a 42-track annual or a 13-of-223
+             -- box disc — there the album really is "mostly other tracks", so the original
+             -- bidirectional check stays. Studio (non-comp): name + owned-half only.
+    SELECT rc.album_id, rc.rg_mbid, rc.rgn, rc.owned_cov, rc.total, rt.n AS rel_total, rc.is_comp,
+           GREATEST(similarity(rc.rgn, at.atitle), similarity(rc.rgn, at.abase)) AS namesim
+    FROM rel_cov rc
+    JOIN rel_total rt ON rt.rel_id = rc.rel_id
+    JOIN atitle at ON at.album_id = rc.album_id
+    WHERE GREATEST(similarity(rc.rgn, at.atitle), similarity(rc.rgn, at.abase)) >= %(nmin)s
+      AND (NOT rc.is_comp
+           OR (rc.owned_cov::float >= 0.5 * rt.n
+               AND GREATEST(similarity(rc.rgn, at.atitle), similarity(rc.rgn, at.abase)) >= {_RG_RESIDUE_COMP_NAME}))
+)
+SELECT album_id, rg_mbid, rgn, namesim, owned_cov, total, rel_total FROM (
+    SELECT album_id, rg_mbid, rgn, namesim, owned_cov, total, rel_total,
+           row_number() OVER (PARTITION BY album_id
+               ORDER BY namesim DESC, owned_cov DESC, abs(rel_total - total), is_comp) AS rn
+    FROM valid
+) x WHERE x.rn = 1
+"""
+
+
 def _owned_counts(artist_id):
     # Count only THIS artist's tracks (ta2): a shared/mixed album directory
     # otherwise inflates the denominator and the coverage gates become
@@ -872,6 +970,92 @@ def apply_editions(dry_run: bool = True, artist_ids: list = None) -> dict:
                 logger.error("apply_editions failed for album %s: %s", album_id, e)
     finally:
         db.close()
+    return st
+
+
+def distill_album_residue(limit: int = None, dry_run: bool = True,
+                          name_min: float = _RG_RESIDUE_NAME_MIN) -> dict:
+    """Algorithmic catcher for the NULL-rg owned-album residue.
+
+    The main matcher (resolve_artist→_RG_SQL) leaves ~855 owned albums unbound:
+    full albums ripped against a deluxe/multi-disc release (fail the bidirectional
+    release-half gate) and thin fragments (too few tracks to cover half a release).
+    Their artist is already canonized, so per artist we re-match each NULL-rg owned
+    album against that artist's MB recordings (TEMP _recs, same scope as the main
+    matcher) and bind the release-group whose edition-stripped name strongly matches
+    the owned title — keeping owned-half coverage, dropping the release-half (the
+    strong name + single-artist scope is the safety). Runs over ALL residue albums,
+    not just cascade-verified ones, so albums the cascade never reached are caught
+    too. Idempotent (residue-scoped UPDATE); dry_run reports without mutating."""
+    arts = db_query("""
+        SELECT DISTINCT aa.artist_id::text AS aid, ar.name
+        FROM albums a
+        JOIN album_artists aa ON aa.album_id=a.id AND aa.role='primary'
+        JOIN artists ar ON ar.id=aa.artist_id
+        WHERE a.musicbrainz_id IS NULL
+          AND EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id=a.id)
+          AND EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id=aa.artist_id)
+        ORDER BY ar.name
+    """)
+    st = {"artists": 0, "residue": 0, "bound": 0, "examples": []}
+    for art in arts:
+        if limit and st["bound"] >= limit:
+            break
+        aid = art["aid"]
+        mbids = [r["mbid"] for r in db_query(
+            "SELECT mbid::text AS mbid FROM artist_mbids WHERE artist_id=%(a)s::uuid", {"a": aid})]
+        resid = db_query("""
+            SELECT a.id::text AS id, a.title FROM albums a
+            JOIN album_artists aa ON aa.album_id=a.id AND aa.role='primary' AND aa.artist_id=%(a)s::uuid
+            WHERE a.musicbrainz_id IS NULL
+              AND EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id=a.id)
+        """, {"a": aid})
+        if not mbids or not resid:
+            continue
+        st["artists"] += 1
+        st["residue"] += len(resid)
+        title_by_id = {r["id"]: r["title"] for r in resid}
+        with get_conn() as conn:
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("DROP TABLE IF EXISTS _recs")
+                cur.execute(_RECS_SQL, {"cands": mbids})
+                cur.execute("CREATE INDEX ON _recs (rname)")
+                cur.execute("CREATE INDEX ON _recs USING gin (rname gin_trgm_ops)")
+                cur.execute("ANALYZE _recs")
+                cur.execute("DROP TABLE IF EXISTS _abase")
+                cur.execute("CREATE TEMP TABLE _abase (album_id text PRIMARY KEY, base text)")
+                psycopg2.extras.execute_values(cur,
+                    "INSERT INTO _abase (album_id, base) VALUES %s",
+                    [(r["id"], release_match_key(r["title"])) for r in resid])
+                cur.execute("SET pg_trgm.similarity_threshold = %s", (_RG_SIM,))
+                cur.execute(_RG_RESIDUE_SQL,
+                            {"artist": aid, "albums": list(title_by_id), "nmin": name_min})
+                picks = cur.fetchall()
+                try:
+                    if not dry_run:
+                        set_aa = mbids[0] if len(mbids) == 1 else None
+                        for p in picks:
+                            cur.execute("UPDATE albums SET musicbrainz_id=%s, "
+                                        "mb_match_confidence='overlap_verified' "
+                                        "WHERE id=%s AND musicbrainz_id IS NULL",
+                                        (p["rg_mbid"], p["album_id"]))
+                            if set_aa:
+                                cur.execute("UPDATE album_artists SET mbid=%s WHERE album_id=%s "
+                                            "AND artist_id=%s AND role='primary' AND mbid IS NULL",
+                                            (set_aa, p["album_id"], aid))
+                finally:
+                    cur.execute("RESET pg_trgm.similarity_threshold")
+                    cur.execute("DROP TABLE IF EXISTS _recs")
+                    cur.execute("DROP TABLE IF EXISTS _abase")
+        for p in picks:
+            st["bound"] += 1
+            if len(st["examples"]) < 80:
+                st["examples"].append("%s — %r -> %r (sim=%.2f cov=%d/%d rel=%d)" % (
+                    art["name"], title_by_id.get(p["album_id"], "?"), p["rgn"],
+                    p["namesim"], p["owned_cov"], p["total"], p["rel_total"]))
+    logger.info("distill_album_residue: %s",
+                {k: v for k, v in st.items() if k != "examples"})
     return st
 
 

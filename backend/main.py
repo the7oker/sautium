@@ -591,7 +591,14 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                     with algo_canon() as _ok:   # priority over AI; holds the dump lock
                         if _ok:
                             canon_stats = canonicalize_pending()
-                    if canon_stats.get("artists"):
+                            # Catch the NULL-rg owned-album residue the main matcher
+                            # rejects on its bidirectional size gate (deluxe/multi-disc
+                            # rips, thin fragments) — free, algorithmic, event-driven.
+                            from canon.content import distill_album_residue
+                            bound = distill_album_residue().get("bound", 0)
+                            if bound:
+                                canon_stats["album_residue_bound"] = bound
+                    if canon_stats.get("artists") or canon_stats.get("album_residue_bound"):
                         result["mb_canon"] = canon_stats
                         logger.info(f"Post-scan MB canon: {canon_stats}")
                     # AI judgment tier on what the deterministic canon left — scoped
