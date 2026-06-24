@@ -537,11 +537,21 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
     return stats
 
 
-def fetch_new_albums(artist_id) -> List[dict]:
+def fetch_new_albums(artist_id, mbid=None, include_unattributed=False) -> List[dict]:
     """The phantom albums for an artist — those linked via `album_artists`
     with no local files — newest first. Tile shape for the artist screen.
+
+    `mbid` scopes to one namesake (album_artists.mbid) when a display name maps
+    to several MB artists; `include_unattributed` also folds NULL-mbid residue
+    under it (used for the dominant namesake so nothing is orphaned).
     """
-    return db_query("""
+    scope = ""
+    params = {"id": str(artist_id)}
+    if mbid is not None:
+        scope = ("AND (aa.mbid = %(mbid)s::uuid OR aa.mbid IS NULL)"
+                 if include_unattributed else "AND aa.mbid = %(mbid)s::uuid")
+        params["mbid"] = str(mbid)
+    return db_query(f"""
         SELECT al.id::text AS id,
                al.title,
                al.release_year AS year,
@@ -549,11 +559,12 @@ def fetch_new_albums(artist_id) -> List[dict]:
         FROM albums al
         JOIN album_artists aa ON aa.album_id = al.id
         WHERE aa.artist_id = %(id)s::uuid
+          {scope}
           AND NOT EXISTS (
               SELECT 1 FROM album_variants av WHERE av.album_id = al.id
           )
         ORDER BY al.release_year DESC NULLS LAST, al.title
-    """, {"id": str(artist_id)})
+    """, params)
 
 
 # Listening recency window that defines "artists I listen to" for the

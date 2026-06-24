@@ -417,7 +417,8 @@
       const kind = segments[1];
       const id = segments.slice(2).join('/');
       if (kind === 'artist') {
-        renderArtist(app, id);
+        // Optional 4th segment selects a namesake — #<tab>/artist/<uuid>/<mbid>.
+        renderArtist(app, segments[2], segments[3] || null);
         updateNavActive(route);
         updateFabVisibility(route);
         window.scrollTo(0, 0);
@@ -3235,7 +3236,7 @@
     return 'release_year';
   }
 
-  async function renderArtist(root, artistId) {
+  async function renderArtist(root, artistId, selectedMbid) {
     root.innerHTML = '';
     const screen = document.createElement('div');
     screen.className = 'detail-screen';
@@ -3245,7 +3246,8 @@
     let d;
     try {
       const url = '/api/artists/' + encodeURIComponent(artistId)
-                  + '?sort=' + encodeURIComponent(sort);
+                  + '?sort=' + encodeURIComponent(sort)
+                  + (selectedMbid ? '&mbid=' + encodeURIComponent(selectedMbid) : '');
       const resp = await fetch(url);
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       d = await resp.json();
@@ -3257,6 +3259,43 @@
       return;
     }
 
+    // Namesake split: when a display name maps to several real MB artists, the
+    // endpoint scopes this payload to one of them (default = the dominant, i.e.
+    // most owned listening time). `is_external` marks the namesake Last.fm's
+    // photo/similar actually describe; a non-dominant namesake renders lean.
+    const split = !!d.is_namesake_split;
+    const ns = d.namesake || null;
+    const others = d.other_namesakes || [];
+    const isLean = split && ns && !ns.is_dominant;
+    const showPhoto = !split || (ns && ns.is_external);
+
+    const nsChevron = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>';
+    function namesakeRowHtml(o, single) {
+      const initial = escapeHtml(((o.name || o.about || '?').trim().charAt(0) || '?').toUpperCase());
+      const cap = single
+        ? `${escapeHtml(d.name || '')} — ${escapeHtml(o.about || o.name || '')}`
+        : escapeHtml(o.about || o.name || '');
+      const n = o.owned_albums || 0;
+      return `<button class="namesake-row" type="button" data-ns-mbid="${escapeHtml(o.mbid)}">
+        <div class="namesake-thumb tone"><span class="gm">${initial}</span></div>
+        <div class="namesake-body">
+          ${single ? '<div class="namesake-eyebrow">Another artist with this name</div>' : ''}
+          <div class="namesake-caption">${cap}</div>
+        </div>
+        <div class="namesake-meta">
+          <span class="namesake-count">${n} album${n === 1 ? '' : 's'}</span>${nsChevron}
+        </div>
+      </button>`;
+    }
+    let pointerHtml = '';
+    if (split && !isLean && others.length) {
+      const head = others.length > 1
+        ? `<div class="namesake-listhead">${others.length} other artists named ${escapeHtml(d.name || '')}</div>`
+        : '';
+      pointerHtml = `<div class="namesake-pointer">${head}${
+        others.map(o => namesakeRowHtml(o, others.length === 1)).join('')}</div>`;
+    }
+
     const ph = avatarPlaceholder(d.name || '?');
     // Initials backdrop is always rendered; the lazy-resolved photo
     // overlays it when the request succeeds, otherwise <img> removes
@@ -3264,7 +3303,10 @@
     const heroFallback = `<div class="artist-hero-fallback"
         style="--cover-bg-1: ${ph.bg}; --cover-bg-2: var(--color-foundation);">${
           escapeHtml(ph.initials)}</div>`;
-    const heroImg = d.id
+    // The stored artist photo (covers/by-artist) is the one Last.fm/Deezer
+    // returned for the name — it belongs to the namesake Last.fm describes
+    // (is_external). On any other namesake show only the initials fallback.
+    const heroImg = (d.id && showPhoto)
       ? `${heroFallback}<img src="/api/covers/by-artist/${
           encodeURIComponent(d.id)}" alt="" onerror="this.remove()">`
       : heroFallback;
@@ -3387,22 +3429,11 @@
         }</p>`
       : '';
 
-    screen.innerHTML = `
-      <div class="artist-hero">
-        ${heroImg}
-        <div class="artist-hero-scrim-top"></div>
-        <div class="artist-hero-scrim-bottom"></div>
-        <div class="artist-hero-controls">
-          <button class="icon-btn" type="button" data-action="back" aria-label="Back">${SVG_BACK}</button>
-        </div>
-        <h1 class="artist-hero-name">${escapeHtml(d.name || '')}</h1>
-      </div>
-      <div style="height: calc(14 * var(--px));"></div>
-      ${tagsHtml ? `<div class="tag-row">${tagsHtml}</div>` : ''}
-      ${bioHtml}
-      ${albumsHtml ? `
-        <div class="section-sep"></div>
-        <div class="section-head">
+    // Albums header differs by mode: the dominant/normal page carries the sort
+    // picker; the lean page just states the owned count.
+    const albumsHeader = isLean
+      ? `<div class="section-head"><h3>Albums</h3><span class="sub">${(d.albums || []).length}</span></div>`
+      : `<div class="section-head">
           <h3>Albums</h3>
           <button class="sort-trigger" type="button"
                   data-action="albums-sort"
@@ -3412,9 +3443,12 @@
             <span class="label">${escapeHtml(sortSpec.label)}</span>
             <span class="chev">${ALBUMS_SORT_CHEV_SVG}</span>
           </button>
-        </div>
-        <div class="h-scroll">${albumsHtml}</div>
-      ` : ''}
+        </div>`;
+    // Albums / Missing / Popular / Similar are identical in both layouts; each
+    // hides when empty (the backend already nulls bio off the dominant and
+    // empties similar off any non-external namesake).
+    const sectionsHtml = `
+      ${albumsHtml ? `<div class="section-sep"></div>${albumsHeader}<div class="h-scroll">${albumsHtml}</div>` : ''}
       <div class="new-albums-section" data-new-albums
            style="${newAlbumsHtml ? '' : 'display:none'}">
         <div class="section-sep"></div>
@@ -3428,13 +3462,52 @@
       ` : ''}
       ${similarHtml ? `
         <div class="section-sep"></div>
-        <div class="section-head">
-          <h3>Similar artists</h3>
-        </div>
+        <div class="section-head"><h3>Similar artists</h3></div>
         <div class="similar-row">${similarHtml}</div>
-      ` : ''}
-      <div style="height: calc(24 * var(--px));"></div>
-    `;
+      ` : ''}`;
+
+    if (isLean) {
+      // Lesser-known namesake — lean page. No artist photo exists (and an album
+      // cover hero would just duplicate the Albums shelf below), so the page
+      // leads straight with the name; the `about` caption stands in for the
+      // absent bio, with an honest end-cap and a context line to the dominant.
+      const dom = others.find(o => o.is_dominant);
+      screen.innerHTML = `
+        <div class="lean-context">
+          <span class="count">One of ${others.length + 1} artists named ${escapeHtml(d.name || '')}</span>
+          ${dom ? `<button class="backlink" type="button" data-ns-back aria-label="Back to main artist">
+            ${SVG_BACK}<span>${escapeHtml(d.name || '')}</span><span class="bcap">· ${escapeHtml(dom.about || dom.name || '')}</span>
+          </button>` : ''}
+        </div>
+        <div class="hero-meta lean">
+          <h1 class="lean-name">${escapeHtml(d.name || '')}</h1>
+          ${ns && ns.about ? `<p class="lean-caption">${escapeHtml(ns.about)}</p>` : ''}
+          ${tagsHtml ? `<div class="tag-row">${tagsHtml}</div>` : ''}
+        </div>
+        ${sectionsHtml}
+        <div class="lean-endcap">
+          That’s the full profile for this ${escapeHtml(d.name || '')}.
+          <span class="mb"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v.5M11 12h1v4h1"/></svg> metadata from MusicBrainz</span>
+        </div>
+        <div style="height: calc(24 * var(--px));"></div>`;
+    } else {
+      screen.innerHTML = `
+        <div class="artist-hero">
+          ${heroImg}
+          <div class="artist-hero-scrim-top"></div>
+          <div class="artist-hero-scrim-bottom"></div>
+          <div class="artist-hero-controls">
+            <button class="icon-btn" type="button" data-action="back" aria-label="Back">${SVG_BACK}</button>
+          </div>
+          <h1 class="artist-hero-name">${escapeHtml(d.name || '')}</h1>
+        </div>
+        <div style="height: calc(14 * var(--px));"></div>
+        ${tagsHtml ? `<div class="tag-row">${tagsHtml}</div>` : ''}
+        ${bioHtml}
+        ${pointerHtml}
+        ${sectionsHtml}
+        <div style="height: calc(24 * var(--px));"></div>`;
+    }
 
     if (hasMoreBio) {
       const bioP = screen.querySelector('.bio');
@@ -3467,13 +3540,25 @@
           } catch (_) {}
           // Re-fetch the whole artist payload so the tiles get the
           // metric formatted server-side for the new sort.
-          renderArtist(root, artistId);
+          renderArtist(root, artistId, selectedMbid);
         });
       });
     }
 
     wireDetailHandlers(screen);
     updatePlayingHighlight();
+
+    // Namesake navigation: a pointer row opens that namesake's page; the lean
+    // page's backlink returns to the dominant (no mbid segment → default).
+    screen.querySelectorAll('[data-ns-mbid]').forEach(el => {
+      el.addEventListener('click', () => {
+        const m = el.getAttribute('data-ns-mbid');
+        if (m) navigate(`${currentRoute || 'home'}/artist/${artistId}/${m}`);
+      });
+    });
+    const nsBack = screen.querySelector('[data-ns-back]');
+    if (nsBack) nsBack.addEventListener('click',
+      () => navigate(`${currentRoute || 'home'}/artist/${artistId}`));
 
     // Fetch-on-view: if this artist's new-album data is stale (>1 day or
     // never synced), reconcile it against the local MB dump in the

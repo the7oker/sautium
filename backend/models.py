@@ -149,6 +149,7 @@ class Artist(Base):
     last_album_sync = Column(DateTime(timezone=True))          # freshness gate for new-album discovery
     last_mb_sync = Column(DateTime(timezone=True))             # freshness gate for MB canonicalization pass
     last_similar_sync = Column(DateTime(timezone=True))        # freshness gate for Last.fm similar-artists backfill (incl. phantoms)
+    lastfm_mbid = Column(UUID(as_uuid=True))                   # MB artist Last.fm treats as canonical for this name; gates photo/similar to the matching namesake (artist_mbids)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())

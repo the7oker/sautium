@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS artists (
     last_album_sync TIMESTAMPTZ,            -- freshness gate for new-album discovery
     last_mb_sync TIMESTAMPTZ,              -- freshness gate for MB canonicalization pass
     last_similar_sync TIMESTAMPTZ,         -- freshness gate for Last.fm similar-artists backfill (incl. out-of-catalog phantoms)
+    lastfm_mbid UUID,                      -- MB artist Last.fm treats as canonical for this name; disambiguates namesakes (gates photo/similar to the matching artist_mbids row)
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
@@ -365,6 +366,7 @@ ALTER TABLE artists ADD COLUMN IF NOT EXISTS photo_cover_id UUID
 ALTER TABLE artists ADD COLUMN IF NOT EXISTS last_album_sync TIMESTAMPTZ;
 ALTER TABLE artists ADD COLUMN IF NOT EXISTS last_mb_sync TIMESTAMPTZ;
 ALTER TABLE artists ADD COLUMN IF NOT EXISTS last_similar_sync TIMESTAMPTZ;
+ALTER TABLE artists ADD COLUMN IF NOT EXISTS lastfm_mbid UUID;
 ALTER TABLE albums  ADD COLUMN IF NOT EXISTS cover_url TEXT;
 -- Discography moved from Deezer to the local MB dump (2026-06-12) — the
 -- cached Deezer artist id is gone; converge installs that pre-date the move.

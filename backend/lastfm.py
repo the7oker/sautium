@@ -141,6 +141,14 @@ class LastFmService:
                 except Exception as e:
                     logger.debug(f"No similar artists for {artist_name}: {e}")
 
+            # Last.fm's canonical MBID for this name — disambiguates namesakes
+            # (one display name → several real MB artists). getInfo is already
+            # cached by the calls above, so this reads it for free.
+            try:
+                lastfm_mbid = artist.get_mbid() or None
+            except Exception:
+                lastfm_mbid = None
+
             # Reaching here with every section empty but no WSError means the
             # per-section handlers swallowed a transient failure (network/throttle):
             # a genuinely missing artist would have raised status-6 on the bio call
@@ -153,6 +161,7 @@ class LastFmService:
                 "tags": tags_data,
                 "stats": stats_data,
                 "similar": similar_data,
+                "lastfm_mbid": lastfm_mbid,
             }
 
         except pylast.WSError as e:
@@ -179,6 +188,16 @@ class LastFmService:
         Returns dict indicating what was stored: {bio: True, tags: True, similar: False, ...}
         """
         stored = {}
+
+        # Persist Last.fm's canonical MBID for this name onto the artist row.
+        # A name-UUID may conflate namesakes; this records which real MB artist
+        # Last.fm's name-based bio/photo/similar actually describe, so the UI can
+        # gate the photo/similar block to the matching artist_mbids row. NULL
+        # (Last.fm returned no/empty mbid) overwrites stale values — idempotent.
+        db.execute(
+            text("UPDATE artists SET lastfm_mbid = :m WHERE id = :a"),
+            {"m": data.get("lastfm_mbid"), "a": str(artist_id)},
+        )
 
         # Store bio in normalized table
         if data.get("bio"):
@@ -1141,5 +1160,59 @@ def backfill_similar(limit: Optional[int] = None, delay: float = 0.2,
         except Exception as e:
             stats["errors"] += 1
             logger.error(f"backfill_similar failed for {row.name}: {e}")
+        time.sleep(delay)
+    return stats
+
+
+def backfill_lastfm_mbid(limit: Optional[int] = None, delay: float = 0.2,
+                         force: bool = False, namesakes_only: bool = True) -> Dict[str, int]:
+    """Populate ``artists.lastfm_mbid`` — the MB artist Last.fm treats as canonical
+    for the name. Used to decide which namesake owns the (name-based) photo/similar
+    block when one display name maps to several real MB artists.
+
+    Defaults to namesake artists only (>=2 ``artist_mbids`` rows) — the sole
+    consumer; ``namesakes_only=False`` covers every Last.fm-known artist. Incremental
+    (skips rows already set) unless ``force``; one lightweight getInfo call each.
+    New artists need no backfill — captured on first bio enrichment.
+    """
+    from database import get_db_context
+
+    svc = LastFmService()
+    scope = ("(SELECT count(*) FROM artist_mbids am WHERE am.artist_id = a.id) >= 2"
+             if namesakes_only else
+             "EXISTS (SELECT 1 FROM artist_bios b WHERE b.artist_id = a.id AND b.source = 'lastfm')")
+    fresh = "" if force else "AND a.lastfm_mbid IS NULL"
+    lim = "LIMIT :lim" if limit else ""
+    sql = text(f"""
+        SELECT a.id, a.name FROM artists a
+        WHERE {scope} {fresh}
+        ORDER BY a.name {lim}
+    """)
+    stats = {"processed": 0, "set": 0, "null": 0, "errors": 0}
+    with get_db_context() as db:
+        rows = db.execute(sql, {"lim": limit} if limit else {}).fetchall()
+    logger.info(f"backfill_lastfm_mbid: {len(rows)} artists queued")
+    for row in rows:
+        try:
+            artist = svc.network.get_artist(row.name)
+
+            def _mbid():
+                try:
+                    return artist.get_mbid() or None
+                except pylast.WSError:
+                    raise
+                except Exception:
+                    return None
+
+            mbid = svc._with_retry(_mbid)
+            with get_db_context() as db:
+                db.execute(text("UPDATE artists SET lastfm_mbid = :m WHERE id = :a"),
+                           {"m": mbid, "a": str(row.id)})
+            stats["processed"] += 1
+            stats["set" if mbid else "null"] += 1
+            logger.info(f"  {row.name}: lastfm_mbid={mbid}")
+        except Exception as e:
+            stats["errors"] += 1
+            logger.error(f"backfill_lastfm_mbid failed for {row.name}: {e}")
         time.sleep(delay)
     return stats
