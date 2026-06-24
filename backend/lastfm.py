@@ -1170,10 +1170,13 @@ def backfill_lastfm_mbid(limit: Optional[int] = None, delay: float = 0.2,
     for the name. Used to decide which namesake owns the (name-based) photo/similar
     block when one display name maps to several real MB artists.
 
-    Defaults to namesake artists only (>=2 ``artist_mbids`` rows) — the sole
-    consumer; ``namesakes_only=False`` covers every Last.fm-known artist. Incremental
-    (skips rows already set) unless ``force``; one lightweight getInfo call each.
-    New artists need no backfill — captured on first bio enrichment.
+    Defaults to namesake artists only (>=2 ``artist_mbids`` rows) — the immediate
+    consumers. ``namesakes_only=False`` covers every Last.fm-known artist, owned
+    AND phantom: phantoms are first-class enrichment carriers (they accumulate
+    metadata for the P2P network's coverage), so lastfm_mbid is filled for them
+    too — even though the artist screen only reads it for owned namesake splits.
+    Incremental (skips rows already set) unless ``force``; one lightweight getInfo
+    call each. New artists need no backfill — captured on first bio enrichment.
     """
     from database import get_db_context
 
