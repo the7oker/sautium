@@ -311,6 +311,13 @@ CREATE TABLE IF NOT EXISTS album_tracks (
     disc INTEGER NOT NULL DEFAULT 1,
     position INTEGER NOT NULL,
     recording_mbid UUID,                   -- MB recording gid (dedup / future preview)
+    length_ms INTEGER,                     -- MB track length (ms), stored at mint time so the
+                                           -- phantom-preview YouTube timing-match reads it
+                                           -- directly instead of re-joining the 39M-row
+                                           -- mb_recording per request — the MB dump is an
+                                           -- optional, refreshable layer that may be reloaded
+                                           -- or removed after a phantom was minted. From the
+                                           -- canonical release's mb_track.length.
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (album_id, disc, position)

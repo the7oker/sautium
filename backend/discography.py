@@ -330,7 +330,7 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
         track_rows.append((tid, title))
         artist_rows.append((tid, artist_id))
         slot_rows.append((album_id, tid, tr["disc"] or 1, tr["position"],
-                          tr["recording_mbid"]))
+                          tr["recording_mbid"], tr["length_ms"]))
     if not slot_rows:
         return 0
 
@@ -346,13 +346,14 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
             """, artist_rows, template="(%s::uuid, 'primary', %s::uuid)")
             execute_values(cur, """
                 INSERT INTO album_tracks
-                    (album_id, track_id, disc, position, recording_mbid)
+                    (album_id, track_id, disc, position, recording_mbid, length_ms)
                 VALUES %s
                 ON CONFLICT (album_id, disc, position)
                 DO UPDATE SET track_id = EXCLUDED.track_id,
                               recording_mbid = EXCLUDED.recording_mbid,
+                              length_ms = EXCLUDED.length_ms,
                               updated_at = now()
-            """, slot_rows, template="(%s::uuid, %s::uuid, %s, %s, %s::uuid)")
+            """, slot_rows, template="(%s::uuid, %s::uuid, %s, %s, %s::uuid, %s)")
         conn.commit()
     return len(slot_rows)
 

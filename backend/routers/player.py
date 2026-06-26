@@ -1719,7 +1719,7 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
     rows = _db_query("""
         SELECT t.title,
                al.title AS album,
-               mr.length AS length_ms,
+               atr.length_ms,
                (SELECT ar.name FROM track_artists ta
                   JOIN artists ar ON ar.id = ta.artist_id
                 WHERE ta.track_id = t.id
@@ -1727,7 +1727,6 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
         FROM album_tracks atr
         JOIN tracks t ON t.id = atr.track_id
         JOIN albums al ON al.id = atr.album_id
-        LEFT JOIN mb_recording mr ON mr.gid = atr.recording_mbid
         WHERE atr.album_id = %(album_id)s
         ORDER BY atr.disc, atr.position
     """, {"album_id": req.album_id})
