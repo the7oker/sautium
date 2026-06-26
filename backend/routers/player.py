@@ -246,6 +246,12 @@ def stop_status_poller():
 _hqp_client: Optional[HQPlayerClient] = None
 _hqp_lock = threading.Lock()  # cmd commands
 
+# Bumped every time a NEW playback queue is started (any clear_first add). A
+# background phantom-album filler captures it and stops appending the instant the
+# user moves to another queue, so a slow album fill never bleeds tracks into an
+# unrelated session. Only ever mutated under _hqp_lock.
+_playback_generation = 0
+
 _hqp_status_client: Optional[HQPlayerClient] = None
 _hqp_status_lock = threading.Lock()  # status poller
 
@@ -394,6 +400,10 @@ def _add_uris_with_retry(uris: list[str], *, clear_first: bool = False) -> int:
     semantics); the rest append. The clear only ever fires on i == 0, so a
     mid-batch reconnect never re-clears already-added tracks.
     """
+    if clear_first:
+        # New queue = new playback generation (retires any phantom filler).
+        global _playback_generation
+        _playback_generation += 1
     added = 0
     for i, uri in enumerate(uris):
         clear = clear_first and i == 0
@@ -1692,6 +1702,53 @@ def play_album(req: PlayAlbumRequest):
         raise HTTPException(status_code=503, detail=str(e))
 
 
+# -- Phantom-album streaming buffer policy ------------------------------------
+_PHANTOM_LEAD_CAP_SECONDS = 240.0    # never pre-buffer more than ~4 min of audio
+_PHANTOM_LEAD_TRACK_TIMEOUT = 60.0   # cap the per-track wait while pre-buffering
+
+
+def _phantom_lead_seconds(rtf: float, queries, concurrency: int) -> float:
+    """How much contiguous audio to buffer before starting playback, derived
+    from the measured real-time factor (wall-fetch seconds per audio second of
+    track 0 — the channel-speed signal):
+
+      rtf <= 1       the pipeline outruns playback on ONE stream → start at once
+                     on track 0 (lead 0): truly ASAP.
+      1 < rtf <= C   a single stream lags, but C concurrent fetches keep up in
+                     steady state → a one-track cushion absorbs variance.
+      rtf > C        sustained deficit (very slow channel) → buffer the cap, then
+                     start; a long album still eventually drains, but the opening
+                     stretch plays seamlessly.
+    """
+    if rtf <= 1.0:
+        return 0.0
+    durs = [q.duration for q in queries if q.duration]
+    d_avg = (sum(durs) / len(durs)) if durs else 60.0
+    if rtf <= concurrency:
+        return min(_PHANTOM_LEAD_CAP_SECONDS, d_avg)
+    return _PHANTOM_LEAD_CAP_SECONDS
+
+
+def _phantom_filler(proxy, tokens: list, start_index: int, gen: int) -> None:
+    """Rolling-append the rest of a phantom album: append each track to
+    HQPlayer's native playlist as it finishes fetching, in order. HQPlayer
+    HEAD-probes each URI at ADD time, so we only ever hand it a ready buffer.
+    Stops the instant another playback session starts (the generation moved on)."""
+    for j in range(start_index, len(tokens)):
+        try:
+            e = proxy.wait_ready(tokens[j])
+        except (TimeoutError, KeyError):
+            continue   # a track that never fetched — skip it, keep the album going
+        if e is None or e.audio is None:
+            continue
+        with _hqp_lock:
+            if _playback_generation != gen:
+                return   # user moved to another queue → stop appending
+            _add_uris_with_retry([proxy.url_for(tokens[j])], clear_first=False)
+        _invalidate_playlist()
+        _notify_update()
+
+
 class PlayPhantomAlbumRequest(BaseModel):
     album_id: str   # UUID of a phantom (not-owned) album
 
@@ -1746,28 +1803,44 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
         raise HTTPException(status_code=404, detail="Album tracklist is empty")
 
     proxy = streaming_service.get_proxy()
-    tokens = proxy.start_session(provider, queries)
+    tokens = proxy.start_session(provider, queries)   # priority-fetches track 0
 
-    # HQPlayer HEAD/GET-probes every URI synchronously at add time and needs the
-    # buffer present, so wait for the whole album to fetch (the UI shows a
-    # buffering state) and drop tracks the provider could not resolve. Playing
-    # the first track before the rest finish (rolling append) is a follow-up.
-    urls: list[str] = []
-    for tok in tokens:
+    # Adaptive rolling buffer. Track 0 is fetched alone (full bandwidth) for the
+    # fastest safe start; its measured real-time factor sizes how much audio we
+    # pre-buffer before playing so transitions don't gap on a slow channel; the
+    # tail then streams in via a background filler that appends each track as it
+    # lands. The UI shows a buffering state until this returns.
+    try:
+        proxy.wait_ready(tokens[0])
+    except (TimeoutError, KeyError):
+        pass
+    rtf = proxy.fetch_rtf(tokens[0]) or 1.0
+    proxy.prefetch_from(1)                     # fan out the tail concurrently
+    lead_target = _phantom_lead_seconds(rtf, queries, proxy.fetch_concurrency)
+
+    # Event-driven pre-buffer: block on each boundary track's ready event in
+    # order until the contiguous buffered audio covers the lead (or the album
+    # ends, or a track is too slow — then start with what we have).
+    prefix, buffered, next_index = proxy.ready_lead(0)
+    while (not prefix or buffered < lead_target) and next_index < len(tokens):
         try:
-            e = proxy.wait_ready(tok)
-        except TimeoutError:
-            continue
-        if e.audio is not None:
-            urls.append(proxy.url_for(tok))
+            proxy.wait_ready(tokens[next_index], timeout=_PHANTOM_LEAD_TRACK_TIMEOUT)
+        except (TimeoutError, KeyError):
+            break
+        prefix, buffered, next_index = proxy.ready_lead(0)
 
-    if not urls:
+    logger.info("phantom buffer: rtf=%.2f lead=%.0fs → start with %d/%d tracks (%.0fs buffered)",
+                rtf, lead_target, len(prefix), len(queries), buffered)
+
+    if not prefix:
         raise HTTPException(status_code=502, detail="No tracks could be fetched from the provider")
 
+    prefix_urls = [proxy.url_for(t) for t in prefix]
     try:
         with _hqp_lock:
             _hqp_safe(lambda h: h.stop())
-            added = _add_uris_with_retry(urls, clear_first=True)
+            added = _add_uris_with_retry(prefix_urls, clear_first=True)
+            gen = _playback_generation          # capture under lock, after the clear
             if added:
                 _hqp_safe(lambda h: h.play())
         _invalidate_playlist()
@@ -1779,13 +1852,19 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
                 status_code=503,
                 detail="HQPlayer unavailable — preview not queued. Try again.",
             )
+        # Roll the remaining tracks in as they finish fetching (background).
+        if next_index < len(tokens):
+            threading.Thread(
+                target=_phantom_filler, args=(proxy, list(tokens), next_index, gen),
+                daemon=True, name="phantom-filler").start()
         return {
             "ok": True,
             "album": queries[0].album,
             "artist": queries[0].artist,
             "provider": provider.manifest.id,
-            "track_count": len(urls),       # tracks actually streaming
-            "requested": len(queries),      # tracklist size (misses dropped)
+            "track_count": added,                        # streaming now
+            "buffering": max(0, len(queries) - added),   # rolling in via the filler
+            "requested": len(queries),                   # tracklist size
         }
     except HTTPException:
         raise

@@ -22,11 +22,90 @@ from db_pool import db_query, db_query_one
 router = APIRouter(prefix="/api/albums", tags=["albums"])
 
 
+def _phantom_album(album_id: str) -> dict:
+    """Album-detail payload for a PHANTOM (not-owned) album. Owned albums are
+    served from media_files/album_variants; a phantom has neither, so the
+    tracklist comes from `album_tracks` (Phantom Discovery) with its MB length,
+    the cover from `albums.cover_url` (Cover Art Archive hotlink), and the
+    primary artist from the track credits. No quality / variant data — a phantom
+    is not a rip. `is_owned=False` lets the UI swap Play/Queue for Listen/Buy."""
+    album = db_query_one("""
+        SELECT al.id::text AS id,
+               al.title,
+               al.release_year AS year,
+               al.cover_url
+        FROM albums al
+        WHERE al.id = %(id)s::uuid
+    """, {"id": album_id})
+    if not album:
+        raise HTTPException(status_code=404, detail="album not found")
+
+    album["is_owned"] = False
+    album["cover_id"] = None
+    album["media_file_id"] = None
+    album["quality"] = None
+    album["variants"] = []
+    album["selected_variant_id"] = None
+
+    # Most-frequent primary credit across the phantom tracklist (album has no
+    # artist_id; phantom tracks carry track_artists from the MB release).
+    album["primary_artist"] = db_query_one("""
+        SELECT a.id::text AS id, a.name
+        FROM artists a
+        JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
+        JOIN album_tracks atr ON atr.track_id = ta.track_id
+        WHERE atr.album_id = %(id)s::uuid
+        GROUP BY a.id, a.name
+        ORDER BY COUNT(*) DESC
+        LIMIT 1
+    """, {"id": album_id})
+
+    # Genre is album-grain; phantom albums carry MB-sourced album_genres.
+    album["genres"] = db_query("""
+        SELECT g.id::text AS id, g.name, MAX(ag.count) AS occurrences
+        FROM album_genres ag
+        JOIN genres g ON g.id = ag.genre_id
+        WHERE ag.album_id = %(id)s::uuid
+        GROUP BY g.id, g.name
+        ORDER BY MAX(ag.count) DESC NULLS LAST, g.name
+        LIMIT 3
+    """, {"id": album_id})
+
+    # Tracklist from album_tracks. No media_file_id / bpm / key — these tracks
+    # have no local audio, so the rows render display-only (title + length) and
+    # playback goes through play-phantom-album (streamed), not per-track.
+    album["tracks"] = db_query("""
+        SELECT t.id::text AS track_id,
+               NULL::int    AS media_file_id,
+               t.title,
+               atr.disc     AS disc_number,
+               atr.position AS track_number,
+               atr.length_ms / 1000.0 AS duration,
+               NULL::real AS bpm,
+               NULL::text AS key,
+               NULL::text AS mode
+        FROM album_tracks atr
+        JOIN tracks t ON t.id = atr.track_id
+        WHERE atr.album_id = %(id)s::uuid
+        ORDER BY atr.disc, atr.position
+    """, {"id": album_id})
+    album["total_duration"] = float(sum(t["duration"] or 0 for t in album["tracks"]))
+    return album
+
+
 @router.get("/{album_id}")
 def get_album(
     album_id: str,
     variant_id: int | None = Query(None),
 ) -> dict:
+    # A phantom (not-owned) album has no album_variants/media_files; serve its
+    # tracklist from album_tracks instead of the rip-based queries below.
+    if not db_query_one(
+        "SELECT 1 AS ok FROM album_variants WHERE album_id = %(id)s::uuid LIMIT 1",
+        {"id": album_id},
+    ):
+        return _phantom_album(album_id)
+
     if variant_id is not None:
         owner = db_query_one("""
             SELECT 1 AS ok FROM album_variants
@@ -191,6 +270,7 @@ def get_album(
                  av.id
     """, {"id": album_id})
     album["selected_variant_id"] = variant_id
+    album["is_owned"] = True
 
     return album
 

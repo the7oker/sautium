@@ -543,7 +543,7 @@
   const sheet = {
     el: null,
     coverImg: null, coverFallback: null,
-    title: null, artist: null, albumText: null, year: null,
+    title: null, artist: null, albumText: null, year: null, previewBadge: null,
     qBadge: null, keyPill: null, bpm: null, bpmNum: null,
     energy: null, energyDots: null,
     progressFill: null, progressHead: null,
@@ -566,6 +566,7 @@
       this.artist = document.getElementById('npArtistLine');
       this.albumText = document.getElementById('npAlbumText');
       this.year = document.getElementById('npYearText');
+      this.previewBadge = document.getElementById('npPreviewBadge');
       this.qBadge = document.getElementById('npQBadge');
       this.keyPill = document.getElementById('npKeyPill');
       this.bpm = document.getElementById('npBpm');
@@ -760,6 +761,11 @@
         if (this.title) this.title.textContent = data.song || '—';
         if (this.artist) this.artist.textContent = data.artist || '';
         if (this.albumText) this.albumText.textContent = data.album || '';
+        if (this.previewBadge) {
+          const show = !!(data.preview && data.provider);
+          this.previewBadge.hidden = !show;
+          this.previewBadge.textContent = show ? `Preview · ${data.provider}` : '';
+        }
         if (this.year) this.year.textContent = '';
         if (this.coverImg) {
           this.coverImg.hidden = true;
@@ -959,7 +965,7 @@
   /* ---------- Mini-player adapter ---------- */
 
   const mp = {
-    el: null, cover: null, title: null, artist: null,
+    el: null, cover: null, title: null, artist: null, previewBadge: null,
     playPauseIcon: null, playPause: null, next: null,
     lastSongKey: null,
 
@@ -968,6 +974,7 @@
       this.cover = document.getElementById('mpCover');
       this.title = document.getElementById('mpTitle');
       this.artist = document.getElementById('mpArtist');
+      this.previewBadge = document.getElementById('mpPreviewBadge');
       this.playPause = document.getElementById('mpPlayPause');
       this.playPauseIcon = document.getElementById('mpPlayPauseIcon');
       this.next = document.getElementById('mpNext');
@@ -1014,6 +1021,11 @@
       const artist = data.artist || '';
       const album = data.album || '';
       this.artist.textContent = album ? `${artist} · ${album}` : artist;
+      if (this.previewBadge) {
+        const show = !!(data.preview && data.provider);
+        this.previewBadge.hidden = !show;
+        this.previewBadge.textContent = show ? `Preview · ${data.provider}` : '';
+      }
 
       if (this.playPauseIcon) {
         this.playPauseIcon.setAttribute('d',
@@ -3405,14 +3417,13 @@
               style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${
                 escapeHtml(a.title || '')}</div>`;
       const year = a.year ? String(a.year) : '';
-      const buyUrl = 'https://bandcamp.com/search?q='
-        + encodeURIComponent(((d.name || '') + ' ' + (a.title || '')).trim())
-        + '&item_type=a';  // a = albums only
+      // Phantom tiles navigate to the album detail page (is_owned=false), which
+      // carries the Listen-preview + Buy actions — same gesture as owned tiles.
       return `
         <button class="album-tile is-unowned" type="button"
-                data-buy-url="${escapeHtml(buyUrl)}">
+                data-album-id="${escapeHtml(a.id)}">
           <div class="album-cover"
-               style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${inner}<span class="album-tile-buy">Buy ↗</span></div>
+               style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${inner}</div>
           <div class="album-tile-title">${escapeHtml(a.title || '')}</div>
           <div class="album-tile-year${year ? '' : ' unavailable'}">${year || '—'}</div>
         </button>`;
@@ -3576,13 +3587,14 @@
           if (!res.new_albums.length) { sec.style.display = 'none'; return; }
           scroll.innerHTML = res.new_albums.map(newAlbumTileHtml).join('');
           sec.style.display = '';
-          // Wire only the freshly-built buy tiles — re-running the full
-          // wireDetailHandlers would double-bind every other handler.
-          scroll.querySelectorAll('[data-buy-url]').forEach(el => {
+          // Wire only the freshly-built phantom tiles — re-running the full
+          // wireDetailHandlers would double-bind every other handler. They
+          // navigate to the album detail page (Listen/Buy live there now).
+          scroll.querySelectorAll('[data-album-id]').forEach(el => {
             el.addEventListener('click', e => {
               e.stopPropagation();
-              const url = el.getAttribute('data-buy-url');
-              if (url) window.open(url, '_blank', 'noopener');
+              const id = el.getAttribute('data-album-id');
+              if (id) navigateToEntity('album', id);
             });
           });
         })
@@ -3760,6 +3772,13 @@
         return;
       }
 
+      const isPhantom = d.is_owned === false;
+      // Bandcamp search for the Buy CTA (no stored buy_url; built from credits).
+      const buyUrl = 'https://bandcamp.com/search?q='
+        + encodeURIComponent((((d.primary_artist && d.primary_artist.name) || '')
+            + ' ' + (d.title || '')).trim())
+        + '&item_type=a';
+
       const c = coverPlaceholderColors(d.title || d.id);
       const heroUrl = coverUrl(d);
       const heroImg = heroUrl
@@ -3786,6 +3805,20 @@
         if (hasMultipleDiscs && t.disc_number && t.disc_number !== lastDisc) {
           lastDisc = t.disc_number;
           trackParts.push(`<div class="disc-header">Disc ${t.disc_number}</div>`);
+        }
+        if (isPhantom) {
+          // No local audio: display-only row (title + length). Playback is the
+          // whole-album Listen action; per-track key/BPM await CLAP enrichment.
+          trackParts.push(`
+            <div class="track-row is-phantom-track">
+              <span class="track-rank">${t.track_number || ''}</span>
+              <div class="track-info">
+                <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+              </div>
+              <span class="track-dur">${fmtDuration(t.duration)}</span>
+            </div>
+          `);
+          continue;
         }
         const sub = [
           t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
@@ -3843,15 +3876,22 @@
           <div class="album-meta-row">
             ${d.year ? `<span class="am-year">${d.year}</span><span class="am-dot"></span>` : ''}
             <span class="am-dur" style="margin-left: 0;">${totalDuration}</span>
-            <span class="am-hires ${qualClass}" style="margin-left: auto;">${qualLabel}</span>
+            ${isPhantom ? '' : `<span class="am-hires ${qualClass}" style="margin-left: auto;">${qualLabel}</span>`}
           </div>
           ${genresHtml ? `<div class="tag-row" style="padding: calc(12 * var(--px)) 0 0;">${genresHtml}</div>` : ''}
         </div>
         <div class="album-actions">
-          <button class="btn-primary" type="button" data-action="play-all">${SVG_PLAY} Play all</button>
-          <button class="btn-secondary album-queue-btn" type="button" data-action="queue-album">
-            <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
-          </button>
+          ${isPhantom ? `
+            <button class="btn-primary" type="button" data-action="play-phantom">${SVG_PLAY} Listen</button>
+            <button class="btn-secondary album-buy-btn" type="button" data-buy-url="${escapeHtml(buyUrl)}">
+              <span class="btn-label">Buy ↗</span>
+            </button>
+          ` : `
+            <button class="btn-primary" type="button" data-action="play-all">${SVG_PLAY} Play all</button>
+            <button class="btn-secondary album-queue-btn" type="button" data-action="queue-album">
+              <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
+            </button>
+          `}
         </div>
         <div class="album-tracklist">${tracksHtml}</div>
         <div class="album-similar" data-similar-slot hidden></div>
@@ -3874,6 +3914,7 @@
       wireDetailHandlers(screen, {
         albumId, tracks: d.tracks,
         playOrigin: 'album', originAlbumId: albumId,
+        phantomAlbumId: isPhantom ? albumId : null,
       });
       updatePlayingHighlight();
 
@@ -4160,6 +4201,28 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         }).catch(() => null);
+        await reportPlaybackResult(resp);
+      });
+    });
+    // Listen (phantom album) — streams the not-owned album onto HQPlayer via the
+    // provider proxy. No media_file_ids exist, so it's a whole-album call by
+    // album_id (play-phantom-album prefetches every track, then plays).
+    screen.querySelectorAll('[data-action="play-phantom"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!ctx.phantomAlbumId) return;
+        // The endpoint prefetches the whole album (search + download +
+        // transcode) before returning — tens of seconds. Show a buffering state
+        // in place (no flicker) and block re-clicks meanwhile.
+        const restore = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = `${SVG_PLAY} Buffering…`;
+        const resp = await fetch('/api/player/play-phantom-album', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ album_id: ctx.phantomAlbumId }),
+        }).catch(() => null);
+        btn.disabled = false;
+        btn.innerHTML = restore;
         await reportPlaybackResult(resp);
       });
     });

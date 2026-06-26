@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import secrets
 import threading
+import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
@@ -36,6 +37,7 @@ class _Entry:
     ready: threading.Event = field(default_factory=threading.Event)
     audio: Optional[FetchedAudio] = None
     error: Optional[str] = None
+    fetch_seconds: Optional[float] = None   # wall time of the provider fetch
     _claimed: bool = False          # a worker is (or has) prepared this entry
 
 
@@ -49,7 +51,8 @@ class MediaProxy:
         self._bind_host = bind_host
         self._prepare_timeout = prepare_timeout
         self._lock = threading.RLock()
-        self._fetch_sem = threading.Semaphore(3)   # bound concurrent yt-dlp+ffmpeg
+        self._fetch_concurrency = 3                # bound concurrent yt-dlp+ffmpeg
+        self._fetch_sem = threading.Semaphore(self._fetch_concurrency)
         self._entries: dict[str, _Entry] = {}
         self._session: list[str] = []   # ordered tokens of the current preview
         self._httpd: Optional[ThreadingHTTPServer] = None
@@ -76,13 +79,58 @@ class MediaProxy:
                 tok = secrets.token_urlsafe(12)
                 self._entries[tok] = _Entry(tok, provider, q, i)
                 self._session.append(tok)
-        # Prefetch the whole album (bounded by _fetch_sem). HQPlayer HEAD-probes
-        # every URI synchronously at add time and needs Content-Length, so the
-        # buffers must exist before we hand the URLs over.
-        for tok in self._session:
-            self._prefetch(tok)
+        # Priority start: fetch ONLY track 0 now (full bandwidth → fastest first
+        # track). The caller measures its throughput, then calls prefetch_from(1)
+        # to fan out the rest concurrently while track 0 buffers and plays. This
+        # is rolling-append: HQPlayer HEAD-probes each URI at ADD time, so we add
+        # the ready prefix, play, then append the tail as each track lands.
+        if self._session:
+            self._prefetch(self._session[0])
         logger.info("preview session: %d tracks (%s)", len(queries), provider.manifest.id)
         return list(self._session)
+
+    def prefetch_from(self, start_index: int) -> None:
+        """Fan out concurrent (semaphore-bounded) prefetch of the session tail —
+        called once track 0 is in hand so the rest download while it plays."""
+        with self._lock:
+            tail = self._session[start_index:]
+        for tok in tail:
+            self._prefetch(tok)
+
+    def fetch_rtf(self, token: str) -> Optional[float]:
+        """Real-time factor of a fetched track: wall seconds spent fetching per
+        second of audio. <1 means the pipeline outruns playback on a single
+        stream — the channel-speed signal the buffering policy sizes its lead by.
+        None until the track is fetched and its duration is known."""
+        with self._lock:
+            e = self._entries.get(token)
+        if e is None or e.fetch_seconds is None or not e.query.duration:
+            return None
+        return e.fetch_seconds / e.query.duration
+
+    def ready_lead(self, from_index: int) -> tuple[list[str], float, int]:
+        """The contiguous run of already-fetched tracks from `from_index`: the
+        playable tokens (failed fetches skipped), their total audio-seconds, and
+        the next index to resume at (the first not-yet-fetched track — the buffer
+        boundary). This is what is safe to hand HQPlayer right now."""
+        with self._lock:
+            playable: list[str] = []
+            secs = 0.0
+            idx = from_index
+            for j in range(from_index, len(self._session)):
+                e = self._entries.get(self._session[j])
+                if e is None or not e.ready.is_set():
+                    break                       # first un-fetched track = boundary
+                idx = j + 1
+                if e.audio is None:
+                    continue                    # fetched-but-failed → skip, scan on
+                playable.append(self._session[j])
+                secs += e.query.duration or 0.0
+            return playable, secs, idx
+
+    @property
+    def fetch_concurrency(self) -> int:
+        return self._fetch_concurrency
 
     def url_for(self, token: str) -> str:
         return f"http://{self._advertised_host}:{self.port}/preview/{token}"
@@ -121,7 +169,9 @@ class MediaProxy:
             e._claimed = True
         try:
             with self._fetch_sem:
+                started = time.monotonic()
                 audio = e.provider.fetch(e.query)
+                e.fetch_seconds = time.monotonic() - started
             e.audio = audio
         except ProviderError as ex:
             e.error = str(ex)
