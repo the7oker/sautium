@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     media_proxy_port: int = 8830
     ytdlp_path: str = "yt-dlp"                       # external (user-installed) tool
     ffmpeg_location: Optional[str] = None            # dir containing ffmpeg; None = PATH
+    # Tee previewed audio through CLAP/feature analysis (gated on known duration)
+    # so phantom tracks enter the audio-similarity space. Off → previews still
+    # play, just don't enrich.
+    streaming_preview_analyze: bool = True
 
     # Native OS path prefix for stored DB paths (used when scanner runs inside Docker)
     # Docker: scanner sees /music/... → DB stores E:/Music/...

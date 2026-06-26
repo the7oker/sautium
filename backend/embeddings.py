@@ -197,12 +197,19 @@ class AudioEmbeddingGenerator:
         source_bit_depth: Optional[int] = None,
         source_sample_rate: Optional[int] = None,
         source_is_lossless: Optional[bool] = None,
+        is_preview: bool = False,
     ):
         """Create or update Embedding record. Won't overwrite higher quality source."""
         existing = db.query(Embedding).filter(
             Embedding.track_id == track_id,
             Embedding.model_id == model.id,
         ).first()
+
+        # A preview (lossy, no media_file) must never replace a real-file
+        # embedding — both score at the lossy floor, so the quality guard alone
+        # would let it through. Guard on the source explicitly.
+        if is_preview and existing and existing.source_media_file_id is not None:
+            return
 
         if existing:
             old_score = self._quality_score(existing.source_bit_depth, existing.source_is_lossless)

@@ -22,7 +22,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Optional
+from typing import Callable, Optional
 
 from .base import FetchedAudio, ProviderError, StreamProvider, TrackQuery
 
@@ -56,6 +56,9 @@ class MediaProxy:
         self._entries: dict[str, _Entry] = {}
         self._session: list[str] = []   # ordered tokens of the current preview
         self._httpd: Optional[ThreadingHTTPServer] = None
+        # Fired (with the _Entry) once a track is fetched, audio present — the
+        # preview-enrichment tee. Kept generic so the proxy stays CLAP-agnostic.
+        self.on_track_ready: Optional[Callable[["_Entry"], None]] = None
 
     # ---- lifecycle -------------------------------------------------------
     def start(self) -> None:
@@ -182,6 +185,12 @@ class MediaProxy:
             logger.error("preview fetch crashed [%d]: %s", e.index, ex, exc_info=True)
         finally:
             e.ready.set()
+            hook = self.on_track_ready
+            if hook is not None and e.audio is not None:
+                try:
+                    hook(e)
+                except Exception:
+                    logger.exception("on_track_ready hook failed [%d]", e.index)
 
     def _peek(self, token: str) -> Optional[_Entry]:
         """Lookup without triggering a fetch or advancing — for cheap HEAD."""

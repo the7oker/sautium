@@ -43,6 +43,7 @@ class TrackQuery:
     album: str = ""
     duration: Optional[float] = None   # seconds — for match disambiguation
     isrc: Optional[str] = None
+    track_id: Optional[str] = None     # Sautium track UUID — for preview enrichment
 
 
 @dataclass

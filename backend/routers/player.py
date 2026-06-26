@@ -1774,7 +1774,8 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
         raise HTTPException(status_code=503, detail="No streaming provider available")
 
     rows = _db_query("""
-        SELECT t.title,
+        SELECT t.id::text AS track_id,
+               t.title,
                al.title AS album,
                atr.length_ms,
                (SELECT ar.name FROM track_artists ta
@@ -1796,6 +1797,7 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
         TrackQuery(
             artist=r["artist"] or "", title=r["title"], album=r["album"],
             duration=(float(r["length_ms"]) / 1000.0 if r["length_ms"] else None),
+            track_id=r["track_id"],
         )
         for r in rows if r["title"]
     ]
