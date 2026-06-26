@@ -71,9 +71,10 @@ def _phantom_album(album_id: str) -> dict:
         LIMIT 3
     """, {"id": album_id})
 
-    # Tracklist from album_tracks. No media_file_id / bpm / key — these tracks
-    # have no local audio, so the rows render display-only (title + length) and
-    # playback goes through play-phantom-album (streamed), not per-track.
+    # Tracklist from album_tracks. No media_file_id (no local audio → rows are
+    # display-only, playback via play-phantom-album), but bpm/key/mode DO appear
+    # once a preview has streamed and the enricher analysed the track
+    # (audio_features keyed by track_id, source_media_file_id NULL).
     album["tracks"] = db_query("""
         SELECT t.id::text AS track_id,
                NULL::int    AS media_file_id,
@@ -81,11 +82,12 @@ def _phantom_album(album_id: str) -> dict:
                atr.disc     AS disc_number,
                atr.position AS track_number,
                atr.length_ms / 1000.0 AS duration,
-               NULL::real AS bpm,
-               NULL::text AS key,
-               NULL::text AS mode
+               af.bpm,
+               af.key,
+               af.mode
         FROM album_tracks atr
         JOIN tracks t ON t.id = atr.track_id
+        LEFT JOIN audio_features af ON af.track_id = t.id
         WHERE atr.album_id = %(id)s::uuid
         ORDER BY atr.disc, atr.position
     """, {"id": album_id})

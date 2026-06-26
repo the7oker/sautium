@@ -3807,13 +3807,18 @@
           trackParts.push(`<div class="disc-header">Disc ${t.disc_number}</div>`);
         }
         if (isPhantom) {
-          // No local audio: display-only row (title + length). Playback is the
-          // whole-album Listen action; per-track key/BPM await CLAP enrichment.
+          // No local audio → display-only row (no play/add). Key/BPM appear once
+          // a preview has streamed and the enricher analysed the track.
+          const psub = [
+            t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
+            t.bpm ? Math.round(t.bpm) + ' bpm' : null,
+          ].filter(Boolean).join(' · ');
           trackParts.push(`
             <div class="track-row is-phantom-track">
               <span class="track-rank">${t.track_number || ''}</span>
               <div class="track-info">
                 <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+                ${psub ? `<div class="track-sub">${escapeHtml(psub)}</div>` : ''}
               </div>
               <span class="track-dur">${fmtDuration(t.duration)}</span>
             </div>
