@@ -1719,6 +1719,7 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
     rows = _db_query("""
         SELECT t.title,
                al.title AS album,
+               mr.length AS length_ms,
                (SELECT ar.name FROM track_artists ta
                   JOIN artists ar ON ar.id = ta.artist_id
                 WHERE ta.track_id = t.id
@@ -1726,6 +1727,7 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
         FROM album_tracks atr
         JOIN tracks t ON t.id = atr.track_id
         JOIN albums al ON al.id = atr.album_id
+        LEFT JOIN mb_recording mr ON mr.gid = atr.recording_mbid
         WHERE atr.album_id = %(album_id)s
         ORDER BY atr.disc, atr.position
     """, {"album_id": req.album_id})
@@ -1733,8 +1735,12 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
     if not rows:
         raise HTTPException(status_code=404, detail="Phantom album not found or has no tracklist")
 
+    # Canonical MB length lets the provider reject remixes / wrong-length results.
     queries = [
-        TrackQuery(artist=r["artist"] or "", title=r["title"], album=r["album"])
+        TrackQuery(
+            artist=r["artist"] or "", title=r["title"], album=r["album"],
+            duration=(float(r["length_ms"]) / 1000.0 if r["length_ms"] else None),
+        )
         for r in rows if r["title"]
     ]
     if not queries:
