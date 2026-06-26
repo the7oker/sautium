@@ -129,6 +129,14 @@ async def lifespan(app: FastAPI):
     from routers.player import start_status_poller, stop_status_poller
     start_status_poller()
 
+    # Start streaming-preview service (media proxy + provider registry).
+    # No-op unless streaming_preview_enabled — costs nothing when off.
+    try:
+        from streaming import service as streaming_service
+        streaming_service.init(settings)
+    except Exception as e:
+        logger.warning(f"Streaming preview init failed: {e}")
+
     # Start chat SSE listener
     from routers.p2p import start_chat_listener, stop_chat_listener
     start_chat_listener()

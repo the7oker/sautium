@@ -68,6 +68,12 @@ services:
       HQPLAYER_HOST: ${HQPLAYER_HOST:-host.docker.internal}
       HQPLAYER_PORT: ${HQPLAYER_PORT:-4321}
       HQPLAYER_ENABLED: ${HQPLAYER_ENABLED:-false}
+      # Phantom-album streaming preview (media proxy on a separate plain-http port;
+      # advertised_host is what HQPlayer puts in the URL — 127.0.0.1 = the published
+      # port on this host).
+      STREAMING_PREVIEW_ENABLED: ${STREAMING_PREVIEW_ENABLED:-false}
+      MEDIA_PROXY_PORT: ${MEDIA_PROXY_PORT:-8830}
+      MEDIA_PROXY_ADVERTISED_HOST: ${MEDIA_PROXY_ADVERTISED_HOST:-127.0.0.1}
       MUSIC_HOST_PATH: ${MUSIC_HOST_PATH:-}
       CLAUDE_CODE_ENABLED: ${CLAUDE_CODE_ENABLED:-true}
       P2P_ENABLED: ${P2P_ENABLED:-true}
@@ -115,6 +121,7 @@ services:
       - ./data/claude_sessions:/home/claudeuser/.claude/projects
     ports:
       - "8800:8000"
+      - "${MEDIA_PROXY_PORT:-8830}:${MEDIA_PROXY_PORT:-8830}"   # phantom-preview media proxy (plain http, HQPlayer pulls)
       - "${P2P_DHT_PORT:-19001}:${P2P_DHT_PORT:-19001}/udp"
     networks:
       - sautium-network

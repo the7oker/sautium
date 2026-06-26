@@ -137,11 +137,14 @@ def _status_poller():
                     if isinstance(idx, int) and 1 <= idx <= len(pl_tracks)
                     else None
                 )
+                # Phantom previews carry 'HTTP stream' in HQPlayer's own metadata
+                # — surface the provider's real artist/title from the playlist cache.
+                preview = bool(pl_row and pl_row.get("preview"))
                 new_data = {
                     "state": state_names.get(status.state, "unknown"),
-                    "artist": status.artist,
-                    "album": status.album,
-                    "song": status.song,
+                    "artist": pl_row["artist"] if preview else status.artist,
+                    "album": (pl_row.get("album") or "") if preview else status.album,
+                    "song": pl_row["title"] if preview else status.song,
                     "genre": status.genre,
                     "position": status.position,
                     "length": status.length,
@@ -155,6 +158,8 @@ def _status_poller():
                     "length_formatted": format_time(status.length),
                     "playlist_version": _playlist_version,
                     "radio_mode": _radio_mode,
+                    "preview": preview,
+                    "provider": pl_row.get("provider") if preview else None,
                 }
 
                 # Natural end-of-queue: HQPlayer stopped on the last track.
@@ -902,6 +907,19 @@ async def search_tracks(q: str = "", limit: int = 20):
 
 # -- Transport controls -------------------------------------------------------
 
+def _preview_meta(uri: str) -> Optional[dict]:
+    """Provider metadata for a phantom-preview URI (http proxy URL), or None.
+    Lets the queue/Now-Playing show real artist/title instead of HQPlayer's
+    generic 'HTTP stream' label. In-memory lookup, no I/O."""
+    if not uri.startswith("http://"):
+        return None
+    try:
+        from streaming import service as streaming_service
+        return streaming_service.preview_meta(uri)
+    except Exception:
+        return None
+
+
 def _build_playlist_payload(hqp_tracks: list) -> dict:
     """Convert HQPlayer raw playlist into the JSON shape served to the UI.
     Pure transform — no HQPlayer or socket I/O."""
@@ -968,15 +986,30 @@ def _build_playlist_payload(hqp_tracks: list) -> dict:
                 "index": idx,
             })
         else:
-            tracks_with_info.append({
-                "id": None,
-                "title": hqp_track["song"] or "Unknown",
-                "track_number": None,
-                "artist": hqp_track["artist"] or "Unknown",
-                "duration_seconds": None,
-                "cover_id": None,
-                "index": idx,
-            })
+            meta = _preview_meta(hqp_track["uri"])
+            if meta:
+                tracks_with_info.append({
+                    "id": None,
+                    "title": meta["title"] or "Unknown",
+                    "track_number": None,
+                    "artist": meta["artist"] or "Unknown",
+                    "album": meta.get("album") or "",
+                    "duration_seconds": None,
+                    "cover_id": None,
+                    "preview": True,
+                    "provider": meta["provider"],
+                    "index": idx,
+                })
+            else:
+                tracks_with_info.append({
+                    "id": None,
+                    "title": hqp_track["song"] or "Unknown",
+                    "track_number": None,
+                    "artist": hqp_track["artist"] or "Unknown",
+                    "duration_seconds": None,
+                    "cover_id": None,
+                    "index": idx,
+                })
 
     return {"tracks": tracks_with_info, "count": len(tracks_with_info)}
 
@@ -1652,6 +1685,102 @@ def play_album(req: PlayAlbumRequest):
                 {"id": r["id"], "title": r["title"], "track_number": r.get("track_number")}
                 for r in rows
             ],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+class PlayPhantomAlbumRequest(BaseModel):
+    album_id: str   # UUID of a phantom (not-owned) album
+
+
+@router.post("/play-phantom-album")
+def play_phantom_album(req: PlayPhantomAlbumRequest):
+    """Stream a phantom (not-in-library) album onto HQPlayer.
+
+    Resolves the album's MusicBrainz tracklist to a streaming provider, serves
+    the audio through the in-memory media proxy as plain-http URLs, and feeds
+    those into HQPlayer's NATIVE playlist exactly like owned ``file://`` tracks
+    (proven: HQPlayer plays http FLAC sustained alongside local files).
+
+    Now-Playing shows HQPlayer's generic stream label for these tracks until
+    provider-sourced metadata is wired into the status poller (next step)."""
+    from streaming import service as streaming_service
+    from streaming.base import TrackQuery
+
+    if not streaming_service.is_enabled():
+        raise HTTPException(status_code=503, detail="Streaming preview is disabled")
+    provider = streaming_service.get_provider("youtube")
+    if provider is None:
+        raise HTTPException(status_code=503, detail="No streaming provider available")
+
+    rows = _db_query("""
+        SELECT t.title,
+               al.title AS album,
+               (SELECT ar.name FROM track_artists ta
+                  JOIN artists ar ON ar.id = ta.artist_id
+                WHERE ta.track_id = t.id
+                ORDER BY (ta.role = 'primary') DESC LIMIT 1) AS artist
+        FROM album_tracks atr
+        JOIN tracks t ON t.id = atr.track_id
+        JOIN albums al ON al.id = atr.album_id
+        WHERE atr.album_id = %(album_id)s
+        ORDER BY atr.disc, atr.position
+    """, {"album_id": req.album_id})
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Phantom album not found or has no tracklist")
+
+    queries = [
+        TrackQuery(artist=r["artist"] or "", title=r["title"], album=r["album"])
+        for r in rows if r["title"]
+    ]
+    if not queries:
+        raise HTTPException(status_code=404, detail="Album tracklist is empty")
+
+    proxy = streaming_service.get_proxy()
+    tokens = proxy.start_session(provider, queries)
+
+    # HQPlayer HEAD/GET-probes every URI synchronously at add time and needs the
+    # buffer present, so wait for the whole album to fetch (the UI shows a
+    # buffering state) and drop tracks the provider could not resolve. Playing
+    # the first track before the rest finish (rolling append) is a follow-up.
+    urls: list[str] = []
+    for tok in tokens:
+        try:
+            e = proxy.wait_ready(tok)
+        except TimeoutError:
+            continue
+        if e.audio is not None:
+            urls.append(proxy.url_for(tok))
+
+    if not urls:
+        raise HTTPException(status_code=502, detail="No tracks could be fetched from the provider")
+
+    try:
+        with _hqp_lock:
+            _hqp_safe(lambda h: h.stop())
+            added = _add_uris_with_retry(urls, clear_first=True)
+            if added:
+                _hqp_safe(lambda h: h.play())
+        _invalidate_playlist()
+        _exit_radio_mode()
+        _notify_update()
+
+        if not added:
+            raise HTTPException(
+                status_code=503,
+                detail="HQPlayer unavailable — preview not queued. Try again.",
+            )
+        return {
+            "ok": True,
+            "album": queries[0].album,
+            "artist": queries[0].artist,
+            "provider": provider.manifest.id,
+            "track_count": len(urls),       # tracks actually streaming
+            "requested": len(queries),      # tracklist size (misses dropped)
         }
     except HTTPException:
         raise
