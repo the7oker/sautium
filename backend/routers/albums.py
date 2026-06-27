@@ -17,6 +17,7 @@ so the UI can render a selector without a second roundtrip.
 from fastapi import APIRouter, HTTPException, Query
 
 from db_pool import db_query, db_query_one
+from genre_queries import album_genre_chips
 
 
 router = APIRouter(prefix="/api/albums", tags=["albums"])
@@ -69,16 +70,11 @@ def _phantom_album(album_id: str) -> dict:
         LIMIT 1
     """, {"id": album_id})
 
-    # Genre is album-grain; phantom albums carry MB-sourced album_genres.
-    album["genres"] = db_query("""
-        SELECT g.id::text AS id, g.name, MAX(ag.count) AS occurrences
-        FROM album_genres ag
-        JOIN genres g ON g.id = ag.genre_id
-        WHERE ag.album_id = %(id)s::uuid
-        GROUP BY g.id, g.name
-        ORDER BY MAX(ag.count) DESC NULLS LAST, g.name
-        LIMIT 3
-    """, {"id": album_id})
+    # Album-grain genres, falling back to the primary artist's genres when the
+    # phantom album has none (same shared rule as the owned-album page).
+    album["genres"] = album_genre_chips(
+        album_id,
+        album["primary_artist"]["id"] if album["primary_artist"] else None)
 
     # Tracklist from album_tracks. No media_file_id (no local audio → rows are
     # display-only, playback via play-phantom-album), but bpm/key/mode DO appear
@@ -206,18 +202,11 @@ def get_album(
         album["quality"] = "lossy"
     album["total_duration"] = float(qrow["total_duration"] or 0)
 
-    # Top 3 genres for the album, deduped across sources (filetag/mb) by
-    # genre_id and ranked by count (file occurrences or MB tag votes).
-    # Genre is album-grain, so this is a direct read — no track rollup.
-    album["genres"] = db_query("""
-        SELECT g.id::text AS id, g.name, MAX(ag.count) AS occurrences
-        FROM album_genres ag
-        JOIN genres g ON g.id = ag.genre_id
-        WHERE ag.album_id = %(id)s::uuid
-        GROUP BY g.id, g.name
-        ORDER BY MAX(ag.count) DESC NULLS LAST, g.name
-        LIMIT 3
-    """, {"id": album_id})
+    # Album-grain genres (deduped across filetag/mb, ranked by count), falling
+    # back to the primary artist's genres when the album has none — the same
+    # rule the phantom-album page uses, so both render identically.
+    album["genres"] = album_genre_chips(
+        album_id, primary["id"] if primary else None)
 
     # Tracklist ordered by disc / track number. `is_analysis_source`
     # is a *preference* — it marks the media_file we chose for audio

@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from db_pool import db_query, db_query_one
 from discography import fetch_new_albums, sync_artist_discography
+from genre_queries import artist_genres
 from release_groups import collapse_to_groups
 
 
@@ -220,41 +221,7 @@ def get_artist(
     # signal that surfaces niche artists whose Last.fm tagging is
     # weak but whose tracks are clearly genre-tagged in the library.
     # The non-alphanumeric-strip lets "nu-jazz" resolve to "Nu Jazz".
-    artist["tags"] = db_query("""
-        WITH via_tag AS (
-            SELECT g.id::text AS genre_id, g.name,
-                   COALESCE(at.weight, 0)::int AS lastfm_weight,
-                   0::int AS track_count
-            FROM artist_tags at
-            JOIN tags tg ON tg.id = at.tag_id
-            JOIN genres g
-              ON regexp_replace(LOWER(g.name), '[^a-z0-9]', '', 'g')
-               = regexp_replace(LOWER(tg.name), '[^a-z0-9]', '', 'g')
-            WHERE at.artist_id = %(id)s::uuid
-              AND COALESCE(at.weight, 0) >= 10
-        ),
-        via_track AS (
-            SELECT g.id::text AS genre_id, g.name,
-                   0::int AS lastfm_weight,
-                   COUNT(DISTINCT t.id)::int AS track_count
-            FROM tracks t
-            JOIN track_artists ta
-              ON ta.track_id = t.id AND ta.role = 'primary'
-            JOIN media_files mf ON mf.track_id = t.id
-            JOIN album_variants av ON av.id = mf.album_variant_id
-            JOIN album_genres ag ON ag.album_id = av.album_id
-            JOIN genres g ON g.id = ag.genre_id
-            WHERE ta.artist_id = %(id)s::uuid
-            GROUP BY g.id, g.name
-            HAVING COUNT(DISTINCT t.id) >= 5
-        )
-        SELECT genre_id, name,
-               MAX(lastfm_weight)::int AS weight,
-               MAX(track_count)::int  AS track_count
-        FROM (SELECT * FROM via_tag UNION ALL SELECT * FROM via_track) u
-        GROUP BY genre_id, name
-        ORDER BY weight DESC, track_count DESC, name
-    """, {"id": artist_id})
+    artist["tags"] = artist_genres(artist_id)
 
     # In split mode the artist-level Last.fm tags above can't be attributed to
     # one namesake, so the chips come purely from the album-grain genres of the
