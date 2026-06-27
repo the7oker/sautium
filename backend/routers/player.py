@@ -383,6 +383,17 @@ def _hqp_cmd(func):
             return func(hqp)
 
 
+def _uri_in_playlist(uri: str) -> bool:
+    """Best-effort: is `uri` already in HQPlayer's playlist? Used to avoid
+    re-adding (duplicating) a track whose add LANDED but whose response was lost
+    to a slow read-timeout. Returns False if the playlist can't be read. Call
+    while holding `_hqp_lock`."""
+    try:
+        return any(t.get("uri") == uri for t in (_get_hqp().get_playlist() or []))
+    except Exception:
+        return False
+
+
 def _add_uris_with_retry(uris: list[str], *, clear_first: bool = False) -> int:
     """Append URIs to the HQPlayer playlist, surviving a mid-batch
     connection drop. MUST be called while holding `_hqp_lock`.
@@ -416,6 +427,13 @@ def _add_uris_with_retry(uris: list[str], *, clear_first: bool = False) -> int:
             if ok:
                 break
             if attempt == 1:
+                # The add may have LANDED but its response was lost (slow
+                # HQPlayer read-timeout); re-adding an append would DUPLICATE the
+                # track. Verify first — preview URIs are unique, so a present URI
+                # means the first add took.
+                if not clear and _uri_in_playlist(uri):
+                    ok = True
+                    break
                 _reset_hqp()  # force a fresh socket before the single retry
         if ok:
             added += 1
