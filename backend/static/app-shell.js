@@ -3828,6 +3828,7 @@
                 <div class="track-buffering" hidden>Buffering…</div>
               </div>
               <span class="track-dur">${fmtDuration(t.duration)}</span>
+              <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
             </div>
           `);
           continue;
@@ -3897,6 +3898,9 @@
         <div class="album-actions">
           ${isPhantom ? `
             <button class="btn-primary" type="button" data-action="play-phantom">${SVG_PLAY} Stream all</button>
+            <button class="btn-secondary" type="button" data-action="queue-phantom-album">
+              <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
+            </button>
             <button class="btn-secondary album-buy-btn" type="button" data-buy-url="${escapeHtml(buyUrl)}">
               <span class="btn-label">Buy ↗</span>
             </button>
@@ -4206,7 +4210,7 @@
     // /reorder call to slot the new track right after the current
     // one — HQPlayer has no insert primitive, so the seamless-
     // rebuild reorder is the cleanest path.
-    screen.querySelectorAll('.track-add').forEach(btn => {
+    screen.querySelectorAll('.track-row:not(.is-phantom-track) .track-add').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         const row = btn.closest('[data-media-file-id]');
@@ -4216,6 +4220,46 @@
         } else {
           openQueueConfirm(row);
         }
+      });
+    });
+    // Phantom track [+] → append that one track to the queue (streamed); the
+    // title shows "Buffering…" until it lands. (Owned rows use the Next/End
+    // confirm above; phantom appends directly — streaming has no insert step.)
+    screen.querySelectorAll('.track-row.is-phantom-track .track-add').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const row = btn.closest('[data-track-id]');
+        const tid = row && row.getAttribute('data-track-id');
+        if (!tid) return;
+        setTrackBuffering(screen, tid, true);
+        const resp = await fetch('/api/player/queue-phantom-track', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ track_id: tid }),
+        }).catch(() => null);
+        let body = null;
+        try { body = resp ? await resp.json() : null; } catch (_) {}
+        setTrackBuffering(screen, tid, false);
+        if (!resp || !resp.ok) { await reportPlaybackResult(resp); return; }
+        if (body && body.track_count === 0) applyPhantomMissing(screen, body.missing);
+      });
+    });
+    // Phantom [+ Queue] → append the whole album to the queue (rolling-append).
+    screen.querySelectorAll('[data-action="queue-phantom-album"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!ctx.phantomAlbumId) return;
+        const restore = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="btn-label">Queuing…</span>';
+        const resp = await fetch('/api/player/queue-phantom-album', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ album_id: ctx.phantomAlbumId }),
+        }).catch(() => null);
+        let body = null;
+        try { body = resp ? await resp.json() : null; } catch (_) {}
+        btn.disabled = false;
+        btn.innerHTML = restore;
+        if (!resp || !resp.ok) { await reportPlaybackResult(resp); return; }
+        applyPhantomMissing(screen, body && body.missing);
       });
     });
     // Play all — replaces the queue with the full track list. ctx.playOrigin

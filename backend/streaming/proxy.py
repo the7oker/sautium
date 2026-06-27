@@ -103,6 +103,25 @@ class MediaProxy:
         for tok in tail:
             self._prefetch(tok)
 
+    def add_tracks(self, provider: StreamProvider, queries: list,
+                   source_ids: Optional[list] = None) -> list:
+        """Add tracks to the served pool WITHOUT replacing the current album
+        session — for queue-appends, so the album and the queued tracks are
+        served at once. Returns the new tokens (prefetched); the caller waits
+        and appends them to HQPlayer. They are NOT part of the rolling-append
+        `_session`; the next start_session (a replace-queue play) clears them
+        together with the album, in step with HQPlayer's own queue clear."""
+        toks = []
+        with self._lock:
+            for i, q in enumerate(queries):
+                tok = secrets.token_urlsafe(12)
+                sid = source_ids[i] if source_ids else None
+                self._entries[tok] = _Entry(tok, provider, q, i, source_id=sid)
+                toks.append(tok)
+        for tok in toks:
+            self._prefetch(tok)
+        return toks
+
     def fetch_rtf(self, token: str) -> Optional[float]:
         """Real-time factor of a fetched track: wall seconds spent fetching per
         second of audio. <1 means the pipeline outruns playback on a single

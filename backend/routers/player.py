@@ -1768,6 +1768,53 @@ def _parallel_resolve(provider, queries: list) -> list:
         return list(ex.map(one, queries))
 
 
+def _phantom_track_query(track_id: str):
+    """Build a TrackQuery for one phantom track from album_tracks, or None."""
+    from streaming.base import TrackQuery
+    row = _db_query_one("""
+        SELECT t.title, atr.length_ms, al.title AS album,
+               (SELECT ar.name FROM track_artists ta
+                  JOIN artists ar ON ar.id = ta.artist_id
+                WHERE ta.track_id = t.id
+                ORDER BY (ta.role = 'primary') DESC LIMIT 1) AS artist
+        FROM tracks t
+        JOIN album_tracks atr ON atr.track_id = t.id
+        JOIN albums al ON al.id = atr.album_id
+        WHERE t.id = %(tid)s::uuid
+        LIMIT 1
+    """, {"tid": track_id})
+    if not row or not row["title"]:
+        return None
+    return TrackQuery(
+        artist=row["artist"] or "", title=row["title"], album=row["album"],
+        duration=(float(row["length_ms"]) / 1000.0 if row["length_ms"] else None),
+        track_id=track_id)
+
+
+def _phantom_album_queries(album_id: str) -> list:
+    """Ordered TrackQuery list for a phantom album's tracklist (album_tracks)."""
+    from streaming.base import TrackQuery
+    rows = _db_query("""
+        SELECT t.id::text AS track_id, t.title, al.title AS album, atr.length_ms,
+               (SELECT ar.name FROM track_artists ta
+                  JOIN artists ar ON ar.id = ta.artist_id
+                WHERE ta.track_id = t.id
+                ORDER BY (ta.role = 'primary') DESC LIMIT 1) AS artist
+        FROM album_tracks atr
+        JOIN tracks t ON t.id = atr.track_id
+        JOIN albums al ON al.id = atr.album_id
+        WHERE atr.album_id = %(album_id)s
+        ORDER BY atr.disc, atr.position
+    """, {"album_id": album_id})
+    return [
+        TrackQuery(
+            artist=r["artist"] or "", title=r["title"], album=r["album"],
+            duration=(float(r["length_ms"]) / 1000.0 if r["length_ms"] else None),
+            track_id=r["track_id"])
+        for r in rows if r["title"]
+    ]
+
+
 class PlayPhantomAlbumRequest(BaseModel):
     album_id: str   # UUID of a phantom (not-owned) album
 
@@ -1792,36 +1839,9 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
     if provider is None:
         raise HTTPException(status_code=503, detail="No streaming provider available")
 
-    rows = _db_query("""
-        SELECT t.id::text AS track_id,
-               t.title,
-               al.title AS album,
-               atr.length_ms,
-               (SELECT ar.name FROM track_artists ta
-                  JOIN artists ar ON ar.id = ta.artist_id
-                WHERE ta.track_id = t.id
-                ORDER BY (ta.role = 'primary') DESC LIMIT 1) AS artist
-        FROM album_tracks atr
-        JOIN tracks t ON t.id = atr.track_id
-        JOIN albums al ON al.id = atr.album_id
-        WHERE atr.album_id = %(album_id)s
-        ORDER BY atr.disc, atr.position
-    """, {"album_id": req.album_id})
-
-    if not rows:
-        raise HTTPException(status_code=404, detail="Phantom album not found or has no tracklist")
-
-    # Canonical MB length lets the provider reject remixes / wrong-length results.
-    queries = [
-        TrackQuery(
-            artist=r["artist"] or "", title=r["title"], album=r["album"],
-            duration=(float(r["length_ms"]) / 1000.0 if r["length_ms"] else None),
-            track_id=r["track_id"],
-        )
-        for r in rows if r["title"]
-    ]
+    queries = _phantom_album_queries(req.album_id)
     if not queries:
-        raise HTTPException(status_code=404, detail="Album tracklist is empty")
+        raise HTTPException(status_code=404, detail="Phantom album not found or has no tracklist")
 
     proxy = streaming_service.get_proxy()
 
@@ -1936,27 +1956,10 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
     if provider is None:
         raise HTTPException(status_code=503, detail="No streaming provider available")
 
-    row = _db_query_one("""
-        SELECT t.title, atr.length_ms, al.title AS album,
-               (SELECT ar.name FROM track_artists ta
-                  JOIN artists ar ON ar.id = ta.artist_id
-                WHERE ta.track_id = t.id
-                ORDER BY (ta.role = 'primary') DESC LIMIT 1) AS artist
-        FROM tracks t
-        JOIN album_tracks atr ON atr.track_id = t.id
-        JOIN albums al ON al.id = atr.album_id
-        WHERE t.id = %(tid)s::uuid
-        LIMIT 1
-    """, {"tid": req.track_id})
-    if not row or not row["title"]:
+    q = _phantom_track_query(req.track_id)
+    if q is None:
         raise HTTPException(status_code=404, detail="Phantom track not found")
-
-    q = TrackQuery(
-        artist=row["artist"] or "", title=row["title"], album=row["album"],
-        duration=(float(row["length_ms"]) / 1000.0 if row["length_ms"] else None),
-        track_id=req.track_id,
-    )
-    missing = [{"track_id": req.track_id, "title": row["title"]}]
+    missing = [{"track_id": req.track_id, "title": q.title}]
     sid = provider.resolve(q) if provider.supports_resolve else None
     if provider.supports_resolve and not sid:
         return {"ok": True, "provider": provider.manifest.id,
@@ -1990,6 +1993,90 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+
+@router.post("/queue-phantom-track")
+def queue_phantom_track(req: PlayPhantomTrackRequest):
+    """Append one phantom track to the HQPlayer queue (streamed, no replace)."""
+    from streaming import service as streaming_service
+    if not streaming_service.is_enabled():
+        raise HTTPException(status_code=503, detail="Streaming preview is disabled")
+    provider = streaming_service.get_provider()
+    if provider is None:
+        raise HTTPException(status_code=503, detail="No streaming provider available")
+
+    q = _phantom_track_query(req.track_id)
+    if q is None:
+        raise HTTPException(status_code=404, detail="Phantom track not found")
+    missing = [{"track_id": req.track_id, "title": q.title}]
+    sid = provider.resolve(q) if provider.supports_resolve else None
+    if provider.supports_resolve and not sid:
+        return {"ok": True, "provider": provider.manifest.id,
+                "track_count": 0, "requested": 1, "missing": missing}
+
+    proxy = streaming_service.get_proxy()
+    tokens = proxy.add_tracks(provider, [q], [sid] if sid else None)
+    try:
+        e = proxy.wait_ready(tokens[0])
+    except (TimeoutError, KeyError):
+        e = None
+    if e is None or e.audio is None:
+        raise HTTPException(status_code=502, detail="Track could not be fetched from the provider")
+
+    try:
+        with _hqp_lock:
+            added = _add_uris_with_retry([proxy.url_for(tokens[0])], clear_first=False)
+        _invalidate_playlist()
+        _notify_update()
+        if not added:
+            raise HTTPException(status_code=503,
+                                detail="HQPlayer unavailable — not queued. Try again.")
+        return {"ok": True, "provider": provider.manifest.id, "track_count": 1,
+                "requested": 1, "missing": []}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@router.post("/queue-phantom-album")
+def queue_phantom_album(req: PlayPhantomAlbumRequest):
+    """Append a phantom album to the HQPlayer queue (streamed, rolling-append)."""
+    from streaming import service as streaming_service
+    if not streaming_service.is_enabled():
+        raise HTTPException(status_code=503, detail="Streaming preview is disabled")
+    provider = streaming_service.get_provider()
+    if provider is None:
+        raise HTTPException(status_code=503, detail="No streaming provider available")
+
+    queries = _phantom_album_queries(req.album_id)
+    if not queries:
+        raise HTTPException(status_code=404, detail="Phantom album not found or has no tracklist")
+
+    if provider.supports_resolve:
+        source_ids = _parallel_resolve(provider, queries)
+        avail_q = [q for q, s in zip(queries, source_ids) if s]
+        avail_sids = [s for s in source_ids if s]
+        missing = [q for q, s in zip(queries, source_ids) if not s]
+    else:
+        avail_q, avail_sids, missing = queries, None, []
+    missing_payload = [{"track_id": q.track_id, "title": q.title} for q in missing]
+    if not avail_q:
+        return {"ok": True, "provider": provider.manifest.id, "track_count": 0,
+                "requested": len(queries), "missing": missing_payload}
+
+    proxy = streaming_service.get_proxy()
+    tokens = proxy.add_tracks(provider, avail_q, avail_sids)
+    # Append each available track to the queue as it finishes fetching, in order.
+    # A queue-append doesn't start a new session, so capture the CURRENT
+    # generation; the filler aborts if the user replaces the queue meanwhile.
+    with _hqp_lock:
+        gen = _playback_generation
+    threading.Thread(target=_phantom_filler, args=(proxy, list(tokens), 0, gen),
+                     daemon=True, name="phantom-queue").start()
+    return {"ok": True, "provider": provider.manifest.id,
+            "track_count": len(avail_q), "requested": len(queries),
+            "missing": missing_payload}
 
 
 @router.post("/play-similar")
