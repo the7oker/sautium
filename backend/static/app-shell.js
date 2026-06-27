@@ -3895,14 +3895,14 @@
           </div>
           ${genresHtml ? `<div class="tag-row" style="padding: calc(12 * var(--px)) 0 0;">${genresHtml}</div>` : ''}
         </div>
-        <div class="album-actions">
+        <div class="album-actions${isPhantom ? ' is-phantom' : ''}">
           ${isPhantom ? `
             <button class="btn-primary" type="button" data-action="play-phantom">${SVG_PLAY} Stream all</button>
-            <button class="btn-secondary album-queue-btn" type="button" data-action="queue-phantom-album">
-              <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
-            </button>
             <button class="btn-secondary album-buy-btn" type="button" data-buy-url="${escapeHtml(buyUrl)}">
               <span class="btn-label">Buy ↗</span>
+            </button>
+            <button class="btn-secondary album-queue-btn" type="button" data-action="queue-phantom-album">
+              <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
             </button>
           ` : `
             <button class="btn-primary" type="button" data-action="play-all">${SVG_PLAY} Play all</button>

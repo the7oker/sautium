@@ -2548,6 +2548,10 @@ body.has-miniplayer .ai-fab {
   grid-template-columns: 1fr auto;
   gap: calc(10 * var(--px));
 }
+/* Phantom adds a third button (Stream all · Buy · +Queue) — keep them one row. */
+.album-actions.is-phantom {
+  grid-template-columns: 1fr auto auto;
+}
 /* Confirming state — Play all collapses behind the bar; the Queue
    button stays in the right column and rotates 45° so the same `+`
    glyph plays the role of ×. Mirrors the per-track confirm pattern
