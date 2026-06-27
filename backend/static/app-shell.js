@@ -3825,6 +3825,7 @@
               <div class="track-info">
                 <div class="track-title-line">${escapeHtml(t.title || '')}</div>
                 ${psub ? `<div class="track-sub">${escapeHtml(psub)}</div>` : ''}
+                <div class="track-buffering" hidden>Buffering…</div>
               </div>
               <span class="track-dur">${fmtDuration(t.duration)}</span>
             </div>
@@ -4135,6 +4136,16 @@
     });
   }
 
+  // Show/hide the "Buffering…" line under a phantom track's title. Shared by
+  // click-to-play and (later) the SSE preview-event stream, so every way a track
+  // starts streaming surfaces the same in-place indicator (no flicker).
+  function setTrackBuffering(screen, trackId, active) {
+    if (!screen || !trackId) return;
+    const sel = (window.CSS && CSS.escape) ? CSS.escape(trackId) : trackId;
+    const el = screen.querySelector(`.track-row[data-track-id="${sel}"] .track-buffering`);
+    if (el) el.hidden = !active;
+  }
+
   function wireDetailHandlers(screen, ctx = {}) {
     // Back chevron
     screen.querySelectorAll('[data-action="back"]').forEach(btn => {
@@ -4262,6 +4273,26 @@
           btn.disabled = false;
           btn.innerHTML = restore;
         }
+      });
+    });
+    // Phantom track row → stream + play that single track (mirrors clicking an
+    // owned track). Display-only rows carry data-track-id (no media_file_id) and
+    // stream via play-phantom-track; "Buffering…" shows under the title meanwhile.
+    screen.querySelectorAll('.track-row.is-phantom-track[data-track-id]').forEach(row => {
+      row.addEventListener('click', async (e) => {
+        if (e.target.closest('.track-add')) return;   // queue button handles its own
+        const tid = row.getAttribute('data-track-id');
+        if (!tid) return;
+        setTrackBuffering(screen, tid, true);
+        const resp = await fetch('/api/player/play-phantom-track', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ track_id: tid }),
+        }).catch(() => null);
+        let body = null;
+        try { body = resp ? await resp.json() : null; } catch (_) {}
+        setTrackBuffering(screen, tid, false);
+        if (!resp || !resp.ok) { await reportPlaybackResult(resp); return; }
+        if (body && body.track_count === 0) applyPhantomMissing(screen, body.missing);
       });
     });
     // Queue album — opens the same inline "Add to: [Next] [End]"

@@ -1917,6 +1917,81 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
         raise HTTPException(status_code=503, detail=str(e))
 
 
+class PlayPhantomTrackRequest(BaseModel):
+    track_id: str   # UUID of a phantom (not-owned) track
+
+
+@router.post("/play-phantom-track")
+def play_phantom_track(req: PlayPhantomTrackRequest):
+    """Stream a single phantom track onto HQPlayer (replaces the queue), the
+    streaming counterpart of clicking an owned track. Resolves the track via the
+    preferred provider; returns track_count=0 + the track in `missing` when the
+    provider has no match (the UI greys the row)."""
+    from streaming import service as streaming_service
+    from streaming.base import TrackQuery
+
+    if not streaming_service.is_enabled():
+        raise HTTPException(status_code=503, detail="Streaming preview is disabled")
+    provider = streaming_service.get_provider()
+    if provider is None:
+        raise HTTPException(status_code=503, detail="No streaming provider available")
+
+    row = _db_query_one("""
+        SELECT t.title, atr.length_ms, al.title AS album,
+               (SELECT ar.name FROM track_artists ta
+                  JOIN artists ar ON ar.id = ta.artist_id
+                WHERE ta.track_id = t.id
+                ORDER BY (ta.role = 'primary') DESC LIMIT 1) AS artist
+        FROM tracks t
+        JOIN album_tracks atr ON atr.track_id = t.id
+        JOIN albums al ON al.id = atr.album_id
+        WHERE t.id = %(tid)s::uuid
+        LIMIT 1
+    """, {"tid": req.track_id})
+    if not row or not row["title"]:
+        raise HTTPException(status_code=404, detail="Phantom track not found")
+
+    q = TrackQuery(
+        artist=row["artist"] or "", title=row["title"], album=row["album"],
+        duration=(float(row["length_ms"]) / 1000.0 if row["length_ms"] else None),
+        track_id=req.track_id,
+    )
+    missing = [{"track_id": req.track_id, "title": row["title"]}]
+    sid = provider.resolve(q) if provider.supports_resolve else None
+    if provider.supports_resolve and not sid:
+        return {"ok": True, "provider": provider.manifest.id,
+                "track_count": 0, "requested": 1, "missing": missing}
+
+    proxy = streaming_service.get_proxy()
+    tokens = proxy.start_session(provider, [q], [sid] if sid else None)
+    try:
+        e = proxy.wait_ready(tokens[0])
+    except (TimeoutError, KeyError):
+        e = None
+    if e is None or e.audio is None:
+        raise HTTPException(status_code=502, detail="Track could not be fetched from the provider")
+
+    try:
+        with _hqp_lock:
+            _hqp_safe(lambda h: h.stop())
+            added = _add_uris_with_retry([proxy.url_for(tokens[0])], clear_first=True)
+            if added:
+                _hqp_safe(lambda h: h.play())
+        _invalidate_playlist()
+        _exit_radio_mode()
+        _notify_update()
+        if not added:
+            raise HTTPException(
+                status_code=503,
+                detail="HQPlayer unavailable — preview not queued. Try again.")
+        return {"ok": True, "provider": provider.manifest.id, "track_count": 1,
+                "requested": 1, "missing": [], "artist": q.artist, "album": q.album}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
 @router.post("/play-similar")
 def play_similar(req: PlaySimilarRequest):
     """Find similar tracks via pgvector cosine search, queue and play."""

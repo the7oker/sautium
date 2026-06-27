@@ -2076,6 +2076,13 @@ body.has-miniplayer .ai-fab {
   pointer-events: none;
   cursor: default;
 }
+/* "Buffering…" under a phantom track title while it streams (in-place, no flicker). */
+.track-buffering {
+  font-size: var(--text-caption);
+  color: var(--color-text-muted);
+  animation: track-buffer-pulse 1.2s ease-in-out infinite;
+}
+@keyframes track-buffer-pulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 0.9; } }
 .track-rank {
   font-family: var(--font-mono);
   font-size: calc(12 * var(--px));
