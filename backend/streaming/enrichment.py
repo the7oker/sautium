@@ -46,28 +46,30 @@ class PreviewEnricher:
         self._analyzer = None
 
     def submit(self, track_id: Optional[str], flac: Optional[bytes],
-               duration: Optional[float]) -> None:
+               duration: Optional[float], lossless: bool = False) -> None:
         """Queue a previewed track for enrichment. No-ops without a track_id, a
-        duration (unverified match — see GATE) or audio, or if already queued."""
+        duration (unverified match — see GATE) or audio, or if already queued.
+        ``lossless`` is the provider's source-quality flag (Deezer FLAC=True,
+        YouTube=False) — it sets the feature provenance + embedding quality tier."""
         if not track_id or not duration or not flac:
             return
         with self._lock:
             if track_id in self._inflight:
                 return
             self._inflight.add(track_id)
-        self._pool.submit(self._run, track_id, flac, duration)
+        self._pool.submit(self._run, track_id, flac, duration, lossless)
 
     # ---- worker ----------------------------------------------------------
-    def _run(self, track_id: str, flac: bytes, duration: float) -> None:
+    def _run(self, track_id: str, flac: bytes, duration: float, lossless: bool) -> None:
         try:
-            self._enrich(track_id, flac, duration)
+            self._enrich(track_id, flac, duration, lossless)
         except Exception:
             logger.exception("preview enrichment failed for %s", track_id)
         finally:
             with self._lock:
                 self._inflight.discard(track_id)
 
-    def _enrich(self, track_id: str, flac: bytes, duration: float) -> None:
+    def _enrich(self, track_id: str, flac: bytes, duration: float, lossless: bool) -> None:
         import librosa
         from config import settings
         from database import SessionLocal
@@ -95,11 +97,11 @@ class PreviewEnricher:
                 embedder._save_embedding(
                     db, track_id, vec[0], model,
                     source_media_file_id=None, source_bit_depth=None,
-                    source_sample_rate=48000, source_is_lossless=False,
+                    source_sample_rate=48000, source_is_lossless=lossless,
                     is_preview=True,
                 )
             if feats:
-                self._save_features(db, track_id, feats)
+                self._save_features(db, track_id, feats, lossless)
             db.commit()
 
         self._empty_cache()
@@ -107,7 +109,7 @@ class PreviewEnricher:
                     track_id, vec is not None, bool(feats))
 
     @staticmethod
-    def _save_features(db, track_id: str, feats: dict) -> None:
+    def _save_features(db, track_id: str, feats: dict, lossless: bool) -> None:
         from models import AudioFeature
 
         existing = db.query(AudioFeature).filter(
@@ -126,12 +128,12 @@ class PreviewEnricher:
             existing.source_media_file_id = None
             existing.source_bit_depth = None
             existing.source_sample_rate = 48000
-            existing.source_is_lossless = False
+            existing.source_is_lossless = lossless
         else:
             db.add(AudioFeature(
                 track_id=track_id,
                 source_media_file_id=None, source_bit_depth=None,
-                source_sample_rate=48000, source_is_lossless=False,
+                source_sample_rate=48000, source_is_lossless=lossless,
                 **{k: feats.get(k) for k in cols},
             ))
 

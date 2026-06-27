@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     # so phantom tracks enter the audio-similarity space. Off → previews still
     # play, just don't enrich.
     streaming_preview_analyze: bool = True
+    # Directory for bring-your-own provider plugins (closed-repo Deezer etc.).
+    # None → <streaming pkg>/providers. Gitignored; empty in the public tree.
+    streaming_providers_dir: Optional[str] = None
 
     # Native OS path prefix for stored DB paths (used when scanner runs inside Docker)
     # Docker: scanner sees /music/... → DB stores E:/Music/...

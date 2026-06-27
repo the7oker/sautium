@@ -1769,7 +1769,7 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
 
     if not streaming_service.is_enabled():
         raise HTTPException(status_code=503, detail="Streaming preview is disabled")
-    provider = streaming_service.get_provider("youtube")
+    provider = streaming_service.get_provider()   # preferred: lossless before lossy
     if provider is None:
         raise HTTPException(status_code=503, detail="No streaming provider available")
 

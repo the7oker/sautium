@@ -88,3 +88,7 @@ backend/mcp-wsl.json
 # PyInstaller
 *.spec
 /worker/.wrangler/cache/
+
+# Bring-your-own streaming provider plugins (closed-repo, §1201 — Deezer etc.).
+# Each is the user's OWN private repo cloned in here; never tracked by Sautium.
+backend/streaming/providers/

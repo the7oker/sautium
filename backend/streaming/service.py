@@ -33,6 +33,19 @@ def init(settings) -> bool:
         ytdlp_path=settings.ytdlp_path,
         ffmpeg_location=settings.ffmpeg_location,
     ))
+
+    # Bring-your-own providers (e.g. a lossless Deezer bridge) drop into the
+    # local providers directory — NOT bundled here (§1201). Core has no
+    # knowledge of them; a missing/broken plugin is skipped, never fatal.
+    from pathlib import Path
+    from .loader import load_external_providers
+    providers_dir = (Path(settings.streaming_providers_dir)
+                     if getattr(settings, "streaming_providers_dir", None)
+                     else Path(__file__).parent / "providers")
+    n = load_external_providers(_registry, providers_dir)
+    if n:
+        logger.info("loaded %d external stream provider(s) from %s", n, providers_dir)
+
     _proxy = MediaProxy(
         port=settings.media_proxy_port,
         advertised_host=settings.media_proxy_advertised_host,
@@ -50,6 +63,7 @@ def init(settings) -> bool:
             e.query.track_id,
             e.audio.data if e.audio else None,
             e.query.duration,
+            e.provider.manifest.lossless,
         )
         logger.info("preview enrichment enabled (analyze-on-preview)")
 
@@ -67,8 +81,17 @@ def get_proxy() -> Optional[MediaProxy]:
     return _proxy
 
 
-def get_provider(provider_id: str = "youtube") -> Optional[StreamProvider]:
-    return _registry.get(provider_id) if _registry else None
+def get_provider(provider_id: Optional[str] = None) -> Optional[StreamProvider]:
+    """A specific provider by id, or — with no id — the preferred one: a lossless
+    source (e.g. Deezer FLAC) ranks above a lossy one (YouTube)."""
+    if _registry is None:
+        return None
+    if provider_id:
+        return _registry.get(provider_id)
+    provs = _registry.enabled()
+    if not provs:
+        return None
+    return sorted(provs, key=lambda p: (not p.manifest.lossless, p.manifest.id))[0]
 
 
 def preview_meta(uri: str) -> Optional[dict]:
