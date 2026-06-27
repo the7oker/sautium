@@ -3814,7 +3814,7 @@
             t.bpm ? Math.round(t.bpm) + ' bpm' : null,
           ].filter(Boolean).join(' · ');
           trackParts.push(`
-            <div class="track-row is-phantom-track">
+            <div class="track-row is-phantom-track" data-track-id="${escapeHtml(t.track_id || '')}">
               <span class="track-rank">${t.track_number || ''}</span>
               <div class="track-info">
                 <div class="track-title-line">${escapeHtml(t.title || '')}</div>
@@ -4117,6 +4117,16 @@
     return false;
   }
 
+  // Grey out + disable the phantom track rows a provider couldn't resolve
+  // (semi-transparent, pointer-events off). Driven by play-phantom-album's
+  // `missing` list; matched by track_id, cleared/re-applied on each attempt.
+  function applyPhantomMissing(screen, missing) {
+    const ids = new Set((missing || []).map(m => m && m.track_id).filter(Boolean));
+    screen.querySelectorAll('.track-row.is-phantom-track[data-track-id]').forEach(row => {
+      row.classList.toggle('is-unavailable', ids.has(row.getAttribute('data-track-id')));
+    });
+  }
+
   function wireDetailHandlers(screen, ctx = {}) {
     // Back chevron
     screen.querySelectorAll('[data-action="back"]').forEach(btn => {
@@ -4215,9 +4225,8 @@
     screen.querySelectorAll('[data-action="play-phantom"]').forEach(btn => {
       btn.addEventListener('click', async () => {
         if (!ctx.phantomAlbumId) return;
-        // The endpoint prefetches the whole album (search + download +
-        // transcode) before returning — tens of seconds. Show a buffering state
-        // in place (no flicker) and block re-clicks meanwhile.
+        // The endpoint resolves availability then prefetches — tens of seconds.
+        // Show a buffering state in place (no flicker) and block re-clicks.
         const restore = btn.innerHTML;
         btn.disabled = true;
         btn.innerHTML = `${SVG_PLAY} Buffering…`;
@@ -4226,9 +4235,25 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ album_id: ctx.phantomAlbumId }),
         }).catch(() => null);
-        btn.disabled = false;
-        btn.innerHTML = restore;
-        await reportPlaybackResult(resp);
+        let body = null;
+        try { body = resp ? await resp.json() : null; } catch (_) {}
+
+        if (!resp || !resp.ok) {                  // HQPlayer down / hard error
+          btn.disabled = false;
+          btn.innerHTML = restore;
+          await reportPlaybackResult(resp);
+          return;
+        }
+        // Grey out + disable the rows the provider couldn't find.
+        applyPhantomMissing(screen, body && body.missing);
+        if (body && body.track_count === 0) {
+          // Whole album unavailable on this provider → keep Listen disabled.
+          btn.disabled = true;
+          btn.innerHTML = `${SVG_PLAY} Unavailable`;
+        } else {
+          btn.disabled = false;
+          btn.innerHTML = restore;
+        }
       });
     });
     // Queue album — opens the same inline "Add to: [Next] [End]"

@@ -1749,6 +1749,25 @@ def _phantom_filler(proxy, tokens: list, start_index: int, gen: int) -> None:
         _notify_update()
 
 
+def _parallel_resolve(provider, queries: list) -> list:
+    """Resolve every query to a provider source id concurrently (the fast
+    availability pass, no downloads). Returns a list parallel to `queries` of
+    source ids / None (None = not found on this provider)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(q):
+        try:
+            return provider.resolve(q)
+        except Exception:
+            return None
+
+    if not queries:
+        return []
+    with ThreadPoolExecutor(max_workers=min(8, len(queries)),
+                            thread_name_prefix="resolve") as ex:
+        return list(ex.map(one, queries))
+
+
 class PlayPhantomAlbumRequest(BaseModel):
     album_id: str   # UUID of a phantom (not-owned) album
 
@@ -1805,7 +1824,30 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
         raise HTTPException(status_code=404, detail="Album tracklist is empty")
 
     proxy = streaming_service.get_proxy()
-    tokens = proxy.start_session(provider, queries)   # priority-fetches track 0
+
+    # Resolve-first availability pass: which tracks actually exist on this
+    # provider, BEFORE the slow downloads — so the UI can grey out the missing
+    # ones and disable Listen when the whole album is unavailable. Providers that
+    # can't pre-resolve fall back to fetch-and-skip (no miss list).
+    if provider.supports_resolve:
+        source_ids = _parallel_resolve(provider, queries)
+        avail_q = [q for q, s in zip(queries, source_ids) if s]
+        avail_sids = [s for s in source_ids if s]
+        missing = [q for q, s in zip(queries, source_ids) if not s]
+    else:
+        avail_q, avail_sids, missing = queries, None, []
+    missing_payload = [{"track_id": q.track_id, "title": q.title} for q in missing]
+
+    if not avail_q:
+        # Nothing on this provider — leave HQPlayer untouched; the UI disables
+        # Listen and greys out every row.
+        return {
+            "ok": True, "provider": provider.manifest.id,
+            "album": queries[0].album, "artist": queries[0].artist,
+            "track_count": 0, "requested": len(queries), "missing": missing_payload,
+        }
+
+    tokens = proxy.start_session(provider, avail_q, avail_sids)  # priority-fetches track 0
 
     # Adaptive rolling buffer. Track 0 is fetched alone (full bandwidth) for the
     # fastest safe start; its measured real-time factor sizes how much audio we
@@ -1818,7 +1860,7 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
         pass
     rtf = proxy.fetch_rtf(tokens[0]) or 1.0
     proxy.prefetch_from(1)                     # fan out the tail concurrently
-    lead_target = _phantom_lead_seconds(rtf, queries, proxy.fetch_concurrency)
+    lead_target = _phantom_lead_seconds(rtf, avail_q, proxy.fetch_concurrency)
 
     # Event-driven pre-buffer: block on each boundary track's ready event in
     # order until the contiguous buffered audio covers the lead (or the album
@@ -1831,8 +1873,8 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
             break
         prefix, buffered, next_index = proxy.ready_lead(0)
 
-    logger.info("phantom buffer: rtf=%.2f lead=%.0fs → start with %d/%d tracks (%.0fs buffered)",
-                rtf, lead_target, len(prefix), len(queries), buffered)
+    logger.info("phantom buffer: rtf=%.2f lead=%.0fs → start %d/%d (avail %d, missing %d)",
+                rtf, lead_target, len(prefix), len(queries), len(avail_q), len(missing))
 
     if not prefix:
         raise HTTPException(status_code=502, detail="No tracks could be fetched from the provider")
@@ -1861,12 +1903,13 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
                 daemon=True, name="phantom-filler").start()
         return {
             "ok": True,
-            "album": queries[0].album,
-            "artist": queries[0].artist,
+            "album": avail_q[0].album,
+            "artist": avail_q[0].artist,
             "provider": provider.manifest.id,
             "track_count": added,                        # streaming now
-            "buffering": max(0, len(queries) - added),   # rolling in via the filler
+            "buffering": max(0, len(avail_q) - added),   # rolling in via the filler
             "requested": len(queries),                   # tracklist size
+            "missing": missing_payload,                  # not found on this provider
         }
     except HTTPException:
         raise

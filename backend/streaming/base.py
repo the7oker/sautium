@@ -70,6 +70,34 @@ class StreamProvider(ABC):
         Raises ProviderError on no-match / failure."""
         ...
 
+    # Split resolve/download so the host can run a fast availability pass (which
+    # tracks exist on this provider) BEFORE the slow downloads — to mark missing
+    # tracks in the UI. Providers expose this for free by implementing the
+    # internal `_resolve` (query -> source id, raising ProviderError) and
+    # `_download` (source id -> audio); fetch() == download(_resolve(query)).
+    @property
+    def supports_resolve(self) -> bool:
+        return callable(getattr(self, "_resolve", None)) and \
+            callable(getattr(self, "_download", None))
+
+    def resolve(self, query: TrackQuery) -> Optional[str]:
+        """The provider's source id for the query, or None if no acceptable
+        match (availability check — no download)."""
+        rfn = getattr(self, "_resolve", None)
+        if not callable(rfn):
+            raise NotImplementedError(f"{self.manifest.id} cannot pre-resolve")
+        try:
+            return rfn(query)
+        except ProviderError:
+            return None
+
+    def download(self, source_id: str) -> FetchedAudio:
+        """Fetch by the provider's own source id, skipping resolution."""
+        dfn = getattr(self, "_download", None)
+        if not callable(dfn):
+            raise NotImplementedError(f"{self.manifest.id} has no _download")
+        return dfn(source_id)
+
     @property
     def feature_source(self) -> str:
         """Provenance tag for audio features derived from this provider's

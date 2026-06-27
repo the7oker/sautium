@@ -2070,6 +2070,12 @@ body.has-miniplayer .ai-fab {
   padding: 0;
 }
 .track-row:last-child { border-bottom: none; }
+/* Phantom track a provider couldn't find — semi-transparent + events off. */
+.track-row.is-unavailable {
+  opacity: 0.4;
+  pointer-events: none;
+  cursor: default;
+}
 .track-rank {
   font-family: var(--font-mono);
   font-size: calc(12 * var(--px));

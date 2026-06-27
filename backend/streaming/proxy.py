@@ -34,6 +34,7 @@ class _Entry:
     provider: StreamProvider
     query: TrackQuery
     index: int                      # position in the session, for prefetch/eviction
+    source_id: Optional[str] = None  # pre-resolved provider id → skip re-resolution
     ready: threading.Event = field(default_factory=threading.Event)
     audio: Optional[FetchedAudio] = None
     error: Optional[str] = None
@@ -70,17 +71,19 @@ class MediaProxy:
                     self._bind_host, self.port, self._advertised_host)
 
     # ---- session API (called by the player endpoint) --------------------
-    def start_session(self, provider: StreamProvider,
-                      queries: list[TrackQuery]) -> list[str]:
+    def start_session(self, provider: StreamProvider, queries: list[TrackQuery],
+                      source_ids: Optional[list] = None) -> list[str]:
         """Replace the current preview with an ordered track list. Returns the
         per-track tokens; build URLs with ``url_for`` and hand them to HQPlayer.
-        Track 0 (and 1) are prefetched immediately."""
+        ``source_ids`` (parallel to queries) are pre-resolved provider ids so the
+        fetch skips re-resolution; None → the provider resolves inside fetch."""
         with self._lock:
             self._entries.clear()
             self._session = []
             for i, q in enumerate(queries):
                 tok = secrets.token_urlsafe(12)
-                self._entries[tok] = _Entry(tok, provider, q, i)
+                sid = source_ids[i] if source_ids else None
+                self._entries[tok] = _Entry(tok, provider, q, i, source_id=sid)
                 self._session.append(tok)
         # Priority start: fetch ONLY track 0 now (full bandwidth → fastest first
         # track). The caller measures its throughput, then calls prefetch_from(1)
@@ -173,7 +176,8 @@ class MediaProxy:
         try:
             with self._fetch_sem:
                 started = time.monotonic()
-                audio = e.provider.fetch(e.query)
+                audio = (e.provider.download(e.source_id) if e.source_id
+                         else e.provider.fetch(e.query))
                 e.fetch_seconds = time.monotonic() - started
             e.audio = audio
         except ProviderError as ex:
