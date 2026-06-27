@@ -44,6 +44,15 @@ def _phantom_album(album_id: str) -> dict:
     album["cover_id"] = None
     album["media_file_id"] = None
     album["quality"] = None
+    # Streaming source quality (the preferred provider that would serve this
+    # phantom): lossless (Deezer) vs lossy (YouTube). None if streaming is off.
+    try:
+        from streaming import service as _streaming
+        _prov = _streaming.get_provider() if _streaming.is_enabled() else None
+        album["stream_quality"] = (
+            ("lossless" if _prov.manifest.lossless else "lossy") if _prov else None)
+    except Exception:
+        album["stream_quality"] = None
     album["variants"] = []
     album["selected_variant_id"] = None
 

@@ -3779,6 +3779,12 @@
             + ' ' + (d.title || '')).trim())
         + '&item_type=a';
 
+      // Streaming source quality for the phantom badge — the preferred provider
+      // (Deezer lossless > YouTube lossy), reported by the album endpoint.
+      const streamQual = d.stream_quality || null;   // 'lossless' | 'lossy' | null
+      const streamQualClass = streamQual === 'lossless' ? 'is-lossless' : 'is-lossy';
+      const streamQualLabel = streamQual === 'lossless' ? 'Lossless' : 'Lossy';
+
       const c = coverPlaceholderColors(d.title || d.id);
       const heroUrl = coverUrl(d);
       const heroImg = heroUrl
@@ -3881,13 +3887,15 @@
           <div class="album-meta-row">
             ${d.year ? `<span class="am-year">${d.year}</span><span class="am-dot"></span>` : ''}
             <span class="am-dur" style="margin-left: 0;">${totalDuration}</span>
-            ${isPhantom ? '' : `<span class="am-hires ${qualClass}" style="margin-left: auto;">${qualLabel}</span>`}
+            ${isPhantom
+              ? (streamQual ? `<span class="am-hires ${streamQualClass}" style="margin-left: auto;">${streamQualLabel}</span>` : '')
+              : `<span class="am-hires ${qualClass}" style="margin-left: auto;">${qualLabel}</span>`}
           </div>
           ${genresHtml ? `<div class="tag-row" style="padding: calc(12 * var(--px)) 0 0;">${genresHtml}</div>` : ''}
         </div>
         <div class="album-actions">
           ${isPhantom ? `
-            <button class="btn-primary" type="button" data-action="play-phantom">${SVG_PLAY} Listen</button>
+            <button class="btn-primary" type="button" data-action="play-phantom">${SVG_PLAY} Stream all</button>
             <button class="btn-secondary album-buy-btn" type="button" data-buy-url="${escapeHtml(buyUrl)}">
               <span class="btn-label">Buy ↗</span>
             </button>
