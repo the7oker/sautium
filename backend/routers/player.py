@@ -1860,8 +1860,10 @@ def _queue_uris(new_uris: list, position: str) -> int:
         after = [t.get("uri") for t in raw[status_idx:] if t.get("uri")]
         for _ in range(len(after)):
             _hqp_safe(lambda h: h.playlist_remove(status_idx + 1))
-        _add_uris_with_retry(new_uris + after, clear_first=False)
-        return len(new_uris)
+        added = _add_uris_with_retry(new_uris, clear_first=False)
+        if after:
+            _add_uris_with_retry(after, clear_first=False)   # re-append behind the new block
+        return added
 
 
 @router.post("/play-phantom-album")
@@ -2126,14 +2128,26 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
         if not urls:
             raise HTTPException(status_code=502, detail="No tracks could be fetched from the provider")
         added = _queue_uris(urls, "next")
+        if not added:
+            raise HTTPException(status_code=503,
+                                detail="HQPlayer unavailable — preview not queued. Try again.")
         _invalidate_playlist()
         _notify_update()
         return {"ok": True, "provider": provider.manifest.id, "track_count": added,
                 "requested": len(queries), "missing": missing_payload}
     # 'end' → roll each available track into the back of the queue as it lands.
-    # A queue-append doesn't start a new session, so capture the CURRENT
-    # generation; the filler aborts if the user replaces the queue meanwhile.
+    # The filler runs in the background, so probe HQPlayer now and fail loudly if
+    # it's unreachable — otherwise we'd return ok and silently drop everything.
     with _hqp_lock:
+        try:
+            reachable = _get_hqp().get_status() is not None
+        except Exception:
+            reachable = False
+        if not reachable:
+            raise HTTPException(status_code=503,
+                                detail="HQPlayer unavailable — preview not queued. Try again.")
+        # A queue-append doesn't start a new session, so capture the CURRENT
+        # generation; the filler aborts if the user replaces the queue meanwhile.
         gen = _playback_generation
     threading.Thread(target=_phantom_filler, args=(proxy, list(tokens), 0, gen),
                      daemon=True, name="phantom-queue").start()
