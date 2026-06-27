@@ -1816,7 +1816,34 @@ def _phantom_album_queries(album_id: str) -> list:
 
 
 class PlayPhantomAlbumRequest(BaseModel):
-    album_id: str   # UUID of a phantom (not-owned) album
+    album_id: str             # UUID of a phantom (not-owned) album
+    position: str = "end"     # queue endpoint only: 'next' | 'end'
+
+
+def _queue_uris(new_uris: list, position: str) -> int:
+    """Append `new_uris` to the HQPlayer queue. 'end' appends; 'next' inserts
+    them right after the current track via the seamless remove-after /
+    re-append trick — same zero-interrupt primitive as /reorder, but URI-based
+    so it works for preview streams (which have no media_file_id). Returns the
+    count of NEW tracks queued. Acquires _hqp_lock; call WITHOUT holding it."""
+    with _hqp_lock:
+        if position != "next":
+            return _add_uris_with_retry(new_uris, clear_first=False)
+        try:
+            raw = _get_hqp().get_playlist() or []
+        except Exception:
+            raw = []
+        status_idx = int(_latest_status.get("track_index") or 0)   # 1-based
+        if status_idx < 1 or status_idx > len(raw):
+            return _add_uris_with_retry(new_uris, clear_first=False)   # nothing playing
+        # Remove the after-segment (always slot status_idx+1, which the rest
+        # shift down into), then re-append it behind the new tracks. The current
+        # slot is never touched, so audio plays through.
+        after = [t.get("uri") for t in raw[status_idx:] if t.get("uri")]
+        for _ in range(len(after)):
+            _hqp_safe(lambda h: h.playlist_remove(status_idx + 1))
+        _add_uris_with_retry(new_uris + after, clear_first=False)
+        return len(new_uris)
 
 
 @router.post("/play-phantom-album")
@@ -1938,7 +1965,8 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
 
 
 class PlayPhantomTrackRequest(BaseModel):
-    track_id: str   # UUID of a phantom (not-owned) track
+    track_id: str             # UUID of a phantom (not-owned) track
+    position: str = "end"     # queue endpoint only: 'next' | 'end'
 
 
 @router.post("/play-phantom-track")
@@ -2024,8 +2052,7 @@ def queue_phantom_track(req: PlayPhantomTrackRequest):
         raise HTTPException(status_code=502, detail="Track could not be fetched from the provider")
 
     try:
-        with _hqp_lock:
-            added = _add_uris_with_retry([proxy.url_for(tokens[0])], clear_first=False)
+        added = _queue_uris([proxy.url_for(tokens[0])], req.position)
         _invalidate_playlist()
         _notify_update()
         if not added:
@@ -2067,7 +2094,25 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
 
     proxy = streaming_service.get_proxy()
     tokens = proxy.add_tracks(provider, avail_q, avail_sids)
-    # Append each available track to the queue as it finishes fetching, in order.
+    if req.position == "next":
+        # Inserting after current needs the whole block in hand, so wait for the
+        # available tracks (the UI shows buffering), then seamless-insert them.
+        urls = []
+        for tok in tokens:
+            try:
+                e = proxy.wait_ready(tok)
+            except (TimeoutError, KeyError):
+                e = None
+            if e is not None and e.audio is not None:
+                urls.append(proxy.url_for(tok))
+        if not urls:
+            raise HTTPException(status_code=502, detail="No tracks could be fetched from the provider")
+        added = _queue_uris(urls, "next")
+        _invalidate_playlist()
+        _notify_update()
+        return {"ok": True, "provider": provider.manifest.id, "track_count": added,
+                "requested": len(queries), "missing": missing_payload}
+    # 'end' → roll each available track into the back of the queue as it lands.
     # A queue-append doesn't start a new session, so capture the CURRENT
     # generation; the filler aborts if the user replaces the queue meanwhile.
     with _hqp_lock:

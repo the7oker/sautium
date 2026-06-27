@@ -3898,7 +3898,7 @@
         <div class="album-actions">
           ${isPhantom ? `
             <button class="btn-primary" type="button" data-action="play-phantom">${SVG_PLAY} Stream all</button>
-            <button class="btn-secondary" type="button" data-action="queue-phantom-album">
+            <button class="btn-secondary album-queue-btn" type="button" data-action="queue-phantom-album">
               <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
             </button>
             <button class="btn-secondary album-buy-btn" type="button" data-buy-url="${escapeHtml(buyUrl)}">
@@ -4222,44 +4222,25 @@
         }
       });
     });
-    // Phantom track [+] → append that one track to the queue (streamed); the
-    // title shows "Buffering…" until it lands. (Owned rows use the Next/End
-    // confirm above; phantom appends directly — streaming has no insert step.)
+    // Phantom track [+] → toggles the same "Add to: [Next] [End]" confirm as
+    // owned rows; the chosen position streams via queue-phantom-track.
     screen.querySelectorAll('.track-row.is-phantom-track .track-add').forEach(btn => {
-      btn.addEventListener('click', async (e) => {
+      btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        const row = btn.closest('[data-track-id]');
-        const tid = row && row.getAttribute('data-track-id');
-        if (!tid) return;
-        setTrackBuffering(screen, tid, true);
-        const resp = await fetch('/api/player/queue-phantom-track', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ track_id: tid }),
-        }).catch(() => null);
-        let body = null;
-        try { body = resp ? await resp.json() : null; } catch (_) {}
-        setTrackBuffering(screen, tid, false);
-        if (!resp || !resp.ok) { await reportPlaybackResult(resp); return; }
-        if (body && body.track_count === 0) applyPhantomMissing(screen, body.missing);
+        const row = btn.closest('.track-row');
+        if (!row) return;
+        if (row.classList.contains('is-confirming')) closeQueueConfirm(row);
+        else openPhantomQueueConfirm(screen, row);
       });
     });
-    // Phantom [+ Queue] → append the whole album to the queue (rolling-append).
+    // Phantom [+ Queue] → toggles the album-wide "Add album to: [Next] [End]"
+    // confirm; the chosen position streams via queue-phantom-album.
     screen.querySelectorAll('[data-action="queue-phantom-album"]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        if (!ctx.phantomAlbumId) return;
-        const restore = btn.innerHTML;
-        btn.disabled = true;
-        btn.innerHTML = '<span class="btn-label">Queuing…</span>';
-        const resp = await fetch('/api/player/queue-phantom-album', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ album_id: ctx.phantomAlbumId }),
-        }).catch(() => null);
-        let body = null;
-        try { body = resp ? await resp.json() : null; } catch (_) {}
-        btn.disabled = false;
-        btn.innerHTML = restore;
-        if (!resp || !resp.ok) { await reportPlaybackResult(resp); return; }
-        applyPhantomMissing(screen, body && body.missing);
+      btn.addEventListener('click', () => {
+        const wrap = btn.closest('.album-actions');
+        if (!wrap) return;
+        if (wrap.classList.contains('is-confirming')) closeAlbumQueueConfirm(wrap);
+        else openPhantomAlbumQueueConfirm(screen, wrap, ctx.phantomAlbumId);
       });
     });
     // Play all — replaces the queue with the full track list. ctx.playOrigin
@@ -4532,6 +4513,64 @@
       closeAlbumQueueConfirm(wrap);
       await reportPlaybackResult(resp);
     });
+  }
+
+  /* Phantom queue confirms — reuse the owned "Add to: [Next] [End]" bar, but the
+     chosen position streams via the phantom queue endpoints, which append
+     ('end') or seamlessly insert after the current track ('next') server-side. */
+  function openPhantomQueueConfirm(screen, row) {
+    const tid = row.getAttribute('data-track-id');
+    if (!tid) return;
+    row.classList.add('is-confirming');
+    const bar = document.createElement('div');
+    bar.className = 'track-confirm-bar';
+    bar.innerHTML = `
+      <span class="track-confirm-ask">Add to:</span>
+      <button class="track-confirm-btn" type="button" data-confirm="next">Next</button>
+      <button class="track-confirm-btn" type="button" data-confirm="end">End</button>`;
+    const addBtn = row.querySelector('.track-add');
+    if (addBtn) row.insertBefore(bar, addBtn); else row.appendChild(bar);
+    const go = async (position) => {
+      closeQueueConfirm(row);
+      setTrackBuffering(screen, tid, true);
+      const resp = await fetch('/api/player/queue-phantom-track', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ track_id: tid, position }),
+      }).catch(() => null);
+      let body = null;
+      try { body = resp ? await resp.json() : null; } catch (_) {}
+      setTrackBuffering(screen, tid, false);
+      if (!resp || !resp.ok) { await reportPlaybackResult(resp); return; }
+      if (body && body.track_count === 0) applyPhantomMissing(screen, body.missing);
+    };
+    bar.querySelector('[data-confirm="next"]').addEventListener('click', e => { e.stopPropagation(); go('next'); });
+    bar.querySelector('[data-confirm="end"]').addEventListener('click', e => { e.stopPropagation(); go('end'); });
+  }
+
+  function openPhantomAlbumQueueConfirm(screen, wrap, albumId) {
+    if (!albumId) return;
+    wrap.classList.add('is-confirming');
+    const bar = document.createElement('div');
+    bar.className = 'track-confirm-bar';
+    bar.innerHTML = `
+      <span class="track-confirm-ask">Add album to:</span>
+      <button class="track-confirm-btn" type="button" data-confirm="next">Next</button>
+      <button class="track-confirm-btn" type="button" data-confirm="end">End</button>`;
+    const queueBtn = wrap.querySelector('.album-queue-btn');
+    if (queueBtn) wrap.insertBefore(bar, queueBtn); else wrap.appendChild(bar);
+    const go = async (position) => {
+      closeAlbumQueueConfirm(wrap);
+      const resp = await fetch('/api/player/queue-phantom-album', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ album_id: albumId, position }),
+      }).catch(() => null);
+      let body = null;
+      try { body = resp ? await resp.json() : null; } catch (_) {}
+      if (!resp || !resp.ok) { await reportPlaybackResult(resp); return; }
+      applyPhantomMissing(screen, body && body.missing);
+    };
+    bar.querySelector('[data-confirm="next"]').addEventListener('click', e => { e.stopPropagation(); go('next'); });
+    bar.querySelector('[data-confirm="end"]').addEventListener('click', e => { e.stopPropagation(); go('end'); });
   }
 
   /* ---------- Genre screen ----------

@@ -2554,6 +2554,7 @@ body.has-miniplayer .ai-fab {
    so the user's reflex from track-row `+` carries over to the
    album-wide Queue button. */
 .album-actions.is-confirming > .btn-primary { display: none; }
+.album-actions.is-confirming > .album-buy-btn { display: none; }
 .album-actions.is-confirming .album-queue-btn .btn-label { display: none; }
 .album-actions.is-confirming .album-queue-btn {
   width: calc(48 * var(--px));
