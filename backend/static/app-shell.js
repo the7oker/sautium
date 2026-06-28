@@ -3022,7 +3022,8 @@
     return `<div class="shuffle-row d-album-row">${
       items.map(a => {
         const c = coverPlaceholderColors(a.album || a.title || a.album_id || '');
-        const url = coverUrl({cover_id: a.cover_id, media_file_id: a.media_file_id});
+        const phantom = a.is_owned === false ? ' is-phantom' : '';
+        const url = coverUrl({cover_url: a.cover_url, cover_id: a.cover_id, media_file_id: a.media_file_id});
         const cover = url
           ? `<img src="${url}" alt="" loading="lazy" onerror="this.style.display='none'">`
           : '';
@@ -3033,7 +3034,7 @@
           ? `<span class="mosaic-score">${Number(a.similarity).toFixed(2)}</span>`
           : '';
         return `
-          <button class="mosaic-tile" type="button"
+          <button class="mosaic-tile${phantom}" type="button"
                   data-album-id="${escapeHtml(a.album_id || '')}">
             <div class="mosaic-cover"
                  style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}${score}</div>

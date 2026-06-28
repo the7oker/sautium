@@ -436,6 +436,7 @@ def search_by_lyrics(
     query_text: str,
     limit: int = None,
     min_similarity: float = None,
+    filters: dict = None,
 ) -> Dict[str, Any]:
     """
     Search tracks by lyrics content similarity.
@@ -480,6 +481,11 @@ def search_by_lyrics(
 
     qvec = _to_vector_param(query_vector)
 
+    # Optional pre-filter to a candidate track set (Discovery narrows by
+    # bpm/key/vocalist/etc. before the semantic pass).
+    track_ids = (filters or {}).get("track_ids")
+    track_filter = "AND le.track_id = ANY(CAST(:track_ids AS uuid[]))" if track_ids else ""
+
     # Search: GROUP BY track_id, take MAX similarity across chunks
     # Use subquery with DISTINCT ON to avoid duplicates from genre joins
     similarity_sql = text(f"""
@@ -500,6 +506,7 @@ def search_by_lyrics(
                        MAX(1 - (le.vector <=> CAST(:qvec AS vector))) as similarity
                 FROM lyrics_embeddings le
                 WHERE le.model_id = :model_id
+                {track_filter}
                 GROUP BY le.track_id
                 HAVING MAX(1 - (le.vector <=> CAST(:qvec AS vector))) >= :min_similarity
             ) matches
@@ -524,6 +531,8 @@ def search_by_lyrics(
     """)
 
     params = {"qvec": qvec, "model_id": model_id, "min_similarity": min_similarity, "limit": limit}
+    if track_ids:
+        params["track_ids"] = list(track_ids)
     rows = db.execute(similarity_sql, params).fetchall()
 
     results = [_build_track_result(row) for row in rows]

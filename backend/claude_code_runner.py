@@ -40,7 +40,10 @@ else:
 
 DEFAULT_MODEL = "sonnet"
 ALLOWED_MODELS = {"sonnet", "haiku"}
-TIMEOUT_SECONDS = 180
+# Kept below the ~180s at which the browser/LAN drops the streaming connection,
+# so the graceful timeout `done` event reaches the client (a clean "took too
+# long" message) instead of the stream dying as a raw "network error".
+TIMEOUT_SECONDS = 150
 CLAUDE_USER = "claudeuser"  # non-root user (--dangerously-skip-permissions requires non-root)
 
 

@@ -369,6 +369,7 @@ def _trigram_artists(q: str, limit: int) -> list[dict]:
     Artists with zero primary tracks (orphan import rows) are
     filtered out.
     """
+    q = q[:255]                 # postgres levenshtein() rejects args > 255 chars
     rows = db_query("""
         SELECT a.id::text AS artist_id,
                a.name AS artist,
@@ -476,6 +477,7 @@ def _trigram_albums(q: str, limit: int) -> list[dict]:
     Same prefix + trigram + levenshtein strategy as _trigram_artists —
     see comments there for the score rationale.
     """
+    q = q[:255]                 # postgres levenshtein() rejects args > 255 chars
     rows = db_query("""
         SELECT al.id::text AS album_id,
                al.title AS album,
@@ -653,7 +655,7 @@ def discovery_titles(
 
     Pure SQL — no ML model dependency.
     """
-    q = (q or "").strip()
+    q = (q or "").strip()[:255]   # postgres levenshtein() rejects args > 255 chars
     f = _build_filter_params(bpm_min, bpm_max, key, mode, vocalist,
                              gender, danceable, energy, instruments, quality)
     extra_where, filter_params = _filter_clauses(f, mf_alias="mf")

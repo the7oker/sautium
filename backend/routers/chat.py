@@ -774,7 +774,10 @@ async def send_message(session_id: int, req: ChatMessageRequest):
             # for a short summary and overwrite. Skips silently on any
             # failure — the truncation is still good enough.
             ai_title: Optional[str] = None
-            if not history_rows:
+            # Skip title generation on a provider error/timeout — it spawns
+            # ANOTHER (slow) model call and would delay the error `done` past
+            # the ~180s point where the client drops the stream.
+            if not history_rows and not (final and final.error):
                 ai_title = _generate_session_title(
                     req.message, clean_text, provider_used or provider_name,
                 )

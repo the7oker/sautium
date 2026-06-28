@@ -24,7 +24,15 @@ Also check `a.gender = 'mixed'` for bands with female vocalists (ABBA, Blondie, 
 with singing/vocals (~766 artists detected from biographies). Use \
 `a.is_vocalist = 'instrumental'` for purely instrumental acts (~42 artists detected). \
 Combine with `a.gender` for queries like "female vocal jazz".
-- For "recently added" queries: use `media_files.created_at` to find newest additions (`ORDER BY mf.created_at DESC`)."""
+- For "recently added" queries: use `media_files.created_at` to find newest additions (`ORDER BY mf.created_at DESC`).
+- PHANTOM / not-owned / "missing" / "recommend something I don't have" / "what can I stream" queries: \
+the library also holds ~22k PHANTOM artists and many phantom albums the user does NOT own \
+(discovered from MusicBrainz/Last.fm/similar-artists — see the schema's Phantom section). They are \
+valid recommendations: a phantom ALBUM can be STREAMED onto HQPlayer (Deezer lossless / YouTube lossy) \
+from its album page. Find them with raw SQL gating on the ABSENCE of media_files (NOT EXISTS ...); the \
+owned-music search/play tools and every media_files-joining pattern are OWNED-ONLY and never surface a \
+phantom. Recommend phantoms freely — emit them as `artist`/`album` output blocks so the user gets a card \
+that opens the streamable album page."""
 
 _DB_SCHEMA = """\
 # Database Schema (PostgreSQL)
@@ -51,6 +59,29 @@ _DB_SCHEMA = """\
 is_lossless BOOLEAN, sample_rate, bit_depth, bitrate, channels, duration_seconds, \
 track_number, disc_number, is_analysis_source BOOLEAN, play_count)
   - A physical audio file on disk. `id` is the track ID used for playback.
+
+## Phantom (NOT-owned) entities — discovered, not on disk
+
+Sautium also stores artists/albums/tracks the user does NOT own — "phantom" entities \
+discovered from MusicBrainz / Last.fm / similar-artists (~22k phantom artists, hundreds of \
+thousands of phantom albums). They live in the SAME canonical tables (artists, albums, tracks) \
+but have NO media_files and NO album_variants (no audio on disk). They ARE valid recommendations: \
+a phantom ALBUM can be STREAMED onto HQPlayer (Deezer lossless / YouTube lossy) from its album page.
+
+**album_tracks** (album_id UUID, track_id UUID, disc, position, length_ms)
+  - Tracklist of an album with no rip. Phantom albums live here (no album_variants). length_ms is \
+the MusicBrainz track length — the ONLY place a phantom track's length lives.
+
+There is NO is_phantom flag — owned vs phantom is defined by PRESENCE of files:
+  - OWNED artist  = EXISTS a media_files row for one of its tracks.
+  - PHANTOM artist = NO media_files for any track (still has track_artists, album_tracks, and \
+usually artist_tags / artist_bios / similar_artists — ~80% of phantoms carry tags+bios+tracklists, \
+~98% are reachable via similar_artists from a seed).
+  - PHANTOM album = has album_tracks but NO album_variants.
+
+To find or recommend phantoms, query artists / albums / album_tracks and gate on the ABSENCE of \
+media_files (NOT EXISTS ...). NEVER join media_files for a phantom query — and note the owned-music \
+search/play tools (hqplayer MCP / search_tracks / play_album) are owned-only and cannot surface phantoms.
 
 ## Audio analysis (linked to tracks, not files)
 
@@ -263,6 +294,45 @@ JOIN artists a ON ta.artist_id = a.id
 WHERE ts.source = 'lastfm'
 ORDER BY ts.playcount DESC
 LIMIT 20
+```
+
+Find PHANTOM (not-owned) artists matching a vibe (e.g. Italian, instrumental):
+```sql
+SELECT a.id, a.name, a.gender, a.is_vocalist
+FROM artists a
+WHERE NOT EXISTS (                           -- phantom: user owns no audio by them
+        SELECT 1 FROM media_files mf
+        JOIN track_artists ta ON ta.track_id = mf.track_id
+        WHERE ta.artist_id = a.id)
+  AND a.is_vocalist = 'instrumental'         -- or 'vocal'; combine with a.gender
+  AND EXISTS (                               -- has a discovered tracklist to stream
+        SELECT 1 FROM track_artists ta
+        JOIN album_tracks atr ON atr.track_id = ta.track_id
+        WHERE ta.artist_id = a.id)
+  AND EXISTS (                               -- "Italian" via Last.fm tags (or join artist_bios)
+        SELECT 1 FROM artist_tags x JOIN tags g ON g.id = x.tag_id
+        WHERE x.artist_id = a.id AND g.name ILIKE '%ital%')
+LIMIT 20
+```
+
+Phantom recommendations from an OWNED seed the user likes (strongest path, ~98% coverage):
+```sql
+SELECT a.id, a.name, MAX(s.match_score) AS score
+FROM similar_artists s
+JOIN artists a ON a.id = s.similar_artist_id
+WHERE s.artist_id = :owned_seed_artist_id
+  AND NOT EXISTS (SELECT 1 FROM media_files mf
+                  JOIN track_artists ta ON ta.track_id = mf.track_id
+                  WHERE ta.artist_id = a.id)     -- keep only the NOT-owned similars
+GROUP BY a.id, a.name
+ORDER BY score DESC LIMIT 15
+```
+
+A phantom album's tracklist (album_id is the streamable id for the album page):
+```sql
+SELECT atr.disc, atr.position, t.title, atr.length_ms
+FROM album_tracks atr JOIN tracks t ON t.id = atr.track_id
+WHERE atr.album_id = :album_id ORDER BY atr.disc, atr.position
 ```"""
 
 _TRACK_OUTPUT_FORMAT = """\
@@ -291,6 +361,16 @@ Rules for the block list:
 - `artist_id` and `album_id` are UUIDs from the `artists.id` / `albums.id` columns.
   `id` inside the `tracks` block is `media_files.id` (integer) — the same value used
   for playback. Use real IDs you obtained from SQL or search tools; never invent them.
+- PHANTOM (not-owned) artists and albums use the SAME `artist`/`album` blocks — they have real
+  `artists.id` / `albums.id` UUIDs, and the card opens the album page where the user can stream it.
+  But a phantom TRACK has NO `media_files.id`, so NEVER put a phantom track in the `tracks` block
+  (it has no integer id) — recommend the phantom ALBUM or ARTIST instead.
+- CRITICAL — prose and blocks MUST match: if your prose recommends PHANTOM artists/albums, you MUST
+  first query their real `artists.id` / `albums.id` (the phantom rows) and put THOSE UUIDs in the
+  blocks. NEVER substitute OWNED artists/albums into the blocks when your prose is about phantoms
+  (e.g. do not name phantom composers in prose and then emit owned Morricone/Papetti tiles) — that
+  shows the user the wrong owned tiles. If you cannot obtain a phantom's real UUID from SQL, do not
+  name it. The entities in the blocks must be the SAME ones you discussed.
 - Keep each block compact: at most ~10 items per block. Quality over quantity.
 - The frontend hydrates each entity's name, year and cover from the IDs you provide,
   so do not duplicate that data inside the marker.
@@ -311,6 +391,12 @@ You have direct access to the music database via SQL (postgres MCP) and HQPlayer
 
 {rules_common}
 - Be concise but insightful. Show your music knowledge.
+- WORK FAST — you run on a hard wallclock budget and the user sees NOTHING if you exceed it. Answer a \
+recommendation/search query with AT MOST 1–3 focused SQL queries, then reply immediately with the \
+DJ_BLOCKS. Do NOT re-query to "double-check", do NOT try many alternative phrasings of the same search, \
+and do NOT call HQPlayer tools for a recommend-only request (HQPlayer may be offline, and each call then \
+blocks ~10s). The phantom `NOT EXISTS media_files` query returns in well under a second — run it once and \
+answer. A long multi-tool exploration times out and the user gets nothing.
 - When the user asks to play something, use the hqplayer MCP tools (play_track, play_album, play_similar, add_to_queue).
 - When searching for tracks/artists/albums, use SQL queries via postgres MCP or hqplayer search tools.
 - `search_tracks(query="X")` searches track titles, album titles AND artist names with fuzzy matching. \
