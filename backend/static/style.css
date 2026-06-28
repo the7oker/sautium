@@ -2072,9 +2072,14 @@ body.has-miniplayer .ai-fab {
 .track-row:last-child { border-bottom: none; }
 /* Phantom track a provider couldn't find — semi-transparent + events off. */
 .track-row.is-unavailable {
-  opacity: 0.4;
   pointer-events: none;
   cursor: default;
+}
+/* Fade the CONTENT, not the row itself — opacity on .track-row would also dim
+   its border-bottom (the divider line between tracks). Children only keeps the
+   divider crisp while the track reads as unavailable. */
+.track-row.is-unavailable > * {
+  opacity: 0.4;
 }
 /* "Buffering…" under a phantom track title while it streams (in-place, no flicker). */
 .track-buffering {
