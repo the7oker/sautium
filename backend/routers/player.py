@@ -1871,6 +1871,44 @@ def _phantom_album_queries(album_id: str) -> list:
     ]
 
 
+# Phantom-availability cache: track ids a provider can't resolve, per
+# (album_id, provider_id). One resolve pass is tens of provider searches — far
+# too slow to redo on every album-page view, so cache it (catalogs are stable).
+_availability_cache: dict[tuple, tuple] = {}   # key -> (timestamp, frozenset(unavailable))
+_AVAILABILITY_TTL_S = 3600.0
+
+
+@router.get("/phantom-availability/{album_id}")
+def phantom_availability(album_id: str) -> dict:
+    """Track ids of a phantom album the streaming provider can't resolve, so the
+    album page can dim + disable them up front (no need to stream first). A track
+    is available if ANY of its tracklist rows resolves — the same title can appear
+    at several durations and one provider match is enough. Cached per album+provider."""
+    from streaming import service as streaming_service
+    if not streaming_service.is_enabled():
+        return {"unavailable": [], "provider": None}
+    provider = streaming_service.get_provider()
+    if provider is None or not provider.supports_resolve:
+        return {"unavailable": [], "provider": None}
+
+    key = (album_id, provider.manifest.id)
+    now = time.time()
+    hit = _availability_cache.get(key)
+    if hit and now - hit[0] < _AVAILABILITY_TTL_S:
+        unavailable = hit[1]
+    else:
+        queries = _phantom_album_queries(album_id)
+        sids = _parallel_resolve(provider, queries)
+        resolved = {q.track_id for q, sid in zip(queries, sids)
+                    if sid is not None and q.track_id}
+        all_ids = {q.track_id for q in queries if q.track_id}
+        unavailable = frozenset(all_ids - resolved)
+        _availability_cache[key] = (now, unavailable)
+
+    return {"unavailable": [{"track_id": t} for t in unavailable],
+            "provider": provider.manifest.id}
+
+
 class PlayPhantomAlbumRequest(BaseModel):
     album_id: str             # UUID of a phantom (not-owned) album
     position: str = "end"     # queue endpoint only: 'next' | 'end'

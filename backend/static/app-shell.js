@@ -3941,6 +3941,19 @@
       });
       updatePlayingHighlight();
 
+      if (isPhantom) {
+        // Dim + disable tracks the provider can't stream — up front, no need to
+        // hit [Stream all] first. Async so it never blocks the page; the server
+        // caches the resolve so revisits are instant. Reuses the same mechanism
+        // the stream response applies, so the two never disagree.
+        fetch('/api/player/phantom-availability/' + encodeURIComponent(albumId))
+          .then(r => r.ok ? r.json() : null)
+          .then(body => {
+            if (body && screen.isConnected) applyPhantomMissing(screen, body.unavailable);
+          })
+          .catch(() => {});
+      }
+
       const simSlot = screen.querySelector('[data-similar-slot]');
       if (simSlot) loadSimilarInto(simSlot);
     };
