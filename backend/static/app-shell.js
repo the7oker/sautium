@@ -3949,7 +3949,10 @@
         fetch('/api/player/phantom-availability/' + encodeURIComponent(albumId))
           .then(r => r.ok ? r.json() : null)
           .then(body => {
-            if (body && screen.isConnected) applyPhantomMissing(screen, body.unavailable);
+            if (body && screen.isConnected) {
+              applyPhantomMissing(screen, body.unavailable);
+              updateStreamQualityBadge(screen, body.quality);
+            }
           })
           .catch(() => {});
       }
@@ -4135,10 +4138,14 @@
   // partial add the backend now reports as 503) as a styled dialog instead
   // of a swallowed console.warn. `resp` may be null (network error / thrown
   // fetch). Returns true on success so callers can skip follow-up work.
-  async function reportPlaybackResult(resp) {
+  async function reportPlaybackResult(resp, body) {
     if (resp && resp.ok) return true;
-    let detail = '';
-    try { if (resp) detail = (await resp.json()).detail || ''; } catch (_) {}
+    // A Response body is one-shot: callers that already read resp.json() must
+    // pass it here, else our re-read throws and we'd wrongly blame HQPlayer.
+    let detail = (body && body.detail) || '';
+    if (!detail && body === undefined) {
+      try { if (resp) detail = (await resp.json()).detail || ''; } catch (_) {}
+    }
     await notifyDialog({
       title: 'Playback unavailable',
       message: escapeProfileHtml(
@@ -4156,6 +4163,37 @@
     screen.querySelectorAll('.track-row.is-phantom-track[data-track-id]').forEach(row => {
       row.classList.toggle('is-unavailable', ids.has(row.getAttribute('data-track-id')));
     });
+  }
+
+  // Refine the phantom album's quality badge to the ACTUAL streamed mix once the
+  // availability resolve knows each track's provider (lossless = Deezer, lossy =
+  // YouTube). Initial render shows the best case; this corrects it to Lossy /
+  // Mostly lossy / Mostly lossless so the badge can't overstate the quality.
+  function updateStreamQualityBadge(screen, quality) {
+    if (!screen || !quality) return;
+    const MAP = {
+      lossless:        ['Lossless',        'is-lossless'],
+      lossy:           ['Lossy',           'is-lossy'],
+      mostly_lossless: ['Mostly lossless', 'is-lossless'],
+      mostly_lossy:    ['Mostly lossy',    'is-lossy'],
+    };
+    const m = MAP[quality];
+    if (!m) return;
+    // The phantom badge isn't rendered up front (quality is unknown until the
+    // tracklist resolves) — create it in the meta row the first time, then keep
+    // it in sync on later resolves.
+    let el = screen.querySelector('.am-hires');
+    if (!el) {
+      const row = screen.querySelector('.album-meta-row');
+      if (!row) return;
+      el = document.createElement('span');
+      el.className = 'am-hires';
+      el.style.marginLeft = 'auto';
+      row.appendChild(el);
+    }
+    el.classList.remove('is-lossless', 'is-lossy', 'is-hires');
+    el.classList.add(m[1]);
+    if (el.textContent !== m[0]) el.textContent = m[0];
   }
 
   // Show/hide the "Buffering…" line under a phantom track's title. Shared by
@@ -4362,7 +4400,7 @@
 
         if (!resp || !resp.ok) {                  // HQPlayer down / hard error
           btn.disabled = false;
-          await reportPlaybackResult(resp);
+          await reportPlaybackResult(resp, body);
           return;
         }
         // Grey out + disable the rows the provider couldn't find.
@@ -4400,7 +4438,7 @@
         let body = null;
         try { body = resp ? await resp.json() : null; } catch (_) {}
         setTrackBuffering(screen, tid, false);
-        if (!resp || !resp.ok) { await reportPlaybackResult(resp); return; }
+        if (!resp || !resp.ok) { await reportPlaybackResult(resp, body); return; }
         if (body && body.track_count === 0) applyPhantomMissing(screen, body.missing);
       });
     });

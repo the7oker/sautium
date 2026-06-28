@@ -72,19 +72,18 @@ class MediaProxy:
                     self._bind_host, self.port, self._advertised_host)
 
     # ---- session API (called by the player endpoint) --------------------
-    def start_session(self, provider: StreamProvider, queries: list[TrackQuery],
-                      source_ids: Optional[list] = None) -> list[str]:
-        """Replace the current preview with an ordered track list. Returns the
-        per-track tokens; build URLs with ``url_for`` and hand them to HQPlayer.
-        ``source_ids`` (parallel to queries) are pre-resolved provider ids so the
-        fetch skips re-resolution; None → the provider resolves inside fetch."""
+    def start_session(self, items: list) -> list[str]:
+        """Replace the current preview with an ordered track list. Each item is a
+        ``(provider, query, source_id)`` triple — providers may DIFFER per track
+        (lossless where a source has it, lossy fallback elsewhere); ``source_id``
+        is the pre-resolved provider id (or None → the provider resolves inside
+        fetch). Returns the per-track tokens; build URLs with ``url_for``."""
         with self._lock:
             self._entries.clear()
             self._session = []
-            for i, q in enumerate(queries):
+            for i, (prov, q, sid) in enumerate(items):
                 tok = secrets.token_urlsafe(12)
-                sid = source_ids[i] if source_ids else None
-                self._entries[tok] = _Entry(tok, provider, q, i, source_id=sid)
+                self._entries[tok] = _Entry(tok, prov, q, i, source_id=sid)
                 self._session.append(tok)
         # Priority start: fetch ONLY track 0 now (full bandwidth → fastest first
         # track). The caller measures its throughput, then calls prefetch_from(1)
@@ -93,7 +92,7 @@ class MediaProxy:
         # the ready prefix, play, then append the tail as each track lands.
         if self._session:
             self._prefetch(self._session[0])
-        logger.info("preview session: %d tracks (%s)", len(queries), provider.manifest.id)
+        logger.info("preview session: %d tracks", len(items))
         preview_events.ping()   # new buffering set → open album page re-fetches
         return list(self._session)
 
@@ -105,20 +104,19 @@ class MediaProxy:
         for tok in tail:
             self._prefetch(tok)
 
-    def add_tracks(self, provider: StreamProvider, queries: list,
-                   source_ids: Optional[list] = None) -> list:
+    def add_tracks(self, items: list) -> list:
         """Add tracks to the served pool WITHOUT replacing the current album
         session — for queue-appends, so the album and the queued tracks are
-        served at once. Returns the new tokens (prefetched); the caller waits
-        and appends them to HQPlayer. They are NOT part of the rolling-append
-        `_session`; the next start_session (a replace-queue play) clears them
-        together with the album, in step with HQPlayer's own queue clear."""
+        served at once. Each item is a ``(provider, query, source_id)`` triple
+        (providers may differ per track). Returns the new tokens (prefetched);
+        the caller waits and appends them to HQPlayer. They are NOT part of the
+        rolling-append `_session`; the next start_session (a replace-queue play)
+        clears them together with the album, in step with HQPlayer's queue clear."""
         toks = []
         with self._lock:
-            for i, q in enumerate(queries):
+            for i, (prov, q, sid) in enumerate(items):
                 tok = secrets.token_urlsafe(12)
-                sid = source_ids[i] if source_ids else None
-                self._entries[tok] = _Entry(tok, provider, q, i, source_id=sid)
+                self._entries[tok] = _Entry(tok, prov, q, i, source_id=sid)
                 toks.append(tok)
         for tok in toks:
             self._prefetch(tok)

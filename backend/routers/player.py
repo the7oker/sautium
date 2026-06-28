@@ -1824,6 +1824,57 @@ def _parallel_resolve(provider, queries: list) -> list:
         return list(ex.map(one, queries))
 
 
+def _resolve_waterfall(queries: list) -> list:
+    """Resolve each query to ``(provider, source_id)``, trying enabled providers
+    lossless-first (Deezer FLAC before YouTube lossy). Each tier resolves its
+    pending subset in parallel; the failures cascade to the next provider. A
+    track is ``(None, None)`` only if NO provider has it — so an album absent
+    from Deezer still streams from YouTube instead of showing as unavailable."""
+    from streaming import service as streaming_service
+
+    out = [(None, None)] * len(queries)
+    pending = list(range(len(queries)))
+    for prov in streaming_service.providers_preferred():
+        if not pending:
+            break
+        if not prov.supports_resolve:
+            # Can't pre-resolve — claim the rest for fetch-and-skip and stop
+            # (no per-track miss list is possible for such a provider).
+            for i in pending:
+                out[i] = (prov, None)
+            pending = []
+            break
+        sids = _parallel_resolve(prov, [queries[i] for i in pending])
+        still = []
+        for i, sid in zip(pending, sids):
+            if sid is not None:
+                out[i] = (prov, sid)
+            else:
+                still.append(i)
+        pending = still
+    return out
+
+
+def _provider_label(items: list) -> Optional[str]:
+    """Provider id(s) actually serving a session — 'deezer', 'youtube', or
+    'deezer+youtube' when a mixed waterfall served one album from both."""
+    ids = sorted({prov.manifest.id for prov, _q, _s in items})
+    return "+".join(ids) if ids else None
+
+
+def _mix_quality(n_lossless: int, n_lossy: int) -> Optional[str]:
+    """Album-level quality from the per-track lossless/lossy split — drives the
+    badge so it stops claiming pure 'Lossless' when most tracks stream from a
+    lossy fallback. Returns the dominant tier (mostly_* when the album mixes both)."""
+    if not (n_lossless or n_lossy):
+        return None
+    if not n_lossy:
+        return "lossless"
+    if not n_lossless:
+        return "lossy"
+    return "mostly_lossless" if n_lossless > n_lossy else "mostly_lossy"
+
+
 def _phantom_track_query(track_id: str):
     """Build a TrackQuery for one phantom track from album_tracks, or None."""
     from streaming.base import TrackQuery
@@ -1880,33 +1931,41 @@ _AVAILABILITY_TTL_S = 3600.0
 
 @router.get("/phantom-availability/{album_id}")
 def phantom_availability(album_id: str) -> dict:
-    """Track ids of a phantom album the streaming provider can't resolve, so the
-    album page can dim + disable them up front (no need to stream first). A track
-    is available if ANY of its tracklist rows resolves — the same title can appear
-    at several durations and one provider match is enough. Cached per album+provider."""
+    """Track ids of a phantom album NO provider can stream, so the album page can
+    dim + disable them up front (no need to stream first). Tries every provider
+    (lossless-first); a track is unavailable only if none has it, and available if
+    ANY of its tracklist rows resolves (the same title can appear at several
+    durations — one match is enough). Cached per album + provider-set."""
     from streaming import service as streaming_service
     if not streaming_service.is_enabled():
-        return {"unavailable": [], "provider": None}
-    provider = streaming_service.get_provider()
-    if provider is None or not provider.supports_resolve:
-        return {"unavailable": [], "provider": None}
+        return {"unavailable": []}
+    provs = streaming_service.providers_preferred()
+    if not provs:
+        return {"unavailable": []}
 
-    key = (album_id, provider.manifest.id)
+    key = (album_id, tuple(p.manifest.id for p in provs))
     now = time.time()
     hit = _availability_cache.get(key)
     if hit and now - hit[0] < _AVAILABILITY_TTL_S:
-        unavailable = hit[1]
+        unavailable, quality = hit[1], hit[2]
     else:
         queries = _phantom_album_queries(album_id)
-        sids = _parallel_resolve(provider, queries)
-        resolved = {q.track_id for q, sid in zip(queries, sids)
-                    if sid is not None and q.track_id}
+        resolved = _resolve_waterfall(queries)
+        # Per distinct track_id, keep the BEST quality among its rows (the same
+        # title at several durations may resolve on different providers).
+        best_lossless = {}
+        for q, (prov, sid) in zip(queries, resolved):
+            if prov is None or not q.track_id:
+                continue
+            best_lossless[q.track_id] = (best_lossless.get(q.track_id, False)
+                                         or prov.manifest.lossless)
         all_ids = {q.track_id for q in queries if q.track_id}
-        unavailable = frozenset(all_ids - resolved)
-        _availability_cache[key] = (now, unavailable)
+        unavailable = frozenset(all_ids - set(best_lossless))
+        quality = _mix_quality(sum(best_lossless.values()),
+                               sum(1 for v in best_lossless.values() if not v))
+        _availability_cache[key] = (now, unavailable, quality)
 
-    return {"unavailable": [{"track_id": t} for t in unavailable],
-            "provider": provider.manifest.id}
+    return {"unavailable": [{"track_id": t} for t in unavailable], "quality": quality}
 
 
 class PlayPhantomAlbumRequest(BaseModel):
@@ -1954,43 +2013,39 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
     Now-Playing shows HQPlayer's generic stream label for these tracks until
     provider-sourced metadata is wired into the status poller (next step)."""
     from streaming import service as streaming_service
-    from streaming.base import TrackQuery
 
     if not streaming_service.is_enabled():
         raise HTTPException(status_code=503, detail="Streaming preview is disabled")
-    provider = streaming_service.get_provider()   # preferred: lossless before lossy
-    if provider is None:
-        raise HTTPException(status_code=503, detail="No streaming provider available")
 
     queries = _phantom_album_queries(req.album_id)
     if not queries:
         raise HTTPException(status_code=404, detail="Phantom album not found or has no tracklist")
 
     proxy = streaming_service.get_proxy()
+    if proxy is None:
+        raise HTTPException(status_code=503, detail="No streaming provider available")
 
-    # Resolve-first availability pass: which tracks actually exist on this
-    # provider, BEFORE the slow downloads — so the UI can grey out the missing
-    # ones and disable Listen when the whole album is unavailable. Providers that
-    # can't pre-resolve fall back to fetch-and-skip (no miss list).
-    if provider.supports_resolve:
-        source_ids = _parallel_resolve(provider, queries)
-        avail_q = [q for q, s in zip(queries, source_ids) if s]
-        avail_sids = [s for s in source_ids if s]
-        missing = [q for q, s in zip(queries, source_ids) if not s]
-    else:
-        avail_q, avail_sids, missing = queries, None, []
+    # Per-track resolve waterfall: each track is served by the best provider that
+    # actually has it — Deezer lossless first, YouTube fallback — BEFORE the slow
+    # downloads, so the UI greys out only the tracks NO provider can stream. An
+    # album absent from Deezer therefore streams from YouTube instead of looking
+    # empty (that single-provider gap was the bug this replaced).
+    resolved = _resolve_waterfall(queries)
+    items = [(prov, q, sid) for q, (prov, sid) in zip(queries, resolved) if prov is not None]
+    missing = [q for q, (prov, sid) in zip(queries, resolved) if prov is None]
     missing_payload = [{"track_id": q.track_id, "title": q.title} for q in missing]
 
-    if not avail_q:
-        # Nothing on this provider — leave HQPlayer untouched; the UI disables
-        # Listen and greys out every row.
+    if not items:
+        # No provider has any track — leave HQPlayer untouched; the UI disables
+        # Stream all and greys out every row.
         return {
-            "ok": True, "provider": provider.manifest.id,
+            "ok": True, "provider": None,
             "album": queries[0].album, "artist": queries[0].artist,
             "track_count": 0, "requested": len(queries), "missing": missing_payload,
         }
 
-    tokens = proxy.start_session(provider, avail_q, avail_sids)  # priority-fetches track 0
+    avail_q = [q for _prov, q, _sid in items]
+    tokens = proxy.start_session(items)        # priority-fetches track 0
 
     # Adaptive rolling buffer. Track 0 is fetched alone (full bandwidth) for the
     # fastest safe start; its measured real-time factor sizes how much audio we
@@ -2048,11 +2103,11 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
             "ok": True,
             "album": avail_q[0].album,
             "artist": avail_q[0].artist,
-            "provider": provider.manifest.id,
+            "provider": _provider_label(items),
             "track_count": added,                        # streaming now
             "buffering": max(0, len(avail_q) - added),   # rolling in via the filler
             "requested": len(queries),                   # tracklist size
-            "missing": missing_payload,                  # not found on this provider
+            "missing": missing_payload,                  # not found on ANY provider
         }
     except HTTPException:
         raise
@@ -2072,31 +2127,27 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
     preferred provider; returns track_count=0 + the track in `missing` when the
     provider has no match (the UI greys the row)."""
     from streaming import service as streaming_service
-    from streaming.base import TrackQuery
 
     if not streaming_service.is_enabled():
         raise HTTPException(status_code=503, detail="Streaming preview is disabled")
-    provider = streaming_service.get_provider()
-    if provider is None:
-        raise HTTPException(status_code=503, detail="No streaming provider available")
 
     q = _phantom_track_query(req.track_id)
     if q is None:
         raise HTTPException(status_code=404, detail="Phantom track not found")
     missing = [{"track_id": req.track_id, "title": q.title}]
-    sid = provider.resolve(q) if provider.supports_resolve else None
-    if provider.supports_resolve and not sid:
-        return {"ok": True, "provider": provider.manifest.id,
+    prov, sid = _resolve_waterfall([q])[0]    # Deezer lossless, else YouTube
+    if prov is None:
+        return {"ok": True, "provider": None,
                 "track_count": 0, "requested": 1, "missing": missing}
 
     proxy = streaming_service.get_proxy()
-    tokens = proxy.start_session(provider, [q], [sid] if sid else None)
+    tokens = proxy.start_session([(prov, q, sid)])
     try:
         e = proxy.wait_ready(tokens[0])
     except (TimeoutError, KeyError):
         e = None
     if e is None or e.audio is None:
-        raise HTTPException(status_code=502, detail="Track could not be fetched from the provider")
+        raise HTTPException(status_code=502, detail="This track isn't available to stream right now.")
 
     try:
         with _hqp_lock:
@@ -2111,7 +2162,7 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
             raise HTTPException(
                 status_code=503,
                 detail="HQPlayer unavailable — preview not queued. Try again.")
-        return {"ok": True, "provider": provider.manifest.id, "track_count": 1,
+        return {"ok": True, "provider": prov.manifest.id, "track_count": 1,
                 "requested": 1, "missing": [], "artist": q.artist, "album": q.album}
     except HTTPException:
         raise
@@ -2125,27 +2176,24 @@ def queue_phantom_track(req: PlayPhantomTrackRequest):
     from streaming import service as streaming_service
     if not streaming_service.is_enabled():
         raise HTTPException(status_code=503, detail="Streaming preview is disabled")
-    provider = streaming_service.get_provider()
-    if provider is None:
-        raise HTTPException(status_code=503, detail="No streaming provider available")
 
     q = _phantom_track_query(req.track_id)
     if q is None:
         raise HTTPException(status_code=404, detail="Phantom track not found")
     missing = [{"track_id": req.track_id, "title": q.title}]
-    sid = provider.resolve(q) if provider.supports_resolve else None
-    if provider.supports_resolve and not sid:
-        return {"ok": True, "provider": provider.manifest.id,
+    prov, sid = _resolve_waterfall([q])[0]    # Deezer lossless, else YouTube
+    if prov is None:
+        return {"ok": True, "provider": None,
                 "track_count": 0, "requested": 1, "missing": missing}
 
     proxy = streaming_service.get_proxy()
-    tokens = proxy.add_tracks(provider, [q], [sid] if sid else None)
+    tokens = proxy.add_tracks([(prov, q, sid)])
     try:
         e = proxy.wait_ready(tokens[0])
     except (TimeoutError, KeyError):
         e = None
     if e is None or e.audio is None:
-        raise HTTPException(status_code=502, detail="Track could not be fetched from the provider")
+        raise HTTPException(status_code=502, detail="This track isn't available to stream right now.")
 
     try:
         added = _queue_uris([proxy.url_for(tokens[0])], req.position)
@@ -2154,7 +2202,7 @@ def queue_phantom_track(req: PlayPhantomTrackRequest):
         if not added:
             raise HTTPException(status_code=503,
                                 detail="HQPlayer unavailable — not queued. Try again.")
-        return {"ok": True, "provider": provider.manifest.id, "track_count": 1,
+        return {"ok": True, "provider": prov.manifest.id, "track_count": 1,
                 "requested": 1, "missing": []}
     except HTTPException:
         raise
@@ -2168,28 +2216,25 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
     from streaming import service as streaming_service
     if not streaming_service.is_enabled():
         raise HTTPException(status_code=503, detail="Streaming preview is disabled")
-    provider = streaming_service.get_provider()
-    if provider is None:
-        raise HTTPException(status_code=503, detail="No streaming provider available")
 
     queries = _phantom_album_queries(req.album_id)
     if not queries:
         raise HTTPException(status_code=404, detail="Phantom album not found or has no tracklist")
 
-    if provider.supports_resolve:
-        source_ids = _parallel_resolve(provider, queries)
-        avail_q = [q for q, s in zip(queries, source_ids) if s]
-        avail_sids = [s for s in source_ids if s]
-        missing = [q for q, s in zip(queries, source_ids) if not s]
-    else:
-        avail_q, avail_sids, missing = queries, None, []
+    proxy = streaming_service.get_proxy()
+    if proxy is None:
+        raise HTTPException(status_code=503, detail="No streaming provider available")
+
+    resolved = _resolve_waterfall(queries)    # Deezer lossless first, YouTube fallback
+    items = [(prov, q, sid) for q, (prov, sid) in zip(queries, resolved) if prov is not None]
+    missing = [q for q, (prov, sid) in zip(queries, resolved) if prov is None]
     missing_payload = [{"track_id": q.track_id, "title": q.title} for q in missing]
-    if not avail_q:
-        return {"ok": True, "provider": provider.manifest.id, "track_count": 0,
+    if not items:
+        return {"ok": True, "provider": None, "track_count": 0,
                 "requested": len(queries), "missing": missing_payload}
 
-    proxy = streaming_service.get_proxy()
-    tokens = proxy.add_tracks(provider, avail_q, avail_sids)
+    avail_q = [q for _prov, q, _sid in items]
+    tokens = proxy.add_tracks(items)
     if req.position == "next":
         # Inserting after current needs the whole block in hand, so wait for the
         # available tracks (the UI shows buffering), then seamless-insert them.
@@ -2209,7 +2254,7 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
                                 detail="HQPlayer unavailable — preview not queued. Try again.")
         _invalidate_playlist()
         _notify_update()
-        return {"ok": True, "provider": provider.manifest.id, "track_count": added,
+        return {"ok": True, "provider": _provider_label(items), "track_count": added,
                 "requested": len(queries), "missing": missing_payload}
     # 'end' → roll each available track into the back of the queue as it lands.
     # The filler runs in the background, so probe HQPlayer now and fail loudly if
@@ -2227,7 +2272,7 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
         gen = _playback_generation
     threading.Thread(target=_phantom_filler, args=(proxy, list(tokens), 0, gen),
                      daemon=True, name="phantom-queue").start()
-    return {"ok": True, "provider": provider.manifest.id,
+    return {"ok": True, "provider": _provider_label(items),
             "track_count": len(avail_q), "requested": len(queries),
             "missing": missing_payload}
 

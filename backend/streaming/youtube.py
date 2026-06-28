@@ -11,6 +11,7 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import re
 import subprocess
 import tempfile
 
@@ -18,6 +19,10 @@ from .base import (FetchedAudio, ProviderError, ProviderManifest, StreamProvider
                    TrackQuery)
 
 logger = logging.getLogger(__name__)
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
 
 class YouTubeProvider(StreamProvider):
@@ -66,6 +71,24 @@ class YouTubeProvider(StreamProvider):
             cands.append({"id": p[0], "title": p[1], "duration": dur, "channel": p[3]})
         if not cands:
             raise ProviderError(f"youtube: no results for {search!r}")
+
+        # Artist gate on the CHANNEL: YouTube full-text search returns wrong-artist
+        # covers and same-title different songs for obscure artists; with duration-
+        # dominant scoring one of those would win and stream the WRONG recording
+        # (often not even downloadable — "video not available"). The reliable artist
+        # signal is the channel — official "<Artist> - Topic" Art Tracks, VEVO, or
+        # the artist's own channel — NOT the title (covers name the original artist
+        # in their title, e.g. a "Duo Diamanti" upload titled "Musica Nuda - Lunedì").
+        # If no channel carries the artist, the real recording isn't on YouTube —
+        # reject rather than stream a cover.
+        na = _norm(query.artist)
+        if na:
+            matched = [c for c in cands if na in _norm(c["channel"])]
+            if not matched:
+                raise ProviderError(
+                    f"youtube: no artist match for {search!r} "
+                    f"(top hit channel {cands[0]['channel']!r})")
+            cands = matched
 
         best = max(cands, key=lambda c: self._score(c, query))
         # Known length but even the best is >50% off (different recording / DJ

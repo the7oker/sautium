@@ -81,6 +81,16 @@ def get_proxy() -> Optional[MediaProxy]:
     return _proxy
 
 
+def providers_preferred() -> list:
+    """All enabled providers, lossless-first (Deezer FLAC before YouTube lossy).
+    The per-track resolve waterfall tries each in order, so a track absent from
+    Deezer still streams from YouTube instead of showing up as unavailable."""
+    if _registry is None:
+        return []
+    return sorted(_registry.enabled(),
+                  key=lambda p: (not p.manifest.lossless, p.manifest.id))
+
+
 def get_provider(provider_id: Optional[str] = None) -> Optional[StreamProvider]:
     """A specific provider by id, or — with no id — the preferred one: a lossless
     source (e.g. Deezer FLAC) ranks above a lossy one (YouTube)."""
@@ -88,10 +98,8 @@ def get_provider(provider_id: Optional[str] = None) -> Optional[StreamProvider]:
         return None
     if provider_id:
         return _registry.get(provider_id)
-    provs = _registry.enabled()
-    if not provs:
-        return None
-    return sorted(provs, key=lambda p: (not p.manifest.lossless, p.manifest.id))[0]
+    provs = providers_preferred()
+    return provs[0] if provs else None
 
 
 def preview_meta(uri: str) -> Optional[dict]:
