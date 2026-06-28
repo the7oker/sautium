@@ -1140,6 +1140,44 @@ async def status_stream():
     )
 
 
+@router.get("/preview-events")
+async def preview_events_stream():
+    """SSE: bare 'refresh' pings whenever phantom-preview state changes (a track
+    starts/finishes buffering, or enrichment commits key·bpm). No payload — the
+    open album page already knows its own id and re-fetches /api/albums/{id} for
+    a single consistent snapshot (features + buffering), so there's no split
+    source to race. Coalesced server-side; the client debounces its re-fetch."""
+    from streaming.events import preview_events
+
+    async def event_generator():
+        q = preview_events.subscribe()
+        try:
+            while True:
+                try:
+                    await asyncio.wait_for(q.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                # Drain any coalesced pings so one re-fetch covers the burst.
+                while not q.empty():
+                    q.get_nowait()
+                yield "data: refresh\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            preview_events.unsubscribe(q)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/status")
 def get_status():
     """Return last cached HQPlayer status. Cache is maintained by the

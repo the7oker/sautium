@@ -31,6 +31,8 @@ from typing import Optional
 
 import numpy as np
 
+from .events import preview_events
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,6 +107,7 @@ class PreviewEnricher:
             db.commit()
 
         self._empty_cache()
+        preview_events.ping()   # features committed → open album page re-fetches key·bpm
         logger.info("preview enriched %s (embedding=%s features=%s)",
                     track_id, vec is not None, bool(feats))
 

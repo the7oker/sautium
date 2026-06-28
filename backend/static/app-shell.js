@@ -3773,6 +3773,10 @@
       }
 
       const isPhantom = d.is_owned === false;
+      // Tag the screen so the global preview-events listener can find the open
+      // phantom album by id and re-fetch it (no per-render listener to tear down).
+      if (isPhantom) screen.dataset.phantomAlbumId = albumId;
+      else delete screen.dataset.phantomAlbumId;
       // Bandcamp search for the Buy CTA (no stored buy_url; built from credits).
       const buyUrl = 'https://bandcamp.com/search?q='
         + encodeURIComponent((((d.primary_artist && d.primary_artist.name) || '')
@@ -4150,6 +4154,67 @@
     if (el) el.hidden = !active;
   }
 
+  // Insert / update / remove a phantom track's key·bpm sub-line in place (it sits
+  // after the title, before the buffering line). Writes only on change so a
+  // re-fetch that found nothing new touches no DOM (no flicker).
+  function updateTrackSubLine(row, text) {
+    const info = row.querySelector('.track-info');
+    if (!info) return;
+    let sub = info.querySelector('.track-sub');
+    if (text) {
+      if (!sub) {
+        sub = document.createElement('div');
+        sub.className = 'track-sub';
+        info.insertBefore(sub, info.querySelector('.track-buffering') || null);
+      }
+      if (sub.textContent !== text) sub.textContent = text;
+    } else if (sub) {
+      sub.remove();
+    }
+  }
+
+  // Re-read the open phantom album and diff its rows in place: buffering line
+  // (transient, from the proxy) + key·bpm sub-line (from enrichment), both
+  // carried by the one /api/albums/{id} snapshot. No structural re-render, so
+  // open [Next]/[End] confirm bars and scroll position survive. Driven by the
+  // preview-events SSE (see the listener wired in init).
+  async function refreshPhantomAlbumTracks(screen, albumId) {
+    if (!screen || !screen.isConnected || !albumId) return;
+    let d;
+    try {
+      const resp = await fetch('/api/albums/' + encodeURIComponent(albumId));
+      if (!resp.ok) return;
+      d = await resp.json();
+    } catch (_) { return; }
+    if (!screen.isConnected) return;   // navigated away mid-fetch
+    for (const t of (d.tracks || [])) {
+      if (!t.track_id) continue;
+      const sel = (window.CSS && CSS.escape) ? CSS.escape(t.track_id) : t.track_id;
+      const row = screen.querySelector(`.track-row[data-track-id="${sel}"]`);
+      if (!row) continue;
+      const buf = row.querySelector('.track-buffering');
+      if (buf) buf.hidden = !t.buffering;
+      updateTrackSubLine(row, [
+        t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
+        t.bpm ? Math.round(t.bpm) + ' bpm' : null,
+      ].filter(Boolean).join(' · '));
+    }
+  }
+
+  // One global listener (registered once): a preview-changed ping re-fetches
+  // whichever phantom album is currently open, found by its data attribute — no
+  // per-render listener to leak. Debounced so a burst of pings (a 12-track album
+  // landing) collapses into a single re-fetch.
+  let _previewRefreshTimer = null;
+  window.addEventListener('sautium:preview-changed', () => {
+    if (_previewRefreshTimer) return;
+    _previewRefreshTimer = setTimeout(() => {
+      _previewRefreshTimer = null;
+      const screen = document.querySelector('.detail-screen[data-phantom-album-id]');
+      if (screen) refreshPhantomAlbumTracks(screen, screen.dataset.phantomAlbumId);
+    }, 400);
+  });
+
   function wireDetailHandlers(screen, ctx = {}) {
     // Back chevron
     screen.querySelectorAll('[data-action="back"]').forEach(btn => {
@@ -4269,11 +4334,10 @@
     screen.querySelectorAll('[data-action="play-phantom"]').forEach(btn => {
       btn.addEventListener('click', async () => {
         if (!ctx.phantomAlbumId) return;
-        // The endpoint resolves availability then prefetches — tens of seconds.
-        // Show a buffering state in place (no flicker) and block re-clicks.
-        const restore = btn.innerHTML;
+        // Resolve + prefetch takes tens of seconds. Block re-clicks; the
+        // per-track "Buffering…" lines (driven by the preview-events re-fetch)
+        // carry the progress now, not the button.
         btn.disabled = true;
-        btn.innerHTML = `${SVG_PLAY} Buffering…`;
         const resp = await fetch('/api/player/play-phantom-album', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -4284,20 +4348,26 @@
 
         if (!resp || !resp.ok) {                  // HQPlayer down / hard error
           btn.disabled = false;
-          btn.innerHTML = restore;
           await reportPlaybackResult(resp);
           return;
         }
         // Grey out + disable the rows the provider couldn't find.
         applyPhantomMissing(screen, body && body.missing);
         if (body && body.track_count === 0) {
-          // Whole album unavailable on this provider → keep Listen disabled.
+          // Whole album unavailable on this provider → keep the button disabled.
           btn.disabled = true;
           btn.innerHTML = `${SVG_PLAY} Unavailable`;
-        } else {
-          btn.disabled = false;
-          btn.innerHTML = restore;
+          return;
         }
+        // Optimistic buffering on the rows that will stream; the preview-events
+        // re-fetch then clears each as the proxy finishes it (the truth source).
+        const missingIds = new Set(((body && body.missing) || [])
+          .map(m => m && m.track_id).filter(Boolean));
+        (ctx.tracks || []).forEach(t => {
+          if (t.track_id && !missingIds.has(t.track_id))
+            setTrackBuffering(screen, t.track_id, true);
+        });
+        btn.disabled = false;
       });
     });
     // Phantom track row → stream + play that single track (mirrors clicking an

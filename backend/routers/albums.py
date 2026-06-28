@@ -96,6 +96,20 @@ def _phantom_album(album_id: str) -> dict:
         WHERE atr.album_id = %(id)s::uuid
         ORDER BY atr.disc, atr.position
     """, {"id": album_id})
+
+    # Per-track buffering flag from the live preview proxy (in-memory, transient).
+    # Folding it into THIS payload means one re-fetch carries both the enriched
+    # features (DB) AND the buffering state (proxy) — a single consistent snapshot,
+    # so there's no second source for the UI to race against (preview-events SSE
+    # just pings 'refresh'; the page re-reads everything here).
+    try:
+        from streaming import service as _streaming
+        _proxy = _streaming.get_proxy() if _streaming.is_enabled() else None
+    except Exception:
+        _proxy = None
+    for t in album["tracks"]:
+        t["buffering"] = bool(_proxy and _proxy.is_buffering(t["track_id"]))
+
     album["total_duration"] = float(sum(t["duration"] or 0 for t in album["tracks"]))
     return album
 

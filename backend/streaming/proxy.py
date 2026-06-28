@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Optional
 
 from .base import FetchedAudio, ProviderError, StreamProvider, TrackQuery
+from .events import preview_events
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,7 @@ class MediaProxy:
         if self._session:
             self._prefetch(self._session[0])
         logger.info("preview session: %d tracks (%s)", len(queries), provider.manifest.id)
+        preview_events.ping()   # new buffering set → open album page re-fetches
         return list(self._session)
 
     def prefetch_from(self, start_index: int) -> None:
@@ -120,6 +122,7 @@ class MediaProxy:
                 toks.append(tok)
         for tok in toks:
             self._prefetch(tok)
+        preview_events.ping()   # queued tracks now buffering → re-fetch
         return toks
 
     def fetch_rtf(self, token: str) -> Optional[float]:
@@ -152,6 +155,16 @@ class MediaProxy:
                 playable.append(self._session[j])
                 secs += e.query.duration or 0.0
             return playable, secs, idx
+
+    def is_buffering(self, track_id: str) -> bool:
+        """True if a track with this id is still in-flight in the served pool (an
+        entry exists that hasn't finished fetching) — the UI buffering flag. Read
+        by /api/albums/{id} so one re-fetch carries buffering with the features."""
+        if not track_id:
+            return False
+        with self._lock:
+            return any(e.query.track_id == track_id and not e.ready.is_set()
+                       for e in self._entries.values())
 
     @property
     def fetch_concurrency(self) -> int:
@@ -208,6 +221,7 @@ class MediaProxy:
             logger.error("preview fetch crashed [%d]: %s", e.index, ex, exc_info=True)
         finally:
             e.ready.set()
+            preview_events.ping()   # buffering ended → re-fetch picks up the change
             hook = self.on_track_ready
             if hook is not None and e.audio is not None:
                 try:

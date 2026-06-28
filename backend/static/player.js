@@ -65,6 +65,21 @@
     );
   }
 
+  // Phantom-preview change pings. A bare SSE: each message just means "preview
+  // state changed" (a track started/finished buffering, or enrichment landed).
+  // Re-broadcast as a DOM event; the open album page (app-shell.js) re-fetches
+  // its OWN /api/albums/{id} for one consistent snapshot (features + buffering),
+  // so there's no payload to keep in sync here — the page owns the re-read.
+  let _previewSSE = null;
+  function connectPreviewSSE() {
+    if (_previewSSE) _previewSSE.abort();
+    _previewSSE = window.sseStream(
+      '/api/player/preview-events',
+      () => window.dispatchEvent(new CustomEvent('sautium:preview-changed')),
+      () => { /* sseStream auto-reconnects; nothing to repaint here */ }
+    );
+  }
+
   // SSE events are dispatched as soon as the message lands; if we made
   // the handler async directly, two rapid playlist mutations would race
   // their fetchPlaylist() calls. Chain each event onto a promise so the
@@ -140,6 +155,7 @@
   // --- Boot ------------------------------------------------------------
   function init() {
     connectStatusSSE();
+    connectPreviewSSE();
     fetchPlaylist();
   }
   if (document.readyState === 'loading') {
@@ -150,5 +166,6 @@
 
   window.addEventListener('beforeunload', () => {
     if (_sseSource) _sseSource.abort();
+    if (_previewSSE) _previewSSE.abort();
   });
 })();
