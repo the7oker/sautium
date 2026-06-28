@@ -29,6 +29,19 @@ logger = logging.getLogger(__name__)
 
 SOURCE = "clap_assignment"
 
+# Album → its track ids, covering BOTH owned albums (physical files via
+# media_files/album_variants) AND phantom albums (the album_tracks tracklist, no
+# files). Lets audio similarity work for previewed-and-enriched phantom albums
+# too — a phantom source finds owned neighbours just like an owned source does.
+_ALBUM_TRACKS_SQL = """
+    SELECT av.album_id, mf.track_id
+    FROM media_files mf
+    JOIN album_variants av ON av.id = mf.album_variant_id
+    UNION
+    SELECT atr.album_id, atr.track_id
+    FROM album_tracks atr
+"""
+
 # Candidate generation: PER_TRACK_K neighbours per source track, capped to
 # TOP_N_CANDIDATES distinct albums by hit count before the assignment rerank.
 # TOP_K neighbours are cached per album.
@@ -49,14 +62,13 @@ def _load_album_vectors(cur, album_ids) -> dict[str, np.ndarray]:
     """{album_id: ndarray[m,512]} — one row per (album, track). A track has a
     single CLAP embedding, so DISTINCT ON dedupes multi-variant duplicates."""
     cur.execute(
-        """
-        SELECT DISTINCT ON (av.album_id, e.track_id)
-               av.album_id::text AS album_id, e.vector AS vector
+        f"""
+        SELECT DISTINCT ON (m.album_id, e.track_id)
+               m.album_id::text AS album_id, e.vector AS vector
         FROM embeddings e
-        JOIN media_files mf ON mf.track_id = e.track_id
-        JOIN album_variants av ON av.id = mf.album_variant_id
-        WHERE av.album_id = ANY(%(ids)s::uuid[])
-        ORDER BY av.album_id, e.track_id
+        JOIN ({_ALBUM_TRACKS_SQL}) m ON m.track_id = e.track_id
+        WHERE m.album_id = ANY(%(ids)s::uuid[])
+        ORDER BY m.album_id, e.track_id
         """,
         {"ids": [str(a) for a in album_ids]},
     )
@@ -73,15 +85,14 @@ def _candidate_albums(cur, album_id) -> list[str]:
     source track, which pgvector serves from the HNSW index on `embeddings`.
     """
     cur.execute(
-        """
+        f"""
         WITH src AS (
             SELECT DISTINCT e.track_id, e.vector
             FROM embeddings e
-            JOIN media_files mf ON mf.track_id = e.track_id
-            JOIN album_variants av ON av.id = mf.album_variant_id
-            WHERE av.album_id = %(id)s::uuid
+            JOIN ({_ALBUM_TRACKS_SQL}) m ON m.track_id = e.track_id
+            WHERE m.album_id = %(id)s::uuid
         )
-        SELECT cav.album_id::text AS album_id, COUNT(*) AS hits
+        SELECT cm.album_id::text AS album_id, COUNT(*) AS hits
         FROM src
         CROSS JOIN LATERAL (
             SELECT e2.track_id
@@ -90,10 +101,9 @@ def _candidate_albums(cur, album_id) -> list[str]:
             ORDER BY e2.vector <=> src.vector
             LIMIT %(k)s
         ) nn
-        JOIN media_files cmf ON cmf.track_id = nn.track_id
-        JOIN album_variants cav ON cav.id = cmf.album_variant_id
-        WHERE cav.album_id <> %(id)s::uuid
-        GROUP BY cav.album_id
+        JOIN ({_ALBUM_TRACKS_SQL}) cm ON cm.track_id = nn.track_id
+        WHERE cm.album_id <> %(id)s::uuid
+        GROUP BY cm.album_id
         ORDER BY hits DESC
         LIMIT %(n)s
         """,

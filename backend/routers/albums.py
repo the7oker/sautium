@@ -310,68 +310,53 @@ def get_similar_albums(
         has_emb = db_query_one("""
             SELECT 1 AS ok
             FROM embeddings e
-            JOIN media_files mf ON mf.track_id = e.track_id
-            JOIN album_variants av ON av.id = mf.album_variant_id
-            WHERE av.album_id = %(id)s::uuid
+            WHERE e.track_id IN (
+                SELECT mf.track_id FROM media_files mf
+                JOIN album_variants av ON av.id = mf.album_variant_id
+                WHERE av.album_id = %(id)s::uuid
+                UNION
+                SELECT atr.track_id FROM album_tracks atr
+                WHERE atr.album_id = %(id)s::uuid
+            )
             LIMIT 1
         """, {"id": album_id})
         if has_emb:
             compute_and_cache(album_id)
 
-    # Enrich the cached neighbours with display metadata + the most-frequent
-    # primary artist (album has no artist_id), excluding same-artist when asked.
-    # All ordering / filtering / trimming pushed into SQL.
-    results = db_query("""
-        WITH src_artist AS (
-            SELECT ta.artist_id
-            FROM track_artists ta
-            JOIN media_files mf ON mf.track_id = ta.track_id
-            JOIN album_variants av ON av.id = mf.album_variant_id
-            WHERE av.album_id = %(id)s::uuid AND ta.role = 'primary'
-            GROUP BY ta.artist_id
-            ORDER BY COUNT(*) DESC
-            LIMIT 1
-        )
-        SELECT sa.similar_album_id::text AS album_id,
-               al.title AS album,
-               al.release_year AS year,
-               sa.match_score AS similarity,
-               pa.name AS artist,
-               pa.artist_id::text AS artist_id,
-               (SELECT mf2.cover_id::text
-                FROM album_variants av2
-                JOIN media_files mf2 ON mf2.album_variant_id = av2.id
-                WHERE av2.album_id = sa.similar_album_id AND mf2.cover_id IS NOT NULL
-                LIMIT 1) AS cover_id,
-               (SELECT mf3.id
-                FROM album_variants av3
-                JOIN media_files mf3 ON mf3.album_variant_id = av3.id
-                WHERE av3.album_id = sa.similar_album_id
-                ORDER BY mf3.disc_number, mf3.track_number
-                LIMIT 1) AS media_file_id
-        FROM similar_albums sa
-        JOIN albums al ON al.id = sa.similar_album_id
-        JOIN LATERAL (
-            SELECT a.id AS artist_id, a.name
+    # Ordered candidate ids + scores (floor + cap in SQL); owned AND phantom
+    # neighbours rank together purely by similarity. Tiles hydrate via the shared
+    # phantom-aware hydrator, so a phantom neighbour renders with its CAA cover and
+    # routes to the streamable album page exactly like the chat blocks do.
+    rows = db_query("""
+        SELECT similar_album_id::text AS album_id, match_score::float AS sim
+        FROM similar_albums
+        WHERE album_id = %(id)s::uuid AND source = %(src)s AND match_score >= %(floor)s
+        ORDER BY match_score DESC
+        LIMIT %(cap)s
+    """, {"id": album_id, "src": SOURCE, "floor": min_similarity,
+          "cap": limit * 3 if exclude_same_artist else limit})
+    if not rows:
+        return {"results": []}
+
+    from entity_hydration import hydrate_albums
+    sim = {r["album_id"]: round(r["sim"], 4) for r in rows}
+    tiles = hydrate_albums([r["album_id"] for r in rows])   # phantom-aware, order-preserving
+
+    if exclude_same_artist:
+        src = db_query_one("""
+            SELECT a.name
             FROM track_artists ta
             JOIN artists a ON a.id = ta.artist_id
-            JOIN media_files mf ON mf.track_id = ta.track_id
-            JOIN album_variants av ON av.id = mf.album_variant_id
-            WHERE av.album_id = sa.similar_album_id AND ta.role = 'primary'
-            GROUP BY a.id, a.name
-            ORDER BY COUNT(*) DESC
-            LIMIT 1
-        ) pa ON true
-        WHERE sa.album_id = %(id)s::uuid
-          AND sa.source = %(src)s
-          AND sa.match_score >= %(floor)s
-          AND (NOT %(excl)s OR pa.artist_id <> (SELECT artist_id FROM src_artist))
-        ORDER BY sa.match_score DESC
-        LIMIT %(limit)s
-    """, {"id": album_id, "src": SOURCE, "excl": exclude_same_artist,
-          "floor": min_similarity, "limit": limit})
+            WHERE ta.role = 'primary' AND ta.track_id IN (
+                SELECT mf.track_id FROM media_files mf
+                JOIN album_variants av ON av.id = mf.album_variant_id WHERE av.album_id = %(id)s::uuid
+                UNION
+                SELECT atr.track_id FROM album_tracks atr WHERE atr.album_id = %(id)s::uuid)
+            GROUP BY a.name ORDER BY COUNT(*) DESC LIMIT 1
+        """, {"id": album_id})
+        if src and src.get("name"):
+            tiles = [t for t in tiles if t.get("artist") != src["name"]]
 
-    for r in results:
-        r["similarity"] = round(float(r["similarity"]), 4) if r["similarity"] is not None else None
-
-    return {"results": results}
+    for t in tiles:
+        t["similarity"] = sim.get(t["album_id"])
+    return {"results": tiles[:limit]}
