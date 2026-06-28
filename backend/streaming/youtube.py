@@ -149,4 +149,5 @@ class YouTubeProvider(StreamProvider):
             with open(flacs[0], "rb") as f:
                 data = f.read()
         logger.info("youtube fetch ok: %s (%d KiB FLAC)", video_id, len(data) // 1024)
-        return FetchedAudio(data=data, mime="audio/flac")
+        # FLAC container, but a lossy source — lossless=False for provenance.
+        return FetchedAudio(data=data, mime="audio/flac", lossless=False)

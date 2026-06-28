@@ -32,10 +32,15 @@ logger = logging.getLogger(__name__)
 @dataclass
 class _Entry:
     token: str
-    provider: StreamProvider
     query: TrackQuery
     index: int                      # position in the session, for prefetch/eviction
-    source_id: Optional[str] = None  # pre-resolved provider id → skip re-resolution
+    # Lossless-first fallback chain of (provider, source_id). source_id is the
+    # pre-resolved id (skip re-resolution) or None (the provider resolves inside
+    # fetch). Tried in order: a provider that RESOLVED but fails to DOWNLOAD (e.g.
+    # Deezer has the track but no FLAC for this account/region) cascades to the
+    # next, so a resolvable-but-undownloadable track still streams from YouTube.
+    chain: list = field(default_factory=list)
+    provider: Optional[StreamProvider] = None   # chain[0]'s provider; the actual one once fetched
     ready: threading.Event = field(default_factory=threading.Event)
     audio: Optional[FetchedAudio] = None
     error: Optional[str] = None
@@ -53,8 +58,14 @@ class MediaProxy:
         self._bind_host = bind_host
         self._prepare_timeout = prepare_timeout
         self._lock = threading.RLock()
-        self._fetch_concurrency = 3                # bound concurrent yt-dlp+ffmpeg
-        self._fetch_sem = threading.Semaphore(self._fetch_concurrency)
+        # SEQUENTIAL, in-ORDER fetching: one worker drains an ordered token queue
+        # (enqueue order == playlist order). The next-to-play track gets the full
+        # pipe (best keep-up on a slow link), and one-at-a-time traffic looks like
+        # normal listening — a parallel bulk pull is a classic scraping/piracy
+        # signal that trips provider abuse detection (ARL flag / YouTube 403).
+        self._fetch_q: list[str] = []
+        self._fetch_cv = threading.Condition(self._lock)
+        self._fetch_worker = False
         self._entries: dict[str, _Entry] = {}
         self._session: list[str] = []   # ordered tokens of the current preview
         self._httpd: Optional[ThreadingHTTPServer] = None
@@ -74,16 +85,17 @@ class MediaProxy:
     # ---- session API (called by the player endpoint) --------------------
     def start_session(self, items: list) -> list[str]:
         """Replace the current preview with an ordered track list. Each item is a
-        ``(provider, query, source_id)`` triple — providers may DIFFER per track
-        (lossless where a source has it, lossy fallback elsewhere); ``source_id``
-        is the pre-resolved provider id (or None → the provider resolves inside
-        fetch). Returns the per-track tokens; build URLs with ``url_for``."""
+        ``(query, chain)`` pair where chain is the lossless-first fallback list of
+        ``(provider, source_id)`` (see _Entry). Returns the per-track tokens; build
+        URLs with ``url_for``."""
         with self._lock:
             self._entries.clear()
+            self._fetch_q.clear()        # drop the previous session's pending fetches
             self._session = []
-            for i, (prov, q, sid) in enumerate(items):
+            for i, (q, chain) in enumerate(items):
                 tok = secrets.token_urlsafe(12)
-                self._entries[tok] = _Entry(tok, prov, q, i, source_id=sid)
+                self._entries[tok] = _Entry(tok, q, i, chain=chain,
+                                            provider=chain[0][0] if chain else None)
                 self._session.append(tok)
         # Priority start: fetch ONLY track 0 now (full bandwidth → fastest first
         # track). The caller measures its throughput, then calls prefetch_from(1)
@@ -107,16 +119,17 @@ class MediaProxy:
     def add_tracks(self, items: list) -> list:
         """Add tracks to the served pool WITHOUT replacing the current album
         session — for queue-appends, so the album and the queued tracks are
-        served at once. Each item is a ``(provider, query, source_id)`` triple
-        (providers may differ per track). Returns the new tokens (prefetched);
+        served at once. Each item is a ``(query, chain)`` pair (see start_session).
+        Returns the new tokens (prefetched);
         the caller waits and appends them to HQPlayer. They are NOT part of the
         rolling-append `_session`; the next start_session (a replace-queue play)
         clears them together with the album, in step with HQPlayer's queue clear."""
         toks = []
         with self._lock:
-            for i, (prov, q, sid) in enumerate(items):
+            for i, (q, chain) in enumerate(items):
                 tok = secrets.token_urlsafe(12)
-                self._entries[tok] = _Entry(tok, prov, q, i, source_id=sid)
+                self._entries[tok] = _Entry(tok, q, i, chain=chain,
+                                            provider=chain[0][0] if chain else None)
                 toks.append(tok)
         for tok in toks:
             self._prefetch(tok)
@@ -164,10 +177,6 @@ class MediaProxy:
             return any(e.query.track_id == track_id and not e.ready.is_set()
                        for e in self._entries.values())
 
-    @property
-    def fetch_concurrency(self) -> int:
-        return self._fetch_concurrency
-
     def url_for(self, token: str) -> str:
         return f"http://{self._advertised_host}:{self.port}/preview/{token}"
 
@@ -194,8 +203,27 @@ class MediaProxy:
 
     # ---- preparation -----------------------------------------------------
     def _prefetch(self, token: str) -> None:
-        threading.Thread(target=self._prepare, args=(token,), daemon=True,
-                         name=f"prefetch-{token[:6]}").start()
+        """Enqueue a token for the single sequential fetch worker (FIFO = playlist
+        order). Idempotent — a claimed or already-queued token is a no-op."""
+        with self._fetch_cv:
+            e = self._entries.get(token)
+            if e is None or e._claimed or token in self._fetch_q:
+                return
+            self._fetch_q.append(token)
+            if not self._fetch_worker:
+                self._fetch_worker = True
+                threading.Thread(target=self._fetch_loop, daemon=True,
+                                 name="preview-fetch").start()
+            self._fetch_cv.notify()
+
+    def _fetch_loop(self) -> None:
+        """One worker fetches the queue strictly in order, one track at a time."""
+        while True:
+            with self._fetch_cv:
+                while not self._fetch_q:
+                    self._fetch_cv.wait()
+                token = self._fetch_q.pop(0)
+            self._prepare(token)        # serial — full pipe per track, in order
 
     def _prepare(self, token: str) -> None:
         with self._lock:
@@ -204,16 +232,24 @@ class MediaProxy:
                 return
             e._claimed = True
         try:
-            with self._fetch_sem:
+            # Walk the lossless-first chain: a provider that RESOLVED but can't
+            # DOWNLOAD (Deezer has the track but no FLAC for this account) falls
+            # through to the next provider (e.g. YouTube) instead of dropping it.
+            last_err = None
+            for prov, sid in e.chain:
                 started = time.monotonic()
-                audio = (e.provider.download(e.source_id) if e.source_id
-                         else e.provider.fetch(e.query))
-                e.fetch_seconds = time.monotonic() - started
-            e.audio = audio
-        except ProviderError as ex:
-            e.error = str(ex)
-            logger.warning("preview fetch failed [%d] %s — %s: %s",
-                           e.index, e.query.artist, e.query.title, ex)
+                try:
+                    e.audio = prov.download(sid) if sid else prov.fetch(e.query)
+                    e.provider = prov                     # the one that actually served
+                    e.fetch_seconds = time.monotonic() - started
+                    break
+                except ProviderError as ex:
+                    last_err = ex
+                    logger.warning("preview fetch failed [%d] %s — %s via %s: %s",
+                                   e.index, e.query.artist, e.query.title,
+                                   prov.manifest.id, ex)
+            if e.audio is None and last_err is not None:
+                e.error = str(last_err)
         except Exception as ex:  # provider bug — surface, don't hang the GET
             e.error = f"unexpected: {ex}"
             logger.error("preview fetch crashed [%d]: %s", e.index, ex, exc_info=True)
@@ -238,7 +274,7 @@ class MediaProxy:
         if e is None:
             raise KeyError(token)
         if not e._claimed:
-            self._prepare(token)            # synchronous fallback (GET before prefetch)
+            self._prefetch(token)           # enqueue (keeps fetching strictly sequential)
         if not e.ready.wait(timeout):
             raise TimeoutError(f"preview not ready: {e.query.title}")
         return e

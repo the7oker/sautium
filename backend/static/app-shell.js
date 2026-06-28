@@ -3830,7 +3830,7 @@
               <div class="track-info">
                 <div class="track-title-line">${escapeHtml(t.title || '')}</div>
                 ${psub ? `<div class="track-sub">${escapeHtml(psub)}</div>` : ''}
-                <div class="track-buffering" hidden>Buffering…</div>
+                <div class="track-buffering"${t.buffering ? '' : ' hidden'}>Buffering…</div>
               </div>
               <span class="track-dur">${fmtDuration(t.duration)}</span>
               <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>

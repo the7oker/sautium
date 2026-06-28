@@ -1763,26 +1763,23 @@ _PHANTOM_LEAD_CAP_SECONDS = 240.0    # never pre-buffer more than ~4 min of audi
 _PHANTOM_LEAD_TRACK_TIMEOUT = 60.0   # cap the per-track wait while pre-buffering
 
 
-def _phantom_lead_seconds(rtf: float, queries, concurrency: int) -> float:
-    """How much contiguous audio to buffer before starting playback, derived
-    from the measured real-time factor (wall-fetch seconds per audio second of
-    track 0 — the channel-speed signal):
+def _phantom_lead_seconds(rtf: float, queries) -> float:
+    """How much contiguous audio to buffer before starting playback, from the
+    measured real-time factor (wall-fetch seconds per audio second of track 0 —
+    the channel-speed signal). Fetching is now SEQUENTIAL (one stream), so a
+    single stream keeps up iff rtf <= 1:
 
-      rtf <= 1       the pipeline outruns playback on ONE stream → start at once
-                     on track 0 (lead 0): truly ASAP.
-      1 < rtf <= C   a single stream lags, but C concurrent fetches keep up in
-                     steady state → a one-track cushion absorbs variance.
-      rtf > C        sustained deficit (very slow channel) → buffer the cap, then
-                     start; a long album still eventually drains, but the opening
-                     stretch plays seamlessly.
+      rtf <= 1   one stream outruns playback → start at once (lead 0), ASAP.
+      rtf  > 1   a per-track deficit of (rtf-1)·duration accrues → pre-buffer
+                 proportional to the deficit (≈ one track at rtf≈2), capped so the
+                 user never waits more than the cap; a very slow channel still
+                 eventually drains, but the opening plays seamlessly.
     """
     if rtf <= 1.0:
         return 0.0
     durs = [q.duration for q in queries if q.duration]
     d_avg = (sum(durs) / len(durs)) if durs else 60.0
-    if rtf <= concurrency:
-        return min(_PHANTOM_LEAD_CAP_SECONDS, d_avg)
-    return _PHANTOM_LEAD_CAP_SECONDS
+    return min(_PHANTOM_LEAD_CAP_SECONDS, d_avg * min(rtf - 1.0, 1.0))
 
 
 def _phantom_filler(proxy, tokens: list, start_index: int, gen: int) -> None:
@@ -1825,40 +1822,48 @@ def _parallel_resolve(provider, queries: list) -> list:
 
 
 def _resolve_waterfall(queries: list) -> list:
-    """Resolve each query to ``(provider, source_id)``, trying enabled providers
-    lossless-first (Deezer FLAC before YouTube lossy). Each tier resolves its
-    pending subset in parallel; the failures cascade to the next provider. A
-    track is ``(None, None)`` only if NO provider has it — so an album absent
-    from Deezer still streams from YouTube instead of showing as unavailable."""
+    """Per-track lossless-first fallback CHAIN ``[(provider, source_id), ...]``.
+    Each track resolves to its best provider (Deezer FLAC before YouTube lossy);
+    the chain then appends LOWER-preference providers (source_id=None, resolved
+    lazily inside fetch) as DOWNLOAD-failure fallbacks — so a track Deezer has but
+    can't serve in FLAC (region/licensing) still streams from YouTube instead of
+    just dropping. An empty chain == no provider resolved it (truly unavailable)."""
     from streaming import service as streaming_service
 
-    out = [(None, None)] * len(queries)
+    provs = streaming_service.providers_preferred()
+    best = [None] * len(queries)            # index into provs that resolved
+    sids = [None] * len(queries)
     pending = list(range(len(queries)))
-    for prov in streaming_service.providers_preferred():
+    for pi, prov in enumerate(provs):
         if not pending:
             break
         if not prov.supports_resolve:
-            # Can't pre-resolve — claim the rest for fetch-and-skip and stop
-            # (no per-track miss list is possible for such a provider).
-            for i in pending:
-                out[i] = (prov, None)
-            pending = []
-            break
-        sids = _parallel_resolve(prov, [queries[i] for i in pending])
+            continue                        # can't pre-resolve; appears only as a lazy fallback
+        res = _parallel_resolve(prov, [queries[i] for i in pending])
         still = []
-        for i, sid in zip(pending, sids):
+        for i, sid in zip(pending, res):
             if sid is not None:
-                out[i] = (prov, sid)
+                best[i], sids[i] = pi, sid
             else:
                 still.append(i)
         pending = still
-    return out
+
+    chains = []
+    for i in range(len(queries)):
+        if best[i] is not None:
+            chain = [(provs[best[i]], sids[i])]
+            chain += [(provs[pi], None) for pi in range(best[i] + 1, len(provs))]
+        else:
+            chain = [(p, None) for p in provs if not p.supports_resolve]
+        chains.append(chain)
+    return chains
 
 
 def _provider_label(items: list) -> Optional[str]:
-    """Provider id(s) actually serving a session — 'deezer', 'youtube', or
-    'deezer+youtube' when a mixed waterfall served one album from both."""
-    ids = sorted({prov.manifest.id for prov, _q, _s in items})
+    """Preferred provider id(s) for a session — 'deezer', 'youtube', or
+    'deezer+youtube'. From each track's chain head; the actual served provider may
+    differ if a download fell back, but this is just the informational label."""
+    ids = sorted({chain[0][0].manifest.id for _q, chain in items if chain})
     return "+".join(ids) if ids else None
 
 
@@ -1950,15 +1955,17 @@ def phantom_availability(album_id: str) -> dict:
         unavailable, quality = hit[1], hit[2]
     else:
         queries = _phantom_album_queries(album_id)
-        resolved = _resolve_waterfall(queries)
+        chains = _resolve_waterfall(queries)
         # Per distinct track_id, keep the BEST quality among its rows (the same
-        # title at several durations may resolve on different providers).
+        # title at several durations may resolve on different providers). Quality
+        # is the chain HEAD (preferred provider); a download-failure fallback can
+        # still drop it to lossy at stream time.
         best_lossless = {}
-        for q, (prov, sid) in zip(queries, resolved):
-            if prov is None or not q.track_id:
+        for q, chain in zip(queries, chains):
+            if not chain or not q.track_id:
                 continue
             best_lossless[q.track_id] = (best_lossless.get(q.track_id, False)
-                                         or prov.manifest.lossless)
+                                         or chain[0][0].manifest.lossless)
         all_ids = {q.track_id for q in queries if q.track_id}
         unavailable = frozenset(all_ids - set(best_lossless))
         quality = _mix_quality(sum(best_lossless.values()),
@@ -2025,14 +2032,13 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
     if proxy is None:
         raise HTTPException(status_code=503, detail="No streaming provider available")
 
-    # Per-track resolve waterfall: each track is served by the best provider that
-    # actually has it — Deezer lossless first, YouTube fallback — BEFORE the slow
-    # downloads, so the UI greys out only the tracks NO provider can stream. An
-    # album absent from Deezer therefore streams from YouTube instead of looking
-    # empty (that single-provider gap was the bug this replaced).
-    resolved = _resolve_waterfall(queries)
-    items = [(prov, q, sid) for q, (prov, sid) in zip(queries, resolved) if prov is not None]
-    missing = [q for q, (prov, sid) in zip(queries, resolved) if prov is None]
+    # Per-track resolve waterfall → a lossless-first fallback CHAIN per track
+    # (Deezer FLAC, then YouTube). The UI greys out only tracks NO provider can
+    # stream; the chain also covers download-time failures (Deezer resolves but
+    # serves no FLAC) by falling through to YouTube during fetch.
+    chains = _resolve_waterfall(queries)
+    items = [(q, ch) for q, ch in zip(queries, chains) if ch]
+    missing = [q for q, ch in zip(queries, chains) if not ch]
     missing_payload = [{"track_id": q.track_id, "title": q.title} for q in missing]
 
     if not items:
@@ -2044,7 +2050,7 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
             "track_count": 0, "requested": len(queries), "missing": missing_payload,
         }
 
-    avail_q = [q for _prov, q, _sid in items]
+    avail_q = [q for q, _ch in items]
     tokens = proxy.start_session(items)        # priority-fetches track 0
 
     # Adaptive rolling buffer. Track 0 is fetched alone (full bandwidth) for the
@@ -2058,7 +2064,7 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
         pass
     rtf = proxy.fetch_rtf(tokens[0]) or 1.0
     proxy.prefetch_from(1)                     # fan out the tail concurrently
-    lead_target = _phantom_lead_seconds(rtf, avail_q, proxy.fetch_concurrency)
+    lead_target = _phantom_lead_seconds(rtf, avail_q)
 
     # Event-driven pre-buffer: block on each boundary track's ready event in
     # order until the contiguous buffered audio covers the lead (or the album
@@ -2135,13 +2141,13 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
     if q is None:
         raise HTTPException(status_code=404, detail="Phantom track not found")
     missing = [{"track_id": req.track_id, "title": q.title}]
-    prov, sid = _resolve_waterfall([q])[0]    # Deezer lossless, else YouTube
-    if prov is None:
+    chain = _resolve_waterfall([q])[0]        # Deezer lossless first, YouTube fallback
+    if not chain:
         return {"ok": True, "provider": None,
                 "track_count": 0, "requested": 1, "missing": missing}
 
     proxy = streaming_service.get_proxy()
-    tokens = proxy.start_session([(prov, q, sid)])
+    tokens = proxy.start_session([(q, chain)])
     try:
         e = proxy.wait_ready(tokens[0])
     except (TimeoutError, KeyError):
@@ -2162,7 +2168,7 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
             raise HTTPException(
                 status_code=503,
                 detail="HQPlayer unavailable — preview not queued. Try again.")
-        return {"ok": True, "provider": prov.manifest.id, "track_count": 1,
+        return {"ok": True, "provider": e.provider.manifest.id, "track_count": 1,
                 "requested": 1, "missing": [], "artist": q.artist, "album": q.album}
     except HTTPException:
         raise
@@ -2181,13 +2187,13 @@ def queue_phantom_track(req: PlayPhantomTrackRequest):
     if q is None:
         raise HTTPException(status_code=404, detail="Phantom track not found")
     missing = [{"track_id": req.track_id, "title": q.title}]
-    prov, sid = _resolve_waterfall([q])[0]    # Deezer lossless, else YouTube
-    if prov is None:
+    chain = _resolve_waterfall([q])[0]        # Deezer lossless first, YouTube fallback
+    if not chain:
         return {"ok": True, "provider": None,
                 "track_count": 0, "requested": 1, "missing": missing}
 
     proxy = streaming_service.get_proxy()
-    tokens = proxy.add_tracks([(prov, q, sid)])
+    tokens = proxy.add_tracks([(q, chain)])
     try:
         e = proxy.wait_ready(tokens[0])
     except (TimeoutError, KeyError):
@@ -2202,7 +2208,7 @@ def queue_phantom_track(req: PlayPhantomTrackRequest):
         if not added:
             raise HTTPException(status_code=503,
                                 detail="HQPlayer unavailable — not queued. Try again.")
-        return {"ok": True, "provider": prov.manifest.id, "track_count": 1,
+        return {"ok": True, "provider": e.provider.manifest.id, "track_count": 1,
                 "requested": 1, "missing": []}
     except HTTPException:
         raise
@@ -2225,15 +2231,15 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
     if proxy is None:
         raise HTTPException(status_code=503, detail="No streaming provider available")
 
-    resolved = _resolve_waterfall(queries)    # Deezer lossless first, YouTube fallback
-    items = [(prov, q, sid) for q, (prov, sid) in zip(queries, resolved) if prov is not None]
-    missing = [q for q, (prov, sid) in zip(queries, resolved) if prov is None]
+    chains = _resolve_waterfall(queries)      # Deezer lossless first, YouTube fallback
+    items = [(q, ch) for q, ch in zip(queries, chains) if ch]
+    missing = [q for q, ch in zip(queries, chains) if not ch]
     missing_payload = [{"track_id": q.track_id, "title": q.title} for q in missing]
     if not items:
         return {"ok": True, "provider": None, "track_count": 0,
                 "requested": len(queries), "missing": missing_payload}
 
-    avail_q = [q for _prov, q, _sid in items]
+    avail_q = [q for q, _ch in items]
     tokens = proxy.add_tracks(items)
     if req.position == "next":
         # Inserting after current needs the whole block in hand, so wait for the

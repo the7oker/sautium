@@ -63,7 +63,7 @@ def init(settings) -> bool:
             e.query.track_id,
             e.audio.data if e.audio else None,
             e.query.duration,
-            e.provider.manifest.lossless,
+            e.audio.lossless if e.audio else False,   # ACTUAL fetch quality (may be a degraded tier)
         )
         logger.info("preview enrichment enabled (analyze-on-preview)")
 

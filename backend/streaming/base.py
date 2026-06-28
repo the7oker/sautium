@@ -53,6 +53,10 @@ class FetchedAudio:
     FLAC (lossless of the lossy source)."""
     data: bytes
     mime: str          # "audio/flac" | "audio/mpeg"
+    # ACTUAL quality of THIS fetch, not the provider's best — a provider may
+    # degrade within its own tiers (Deezer FLAC→320 when no FLAC for the region),
+    # so enrichment provenance reads this, not manifest.lossless.
+    lossless: bool = False
 
 
 class ProviderError(Exception):
