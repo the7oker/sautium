@@ -83,11 +83,28 @@ class PreviewEnricher:
             if db.query(Embedding.id).filter(Embedding.track_id == track_id).first():
                 return
 
-        embedder, analyzer = self._models()
-
         # Decode the in-memory FLAC to 48k mono and take the SAME middle window
         # the scanner uses, so the embedding is comparable to owned tracks.
         audio, _ = librosa.load(io.BytesIO(flac), sr=48000, mono=True)
+
+        # Poison guard (before loading models / GPU work): the provider resolve matches by
+        # metadata + a loose ±50% duration gate, so a known-MB-duration track can
+        # still stream the WRONG recording (cover / remix / live) that merely passed
+        # that gate. Features from the wrong audio would poison the shared pool, and
+        # unlike an owned track there is no real-file analysis shielding this slot.
+        # Verify the fetched audio's actual length against the MB duration and bail
+        # on divergence — tight (~5%) vs the resolve's loose gate, so a real master
+        # variance still enriches but a different recording does not. Tunable.
+        actual = len(audio) / 48000.0
+        tol = max(7.0, 0.05 * duration)
+        if abs(actual - duration) > tol:
+            logger.warning(
+                "preview enrich SKIP %s: fetched audio %.0fs vs MB %.0fs (>%.0fs "
+                "tolerance) — likely a different recording, not enriching",
+                track_id, actual, duration, tol)
+            return
+
+        embedder, analyzer = self._models()
         mid = self._middle(audio, 48000, float(settings.audio_sample_duration))
 
         vec = embedder._generate_batch_embeddings([mid])     # (1, 512) L2-normed | None
