@@ -650,10 +650,12 @@
             return;
           }
           // Off → On. Radio replaces the queue, so warn the user if
-          // there's more than just the current track to lose.
-          const seedId = (this.lastDetail && this.lastDetail.media_file_id)
+          // there's more than just the current track to lose. Seed by owned
+          // media_file_id, or — for a streamed phantom track — its track UUID.
+          const seedMf = (this.lastDetail && this.lastDetail.media_file_id)
                        || (this._npMfId || null);
-          if (!seedId) return;
+          const seedTid = this._npPreviewTid || null;
+          if (!seedMf && !seedTid) return;
           const playlistLen = (window.currentPlaylist || []).length;
           if (playlistLen > 1) {
             const ok = await window.confirmDestructive({
@@ -665,11 +667,17 @@
             if (!ok) return;
           }
           try {
-            await fetch('/api/player/radio/start', {
+            const resp = await fetch('/api/player/radio/start', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ track_id: seedId }),
+              body: JSON.stringify(seedMf ? { track_id: seedMf } : { track_uuid: seedTid }),
             });
+            if (!resp.ok) {
+              let msg = 'Could not start radio.';
+              try { const b = await resp.json(); if (b && b.detail) msg = b.detail; } catch (_) {}
+              await window.notifyDialog({
+                title: 'Radio', message: window.escapeProfileHtml(msg), kind: 'error' });
+            }
           } catch (err) { console.warn('radio start failed', err); }
         });
       }

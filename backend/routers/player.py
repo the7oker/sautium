@@ -2871,8 +2871,9 @@ def _radio_fill(seed_uuid: str, gen: int) -> None:
 
 
 class RadioStartRequest(BaseModel):
-    track_id: int           # media_file_id of the seed
-    limit: int = 20         # legacy — batches are fixed-size and refilled now
+    track_id: Optional[int] = None    # media_file_id of an owned seed
+    track_uuid: Optional[str] = None  # track UUID of a phantom (streamed) seed
+    limit: int = 20                   # legacy — batches are fixed-size and refilled now
 
 
 @router.post("/radio/start")
@@ -2885,12 +2886,28 @@ def radio_start(req: RadioStartRequest):
     global _radio_mode, _radio_played, _radio_refilling
     global _playback_generation, _status_version
 
-    seed = _db_query_one(
-        "SELECT track_id::text AS tid FROM media_files WHERE id = %(id)s",
-        {"id": req.track_id})
-    if not seed:
-        raise HTTPException(status_code=404, detail="Track not found")
-    seed_uuid = seed["tid"]
+    # Seed by track UUID (a streamed phantom row has no media_file) or by
+    # media_file_id (owned). Either way radio keys on the track's CLAP embedding.
+    if req.track_uuid:
+        seed_uuid = req.track_uuid
+    elif req.track_id:
+        seed = _db_query_one(
+            "SELECT track_id::text AS tid FROM media_files WHERE id = %(id)s",
+            {"id": req.track_id})
+        if not seed:
+            raise HTTPException(status_code=404, detail="Track not found")
+        seed_uuid = seed["tid"]
+    else:
+        raise HTTPException(status_code=400, detail="track_id or track_uuid required")
+
+    # Radio needs the seed's audio embedding to find similar tracks. A just-started
+    # phantom may not be analysed yet — fail clearly instead of an empty station.
+    if not _db_query_one(
+            "SELECT 1 FROM embeddings WHERE track_id = %(t)s::uuid LIMIT 1",
+            {"t": seed_uuid}):
+        raise HTTPException(
+            status_code=409,
+            detail="This track isn't analysed yet — play it a moment, then start radio.")
 
     _rotate_session('radio', seed_media_file_id=req.track_id)
     with _hqp_lock:
