@@ -4253,18 +4253,53 @@
     }
   }
 
+  // (Re)load the "Similar albums" shelf for the open phantom album. Streaming
+  // enriches the tracks (adds CLAP embeddings) AFTER the page rendered — which is
+  // exactly what makes the album similarity-eligible — so the shelf must be
+  // refetched once enrichment lands, not just on the initial render. Renders only
+  // when the result set changes (signature), so repeated settles don't reflow it.
+  async function loadPhantomSimilar(screen, albumId) {
+    const slot = screen && screen.querySelector('[data-similar-slot]');
+    if (!slot || !albumId) return;
+    let items;
+    try {
+      const resp = await fetch('/api/albums/' + encodeURIComponent(albumId) + '/similar');
+      items = resp.ok ? ((await resp.json()).results || []) : [];
+    } catch (_) { return; }
+    if (!screen.isConnected || !items.length) return;
+    const sig = items.map(a => a.album_id).join(',');
+    if (slot.dataset.simSig === sig) return;
+    slot.dataset.simSig = sig;
+    slot.hidden = false;
+    slot.innerHTML = `<div class="section-sep"></div>
+      <div class="section-head"><h3>Similar albums</h3></div>
+      ${renderAlbumRow(items)}`;
+    slot.querySelectorAll('[data-album-id]').forEach(el =>
+      el.addEventListener('click', () =>
+        navigateToEntity('album', el.getAttribute('data-album-id'))));
+  }
+
   // One global listener (registered once): a preview-changed ping re-fetches
   // whichever phantom album is currently open, found by its data attribute — no
-  // per-render listener to leak. Debounced so a burst of pings (a 12-track album
-  // landing) collapses into a single re-fetch.
+  // per-render listener to leak. Two cadences: a quick debounce for the track
+  // rows (buffering + key·bpm), and a longer SETTLE timer for the Similar shelf —
+  // similarity is only worth (re)computing once enrichment has stopped landing.
   let _previewRefreshTimer = null;
+  let _similarSettleTimer = null;
   window.addEventListener('sautium:preview-changed', () => {
-    if (_previewRefreshTimer) return;
-    _previewRefreshTimer = setTimeout(() => {
-      _previewRefreshTimer = null;
+    if (!_previewRefreshTimer) {
+      _previewRefreshTimer = setTimeout(() => {
+        _previewRefreshTimer = null;
+        const screen = document.querySelector('.detail-screen[data-phantom-album-id]');
+        if (screen) refreshPhantomAlbumTracks(screen, screen.dataset.phantomAlbumId);
+      }, 400);
+    }
+    if (_similarSettleTimer) clearTimeout(_similarSettleTimer);
+    _similarSettleTimer = setTimeout(() => {
+      _similarSettleTimer = null;
       const screen = document.querySelector('.detail-screen[data-phantom-album-id]');
-      if (screen) refreshPhantomAlbumTracks(screen, screen.dataset.phantomAlbumId);
-    }, 400);
+      if (screen) loadPhantomSimilar(screen, screen.dataset.phantomAlbumId);
+    }, 5000);
   });
 
   function wireDetailHandlers(screen, ctx = {}) {

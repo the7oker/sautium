@@ -93,6 +93,8 @@ class PreviewEnricher:
         vec = embedder._generate_batch_embeddings([mid])     # (1, 512) L2-normed | None
         feats = analyzer.analyze_from_array(mid, sr=48000)    # dict | None
 
+        from sqlalchemy import text
+
         with SessionLocal() as db:
             if vec is not None and len(vec):
                 model = embedder._get_or_create_embedding_model(db)
@@ -102,6 +104,13 @@ class PreviewEnricher:
                     source_sample_rate=48000, source_is_lossless=lossless,
                     is_preview=True,
                 )
+                # New CLAP vector → the track's album(s) audio-similarity cache is
+                # stale; drop it so /similar recomputes with the richer vector set
+                # (a phantom album becomes similarity-eligible only as it enriches).
+                db.execute(text(
+                    "DELETE FROM similar_albums WHERE source = 'clap_assignment' "
+                    "AND album_id IN (SELECT album_id FROM album_tracks "
+                    "WHERE track_id = :tid)"), {"tid": track_id})
             if feats:
                 self._save_features(db, track_id, feats, lossless)
             db.commit()
