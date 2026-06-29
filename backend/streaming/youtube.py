@@ -15,8 +15,8 @@ import re
 import subprocess
 import tempfile
 
-from .base import (FetchedAudio, ProviderError, ProviderManifest, StreamProvider,
-                   TrackQuery)
+from .base import (FetchedAudio, ProviderError, ProviderManifest, ResolvedSource,
+                   StreamProvider, TrackQuery)
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +40,9 @@ class YouTubeProvider(StreamProvider):
     SEARCH_N = 5    # candidates to score before downloading one
 
     def fetch(self, query: TrackQuery) -> FetchedAudio:
-        return self._download(self._resolve(query))
+        return self._download(self._resolve(query).source_id)
 
-    def _resolve(self, query: TrackQuery) -> str:
+    def _resolve(self, query: TrackQuery) -> ResolvedSource:
         """Pick the best video via a flat (no-download) search. We prefer the
         candidate whose length matches the MusicBrainz duration — this rejects
         remixes, extended/edited cuts and wrong tracks that the bare top hit
@@ -101,7 +101,7 @@ class YouTubeProvider(StreamProvider):
                 f"(want ~{query.duration:.0f}s, best {best['duration']:.0f}s)")
         logger.info("youtube resolve %r -> %s (%ss, %s)",
                     search, best["id"], best["duration"], best["channel"])
-        return best["id"]
+        return ResolvedSource(source_id=best["id"], duration=best["duration"])
 
     def _score(self, c: dict, query: TrackQuery) -> float:
         s = 0.0

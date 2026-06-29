@@ -60,6 +60,17 @@ class FetchedAudio:
     lossless: bool = False
 
 
+@dataclass(frozen=True)
+class ResolvedSource:
+    """Availability-pass result: the provider source id to download, plus the
+    metadata the resolve already saw. ``duration`` (seconds) backfills phantom
+    track lengths MusicBrainz left blank — see player._backfill_phantom_durations.
+    A provider's ``_resolve`` may return a bare source-id str (back-compat) or
+    this richer object; the host normalises both in ``resolve()``."""
+    source_id: str
+    duration: Optional[float] = None
+
+
 class ProviderError(Exception):
     """No match found, or the source fetch/transcode failed."""
 
@@ -85,16 +96,20 @@ class StreamProvider(ABC):
         return callable(getattr(self, "_resolve", None)) and \
             callable(getattr(self, "_download", None))
 
-    def resolve(self, query: TrackQuery) -> Optional[str]:
-        """The provider's source id for the query, or None if no acceptable
-        match (availability check — no download)."""
+    def resolve(self, query: TrackQuery) -> Optional["ResolvedSource"]:
+        """The provider's source for the query, or None if no acceptable match
+        (availability check — no download). Normalises a bare source-id str from
+        ``_resolve`` (back-compat) into a ResolvedSource."""
         rfn = getattr(self, "_resolve", None)
         if not callable(rfn):
             raise NotImplementedError(f"{self.manifest.id} cannot pre-resolve")
         try:
-            return rfn(query)
+            r = rfn(query)
         except ProviderError:
             return None
+        if r is None:
+            return None
+        return r if isinstance(r, ResolvedSource) else ResolvedSource(source_id=r)
 
     def download(self, source_id: str) -> FetchedAudio:
         """Fetch by the provider's own source id, skipping resolution."""

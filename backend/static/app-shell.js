@@ -3953,6 +3953,7 @@
             if (body && screen.isConnected) {
               applyPhantomMissing(screen, body.unavailable);
               updateStreamQualityBadge(screen, body.quality);
+              applyPhantomDurations(screen, body.durations, d);
             }
           })
           .catch(() => {});
@@ -4175,6 +4176,29 @@
     screen.querySelectorAll('.track-row.is-phantom-track[data-track-id]').forEach(row => {
       row.classList.toggle('is-unavailable', ids.has(row.getAttribute('data-track-id')));
     });
+  }
+
+  // Provider-resolved durations for tracks MusicBrainz had no length for. The
+  // backend never persists these (length_ms stays MB-canonical), so they arrive
+  // with the availability response and are patched in display-only — a full
+  // re-render shows 0:00 again until the next resolve re-supplies them.
+  function applyPhantomDurations(screen, durations, albumData) {
+    if (!screen || !durations) return;
+    for (const [tid, sec] of Object.entries(durations)) {
+      if (!sec) continue;
+      const sel = (window.CSS && CSS.escape) ? CSS.escape(tid) : tid;
+      const durEl = screen.querySelector(
+        `.track-row[data-track-id="${sel}"] .track-dur`);
+      if (durEl) durEl.textContent = fmtDuration(sec);
+    }
+    // Album total = MB lengths (already on the tracks) + the virtual ones; the
+    // header rendered 0:00 because every MB length was NULL.
+    if (albumData && albumData.tracks) {
+      const total = albumData.tracks.reduce((s, t) =>
+        s + (Number(t.duration) || Number(durations[t.track_id]) || 0), 0);
+      const totEl = screen.querySelector('.am-dur');
+      if (totEl && total > 0) totEl.textContent = fmtDurationLong(total);
+    }
   }
 
   // Refine the phantom album's quality badge to the ACTUAL streamed mix once the

@@ -1024,7 +1024,8 @@ def _build_playlist_payload(hqp_tracks: list) -> dict:
                     "track_number": None,
                     "artist": meta["artist"] or "Unknown",
                     "album": meta.get("album") or "",
-                    "duration_seconds": meta.get("duration"),
+                    "duration_seconds": (meta.get("duration")
+                                         or _resolved_durations.get(meta.get("track_id"))),
                     "cover_id": None,
                     "preview": True,
                     "provider": meta["provider"],
@@ -1807,9 +1808,9 @@ def _phantom_filler(proxy, tokens: list, start_index: int, gen: int) -> None:
 
 
 def _parallel_resolve(provider, queries: list) -> list:
-    """Resolve every query to a provider source id concurrently (the fast
-    availability pass, no downloads). Returns a list parallel to `queries` of
-    source ids / None (None = not found on this provider)."""
+    """Resolve every query on a provider concurrently (the fast availability
+    pass, no downloads). Returns a list parallel to `queries` of ResolvedSource
+    / None (None = not found on this provider)."""
     from concurrent.futures import ThreadPoolExecutor
 
     def one(q):
@@ -1825,6 +1826,18 @@ def _parallel_resolve(provider, queries: list) -> list:
         return list(ex.map(one, queries))
 
 
+# Provider-resolved track durations for phantom tracks MusicBrainz has NO length
+# for — DISPLAY ONLY, deliberately never written to album_tracks.length_ms. That
+# column is MB-canonical IDENTITY: a provider duration written there would
+# circularly self-confirm the very match it was derived from, defeating the
+# resolve/enrichment length-gate and letting wrong-recording features (cover /
+# remix / DJ-mix) poison the shared feature pool. So the resolved duration lives
+# only in memory (recomputed by the availability resolve) and is surfaced solely
+# for display. Enrichment stays gated on the MB duration (e.query.duration), so an
+# MB-length-less track is never analysed. Keyed by track_id; resets on restart.
+_resolved_durations: dict[str, float] = {}
+
+
 def _resolve_waterfall(queries: list) -> list:
     """Per-track lossless-first fallback CHAIN ``[(provider, source_id), ...]``.
     Each track resolves to its best provider (Deezer FLAC before YouTube lossy);
@@ -1837,6 +1850,7 @@ def _resolve_waterfall(queries: list) -> list:
     provs = streaming_service.providers_preferred()
     best = [None] * len(queries)            # index into provs that resolved
     sids = [None] * len(queries)
+    durs = [None] * len(queries)            # provider-reported duration (s), for length_ms backfill
     pending = list(range(len(queries)))
     for pi, prov in enumerate(provs):
         if not pending:
@@ -1845,12 +1859,16 @@ def _resolve_waterfall(queries: list) -> list:
             continue                        # can't pre-resolve; appears only as a lazy fallback
         res = _parallel_resolve(prov, [queries[i] for i in pending])
         still = []
-        for i, sid in zip(pending, res):
-            if sid is not None:
-                best[i], sids[i] = pi, sid
+        for i, r in zip(pending, res):
+            if r is not None:
+                best[i], sids[i], durs[i] = pi, r.source_id, r.duration
             else:
                 still.append(i)
         pending = still
+
+    for q, d in zip(queries, durs):
+        if d and d > 0 and q.track_id:
+            _resolved_durations[q.track_id] = float(d)
 
     chains = []
     for i in range(len(queries)):
@@ -1957,7 +1975,7 @@ def phantom_availability(album_id: str) -> dict:
     now = time.time()
     hit = _availability_cache.get(key)
     if hit and now - hit[0] < _AVAILABILITY_TTL_S:
-        unavailable, quality = hit[1], hit[2]
+        unavailable, quality, durations = hit[1], hit[2], hit[3]
     else:
         queries = _phantom_album_queries(album_id)
         chains = _resolve_waterfall(queries)
@@ -1975,9 +1993,14 @@ def phantom_availability(album_id: str) -> dict:
         unavailable = frozenset(all_ids - set(best_lossless))
         quality = _mix_quality(sum(best_lossless.values()),
                                sum(1 for v in best_lossless.values() if not v))
-        _availability_cache[key] = (now, unavailable, quality)
+        # DISPLAY-only durations the resolve recovered for MB-length-less tracks
+        # (not persisted — see _resolved_durations).
+        durations = {t: _resolved_durations[t] for t in all_ids
+                     if t in _resolved_durations}
+        _availability_cache[key] = (now, unavailable, quality, durations)
 
-    return {"unavailable": [{"track_id": t} for t in unavailable], "quality": quality}
+    return {"unavailable": [{"track_id": t} for t in unavailable],
+            "quality": quality, "durations": durations}
 
 
 class PlayPhantomAlbumRequest(BaseModel):
