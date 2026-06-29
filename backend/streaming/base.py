@@ -44,6 +44,7 @@ class TrackQuery:
     duration: Optional[float] = None   # seconds — for match disambiguation
     isrc: Optional[str] = None
     track_id: Optional[str] = None     # Sautium track UUID — for preview enrichment
+    cover_url: Optional[str] = None    # phantom album art (CAA) — display only, not for resolution
 
 
 @dataclass

@@ -153,6 +153,7 @@ def _status_poller():
                     "track_index": status.track_index,
                     "media_file_id": pl_row["id"] if pl_row else None,
                     "cover_id": pl_row["cover_id"] if pl_row else None,
+                    "cover_url": pl_row.get("cover_url") if pl_row else None,
                     "progress_percent": round(status.progress_percent, 1),
                     "position_formatted": format_time(status.position),
                     "length_formatted": format_time(status.length),
@@ -1028,6 +1029,7 @@ def _build_playlist_payload(hqp_tracks: list) -> dict:
                     "preview": True,
                     "provider": meta["provider"],
                     "track_id": meta.get("track_id"),
+                    "cover_url": meta.get("cover_url"),
                     "index": idx,
                 })
             else:
@@ -1886,7 +1888,7 @@ def _phantom_track_query(track_id: str):
     """Build a TrackQuery for one phantom track from album_tracks, or None."""
     from streaming.base import TrackQuery
     row = _db_query_one("""
-        SELECT t.title, atr.length_ms, al.title AS album,
+        SELECT t.title, atr.length_ms, al.title AS album, al.cover_url,
                (SELECT ar.name FROM track_artists ta
                   JOIN artists ar ON ar.id = ta.artist_id
                 WHERE ta.track_id = t.id
@@ -1902,14 +1904,15 @@ def _phantom_track_query(track_id: str):
     return TrackQuery(
         artist=row["artist"] or "", title=row["title"], album=row["album"],
         duration=(float(row["length_ms"]) / 1000.0 if row["length_ms"] else None),
-        track_id=track_id)
+        track_id=track_id, cover_url=row["cover_url"])
 
 
 def _phantom_album_queries(album_id: str) -> list:
     """Ordered TrackQuery list for a phantom album's tracklist (album_tracks)."""
     from streaming.base import TrackQuery
     rows = _db_query("""
-        SELECT t.id::text AS track_id, t.title, al.title AS album, atr.length_ms,
+        SELECT t.id::text AS track_id, t.title, al.title AS album, al.cover_url,
+               atr.length_ms,
                (SELECT ar.name FROM track_artists ta
                   JOIN artists ar ON ar.id = ta.artist_id
                 WHERE ta.track_id = t.id
@@ -1924,7 +1927,7 @@ def _phantom_album_queries(album_id: str) -> list:
         TrackQuery(
             artist=r["artist"] or "", title=r["title"], album=r["album"],
             duration=(float(r["length_ms"]) / 1000.0 if r["length_ms"] else None),
-            track_id=r["track_id"])
+            track_id=r["track_id"], cover_url=r["cover_url"])
         for r in rows if r["title"]
     ]
 

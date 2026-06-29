@@ -976,7 +976,7 @@
   /* ---------- Mini-player adapter ---------- */
 
   const mp = {
-    el: null, cover: null, title: null, artist: null, previewBadge: null,
+    el: null, cover: null, title: null, artist: null,
     playPauseIcon: null, playPause: null, next: null,
     lastSongKey: null,
 
@@ -985,7 +985,6 @@
       this.cover = document.getElementById('mpCover');
       this.title = document.getElementById('mpTitle');
       this.artist = document.getElementById('mpArtist');
-      this.previewBadge = document.getElementById('mpPreviewBadge');
       this.playPause = document.getElementById('mpPlayPause');
       this.playPauseIcon = document.getElementById('mpPlayPauseIcon');
       this.next = document.getElementById('mpNext');
@@ -1032,11 +1031,6 @@
       const artist = data.artist || '';
       const album = data.album || '';
       this.artist.textContent = album ? `${artist} · ${album}` : artist;
-      if (this.previewBadge) {
-        const show = !!(data.preview && data.provider);
-        this.previewBadge.hidden = !show;
-        this.previewBadge.textContent = show ? `Preview · ${data.provider}` : '';
-      }
 
       if (this.playPauseIcon) {
         this.playPauseIcon.setAttribute('d',
@@ -1059,10 +1053,11 @@
         const c = coverPlaceholderColors(data.song || data.album || '');
         this.cover.style.backgroundImage =
           `linear-gradient(135deg, ${c.bg1}, ${c.bg2})`;
-        if (data.cover_id || data.media_file_id) {
+        if (data.cover_id || data.media_file_id || data.cover_url) {
           this.setCover({
             cover_id: data.cover_id,
             media_file_id: data.media_file_id,
+            cover_url: data.cover_url,
           });
         }
       }
@@ -1206,7 +1201,7 @@
         // re-anchors playback to the current track's new slot.
         const isLocked = false;
         const c = coverPlaceholderColors(t.title || t.album || '');
-        const url = coverUrl({cover_id: t.cover_id, media_file_id: t.id});
+        const url = coverUrl({cover_id: t.cover_id, media_file_id: t.id, cover_url: t.cover_url});
         const cover = url
           ? `<img src="${url}" alt="" loading="lazy" onerror="this.style.display='none'">`
           : '';

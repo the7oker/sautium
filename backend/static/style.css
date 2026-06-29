@@ -1323,17 +1323,6 @@ body.has-miniplayer .ai-fab {
   background: var(--color-surface-hi);
   border: 1px solid var(--color-divider);
 }
-.mp-preview-badge {
-  font-size: calc(9 * var(--px));
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--color-text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 /* ---- Meta row (with top divider) ---- */
 .np-meta-row {
   display: flex;
