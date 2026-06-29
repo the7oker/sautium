@@ -1033,6 +1033,31 @@ def _build_playlist_payload(hqp_tracks: list) -> dict:
             })
         else:
             meta = _preview_meta(hqp_track["uri"])
+            if meta and meta.get("media_file_id"):
+                # An OWNED m4a transcoded on play and served via the proxy http URL
+                # — render it as the owned track it is (cover, real metadata), not a
+                # preview. Look the row up by media_file_id (the URI is not file://).
+                orow = _db_query_one("""
+                    SELECT mf.id, t.title, mf.track_number, mf.duration_seconds,
+                           mf.cover_id::text AS cover_id, a.name AS artist
+                    FROM media_files mf
+                    JOIN tracks t ON mf.track_id = t.id
+                    JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+                    JOIN artists a ON ta.artist_id = a.id
+                    WHERE mf.id = %(id)s
+                """, {"id": meta["media_file_id"]})
+                if orow:
+                    tracks_with_info.append({
+                        "id": orow["id"],
+                        "title": orow["title"],
+                        "track_number": orow["track_number"],
+                        "artist": orow["artist"],
+                        "duration_seconds": (float(orow["duration_seconds"])
+                                             if orow["duration_seconds"] is not None else None),
+                        "cover_id": orow["cover_id"],
+                        "index": idx,
+                    })
+                    continue
             if meta:
                 tracks_with_info.append({
                     "id": None,
@@ -1707,11 +1732,134 @@ def jump(req: JumpRequest):
         raise HTTPException(status_code=503, detail=str(e))
 
 
+_local_provider = None
+
+
+def _owned_play_uri(media_file_id: int, db_path: str, file_format: str) -> str:
+    """HQPlayer URI for an owned track. Native file:// for formats HQPlayer decodes;
+    for an m4a (which it can't — MP4 container, AAC or ALAC) transcode to FLAC in
+    memory and return the media-proxy http URL so it plays anyway, displayed as
+    owned. Falls back to file:// if streaming/proxy is off or the transcode fails."""
+    global _local_provider
+    from streaming.local import TRANSCODE_FORMATS
+    if (file_format or "").upper() not in TRANSCODE_FORMATS:
+        return file_path_to_uri(db_path)
+
+    from streaming import service as streaming_service
+    proxy = streaming_service.get_proxy() if streaming_service.is_enabled() else None
+    if proxy is None:
+        return file_path_to_uri(db_path)
+
+    if _local_provider is None:
+        from streaming.local import LocalTranscodeProvider
+        _local_provider = LocalTranscodeProvider()
+    from streaming.base import TrackQuery
+    container_path = settings.translate_to_local_path(db_path)
+    # artist/title are required but unused for display here — the playlist payload
+    # renders this entry from media_file_id (a real owned row), not the query.
+    q = TrackQuery(artist="", title="", media_file_id=media_file_id)
+    tokens = proxy.add_tracks([(q, [(_local_provider, container_path)])])
+    try:
+        e = proxy.wait_ready(tokens[0])
+    except (TimeoutError, KeyError):
+        e = None
+    if e is None or e.audio is None:
+        return file_path_to_uri(db_path)
+    return proxy.url_for(tokens[0])
+
+
+def _owned_filler(rows: list, gen: int) -> None:
+    """Append the rest of an owned set to HQPlayer as each URI is ready — file://
+    instantly, an m4a after its in-memory transcode — in order, stopping if a new
+    playback supersedes this one (generation)."""
+    for r in rows:
+        if _playback_generation != gen:
+            return
+        uri = _owned_play_uri(r["id"], r["file_path"], r["file_format"])
+        with _hqp_lock:
+            if _playback_generation != gen:
+                return
+            _add_uris_with_retry([uri], clear_first=False)
+        _invalidate_playlist()
+        _notify_update()
+
+
+def _skip_to_first_playable(added: int) -> None:
+    """If the first queued track didn't start (e.g. a [Vinyl] placeholder path that
+    isn't real audio), skip ahead until one plays. Best-effort; holds _hqp_lock."""
+    try:
+        hqp = _get_hqp()
+        time.sleep(0.5)
+        status = hqp.get_status()
+        if status and status.state == PlaybackState.STOPPED and added > 1:
+            logger.warning("play: first track didn't start, skipping ahead")
+            for skip_idx in range(2, min(added + 1, 6)):
+                hqp.select_track(skip_idx)
+                hqp.play()
+                time.sleep(0.5)
+                status = hqp.get_status()
+                if status and status.state != PlaybackState.STOPPED:
+                    logger.info(f"play: track {skip_idx} started")
+                    break
+    except (BrokenPipeError, ConnectionError, OSError):
+        pass
+
+
+def _add_owned(rows: list, *, clear_first: bool, position: str = "end") -> int:
+    """THE single path for handing owned tracks to HQPlayer. Each row (id, file_path,
+    file_format) is turned into a playable URI: native formats go as file://, ones
+    HQPlayer can't decode (m4a) are transcoded to FLAC in memory and served via the
+    proxy. When any need transcoding the queue is rolled in — the first track is
+    added (and, for a replace, played) now, the rest fill in behind via a background
+    filler — so a slow transcode never blocks the add or holds _hqp_lock. A native-
+    only set takes the fast add-everything-at-once path. ``clear_first`` replaces the
+    queue (and starts playback); otherwise tracks append (``position`` next|end).
+    Future proxy-processing of owned tracks hooks into _owned_play_uri — one place,
+    not every play path. Returns the count queued (rolling appends finish async)."""
+    from streaming.local import TRANSCODE_FORMATS
+    needs_roll = any((r.get("file_format") or "").upper() in TRANSCODE_FORMATS for r in rows)
+
+    if not needs_roll:
+        uris = [file_path_to_uri(r["file_path"]) for r in rows]
+        if clear_first:
+            with _hqp_lock:
+                _hqp_safe(lambda h: h.stop())
+                added = _add_uris_with_retry(uris, clear_first=True)
+                if added:
+                    _hqp_safe(lambda h: h.play())
+                    _skip_to_first_playable(added)
+        else:
+            added = _queue_uris(uris, position)
+        _invalidate_playlist()
+        _notify_update()
+        return added
+
+    # Rolling: prepare + add/play the first now, background-fill the rest in order.
+    first = rows[0]
+    uri0 = _owned_play_uri(first["id"], first["file_path"], first["file_format"])
+    if clear_first:
+        with _hqp_lock:
+            _hqp_safe(lambda h: h.stop())
+            added = _add_uris_with_retry([uri0], clear_first=True)   # bumps generation
+            gen = _playback_generation
+            if added:
+                _hqp_safe(lambda h: h.play())
+    else:
+        added = _queue_uris([uri0], position)
+        gen = _playback_generation
+    _invalidate_playlist()
+    _notify_update()
+    if added and len(rows) > 1:
+        threading.Thread(target=_owned_filler, args=(rows[1:], gen),
+                         daemon=True, name="owned-fill").start()
+    return len(rows) if added else 0
+
+
 @router.post("/play-track")
 def play_track(req: PlayTrackRequest):
     """Clear playlist, add single track, play, register with tracker."""
     row = _db_query_one("""
-        SELECT mf.file_path, t.title, a.name as artist, al.title as album
+        SELECT mf.id, mf.file_path, mf.file_format, t.title, a.name as artist, al.title as album
         FROM media_files mf
         JOIN tracks t ON mf.track_id = t.id
         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
@@ -1727,16 +1875,8 @@ def play_track(req: PlayTrackRequest):
     _rotate_session('track', seed_media_file_id=req.track_id)
 
     try:
-        uri = file_path_to_uri(row["file_path"])
-        with _hqp_lock:
-            _hqp_safe(lambda h: h.stop())
-            added = _add_uris_with_retry([uri], clear_first=True)
-            if added:
-                _hqp_safe(lambda h: h.play())
-        _invalidate_playlist()
+        added = _add_owned([row], clear_first=True)
         _exit_radio_mode()
-        _notify_update()
-
         if not added:
             raise HTTPException(
                 status_code=503,
@@ -2502,7 +2642,7 @@ def play_tracks(req: PlayTracksRequest):
         raise HTTPException(status_code=400, detail=f"invalid origin: {req.origin}")
 
     rows = _db_query("""
-        SELECT mf.id, mf.file_path, t.title, a.name as artist, al.title as album
+        SELECT mf.id, mf.file_path, mf.file_format, t.title, a.name as artist, al.title as album
         FROM media_files mf
         JOIN tracks t ON mf.track_id = t.id
         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
@@ -2523,40 +2663,8 @@ def play_tracks(req: PlayTracksRequest):
     )
 
     try:
-        uris = [file_path_to_uri(r["file_path"]) for r in rows]
-        with _hqp_lock:
-            logger.info("play-tracks: stopping playback")
-            _hqp_safe(lambda h: h.stop())
-            added = _add_uris_with_retry(uris, clear_first=True)
-            logger.info(f"play-tracks: added {added} of {len(rows)} tracks")
-            if added:
-                _hqp_safe(lambda h: h.play())
-
-                # Verify playback started; if the first track fails (e.g. a
-                # [Vinyl] path) skip ahead until one plays. Best-effort —
-                # the tracks are already queued, so a status-read miss here
-                # must not fail the whole call.
-                try:
-                    hqp = _get_hqp()
-                    time.sleep(0.5)
-                    status = hqp.get_status()
-                    if status and status.state == PlaybackState.STOPPED and added > 1:
-                        logger.warning("play-tracks: first track didn't start, skipping ahead")
-                        for skip_idx in range(2, min(added + 1, 6)):
-                            hqp.select_track(skip_idx)
-                            hqp.play()
-                            time.sleep(0.5)
-                            status = hqp.get_status()
-                            if status and status.state != PlaybackState.STOPPED:
-                                logger.info(f"play-tracks: track {skip_idx} started")
-                                break
-                except (BrokenPipeError, ConnectionError, OSError):
-                    pass
-
-        _invalidate_playlist()
+        added = _add_owned(rows, clear_first=True)
         _exit_radio_mode()
-        _notify_update()
-
         if added < len(rows):
             raise HTTPException(
                 status_code=503,

@@ -45,6 +45,8 @@ class TrackQuery:
     isrc: Optional[str] = None
     track_id: Optional[str] = None     # Sautium track UUID — for preview enrichment
     cover_url: Optional[str] = None    # phantom album art (CAA) — display only, not for resolution
+    media_file_id: Optional[int] = None  # set for an OWNED file transcoded on play (m4a) —
+                                         # makes Now Playing / queue render it as owned, not preview
 
 
 @dataclass

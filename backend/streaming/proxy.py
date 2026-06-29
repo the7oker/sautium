@@ -195,7 +195,7 @@ class MediaProxy:
         return {"artist": e.query.artist, "title": e.query.title,
                 "album": e.query.album, "provider": e.provider.manifest.id,
                 "track_id": e.query.track_id, "cover_url": e.query.cover_url,
-                "duration": e.query.duration}
+                "duration": e.query.duration, "media_file_id": e.query.media_file_id}
 
     def wait_ready(self, token: str, timeout: Optional[float] = None) -> _Entry:
         """Block until a track is fetched (used by the endpoint to absorb the
