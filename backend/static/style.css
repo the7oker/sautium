@@ -1348,9 +1348,9 @@ body.has-miniplayer .ai-fab {
   background: rgba(237, 226, 212, 0.02);
 }
 .np-q-badge.is-lossy {
-  color: var(--color-amber);
-  border-color: rgba(232, 176, 111, 0.35);
-  background: rgba(232, 176, 111, 0.06);
+  color: var(--color-negative);
+  border-color: rgba(193, 86, 78, 0.35);
+  background: rgba(193, 86, 78, 0.06);
 }
 
 .np-key-pill {
@@ -2553,9 +2553,9 @@ body.has-miniplayer .ai-fab {
   background: rgba(237, 226, 212, 0.02);
 }
 .am-hires.is-lossy {
-  color: var(--color-amber);
-  border: 1px solid rgba(232, 176, 111, 0.35);
-  background: rgba(232, 176, 111, 0.06);
+  color: var(--color-negative);
+  border: 1px solid rgba(193, 86, 78, 0.35);
+  background: rgba(193, 86, 78, 0.06);
 }
 
 /* ---- Album action buttons ---- */
