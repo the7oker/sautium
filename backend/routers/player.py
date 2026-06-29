@@ -1867,7 +1867,10 @@ def _resolve_waterfall(queries: list) -> list:
         pending = still
 
     for q, d in zip(queries, durs):
-        if d and d > 0 and q.track_id:
+        # Only MB-length-less tracks — the virtual duration is a FALLBACK, never an
+        # override of a known MB length (that is the canonical display; the resolved
+        # source may be a mismatch at a different length).
+        if d and d > 0 and q.track_id and not q.duration:
             _resolved_durations[q.track_id] = float(d)
 
     chains = []
