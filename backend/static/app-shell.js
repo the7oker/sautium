@@ -4138,6 +4138,17 @@
   // partial add the backend now reports as 503) as a styled dialog instead
   // of a swallowed console.warn. `resp` may be null (network error / thrown
   // fetch). Returns true on success so callers can skip follow-up work.
+  // Run an async click action at most once at a time per element — re-clicks
+  // while it's in flight are ignored (kills the double-[Stream all] / double-queue
+  // / double-play races where a 2nd click fires before the 1st settles). The
+  // faded-button visual is the caller's, where a button stays on screen.
+  async function onceInFlight(el, fn) {
+    if (!el || el.dataset.busy) return;
+    el.dataset.busy = '1';
+    try { await fn(); }
+    finally { delete el.dataset.busy; }
+  }
+
   async function reportPlaybackResult(resp, body) {
     if (resp && resp.ok) return true;
     // A Response body is one-shot: callers that already read resp.json() must
@@ -4351,7 +4362,7 @@
         e.stopPropagation();
         const mfId = el.getAttribute('data-media-file-id');
         if (mfId && typeof window.playTrack === 'function') {
-          window.playTrack(parseInt(mfId, 10));
+          onceInFlight(el, () => window.playTrack(parseInt(mfId, 10)));
         }
       });
     });
@@ -4400,19 +4411,22 @@
     // session replay sends no origin → backend defaults to 'mix'.
     screen.querySelectorAll('[data-action="play-all"]').forEach(btn => {
       btn.addEventListener('click', async () => {
-        if (!ctx.tracks || !ctx.tracks.length) return;
+        if (btn.disabled || !ctx.tracks || !ctx.tracks.length) return;
         const ids = ctx.tracks.map(t => t.media_file_id).filter(Boolean);
         const body = { track_ids: ids };
         if (ctx.playOrigin) {
           body.origin = ctx.playOrigin;
           if (ctx.originAlbumId) body.origin_album_id = ctx.originAlbumId;
         }
-        const resp = await fetch('/api/player/play-tracks', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        }).catch(() => null);
-        await reportPlaybackResult(resp);
+        btn.disabled = true;            // block double-fire; faded while in flight
+        try {
+          const resp = await fetch('/api/player/play-tracks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          }).catch(() => null);
+          await reportPlaybackResult(resp);
+        } finally { btn.disabled = false; }
       });
     });
     // Listen (phantom album) — streams the not-owned album onto HQPlayer via the
@@ -4461,20 +4475,22 @@
     // owned track). Display-only rows carry data-track-id (no media_file_id) and
     // stream via play-phantom-track; "Buffering…" shows under the title meanwhile.
     screen.querySelectorAll('.track-row.is-phantom-track[data-track-id]').forEach(row => {
-      row.addEventListener('click', async (e) => {
+      row.addEventListener('click', (e) => {
         if (e.target.closest('.track-add')) return;   // queue button handles its own
         const tid = row.getAttribute('data-track-id');
         if (!tid) return;
-        setTrackBuffering(screen, tid, true);
-        const resp = await fetch('/api/player/play-phantom-track', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ track_id: tid }),
-        }).catch(() => null);
-        let body = null;
-        try { body = resp ? await resp.json() : null; } catch (_) {}
-        setTrackBuffering(screen, tid, false);
-        if (!resp || !resp.ok) { await reportPlaybackResult(resp, body); return; }
-        if (body && body.track_count === 0) applyPhantomMissing(screen, body.missing);
+        onceInFlight(row, async () => {               // ignore re-click while loading
+          setTrackBuffering(screen, tid, true);
+          const resp = await fetch('/api/player/play-phantom-track', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ track_id: tid }),
+          }).catch(() => null);
+          let body = null;
+          try { body = resp ? await resp.json() : null; } catch (_) {}
+          setTrackBuffering(screen, tid, false);
+          if (!resp || !resp.ok) { await reportPlaybackResult(resp, body); return; }
+          if (body && body.track_count === 0) applyPhantomMissing(screen, body.missing);
+        });
       });
     });
     // Queue album — opens the same inline "Add to: [Next] [End]"
@@ -4540,20 +4556,25 @@
     if (addBtn) row.insertBefore(bar, addBtn);
     else row.appendChild(bar);
 
-    bar.querySelector('[data-confirm="end"]').addEventListener('click', async e => {
+    bar.querySelector('[data-confirm="end"]').addEventListener('click', e => {
       e.stopPropagation();
-      const resp = await fetch('/api/player/queue-tracks', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ track_ids: [mfId] }),
-      }).catch(() => null);
-      closeQueueConfirm(row);
-      await reportPlaybackResult(resp);
+      onceInFlight(bar, async () => {
+        bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
+        const resp = await fetch('/api/player/queue-tracks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ track_ids: [mfId] }),
+        }).catch(() => null);
+        closeQueueConfirm(row);
+        await reportPlaybackResult(resp);
+      });
     });
-    bar.querySelector('[data-confirm="next"]').addEventListener('click', async e => {
+    bar.querySelector('[data-confirm="next"]').addEventListener('click', e => {
       e.stopPropagation();
-      let resp = null;
-      try {
+      onceInFlight(bar, async () => {
+        bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
+        let resp = null;
+        try {
         // 1. Pull current playing index + freshest playlist so we
         //    can build the new order from a consistent snapshot.
         //    HQPlayer's track_index is 1-based; convert to JS index.
@@ -4591,8 +4612,9 @@
           });
         }
       } catch (err) { console.warn('queue-tracks (next) failed', err); }
-      closeQueueConfirm(row);
-      await reportPlaybackResult(resp);
+        closeQueueConfirm(row);
+        await reportPlaybackResult(resp);
+      });
     });
   }
 
@@ -4620,20 +4642,25 @@
     if (queueBtn) wrap.insertBefore(bar, queueBtn);
     else wrap.appendChild(bar);
 
-    bar.querySelector('[data-confirm="end"]').addEventListener('click', async e => {
+    bar.querySelector('[data-confirm="end"]').addEventListener('click', e => {
       e.stopPropagation();
-      const resp = await fetch('/api/player/queue-tracks', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ track_ids: ids }),
-      }).catch(() => null);
-      closeAlbumQueueConfirm(wrap);
-      await reportPlaybackResult(resp);
+      onceInFlight(bar, async () => {
+        bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
+        const resp = await fetch('/api/player/queue-tracks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ track_ids: ids }),
+        }).catch(() => null);
+        closeAlbumQueueConfirm(wrap);
+        await reportPlaybackResult(resp);
+      });
     });
-    bar.querySelector('[data-confirm="next"]').addEventListener('click', async e => {
+    bar.querySelector('[data-confirm="next"]').addEventListener('click', e => {
       e.stopPropagation();
-      let resp = null;
-      try {
+      onceInFlight(bar, async () => {
+        bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
+        let resp = null;
+        try {
         // Same approach as single-track Next: snapshot current
         // index + playlist, append the whole album, then reorder
         // so the appended block lands right after the current slot.
@@ -4667,8 +4694,9 @@
           });
         }
       } catch (err) { console.warn('queue-album (next) failed', err); }
-      closeAlbumQueueConfirm(wrap);
-      await reportPlaybackResult(resp);
+        closeAlbumQueueConfirm(wrap);
+        await reportPlaybackResult(resp);
+      });
     });
   }
 

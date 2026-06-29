@@ -2614,6 +2614,14 @@ body.has-miniplayer .ai-fab {
   font-family: inherit;
 }
 .btn-primary:active { background: var(--color-amber-press); }
+/* Disabled playback/queue button — faded + inert while its action is in flight
+   (the in-flight guard sets `disabled` to block double-clicks). */
+.btn-primary:disabled,
+.btn-secondary:disabled,
+.track-confirm-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 .btn-secondary {
   height: calc(48 * var(--px));
   padding: 0 calc(18 * var(--px));
