@@ -2696,7 +2696,7 @@ def queue_tracks(req: QueueTracksRequest):
         raise HTTPException(status_code=400, detail="No track IDs provided")
 
     rows = _db_query("""
-        SELECT mf.id, mf.file_path, t.title, a.name as artist, al.title as album
+        SELECT mf.id, mf.file_path, mf.file_format, t.title, a.name as artist, al.title as album
         FROM media_files mf
         JOIN tracks t ON mf.track_id = t.id
         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
@@ -2711,10 +2711,7 @@ def queue_tracks(req: QueueTracksRequest):
         raise HTTPException(status_code=404, detail="No tracks found")
 
     try:
-        uris = [file_path_to_uri(r["file_path"]) for r in rows]
-        with _hqp_lock:
-            added = _add_uris_with_retry(uris)
-        _invalidate_playlist()
+        added = _add_owned(rows, clear_first=False, position="end")
         if added < len(rows):
             raise HTTPException(
                 status_code=503,
@@ -2846,7 +2843,7 @@ def _radio_similar(seed_uuid: str, exclude: set, limit: int) -> list:
     return _db_query("""
         WITH target AS (SELECT vector FROM embeddings WHERE track_id = %(seed)s::uuid)
         SELECT t.id::text AS track_id,
-               mf_rep.id AS media_file_id, mf_rep.file_path,
+               mf_rep.id AS media_file_id, mf_rep.file_path, mf_rep.file_format,
                (mf_rep.id IS NOT NULL) AS is_owned,
                t.title, a.name AS artist,
                ph_rep.album AS phantom_album, ph_rep.length_ms,
@@ -2856,7 +2853,7 @@ def _radio_similar(seed_uuid: str, exclude: set, limit: int) -> list:
         JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
         JOIN artists a ON a.id = ta.artist_id
         LEFT JOIN LATERAL (
-            SELECT mf.id, mf.file_path
+            SELECT mf.id, mf.file_path, mf.file_format
             FROM media_files mf
             WHERE mf.track_id = t.id
             ORDER BY mf.is_analysis_source DESC, mf.id LIMIT 1
@@ -2878,8 +2875,9 @@ def _radio_similar(seed_uuid: str, exclude: set, limit: int) -> list:
 def _radio_build_batch(seed_uuid: str) -> list:
     """Pick a mixed batch from the seed, cap + space out the phantoms (owned tracks
     between them buffer the next stream), resolve the phantom chains and submit them
-    to the proxy. Returns ordered items {"kind","uri"|"token","track_uuid"} for the
-    rolling appender. Phantoms that no provider resolves are simply dropped."""
+    to the proxy. Returns ordered items for the rolling appender (owned: file fields,
+    turned into a URI — and transcoded if m4a — at append time; phantom: a proxy
+    token). Phantoms that no provider resolves are simply dropped."""
     from streaming import service as streaming_service
     from streaming.base import TrackQuery
 
@@ -2922,7 +2920,8 @@ def _radio_build_batch(seed_uuid: str) -> list:
     batch = []
     for i, r in enumerate(batch_rows):
         if r["is_owned"]:
-            batch.append({"kind": "owned", "uri": file_path_to_uri(r["file_path"]),
+            batch.append({"kind": "owned", "media_file_id": r["media_file_id"],
+                          "file_path": r["file_path"], "file_format": r["file_format"],
                           "track_uuid": r["track_id"]})
         elif i in pos_token:
             batch.append({"kind": "phantom", "token": pos_token[i],
@@ -2953,7 +2952,8 @@ def _radio_append_batch(batch: list, gen: int) -> None:
                 continue
             uri = proxy.url_for(item["token"])
         else:
-            uri = item["uri"]
+            # owned: native file:// or, for an m4a, transcode to FLAC via the proxy
+            uri = _owned_play_uri(item["media_file_id"], item["file_path"], item["file_format"])
         with _hqp_lock:
             if not _radio_mode or _playback_generation != gen:
                 return
