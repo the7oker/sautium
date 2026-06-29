@@ -160,6 +160,7 @@ def _status_poller():
                     "radio_mode": _radio_mode,
                     "preview": preview,
                     "provider": pl_row.get("provider") if preview else None,
+                    "preview_track_id": pl_row.get("track_id") if preview else None,
                 }
 
                 # Natural end-of-queue: HQPlayer stopped on the last track.
@@ -1026,6 +1027,7 @@ def _build_playlist_payload(hqp_tracks: list) -> dict:
                     "cover_id": None,
                     "preview": True,
                     "provider": meta["provider"],
+                    "track_id": meta.get("track_id"),
                     "index": idx,
                 })
             else:

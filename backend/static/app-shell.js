@@ -59,13 +59,24 @@
   // carries no detail of its own) can re-run the highlight pass after a
   // detail screen renders with stale rows.
   let _lastNpMediaFileId = null;
+  // Phantom previews have no media_files.id — the playing one is identified by
+  // its track UUID (surfaced as preview_track_id on the status payload).
+  let _lastNpPreviewTrackId = null;
 
   function updatePlayingHighlight() {
-    const target = _lastNpMediaFileId != null ? String(_lastNpMediaFileId) : null;
+    const mfTarget = _lastNpMediaFileId != null ? String(_lastNpMediaFileId) : null;
     document.querySelectorAll('.detail-screen .track-row[data-media-file-id]')
       .forEach(row => {
-        const match = target !== null
-          && row.getAttribute('data-media-file-id') === target;
+        const match = mfTarget !== null
+          && row.getAttribute('data-media-file-id') === mfTarget;
+        row.classList.toggle('is-playing', match);
+      });
+    // Streaming (phantom) tracks: matched by track UUID instead of file id.
+    const tidTarget = _lastNpPreviewTrackId != null ? String(_lastNpPreviewTrackId) : null;
+    document.querySelectorAll('.detail-screen .track-row.is-phantom-track[data-track-id]')
+      .forEach(row => {
+        const match = tidTarget !== null
+          && row.getAttribute('data-track-id') === tidTarget;
         row.classList.toggle('is-playing', match);
       });
   }
@@ -9061,6 +9072,7 @@
     document.addEventListener('np-update', e => {
       const d = e.detail || {};
       _lastNpMediaFileId = d.media_file_id != null ? d.media_file_id : null;
+      _lastNpPreviewTrackId = d.preview_track_id != null ? d.preview_track_id : null;
       mp.update(d);
       sheet.onStatus(d);
       updatePlayingHighlight();
