@@ -1902,6 +1902,23 @@ body.has-miniplayer .ai-fab {
   color: var(--color-text-dim);
 }
 
+/* Phantom (out-of-library) match in the Now Playing 'Similar tracks' list —
+   dimmed like a phantom mosaic tile so it reads as "not in your library" beside
+   owned rows; it streams on tap rather than playing a local file. */
+.np-sim-row.is-phantom-sim .np-sim-art {
+  opacity: 0.55;
+  transition: opacity var(--dur-fast) var(--ease-standard);
+}
+.np-sim-row.is-phantom-sim:active .np-sim-art {
+  opacity: 0.8;
+}
+.np-sim-row.is-phantom-sim .np-sim-track {
+  color: var(--color-text-muted);
+}
+.np-sim-row.is-phantom-sim .np-sim-artist {
+  color: var(--color-text-dim);
+}
+
 /* Phantom (unowned but canonized) artist tile — surfaced from out-of-catalog
    similar/discovery data. Dimmed like an unowned album so it reads as "not in
    your library" beside the solid owned artists. Mirrors .album-tile.is-unowned. */

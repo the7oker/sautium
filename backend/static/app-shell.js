@@ -724,12 +724,15 @@
             const tid = row.getAttribute('data-phantom-tid');
             if (!tid) return;
             onceInFlight(row, async () => {     // phantom match → stream it
+              const buf = row.querySelector('.track-buffering');
+              if (buf) buf.hidden = false;      // resolve+download is slow — show it
               const resp = await fetch('/api/player/play-phantom-track', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ track_id: tid }),
               }).catch(() => null);
               let body = null;
               try { body = resp ? await resp.json() : null; } catch (_) {}
+              if (buf) buf.hidden = true;
               if (!resp || !resp.ok) await reportPlaybackResult(resp, body);
             });
             return;
@@ -1036,6 +1039,7 @@
                 <div class="np-sim-info-left">
                   <div class="np-sim-track">${escapeHtml(t.title || t.song || '')}</div>
                   <div class="np-sim-artist">${escapeHtml((t.artist || '') + yearStr)}</div>
+                  ${owned ? '' : '<div class="track-buffering" hidden>Buffering…</div>'}
                 </div>
                 <span class="np-sim-score">${score}</span>
               </div>
