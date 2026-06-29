@@ -1024,7 +1024,7 @@ def _build_playlist_payload(hqp_tracks: list) -> dict:
                     "track_number": None,
                     "artist": meta["artist"] or "Unknown",
                     "album": meta.get("album") or "",
-                    "duration_seconds": None,
+                    "duration_seconds": meta.get("duration"),
                     "cover_id": None,
                     "preview": True,
                     "provider": meta["provider"],

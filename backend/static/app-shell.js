@@ -1333,8 +1333,8 @@
       // Time field is a queue-wide countdown: remaining seconds of
       // the current track plus full duration of every track after
       // it. Falls back to total of the whole list when nothing is
-      // playing. Tracks count and album count don't tick — only
-      // the time string changes between SSE pulses.
+      // playing. The track count doesn't tick — only the time
+      // string changes between SSE pulses.
       if (!this.summary) return;
       const tracks = this.tracks;
       if (!tracks || tracks.length === 0) {
@@ -1355,15 +1355,10 @@
         remaining = tracks.reduce(
           (s, t) => s + (Number(t.duration_seconds) || 0), 0);
       }
-      const albumCount = new Set(
-        tracks.map(t => t.album).filter(Boolean)).size;
       const parts = [
         `${tracks.length} tracks`,
         formatDurationSummary(remaining),
-        albumCount > 0
-          ? `${albumCount} ${albumCount === 1 ? 'album' : 'albums'}`
-          : null,
-      ].filter(Boolean);
+      ];
       this.summary.innerHTML = parts
         .map((p, i) => i === 0
           ? `<span>${escapeHtml(p)}</span>`
