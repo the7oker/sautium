@@ -987,11 +987,16 @@
         }
       }
 
-      // Energy dots — prefer energy_db (dB), fallback to raw RMS
+      // Energy dots — prefer energy_db (dB), fallback to raw RMS. Guard on the raw
+      // values being PRESENT: an un-enriched track has both null, and Number(null)
+      // is 0 (not NaN), which energyLevelFromRaw would otherwise floor to 1 dot —
+      // showing a phantom "minimal energy" badge where there's no data at all.
       if (this.energy && this.energyDots) {
         const lvl = (d.energy_db != null)
           ? energyLevelFromDb(Number(d.energy_db))
-          : energyLevelFromRaw(Number(d.energy));
+          : (d.energy != null)
+            ? energyLevelFromRaw(Number(d.energy))
+            : 0;
         if (lvl > 0) {
           let dots = '';
           for (let i = 0; i < 5; i++) {
