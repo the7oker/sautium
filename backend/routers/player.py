@@ -154,6 +154,7 @@ def _status_poller():
                     "media_file_id": pl_row["id"] if pl_row else None,
                     "cover_id": pl_row["cover_id"] if pl_row else None,
                     "cover_url": pl_row.get("cover_url") if pl_row else None,
+                    "provider_cover_url": pl_row.get("provider_cover_url") if pl_row else None,
                     "progress_percent": round(status.progress_percent, 1),
                     "position_formatted": format_time(status.position),
                     "length_formatted": format_time(status.length),
@@ -1031,6 +1032,7 @@ def _build_playlist_payload(hqp_tracks: list) -> dict:
                     "provider": meta["provider"],
                     "track_id": meta.get("track_id"),
                     "cover_url": meta.get("cover_url"),
+                    "provider_cover_url": _resolved_artwork.get(meta.get("track_id")),
                     "index": idx,
                 })
             else:
@@ -1232,15 +1234,82 @@ def get_status_fresh():
         return {"state": "disconnected"}
 
 
+def _stream_quality(provider_id: Optional[str]) -> str:
+    """'lossless' / 'lossy' for the serving provider — the preview analog of the
+    owned file-quality badge (a stream has no file bit-depth)."""
+    if provider_id:
+        try:
+            from streaming import service as streaming_service
+            for p in streaming_service.providers_preferred():
+                if p.manifest.id == provider_id:
+                    return "lossless" if p.manifest.lossless else "lossy"
+        except Exception:
+            pass
+        if provider_id == "deezer":   # registry not ready — known-provider fallback
+            return "lossless"
+    return "lossy"
+
+
+def _preview_now_playing_detail(track_id: str, provider: Optional[str]) -> dict:
+    """Now Playing detail for a streamed phantom track (no media_file). Same shape
+    as the owned path, sourced by track_id: MB tracklist metadata + CAA cover +
+    whatever audio_features the preview enrichment has produced so far (key/BPM/
+    energy fill in live as the stream is analysed). Album is the track's first
+    release that carries art; quality is the stream source, not a file bit-depth."""
+    row = _db_query_one("""
+        SELECT t.id::text AS track_id, t.title,
+               al.id::text AS album_id, al.title AS album_title,
+               al.release_year AS year, al.cover_url,
+               af.bpm, af.key, af.mode, af.energy, af.energy_db,
+               af.danceability, af.instruments, af.moods
+        FROM tracks t
+        JOIN album_tracks atr ON atr.track_id = t.id
+        JOIN albums al ON al.id = atr.album_id
+        LEFT JOIN audio_features af ON af.track_id = t.id
+        WHERE t.id = %(tid)s::uuid
+        ORDER BY (al.cover_url IS NOT NULL) DESC, al.id
+        LIMIT 1
+    """, {"tid": track_id})
+    if not row:
+        raise HTTPException(status_code=404, detail="track not found")
+    row["media_file_id"] = None
+    row["cover_id"] = None
+    row["genres"] = _db_query("""
+        SELECT g.id::text, g.name
+        FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
+        WHERE ag.album_id = %(a)s::uuid
+        GROUP BY g.id, g.name
+        ORDER BY MAX(ag.count) DESC NULLS LAST, g.name
+        LIMIT 3
+    """, {"a": row["album_id"]})
+    row["primary_artist"] = _db_query_one("""
+        SELECT a.id::text, a.name
+        FROM artists a
+        JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
+        WHERE ta.track_id = %(t)s::uuid
+        LIMIT 1
+    """, {"t": track_id})
+    row["quality"] = _stream_quality(provider)
+    row["provider_cover_url"] = _resolved_artwork.get(track_id)
+    return row
+
+
 @router.get("/now-playing-detail")
-def now_playing_detail(media_file_id: int):
+def now_playing_detail(media_file_id: int = None, track_id: str = None,
+                       provider: str = None):
     """Aggregated rich payload for the Now Playing screen.
 
     Combines media-file metadata (format, sample rate, bit depth, cover),
     track-level audio features (BPM, key, mode, energy, instruments),
     album info, and the top genres into one roundtrip. Called by the
-    frontend whenever the playing track changes.
+    frontend whenever the playing track changes. A streamed phantom track has no
+    media_file — it is fetched by ``track_id`` (+ the serving ``provider`` for the
+    quality badge) and served the same shape via _preview_now_playing_detail.
     """
+    if track_id:
+        return _preview_now_playing_detail(track_id, provider)
+    if not media_file_id:
+        raise HTTPException(status_code=400, detail="media_file_id or track_id required")
     row = _db_query_one("""
         SELECT mf.id AS media_file_id,
                mf.track_id::text AS track_id,
@@ -1837,6 +1906,11 @@ def _parallel_resolve(provider, queries: list) -> list:
 # MB-length-less track is never analysed. Keyed by track_id; resets on restart.
 _resolved_durations: dict[str, float] = {}
 
+# Provider album art for streamed tracks, keyed by track_id — a fallback for the
+# CAA cover, which 404s for ~a quarter of phantom release-groups (no front art in
+# MusicBrainz). DISPLAY-only, in-memory; the streamed provider always has a cover.
+_resolved_artwork: dict[str, str] = {}
+
 
 def _resolve_waterfall(queries: list) -> list:
     """Per-track lossless-first fallback CHAIN ``[(provider, source_id), ...]``.
@@ -1851,6 +1925,7 @@ def _resolve_waterfall(queries: list) -> list:
     best = [None] * len(queries)            # index into provs that resolved
     sids = [None] * len(queries)
     durs = [None] * len(queries)            # provider-reported duration (s), for length_ms backfill
+    arts = [None] * len(queries)            # provider album art, for the CAA-cover fallback
     pending = list(range(len(queries)))
     for pi, prov in enumerate(provs):
         if not pending:
@@ -1861,17 +1936,19 @@ def _resolve_waterfall(queries: list) -> list:
         still = []
         for i, r in zip(pending, res):
             if r is not None:
-                best[i], sids[i], durs[i] = pi, r.source_id, r.duration
+                best[i], sids[i], durs[i], arts[i] = pi, r.source_id, r.duration, r.artwork_url
             else:
                 still.append(i)
         pending = still
 
-    for q, d in zip(queries, durs):
+    for q, d, art in zip(queries, durs, arts):
         # Only MB-length-less tracks — the virtual duration is a FALLBACK, never an
         # override of a known MB length (that is the canonical display; the resolved
         # source may be a mismatch at a different length).
         if d and d > 0 and q.track_id and not q.duration:
             _resolved_durations[q.track_id] = float(d)
+        if art and q.track_id:
+            _resolved_artwork[q.track_id] = art
 
     chains = []
     for i in range(len(queries)):
@@ -1918,6 +1995,7 @@ def _phantom_track_query(track_id: str):
         JOIN album_tracks atr ON atr.track_id = t.id
         JOIN albums al ON al.id = atr.album_id
         WHERE t.id = %(tid)s::uuid
+        ORDER BY (al.cover_url IS NOT NULL) DESC, (atr.length_ms IS NOT NULL) DESC, al.id
         LIMIT 1
     """, {"tid": track_id})
     if not row or not row["title"]:

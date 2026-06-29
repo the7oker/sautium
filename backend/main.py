@@ -983,6 +983,7 @@ async def search_similar(
     is_lossless: Optional[bool] = None,
     year_from: Optional[int] = None,
     year_to: Optional[int] = None,
+    include_phantom: bool = False,
 ) -> Dict[str, Any]:
     """Find tracks similar to a given track by audio embedding similarity."""
     from database import get_db_context
@@ -1003,7 +1004,8 @@ async def search_similar(
     try:
         with get_db_context() as db:
             result = search_similar_tracks(
-                db, track_id, limit=limit, min_similarity=min_similarity, filters=filters
+                db, track_id, limit=limit, min_similarity=min_similarity,
+                filters=filters, include_phantom=include_phantom
             )
             if "error" in result:
                 raise HTTPException(status_code=404, detail=result["error"])
@@ -1012,6 +1014,29 @@ async def search_similar(
         raise
     except Exception as e:
         logger.error(f"Similar search failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/search/similar-by-track")
+async def search_similar_by_track(
+    track_uuid: str,
+    limit: Optional[int] = None,
+    min_similarity: Optional[float] = None,
+    include_phantom: bool = False,
+) -> Dict[str, Any]:
+    """Tracks similar to a phantom/preview track (keyed by track UUID, not
+    media_file_id) — the Now Playing screen of a streamed track. With
+    include_phantom, out-of-library matches rank alongside owned ones. Empty until
+    the preview has been analysed (no embedding yet)."""
+    from database import get_db_context
+    from search import search_similar_tracks_by_uuid
+    try:
+        with get_db_context() as db:
+            return search_similar_tracks_by_uuid(
+                db, track_uuid, limit=limit, min_similarity=min_similarity,
+                include_phantom=include_phantom)
+    except Exception as e:
+        logger.error(f"Similar-by-track search failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

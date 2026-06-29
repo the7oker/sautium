@@ -100,6 +100,23 @@
     return '';
   }
 
+  // Paint an <img> from the first URL that actually loads, then hide so the
+  // gradient placeholder shows. The provider (Deezer) art is the fallback for a
+  // phantom CAA cover — ~a quarter of phantom release-groups have no front art in
+  // MusicBrainz, so the CAA URL 404s and we swap to the streamed source's cover.
+  function paintCoverImg(img, ...urls) {
+    if (!img) return;
+    const list = urls.filter(Boolean);
+    let i = 0;
+    const tryNext = () => {
+      if (i >= list.length) { img.onerror = null; img.hidden = true; return; }
+      img.onerror = tryNext;
+      img.src = list[i++];
+      img.hidden = false;
+    };
+    tryNext();
+  }
+
   // Artist avatar layered HTML: an initials backdrop with an <img>
   // overlay on top. The <img> covers the initials when it loads
   // (artist photo from Last.fm); on 404/error it removes itself or
@@ -554,7 +571,7 @@
   const sheet = {
     el: null,
     coverImg: null, coverFallback: null,
-    title: null, artist: null, albumText: null, year: null, previewBadge: null,
+    title: null, artist: null, albumText: null, year: null,
     qBadge: null, keyPill: null, bpm: null, bpmNum: null,
     energy: null, energyDots: null,
     progressFill: null, progressHead: null,
@@ -566,6 +583,10 @@
     lastTrackKey: null,
     lastDetailFetchedMfId: null,
     inflightMfId: null,
+    lastDetailFetchedTid: null,
+    inflightTid: null,
+    _npPreviewTid: null,
+    _npProvider: null,
     lastDetail: null,
 
     init() {
@@ -577,7 +598,6 @@
       this.artist = document.getElementById('npArtistLine');
       this.albumText = document.getElementById('npAlbumText');
       this.year = document.getElementById('npYearText');
-      this.previewBadge = document.getElementById('npPreviewBadge');
       this.qBadge = document.getElementById('npQBadge');
       this.keyPill = document.getElementById('npKeyPill');
       this.bpm = document.getElementById('npBpm');
@@ -700,6 +720,20 @@
             return;
           }
           if (row.classList.contains('is-confirming')) return;
+          if (row.classList.contains('is-phantom-sim')) {
+            const tid = row.getAttribute('data-phantom-tid');
+            if (!tid) return;
+            onceInFlight(row, async () => {     // phantom match → stream it
+              const resp = await fetch('/api/player/play-phantom-track', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ track_id: tid }),
+              }).catch(() => null);
+              let body = null;
+              try { body = resp ? await resp.json() : null; } catch (_) {}
+              if (!resp || !resp.ok) await reportPlaybackResult(resp, body);
+            });
+            return;
+          }
           const mfId = row.getAttribute('data-track-id');
           if (!mfId) return;
           if (typeof window.playTrack === 'function') {
@@ -772,27 +806,17 @@
         if (this.title) this.title.textContent = data.song || '—';
         if (this.artist) this.artist.textContent = data.artist || '';
         if (this.albumText) this.albumText.textContent = data.album || '';
-        if (this.previewBadge) {
-          const show = !!(data.preview && data.provider);
-          this.previewBadge.hidden = !show;
-          this.previewBadge.textContent = show ? `Preview · ${data.provider}` : '';
-        }
         if (this.year) this.year.textContent = '';
         if (this.coverImg) {
-          this.coverImg.hidden = true;
-          this.coverImg.removeAttribute('src');
-          // Cover URL is resolvable from the SSE payload alone — paint
-          // the big cover immediately so opening the sheet during a
-          // detail fetch doesn't flash a blank placeholder.
+          // Paint the big cover immediately from the SSE payload so opening the
+          // sheet during a detail fetch doesn't flash blank. cover_url covers
+          // streamed phantom tracks; provider art is the CAA-404 fallback.
           const eagerUrl = coverUrl({
             cover_id: data.cover_id,
             media_file_id: data.media_file_id,
+            cover_url: data.cover_url,
           });
-          if (eagerUrl) {
-            this.coverImg.src = eagerUrl;
-            this.coverImg.onerror = () => { this.coverImg.hidden = true; };
-            this.coverImg.hidden = false;
-          }
+          paintCoverImg(this.coverImg, eagerUrl, data.provider_cover_url);
         }
         if (this.coverFallback) {
           const c = coverPlaceholderColors(data.song || data.album || '');
@@ -812,9 +836,62 @@
       // `song` leads media_file_id by one SSE tick, so fetching on song-change
       // locks onto the previous track's media_file_id and never corrects.
       // Refetch whenever the resolved media_file_id actually changes.
+      // A streamed phantom track has no media_file_id — fetch the same rich
+      // detail (+ similar) by its preview track UUID instead, so the screen
+      // matches an owned track. Stash the tid/provider for the enrichment-driven
+      // refresh (key/BPM/similar land after analysis, not on the track change).
+      this._npPreviewTid = data.preview ? (data.preview_track_id || null) : null;
+      this._npProvider = data.preview ? (data.provider || null) : null;
       if (data.media_file_id && this.lastDetailFetchedMfId !== data.media_file_id) {
         this.tryFetchDetail(data.media_file_id);
+      } else if (this._npPreviewTid
+                 && this.lastDetailFetchedTid !== this._npPreviewTid) {
+        this.tryFetchDetailByTrack(this._npPreviewTid, this._npProvider);
       }
+    },
+
+    async tryFetchDetailByTrack(tid, provider) {
+      if (!tid || this.inflightTid === tid) return;
+      this.inflightTid = tid;
+      try {
+        const params = new URLSearchParams({ track_id: tid });
+        if (provider) params.set('provider', provider);
+        const resp = await fetch('/api/player/now-playing-detail?' + params);
+        if (!resp.ok) return;
+        const detail = await resp.json();
+        if (this._npPreviewTid !== tid) return;   // moved on while fetching
+        this.lastDetail = detail;
+        this.lastDetailFetchedTid = tid;
+        this.renderDetail(detail);
+        this.fetchSimilarByTrack(tid);
+        document.dispatchEvent(new CustomEvent('np-detail', { detail }));
+      } catch (err) {
+        console.warn('preview now-playing-detail failed:', err);
+      } finally {
+        if (this.inflightTid === tid) this.inflightTid = null;
+      }
+    },
+
+    async fetchSimilarByTrack(tid) {
+      try {
+        const params = new URLSearchParams({ track_uuid: tid, limit: '7', include_phantom: 'true' });
+        const resp = await fetch('/search/similar-by-track?' + params, { method: 'POST' });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.renderSimilar(data.results || data.tracks || []);
+      } catch (err) {
+        console.warn('preview similar fetch failed:', err);
+      }
+    },
+
+    // Enrichment landed (key/BPM/embedding) for the streamed track — re-fetch its
+    // detail + similar so the meta row and Similar block fill in live, without
+    // waiting for a track change. Forces past the fetched-guard.
+    refreshPreviewDetail() {
+      const tid = this._npPreviewTid;
+      if (!tid) return;
+      this.lastDetailFetchedTid = null;
+      this.tryFetchDetailByTrack(tid, this._npProvider);
     },
 
     async tryFetchDetail(mfId) {
@@ -843,7 +920,7 @@
 
     async fetchSimilar(mfId) {
       try {
-        const params = new URLSearchParams({ track_id: String(mfId), limit: '7' });
+        const params = new URLSearchParams({ track_id: String(mfId), limit: '7', include_phantom: 'true' });
         const resp = await fetch('/search/similar?' + params, { method: 'POST' });
         if (!resp.ok) return;
         const data = await resp.json();
@@ -859,14 +936,7 @@
       if (!d) return;
 
       // Cover — prefer resolved cover_id; fall back to lazy by-media URL.
-      const url = coverUrl(d);
-      if (url && this.coverImg) {
-        this.coverImg.src = url;
-        this.coverImg.onerror = () => { this.coverImg.hidden = true; };
-        this.coverImg.hidden = false;
-      } else if (this.coverImg) {
-        this.coverImg.hidden = true;
-      }
+      paintCoverImg(this.coverImg, coverUrl(d), d.provider_cover_url);
       if (this.coverFallback) {
         const c = coverPlaceholderColors(d.title || d.album_title || '');
         this.coverFallback.style.setProperty('--cover-bg-1', c.bg1);
@@ -940,8 +1010,14 @@
       }
       this.similarCount.textContent = String(tracks.length);
       this.similarList.innerHTML = tracks.map(t => {
-        // /search/similar returns mf_rep.id as t.id — that's media_file_id.
-        const url = coverUrl({cover_id: t.cover_id, media_file_id: t.id});
+        // Mixed results: an owned match carries media_file_id (plays by file); a
+        // phantom one carries only track_id + cover_url (streams). Owned rows keep
+        // the legacy data-track-id=media_file_id attr the play/queue handlers read;
+        // phantom rows are tagged is-phantom-sim + data-phantom-tid.
+        const owned = t.is_owned !== false && t.media_file_id != null;
+        const url = owned
+          ? coverUrl({ media_file_id: t.media_file_id })
+          : coverUrl({ cover_url: t.cover_url });
         const cover = url
           ? `<img src="${url}" alt="" loading="lazy" onerror="this.style.display='none'">`
           : `<div class="np-sim-art-fallback"></div>`;
@@ -949,8 +1025,11 @@
           ? Number(t.similarity).toFixed(2)
           : '';
         const yearStr = t.year ? ' · ' + t.year : '';
+        const rowAttrs = owned
+          ? `class="np-sim-row" data-track-id="${escapeHtml(String(t.media_file_id))}"`
+          : `class="np-sim-row is-phantom-sim" data-phantom-tid="${escapeHtml(String(t.track_id || ''))}"`;
         return `
-          <div class="np-sim-row" data-track-id="${escapeHtml(String(t.id || ''))}">
+          <div ${rowAttrs}>
             <div class="np-sim-art">${cover}</div>
             <div class="np-sim-info">
               <div class="np-sim-info-row">
@@ -1053,11 +1132,12 @@
         const c = coverPlaceholderColors(data.song || data.album || '');
         this.cover.style.backgroundImage =
           `linear-gradient(135deg, ${c.bg1}, ${c.bg2})`;
-        if (data.cover_id || data.media_file_id || data.cover_url) {
+        if (data.cover_id || data.media_file_id || data.cover_url || data.provider_cover_url) {
           this.setCover({
             cover_id: data.cover_id,
             media_file_id: data.media_file_id,
             cover_url: data.cover_url,
+            provider_cover_url: data.provider_cover_url,
           });
         }
       }
@@ -1065,14 +1145,20 @@
 
     setCover(detail) {
       if (!this.cover) return;
-      const url = coverUrl(detail);
-      if (!url) return;
-      // mp-cover is a <div> with background-image. Preloading via Image()
-      // lets us silently keep the gradient placeholder when the URL 404s
-      // (sentinel cover) instead of replacing it with a broken image.
-      const probe = new Image();
-      probe.onload = () => { this.cover.style.backgroundImage = `url(${url})`; };
-      probe.src = url;
+      // mp-cover is a <div> with background-image. Preload via Image() so the
+      // gradient placeholder stays when a URL 404s. Try CAA first, then the
+      // provider art (CAA 404s for some phantom release-groups).
+      const urls = [coverUrl(detail), detail && detail.provider_cover_url].filter(Boolean);
+      let i = 0;
+      const tryNext = () => {
+        if (i >= urls.length) return;
+        const u = urls[i++];
+        const probe = new Image();
+        probe.onload = () => { this.cover.style.backgroundImage = `url(${u})`; };
+        probe.onerror = tryNext;
+        probe.src = u;
+      };
+      tryNext();
     },
   };
 
@@ -4328,6 +4414,7 @@
         _previewRefreshTimer = null;
         const screen = document.querySelector('.detail-screen[data-phantom-album-id]');
         if (screen) refreshPhantomAlbumTracks(screen, screen.dataset.phantomAlbumId);
+        sheet.refreshPreviewDetail();   // live-fill the Now Playing meta + Similar
       }, 400);
     }
     if (_similarSettleTimer) clearTimeout(_similarSettleTimer);
@@ -4559,12 +4646,14 @@
     // vs .np-sim-add) — both are tagged with aria-label "Add to
     // queue" so a single query covers both. Keeping one function
     // shared means UX changes only need editing in one place.
-    const mfId = parseInt(
+    const phantomTid = row.classList.contains('is-phantom-sim')
+      ? row.getAttribute('data-phantom-tid') : null;
+    const mfId = phantomTid ? null : parseInt(
       row.getAttribute('data-media-file-id')
         || row.getAttribute('data-track-id'),
       10,
     );
-    if (!mfId) return;
+    if (!phantomTid && !mfId) return;
     row.classList.add('is-confirming');
 
     const bar = document.createElement('div');
@@ -4580,6 +4669,28 @@
     const addBtn = row.querySelector('.track-add, .np-sim-add');
     if (addBtn) row.insertBefore(bar, addBtn);
     else row.appendChild(bar);
+
+    if (phantomTid) {
+      // Phantom match → stream-queue at the chosen position; the endpoint owns the
+      // next/end insert (same primitive as the album page), so no client reorder.
+      ['next', 'end'].forEach(pos => {
+        bar.querySelector(`[data-confirm="${pos}"]`).addEventListener('click', e => {
+          e.stopPropagation();
+          onceInFlight(bar, async () => {
+            bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
+            const resp = await fetch('/api/player/queue-phantom-track', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ track_id: phantomTid, position: pos }),
+            }).catch(() => null);
+            let body = null;
+            try { body = resp ? await resp.json() : null; } catch (_) {}
+            closeQueueConfirm(row);
+            await reportPlaybackResult(resp, body);
+          });
+        });
+      });
+      return;
+    }
 
     bar.querySelector('[data-confirm="end"]').addEventListener('click', e => {
       e.stopPropagation();

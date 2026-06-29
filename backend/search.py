@@ -151,6 +151,7 @@ def search_similar_tracks(
     limit: int = None,
     min_similarity: float = None,
     filters: Optional[Dict[str, Any]] = None,
+    include_phantom: bool = False,
 ) -> Dict[str, Any]:
     """
     Find tracks similar to a given media file using cosine similarity.
@@ -198,36 +199,6 @@ def search_similar_tracks(
     if not emb_check:
         return {"error": f"Track {track_id} has no embedding", "results": [], "count": 0}
 
-    # Build filter clauses
-    filter_sql, filter_params = _apply_filters(filters)
-
-    af_join = "LEFT JOIN audio_features af ON t.id = af.track_id" if _needs_audio_features_join(filters) else ""
-
-    # Use embedding similarity via tracks, return representative media_file
-    similarity_sql = text(f"""
-        WITH target AS (
-            SELECT e.vector
-            FROM embeddings e
-            WHERE e.track_id = :track_id
-        )
-        {EMBEDDING_SIMILARITY_SELECT},
-               1 - (e.vector <=> (SELECT vector FROM target)) as similarity
-        {EMBEDDING_SIMILARITY_FROM}
-        {af_join}
-        WHERE t.id != :track_id
-          AND 1 - (e.vector <=> (SELECT vector FROM target)) >= :min_similarity
-          {filter_sql}
-        ORDER BY e.vector <=> (SELECT vector FROM target)
-        LIMIT :limit
-    """)
-
-    params = {"track_id": source_row.track_id, "min_similarity": min_similarity, "limit": limit}
-    params.update(filter_params)
-
-    rows = db.execute(similarity_sql, params).fetchall()
-
-    results = [_build_track_result(row) for row in rows]
-
     query_track = {
         "id": source_row.id,
         "title": source_row.title,
@@ -235,8 +206,140 @@ def search_similar_tracks(
         "album": source_row.album,
         "genre": source_row.genre,
     }
+    return _similar_by_track_embedding(
+        db, source_row.track_id, query_track, limit, min_similarity, filters,
+        include_phantom=include_phantom)
 
+
+def _similar_by_track_embedding(
+    db: Session,
+    source_track_uuid: str,
+    query_track: Dict[str, Any],
+    limit: int,
+    min_similarity: float,
+    filters: Dict[str, Any],
+    include_phantom: bool = False,
+) -> Dict[str, Any]:
+    """Embedding KNN from a source track UUID's vector. By default returns only
+    representative OWNED media_files (the legacy contract — shared by the
+    media_file_id entry point, the track-UUID one, and text search).
+
+    With ``include_phantom`` the representative row LEFT-falls-back to the track's
+    phantom album when it has no media_file, so out-of-library matches rank
+    alongside owned ones (the Now Playing 'Similar' block, mirroring the mixed
+    similar-albums shelf). The mixed rows carry track_id + is_owned + cover_url so
+    the frontend can stream the phantom ones; filters don't apply on this path
+    (no caller passes them)."""
+    if not include_phantom:
+        filter_sql, filter_params = _apply_filters(filters)
+        af_join = "LEFT JOIN audio_features af ON t.id = af.track_id" if _needs_audio_features_join(filters) else ""
+        similarity_sql = text(f"""
+            WITH target AS (
+                SELECT e.vector
+                FROM embeddings e
+                WHERE e.track_id = :track_id
+            )
+            {EMBEDDING_SIMILARITY_SELECT},
+                   1 - (e.vector <=> (SELECT vector FROM target)) as similarity
+            {EMBEDDING_SIMILARITY_FROM}
+            {af_join}
+            WHERE t.id != :track_id
+              AND 1 - (e.vector <=> (SELECT vector FROM target)) >= :min_similarity
+              {filter_sql}
+            ORDER BY e.vector <=> (SELECT vector FROM target)
+            LIMIT :limit
+        """)
+        params = {"track_id": source_track_uuid, "min_similarity": min_similarity, "limit": limit}
+        params.update(filter_params)
+        rows = db.execute(similarity_sql, params).fetchall()
+        results = [_build_track_result(row) for row in rows]
+        return {"results": results, "count": len(results), "query_track": query_track}
+
+    similarity_sql = text("""
+        WITH target AS (SELECT e.vector FROM embeddings e WHERE e.track_id = :track_id)
+        SELECT t.id::text AS track_id,
+               mf_rep.id AS media_file_id,
+               (mf_rep.id IS NOT NULL) AS is_owned,
+               t.title,
+               a.name AS artist,
+               COALESCE(mf_rep.album_title, ph_rep.album_title) AS album,
+               COALESCE(mf_rep.release_year, ph_rep.release_year) AS year,
+               ph_rep.cover_url,
+               1 - (e.vector <=> (SELECT vector FROM target)) AS similarity
+        FROM tracks t
+        JOIN embeddings e ON e.track_id = t.id
+        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+        JOIN artists a ON ta.artist_id = a.id
+        LEFT JOIN LATERAL (
+            SELECT mf.id, al.title AS album_title, al.release_year
+            FROM media_files mf
+            JOIN album_variants av ON mf.album_variant_id = av.id
+            JOIN albums al ON av.album_id = al.id
+            WHERE mf.track_id = t.id
+            ORDER BY mf.is_analysis_source DESC, mf.id LIMIT 1
+        ) mf_rep ON true
+        LEFT JOIN LATERAL (
+            SELECT al.title AS album_title, al.release_year, al.cover_url
+            FROM album_tracks atr JOIN albums al ON al.id = atr.album_id
+            WHERE atr.track_id = t.id
+            ORDER BY (al.cover_url IS NOT NULL) DESC, al.id LIMIT 1
+        ) ph_rep ON true
+        WHERE t.id != :track_id
+          AND (mf_rep.id IS NOT NULL OR ph_rep.album_title IS NOT NULL)
+          AND 1 - (e.vector <=> (SELECT vector FROM target)) >= :min_similarity
+        ORDER BY e.vector <=> (SELECT vector FROM target)
+        LIMIT :limit
+    """)
+    params = {"track_id": source_track_uuid, "min_similarity": min_similarity, "limit": limit}
+    rows = db.execute(similarity_sql, params).fetchall()
+    results = [{
+        "track_id": r.track_id,
+        "media_file_id": r.media_file_id,
+        "is_owned": bool(r.is_owned),
+        "title": r.title,
+        "artist": r.artist,
+        "album": r.album,
+        "year": r.year,
+        "cover_url": r.cover_url,
+        "similarity": round(float(r.similarity), 4) if r.similarity is not None else None,
+    } for r in rows]
     return {"results": results, "count": len(results), "query_track": query_track}
+
+
+def search_similar_tracks_by_uuid(
+    db: Session,
+    track_uuid: str,
+    limit: int = None,
+    min_similarity: float = None,
+    filters: Optional[Dict[str, Any]] = None,
+    include_phantom: bool = False,
+) -> Dict[str, Any]:
+    """Like search_similar_tracks but keyed by a track UUID (no media_file) — for
+    the Now Playing screen of a streamed phantom track. Needs the track's CLAP
+    embedding to exist (only present once the preview has been analysed)."""
+    limit = limit or settings.default_search_limit
+    min_similarity = min_similarity if min_similarity is not None else settings.min_similarity_threshold
+    filters = filters or {}
+
+    src = db.execute(text("""
+        SELECT t.title,
+               (SELECT a.name FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
+                WHERE ta.track_id = t.id AND ta.role = 'primary' LIMIT 1) AS artist
+        FROM tracks t WHERE t.id = :tid
+    """), {"tid": track_uuid}).fetchone()
+    if not src:
+        return {"error": f"Track {track_uuid} not found", "results": [], "count": 0}
+
+    emb = db.execute(text("SELECT id FROM embeddings WHERE track_id = :tid"),
+                     {"tid": track_uuid}).fetchone()
+    if not emb:
+        return {"results": [], "count": 0,
+                "query_track": {"id": track_uuid, "title": src.title, "artist": src.artist}}
+
+    query_track = {"id": track_uuid, "title": src.title, "artist": src.artist}
+    return _similar_by_track_embedding(
+        db, track_uuid, query_track, limit, min_similarity, filters,
+        include_phantom=include_phantom)
 
 
 def search_by_text(

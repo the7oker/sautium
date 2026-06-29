@@ -101,7 +101,9 @@ class YouTubeProvider(StreamProvider):
                 f"(want ~{query.duration:.0f}s, best {best['duration']:.0f}s)")
         logger.info("youtube resolve %r -> %s (%ss, %s)",
                     search, best["id"], best["duration"], best["channel"])
-        return ResolvedSource(source_id=best["id"], duration=best["duration"])
+        return ResolvedSource(
+            source_id=best["id"], duration=best["duration"],
+            artwork_url=f"https://i.ytimg.com/vi/{best['id']}/hqdefault.jpg")
 
     def _score(self, c: dict, query: TrackQuery) -> float:
         s = 0.0

@@ -69,6 +69,7 @@ class ResolvedSource:
     this richer object; the host normalises both in ``resolve()``."""
     source_id: str
     duration: Optional[float] = None
+    artwork_url: Optional[str] = None   # provider album art — fallback when the CAA cover 404s
 
 
 class ProviderError(Exception):

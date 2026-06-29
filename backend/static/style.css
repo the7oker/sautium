@@ -1313,16 +1313,6 @@ body.has-miniplayer .ai-fab {
 /* Preview badge — phantom-album streaming source (not owned). Neutral/muted:
    the blue accent is reserved for numeric data, amber for CTAs, so a status
    tag is neither. No `display` set so the [hidden] attribute keeps working. */
-.np-preview-badge {
-  margin-left: calc(8 * var(--px));
-  padding: calc(2 * var(--px)) calc(7 * var(--px));
-  border-radius: calc(3 * var(--px));
-  font-size: var(--text-caption);
-  font-weight: 600;
-  color: var(--color-text-muted);
-  background: var(--color-surface-hi);
-  border: 1px solid var(--color-divider);
-}
 /* ---- Meta row (with top divider) ---- */
 .np-meta-row {
   display: flex;
