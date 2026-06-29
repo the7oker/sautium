@@ -180,3 +180,81 @@ class PreviewEnricher:
                 torch.cuda.empty_cache()
         except Exception:
             pass
+
+
+class PreviewLyricsEnricher:
+    """Fetch + embed LRCLIB lyrics for a streamed phantom track, keyed by track_id.
+
+    Unlike the CLAP/feature enricher this is METADATA-derived: it matches on the
+    phantom's MusicBrainz artist/title/album (+ duration as a hint), NOT on the
+    streamed audio — so a wrong-recording stream cannot poison it, and it is NOT
+    gated on a known duration (LRCLIB's search fallback covers MB-length-less
+    tracks; an absent duration is just a weaker match hint). Populates track_lyrics
+    AND its BGE-M3 lyrics embedding, so a streamed phantom becomes findable by the
+    lyrics-similarity search and the AI DJ's get_lyrics, and joins the P2P pool.
+    Idempotent: skips a track that already has lyrics (or a recorded miss), and the
+    embedding step no-ops on an already-embedded track — so replays don't re-hit
+    LRCLIB or the GPU. Its own single worker keeps the LRCLIB call rate gentle and
+    serialises the BGE-M3 passes."""
+
+    def __init__(self) -> None:
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="preview-lyrics")
+        self._inflight: set[str] = set()
+        self._lock = threading.Lock()
+
+    def submit(self, query) -> None:
+        """Queue a streamed track's lyrics fetch+embed. No-ops without the identity
+        LRCLIB needs (track_id + title + artist), or if already queued."""
+        tid = getattr(query, "track_id", None)
+        if not tid or not query.title or not query.artist:
+            return
+        tid = str(tid)
+        with self._lock:
+            if tid in self._inflight:
+                return
+            self._inflight.add(tid)
+        self._pool.submit(self._run, tid, query.title, query.artist,
+                          query.album or None, query.duration)
+
+    def _run(self, track_id: str, title: str, artist: str,
+             album: Optional[str], duration: Optional[float]) -> None:
+        try:
+            self._enrich(track_id, title, artist, album, duration)
+        except Exception:
+            logger.exception("preview lyrics enrichment failed for %s", track_id)
+        finally:
+            with self._lock:
+                self._inflight.discard(track_id)
+
+    def _enrich(self, track_id: str, title: str, artist: str,
+                album: Optional[str], duration: Optional[float]) -> None:
+        import uuid as _uuid
+        from database import SessionLocal
+        from lrclib import LrclibService
+        from models import ExternalMetadata, TrackLyrics
+
+        tid = _uuid.UUID(track_id)
+        with SessionLocal() as db:
+            has_lyrics = db.query(TrackLyrics.id).filter(
+                TrackLyrics.track_id == tid).first() is not None
+
+        if not has_lyrics:
+            with SessionLocal() as db:
+                miss = db.query(ExternalMetadata.fetch_status).filter_by(
+                    entity_type="track", entity_id=track_id,
+                    source="lrclib", metadata_type="lyrics").first()
+            if miss and miss[0] == "not_found":
+                return   # known miss — don't re-hit LRCLIB on every replay
+            dur = int(duration) if duration else None
+            with LrclibService() as svc, SessionLocal() as db:
+                result = svc.fetch_and_store(
+                    db, track_id=tid, track_name=title,
+                    artist_name=artist, album_name=album, duration=dur)
+            logger.info("preview lyrics %s -> %s", track_id, result.get("status"))
+            if result.get("status") not in ("synced", "plain"):
+                return   # instrumental / not_found / error — nothing to embed
+
+        # Embed the stored lyrics (no-ops if already embedded, or if the text
+        # cleans to nothing / exceeds the junk-length cap).
+        from lyrics_embeddings import generate_lyrics_embeddings
+        generate_lyrics_embeddings(track_ids=[tid])

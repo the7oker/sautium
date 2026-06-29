@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 _proxy: Optional[MediaProxy] = None
 _registry: Optional[ProviderRegistry] = None
 _enricher = None
+_lyrics_enricher = None
 
 
 def init(settings) -> bool:
@@ -55,17 +56,26 @@ def init(settings) -> bool:
 
     # Tee fetched previews through CLAP/feature analysis (gated on known
     # duration). The proxy stays CLAP-agnostic — it just fires the hook.
-    global _enricher
+    global _enricher, _lyrics_enricher
     if getattr(settings, "streaming_preview_analyze", False):
-        from .enrichment import PreviewEnricher
+        from .enrichment import PreviewEnricher, PreviewLyricsEnricher
         _enricher = PreviewEnricher()
-        _proxy.on_track_ready = lambda e: _enricher.submit(
-            e.query.track_id,
-            e.audio.data if e.audio else None,
-            e.query.duration,
-            e.audio.lossless if e.audio else False,   # ACTUAL fetch quality (may be a degraded tier)
-        )
-        logger.info("preview enrichment enabled (analyze-on-preview)")
+        _lyrics_enricher = PreviewLyricsEnricher()
+
+        def _on_track_ready(e):
+            # Audio features (GPU, gated on a known MB duration) + lyrics text and
+            # its embedding (network/text, metadata-derived, ungated — see the
+            # enricher docstrings for the gating rationale).
+            _enricher.submit(
+                e.query.track_id,
+                e.audio.data if e.audio else None,
+                e.query.duration,
+                e.audio.lossless if e.audio else False,   # ACTUAL fetch quality (may be a degraded tier)
+            )
+            _lyrics_enricher.submit(e.query)
+
+        _proxy.on_track_ready = _on_track_ready
+        logger.info("preview enrichment enabled (analyze + lyrics on preview)")
 
     logger.info("streaming preview ready (proxy %s:%d, advertised %s)",
                 settings.media_proxy_host, settings.media_proxy_port,
