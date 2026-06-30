@@ -48,6 +48,9 @@ services:
       # API Keys
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       LASTFM_API_KEY: ${LASTFM_API_KEY}
+      LASTFM_API_SECRET: ${LASTFM_API_SECRET:-}
+      LASTFM_USERNAME: ${LASTFM_USERNAME:-}
+      LASTFM_SESSION_KEY: ${LASTFM_SESSION_KEY:-}
 
       # No GPU — CPU-only inference on Mac
       # CUDA_VISIBLE_DEVICES is not set
@@ -117,42 +120,6 @@ services:
     # No GPU reservation — Apple Silicon GPU (MPS) is not available inside Docker
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-
-  playback-tracker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile.tracker
-    container_name: sautium-playback-tracker
-    environment:
-      # HQPlayer connection
-      HQPLAYER_HOST: ${HQPLAYER_HOST:-host.docker.internal}
-      HQPLAYER_PORT: ${HQPLAYER_PORT:-4321}
-
-      # Database configuration
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: ${POSTGRES_DB:-music_ai}
-      POSTGRES_USER: ${POSTGRES_USER:-musicai}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-
-      # Last.fm Scrobbling
-      LASTFM_API_KEY: ${LASTFM_API_KEY}
-      LASTFM_API_SECRET: ${LASTFM_API_SECRET}
-      LASTFM_USERNAME: ${LASTFM_USERNAME}
-      LASTFM_SESSION_KEY: ${LASTFM_SESSION_KEY}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - ./backend:/app
-    ports:
-      - "127.0.0.1:8765:8765"
-    networks:
-      - sautium-network
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-    command: python playback_tracker.py --hqplayer-host ${HQPLAYER_HOST:-host.docker.internal} --db-host postgres
 
 networks:
   sautium-network:

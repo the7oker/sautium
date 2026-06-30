@@ -47,7 +47,7 @@ try:
     print(f"\nSession key obtained!")
     print(f"\nAdd this to your .env file:")
     print(f"\n   LASTFM_SESSION_KEY={session_key}")
-    print(f"\nThen restart the playback-tracker container.")
+    print(f"\nThen recreate the backend container (docker compose up -d backend).")
     print(f"{'='*60}\n")
 except Exception as e:
     print(f"\nERROR: {e}")

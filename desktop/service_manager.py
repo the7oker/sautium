@@ -27,7 +27,6 @@ class ServiceManager:
     def __init__(self, config: dict):
         self.config = config
         self.backend_proc: Optional[subprocess.Popen] = None
-        self.tracker_proc: Optional[subprocess.Popen] = None
         from desktop.utils import get_project_root
         self._project_root = get_project_root()
         self._backend_dir = self._project_root / "backend"
@@ -460,73 +459,15 @@ class ServiceManager:
     # ================================================================
 
     def start_tracker(self, progress_cb: Optional[Callable] = None) -> bool:
-        """Start the playback tracker (if HQPlayer enabled)."""
-        hqp = self.config.get("hqplayer", {})
-        if not hqp.get("enabled"):
-            logger.info("HQPlayer disabled — tracker not started")
-            return True
-
-        if self.tracker_proc and self.tracker_proc.poll() is None:
-            logger.info("Tracker already running")
-            return True
-
-        if progress_cb:
-            progress_cb("Starting playback tracker...")
-
-        # Kill orphan tracker from a previous launcher session
-        tracker_port = self.ports.get("tracker", 8765)
-        self._kill_orphan_on_port(tracker_port)
-
-        ports = self.ports
-        password = self.config.get("postgres_password", "changeme")
-        lastfm = self.config.get("lastfm", {})
-
-        backend_python = self._get_backend_python()
-        cmd = [
-            backend_python, str(self._backend_dir / "playback_tracker.py"),
-            "--hqplayer-host", hqp.get("host", "localhost"),
-            "--hqplayer-port", str(hqp.get("port", 4321)),
-            "--db-host", "localhost",
-            "--db-port", str(ports.get("postgres", 5432)),
-            "--db-user", "sautium",
-            "--db-password", password,
-            "--db-name", "sautium",
-            "--http-port", str(ports.get("tracker", 8765)),
-        ]
-
-        env = os.environ.copy()
-        env["PYTHONPATH"] = str(self._backend_dir)
-        # Set Last.fm env vars for tracker
-        if lastfm.get("api_key"):
-            env["LASTFM_API_KEY"] = lastfm["api_key"]
-        if lastfm.get("api_secret"):
-            env["LASTFM_API_SECRET"] = lastfm["api_secret"]
-        if lastfm.get("session_key"):
-            env["LASTFM_SESSION_KEY"] = lastfm["session_key"]
-        if lastfm.get("username"):
-            env["LASTFM_USERNAME"] = lastfm["username"]
-
-        kwargs = {
-            "cwd": str(self._backend_dir),
-            "env": env,
-            "stdout": subprocess.PIPE,
-            "stderr": subprocess.PIPE,
-        }
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-
-        try:
-            self.tracker_proc = subprocess.Popen(cmd, **kwargs)
-            logger.info(f"Tracker started (PID {self.tracker_proc.pid})")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to start tracker: {e}")
-            return False
+        """No-op. Play tracking (listening_history + local_play_stats + Last.fm
+        scrobbling) now runs inside the backend's own status poller
+        (backend/routers/player.py), source-agnostic over owned and streamed
+        phantom tracks — there is no separate tracker process anymore. Kept as a
+        lifecycle hook so the launcher/updater start sequence is unchanged."""
+        return True
 
     def stop_tracker(self) -> None:
-        """Stop the playback tracker."""
-        self._stop_process(self.tracker_proc, "Tracker")
-        self.tracker_proc = None
+        """No-op — tracking lives in the backend process (see start_tracker)."""
 
     # ================================================================
     # Aggregate operations
@@ -564,10 +505,12 @@ class ServiceManager:
         """Get status of all services."""
         from desktop.db_init import is_postgres_running
 
+        backend_up = self.backend_proc is not None and self.backend_proc.poll() is None
         return {
             "postgres": is_postgres_running(),
-            "backend": self.backend_proc is not None and self.backend_proc.poll() is None,
-            "tracker": self.tracker_proc is not None and self.tracker_proc.poll() is None,
+            "backend": backend_up,
+            # Tracking is part of the backend poller now — it's up iff backend is.
+            "tracker": backend_up,
         }
 
     # ================================================================

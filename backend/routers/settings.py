@@ -1087,10 +1087,9 @@ def get_hqplayer_prefs() -> Dict[str, Any]:
 @router.put("/hqplayer")
 def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
     """Update HQPlayer host/port. Persisted to user_settings and
-    overlaid onto Pydantic settings runtime so the control client
-    reconnects on the next call. playback-tracker reads env vars at
-    process start — it picks up the change after the launcher
-    restarts it."""
+    overlaid onto Pydantic settings runtime so the control client —
+    and the status poller that play tracking now rides on — reconnect
+    to the new endpoint on the next call, no restart needed."""
     from config import settings as app_settings
     if req.host is not None:
         host = req.host.strip() or None

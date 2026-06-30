@@ -10,6 +10,7 @@ import json
 import logging
 import threading
 import time
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -93,6 +94,239 @@ def _register_status_failure():
         _wake_sse_clients()
 
 
+# -- Play-event tracking (listening_history + local_play_stats + Last.fm) ------
+#
+# Consolidated into the status poller (was a separate playback_tracker.py
+# daemon resolving the playing track by file_path → media_files.id, which
+# silently dropped phantom http previews). The poller already reads HQPlayer
+# <Status/> every tick and resolves the playing row's SOURCE-AGNOSTIC identity
+# from the playlist cache — `_build_playlist_payload` now gives every row a
+# `track_id` UUID (owned AND phantom), with `media_files.id` as the optional
+# physical file. Keying play events on that UUID makes streamed phantom plays
+# first-class: they land in listening_history / local_play_stats and scrobble
+# exactly like owned files, with no per-source code.
+
+_SCROBBLE_MIN_SECONDS = 240  # Last.fm: scrobble after >50% OR >4 min, whichever first
+
+_play_session: "Optional[_PlaySession]" = None
+_play_track_index: Optional[int] = None
+_scrobbler = None
+_scrobbler_init = False
+
+
+class _PlaySession:
+    """One listening session for the currently-playing track, keyed on the
+    track UUID (source-agnostic). `media_file_id` is the optional physical file
+    (owned only; None for phantom previews)."""
+
+    def __init__(self, ident: dict, started_at: datetime, track_length: float):
+        self.track_id = ident["track_id"]
+        self.media_file_id = ident.get("media_file_id")
+        self.artist = ident.get("artist") or ""
+        self.title = ident.get("title") or ""
+        self.album = ident.get("album") or None
+        self.duration = ident.get("duration")
+        self.started_at = started_at
+        self.track_length = track_length
+        self.max_position = 0.0
+        self.scrobbled = False
+
+    @property
+    def percent_listened(self) -> float:
+        if self.track_length > 0:
+            return min(100.0, (self.max_position / self.track_length) * 100)
+        return 0.0
+
+    @property
+    def scrobble_ready(self) -> bool:
+        if self.max_position < 30:
+            return False
+        return (self.percent_listened >= 50
+                or self.max_position >= _SCROBBLE_MIN_SECONDS)
+
+    @property
+    def completed(self) -> bool:
+        return self.scrobble_ready or (
+            self.track_length > 0 and self.max_position >= self.track_length - 5)
+
+    def update_position(self, position: float) -> None:
+        self.max_position = max(self.max_position, position)
+
+
+def _get_scrobbler():
+    """Lazy Last.fm network from env credentials (LASTFM_API_KEY/_API_SECRET/
+    _SESSION_KEY/_USERNAME). None when scrobbling isn't configured."""
+    global _scrobbler, _scrobbler_init
+    if _scrobbler_init:
+        return _scrobbler
+    _scrobbler_init = True
+    import os
+    key = os.environ.get("LASTFM_API_KEY")
+    secret = os.environ.get("LASTFM_API_SECRET")
+    session_key = os.environ.get("LASTFM_SESSION_KEY")
+    username = os.environ.get("LASTFM_USERNAME") or ""
+    if key and secret and session_key:
+        try:
+            import pylast
+            _scrobbler = pylast.LastFMNetwork(
+                api_key=key, api_secret=secret,
+                session_key=session_key, username=username)
+            logger.info("Last.fm scrobbler initialized (user=%s)", username or "?")
+        except Exception as e:
+            logger.error("Last.fm scrobbler init failed: %s", e)
+    else:
+        logger.info("Last.fm scrobbling disabled (missing credentials)")
+    return _scrobbler
+
+
+def _scrobble_async(method: str, **kwargs) -> None:
+    """Fire a Last.fm call (scrobble / update_now_playing) off the poller thread
+    — the network round-trip must never stall status polling."""
+    net = _get_scrobbler()
+    if net is None:
+        return
+
+    def _work():
+        try:
+            getattr(net, method)(**kwargs)
+            logger.info("Last.fm %s: %s — %s", method,
+                        kwargs.get("artist"), kwargs.get("title"))
+        except Exception as e:
+            logger.error("Last.fm %s failed: %s", method, e)
+
+    threading.Thread(target=_work, daemon=True, name="lastfm").start()
+
+
+def _scrobbling_enabled() -> bool:
+    from routers.profile import _read_scrobbling
+    try:
+        return _read_scrobbling()
+    except Exception as e:
+        logger.warning("scrobbling toggle read failed: %s", e)
+        return True
+
+
+def _play_identity(pl_row: Optional[dict]) -> Optional[dict]:
+    """Source-agnostic identity for the playing playlist row: its track UUID
+    (owned AND phantom carry it) + optional media_file_id. None when the row is
+    not a known Sautium track (a foreign / out-of-library URI in the queue)."""
+    if not pl_row:
+        return None
+    tid = pl_row.get("track_id")
+    if not tid:
+        return None
+    return {
+        "track_id": tid,
+        "media_file_id": pl_row.get("id"),
+        "artist": pl_row.get("artist"),
+        "title": pl_row.get("title"),
+        "album": pl_row.get("album"),
+        "duration": pl_row.get("duration_seconds"),
+    }
+
+
+def _save_play_session(s: "_PlaySession") -> None:
+    """Persist a finished session to listening_history + local_play_stats and
+    scrobble. Source-agnostic: keys on the track UUID, so phantom plays persist
+    exactly like owned (media_file_id is NULL for phantoms)."""
+    try:
+        completed = s.completed
+        skipped = not s.scrobble_ready
+        _db_execute(
+            "INSERT INTO listening_history "
+            "(media_file_id, track_id, started_at, ended_at, "
+            " duration_listened, percent_listened, completed, skipped) "
+            "VALUES (%(mf)s, %(tid)s::uuid, %(start)s, now(), "
+            "        %(dur)s, %(pct)s, %(comp)s, %(skip)s)",
+            {"mf": s.media_file_id, "tid": s.track_id, "start": s.started_at,
+             "dur": s.max_position, "pct": s.percent_listened,
+             "comp": completed, "skip": skipped},
+        )
+        if completed:
+            _db_execute(
+                "INSERT INTO local_play_stats "
+                "(track_id, play_count, skip_count, total_listen_time, "
+                " avg_percent_listened, last_played_at) "
+                "VALUES (%(tid)s::uuid, 1, 0, %(dur)s, %(pct)s, now()) "
+                "ON CONFLICT (track_id) DO UPDATE SET "
+                "  play_count = local_play_stats.play_count + 1, "
+                "  total_listen_time = local_play_stats.total_listen_time "
+                "                      + EXCLUDED.total_listen_time, "
+                "  avg_percent_listened = (local_play_stats.avg_percent_listened "
+                "      * local_play_stats.play_count + EXCLUDED.avg_percent_listened) "
+                "      / (local_play_stats.play_count + 1), "
+                "  last_played_at = EXCLUDED.last_played_at, "
+                "  updated_at = now()",
+                {"tid": s.track_id, "dur": s.max_position, "pct": s.percent_listened},
+            )
+            if not s.scrobbled and _scrobbling_enabled():
+                _scrobble_async(
+                    "scrobble", artist=s.artist, title=s.title,
+                    timestamp=int(s.started_at.timestamp()), album=s.album,
+                    duration=int(s.duration) if s.duration else None)
+                s.scrobbled = True
+            logger.info("play: %s — %s (%.0f%%) track=%s",
+                        s.artist, s.title, s.percent_listened, s.track_id)
+        else:
+            _db_execute(
+                "INSERT INTO local_play_stats "
+                "(track_id, play_count, skip_count, total_listen_time, "
+                " avg_percent_listened, last_played_at) "
+                "VALUES (%(tid)s::uuid, 0, 1, %(dur)s, %(pct)s, now()) "
+                "ON CONFLICT (track_id) DO UPDATE SET "
+                "  skip_count = local_play_stats.skip_count + 1, "
+                "  updated_at = now()",
+                {"tid": s.track_id, "dur": s.max_position, "pct": s.percent_listened},
+            )
+            logger.info("skip: %s — %s (%.0f%%) track=%s",
+                        s.artist, s.title, s.percent_listened, s.track_id)
+    except Exception as e:
+        logger.error("save play session failed: %s", e)
+
+
+def _track_play_event(state_name: str, position: float, length: float,
+                      track_index, pl_row: Optional[dict]) -> None:
+    """Advance listening-history / scrobble state from one status tick. Mirrors
+    the retired daemon's _handle_event, but resolves identity from the
+    already-built playlist payload (source-agnostic) — so phantom previews are
+    tracked too. Runs in the poller thread, OUTSIDE the HQPlayer status lock;
+    DB writes go through the autocommit pool, Last.fm calls are fired async."""
+    global _play_session, _play_track_index
+
+    if state_name != "playing":
+        if _play_session is not None:
+            _save_play_session(_play_session)
+            _play_session = None
+            _play_track_index = None
+        return
+
+    if track_index != _play_track_index:
+        if _play_session is not None:
+            _save_play_session(_play_session)
+        ident = _play_identity(pl_row)
+        if ident is None:
+            _play_session = None
+            _play_track_index = track_index
+            return
+        _play_session = _PlaySession(ident, datetime.now(), length)
+        _play_track_index = track_index
+        _scrobble_async(
+            "update_now_playing", artist=ident["artist"] or "",
+            title=ident["title"] or "", album=ident.get("album"),
+            duration=int(ident["duration"]) if ident.get("duration") else None)
+
+    if _play_session is not None:
+        _play_session.update_position(position)
+        if (not _play_session.scrobbled and _play_session.scrobble_ready
+                and _scrobbling_enabled()):
+            _scrobble_async(
+                "scrobble", artist=_play_session.artist, title=_play_session.title,
+                timestamp=int(_play_session.started_at.timestamp()),
+                album=_play_session.album,
+                duration=int(_play_session.duration) if _play_session.duration else None)
+            _play_session.scrobbled = True
+
+
 def _status_poller():
     """Background thread: poll HQPlayer every ~1s, update cache, wake SSE clients.
     Also refreshes the playlist cache every PLAYLIST_REFRESH_EVERY ticks (or
@@ -111,8 +345,14 @@ def _status_poller():
                     hqp = _get_hqp_status()
                     status = hqp.get_status()
 
-                # Playlist cache refresh — share the status socket
-                if _playlist_dirty or (tick % PLAYLIST_REFRESH_EVERY == 0):
+                # Playlist cache refresh — share the status socket. Also force
+                # a refresh the moment the track index changes so the play-event
+                # tracker resolves identity against the live queue (matches the
+                # old daemon's per-track-change PlaylistGet — no 5-tick staleness
+                # window where a phantom/owned row could be misattributed).
+                _track_changed = (status is not None
+                                  and status.track_index != _play_track_index)
+                if _playlist_dirty or _track_changed or (tick % PLAYLIST_REFRESH_EVERY == 0):
                     _refresh_playlist_cache()
 
             if status is None:
@@ -165,6 +405,13 @@ def _status_poller():
                     "provider": pl_row.get("provider") if preview else None,
                     "preview_track_id": pl_row.get("track_id") if preview else None,
                 }
+
+                # Per-track listening history + scrobble (source-agnostic:
+                # owned files and streamed phantoms both resolve via pl_row's
+                # track UUID). Separate from the session/Home-shelf archival
+                # below — that snapshots the whole queue, this records each play.
+                _track_play_event(new_data["state"], status.position,
+                                  status.length, status.track_index, pl_row)
 
                 # Natural end-of-queue: HQPlayer stopped on the last track.
                 # Archive the active session so a fully-listened album/queue
@@ -994,13 +1241,16 @@ def _build_playlist_payload(hqp_tracks: list) -> dict:
     db_rows_by_path: dict[str, dict] = {}
     if all_paths:
         rows_batch = _db_query("""
-            SELECT mf.id, mf.file_path, t.title, mf.track_number,
-                   mf.duration_seconds, mf.cover_id::text AS cover_id,
-                   a.name as artist
+            SELECT mf.id, mf.file_path, t.id::text AS track_uuid, t.title,
+                   mf.track_number, mf.duration_seconds,
+                   mf.cover_id::text AS cover_id, a.name as artist,
+                   al.title AS album
             FROM media_files mf
             JOIN tracks t ON mf.track_id = t.id
             JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
             JOIN artists a ON ta.artist_id = a.id
+            LEFT JOIN album_variants av ON mf.album_variant_id = av.id
+            LEFT JOIN albums al ON av.album_id = al.id
             WHERE mf.file_path = ANY(%(paths)s)
         """, {"paths": all_paths})
         for r in rows_batch:
@@ -1021,9 +1271,14 @@ def _build_playlist_payload(hqp_tracks: list) -> dict:
         if row:
             tracks_with_info.append({
                 "id": row["id"],
+                # The track UUID — the source-agnostic identity. Present on owned
+                # AND phantom rows so the play-event tracker keys on it uniformly
+                # (media_files.id is the optional physical file, owned only).
+                "track_id": row["track_uuid"],
                 "title": row["title"],
                 "track_number": row["track_number"],
                 "artist": row["artist"],
+                "album": row.get("album") or "",
                 "duration_seconds": (
                     float(row["duration_seconds"])
                     if row["duration_seconds"] is not None else None
@@ -1038,20 +1293,26 @@ def _build_playlist_payload(hqp_tracks: list) -> dict:
                 # — render it as the owned track it is (cover, real metadata), not a
                 # preview. Look the row up by media_file_id (the URI is not file://).
                 orow = _db_query_one("""
-                    SELECT mf.id, t.title, mf.track_number, mf.duration_seconds,
-                           mf.cover_id::text AS cover_id, a.name AS artist
+                    SELECT mf.id, t.id::text AS track_uuid, t.title,
+                           mf.track_number, mf.duration_seconds,
+                           mf.cover_id::text AS cover_id, a.name AS artist,
+                           al.title AS album
                     FROM media_files mf
                     JOIN tracks t ON mf.track_id = t.id
                     JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
                     JOIN artists a ON ta.artist_id = a.id
+                    LEFT JOIN album_variants av ON mf.album_variant_id = av.id
+                    LEFT JOIN albums al ON av.album_id = al.id
                     WHERE mf.id = %(id)s
                 """, {"id": meta["media_file_id"]})
                 if orow:
                     tracks_with_info.append({
                         "id": orow["id"],
+                        "track_id": orow["track_uuid"],
                         "title": orow["title"],
                         "track_number": orow["track_number"],
                         "artist": orow["artist"],
+                        "album": orow.get("album") or "",
                         "duration_seconds": (float(orow["duration_seconds"])
                                              if orow["duration_seconds"] is not None else None),
                         "cover_id": orow["cover_id"],
@@ -1500,11 +1761,11 @@ def remove(req: RemoveRequest):
 
     `index` is 1-based to match HQPlayer's `PlaylistRemove`. After
     removal the playlist cache is invalidated so the next status
-    poll refreshes it; the playback-tracker mapping naturally
-    becomes stale (indices shift) but is rebuilt by the next
-    play-track / play-album call. The play_count for the removed
-    slot is unaffected — tracker records past plays, not pending
-    queue contents.
+    poll refreshes it; the play-event tracker re-resolves the playing
+    track's identity from that refreshed cache each tick, so a shifted
+    index self-corrects. The play_count for the removed slot is
+    unaffected — tracking records past plays, not pending queue
+    contents.
 
     Reorder is intentionally not implemented. HQPlayer's Control
     API exposes add (append-only), clear and remove — there is no
