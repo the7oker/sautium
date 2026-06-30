@@ -72,9 +72,12 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# fugashi/MeCab (cutlet's Japanese tokenizer, Phase 0a transliteration) needs an
-# rc file to exist even though the dictionary ships via unidic-lite.
-RUN touch /usr/local/etc/mecabrc
+# cutlet's Japanese dictionary + tokenizer config (Phase 0a transliteration).
+# unidic-lite is sdist-only (no wheel) so it can't live in requirements.txt (the
+# launcher installs that with --only-binary=:all:); install it here for full
+# Japanese romanization. fugashi/MeCab also needs an mecabrc to exist. Where this
+# is absent (launcher), transliterate._japanese degrades to anyascii, not a crash.
+RUN pip install --no-cache-dir unidic-lite && touch /usr/local/etc/mecabrc
 
 # Optional: libtorrent for P2P DHT peer discovery (graceful degradation if unavailable)
 RUN pip install --no-cache-dir libtorrent || echo "WARNING: libtorrent not available — DHT peer discovery disabled"

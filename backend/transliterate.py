@@ -29,7 +29,13 @@ _HAN = ((0x4E00, 0x9FFF), (0x3400, 0x4DBF))
 _NONWORD = re.compile(r"[^a-z0-9]+")
 
 # The Japanese tagger is ~50MB and slow to build — construct once, on first use.
+# It needs unidic-lite + an mecabrc; where those are absent (notably a launcher
+# that pip-installs with --only-binary, under which unidic-lite has no wheel) we
+# degrade to anyascii instead of crashing — kanji then read as Chinese (recall,
+# not precision), the same 0a limit as kana-less Han. So cutlet is an OPTIONAL
+# precision layer (full in Docker; graceful fallback elsewhere).
 _cutlet = None
+_cutlet_unavailable = False
 
 
 def _has(s: str, lo: int, hi: int) -> bool:
@@ -37,10 +43,16 @@ def _has(s: str, lo: int, hi: int) -> bool:
 
 
 def _japanese(s: str) -> str:
-    global _cutlet
+    global _cutlet, _cutlet_unavailable
+    if _cutlet_unavailable:
+        return anyascii(s)
     if _cutlet is None:
-        import cutlet
-        _cutlet = cutlet.Cutlet()
+        try:
+            import cutlet
+            _cutlet = cutlet.Cutlet()
+        except Exception:
+            _cutlet_unavailable = True   # no dictionary / no mecabrc — degrade, don't crash
+            return anyascii(s)
     return _cutlet.romaji(s)
 
 
