@@ -197,8 +197,7 @@ See:
 ## Docker & Runtime Layout
 
 - `sautium-postgres` — PostgreSQL 16 + pgvector. Credentials `musicai/supervisor`, DB `music_ai`. Persistent volume `./data/postgres/`.
-- `sautium-backend` — FastAPI on `0.0.0.0:8000`, exposed to host at `localhost:8800`. GPU access via NVIDIA runtime.
-- `sautium-playback-tracker` — separate daemon that writes to `listening_history`.
+- `sautium-backend` — FastAPI on `0.0.0.0:8000`, exposed to host at `localhost:8800`. GPU access via NVIDIA runtime. Also owns **play tracking** (`listening_history` + `local_play_stats` + Last.fm scrobbling) inside its status poller — keyed source-agnostically on `track_id`, so streamed phantom plays track like owned files. There is **no separate tracker daemon** (consolidated 2026-06-30; the old `sautium-playback-tracker` was retired).
 - Music library mounted read-only: `E:\Music` → `/music:ro` inside backend.
 - Model cache external: `./data/cache` → `/root/.cache`.
 - **Never bake models into the image.** Cache lives on the host, survives container deletes.
@@ -249,8 +248,9 @@ distribution model.
 1. **Backend (8800) on `0.0.0.0` is intentional** — phone use over
    the home Wi-Fi is the primary workflow. Don't "tighten" it to
    `127.0.0.1` thinking you're improving security; you're breaking
-   the product. Postgres (5432) and playback-tracker (8765) **stay
-   on `127.0.0.1`** — they have no remote-access reason.
+   the product. Postgres (5432) **stays on `127.0.0.1`** — it has
+   no remote-access reason (the former playback-tracker on 8765 is
+   gone — tracking moved into the backend).
 2. **Never let UPnP forward backend ports to the internet.**
    `desktop/p2p/p2p_manager.py` currently maps `[http_port]` only
    (P2P sync, which has its own auth). `docker_ports` from

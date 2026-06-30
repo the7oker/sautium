@@ -1,6 +1,17 @@
 # Phantom Discovery — Music Beyond the Local Catalog
 
-> **Status:** design brief, not yet implemented.
+> **Status: largely SHIPPED — this file is now a design-rationale + status
+> record, not an open proposal.** Live: Phases 0–3 (phantom artists, albums,
+> tracks), the MB-anchored canonicalization foundation, missing-albums,
+> phantom tracklists (`album_tracks`), CAA covers, phantom similar-artist
+> discovery, the Deezer/YouTube→HQPlayer streaming preview (D4 / Phase 6,
+> shipped 2026-06-28), and source-agnostic listening tracking of streamed
+> phantom plays (history/stats/scrobble + Home-shelf sessions, 2026-06-30).
+> **Remaining:** Phase 4 (P2P propagation of phantom rows — partial), Phase 5
+> (wire phantom semantic search into the Discovery engine — pending the
+> `DISCOVERY-SEARCH-ENGINE.md` refactor), and Stage C (text-similarity). The
+> "Phases" table and "Design decisions" below are the original plan, kept for
+> rationale; "Implementation status" records what actually landed.
 > **Origin:** proposed 2026-06-01 by Valerii.
 > **Relates to:** `DISCOVERY-SEARCH-ENGINE.md` (the engine that will
 > surface phantom entities alongside local ones),
