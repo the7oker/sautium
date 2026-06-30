@@ -255,11 +255,12 @@ def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
         """, {"al": existing["id"], "year": rg.get("first_year")})
         return existing["id"], False
 
+    from transliterate import latinize
     aid = str(album_uuid(rg["title"], artist_name))
     res = db_execute("""
         WITH up AS (
-            INSERT INTO albums (id, title, release_year, musicbrainz_id, cover_url)
-            VALUES (%(id)s::uuid, %(title)s, %(year)s, %(rg)s::uuid, %(cover)s)
+            INSERT INTO albums (id, title, title_latin, release_year, musicbrainz_id, cover_url)
+            VALUES (%(id)s::uuid, %(title)s, %(title_latin)s, %(year)s, %(rg)s::uuid, %(cover)s)
             ON CONFLICT (id) DO UPDATE
                 SET musicbrainz_id = EXCLUDED.musicbrainz_id,
                     cover_url = EXCLUDED.cover_url,
@@ -279,6 +280,7 @@ def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
     """, {
         "id": aid,
         "title": rg["title"],
+        "title_latin": latinize(rg["title"]),
         "year": rg.get("first_year"),  # None until a dump refresh loads mb_release_country
         "rg": rg["rg_mbid"],
         "cover": _CAA_FRONT_URL.format(rg=rg["rg_mbid"]),
@@ -315,6 +317,7 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
     Idempotent: slot upserts on the (album, disc, position) PK; track
     rows never clobber existing titles. Returns slots written.
     """
+    from transliterate import latinize
     best = _pick_canonical_release(mb.fetch_release_tracklists(rg_mbid))
     if not best:
         return 0
@@ -327,7 +330,7 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
         if not title:
             continue
         tid = str(track_uuid(title, artist_name))
-        track_rows.append((tid, title))
+        track_rows.append((tid, title, latinize(title)))
         artist_rows.append((tid, artist_id))
         slot_rows.append((album_id, tid, tr["disc"] or 1, tr["position"],
                           tr["recording_mbid"], tr["length_ms"]))
@@ -337,9 +340,9 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
     with get_conn() as conn:
         with conn.cursor() as cur:
             execute_values(cur, """
-                INSERT INTO tracks (id, title) VALUES %s
+                INSERT INTO tracks (id, title, title_latin) VALUES %s
                 ON CONFLICT (id) DO NOTHING
-            """, track_rows, template="(%s::uuid, %s)")
+            """, track_rows, template="(%s::uuid, %s, %s)")
             execute_values(cur, """
                 INSERT INTO track_artists (track_id, role, artist_id) VALUES %s
                 ON CONFLICT DO NOTHING

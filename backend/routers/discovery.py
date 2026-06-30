@@ -369,7 +369,9 @@ def _trigram_artists(q: str, limit: int) -> list[dict]:
     Artists with zero primary tracks (orphan import rows) are
     filtered out.
     """
+    from transliterate import latinize
     q = q[:255]                 # postgres levenshtein() rejects args > 255 chars
+    ql = (latinize(q) or q)[:255]   # query in Latin; name_latin is pre-lowered, so no lower()
     rows = db_query("""
         SELECT a.id::text AS artist_id,
                a.name AS artist,
@@ -379,6 +381,12 @@ def _trigram_artists(q: str, limit: int) -> list[dict]:
                         THEN 0.85 ELSE 0 END,
                    CASE WHEN levenshtein_less_equal(
                             lower(a.name), lower(%(q)s), 1) <= 1
+                        THEN 0.70 ELSE 0 END,
+                   similarity(a.name_latin, %(ql)s),
+                   CASE WHEN a.name_latin LIKE %(qlprefix)s
+                        THEN 0.85 ELSE 0 END,
+                   CASE WHEN levenshtein_less_equal(
+                            a.name_latin, %(ql)s, 1) <= 1
                         THEN 0.70 ELSE 0 END
                ) AS sim,
                a.gender AS gender,
@@ -392,7 +400,10 @@ def _trigram_artists(q: str, limit: int) -> list[dict]:
         WHERE (similarity(a.name, %(q)s) >= 0.5
                OR lower(a.name) LIKE lower(%(prefix)s)
                OR levenshtein_less_equal(
-                    lower(a.name), lower(%(q)s), 1) <= 1)
+                    lower(a.name), lower(%(q)s), 1) <= 1
+               OR similarity(a.name_latin, %(ql)s) >= 0.5
+               OR a.name_latin LIKE %(qlprefix)s
+               OR levenshtein_less_equal(a.name_latin, %(ql)s, 1) <= 1)
           AND EXISTS (
             SELECT 1 FROM track_artists ta
             WHERE ta.artist_id = a.id AND ta.role = 'primary'
@@ -402,7 +413,7 @@ def _trigram_artists(q: str, limit: int) -> list[dict]:
                   WHERE ta.artist_id = a.id AND ta.role = 'primary') DESC,
                  a.name
         LIMIT %(limit)s
-    """, {"q": q, "prefix": q + "%", "limit": limit})
+    """, {"q": q, "prefix": q + "%", "ql": ql, "qlprefix": ql + "%", "limit": limit})
     return [{
         "artist_id": r["artist_id"],
         "artist": r["artist"],

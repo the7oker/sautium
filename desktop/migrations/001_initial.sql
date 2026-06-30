@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS artists (
     is_vocalist artist_vocalist DEFAULT 'unknown',
     verification_status verification_status DEFAULT 'unverified',
     raw_name VARCHAR(500),
+    name_latin VARCHAR(500),                -- Latin transliteration of name for cross-script fuzzy search (Phase 0a)
     -- MB identity lives in artist_mbids (1:N — name-UUID may conflate namesakes)
     last_album_sync TIMESTAMPTZ,            -- freshness gate for new-album discovery
     last_mb_sync TIMESTAMPTZ,              -- freshness gate for MB canonicalization pass
@@ -139,6 +140,7 @@ CREATE TABLE IF NOT EXISTS artists (
 CREATE TABLE IF NOT EXISTS albums (
     id UUID PRIMARY KEY,
     title VARCHAR(500) NOT NULL,
+    title_latin VARCHAR(500),               -- Latin transliteration of title for cross-script fuzzy search (Phase 0a)
     release_year INTEGER,
     label VARCHAR(200),
     catalog_number VARCHAR(100),
@@ -154,6 +156,7 @@ CREATE TABLE IF NOT EXISTS albums (
 CREATE TABLE IF NOT EXISTS tracks (
     id UUID PRIMARY KEY,
     title VARCHAR(500) NOT NULL,
+    title_latin VARCHAR(500),               -- Latin transliteration of title for cross-script fuzzy search (Phase 0a)
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
@@ -797,6 +800,12 @@ CREATE INDEX IF NOT EXISTS idx_albums_release_year ON albums(release_year);
 CREATE INDEX IF NOT EXISTS idx_albums_mbid ON albums(musicbrainz_id) WHERE musicbrainz_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
 CREATE INDEX IF NOT EXISTS idx_tracks_title_trgm ON tracks USING gin (title gin_trgm_ops);
+
+-- Latin transliteration indexes for cross-script fuzzy search (Phase 0a).
+-- Population: write-time hooks + backfill; the same latinize() runs on the query.
+CREATE INDEX IF NOT EXISTS idx_artists_name_latin_trgm ON artists USING gin (name_latin gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_albums_title_latin_trgm ON albums USING gin (title_latin gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_tracks_title_latin_trgm ON tracks USING gin (title_latin gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_tags_name_lower ON tags(name text_pattern_ops);
 
 -- Association indexes

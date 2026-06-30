@@ -72,6 +72,10 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# fugashi/MeCab (cutlet's Japanese tokenizer, Phase 0a transliteration) needs an
+# rc file to exist even though the dictionary ships via unidic-lite.
+RUN touch /usr/local/etc/mecabrc
+
 # Optional: libtorrent for P2P DHT peer discovery (graceful degradation if unavailable)
 RUN pip install --no-cache-dir libtorrent || echo "WARNING: libtorrent not available — DHT peer discovery disabled"
 

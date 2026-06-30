@@ -113,6 +113,7 @@ def _clean_all_artist_names(db: Session, dry_run: bool = False) -> Dict:
                 logger.info(f"Merged: '{name}' -> existing '{cleaned}' ({len(tracks)} tracks, {len(albums)} albums)")
                 continue
 
+            from transliterate import latinize
             # Rename: update artist ID + name, recalculate track/album UUIDs
             if new_artist_id != artist_id:
                 # Recalculate track UUIDs
@@ -139,13 +140,13 @@ def _clean_all_artist_names(db: Session, dry_run: bool = False) -> Dict:
 
                 # Update artist ID (ON UPDATE CASCADE propagates to track_artists, etc.)
                 db.execute(text(
-                    "UPDATE artists SET id = :new_id, name = :name WHERE id = :old_id"
-                ), {"new_id": new_artist_id, "name": cleaned, "old_id": artist_id})
+                    "UPDATE artists SET id = :new_id, name = :name, name_latin = :nl WHERE id = :old_id"
+                ), {"new_id": new_artist_id, "name": cleaned, "nl": latinize(cleaned), "old_id": artist_id})
             else:
                 # UUID unchanged (e.g. only whitespace diff) — just update name
                 db.execute(text(
-                    "UPDATE artists SET name = :name WHERE id = :id"
-                ), {"name": cleaned, "id": artist_id})
+                    "UPDATE artists SET name = :name, name_latin = :nl WHERE id = :id"
+                ), {"name": cleaned, "nl": latinize(cleaned), "id": artist_id})
 
         cleaned_count += 1
         logger.info(f"Cleaned name: '{name}' -> '{cleaned}'")

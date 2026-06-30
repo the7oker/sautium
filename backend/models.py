@@ -21,7 +21,7 @@ from typing import Optional, List
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, Numeric, BigInteger, Float,
     Boolean, ForeignKey, CheckConstraint, Index, ARRAY, UniqueConstraint,
-    LargeBinary, func, text,
+    LargeBinary, func, text, event,
 )
 from sqlalchemy.dialects.postgresql import BYTEA, ENUM, JSONB, UUID
 from sqlalchemy.ext.declarative import declarative_base
@@ -144,6 +144,7 @@ class Artist(Base):
     gender = Column(ArtistGenderEnum, default="unknown")        # unknown/female/male/mixed
     is_vocalist = Column(ArtistVocalistEnum, default="unknown") # unknown/vocal/instrumental
     raw_name = Column(String(500))                             # original tag value before normalization
+    name_latin = Column(String(500))                           # Latin transliteration of name for cross-script fuzzy search (Phase 0a)
 
     # MB identity lives in artist_mbids (1:N — name-UUID may conflate namesakes).
     last_album_sync = Column(DateTime(timezone=True))          # freshness gate for new-album discovery
@@ -181,6 +182,7 @@ class Album(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True)
     title = Column(String(500), nullable=False)
+    title_latin = Column(String(500))                         # Latin transliteration of title for cross-script fuzzy search (Phase 0a)
 
     release_year = Column(Integer)
     label = Column(String(200))
@@ -217,6 +219,7 @@ class Track(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True)
     title = Column(String(500), nullable=False)
+    title_latin = Column(String(500))                         # Latin transliteration of title for cross-script fuzzy search (Phase 0a)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -238,6 +241,33 @@ class Track(Base):
 
     def __repr__(self):
         return f"<Track(id={self.id}, title='{self.title}')>"
+
+
+# ── name_latin / title_latin population (Phase 0a) ──────────────────────────
+# ORM write-path hook: every Artist/Album/Track inserted or renamed through a
+# session (the scanner path) gets its Latin search form recomputed here. Raw-SQL
+# write sites (canon, phantom minting, sync) call latinize() explicitly. The
+# identical latinize() transforms the query string at search time — see
+# transliterate.py and docs/design/DISCOVERY-SEARCH-ENGINE.md.
+from transliterate import latinize as _latinize
+
+
+@event.listens_for(Artist, "before_insert")
+@event.listens_for(Artist, "before_update")
+def _fill_artist_name_latin(mapper, connection, target):
+    target.name_latin = _latinize(target.name)
+
+
+@event.listens_for(Album, "before_insert")
+@event.listens_for(Album, "before_update")
+def _fill_album_title_latin(mapper, connection, target):
+    target.title_latin = _latinize(target.title)
+
+
+@event.listens_for(Track, "before_insert")
+@event.listens_for(Track, "before_update")
+def _fill_track_title_latin(mapper, connection, target):
+    target.title_latin = _latinize(target.title)
 
 
 class TrackArtist(Base):

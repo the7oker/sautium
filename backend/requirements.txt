@@ -67,3 +67,12 @@ Unidecode>=1.3.8
 
 # Streaming preview — phantom-album resolution (non-DRM; ffmpeg already in image)
 yt-dlp>=2024.12.0
+
+# Cross-script search transliteration (Phase 0a) — name_latin population.
+# All permissive (anyascii ISC, rest MIT). cutlet needs unidic-lite explicitly
+# (it does not pull a dictionary); fugashi also needs an mecabrc — see Dockerfile.
+anyascii>=0.3.3
+pypinyin>=0.55.0
+cutlet>=0.5.0
+unidic-lite>=1.0.8
+koroman>=1.0.16

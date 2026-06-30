@@ -51,6 +51,8 @@ _CANONIZE_PER_BATCH = 50          # uncanonized artists distilled per batch (Lay
 _DISCOGRAPHY_PER_BATCH = 50       # canonized artists reconciled per batch (local MB dump — DB-only)
 _DISCOGRAPHY_STALE_DAYS = 30      # re-sync an artist's discography at most monthly
 
+_NAME_LATIN_PER_BATCH = 50000     # phantom name_latin rows per batch (Phase 0a) — pure-Python transliteration, not API-bound, so far larger than the Last.fm steps
+
 _PRIORITY_SQL = text("""
     WITH artist_listen AS (
         SELECT ta.artist_id, SUM(lh.duration_listened) AS sec
@@ -392,10 +394,31 @@ def _step_sync_discographies(limit: int) -> Dict[str, int]:
 # Loop
 # ============================================================
 
+def _step_backfill_name_latin(limit: int) -> Dict[str, int]:
+    """Backfill name_latin/title_latin for phantom rows minted before Phase 0a.
+
+    Pure-Python transliteration + DB write (no external API), so it runs in
+    large batches. NULL-gated and id-cursored, so it's idempotent and never
+    re-scans. Owned rows are handled once by the backfill_name_latin CLI;
+    new rows are filled at write time (models event + raw choke-points)."""
+    from backfill_name_latin import backfill_phantom
+
+    out: Dict[str, int] = {}
+    for tbl in ("artists", "albums", "tracks"):
+        if _cancel_flag():
+            break
+        try:
+            out[tbl] = backfill_phantom(tbl, limit=limit)
+        except Exception as e:
+            logger.error(f"name_latin backfill failed for {tbl}: {e}")
+            out[tbl] = 0
+    return out
+
+
 def _run_once() -> Dict[str, Any]:
-    """Run one full batch (all five steps). Honours cancel between steps."""
+    """Run one full batch (all steps). Honours cancel between steps."""
     summary = {"track_stats": {}, "lyrics": {}, "artists": {},
-               "genres": {}, "canonize": {}, "discography": {}}
+               "genres": {}, "canonize": {}, "discography": {}, "name_latin": {}}
 
     if _cancel_flag():
         return summary
@@ -464,6 +487,16 @@ def _run_once() -> Dict[str, Any]:
     _set(current_step="discography")
     summary["discography"] = _step_sync_discographies(_DISCOGRAPHY_PER_BATCH)
     _bump("discography", summary["discography"].get("new_albums", 0))
+
+    if _cancel_flag():
+        return summary
+
+    # Phase 0a: drain pre-0a phantom rows into name_latin so cross-script search
+    # reaches them too. Runs last — canonize/discography mint new phantoms (already
+    # filled at write time); this catches up the millions minted before 0a landed.
+    _set(current_step="name_latin")
+    summary["name_latin"] = _step_backfill_name_latin(_NAME_LATIN_PER_BATCH)
+    _bump("name_latin", sum(summary["name_latin"].values()))
 
     # MB canonicalization is NOT a background step — it runs at its real trigger
     # points (post-scan, post-MB-dump-load) against the local dump. The background

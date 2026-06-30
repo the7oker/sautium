@@ -48,16 +48,17 @@ def _filter_parts(parts: List[str]) -> List[str]:
 
 def _ensure_artist(db: Session, name: str):
     """Get or create artist with deterministic UUID. Returns UUID."""
+    from transliterate import latinize
     uid = artist_uuid(name)
     exists = db.execute(
         text("SELECT 1 FROM artists WHERE id = :id"), {"id": str(uid)}
     ).fetchone()
     if not exists:
         db.execute(text("""
-            INSERT INTO artists (id, name)
-            VALUES (:id, :name)
+            INSERT INTO artists (id, name, name_latin)
+            VALUES (:id, :name, :name_latin)
             ON CONFLICT (id) DO NOTHING
-        """), {"id": str(uid), "name": name})
+        """), {"id": str(uid), "name": name, "name_latin": latinize(name)})
         logger.info(f"  Created artist: {name} ({uid})")
     return uid
 
@@ -264,6 +265,7 @@ def recanonicalize_album(db: Session, album_id, canonical_title: str,
     collapse as named variants of the one album. Returns the final album id
     (unchanged when the title was already canonical). MB-independent (Tier-0).
     """
+    from transliterate import latinize
     aid = str(album_id)
     row = db.execute(text("""
         SELECT ar.name FROM album_artists aa
@@ -282,8 +284,8 @@ def recanonicalize_album(db: Session, album_id, canonical_title: str,
         ), {"ed": edition, "aid": aid})
 
     final_id = _update_album_uuid(db, aid, new_id)  # rename, or merge if canonical exists
-    db.execute(text("UPDATE albums SET title = :t WHERE id = :id"),
-               {"t": canonical_title, "id": final_id})
+    db.execute(text("UPDATE albums SET title = :t, title_latin = :tl WHERE id = :id"),
+               {"t": canonical_title, "tl": latinize(canonical_title), "id": final_id})
     return final_id
 
 
@@ -303,6 +305,7 @@ def recanonicalize_album_variants(db: Session, src_album_id, variant_ids: List[i
     `album_variants.raw_title` is the immutable scan-time title, so the split
     reverses; albums are local-only, never synced.
     """
+    from transliterate import latinize
     src = str(src_album_id)
     vids = [int(v) for v in variant_ids]
     if not vids:
@@ -320,17 +323,17 @@ def recanonicalize_album_variants(db: Session, src_album_id, variant_ids: List[i
         # Primary edition stays in place — just (re)label its variants and pin the title.
         db.execute(text("UPDATE album_variants SET edition = :ed WHERE id = ANY(:v)"),
                    {"ed": edition, "v": vids})
-        db.execute(text("UPDATE albums SET title = :t WHERE id = :a"),
-                   {"t": canonical_title, "a": src})
+        db.execute(text("UPDATE albums SET title = :t, title_latin = :tl WHERE id = :a"),
+                   {"t": canonical_title, "tl": latinize(canonical_title), "a": src})
         return src
 
     # Materialize the destination edition row, inheriting the release group.
     db.execute(text("""
-        INSERT INTO albums (id, title, release_year, musicbrainz_id, mb_match_confidence)
-        SELECT :nid, :t, a.release_year, a.musicbrainz_id, a.mb_match_confidence
+        INSERT INTO albums (id, title, title_latin, release_year, musicbrainz_id, mb_match_confidence)
+        SELECT :nid, :t, :tl, a.release_year, a.musicbrainz_id, a.mb_match_confidence
         FROM albums a WHERE a.id = :a
-        ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title
-    """), {"nid": new_id, "t": canonical_title, "a": src})
+        ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, title_latin = EXCLUDED.title_latin
+    """), {"nid": new_id, "t": canonical_title, "tl": latinize(canonical_title), "a": src})
     db.execute(text("""
         INSERT INTO album_artists (album_id, artist_id, role, mbid)
         SELECT :nid, artist_id, role, mbid FROM album_artists WHERE album_id = :a

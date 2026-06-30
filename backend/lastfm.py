@@ -367,6 +367,7 @@ class LastFmService:
         """
         from uuid_utils import artist_uuid
         from canon.split import detect_compound_type
+        from transliterate import latinize
 
         seed = str(artist_id)
         seen: set = set()   # sids already handled this batch — pending db.add()s
@@ -396,9 +397,9 @@ class LastFmService:
                 # Mint the phantom row if absent. id derives from normalize(name),
                 # so a namesake collapses to the same bucket — intended.
                 db.execute(text(
-                    "INSERT INTO artists (id, name) VALUES (:id, :name) "
+                    "INSERT INTO artists (id, name, name_latin) VALUES (:id, :name, :nl) "
                     "ON CONFLICT (id) DO NOTHING"
-                ), {"id": str(sid), "name": name})
+                ), {"id": str(sid), "name": name, "nl": latinize(name)})
 
                 existing = db.query(SimilarArtist).filter(
                     SimilarArtist.artist_id == artist_id,
