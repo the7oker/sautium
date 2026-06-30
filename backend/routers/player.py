@@ -745,6 +745,7 @@ _SESSION_DEDUP_WINDOW_SEC = 30
 def _rotate_session(
     origin: str,
     *,
+    seed_track_id: Optional[str] = None,
     seed_media_file_id: Optional[int] = None,
     origin_album_id: Optional[str] = None,
 ) -> None:
@@ -752,21 +753,28 @@ def _rotate_session(
     session. Called at the TOP of every destructive play endpoint, BEFORE
     stop()/clear(), so the OLD queue is captured intact.
 
+    Source-agnostic: the snapshot is a list of (track_id, media_file_id) pairs
+    — phantom (streamed) tracks carry a track UUID with media_file_id None, so
+    they land in the session just like owned files. Owned play endpoints pass
+    only seed_media_file_id; _archive_and_open_session derives seed_track_id
+    from it, so those call-sites stay unchanged.
+
     Reads the old queue fresh from HQPlayer under the STATUS lock — a
     different connection + lock from the cmd path the caller is about to use,
     so it never nests with the caller's _hqp_lock block (same split `reorder`
     already relies on). A read miss degrades to an empty snapshot; never
     retried/slept on (project rule)."""
-    old_media_ids: list[int] = []
+    old_pairs: list[tuple[str, Optional[int]]] = []
     try:
         with _hqp_status_lock:
             hqp = _get_hqp_status()
             hqp_tracks = hqp.get_playlist()
         payload = _build_playlist_payload(hqp_tracks)  # pure transform, no socket I/O
-        old_media_ids = [t["id"] for t in payload["tracks"] if t.get("id")]
+        old_pairs = [(t["track_id"], t.get("id"))
+                     for t in payload["tracks"] if t.get("track_id")]
     except Exception as e:
         # Read miss (HQPlayer stalled): skip rotation entirely. An empty
-        # old_media_ids here would otherwise be mistaken for a genuinely empty
+        # old_pairs here would otherwise be mistaken for a genuinely empty
         # queue and DELETE the active session — losing the album the user was
         # actually listening to. A stalled HQPlayer means the play will likely
         # fail anyway, so leave session state untouched; the next successful
@@ -775,7 +783,7 @@ def _rotate_session(
         return
 
     archived_mix_id = _archive_and_open_session(
-        old_media_ids, origin, seed_media_file_id, origin_album_id,
+        old_pairs, origin, seed_track_id, seed_media_file_id, origin_album_id,
     )
     if archived_mix_id is not None:
         _schedule_mix_title(archived_mix_id)
@@ -787,34 +795,36 @@ def _close_active_session() -> None:
     lands in history without a follow-up play. Reads the queue under the
     status lock; a read miss skips (the session stays active and the next play
     rotates it normally)."""
-    old_media_ids: list[int] = []
+    old_pairs: list[tuple[str, Optional[int]]] = []
     try:
         with _hqp_status_lock:
             hqp = _get_hqp_status()
             hqp_tracks = hqp.get_playlist()
         payload = _build_playlist_payload(hqp_tracks)
-        old_media_ids = [t["id"] for t in payload["tracks"] if t.get("id")]
+        old_pairs = [(t["track_id"], t.get("id"))
+                     for t in payload["tracks"] if t.get("track_id")]
     except Exception as e:
         logger.warning(f"_close_active_session: could not read queue: {e}")
         return
     archived_mix_id = _archive_and_open_session(
-        old_media_ids, "mix", None, None, open_new=False,
+        old_pairs, "mix", None, None, None, open_new=False,
     )
     if archived_mix_id is not None:
         _schedule_mix_title(archived_mix_id)
 
 
 def _archive_and_open_session(
-    old_media_ids: list[int],
+    old_pairs: list[tuple[str, Optional[int]]],
     origin: str,
+    seed_track_id: Optional[str],
     seed_media_file_id: Optional[int],
     origin_album_id: Optional[str],
     *,
     open_new: bool = True,
 ) -> Optional[str]:
-    """Archive the current active session against `old_media_ids` and open a
-    new one — atomically. db_pool connections are autocommit, so toggle it
-    off for this multi-statement transaction (mirrors
+    """Archive the current active session against `old_pairs` (track_id,
+    media_file_id) and open a new one — atomically. db_pool connections are
+    autocommit, so toggle it off for this multi-statement transaction (mirrors
     routers.home._db_query_with_ef_search). With open_new=False (end-of-queue
     completion) the active session is archived but no new one is opened.
     Returns the archived session id IFF it was a mix needing a background
@@ -826,9 +836,21 @@ def _archive_and_open_session(
         conn.autocommit = False
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # Owned play endpoints pass only the seed's media_file_id; the
+                # session keys on the logical track UUID, so derive it here (one
+                # query) — keeps every owned call-site untouched. Phantom callers
+                # pass seed_track_id directly (they have no media_file).
+                if seed_track_id is None and seed_media_file_id is not None:
+                    cur.execute(
+                        "SELECT track_id::text AS tid FROM media_files WHERE id = %s",
+                        (seed_media_file_id,))
+                    r = cur.fetchone()
+                    seed_track_id = r["tid"] if r else None
+
                 cur.execute(
                     "SELECT id::text AS id, origin, "
-                    "origin_album_id::text AS origin_album_id, seed_media_file_id, "
+                    "origin_album_id::text AS origin_album_id, "
+                    "seed_track_id::text AS seed_track_id, seed_media_file_id, "
                     "EXTRACT(EPOCH FROM (now() - started_at)) AS age_sec "
                     "FROM listening_sessions WHERE ended_at IS NULL FOR UPDATE"
                 )
@@ -848,30 +870,30 @@ def _archive_and_open_session(
                     and active["age_sec"] < _SESSION_DEDUP_WINDOW_SEC
                     and active["origin"] == origin
                     and active["origin_album_id"] == origin_album_id
-                    and active["seed_media_file_id"] == seed_media_file_id
+                    and active["seed_track_id"] == seed_track_id
                 ):
                     conn.commit()
                     return None
 
                 if active is not None:
-                    snapshot_ids = _snapshot_ids_for(cur, active, old_media_ids)
-                    if snapshot_ids:
+                    snapshot = _snapshot_pairs_for(cur, active, old_pairs)
+                    if snapshot:
                         psycopg2.extras.execute_values(
                             cur,
                             "INSERT INTO session_tracks "
-                            "(session_id, position, media_file_id) VALUES %s",
-                            [(active["id"], i, mid)
-                             for i, mid in enumerate(snapshot_ids)],
+                            "(session_id, position, track_id, media_file_id) VALUES %s",
+                            [(active["id"], i, tid, mid)
+                             for i, (tid, mid) in enumerate(snapshot)],
                         )
-                        title, subtitle, cover_id = _compute_session_card(
-                            cur, active, snapshot_ids,
+                        title, subtitle, cover_id, cover_url = _compute_session_card(
+                            cur, active, snapshot,
                         )
                         cur.execute(
                             "UPDATE listening_sessions SET ended_at = now(), "
                             "track_count = %s, title = %s, subtitle = %s, "
-                            "cover_id = %s::uuid WHERE id = %s::uuid",
-                            (len(snapshot_ids), title, subtitle,
-                             cover_id, active["id"]),
+                            "cover_id = %s::uuid, cover_url = %s WHERE id = %s::uuid",
+                            (len(snapshot), title, subtitle,
+                             cover_id, cover_url, active["id"]),
                         )
                         if active["origin"] == "mix":
                             archived_mix_id = active["id"]
@@ -885,9 +907,9 @@ def _archive_and_open_session(
                 if open_new:
                     cur.execute(
                         "INSERT INTO listening_sessions "
-                        "(origin, seed_media_file_id, origin_album_id) "
-                        "VALUES (%s, %s, %s::uuid)",
-                        (origin, seed_media_file_id, origin_album_id),
+                        "(origin, seed_track_id, seed_media_file_id, origin_album_id) "
+                        "VALUES (%s, %s::uuid, %s, %s::uuid)",
+                        (origin, seed_track_id, seed_media_file_id, origin_album_id),
                     )
             conn.commit()
         except Exception:
@@ -898,8 +920,10 @@ def _archive_and_open_session(
     return archived_mix_id
 
 
-def _snapshot_ids_for(cur, active: dict, old_media_ids: list[int]) -> list[int]:
-    """Resolve which media_file_ids to snapshot into the archived session.
+def _snapshot_pairs_for(cur, active: dict, old_pairs: list[tuple[str, Optional[int]]]
+                        ) -> list[tuple[str, Optional[int]]]:
+    """Resolve which (track_id, media_file_id) pairs to snapshot into the
+    archived session.
 
     For album/track sessions the content is deterministic from the origin, so
     guard against the live queue being replaced out-of-band (e.g. HQPlayer
@@ -908,91 +932,124 @@ def _snapshot_ids_for(cur, active: dict, old_media_ids: list[int]) -> list[int]:
     tracks so the card's cover/tracks match its title. A queue that still
     overlaps is trusted — it reflects in-app edits (queued/removed tracks).
     radio/mix content is dynamic (similar picks / an explicit list) with no
-    origin reference, so the captured queue is the only source."""
+    origin reference, so the captured queue is the only source.
+
+    Album tracks come from the canonical album_tracks list (owned AND phantom
+    albums), LEFT-joined to media_files for the physical id; a phantom album's
+    tracks carry media_file_id None."""
     origin = active["origin"]
+    old_tids = {tid for tid, _mid in old_pairs}
 
     if origin == "album" and active["origin_album_id"]:
         cur.execute(
-            "SELECT mf.id FROM media_files mf "
-            "JOIN album_variants av ON av.id = mf.album_variant_id "
-            "WHERE av.album_id = %s::uuid "
-            "ORDER BY mf.disc_number, mf.track_number",
+            "SELECT t.id::text AS track_id, mf.id AS media_file_id "
+            "FROM album_tracks atk "
+            "JOIN tracks t ON t.id = atk.track_id "
+            "LEFT JOIN media_files mf ON mf.track_id = t.id "
+            "WHERE atk.album_id = %s::uuid "
+            "ORDER BY atk.disc, atk.position",
             (active["origin_album_id"],),
         )
-        album_ids = [r["id"] for r in cur.fetchall()]
-        if album_ids and not (set(old_media_ids) & set(album_ids)):
-            return album_ids
-        return old_media_ids
+        album_pairs = [(r["track_id"], r["media_file_id"]) for r in cur.fetchall()]
+        album_tids = {tid for tid, _mid in album_pairs}
+        if album_tids and not (old_tids & album_tids):
+            return album_pairs
+        return old_pairs
 
-    if origin == "track" and active["seed_media_file_id"]:
+    if origin == "track" and active["seed_track_id"]:
         # A single-track session is exactly its seed; don't let an out-of-band
         # queue swap put a foreign track in it.
-        if active["seed_media_file_id"] not in old_media_ids:
-            return [active["seed_media_file_id"]]
-        return old_media_ids
+        if active["seed_track_id"] not in old_tids:
+            return [(active["seed_track_id"], active.get("seed_media_file_id"))]
+        return old_pairs
 
-    return old_media_ids
+    return old_pairs
 
 
-def _compute_session_card(cur, active: dict, old_media_ids: list[int]):
-    """Title / subtitle / cover_id for an archived session, derived from its
-    origin (NOT the snapshot's first row — album/track/radio titles come from
-    the stored origin columns; only mix uses the snapshot). Per-row label
-    formatting — the Python-side case the project allows; the lookups are SQL.
-    Uses the cursor already inside the archive transaction."""
-    origin = active["origin"]
-    first_mid = old_media_ids[0] if old_media_ids else None
-
-    def _cover_of(mid):
-        if mid is None:
-            return None
-        cur.execute(
-            "SELECT cover_id::text AS cover_id FROM media_files WHERE id = %s",
-            (mid,),
-        )
+def _cover_for_track(cur, track_id: Optional[str], media_file_id: Optional[int]
+                     ) -> tuple[Optional[str], Optional[str]]:
+    """(cover_id, cover_url) for a snapshot track — owned art is a covers(id)
+    via media_files; a phantom track's art is its album's CAA cover_url. The
+    session card renders cover_id (owned) OR cover_url (phantom)."""
+    if media_file_id is not None:
+        cur.execute("SELECT cover_id::text AS c FROM media_files WHERE id = %s",
+                    (media_file_id,))
         r = cur.fetchone()
-        return r["cover_id"] if r else None
+        if r and r["c"]:
+            return (r["c"], None)
+    if track_id is not None:
+        cur.execute(
+            "SELECT al.cover_url FROM album_tracks atk "
+            "JOIN albums al ON al.id = atk.album_id "
+            "WHERE atk.track_id = %s::uuid AND al.cover_url IS NOT NULL LIMIT 1",
+            (track_id,))
+        r = cur.fetchone()
+        if r:
+            return (None, r["cover_url"])
+    return (None, None)
+
+
+def _compute_session_card(cur, active: dict, snapshot: list[tuple[str, Optional[int]]]):
+    """Title / subtitle / (cover_id, cover_url) for an archived session, derived
+    from its origin (NOT the snapshot's first row — album/track/radio titles
+    come from the stored origin columns; only mix uses the snapshot). Cover is
+    source-agnostic via _cover_for_track. Per-row label formatting is the
+    Python-side case the project allows; the lookups are SQL. Uses the cursor
+    already inside the archive transaction."""
+    origin = active["origin"]
+    first = snapshot[0] if snapshot else (None, None)
 
     if origin == "album" and active["origin_album_id"]:
+        # Source-agnostic primary artist: owned via media_files, phantom via the
+        # canonical album_tracks list (COALESCE picks whichever the album has).
         cur.execute("""
             SELECT al.title,
-                   (SELECT a.name
-                    FROM artists a
-                    JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
-                    JOIN tracks t ON t.id = ta.track_id
-                    JOIN media_files mf ON mf.track_id = t.id
-                    JOIN album_variants av ON av.id = mf.album_variant_id
-                    WHERE av.album_id = al.id
-                    GROUP BY a.id, a.name
-                    ORDER BY COUNT(*) DESC
-                    LIMIT 1) AS artist
+                   COALESCE(
+                     (SELECT a.name FROM artists a
+                      JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
+                      JOIN tracks t ON t.id = ta.track_id
+                      JOIN media_files mf ON mf.track_id = t.id
+                      JOIN album_variants av ON av.id = mf.album_variant_id
+                      WHERE av.album_id = al.id
+                      GROUP BY a.id, a.name ORDER BY COUNT(*) DESC LIMIT 1),
+                     (SELECT a.name FROM artists a
+                      JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
+                      JOIN album_tracks atk ON atk.track_id = ta.track_id
+                      WHERE atk.album_id = al.id
+                      GROUP BY a.id, a.name ORDER BY COUNT(*) DESC LIMIT 1)
+                   ) AS artist
             FROM albums al WHERE al.id = %s::uuid
         """, (active["origin_album_id"],))
         r = cur.fetchone()
+        cover_id, cover_url = _cover_for_track(cur, first[0], first[1])
         return (
             r["title"] if r else "Album",
             r["artist"] if r else None,
-            _cover_of(first_mid),
+            cover_id, cover_url,
         )
 
-    if origin in ("track", "radio") and active["seed_media_file_id"]:
+    if origin in ("track", "radio") and active["seed_track_id"]:
         cur.execute("""
-            SELECT t.title, a.name AS artist, mf.cover_id::text AS cover_id
-            FROM media_files mf
-            JOIN tracks t ON t.id = mf.track_id
-            JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
-            JOIN artists a ON a.id = ta.artist_id
-            WHERE mf.id = %s
-        """, (active["seed_media_file_id"],))
+            SELECT t.title, a.name AS artist
+            FROM tracks t
+            LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+            LEFT JOIN artists a ON a.id = ta.artist_id
+            WHERE t.id = %s::uuid
+            LIMIT 1
+        """, (active["seed_track_id"],))
         r = cur.fetchone()
         title = r["title"] if r else "Track"
         subtitle = "Radio" if origin == "radio" else (r["artist"] if r else None)
-        cover = (r["cover_id"] if r else None) or _cover_of(first_mid)
-        return (title, subtitle, cover)
+        cover_id, cover_url = _cover_for_track(
+            cur, active["seed_track_id"], active.get("seed_media_file_id"))
+        if not cover_id and not cover_url:   # seed missing → fall back to the first row
+            cover_id, cover_url = _cover_for_track(cur, first[0], first[1])
+        return (title, subtitle, cover_id, cover_url)
 
     # mix — or album/track/radio with a NULL seed (degrade gracefully).
-    n = len(old_media_ids)
-    return ("Mix", f"{n} track{'s' if n != 1 else ''}", _cover_of(first_mid))
+    n = len(snapshot)
+    cover_id, cover_url = _cover_for_track(cur, first[0], first[1])
+    return ("Mix", f"{n} track{'s' if n != 1 else ''}", cover_id, cover_url)
 
 
 def _schedule_mix_title(session_id: str) -> None:
@@ -1013,8 +1070,7 @@ def _schedule_mix_title(session_id: str) -> None:
             rows = _db_query("""
                 SELECT a.name AS artist, t.title AS title
                 FROM session_tracks st
-                JOIN media_files mf ON mf.id = st.media_file_id
-                JOIN tracks t ON t.id = mf.track_id
+                JOIN tracks t ON t.id = st.track_id
                 JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
                 JOIN artists a ON a.id = ta.artist_id
                 WHERE st.session_id = %(sid)s::uuid
@@ -2608,6 +2664,12 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
     if not prefix:
         raise HTTPException(status_code=502, detail="No tracks could be fetched from the provider")
 
+    # Snapshot the prior queue into a session, then open a phantom-album one —
+    # streamed albums land in the Home shelf like owned albums (origin_album_id
+    # is the phantom album's UUID; the seed is its first available track).
+    _rotate_session('album', origin_album_id=str(req.album_id),
+                    seed_track_id=avail_q[0].track_id)
+
     prefix_urls = [proxy.url_for(t) for t in prefix]
     try:
         with _hqp_lock:
@@ -2679,6 +2741,9 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
         e = None
     if e is None or e.audio is None:
         raise HTTPException(status_code=502, detail="This track isn't available to stream right now.")
+
+    # A single streamed track is a 'track'-origin session seeded by its UUID.
+    _rotate_session('track', seed_track_id=req.track_id)
 
     try:
         with _hqp_lock:
@@ -3278,7 +3343,11 @@ def radio_start(req: RadioStartRequest):
             status_code=409,
             detail="This track isn't analysed yet — play it a moment, then start radio.")
 
-    _rotate_session('radio', seed_media_file_id=req.track_id)
+    # seed_uuid is resolved for BOTH an owned (req.track_id) and a phantom
+    # (req.track_uuid) seed — pass it as the logical seed so a radio started
+    # from a streamed track gets a proper session card (previously this passed
+    # the owned-only req.track_id, which was None for a phantom seed).
+    _rotate_session('radio', seed_track_id=seed_uuid, seed_media_file_id=req.track_id)
     with _hqp_lock:
         # PlaylistClear keeps the reading slot intact — it erases everything queued
         # AFTER the current track while the seed plays on; the batch flows in behind.

@@ -652,17 +652,22 @@ CREATE TABLE IF NOT EXISTS local_play_stats (
 -- (play-track / play-album / play-similar / play-tracks / radio-start)
 -- archives the previous queue as an immutable snapshot and opens a new
 -- active session. ended_at IS NULL ⇔ active; the partial unique index
--- enforces at most one active session at a time. cover_id is
+-- enforces at most one active session at a time. The card cover is
 -- denormalised from the first snapshot track so the Home shelf renders
--- without a join. origin records how the queue started — the one fact
--- HQPlayer (source of truth for the live queue) does not know.
+-- without a join: cover_id (owned art) OR cover_url (a phantom album's CAA
+-- art, which is not a covers(id) row). origin records how the queue started
+-- — the one fact HQPlayer (source of truth for the live queue) does not know.
+-- seed_track_id is the logical seed (owned AND phantom); seed_media_file_id is
+-- the owned-only physical file (mirrors listening_history's dual key).
 CREATE TABLE IF NOT EXISTS listening_sessions (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     origin             session_origin NOT NULL,
     title              TEXT,
     subtitle           TEXT,
     cover_id           UUID REFERENCES covers(id) ON DELETE SET NULL,
+    cover_url          TEXT,
     origin_album_id    UUID REFERENCES albums(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    seed_track_id      UUID REFERENCES tracks(id) ON DELETE SET NULL ON UPDATE CASCADE,
     seed_media_file_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
     track_count        INTEGER NOT NULL DEFAULT 0,
     started_at         TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -672,15 +677,17 @@ CREATE TABLE IF NOT EXISTS listening_sessions (
 );
 
 -- Immutable per-session track snapshot, written when the session is
--- archived. media_file_id (not track_id): the queue is physical files,
--- consistent with the playback domain. ON DELETE CASCADE on media_files
--- so a removed file drops from old snapshots; the session row survives
--- with a smaller list (track_count is the stored snapshot, intentionally
--- not re-derived).
+-- archived. Source-agnostic dual key (mirrors listening_history): track_id
+-- (UUID, the logical identity, owned AND phantom) is the real key;
+-- media_file_id is the owned-only physical file, NULL for streamed phantoms.
+-- media_file_id ON DELETE SET NULL — a removed owned file must not erase
+-- session history now that track_id carries identity (track_count is the
+-- stored snapshot, intentionally not re-derived).
 CREATE TABLE IF NOT EXISTS session_tracks (
     session_id     UUID NOT NULL REFERENCES listening_sessions(id) ON DELETE CASCADE,
     position       INTEGER NOT NULL,
-    media_file_id  INTEGER NOT NULL REFERENCES media_files(id) ON DELETE CASCADE,
+    track_id       UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    media_file_id  INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
     PRIMARY KEY (session_id, position)
 );
 
@@ -873,6 +880,10 @@ CREATE INDEX IF NOT EXISTS idx_listening_sessions_archived
     ON listening_sessions(ended_at DESC) WHERE ended_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_session_tracks_media_file
     ON session_tracks(media_file_id);
+CREATE INDEX IF NOT EXISTS idx_session_tracks_track
+    ON session_tracks(track_id);
+CREATE INDEX IF NOT EXISTS idx_listening_sessions_seed_track
+    ON listening_sessions(seed_track_id);
 
 -- ============================================================
 -- Trigger function for updated_at

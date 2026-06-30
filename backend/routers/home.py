@@ -289,6 +289,7 @@ def get_listening_history(
                title,
                subtitle,
                cover_id::text AS cover_id,
+               cover_url,
                origin,
                track_count
         FROM listening_sessions
@@ -309,6 +310,7 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
                title,
                subtitle,
                cover_id::text AS cover_id,
+               cover_url,
                origin,
                track_count
         FROM listening_sessions
@@ -321,14 +323,22 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
         SELECT st.media_file_id,
                t.title,
                a.name AS artist,
-               mf.duration_seconds::float AS duration_seconds,
+               COALESCE(
+                   mf.duration_seconds,
+                   (SELECT atk.length_ms / 1000.0 FROM album_tracks atk
+                    WHERE atk.track_id = t.id AND atk.length_ms IS NOT NULL LIMIT 1)
+               )::float AS duration_seconds,
                mf.cover_id::text AS cover_id,
+               (SELECT al.cover_url FROM album_tracks atk
+                JOIN albums al ON al.id = atk.album_id
+                WHERE atk.track_id = t.id AND al.cover_url IS NOT NULL LIMIT 1) AS cover_url,
+               (st.media_file_id IS NULL) AS is_phantom,
                af.key,
                af.mode,
                af.bpm::float AS bpm
         FROM session_tracks st
-        JOIN media_files mf ON mf.id = st.media_file_id
-        JOIN tracks t ON t.id = mf.track_id
+        JOIN tracks t ON t.id = st.track_id
+        LEFT JOIN media_files mf ON mf.id = st.media_file_id
         LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
         LEFT JOIN artists a ON a.id = ta.artist_id
         LEFT JOIN audio_features af ON af.track_id = t.id
