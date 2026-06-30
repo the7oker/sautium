@@ -4185,6 +4185,16 @@
             style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};"></div>`;
 
     const tracksList = d.tracks || [];
+    const anyPhantom = tracksList.some(t => t.is_phantom);
+    const anyOwned = tracksList.some(t => !t.is_phantom);
+    // An all-phantom album session replays/streams by album_id, exactly like the
+    // album screen's phantom path — so Play/Queue route through play-phantom.
+    const phantomAlbumId = (d.origin === 'album' && d.origin_album_id
+                            && anyPhantom && !anyOwned) ? d.origin_album_id : null;
+    // Tag the screen so the global preview-events listener refreshes these rows'
+    // buffering + key·bpm by track_id — same mechanism the album page uses, so a
+    // whole-album Play's optimistic "Buffering…" lines clear as each track lands.
+    if (phantomAlbumId) screen.dataset.phantomAlbumId = phantomAlbumId;
     const trackParts = [];
     let n = 0;
     for (const t of tracksList) {
@@ -4194,13 +4204,19 @@
         t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
         t.bpm ? Math.round(t.bpm) + ' bpm' : null,
       ].filter(Boolean).join(' · ');
+      // Phantom (streamed) rows carry is-phantom-track + data-track-id so the
+      // shared handlers route them (click → play-phantom-track, [+] → queue);
+      // owned rows keep data-media-file-id. Same dim styling as other surfaces.
+      const attrs = t.is_phantom
+        ? `class="track-row is-phantom-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`
+        : `class="track-row" data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}"`;
       trackParts.push(`
-        <button class="track-row" type="button"
-                data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}">
+        <button ${attrs} type="button">
           <span class="track-rank">${n}</span>
           <div class="track-info">
             <div class="track-title-line">${escapeHtml(t.title || '')}</div>
             ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
+            ${t.is_phantom ? '<div class="track-buffering" hidden>Buffering…</div>' : ''}
           </div>
           <span class="track-dur">${fmtDuration(t.duration_seconds)}</span>
           <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
@@ -4226,8 +4242,8 @@
         </div>
       </div>
       <div class="album-actions">
-        <button class="btn-primary" type="button" data-action="play-all">${SVG_PLAY} Play</button>
-        <button class="btn-secondary album-queue-btn" type="button" data-action="queue-album">
+        <button class="btn-primary" type="button" data-action="${phantomAlbumId ? 'play-phantom' : 'play-all'}">${SVG_PLAY} Play</button>
+        <button class="btn-secondary album-queue-btn" type="button" data-action="${phantomAlbumId ? 'queue-phantom-album' : 'queue-album'}">
           <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
         </button>
       </div>
@@ -4235,7 +4251,7 @@
       <div style="height: calc(24 * var(--px));"></div>
     `;
 
-    wireDetailHandlers(screen, { tracks: tracksList });
+    wireDetailHandlers(screen, { tracks: tracksList, phantomAlbumId });
     updatePlayingHighlight();
   }
 

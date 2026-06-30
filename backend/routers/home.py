@@ -312,6 +312,7 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
                cover_id::text AS cover_id,
                cover_url,
                origin,
+               origin_album_id::text AS origin_album_id,
                track_count
         FROM listening_sessions
         WHERE id = %(id)s::uuid AND ended_at IS NOT NULL
@@ -321,6 +322,7 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
 
     session["tracks"] = db_query("""
         SELECT st.media_file_id,
+               st.track_id::text AS track_id,
                t.title,
                a.name AS artist,
                COALESCE(
