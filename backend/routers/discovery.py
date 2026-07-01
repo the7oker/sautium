@@ -656,82 +656,53 @@ def discovery_titles(
     energy: Optional[str] = Query(None),
     instruments: list[str] = Query(default_factory=list),
     quality: list[str] = Query(default_factory=list),
+    corpus: str = Query("all"),
 ):
-    """Tracks matching the query and/or the active filters.
+    """Track matches by title and/or audio filters, via the discovery engine.
+    Maps the Discovery filter chips to engine tools; browse mode (no text) returns
+    filter-only matches. (quality isn't an engine tool yet — noted below.)"""
+    from discovery_engine import build
 
-    Two operating modes share one endpoint:
-      - With `q`: trigram + prefix + levenshtein title match,
-        ordered by similarity. Filters narrow the result set.
-      - Without `q`: filter-only browse — returns tracks that
-        satisfy the filters, ordered by play count desc then
-        title. Used by Discovery's Apply button when the search
-        box is empty.
+    active: dict = {}
+    if q and q.strip():
+        active["text"] = q.strip()[:255]
+    if bpm_min is not None or bpm_max is not None:
+        active["bpm"] = (bpm_min if bpm_min is not None else 0.0,
+                         bpm_max if bpm_max is not None else 9999.0)
+    if key:
+        active["key"] = key
+    if mode and mode != "any":
+        active["mode"] = mode
+    if vocalist and vocalist != "any":
+        active["vocalist"] = vocalist
+    if gender and gender != "any":
+        active["gender"] = gender
+    if danceable == "yes":
+        active["danceable"] = True
+    if energy in ("low", "mid", "high"):
+        active["energy"] = energy
+    if instruments:
+        active["instruments"] = instruments
+    # NOTE: `quality` is not an engine tool yet (owned-only file tiers were dropped
+    # from the engine; returns as a two-source file+stream tool later).
 
-    Pure SQL — no ML model dependency.
-    """
-    q = (q or "").strip()[:255]   # postgres levenshtein() rejects args > 255 chars
-    f = _build_filter_params(bpm_min, bpm_max, key, mode, vocalist,
-                             gender, danceable, energy, instruments, quality)
-    extra_where, filter_params = _filter_clauses(f, mf_alias="mf")
-    af_join = "LEFT JOIN audio_features af ON af.track_id = t.id" \
-        if _filter_needs_audio_features(f) else ""
+    if not active:
+        return {"status": "ok", "results": []}
 
-    base_select = """
-        SELECT mf.id,
-               t.title,
-               a.name AS artist,
-               al.title AS album,
-               al.release_year AS year,
-               mf.duration_seconds,
-               mf.cover_id::text AS cover_id,
-    """
-    base_from = f"""
-        FROM media_files mf
-        JOIN tracks t ON t.id = mf.track_id AND mf.is_analysis_source = TRUE
-        JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
-        JOIN artists a ON a.id = ta.artist_id
-        JOIN album_variants av ON av.id = mf.album_variant_id
-        JOIN albums al ON al.id = av.album_id
-        {af_join}
-    """
+    sql, params = build(active, {}, corpus=corpus, limit=limit)["track"]
+    with get_db_context() as db:
+        rows = db.execute(text(sql), params).fetchall()
 
-    if q:
-        # Title-match mode: blend trigram + prefix + levenshtein.
-        sql = base_select + """
-               GREATEST(
-                   similarity(t.title, %(q)s),
-                   CASE WHEN lower(t.title) LIKE lower(%(prefix)s)
-                        THEN 0.85 ELSE 0 END,
-                   CASE WHEN levenshtein_less_equal(
-                            lower(t.title), lower(%(q)s), 1) <= 1
-                        THEN 0.70 ELSE 0 END
-               ) AS similarity
-        """ + base_from + """
-            WHERE (similarity(t.title, %(q)s) >= 0.5
-                   OR lower(t.title) LIKE lower(%(prefix)s)
-                   OR levenshtein_less_equal(
-                        lower(t.title), lower(%(q)s), 1) <= 1)
-        """
-        if extra_where:
-            sql += "  AND " + "  AND ".join(extra_where)
-        sql += " ORDER BY similarity DESC, t.title LIMIT %(limit)s"
-        py_params = {"q": q, "prefix": q + "%",
-                     "limit": limit, **filter_params}
-    else:
-        # Browse mode: no text match, filters drive result set.
-        # Anything goes when no filter is active either — caller
-        # is responsible for not invoking us in that case (the
-        # Discovery frontend gates this on `hasActiveFilters`).
-        sql = base_select + """
-               NULL::float AS similarity
-        """ + base_from
-        if extra_where:
-            sql += " WHERE " + " AND ".join(extra_where)
-        sql += " ORDER BY mf.play_count DESC NULLS LAST, t.title LIMIT %(limit)s"
-        py_params = {"limit": limit, **filter_params}
-
-    py_sql = sql
-    for k in filter_params:
-        py_sql = py_sql.replace(f":{k}", f"%({k})s")
-    rows = db_query(py_sql, py_params)
-    return {"status": "ok", "results": rows}
+    results = [{
+        "id": r.media_file_id,          # owned playback id (None for a phantom track)
+        "track_id": str(r.id),
+        "title": r.name,
+        "artist": r.artist,
+        "album": r.album,
+        "year": r.year,
+        "duration_seconds": float(r.duration_seconds) if r.duration_seconds else None,
+        "cover_id": r.cover_id,
+        "is_owned": bool(r.is_owned),
+        "similarity": round(float(r.score), 4) if r.score is not None else None,
+    } for r in rows]
+    return {"status": "ok", "results": results}

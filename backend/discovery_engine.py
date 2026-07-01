@@ -64,7 +64,20 @@ ENTITIES: dict[str, EntityDef] = {
                         "WHERE av.album_id=al.id ORDER BY mf.disc_number NULLS FIRST, mf.track_number "
                         "LIMIT 1) AS media_file_id"),
     "track":  EntityDef("track", "t.id", "t.title", "t.title_latin", "tracks t",
-                        "t.title"),
+                        "t.title",
+                        surface=", (SELECT a.name FROM track_artists ta JOIN artists a ON a.id=ta.artist_id "
+                        "WHERE ta.track_id=t.id AND ta.role='primary' LIMIT 1) AS artist, "
+                        "EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id=t.id) AS is_owned, "
+                        "(SELECT mf.id FROM media_files mf WHERE mf.track_id=t.id "
+                        "ORDER BY mf.is_analysis_source DESC LIMIT 1) AS media_file_id, "
+                        "(SELECT mf.cover_id::text FROM media_files mf WHERE mf.track_id=t.id "
+                        "AND mf.cover_id IS NOT NULL LIMIT 1) AS cover_id, "
+                        "(SELECT mf.duration_seconds FROM media_files mf WHERE mf.track_id=t.id LIMIT 1) "
+                        "AS duration_seconds, "
+                        "(SELECT al.title FROM media_files mf JOIN album_variants av ON av.id=mf.album_variant_id "
+                        "JOIN albums al ON al.id=av.album_id WHERE mf.track_id=t.id LIMIT 1) AS album, "
+                        "(SELECT al.release_year FROM media_files mf JOIN album_variants av ON av.id=mf.album_variant_id "
+                        "JOIN albums al ON al.id=av.album_id WHERE mf.track_id=t.id LIMIT 1) AS year"),
 }
 
 
@@ -128,9 +141,8 @@ TOOLS: dict[str, Tool] = {
         Source("gender", "artists", "a.gender = :gender", is_gate=True),)),
     # Track-level. Energy is smooth (distance to bucket midpoint → 0..1), not a gate.
     "energy": Tool("energy", targets=("track",), sources=(
-        Source("energy", "audio_features",
-               "GREATEST(0, 1 - abs(af.energy_db - :energy_mid)/:energy_span)",
-               floor=0.0, ceil=1.0, needs_join=frozenset({"audio_features"})),)),
+        Source("energy", "audio_features", "af.energy_db BETWEEN :energy_lo AND :energy_hi",
+               is_gate=True, needs_join=frozenset({"audio_features"})),)),
     "instruments": Tool("instruments", targets=("track",), sources=(
         Source("instruments", "audio_features", "af.instruments ?| :instruments",
                is_gate=True, needs_join=frozenset({"audio_features"}),
@@ -143,6 +155,12 @@ TOOLS: dict[str, Tool] = {
                is_gate=True, needs_join=frozenset({"audio_features"})),)),
     "key": Tool("key", targets=("track",), sources=(
         Source("key", "audio_features", "af.key = :key", is_gate=True,
+               needs_join=frozenset({"audio_features"})),)),
+    "mode": Tool("mode", targets=("track",), sources=(
+        Source("mode", "audio_features", "af.mode = :mode", is_gate=True,
+               needs_join=frozenset({"audio_features"})),)),
+    "danceable": Tool("danceable", targets=("track",), sources=(
+        Source("danceable", "audio_features", "af.danceability >= 0.5", is_gate=True,
                needs_join=frozenset({"audio_features"})),)),
     # Album-level.
     "genre": Tool("genre", targets=("track", "album", "artist"), sources=(
@@ -466,8 +484,10 @@ def _bind_params(tools, active: dict) -> dict:
                 p["qvec"] = _encode_bge(q)   # bio source (BGE-M3) — only if warm
             if _model_ready("clap"):
                 p["qclap"] = _encode_clap(q)  # CLAP source (text→audio) — only if warm
-        elif tool.key in ("gender", "vocalist", "key"):
+        elif tool.key in ("gender", "vocalist", "key", "mode"):
             p[tool.key] = v
+        elif tool.key == "bpm":
+            p["bpm_min"], p["bpm_max"] = v   # (min, max)
         elif tool.key == "genre":
             p["genre"] = list(v) if isinstance(v, (list, tuple)) else [v]
         elif tool.key == "moods":
@@ -476,13 +496,30 @@ def _bind_params(tools, active: dict) -> dict:
             exp = tool.sources[0].expand
             p["instruments"] = exp(v) if exp else (list(v) if isinstance(v, (list, tuple)) else [v])
         elif tool.key == "energy":
-            # (mid, span) in energy_db; TODO calibrate real buckets (Phase 2)
-            buckets = {"low": (-30.0, 10.0), "mid": (-20.0, 8.0), "high": (-10.0, 8.0)}
-            p["energy_mid"], p["energy_span"] = buckets.get(v, (-20.0, 15.0))
+            # energy_db buckets (mirror routers/discovery.ENERGY_BUCKETS)
+            buckets = {"low": (-100.0, -25.0), "mid": (-25.0, -15.0), "high": (-15.0, 0.0)}
+            p["energy_lo"], p["energy_hi"] = buckets.get(v, (-100.0, 0.0))
     return p
 
 
+_INSTRUMENT_GROUPS = {
+    "piano": ["piano", "electric piano", "keyboard (musical)"],
+    "guitar": ["guitar", "acoustic guitar", "plucked string instrument"],
+    "electric guitar": ["electric guitar"],
+    "bass": ["bass guitar", "electric bass", "double bass"],
+    "drums": ["drum", "drum kit", "drum machine", "percussion", "bass drum",
+              "snare drum", "cymbal", "hi-hat", "tabla", "tambourine"],
+    "strings": ["violin, fiddle", "cello", "bowed string instrument"],
+    "orchestra": ["orchestra"],
+    "synth": ["synthesizer", "sampler"],
+    "brass": ["brass instrument", "trumpet", "trombone", "french horn", "tuba"],
+    "saxophone": ["saxophone"],
+}
+
+
 def _expand_instruments(broad: list) -> list:
-    """Broad instrument chip → AST/PaSST tag set (moves here from
-    routers/discovery.INSTRUMENT_GROUPS when that endpoint is absorbed)."""
-    raise NotImplementedError("instrument group expansion")
+    """Broad instrument chip → AST/PaSST raw tag set for the JSONB ?| any-of match."""
+    out: list = []
+    for b in broad:
+        out.extend(_INSTRUMENT_GROUPS.get(b.lower(), [b.lower()]))
+    return list(dict.fromkeys(out))
