@@ -169,6 +169,15 @@ TOOLS: dict[str, Tool] = {
     "year": Tool("year", targets=("album", "track"), sources=(
         Source("year", "albums", "al.release_year BETWEEN :year_from AND :year_to",
                is_gate=True),)),
+    # Semantic-only track relevance (no title): CLAP text→audio, lyrics text→lyrics.
+    "sound": Tool("sound", targets=("track",), sources=(
+        Source("sound", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
+               targets=("track",), floor=0.25, ceil=0.45, weight=1.0, model="clap",
+               needs_join=frozenset({"embeddings"})),)),
+    "lyrics": Tool("lyrics", targets=("track",), sources=(
+        Source("lyrics", "lyrics_embeddings", "1-(le.vector <=> CAST(:qlyr AS vector))",
+               targets=("track",), floor=0.5, ceil=0.75, weight=1.0, model="lyrics",
+               needs_join=frozenset({"lyrics_embeddings"})),)),
 }
 
 
@@ -193,6 +202,7 @@ EDGES: tuple = (
     Edge("album_artists", "albums", "aa.album_id = al.id"),
     Edge("tracks", "audio_features", "af.track_id = t.id"),
     Edge("tracks", "embeddings", "e.track_id = t.id"),
+    Edge("tracks", "lyrics_embeddings", "le.track_id = t.id"),
     Edge("artists", "artist_bio_embeddings", "abe.artist_id = a.id"),
     Edge("artists", "artist_name_aliases", "ana.artist_id = a.id"),
     Edge("tracks", "album_tracks", "atr.track_id = t.id", corpus="phantom"),
@@ -211,7 +221,7 @@ _ALIAS = {
     "track_artists": "ta", "album_artists": "aa", "album_tracks": "atr",
     "audio_features": "af", "embeddings": "e", "artist_bio_embeddings": "abe",
     "media_files": "mf", "album_variants": "av", "album_genres": "ag", "genres": "g",
-    "artist_name_aliases": "ana",
+    "artist_name_aliases": "ana", "lyrics_embeddings": "le",
 }
 
 
@@ -465,6 +475,18 @@ def _encode_clap(q: str) -> str:
     return _to_vector_param(model_cache.get_model("clap", _load).text_to_embedding(q))
 
 
+def _encode_lyrics(q: str) -> str:
+    import model_cache
+    from search import _to_vector_param
+
+    def _load():
+        from lyrics_embeddings import LyricsEmbeddingGenerator
+        g = LyricsEmbeddingGenerator()
+        g.load_model()
+        return g
+    return _to_vector_param(model_cache.get_model("lyrics", _load).query_to_embedding(q))
+
+
 def _bind_params(tools, active: dict) -> dict:
     """Translate active tool values into SQL params. TODO(step 3+): bpm ranges,
     corpus. Vector params (qvec/qclap) are encoded once per text query."""
@@ -499,6 +521,12 @@ def _bind_params(tools, active: dict) -> dict:
             # energy_db buckets (mirror routers/discovery.ENERGY_BUCKETS)
             buckets = {"low": (-100.0, -25.0), "mid": (-25.0, -15.0), "high": (-15.0, 0.0)}
             p["energy_lo"], p["energy_hi"] = buckets.get(v, (-100.0, 0.0))
+        elif tool.key == "sound":
+            if _model_ready("clap"):
+                p["qclap"] = _encode_clap(str(v)[:255])
+        elif tool.key == "lyrics":
+            if _model_ready("lyrics"):
+                p["qlyr"] = _encode_lyrics(str(v)[:255])
     return p
 
 

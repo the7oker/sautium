@@ -557,6 +557,48 @@ def discovery_albums(
     return {"status": "ok", "results": results}
 
 
+def _engine_filters(bpm_min, bpm_max, key, mode, vocalist, gender,
+                    danceable, energy, instruments) -> dict:
+    """Map the shared Discovery filter chips to engine tool values (used by
+    /titles, /sound, /lyrics)."""
+    a: dict = {}
+    if bpm_min is not None or bpm_max is not None:
+        a["bpm"] = (bpm_min if bpm_min is not None else 0.0,
+                    bpm_max if bpm_max is not None else 9999.0)
+    if key:
+        a["key"] = key
+    if mode and mode != "any":
+        a["mode"] = mode
+    if vocalist and vocalist != "any":
+        a["vocalist"] = vocalist
+    if gender and gender != "any":
+        a["gender"] = gender
+    if danceable == "yes":
+        a["danceable"] = True
+    if energy in ("low", "mid", "high"):
+        a["energy"] = energy
+    if instruments:
+        a["instruments"] = instruments
+    return a
+
+
+def _track_results(rows) -> list:
+    """Engine track rows → the /titles /sound /lyrics result shape (owned playback
+    id + phantom track_id + is_owned + tile fields)."""
+    return [{
+        "id": r.media_file_id,
+        "track_id": str(r.id),
+        "title": r.name,
+        "artist": r.artist,
+        "album": r.album,
+        "year": r.year,
+        "duration_seconds": float(r.duration_seconds) if r.duration_seconds else None,
+        "cover_id": r.cover_id,
+        "is_owned": bool(r.is_owned),
+        "similarity": round(float(r.score), 4) if r.score is not None else None,
+    } for r in rows]
+
+
 @router.get("/sound")
 def discovery_sound(
     q: str = Query(..., min_length=1),
@@ -571,36 +613,20 @@ def discovery_sound(
     energy: Optional[str] = Query(None),
     instruments: list[str] = Query(default_factory=list),
     quality: list[str] = Query(default_factory=list),
+    corpus: str = Query("all"),
 ):
-    """Tracks closest in audio embedding to the text query (CLAP).
-
-    Filters are applied as a Stage-A pre-filter producing the set of
-    candidate `track_id`s; the embedding search is then scoped to
-    that set via `track_ids` filter. This avoids rebuilding the
-    embedding SQL while still applying every Discovery filter
-    correctly.
-    """
+    """Tracks closest in CLAP audio embedding to the text query, via the engine
+    (sound tool + filter chips). Loading marker until CLAP is warm."""
     if not model_cache.is_loaded("clap"):
         return _loading("clap", "audio", _clap_loader)
 
-    f = _build_filter_params(bpm_min, bpm_max, key, mode, vocalist,
-                             gender, danceable, energy, instruments, quality)
-    track_ids = _filtered_track_ids(f) if f else None
-    if track_ids is not None and not track_ids:
-        return {"status": "ok", "results": []}
-
-    embedding_filters = {"track_ids": track_ids} if track_ids else {}
-
-    from search import search_by_text
-    try:
-        with get_db_context() as db:
-            res = search_by_text(
-                db, q, limit=limit, min_similarity=0.65,
-                filters=embedding_filters,
-            )
-            return {"status": "ok", "results": res.get("results", [])}
-    except Exception:
-        return {"status": "ok", "results": []}
+    from discovery_engine import build
+    active = {"sound": q, **_engine_filters(bpm_min, bpm_max, key, mode,
+                                            vocalist, gender, danceable, energy, instruments)}
+    sql, params = build(active, {}, corpus=corpus, limit=limit)["track"]
+    with get_db_context() as db:
+        rows = db.execute(text(sql), params).fetchall()
+    return {"status": "ok", "results": _track_results(rows)}
 
 
 @router.get("/lyrics")
@@ -617,29 +643,20 @@ def discovery_lyrics(
     energy: Optional[str] = Query(None),
     instruments: list[str] = Query(default_factory=list),
     quality: list[str] = Query(default_factory=list),
+    corpus: str = Query("all"),
 ):
-    """Tracks whose lyrics chunks match the query semantically."""
+    """Tracks whose lyrics match the query semantically, via the engine (lyrics
+    tool + filter chips). Loading marker until the lyrics model is warm."""
     if not model_cache.is_loaded("lyrics"):
         return _loading("lyrics", "lyrics", _lyrics_loader)
 
-    f = _build_filter_params(bpm_min, bpm_max, key, mode, vocalist,
-                             gender, danceable, energy, instruments, quality)
-    track_ids = _filtered_track_ids(f) if f else None
-    if track_ids is not None and not track_ids:
-        return {"status": "ok", "results": []}
-
-    embedding_filters = {"track_ids": track_ids} if track_ids else {}
-
-    from search import search_by_lyrics
-    try:
-        with get_db_context() as db:
-            res = search_by_lyrics(
-                db, q, limit=limit, min_similarity=0.5,
-                filters=embedding_filters,
-            )
-            return {"status": "ok", "results": res.get("results", [])}
-    except Exception:
-        return {"status": "ok", "results": []}
+    from discovery_engine import build
+    active = {"lyrics": q, **_engine_filters(bpm_min, bpm_max, key, mode,
+                                             vocalist, gender, danceable, energy, instruments)}
+    sql, params = build(active, {}, corpus=corpus, limit=limit)["track"]
+    with get_db_context() as db:
+        rows = db.execute(text(sql), params).fetchall()
+    return {"status": "ok", "results": _track_results(rows)}
 
 
 @router.get("/titles")
@@ -666,43 +683,14 @@ def discovery_titles(
     active: dict = {}
     if q and q.strip():
         active["text"] = q.strip()[:255]
-    if bpm_min is not None or bpm_max is not None:
-        active["bpm"] = (bpm_min if bpm_min is not None else 0.0,
-                         bpm_max if bpm_max is not None else 9999.0)
-    if key:
-        active["key"] = key
-    if mode and mode != "any":
-        active["mode"] = mode
-    if vocalist and vocalist != "any":
-        active["vocalist"] = vocalist
-    if gender and gender != "any":
-        active["gender"] = gender
-    if danceable == "yes":
-        active["danceable"] = True
-    if energy in ("low", "mid", "high"):
-        active["energy"] = energy
-    if instruments:
-        active["instruments"] = instruments
-    # NOTE: `quality` is not an engine tool yet (owned-only file tiers were dropped
-    # from the engine; returns as a two-source file+stream tool later).
-
+    active.update(_engine_filters(bpm_min, bpm_max, key, mode, vocalist,
+                                  gender, danceable, energy, instruments))
+    # NOTE: `quality` is not an engine tool yet (owned-only file tiers dropped;
+    # returns as a two-source file+stream tool later).
     if not active:
         return {"status": "ok", "results": []}
 
     sql, params = build(active, {}, corpus=corpus, limit=limit)["track"]
     with get_db_context() as db:
         rows = db.execute(text(sql), params).fetchall()
-
-    results = [{
-        "id": r.media_file_id,          # owned playback id (None for a phantom track)
-        "track_id": str(r.id),
-        "title": r.name,
-        "artist": r.artist,
-        "album": r.album,
-        "year": r.year,
-        "duration_seconds": float(r.duration_seconds) if r.duration_seconds else None,
-        "cover_id": r.cover_id,
-        "is_owned": bool(r.is_owned),
-        "similarity": round(float(r.score), 4) if r.score is not None else None,
-    } for r in rows]
-    return {"status": "ok", "results": results}
+    return {"status": "ok", "results": _track_results(rows)}
