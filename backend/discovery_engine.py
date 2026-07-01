@@ -35,12 +35,22 @@ class EntityDef:
     latin_col: str
     table: str          # own table + alias, e.g. "artists a"
     default_order: str  # browse-mode ordering (no relevance signal active)
+    surface: str = ""   # extra SELECT columns for tiles (is_owned, cover_id, media_file_id, …)
 
 
 ENTITIES: dict[str, EntityDef] = {
     "artist": EntityDef("artist", "a.id", "a.name", "a.name_latin", "artists a",
                         "(SELECT COUNT(*) FROM track_artists ta "
-                        "WHERE ta.artist_id=a.id AND ta.role='primary') DESC"),
+                        "WHERE ta.artist_id=a.id AND ta.role='primary') DESC",
+                        surface=", a.gender, a.is_vocalist, "
+                        "EXISTS (SELECT 1 FROM track_artists ta JOIN media_files mf "
+                        "ON mf.track_id=ta.track_id WHERE ta.artist_id=a.id) AS is_owned, "
+                        "(SELECT mf.cover_id::text FROM track_artists ta JOIN media_files mf "
+                        "ON mf.track_id=ta.track_id WHERE ta.artist_id=a.id AND mf.cover_id IS NOT NULL "
+                        "LIMIT 1) AS cover_id, "
+                        "(SELECT mf.id FROM track_artists ta JOIN media_files mf "
+                        "ON mf.track_id=ta.track_id AND ta.role='primary' WHERE ta.artist_id=a.id "
+                        "LIMIT 1) AS media_file_id"),
     "album":  EntityDef("album", "al.id", "al.title", "al.title_latin", "albums al",
                         "al.release_year DESC NULLS LAST, al.title"),
     "track":  EntityDef("track", "t.id", "t.title", "t.title_latin", "tracks t",
@@ -60,6 +70,7 @@ class Source:
     floor: float = 0.0         # relevance threshold — also the WHERE cutoff (calibrate: Phase 2)
     ceil: float = 1.0          # "strong match" — norm caps here (calibrate: Phase 2)
     weight: float = 1.0        # importance in the cross-tool sum
+    model: Optional[str] = None   # model_cache key this source needs; gracefully skipped if cold
     needs_join: frozenset = frozenset()
     expand: Optional[Callable[[Any], Any]] = None
 
@@ -80,7 +91,7 @@ TOOLS: dict[str, Tool] = {
                "CASE WHEN a.name_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
                targets=("artist",), floor=0.3, ceil=1.0, weight=1.0),
         Source("artist_bio", "artist_bio_embeddings", "1-(abe.vector <=> CAST(:qvec AS vector))",
-               targets=("artist",), floor=0.5, ceil=0.85, weight=0.7,
+               targets=("artist",), floor=0.5, ceil=0.85, weight=0.7, model="enrichment",
                needs_join=frozenset({"artist_bio_embeddings"})),
         Source("album_title", "albums",
                "GREATEST(similarity(al.title_latin,:ql), "
@@ -91,7 +102,7 @@ TOOLS: dict[str, Tool] = {
                "CASE WHEN t.title_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
                targets=("track",), floor=0.3, ceil=1.0, weight=1.0),
         Source("clap", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
-               targets=("track",), floor=0.25, ceil=0.45, weight=0.8,   # CLAP text→audio: low absolute scale
+               targets=("track",), floor=0.25, ceil=0.45, weight=0.8, model="clap",  # CLAP text→audio: low scale
                needs_join=frozenset({"embeddings"})),
     )),
     # Binary gates (artist-level).
@@ -347,6 +358,9 @@ def _build_for_target(entity, tools, active, query, corpus, limit, K=500):
         for src in tool.sources:
             if src.is_gate or (src.targets and entity.key not in src.targets):
                 continue
+            if src.model and not _model_ready(src.model):
+                _kick_model(src.model)      # graceful: skip cold-model source, warm it for next request
+                continue
             if src.table == et:
                 norm = _norm_expr(src)
             else:
@@ -365,7 +379,8 @@ def _build_for_target(entity, tools, active, query, corpus, limit, K=500):
     where_sql = (" WHERE " + " AND ".join(filt)) if filt else ""
 
     if not branches:                       # gates-only / browse — no relevance retrieve
-        sql = (f"SELECT {entity.pk} AS id, {entity.name_col} AS name, NULL AS score "
+        sql = (f"SELECT {entity.pk} AS id, {entity.name_col} AS name, NULL AS score"
+               f"{entity.surface} "
                f"FROM {entity.table}{where_sql} "
                f"ORDER BY {entity.default_order} LIMIT {int(limit)}")
         return sql, _bind_params(tools, active)
@@ -373,13 +388,28 @@ def _build_for_target(entity, tools, active, query, corpus, limit, K=500):
     score = " + ".join(tool_terms)
     cand = " UNION ".join(f"({b})" for b in branches)
     sql = (f"WITH cand AS ({cand}) "
-           f"SELECT {entity.pk} AS id, {entity.name_col} AS name, ({score}) AS score "
+           f"SELECT {entity.pk} AS id, {entity.name_col} AS name, ({score}) AS score"
+           f"{entity.surface} "
            f"FROM (SELECT DISTINCT id FROM cand) c "
            f"JOIN {entity.table} ON {entity.pk} = c.id "
            f"{' '.join(lateral)}"
            f"{where_sql} "
            f"ORDER BY ({score}) DESC, {entity.default_order} LIMIT {int(limit)}")
     return sql, _bind_params(tools, active)
+
+
+def _model_ready(key: str) -> bool:
+    import model_cache
+    return model_cache.is_loaded(key)
+
+
+def _kick_model(key: str) -> None:
+    import model_cache
+    from routers.discovery import _enrichment_loader, _clap_loader, _lyrics_loader
+    factory = {"enrichment": _enrichment_loader, "clap": _clap_loader,
+               "lyrics": _lyrics_loader}.get(key)
+    if factory:
+        model_cache.kick_load(key, factory)
 
 
 def _encode_bge(q: str) -> str:
@@ -413,8 +443,10 @@ def _bind_params(tools, active: dict) -> dict:
             q = str(v)[:255]
             ql = (latinize(q) or q)[:255]
             p["ql"], p["qlpfx"] = ql, ql + "%"
-            p["qvec"] = _encode_bge(q)      # bio source (BGE-M3)
-            p["qclap"] = _encode_clap(q)    # CLAP source (text→audio)
+            if _model_ready("enrichment"):
+                p["qvec"] = _encode_bge(q)   # bio source (BGE-M3) — only if warm
+            if _model_ready("clap"):
+                p["qclap"] = _encode_clap(q)  # CLAP source (text→audio) — only if warm
         elif tool.key in ("gender", "vocalist", "key"):
             p[tool.key] = v
         elif tool.key == "genre":

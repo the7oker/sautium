@@ -440,57 +440,29 @@ def _trigram_artists(q: str, limit: int) -> list[dict]:
 def discovery_artists(
     q: str = Query(..., min_length=1),
     limit: int = Query(10, ge=1, le=30),
+    corpus: str = Query("all"),
 ):
-    """Artist matches by name trigram + (when warm) bio embedding.
+    """Artist matches via the discovery engine: name_latin trigram + BGE-M3 bio
+    (when warm). The engine gracefully degrades to name-only while the bio model
+    loads (kicking the load), and surfaces is_owned / cover / media_file per tile."""
+    from discovery_engine import build
 
-    Two-tier strategy:
-      1. Trigram on `artists.name` — pure SQL, always available. For
-         a query like "sade" this is the *primary* signal: an exact
-         name hit scores 1.0 and is what the user actually wants.
-      2. BGE-M3 bio similarity — runs in addition WHEN the model is
-         loaded. Useful for descriptive queries ("british jazz vocalist")
-         where name-trigram returns nothing.
+    sql, params = build({"text": q}, {}, corpus=corpus, limit=limit)["artist"]
+    with get_db_context() as db:
+        rows = db.execute(text(sql), params).fetchall()
 
-    Cold-model behaviour:
-      - trigram has results → return them immediately, no waiting.
-      - trigram empty       → kick model load and return `loading`.
-    """
-    name_results = _trigram_artists(q, limit)
-
-    if not model_cache.is_loaded("enrichment"):
-        if name_results:
-            return {"status": "ok", "results": _attach_artist_covers(name_results)}
-        return _loading("enrichment", "text", _enrichment_loader)
-
-    # Model warm — also run BGE-M3 bio search and merge.
-    from search import search_artists_by_bio
-    bio_results: list[dict] = []
-    try:
-        with get_db_context() as db:
-            res = search_artists_by_bio(db, q, limit=limit, min_similarity=0.5)
-            bio_results = res.get("results", [])
-    except Exception:
-        bio_results = []
-
-    # Merge: same artist may appear in both lists. Use higher score.
-    by_id: dict[str, dict] = {}
-    for r in bio_results:
-        by_id[r["artist_id"]] = r
-    for r in name_results:
-        existing = by_id.get(r["artist_id"])
-        if existing is None:
-            by_id[r["artist_id"]] = r
-        elif r["similarity"] > existing.get("similarity", 0):
-            existing["similarity"] = r["similarity"]
-            existing["match_source"] = "name+bio"
-
-    merged = sorted(
-        by_id.values(),
-        key=lambda r: r.get("similarity", 0),
-        reverse=True,
-    )[:limit]
-
-    return {"status": "ok", "results": _attach_artist_covers(merged)}
+    results = [{
+        "artist_id": str(r.id),
+        "artist": r.name,
+        "similarity": round(float(r.score), 4) if r.score is not None else None,
+        "gender": r.gender,
+        "is_vocalist": r.is_vocalist,
+        "is_owned": bool(r.is_owned),
+        "cover_id": r.cover_id,
+        "media_file_id": r.media_file_id,
+        "match_source": "engine",
+    } for r in rows]
+    return {"status": "ok", "results": results}
 
 
 def _trigram_albums(q: str, limit: int) -> list[dict]:
