@@ -532,9 +532,29 @@ def _trigram_albums(q: str, limit: int) -> list[dict]:
 def discovery_albums(
     q: str = Query(..., min_length=1),
     limit: int = Query(10, ge=1, le=30),
+    corpus: str = Query("all"),
 ):
-    """Album matches by title trigram (album-description/wiki embeddings removed)."""
-    return {"status": "ok", "results": _trigram_albums(q, limit)}
+    """Album matches by title via the discovery engine (title_latin trigram),
+    surfacing artist / year / cover / is_owned per tile."""
+    from discovery_engine import build
+
+    sql, params = build({"text": q}, {}, corpus=corpus, limit=limit)["album"]
+    with get_db_context() as db:
+        rows = db.execute(text(sql), params).fetchall()
+
+    results = [{
+        "album_id": str(r.id),
+        "album": r.name,
+        "artist": r.artist,
+        "year": r.year,
+        "cover_id": r.cover_id,
+        "cover_url": r.cover_url,
+        "media_file_id": r.media_file_id,
+        "is_owned": bool(r.is_owned),
+        "similarity": round(float(r.score), 4) if r.score is not None else None,
+        "match_source": "engine",
+    } for r in rows]
+    return {"status": "ok", "results": results}
 
 
 @router.get("/sound")

@@ -52,7 +52,17 @@ ENTITIES: dict[str, EntityDef] = {
                         "ON mf.track_id=ta.track_id AND ta.role='primary' WHERE ta.artist_id=a.id "
                         "LIMIT 1) AS media_file_id"),
     "album":  EntityDef("album", "al.id", "al.title", "al.title_latin", "albums al",
-                        "al.release_year DESC NULLS LAST, al.title"),
+                        "al.release_year DESC NULLS LAST, al.title",
+                        surface=", al.release_year AS year, al.cover_url, "
+                        "(SELECT a.name FROM album_artists aa JOIN artists a ON a.id=aa.artist_id "
+                        "WHERE aa.album_id=al.id AND aa.role='primary' LIMIT 1) AS artist, "
+                        "EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id=al.id) AS is_owned, "
+                        "(SELECT mf.cover_id::text FROM album_variants av JOIN media_files mf "
+                        "ON mf.album_variant_id=av.id WHERE av.album_id=al.id AND mf.cover_id IS NOT NULL "
+                        "LIMIT 1) AS cover_id, "
+                        "(SELECT mf.id FROM album_variants av JOIN media_files mf ON mf.album_variant_id=av.id "
+                        "WHERE av.album_id=al.id ORDER BY mf.disc_number NULLS FIRST, mf.track_number "
+                        "LIMIT 1) AS media_file_id"),
     "track":  EntityDef("track", "t.id", "t.title", "t.title_latin", "tracks t",
                         "t.title"),
 }
