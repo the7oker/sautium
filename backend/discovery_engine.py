@@ -78,7 +78,7 @@ TOOLS: dict[str, Tool] = {
                "GREATEST(similarity(a.name_latin,:ql), "
                "CASE WHEN a.name_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
                floor=0.3, ceil=1.0, weight=1.0),
-        Source("artist_bio", "artist_bio_embeddings", "1-(abe.vector <=> :qvec)",
+        Source("artist_bio", "artist_bio_embeddings", "1-(abe.vector <=> CAST(:qvec AS vector))",
                floor=0.5, ceil=0.85, weight=0.7,
                needs_join=frozenset({"artist_bio_embeddings"})),
         Source("album_title", "albums",
@@ -89,7 +89,7 @@ TOOLS: dict[str, Tool] = {
                "GREATEST(similarity(t.title_latin,:ql), "
                "CASE WHEN t.title_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
                floor=0.3, ceil=1.0, weight=1.0),
-        Source("clap", "embeddings", "1-(e.vector <=> :qclap)",
+        Source("clap", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
                floor=0.25, ceil=0.45, weight=0.8,   # CLAP text→audio: low absolute scale
                needs_join=frozenset({"embeddings"})),
     )),
@@ -158,12 +158,72 @@ EDGES: tuple = (
 )
 
 
+# table → alias used in EDGES.join_sql fragments and subquery FROM/JOINs
+_ALIAS = {
+    "artists": "a", "albums": "al", "tracks": "t",
+    "track_artists": "ta", "album_artists": "aa", "album_tracks": "atr",
+    "audio_features": "af", "embeddings": "e", "artist_bio_embeddings": "abe",
+    "media_files": "mf", "album_variants": "av", "album_genres": "ag", "genres": "g",
+}
+
+
 def _route(src_table: str, target: EntityDef, corpus: str) -> list:
-    """BFS over EDGES usable under `corpus` → shortest table path from src_table to
-    the target table, deduping tables already on other sources' paths. Returns the
-    ordered JOIN fragments. TODO. Two-path corpus='all' (owned+phantom) becomes a
-    UNION/LEFT-JOIN-both at assembly time."""
-    raise NotImplementedError("BFS bridge routing over EDGES (corpus-filtered)")
+    """BFS over corpus-usable EDGES → shortest path from the TARGET table to
+    src_table. Returns [(table, join_sql), ...] starting at the edge adjacent to
+    the target and ending at src_table; the first element's join_sql correlates to
+    the target row. Empty when src IS the target table. corpus='owned'/'phantom'
+    drops the other layer's edges (corpus='all' branching is step 3)."""
+    from collections import deque
+
+    tgt = target.table.split()[0]
+    if src_table == tgt:
+        return []
+    adj: dict = {}
+    for e in EDGES:
+        if corpus != "all" and e.corpus not in ("all", corpus):
+            continue
+        adj.setdefault(e.a, []).append((e.b, e.join_sql))
+        adj.setdefault(e.b, []).append((e.a, e.join_sql))
+
+    q = deque([(tgt, [])])
+    seen = {tgt}
+    while q:
+        node, path = q.popleft()
+        if node == src_table:
+            return path
+        for nxt, js in adj.get(node, []):
+            if nxt not in seen:
+                seen.add(nxt)
+                q.append((nxt, path + [(nxt, js)]))
+    raise ValueError(f"no bridge {tgt} → {src_table} under corpus={corpus}")
+
+
+def _subquery_from(path: list) -> tuple[str, str]:
+    """From a _route() path build (FROM+JOINs, correlation predicate). The first
+    hop's join_sql is the correlation to the outer target row; the rest are JOINs."""
+    first_tbl, corr = path[0]
+    frm = f"{first_tbl} {_ALIAS[first_tbl]}"
+    for tbl, js in path[1:]:
+        frm += f" JOIN {tbl} {_ALIAS[tbl]} ON {js}"
+    return frm, corr
+
+
+def _exists_gate(src: Source, entity: EntityDef, corpus: str) -> str:
+    """A below-target gate becomes EXISTS over the bridge path (e.g. genre on a
+    track target → 'track has an album with this genre')."""
+    frm, corr = _subquery_from(_route(src.table, entity, corpus))
+    return f"EXISTS (SELECT 1 FROM {frm} WHERE {corr} AND {src.score_sql})"
+
+
+def _lateral_relevance(src: Source, entity: EntityDef, corpus: str) -> tuple[str, str, str]:
+    """A below/child relevance source → LEFT JOIN LATERAL over the bridge taking
+    MAX(norm), so 1:N (bio chunks) and 1:1 (clap/energy) both work. Returns
+    (lateral_join_sql, score_ref, floor_predicate)."""
+    frm, corr = _subquery_from(_route(src.table, entity, corpus))
+    alias = f"{src.key}_j"
+    join = (f"LEFT JOIN LATERAL (SELECT MAX({_norm_expr(src)}) AS s "
+            f"FROM {frm} WHERE {corr}) {alias} ON true")
+    return join, f"COALESCE({alias}.s, 0)", f"{alias}.s > 0"
 
 
 # ── Score normalization ─────────────────────────────────────────────────────
@@ -211,6 +271,7 @@ def _build_for_target(entity, tools, active, query, corpus, limit):
     rel_terms: list[str] = []      # weighted GREATEST(norm) per tool
     rel_floors: list[str] = []     # per relevance source: raw >= floor
     joins: set = set()
+    lateral_joins: list[str] = []
 
     for tool in tools:
         if entity.key not in tool.targets:
@@ -218,14 +279,22 @@ def _build_for_target(entity, tools, active, query, corpus, limit):
         norms: list[str] = []
         weight = 0.0
         for src in tool.sources:
-            if src.table != entity_table:
-                continue           # TODO(step 2): _route(src.table, entity, corpus)
-            joins |= src.needs_join
+            same = src.table == entity_table
             if src.is_gate:
-                gates.append(src.score_sql)
-            else:
+                if same:
+                    gates.append(src.score_sql)
+                    joins |= src.needs_join
+                else:
+                    gates.append(_exists_gate(src, entity, corpus))   # below-target gate → EXISTS
+            elif same:
                 norms.append(_norm_expr(src))
                 rel_floors.append(f"({src.score_sql}) >= {src.floor}")
+                weight = max(weight, src.weight)
+            else:                  # bridged relevance → LEFT JOIN LATERAL (MAX norm)
+                lat, ref, fl = _lateral_relevance(src, entity, corpus)
+                lateral_joins.append(lat)
+                norms.append(ref)
+                rel_floors.append(fl)
                 weight = max(weight, src.weight)
         if norms:
             rel_terms.append(f"{weight} * GREATEST({', '.join(norms)})")
@@ -236,7 +305,7 @@ def _build_for_target(entity, tools, active, query, corpus, limit):
 
     score = " + ".join(rel_terms) if rel_terms else "NULL"
     order = f"({score}) DESC, {entity.default_order}" if rel_terms else entity.default_order
-    join_sql = " ".join(sorted(joins))
+    join_sql = " ".join(sorted(joins) + lateral_joins)
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
     sql = (f"SELECT {entity.pk} AS id, {entity.name_col} AS name, ({score}) AS score "
@@ -245,9 +314,26 @@ def _build_for_target(entity, tools, active, query, corpus, limit):
     return sql, _bind_params(tools, active)
 
 
+def _encode_bge(q: str) -> str:
+    from search import _encode_enrichment_query, _to_vector_param
+    return _to_vector_param(_encode_enrichment_query(q))
+
+
+def _encode_clap(q: str) -> str:
+    import model_cache
+    from search import _to_vector_param
+
+    def _load():
+        from embeddings import AudioEmbeddingGenerator
+        g = AudioEmbeddingGenerator()
+        g.load_model()
+        return g
+    return _to_vector_param(model_cache.get_model("clap", _load).text_to_embedding(q))
+
+
 def _bind_params(tools, active: dict) -> dict:
-    """Translate active tool values into SQL params. TODO(step 2+): vector params
-    (qvec/qclap), instrument expansion, bpm/energy ranges."""
+    """Translate active tool values into SQL params. TODO(step 3+): bpm ranges,
+    corpus. Vector params (qvec/qclap) are encoded once per text query."""
     from transliterate import latinize
 
     p: dict = {}
@@ -259,8 +345,21 @@ def _bind_params(tools, active: dict) -> dict:
             q = str(v)[:255]
             ql = (latinize(q) or q)[:255]
             p["ql"], p["qlpfx"] = ql, ql + "%"
+            p["qvec"] = _encode_bge(q)      # bio source (BGE-M3)
+            p["qclap"] = _encode_clap(q)    # CLAP source (text→audio)
         elif tool.key in ("gender", "vocalist", "key"):
             p[tool.key] = v
+        elif tool.key == "genre":
+            p["genre"] = list(v) if isinstance(v, (list, tuple)) else [v]
+        elif tool.key == "moods":
+            p["moods"] = list(v) if isinstance(v, (list, tuple)) else [v]
+        elif tool.key == "instruments":
+            exp = tool.sources[0].expand
+            p["instruments"] = exp(v) if exp else (list(v) if isinstance(v, (list, tuple)) else [v])
+        elif tool.key == "energy":
+            # (mid, span) in energy_db; TODO calibrate real buckets (Phase 2)
+            buckets = {"low": (-30.0, 10.0), "mid": (-20.0, 8.0), "high": (-10.0, 8.0)}
+            p["energy_mid"], p["energy_span"] = buckets.get(v, (-20.0, 15.0))
     return p
 
 
