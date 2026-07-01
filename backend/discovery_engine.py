@@ -55,6 +55,7 @@ class Source:
     key: str
     table: str                 # table the score_sql reads (bridge routing anchor)
     score_sql: str             # raw score in [0,1] (relevance) OR a boolean predicate (gate)
+    targets: tuple = ()        # entity keys this source meaningfully serves (empty = all the tool's targets)
     is_gate: bool = False      # binary filter: pure WHERE, contributes no rank
     floor: float = 0.0         # relevance threshold — also the WHERE cutoff (calibrate: Phase 2)
     ceil: float = 1.0          # "strong match" — norm caps here (calibrate: Phase 2)
@@ -77,20 +78,20 @@ TOOLS: dict[str, Tool] = {
         Source("artist_name", "artists",
                "GREATEST(similarity(a.name_latin,:ql), "
                "CASE WHEN a.name_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
-               floor=0.3, ceil=1.0, weight=1.0),
+               targets=("artist",), floor=0.3, ceil=1.0, weight=1.0),
         Source("artist_bio", "artist_bio_embeddings", "1-(abe.vector <=> CAST(:qvec AS vector))",
-               floor=0.5, ceil=0.85, weight=0.7,
+               targets=("artist",), floor=0.5, ceil=0.85, weight=0.7,
                needs_join=frozenset({"artist_bio_embeddings"})),
         Source("album_title", "albums",
                "GREATEST(similarity(al.title_latin,:ql), "
                "CASE WHEN al.title_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
-               floor=0.3, ceil=1.0, weight=1.0),
+               targets=("album",), floor=0.3, ceil=1.0, weight=1.0),
         Source("track_title", "tracks",
                "GREATEST(similarity(t.title_latin,:ql), "
                "CASE WHEN t.title_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
-               floor=0.3, ceil=1.0, weight=1.0),
+               targets=("track",), floor=0.3, ceil=1.0, weight=1.0),
         Source("clap", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
-               floor=0.25, ceil=0.45, weight=0.8,   # CLAP text→audio: low absolute scale
+               targets=("track",), floor=0.25, ceil=0.45, weight=0.8,   # CLAP text→audio: low absolute scale
                needs_join=frozenset({"embeddings"})),
     )),
     # Binary gates (artist-level).
@@ -280,59 +281,92 @@ def _feasible_targets(tools: list, corpus: str) -> set:
     return out & set(ENTITIES)   # only entities we can build (genre target: TODO step 2+)
 
 
-def _build_for_target(entity, tools, active, query, corpus, limit):
-    """Step 1 (same-table): only sources whose table IS the target's table — no
-    bridge, no corpus branch yet. Gates → WHERE; relevance → normalized score,
-    summed with weights for ORDER BY; a row must clear at least one relevance
-    floor. TODO(step 2+): _route bridges (bio/clap/genre/energy), corpus tails."""
-    entity_table = entity.table.split()[0]
-    gates: list[str] = []
-    rel_terms: list[str] = []      # weighted GREATEST(norm) per tool
-    rel_floors: list[str] = []     # per relevance source: raw >= floor
-    joins: set = set()
-    lateral_joins: list[str] = []
+def _retrieve_branch(src: Source, entity: EntityDef, corpus: str, gates: list, K: int) -> str:
+    """One relevance source → SELECT the target pk, top-K via the source's own index,
+    gates + corpus pushed down so the top-K is already filtered. same-table: WHERE
+    floor ORDER BY score. Bridged: join the source in along the route path and order
+    by its score (HNSW for vectors, trigram for names)."""
+    et = entity.table.split()[0]
+    conds = list(gates)
+    cg = _corpus_clause(entity, corpus)
+    if cg:
+        conds.append(cg)
+    conds.append(f"({src.score_sql}) >= {src.floor}")
+    if src.table == et:
+        frm = entity.table
+    else:
+        path = _route(src.table, entity, corpus)
+        frm = entity.table + " " + " ".join(f"JOIN {t} {_ALIAS[t]} ON {js}" for t, js in path)
+    return (f"SELECT {entity.pk} AS id FROM {frm} WHERE {' AND '.join(conds)} "
+            f"ORDER BY ({src.score_sql}) DESC LIMIT {K}")
 
+
+def _build_for_target(entity, tools, active, query, corpus, limit, K=500):
+    """Retrieve → rerank. Retrieve: each relevance source contributes a top-K
+    candidate branch via its own index (gates + corpus pushed down); branches UNION
+    into a broad candidate set. Rerank: on that bounded set compute the full
+    normalized score (GREATEST within a tool, weighted sum across tools), apply the
+    exact gates + corpus, ORDER. Gates = AND (push-down + rerank WHERE); relevance =
+    OR (union); precise logic runs in rerank on full scores."""
+    et = entity.table.split()[0]
+    corpus_guard = _corpus_clause(entity, corpus)
+
+    # Pass 1: gates — needed both for retrieve push-down and the rerank WHERE.
+    gates: list[str] = []
+    for tool in tools:
+        if entity.key not in tool.targets:
+            continue
+        for src in tool.sources:
+            if src.targets and entity.key not in src.targets:
+                continue
+            if src.is_gate:
+                gates.append(src.score_sql if src.table == et
+                             else _exists_gate(src, entity, corpus))
+
+    # Pass 2: relevance sources → retrieve branches + rerank score terms.
+    branches: list[str] = []
+    tool_terms: list[str] = []
+    lateral: list[str] = []
     for tool in tools:
         if entity.key not in tool.targets:
             continue
         norms: list[str] = []
         weight = 0.0
         for src in tool.sources:
-            same = src.table == entity_table
-            if src.is_gate:
-                if same:
-                    gates.append(src.score_sql)
-                    joins |= src.needs_join
-                else:
-                    gates.append(_exists_gate(src, entity, corpus))   # below-target gate → EXISTS
-            elif same:
-                norms.append(_norm_expr(src))
-                rel_floors.append(f"({src.score_sql}) >= {src.floor}")
-                weight = max(weight, src.weight)
-            else:                  # bridged relevance → LEFT JOIN LATERAL (MAX norm)
-                lat, ref, fl = _lateral_relevance(src, entity, corpus)
-                lateral_joins.append(lat)
-                norms.append(ref)
-                rel_floors.append(fl)
-                weight = max(weight, src.weight)
+            if src.is_gate or (src.targets and entity.key not in src.targets):
+                continue
+            if src.table == et:
+                norm = _norm_expr(src)
+            else:
+                lat, ref, _ = _lateral_relevance(src, entity, corpus)
+                lateral.append(lat)
+                norm = ref
+            norms.append(norm)
+            weight = max(weight, src.weight)
+            branches.append(_retrieve_branch(src, entity, corpus, gates, K))
         if norms:
-            rel_terms.append(f"{weight} * GREATEST({', '.join(norms)})")
+            tool_terms.append(f"{weight} * GREATEST({', '.join(norms)})")
 
-    where = list(gates)
-    corpus_guard = _corpus_clause(entity, corpus)
+    filt = list(gates)
     if corpus_guard:
-        where.append(corpus_guard)
-    if rel_floors:                 # at least one relevance source clears its floor
-        where.append("(" + " OR ".join(rel_floors) + ")")
+        filt.append(corpus_guard)
+    where_sql = (" WHERE " + " AND ".join(filt)) if filt else ""
 
-    score = " + ".join(rel_terms) if rel_terms else "NULL"
-    order = f"({score}) DESC, {entity.default_order}" if rel_terms else entity.default_order
-    join_sql = " ".join(sorted(joins) + lateral_joins)
-    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    if not branches:                       # gates-only / browse — no relevance retrieve
+        sql = (f"SELECT {entity.pk} AS id, {entity.name_col} AS name, NULL AS score "
+               f"FROM {entity.table}{where_sql} "
+               f"ORDER BY {entity.default_order} LIMIT {int(limit)}")
+        return sql, _bind_params(tools, active)
 
-    sql = (f"SELECT {entity.pk} AS id, {entity.name_col} AS name, ({score}) AS score "
-           f"FROM {entity.table} {join_sql}{where_sql} "
-           f"ORDER BY {order} LIMIT {int(limit)}")
+    score = " + ".join(tool_terms)
+    cand = " UNION ".join(f"({b})" for b in branches)
+    sql = (f"WITH cand AS ({cand}) "
+           f"SELECT {entity.pk} AS id, {entity.name_col} AS name, ({score}) AS score "
+           f"FROM (SELECT DISTINCT id FROM cand) c "
+           f"JOIN {entity.table} ON {entity.pk} = c.id "
+           f"{' '.join(lateral)}"
+           f"{where_sql} "
+           f"ORDER BY ({score}) DESC, {entity.default_order} LIMIT {int(limit)}")
     return sql, _bind_params(tools, active)
 
 
