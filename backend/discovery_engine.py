@@ -209,11 +209,23 @@ def _subquery_from(path: list) -> tuple[str, str]:
     return frm, corr
 
 
-def _exists_gate(src: Source, entity: EntityDef, corpus: str) -> str:
-    """A below-target gate becomes EXISTS over the bridge path (e.g. genre on a
-    track target → 'track has an album with this genre')."""
-    frm, corr = _subquery_from(_route(src.table, entity, corpus))
+def _exists_from(src: Source, path: list) -> str:
+    frm, corr = _subquery_from(path)
     return f"EXISTS (SELECT 1 FROM {frm} WHERE {corr} AND {src.score_sql})"
+
+
+def _exists_gate(src: Source, entity: EntityDef, corpus: str) -> str:
+    """A below-target gate → EXISTS over the bridge path (genre on a track target →
+    'track has an album with this genre'). Under corpus='all', a source that crosses
+    the owned/phantom boundary (track↔album) has TWO distinct bridges — owned
+    (media_files→album_variants) and phantom (album_tracks) — so OR both EXISTS;
+    otherwise the shorter phantom path would silently drop 87% of owned tracks."""
+    if corpus == "all":
+        po = _route(src.table, entity, "owned")
+        pp = _route(src.table, entity, "phantom")
+        if po != pp:
+            return f"({_exists_from(src, po)} OR {_exists_from(src, pp)})"
+    return _exists_from(src, _route(src.table, entity, corpus))
 
 
 def _lateral_relevance(src: Source, entity: EntityDef, corpus: str) -> tuple[str, str, str]:
