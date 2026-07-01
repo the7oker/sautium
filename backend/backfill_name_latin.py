@@ -120,8 +120,60 @@ def backfill_aliases(limit: Optional[int] = None) -> int:
     return len(pairs)
 
 
+_JUNK_TAGS = {"unknown", "unknown artist", "various", "various artists",
+              "va", "artist", "traditional", "soundtrack"}
+
+
+def _is_junk_tag(s: str) -> bool:
+    return (s in _JUNK_TAGS or s.isdigit()
+            or any(sep in s for sep in (" feat ", " ft ", " vs ")))
+
+
+def backfill_filetag_aliases(limit: Optional[int] = None) -> int:
+    """Human-tagged Latin readings from owned file tags (media_files.raw_artist).
+
+    Collectors often tag a non-Latin artist in Latin (三宅純 tagged "Jun Miyake"),
+    which beats machine transliteration — especially CJK name order. Kept only when
+    latinize(tag) differs from name_latin: accented-Latin tags just duplicate
+    anyascii, so the diff filter retains a tag only where the human adds real value.
+    Owned-only (phantoms have no file tags). Stored with source='filetag' so its
+    provenance stays separable from the cutlet aliases."""
+    from transliterate import latinize
+
+    rows = db_query(
+        "SELECT DISTINCT a.id::text AS id, a.name_latin AS nl, mf.raw_artist AS tag "
+        "FROM artists a "
+        "JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary' "
+        "JOIN media_files mf ON mf.track_id = ta.track_id "
+        "WHERE octet_length(a.name) <> length(a.name) "
+        "AND mf.raw_artist IS NOT NULL "
+        "AND octet_length(mf.raw_artist) = length(mf.raw_artist) "
+        "AND length(mf.raw_artist) BETWEEN 2 AND 200"
+        + (f" LIMIT {int(limit)}" if limit else "")
+    )
+    pairs = []
+    for r in rows:
+        tag_latin = latinize(r["tag"])
+        if not tag_latin or tag_latin == r["nl"] or _is_junk_tag(tag_latin):
+            continue
+        pairs.append((r["id"], tag_latin))
+    if pairs:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                execute_values(
+                    cur,
+                    "INSERT INTO artist_name_aliases (artist_id, alias_latin, source) "
+                    "VALUES %s ON CONFLICT DO NOTHING",
+                    pairs, template="(%s::uuid, %s, 'filetag')",
+                )
+            conn.commit()
+    logger.info("backfilled %d filetag aliases", len(pairs))
+    return len(pairs)
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     for tbl in ("artists", "albums", "tracks"):
         print(f"{tbl}: {backfill_owned(tbl)} owned rows")
-    print(f"aliases: {backfill_aliases()} rows")
+    print(f"cutlet aliases: {backfill_aliases()} rows")
+    print(f"filetag aliases: {backfill_filetag_aliases()} rows")
