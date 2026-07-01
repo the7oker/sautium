@@ -94,6 +94,7 @@ class Source:
     ceil: float = 1.0          # "strong match" — norm caps here (calibrate: Phase 2)
     weight: float = 1.0        # importance in the cross-tool sum
     model: Optional[str] = None   # model_cache key this source needs; gracefully skipped if cold
+    level: str = ""            # entity level (track/album/artist); default derived from .table
     needs_join: frozenset = frozenset()
     expand: Optional[Callable[[Any], Any]] = None
 
@@ -324,30 +325,51 @@ def _norm_expr(src: Source) -> str:
     return f"LEAST(1.0, GREATEST(0.0, (({src.score_sql}) - {src.floor}) / {span}))"
 
 
+# ── Source levels + atom resolution ─────────────────────────────────────────
+
+# A source's entity level = the grain its signal lives at. The bridge graph pulls
+# it up/down; the level decides the atom and the target range. Derived from .table
+# unless a Source overrides it (genre reads `genres` but is an album-grain filter).
+_TABLE_LEVEL = {
+    "artists": "artist", "artist_name_aliases": "artist", "artist_bio_embeddings": "artist",
+    "albums": "album", "album_artists": "album", "album_genres": "album", "genres": "album",
+    "tracks": "track", "audio_features": "track", "embeddings": "track",
+    "lyrics_embeddings": "track", "album_tracks": "track", "media_files": "track",
+    "track_artists": "track",
+}
+_LEVEL_RANK = {"track": 0, "album": 1, "artist": 2}   # atom = the MIN (finest) rank
+
+
+def _level(src: Source) -> str:
+    return src.level or _TABLE_LEVEL[src.table]
+
+
 # ── Builder ─────────────────────────────────────────────────────────────────
 
 def build(active: dict, query: dict, corpus: str = "all", limit: int = 20) -> dict:
-    """active = {tool_key: value}. Returns {target: (sql, params)} for every target
-    the active tools resolve to (union of their targets, minus corpus-impossible ones).
-
-    Per target: gather each active source, route its table→target via _route (dedup
-    joins), assemble WHERE (gates + relevance floors) and the SELECT/ORDER from the
-    per-tool GREATEST(norm) summed with weights. TODO: assembly, _route, corpus
-    two-path handling, aggregable HAVING, cover/media surfacing.
-    """
-    tools = [TOOLS[k] for k in active if k in TOOLS]
-    targets = _feasible_targets(tools, corpus)
-    return {tk: _build_for_target(ENTITIES[tk], tools, active, query, corpus, limit)
-            for tk in targets}
-
-
-def _feasible_targets(tools: list, corpus: str) -> set:
-    """Union of the tools' targets. TODO: drop targets a gate can't reach under the
-    corpus (e.g. an owned-only file source with corpus='phantom')."""
-    out: set = set()
-    for t in tools:
-        out |= set(t.targets)
-    return out & set(ENTITIES)   # only entities we can build (genre target: TODO step 2+)
+    """active = {tool_key: value}. ATOM-CENTRIC composition: the atom is the LOWEST
+    level among all active sources (track < album < artist). matched(atom) applies
+    every tool — text sources OR (union-retrieve), gates AND — with higher-level
+    sources bridged DOWN to the atom. Results are produced for the atom entity and
+    every level ABOVE it (never below): the atom target ranks by relevance; each
+    higher target is an AVG(atom score) aggregation up the bridge — so a
+    'romantic sax + female vocal' track match rolls up to the artists/albums whose
+    catalogue scores highest (Sade), and a Gender-only query (atom=artist) yields
+    only artists. Returns {target_key: (sql, params)}."""
+    tools = [TOOLS[k] for k in active
+             if k in TOOLS and active.get(k) not in (None, "", "any", [])]
+    if not tools:
+        return {}
+    atom_lvl = min((_level(s) for t in tools for s in t.sources),
+                   key=lambda lv: _LEVEL_RANK[lv])
+    atom = ENTITIES[atom_lvl]
+    out: dict = {}
+    for lvl, rank in _LEVEL_RANK.items():
+        if rank < _LEVEL_RANK[atom_lvl] or lvl not in ENTITIES:
+            continue
+        out[lvl] = (_build_atom(atom, tools, active, corpus, limit) if lvl == atom_lvl
+                    else _build_higher(atom, ENTITIES[lvl], tools, active, corpus, limit))
+    return out
 
 
 def _retrieve_branch(src: Source, entity: EntityDef, corpus: str, gates: list, K: int) -> str:
@@ -370,78 +392,110 @@ def _retrieve_branch(src: Source, entity: EntityDef, corpus: str, gates: list, K
             f"ORDER BY ({src.score_sql}) DESC LIMIT {K}")
 
 
-def _build_for_target(entity, tools, active, query, corpus, limit, K=500):
-    """Retrieve → rerank. Retrieve: each relevance source contributes a top-K
-    candidate branch via its own index (gates + corpus pushed down); branches UNION
-    into a broad candidate set. Rerank: on that bounded set compute the full
-    normalized score (GREATEST within a tool, weighted sum across tools), apply the
-    exact gates + corpus, ORDER. Gates = AND (push-down + rerank WHERE); relevance =
-    OR (union); precise logic runs in rerank on full scores."""
-    et = entity.table.split()[0]
-    corpus_guard = _corpus_clause(entity, corpus)
-
-    # Pass 1: gates — needed both for retrieve push-down and the rerank WHERE.
-    gates: list[str] = []
-    for tool in tools:
-        if entity.key not in tool.targets:
-            continue
-        for src in tool.sources:
-            if src.targets and entity.key not in src.targets:
-                continue
-            if src.is_gate:
-                gates.append(src.score_sql if src.table == et
-                             else _exists_gate(src, entity, corpus))
-
-    # Pass 2: relevance sources → retrieve branches + rerank score terms.
+def _matched_core(atom, tools, active, corpus, K=500):
+    """The retrieve→rerank pieces at the atom level, shared by the atom target and
+    every higher aggregation. Gates come from EVERY active tool (AND, promoted to the
+    atom via _exists_gate) — NOT filtered by target, which is what let cross-level
+    filters (female+vocal on a track atom) silently drop out before. Relevance sources
+    union into indexed top-K branches, bridged DOWN to the atom (artist name → the
+    artist's tracks, etc). Returns (gates, branches, tool_terms, lateral)."""
+    et = atom.table.split()[0]
+    gates = [src.score_sql if src.table == et else _exists_gate(src, atom, corpus)
+             for tool in tools for src in tool.sources if src.is_gate]
     branches: list[str] = []
     tool_terms: list[str] = []
     lateral: list[str] = []
     for tool in tools:
-        if entity.key not in tool.targets:
-            continue
         norms: list[str] = []
         weight = 0.0
         for src in tool.sources:
-            if src.is_gate or (src.targets and entity.key not in src.targets):
+            if src.is_gate:
                 continue
             if src.model and not _model_ready(src.model):
-                _kick_model(src.model)      # graceful: skip cold-model source, warm it for next request
+                _kick_model(src.model)      # skip cold-model source, warm it for next request
                 continue
             if src.table == et:
                 norm = _norm_expr(src)
             else:
-                lat, ref, _ = _lateral_relevance(src, entity, corpus)
+                lat, ref, _ = _lateral_relevance(src, atom, corpus)
                 lateral.append(lat)
                 norm = ref
             norms.append(norm)
             weight = max(weight, src.weight)
-            branches.append(_retrieve_branch(src, entity, corpus, gates, K))
+            branches.append(_retrieve_branch(src, atom, corpus, gates, K))
         if norms:
             tool_terms.append(f"{weight} * GREATEST({', '.join(norms)})")
+    return gates, branches, tool_terms, lateral
 
-    filt = list(gates)
-    if corpus_guard:
-        filt.append(corpus_guard)
-    where_sql = (" WHERE " + " AND ".join(filt)) if filt else ""
 
-    if not branches:                       # gates-only / browse — no relevance retrieve
-        sql = (f"SELECT {entity.pk} AS id, {entity.name_col} AS name, NULL AS score"
-               f"{entity.surface} "
-               f"FROM {entity.table}{where_sql} "
-               f"ORDER BY {entity.default_order} LIMIT {int(limit)}")
+def _matched_sql(atom, gates, branches, tool_terms, lateral, corpus):
+    """(matched-body, ctes-prefix). matched exposes (id, score) at the atom level.
+    Browse (no relevance branches) → every gate-matching atom with NULL score."""
+    cg = _corpus_clause(atom, corpus)
+    filt = list(gates) + ([cg] if cg else [])
+    where = (" WHERE " + " AND ".join(filt)) if filt else ""
+    if not branches:
+        return f"SELECT {atom.pk} AS id, NULL::float AS score FROM {atom.table}{where}", ""
+    score = " + ".join(tool_terms)
+    cand = " UNION ".join(f"({b})" for b in branches)
+    body = (f"SELECT {atom.pk} AS id, ({score}) AS score "
+            f"FROM (SELECT DISTINCT id FROM cand) c JOIN {atom.table} ON {atom.pk}=c.id "
+            f"{' '.join(lateral)}{where}")
+    return body, f"cand AS ({cand}), "
+
+
+def _build_atom(atom, tools, active, corpus, limit):
+    """Atom target: rerank the bounded candidate set on the full normalized score
+    (GREATEST within a tool, weighted sum across tools), gates + corpus in WHERE."""
+    gates, branches, tool_terms, lateral = _matched_core(atom, tools, active, corpus)
+    cg = _corpus_clause(atom, corpus)
+    filt = list(gates) + ([cg] if cg else [])
+    where = (" WHERE " + " AND ".join(filt)) if filt else ""
+    if not branches:                       # gates-only / browse
+        sql = (f"SELECT {atom.pk} AS id, {atom.name_col} AS name, NULL AS score{atom.surface} "
+               f"FROM {atom.table}{where} ORDER BY {atom.default_order} LIMIT {int(limit)}")
         return sql, _bind_params(tools, active)
-
     score = " + ".join(tool_terms)
     cand = " UNION ".join(f"({b})" for b in branches)
     sql = (f"WITH cand AS ({cand}) "
-           f"SELECT {entity.pk} AS id, {entity.name_col} AS name, ({score}) AS score"
-           f"{entity.surface} "
-           f"FROM (SELECT DISTINCT id FROM cand) c "
-           f"JOIN {entity.table} ON {entity.pk} = c.id "
-           f"{' '.join(lateral)}"
-           f"{where_sql} "
-           f"ORDER BY ({score}) DESC, {entity.default_order} LIMIT {int(limit)}")
+           f"SELECT {atom.pk} AS id, {atom.name_col} AS name, ({score}) AS score{atom.surface} "
+           f"FROM (SELECT DISTINCT id FROM cand) c JOIN {atom.table} ON {atom.pk}=c.id "
+           f"{' '.join(lateral)}{where} "
+           f"ORDER BY ({score}) DESC, {atom.default_order} LIMIT {int(limit)}")
     return sql, _bind_params(tools, active)
+
+
+def _build_higher(atom, L, tools, active, corpus, limit):
+    """Higher target: AVG(atom score) rolled up the bridge atom→L, then re-join L for
+    the tile surface. ORDER by AVG (relevance) then COUNT (browse: most matching
+    atoms — 'the albums with the most romantic-sax-female-vocal tracks')."""
+    gates, branches, tool_terms, lateral = _matched_core(atom, tools, active, corpus)
+    body, ctes = _matched_sql(atom, gates, branches, tool_terms, lateral, corpus)
+    link = _agg_link(atom, L, corpus)
+    sql = (f"WITH {ctes}matched AS ({body}) "
+           f"SELECT {L.pk} AS id, {L.name_col} AS name, g.score{L.surface} "
+           f"FROM (SELECT lk.lid AS lid, AVG(m.score) AS score "
+           f"FROM matched m {link} GROUP BY lk.lid "
+           f"ORDER BY AVG(m.score) DESC NULLS LAST, COUNT(*) DESC LIMIT {int(limit)}) g "
+           f"JOIN {L.table} ON {L.pk}=g.lid "
+           f"ORDER BY g.score DESC NULLS LAST LIMIT {int(limit)}")
+    return sql, _bind_params(tools, active)
+
+
+def _agg_link(atom, L, corpus):
+    """LATERAL yielding L's pk(s) for a matched atom row (m.id), corpus two-path aware:
+    under corpus='all' a track rolls up to its owned album (media_files→album_variants)
+    AND its phantom album (album_tracks), so the shorter phantom bridge alone wouldn't
+    drop 87% of owned links."""
+    Lt = L.table.split()[0]
+
+    def one(c):
+        frm, corr = _subquery_from(_route(Lt, atom, c))
+        return f"SELECT {L.pk} AS lid FROM {frm} WHERE {corr.replace(atom.pk, 'm.id')}"
+
+    if corpus == "all" and _route(Lt, atom, "owned") != _route(Lt, atom, "phantom"):
+        return f"JOIN LATERAL ({one('owned')} UNION {one('phantom')}) lk ON true"
+    return f"JOIN LATERAL ({one(corpus)}) lk ON true"
 
 
 def _model_ready(key: str) -> bool:

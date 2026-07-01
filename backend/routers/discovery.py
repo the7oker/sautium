@@ -447,7 +447,10 @@ def discovery_artists(
     loads (kicking the load), and surfaces is_owned / cover / media_file per tile."""
     from discovery_engine import build
 
-    sql, params = build({"text": q}, {}, corpus=corpus, limit=limit)["artist"]
+    built = build({"text": q}, {}, corpus=corpus, limit=limit)
+    if "artist" not in built:
+        return {"status": "ok", "results": []}
+    sql, params = built["artist"]
     with get_db_context() as db:
         rows = db.execute(text(sql), params).fetchall()
 
@@ -538,7 +541,10 @@ def discovery_albums(
     surfacing artist / year / cover / is_owned per tile."""
     from discovery_engine import build
 
-    sql, params = build({"text": q}, {}, corpus=corpus, limit=limit)["album"]
+    built = build({"text": q}, {}, corpus=corpus, limit=limit)
+    if "album" not in built:
+        return {"status": "ok", "results": []}
+    sql, params = built["album"]
     with get_db_context() as db:
         rows = db.execute(text(sql), params).fetchall()
 
@@ -623,7 +629,10 @@ def discovery_sound(
     from discovery_engine import build
     active = {"sound": q, **_engine_filters(bpm_min, bpm_max, key, mode,
                                             vocalist, gender, danceable, energy, instruments)}
-    sql, params = build(active, {}, corpus=corpus, limit=limit)["track"]
+    built = build(active, {}, corpus=corpus, limit=limit)
+    if "track" not in built:
+        return {"status": "ok", "results": []}
+    sql, params = built["track"]
     with get_db_context() as db:
         rows = db.execute(text(sql), params).fetchall()
     return {"status": "ok", "results": _track_results(rows)}
@@ -653,7 +662,10 @@ def discovery_lyrics(
     from discovery_engine import build
     active = {"lyrics": q, **_engine_filters(bpm_min, bpm_max, key, mode,
                                              vocalist, gender, danceable, energy, instruments)}
-    sql, params = build(active, {}, corpus=corpus, limit=limit)["track"]
+    built = build(active, {}, corpus=corpus, limit=limit)
+    if "track" not in built:
+        return {"status": "ok", "results": []}
+    sql, params = built["track"]
     with get_db_context() as db:
         rows = db.execute(text(sql), params).fetchall()
     return {"status": "ok", "results": _track_results(rows)}
@@ -690,7 +702,10 @@ def discovery_titles(
     if not active:
         return {"status": "ok", "results": []}
 
-    sql, params = build(active, {}, corpus=corpus, limit=limit)["track"]
+    built = build(active, {}, corpus=corpus, limit=limit)
+    if "track" not in built:
+        return {"status": "ok", "results": []}
+    sql, params = built["track"]
     with get_db_context() as db:
         rows = db.execute(text(sql), params).fetchall()
     return {"status": "ok", "results": _track_results(rows)}
