@@ -226,6 +226,25 @@ def _lateral_relevance(src: Source, entity: EntityDef, corpus: str) -> tuple[str
     return join, f"COALESCE({alias}.s, 0)", f"{alias}.s > 0"
 
 
+# Ownership is derived, never flagged: owned ⟺ the entity has a media_files row.
+_OWNED_GUARD = {
+    "artist": "EXISTS (SELECT 1 FROM track_artists ta JOIN media_files mf "
+              "ON mf.track_id=ta.track_id WHERE ta.artist_id=a.id)",
+    "album":  "EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id=al.id)",
+    "track":  "EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id=t.id)",
+}
+
+
+def _corpus_clause(entity: EntityDef, corpus: str) -> Optional[str]:
+    """owned/phantom → an EXISTS(/NOT EXISTS) guard on the target's own table; 'all'
+    → no guard. This is also the perf-critical narrowing: it cuts a track target
+    from ~3M to ~37k before any per-row vector LATERAL runs."""
+    guard = _OWNED_GUARD.get(entity.key)
+    if not guard or corpus == "all":
+        return None
+    return guard if corpus == "owned" else f"NOT {guard}"
+
+
 # ── Score normalization ─────────────────────────────────────────────────────
 
 def _norm_expr(src: Source) -> str:
@@ -300,6 +319,9 @@ def _build_for_target(entity, tools, active, query, corpus, limit):
             rel_terms.append(f"{weight} * GREATEST({', '.join(norms)})")
 
     where = list(gates)
+    corpus_guard = _corpus_clause(entity, corpus)
+    if corpus_guard:
+        where.append(corpus_guard)
     if rel_floors:                 # at least one relevance source clears its floor
         where.append("(" + " OR ".join(rel_floors) + ")")
 
