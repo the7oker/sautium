@@ -387,7 +387,13 @@ def _trigram_artists(q: str, limit: int) -> list[dict]:
                         THEN 0.85 ELSE 0 END,
                    CASE WHEN levenshtein_less_equal(
                             a.name_latin, %(ql)s, 1) <= 1
-                        THEN 0.70 ELSE 0 END
+                        THEN 0.70 ELSE 0 END,
+                   COALESCE((SELECT MAX(GREATEST(
+                       similarity(al.alias_latin, %(ql)s),
+                       CASE WHEN al.alias_latin LIKE %(qlprefix)s THEN 0.85 ELSE 0 END,
+                       CASE WHEN levenshtein_less_equal(al.alias_latin, %(ql)s, 1) <= 1
+                            THEN 0.70 ELSE 0 END))
+                       FROM artist_name_aliases al WHERE al.artist_id = a.id), 0)
                ) AS sim,
                a.gender AS gender,
                a.is_vocalist AS is_vocalist,
@@ -403,7 +409,12 @@ def _trigram_artists(q: str, limit: int) -> list[dict]:
                     lower(a.name), lower(%(q)s), 1) <= 1
                OR similarity(a.name_latin, %(ql)s) >= 0.5
                OR a.name_latin LIKE %(qlprefix)s
-               OR levenshtein_less_equal(a.name_latin, %(ql)s, 1) <= 1)
+               OR levenshtein_less_equal(a.name_latin, %(ql)s, 1) <= 1
+               OR EXISTS (SELECT 1 FROM artist_name_aliases al
+                          WHERE al.artist_id = a.id
+                            AND (similarity(al.alias_latin, %(ql)s) >= 0.5
+                                 OR al.alias_latin LIKE %(qlprefix)s
+                                 OR levenshtein_less_equal(al.alias_latin, %(ql)s, 1) <= 1)))
           AND EXISTS (
             SELECT 1 FROM track_artists ta
             WHERE ta.artist_id = a.id AND ta.role = 'primary'

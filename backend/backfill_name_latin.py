@@ -89,7 +89,39 @@ def backfill_phantom(table: str, limit: Optional[int] = None, batch: int = 2000)
     return done
 
 
+def backfill_aliases(limit: Optional[int] = None) -> int:
+    """Populate artist_name_aliases (Phase 0b) with alternate Latin readings.
+
+    Alt readings only apply to kana-less Han (中森明菜 = Nakamori Akina in
+    Japanese vs a Chinese reading), so scan Han-containing artist names and store
+    the Japanese one alongside the pinyin name_latin. Idempotent: skips artists
+    that already have an alias row. Han names are few, so a single pass — no cursor.
+    """
+    from transliterate import latin_alt_forms
+
+    rows = db_query(
+        "SELECT a.id::text AS id, a.name AS nm FROM artists a "
+        "WHERE a.name ~ '[一-鿿㐀-䶿]' "
+        "AND NOT EXISTS (SELECT 1 FROM artist_name_aliases al WHERE al.artist_id = a.id)"
+        + (f" LIMIT {int(limit)}" if limit else "")
+    )
+    pairs = [(r["id"], alt) for r in rows for alt in latin_alt_forms(r["nm"])]
+    if pairs:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                execute_values(
+                    cur,
+                    "INSERT INTO artist_name_aliases (artist_id, alias_latin) "
+                    "VALUES %s ON CONFLICT DO NOTHING",
+                    pairs, template="(%s::uuid, %s)",
+                )
+            conn.commit()
+    logger.info("backfilled %d aliases from %d Han artists", len(pairs), len(rows))
+    return len(pairs)
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     for tbl in ("artists", "albums", "tracks"):
         print(f"{tbl}: {backfill_owned(tbl)} owned rows")
+    print(f"aliases: {backfill_aliases()} rows")

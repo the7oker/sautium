@@ -401,7 +401,7 @@ def _step_backfill_name_latin(limit: int) -> Dict[str, int]:
     large batches. NULL-gated and id-cursored, so it's idempotent and never
     re-scans. Owned rows are handled once by the backfill_name_latin CLI;
     new rows are filled at write time (models event + raw choke-points)."""
-    from backfill_name_latin import backfill_phantom
+    from backfill_name_latin import backfill_phantom, backfill_aliases
 
     out: Dict[str, int] = {}
     for tbl in ("artists", "albums", "tracks"):
@@ -412,6 +412,12 @@ def _step_backfill_name_latin(limit: int) -> Dict[str, int]:
         except Exception as e:
             logger.error(f"name_latin backfill failed for {tbl}: {e}")
             out[tbl] = 0
+    if not _cancel_flag():
+        try:
+            out["aliases"] = backfill_aliases(limit=limit)   # phase 0b: CJK alt readings
+        except Exception as e:
+            logger.error(f"alias backfill failed: {e}")
+            out["aliases"] = 0
     return out
 
 

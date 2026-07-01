@@ -82,3 +82,33 @@ def latinize(s: str | None) -> str | None:
     out = _romanize(s).lower().replace("'", "").replace("’", "")
     out = _NONWORD.sub(" ", out).strip()
     return out or None
+
+
+def _clean(s: str) -> str:
+    return _NONWORD.sub(" ", s.lower().replace("'", "").replace("’", "")).strip()
+
+
+def latin_alt_forms(s: str | None) -> list[str]:
+    """Extra Latin readings for names that are genuinely ambiguous across
+    languages — currently only kana-less Han (中森明菜 reads Nakamori Akina in
+    Japanese but a different Chinese reading). latinize() stores the Chinese
+    (pinyin) form; this returns the Japanese (cutlet) reading as an alias so the
+    name is findable either way (phase 0b). Empty for everything fuzzy already
+    collapses (Cyrillic, accented Latin) and for kana/Hangul (already dispatched
+    to their own language). Empty too when cutlet is unavailable (launcher) or
+    emits junk on Chinese input ("??kun") or coincides with the pinyin form."""
+    if not s or not s.strip():
+        return []
+    if _has(s, *_HANGUL) or _has(s, *_KANA):
+        return []
+    if not (_has(s, *_HAN[0]) or _has(s, *_HAN[1])):
+        return []
+    if _cutlet_unavailable:
+        return []
+    jp = _japanese(s)                      # may flip _cutlet_unavailable on first miss
+    if _cutlet_unavailable or "?" in jp:
+        return []
+    jp_clean = _clean(jp)
+    if not jp_clean or jp_clean == latinize(s):
+        return []
+    return [jp_clean]

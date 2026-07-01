@@ -289,6 +289,17 @@ class TrackArtist(Base):
         return f"<TrackArtist(track_id={self.track_id}, artist_id={self.artist_id}, role='{self.role}')>"
 
 
+class ArtistNameAlias(Base):
+    """Extra Latin reading of an artist name for kana-less Han (Phase 0b) — the
+    Japanese romanization kept alongside the pinyin name_latin so the name is
+    findable either way. Populated by the name_latin backfill."""
+    __tablename__ = "artist_name_aliases"
+
+    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE", onupdate="CASCADE"), primary_key=True)
+    alias_latin = Column(String(500), primary_key=True)
+    source = Column(String(20), nullable=False, default="cutlet")
+
+
 class AlbumGenre(Base):
     """Album-Genre association (many-to-many). Genre is album-grain, not
     track-grain — see album_genres in the schema. `source` is part of the PK

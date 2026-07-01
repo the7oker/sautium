@@ -806,6 +806,18 @@ CREATE INDEX IF NOT EXISTS idx_tracks_title_trgm ON tracks USING gin (title gin_
 CREATE INDEX IF NOT EXISTS idx_artists_name_latin_trgm ON artists USING gin (name_latin gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_albums_title_latin_trgm ON albums USING gin (title_latin gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_tracks_title_latin_trgm ON tracks USING gin (title_latin gin_trgm_ops);
+
+-- Phase 0b: CJK multi-form aliases — a second Latin reading for kana-less Han
+-- (中森明菜 is stored as its pinyin reading in name_latin; its Japanese reading
+-- is kept here) so the name is findable either way. Populated by the name_latin
+-- backfill; searched alongside artists.name_latin in /discovery/artists.
+CREATE TABLE IF NOT EXISTS artist_name_aliases (
+    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    alias_latin VARCHAR(500) NOT NULL,
+    source VARCHAR(20) NOT NULL DEFAULT 'cutlet',
+    PRIMARY KEY (artist_id, alias_latin)
+);
+CREATE INDEX IF NOT EXISTS idx_artist_name_aliases_trgm ON artist_name_aliases USING gin (alias_latin gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_tags_name_lower ON tags(name text_pattern_ops);
 
 -- Association indexes

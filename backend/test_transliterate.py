@@ -5,7 +5,7 @@ per-script dispatch against library drift.
 """
 import pytest
 
-from transliterate import latinize
+from transliterate import latinize, latin_alt_forms
 
 
 @pytest.mark.parametrize("raw, expected", [
@@ -38,3 +38,18 @@ def test_latinize_idempotent_on_latin(latin):
     # Symmetric normalization: query-side latinize must equal the stored form,
     # so an already-Latin string must pass through unchanged.
     assert latinize(latin) == latin
+
+
+@pytest.mark.parametrize("raw, alts", [
+    ("中森明菜", ["nakamori akina"]),   # kana-less Japanese → Japanese reading as alias
+    ("田部井辰雄", ["tabei tatsuo"]),
+    ("邓丽君", []),                      # Chinese → cutlet junk ("??kun") filtered out
+    ("美空ひばり", []),                  # kana present → already Japanese in name_latin
+    ("Высоцкий", []),                    # Cyrillic → fuzzy already collapses variants
+    ("Madonna", []),
+    (None, []),
+])
+def test_latin_alt_forms(raw, alts):
+    # Phase 0b: only genuinely cross-language-ambiguous (kana-less Han) names get
+    # an alternate reading; requires cutlet + unidic-lite (present in the image).
+    assert latin_alt_forms(raw) == alts
