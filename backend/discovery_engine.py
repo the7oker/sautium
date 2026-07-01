@@ -88,8 +88,14 @@ TOOLS: dict[str, Tool] = {
     "text": Tool("text", targets=("artist", "album", "track", "genre"), sources=(
         Source("artist_name", "artists",
                "GREATEST(similarity(a.name_latin,:ql), "
-               "CASE WHEN a.name_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
+               "CASE WHEN a.name_latin LIKE :qlpfx THEN 0.85 ELSE 0 END, "
+               "similarity(a.name,:q))",     # original-script exact match too
                targets=("artist",), floor=0.3, ceil=1.0, weight=1.0),
+        Source("artist_alias", "artist_name_aliases",   # 0b: CJK cutlet + human file-tag readings
+               "GREATEST(similarity(ana.alias_latin,:ql), "
+               "CASE WHEN ana.alias_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
+               targets=("artist",), floor=0.3, ceil=1.0, weight=1.0,
+               needs_join=frozenset({"artist_name_aliases"})),
         Source("artist_bio", "artist_bio_embeddings", "1-(abe.vector <=> CAST(:qvec AS vector))",
                targets=("artist",), floor=0.5, ceil=0.85, weight=0.7, model="enrichment",
                needs_join=frozenset({"artist_bio_embeddings"})),
@@ -160,6 +166,7 @@ EDGES: tuple = (
     Edge("tracks", "audio_features", "af.track_id = t.id"),
     Edge("tracks", "embeddings", "e.track_id = t.id"),
     Edge("artists", "artist_bio_embeddings", "abe.artist_id = a.id"),
+    Edge("artists", "artist_name_aliases", "ana.artist_id = a.id"),
     Edge("tracks", "album_tracks", "atr.track_id = t.id", corpus="phantom"),
     Edge("album_tracks", "albums", "atr.album_id = al.id", corpus="phantom"),
     Edge("tracks", "media_files", "mf.track_id = t.id", corpus="owned"),
@@ -176,6 +183,7 @@ _ALIAS = {
     "track_artists": "ta", "album_artists": "aa", "album_tracks": "atr",
     "audio_features": "af", "embeddings": "e", "artist_bio_embeddings": "abe",
     "media_files": "mf", "album_variants": "av", "album_genres": "ag", "genres": "g",
+    "artist_name_aliases": "ana",
 }
 
 
@@ -442,6 +450,7 @@ def _bind_params(tools, active: dict) -> dict:
         if tool.key == "text":
             q = str(v)[:255]
             ql = (latinize(q) or q)[:255]
+            p["q"] = q
             p["ql"], p["qlpfx"] = ql, ql + "%"
             if _model_ready("enrichment"):
                 p["qvec"] = _encode_bge(q)   # bio source (BGE-M3) — only if warm
