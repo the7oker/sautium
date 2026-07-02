@@ -15,14 +15,17 @@ the engine, so a search never blocks on a model load; `warming: true`
 tells the client the semantic channels weren't all live yet.
 """
 
+import logging
 import random
 from typing import Any, Optional
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 from sqlalchemy import text
 
 import model_cache
 from database import get_db_context
 from db_pool import db_query
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/api/discovery", tags=["discovery"])
@@ -207,6 +210,43 @@ def _genre_results(rows) -> list:
 
 _SHAPERS = {"artist": _artist_results, "album": _album_results,
             "track": _track_results, "genre": _genre_results}
+
+
+@router.get("/streaming-search")
+def streaming_search(q: str = Query(..., min_length=2, max_length=100),
+                     limit: int = Query(6, ge=1, le=12)):
+    """Streaming-provider supplement for a text search (no advanced filters —
+    the provider can't honour our gates). Rows are deduped against the local DB;
+    a tile the user clicks gets minted via /streaming-mint. Provider errors are
+    the tail's problem, not the search's — the endpoint answers empty."""
+    from streaming import search as provider_search
+    if not provider_search.available():
+        return {"available": False, "artists": [], "albums": []}
+    try:
+        res = provider_search.search(q.strip(), limit=limit)
+    except Exception as e:
+        logger.warning("streaming search failed: %s", e)
+        return {"available": True, "artists": [], "albums": []}
+    return {"available": True, **res}
+
+
+@router.post("/streaming-mint")
+def streaming_mint(body: dict = Body(...)):
+    """Mint a clicked streaming tile as a phantom (artist, or album + tracklist)
+    and answer the local UUID to navigate to. Deterministic identity: re-minting
+    is a no-op, an existing MB phantom is reused."""
+    from streaming import search as provider_search
+    kind = body.get("type")
+    provider_id = str(body.get("provider_id") or "")
+    if kind not in ("artist", "album") or not provider_id:
+        raise HTTPException(status_code=422, detail="type must be artist|album with provider_id")
+    try:
+        if kind == "artist":
+            return {"artist_id": provider_search.mint_artist(provider_id)}
+        return {"album_id": provider_search.mint_album(provider_id)}
+    except Exception as e:
+        logger.error("streaming mint failed (%s %s): %s", kind, provider_id, e)
+        raise HTTPException(status_code=502, detail=f"mint failed: {e}")
 
 
 @router.get("/instrument-options")

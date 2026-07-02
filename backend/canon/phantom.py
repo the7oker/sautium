@@ -192,6 +192,9 @@ def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False
                 WHERE a.id = ANY(%s::uuid[])
                   AND NOT EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
                   AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = a.id)
+                  -- streaming-minted phantoms carry explicit user intent (a clicked
+                  -- provider search tile) — never swept, MB-resolvable or not
+                  AND NOT EXISTS (SELECT 1 FROM streaming_mints sm WHERE sm.artist_id = a.id)
             """, (ph_ids,))
             stats["discarded"] = cur.rowcount
     logger.info("phantom canon: %s", stats)

@@ -1635,6 +1635,29 @@ CREATE INDEX IF NOT EXISTS idx_mb_rg_tag_rg             ON mb_release_group_tag(
 CREATE INDEX IF NOT EXISTS idx_mb_genre_name_lower      ON mb_genre(lower(name));
 
 -- ============================================================
+-- Streaming-minted phantoms
+-- ============================================================
+
+-- Provenance for phantoms the user minted from a streaming-provider search tile
+-- (Discovery supplement): explicit user intent + provider ids. The phantom-canon
+-- discard pass must never sweep these rows, MB-resolvable or not.
+CREATE TABLE IF NOT EXISTS streaming_mints (
+    id SERIAL PRIMARY KEY,
+    artist_id UUID REFERENCES artists(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    album_id UUID REFERENCES albums(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    provider VARCHAR(32) NOT NULL,
+    provider_id VARCHAR(64) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CHECK (artist_id IS NOT NULL OR album_id IS NOT NULL)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_streaming_mints_artist
+    ON streaming_mints (provider, provider_id) WHERE artist_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_streaming_mints_album
+    ON streaming_mints (provider, provider_id) WHERE album_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_streaming_mints_artist ON streaming_mints (artist_id);
+CREATE INDEX IF NOT EXISTS idx_streaming_mints_album ON streaming_mints (album_id);
+
+-- ============================================================
 -- Views
 -- ============================================================
 

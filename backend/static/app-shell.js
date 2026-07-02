@@ -3267,9 +3267,110 @@
           if (completion.remaining === 0) {
             searching.hidden = true;
             if (!completion.hadAnyResults) empty.hidden = false;
+            // Streaming supplement: text-only searches also ask the provider
+            // (Deezer) — AFTER the local blocks settled, so the tail append
+            // can't be wiped by a local render. Filters active → skip (the
+            // provider can't honour our gates).
+            if (query && !hasActiveFilters(filters)) {
+              fetchStreamingTail(screen, query, queryId, getActiveId,
+                                 () => { empty.hidden = true; });
+            }
           }
         });
     });
+  }
+
+  function fetchStreamingTail(screen, query, queryId, getActiveId, onAnyResults) {
+    setTimeout(() => {
+      if (queryId !== getActiveId()) return;
+      const params = new URLSearchParams({ q: query, limit: '6' });
+      fetch('/api/discovery/streaming-search?' + params)
+        .then(r => r.ok ? r.json() : Promise.reject(r.status))
+        .then(data => {
+          if (queryId !== getActiveId()) return;
+          if (!data.available) return;
+          const any = (data.artists || []).length + (data.albums || []).length;
+          renderStreamingTail(screen, 'artists', data.artists || []);
+          renderStreamingTail(screen, 'albums', data.albums || []);
+          if (any) onAnyResults();
+        })
+        .catch(err => console.warn('streaming search failed:', err));
+    }, 300);
+  }
+
+  // Provider rows under the local block: visually a phantom-dim tail with a
+  // "From Deezer" header. A click MINTS the phantom (deterministic UUID — an
+  // existing MB phantom is reused) and navigates to its page, which opens the
+  // path to streaming playback + enrichment.
+  function renderStreamingTail(screen, blockId, items) {
+    if (!items.length) return;
+    const blk = screen.querySelector('#dBlock-' + blockId);
+    const body = screen.querySelector('#dBody-' + blockId);
+    if (!blk || !body) return;
+
+    const tail = document.createElement('div');
+    tail.className = 'd-streaming-tail';
+    const tiles = blockId === 'artists'
+      ? `<div class="shuffle-row d-artist-row">${items.map(a => {
+          const ph = avatarPlaceholder(a.name || '?');
+          const inner = a.picture
+            ? `<img src="${escapeHtml(a.picture)}" alt="" loading="lazy" onerror="this.style.display='none'">`
+            : `<span class="d-artist-initials">${escapeHtml(ph.initials)}</span>`;
+          return `
+            <button class="d-artist-tile is-phantom" type="button"
+                    data-sprovider-type="artist"
+                    data-sprovider-id="${escapeHtml(a.provider_id)}">
+              <div class="d-artist-avatar" style="background: ${ph.bg};">${inner}</div>
+              <div class="d-artist-name">${escapeHtml(a.name || '')}</div>
+            </button>`;
+        }).join('')}</div>`
+      : `<div class="shuffle-row d-album-row">${items.map(a => {
+          const c = coverPlaceholderColors(a.title || '');
+          const cover = a.cover
+            ? `<img src="${escapeHtml(a.cover)}" alt="" loading="lazy" onerror="this.style.display='none'">`
+            : '';
+          return `
+            <button class="mosaic-tile is-phantom" type="button"
+                    data-sprovider-type="album"
+                    data-sprovider-id="${escapeHtml(a.provider_id)}">
+              <div class="mosaic-cover"
+                   style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}</div>
+              <div class="mosaic-title">${escapeHtml(a.title || '')}</div>
+              <div class="mosaic-artist">${escapeHtml(a.artist || '')}</div>
+            </button>`;
+        }).join('')}</div>`;
+    tail.innerHTML = `<div class="d-streaming-head">From Deezer</div>` + tiles;
+
+    tail.querySelectorAll('[data-sprovider-id]').forEach(el => {
+      el.addEventListener('click', () => mintStreamingTile(el));
+    });
+    body.appendChild(tail);
+    blk.hidden = false;
+  }
+
+  function mintStreamingTile(el) {
+    if (el.classList.contains('is-minting')) return;
+    el.classList.add('is-minting');
+    const kind = el.getAttribute('data-sprovider-type');
+    fetch('/api/discovery/streaming-mint', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: kind, provider_id: el.getAttribute('data-sprovider-id') }),
+    })
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(data => {
+        const id = kind === 'artist' ? data.artist_id : data.album_id;
+        if (id) navigateToEntity(kind, id);
+      })
+      .catch(err => {
+        el.classList.remove('is-minting');
+        window.notifyDialog({
+          title: 'Streaming import failed',
+          message: 'Could not import this item from the provider. Try again in a moment.',
+          kind: 'error',
+        });
+        console.warn('streaming mint failed:', err);
+      });
   }
 
   function renderDiscoveryBlock(screen, descriptor, data) {

@@ -3008,6 +3008,22 @@ body.has-miniplayer .ai-fab {
   color: var(--color-text-dim);
 }
 
+/* Streaming supplement tail under a results block */
+.discovery-screen .d-streaming-tail {
+  margin-top: calc(8 * var(--px));
+  border-top: 1px solid var(--color-divider);
+  padding-top: calc(8 * var(--px));
+}
+.discovery-screen .d-streaming-head {
+  padding: 0 var(--space-4) calc(6 * var(--px));
+  font-size: calc(11 * var(--px));
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-dim);
+}
+.discovery-screen .is-minting { opacity: 0.4; pointer-events: none; }
+
 /* Genres results block: wrap-row of navigable pills */
 .discovery-screen .d-genre-row {
   display: flex;
