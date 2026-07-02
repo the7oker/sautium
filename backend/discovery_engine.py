@@ -21,12 +21,8 @@ bridge edges) and the normalization expression. Stubbed with TODO: BFS routing,
 per-target assembly, relevance-vs-gate weaving, aggregable HAVING, cover/media
 surfacing. floor/ceil are placeholders — calibration is Phase 2.
 """
-import logging
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any, Callable, Optional
-
-logger = logging.getLogger(__name__)
 
 
 # ── Entities ────────────────────────────────────────────────────────────────
@@ -598,41 +594,6 @@ def _encode_clap(q: str) -> str:
     return _to_vector_param(model_cache.get_model("clap", _load).text_to_embedding(q))
 
 
-def _to_english(q: str) -> str:
-    """CLAP's text encoder was trained on English captions only — translate
-    non-Latin queries before encoding (Latin-script queries bypass the call
-    entirely, per the rate-limit rule). Degrades to the raw query when no API
-    key is configured or the call fails: CLAP then contributes noise-level
-    scores, but the lexical + multilingual (BGE-M3 bio/lyrics) sources still
-    carry the search."""
-    if all(ord(c) < 0x250 for c in q):     # Latin incl. accents — no call
-        return q
-    return _translate_query(q)
-
-
-@lru_cache(maxsize=512)
-def _translate_query(q: str) -> str:
-    try:
-        from config import settings
-        if not settings.anthropic_api_key:
-            return q
-        import anthropic
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        resp = client.messages.create(
-            model="claude-haiku-4-5-20251001", max_tokens=100,
-            system="Translate this music-search query to English. Reply with "
-                   "ONLY the translation — no quotes, no commentary. Keep proper "
-                   "names (artists, albums) as-is.",
-            messages=[{"role": "user", "content": q}],
-        )
-        out = "".join(b.text for b in resp.content if b.type == "text").strip()
-        logger.info("translated query %r -> %r", q, out)
-        return out or q
-    except Exception as e:
-        logger.warning("query translation failed (%s), using raw query", e)
-        return q
-
-
 def _encode_lyrics(q: str) -> str:
     import model_cache
     from search import _to_vector_param
@@ -663,7 +624,10 @@ def _bind_params(tools, active: dict) -> dict:
             if _model_ready("enrichment"):
                 p["qvec"] = _encode_bge(q)   # bio source (BGE-M3, multilingual) — only if warm
             if _model_ready("clap"):
-                p["qclap"] = _encode_clap(_to_english(q))  # CLAP is English-only
+                # CLAP's text encoder is English-only — non-Latin queries score
+                # noise-level here until the planned LOCAL translation model
+                # lands; the multilingual BGE sources (bio, lyrics) carry them.
+                p["qclap"] = _encode_clap(q)
             if _model_ready("lyrics"):
                 p["qlyr"] = _encode_lyrics(q)  # lyrics source (BGE-M3, multilingual)
         elif tool.key in ("gender", "vocalist", "key", "mode"):
@@ -683,7 +647,7 @@ def _bind_params(tools, active: dict) -> dict:
             p["energy_lo"], p["energy_hi"] = buckets.get(v, (-100.0, 0.0))
         elif tool.key == "sound":
             if _model_ready("clap"):
-                p["qclap"] = _encode_clap(_to_english(str(v)[:255]))
+                p["qclap"] = _encode_clap(str(v)[:255])
         elif tool.key == "lyrics":
             if _model_ready("lyrics"):
                 p["qlyr"] = _encode_lyrics(str(v)[:255])
