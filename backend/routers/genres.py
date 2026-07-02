@@ -17,6 +17,23 @@ from db_pool import db_query, db_query_one
 router = APIRouter(prefix="/api/genres", tags=["genres"])
 
 
+@router.get("")
+def top_genres(limit: int = 14) -> dict:
+    """Top genres by owned-album coverage — the Discovery filter panel's quick
+    chips (the full 500+ owned-genre list is reachable via typeahead search)."""
+    rows = db_query("""
+        SELECT g.id::text AS genre_id, g.name AS genre,
+               COUNT(DISTINCT ag.album_id) AS album_count
+        FROM genres g
+        JOIN album_genres ag ON ag.genre_id = g.id
+        JOIN album_variants av ON av.album_id = ag.album_id
+        GROUP BY g.id, g.name
+        ORDER BY COUNT(DISTINCT ag.album_id) DESC
+        LIMIT %(limit)s
+    """, {"limit": min(int(limit), 40)})
+    return {"genres": rows}
+
+
 @router.get("/{genre_id}")
 def get_genre(genre_id: str) -> dict:
     genre = db_query_one("""

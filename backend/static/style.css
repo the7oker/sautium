@@ -2942,6 +2942,84 @@ body.has-miniplayer .ai-fab {
   font-weight: 600;
 }
 
+/* Genre filter: typeahead under the chip row (500+ genres — chips can't cover) */
+.discovery-screen .genre-filter {
+  display: flex;
+  flex-direction: column;
+  gap: calc(8 * var(--px));
+  min-width: 0;
+  flex: 1;
+}
+.discovery-screen .genre-suggest-wrap { position: relative; }
+.discovery-screen .genre-suggest-input {
+  width: calc(160 * var(--px));
+  height: calc(28 * var(--px));
+  padding: 0 calc(10 * var(--px));
+  font-size: calc(12 * var(--px));
+  color: var(--color-text);
+  background: var(--color-surface-lo);
+  border: 1px solid var(--color-divider);
+  border-radius: calc(14 * var(--px));
+  outline: none;
+}
+.discovery-screen .genre-suggest-input:focus { border-color: var(--color-blue); }
+.discovery-screen .genre-suggest-list {
+  position: absolute;
+  top: calc(32 * var(--px));
+  left: 0;
+  z-index: 30;
+  min-width: calc(200 * var(--px));
+  background: var(--color-surface-hi);
+  border: 1px solid var(--color-divider);
+  border-radius: calc(10 * var(--px));
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+}
+.discovery-screen .genre-suggest-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: calc(12 * var(--px));
+  width: 100%;
+  padding: calc(8 * var(--px)) calc(12 * var(--px));
+  font-size: calc(13 * var(--px));
+  color: var(--color-text);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+}
+.discovery-screen .genre-suggest-item:hover { background: var(--color-surface); }
+.discovery-screen .genre-suggest-item .g-count,
+.discovery-screen .d-genre-pill .g-count {
+  font-family: var(--font-mono);
+  font-size: calc(11 * var(--px));
+  color: var(--color-text-dim);
+}
+
+/* Genres results block: wrap-row of navigable pills */
+.discovery-screen .d-genre-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(8 * var(--px));
+  padding: calc(4 * var(--px)) var(--space-4) calc(8 * var(--px));
+}
+.discovery-screen .d-genre-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(8 * var(--px));
+  height: calc(32 * var(--px));
+  padding: 0 calc(14 * var(--px));
+  font-size: calc(13 * var(--px));
+  font-weight: 500;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-divider);
+  border-radius: calc(16 * var(--px));
+  cursor: pointer;
+}
+.discovery-screen .d-genre-pill.is-phantom { opacity: 0.55; }
+
 .discovery-screen .bpm-inputs {
   display: flex;
   align-items: center;

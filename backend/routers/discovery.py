@@ -128,9 +128,11 @@ def _clap_loader():
 
 
 def _engine_filters(bpm_min, bpm_max, key, mode, vocalist, gender,
-                    danceable, energy, instruments) -> dict:
+                    danceable, energy, instruments, genres=()) -> dict:
     """Map the Discovery filter chips to engine tool values."""
     a: dict = {}
+    if genres:
+        a["genre"] = list(genres)
     if bpm_min is not None or bpm_max is not None:
         a["bpm"] = (bpm_min if bpm_min is not None else 0.0,
                     bpm_max if bpm_max is not None else 9999.0)
@@ -193,12 +195,23 @@ def _track_results(rows) -> list:
     } for r in rows]
 
 
-_SHAPERS = {"artist": _artist_results, "album": _album_results, "track": _track_results}
+def _genre_results(rows) -> list:
+    return [{
+        "genre_id": str(r.id),
+        "genre": r.name,
+        "album_count": r.album_count,
+        "is_owned": bool(r.is_owned),
+        "similarity": round(float(r.score), 4) if r.score is not None else None,
+    } for r in rows]
+
+
+_SHAPERS = {"artist": _artist_results, "album": _album_results,
+            "track": _track_results, "genre": _genre_results}
 
 
 @router.get("/search")
 def discovery_search(
-    target: str = Query(..., pattern="^(artist|album|track)$"),
+    target: str = Query(..., pattern="^(artist|album|track|genre)$"),
     q: Optional[str] = Query(None),
     limit: int = Query(10, ge=1, le=30),
     bpm_min: Optional[float] = Query(None),
@@ -210,6 +223,7 @@ def discovery_search(
     danceable: Optional[str] = Query(None),
     energy: Optional[str] = Query(None),
     instruments: list[str] = Query(default_factory=list),
+    genres: list[str] = Query(default_factory=list),
     corpus: str = Query("all"),
 ):
     """One composite query → one target block. Text + chips build the engine's
@@ -225,7 +239,7 @@ def discovery_search(
     if q and q.strip():
         active["text"] = q.strip()[:255]
     active.update(_engine_filters(bpm_min, bpm_max, key, mode, vocalist,
-                                  gender, danceable, energy, instruments))
+                                  gender, danceable, energy, instruments, genres))
     warming = bool(active.get("text")) and not all(
         model_cache.is_loaded(k) for k in ("clap", "lyrics", "enrichment"))
     if not active:

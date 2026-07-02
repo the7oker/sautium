@@ -2600,6 +2600,7 @@
     { id: 'artists', title: 'Artists', target: 'artist', layout: 'artists' },
     { id: 'albums',  title: 'Albums',  target: 'album',  layout: 'albums'  },
     { id: 'tracks',  title: 'Tracks',  target: 'track',  layout: 'tracks'  },
+    { id: 'genres',  title: 'Genres',  target: 'genre',  layout: 'genres'  },
   ];
 
   // Filter rows for the advanced panel (Step 1.5c-a).
@@ -2643,6 +2644,7 @@
       mode: 'any', vocalist: 'any', gender: 'any',
       danceable: 'any', energy: 'any',
       instruments: [],   // multi-select
+      genres: [],        // multi-select: genre names (top chips + typeahead adds)
     };
   }
 
@@ -2659,6 +2661,7 @@
     if (f.danceable && f.danceable !== 'any') return true;
     if (f.energy && f.energy !== 'any') return true;
     if (f.instruments && f.instruments.length) return true;
+    if (f.genres && f.genres.length) return true;
     return false;
   }
 
@@ -2677,6 +2680,7 @@
     if (f.danceable && f.danceable !== 'any') params.set('danceable', f.danceable);
     if (f.energy && f.energy !== 'any') params.set('energy', f.energy);
     (f.instruments || []).forEach(v => params.append('instruments', v));
+    (f.genres || []).forEach(v => params.append('genres', v));
   }
 
   async function renderDiscovery(root) {
@@ -2747,6 +2751,19 @@
             ${DISCOVERY_INSTRUMENTS.map(name =>
               `<span class="f-chip" data-value="${escapeHtml(name.toLowerCase())}">${escapeHtml(name)}</span>`
             ).join('')}
+          </div>
+        </div>
+
+        <div class="filter-row">
+          <span class="filter-label">Genre</span>
+          <div class="genre-filter">
+            <div class="filter-chips" data-filter-multi="genres"
+                 id="discoveryGenreChips"></div>
+            <div class="genre-suggest-wrap">
+              <input type="text" class="genre-suggest-input" id="discoveryGenreInput"
+                     placeholder="Find genre…" autocomplete="off" spellcheck="false">
+              <div class="genre-suggest-list" id="discoveryGenreSuggest" hidden></div>
+            </div>
           </div>
         </div>
 
@@ -2844,6 +2861,8 @@
       });
     });
 
+    wireGenreFilter(screen, panel);
+
     // Numeric BPM bounds — clear-on-empty is OK, the filter is "any".
     const bpmMin = panel.querySelector('#discoveryFilterBpmMin');
     const bpmMax = panel.querySelector('#discoveryFilterBpmMax');
@@ -2881,6 +2900,90 @@
       toggle.classList.remove('is-open');
       triggerDiscoverySearch(screen);
     });
+  }
+
+  // Genre filter: the library has 500+ owned genres — a fixed chip row can't
+  // cover them. Top-N by owned-album coverage render as quick chips; everything
+  // else is reachable through the typeahead (backed by the engine's genre
+  // target, so it matches by name AND description). A picked suggestion becomes
+  // an active chip in the same row.
+  function wireGenreFilter(screen, panel) {
+    const chips = panel.querySelector('#discoveryGenreChips');
+    const input = panel.querySelector('#discoveryGenreInput');
+    const list = panel.querySelector('#discoveryGenreSuggest');
+    if (!chips || !input || !list) return;
+
+    const makeChip = (name, active) => {
+      const el = document.createElement('span');
+      el.className = 'f-chip' + (active ? ' is-active' : '');
+      el.setAttribute('data-value', name);
+      el.textContent = name;
+      chips.appendChild(el);
+      return el;
+    };
+
+    // Delegated toggle — covers both the fetched top chips and suggest-added ones.
+    chips.addEventListener('click', e => {
+      const chip = e.target.closest('.f-chip');
+      if (!chip) return;
+      chip.classList.toggle('is-active');
+      const v = chip.getAttribute('data-value');
+      const cur = screen._filters.genres || [];
+      if (chip.classList.contains('is-active')) {
+        if (!cur.includes(v)) cur.push(v);
+      } else {
+        const i = cur.indexOf(v);
+        if (i >= 0) cur.splice(i, 1);
+      }
+      screen._filters.genres = cur;
+    });
+
+    fetch('/api/genres?limit=14')
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(data => (data.genres || []).forEach(g => makeChip(g.genre, false)))
+      .catch(err => console.warn('genre options failed:', err));
+
+    let debounce = null;
+    input.addEventListener('input', () => {
+      clearTimeout(debounce);
+      const q = input.value.trim();
+      if (q.length < 2) { list.hidden = true; list.innerHTML = ''; return; }
+      debounce = setTimeout(() => {
+        const params = new URLSearchParams({ target: 'genre', q, limit: '8' });
+        fetch('/api/discovery/search?' + params)
+          .then(r => r.ok ? r.json() : Promise.reject(r.status))
+          .then(data => {
+            const items = data.results || [];
+            if (input.value.trim() !== q) return;   // stale
+            list.innerHTML = items.map(g => `
+              <button type="button" class="genre-suggest-item"
+                      data-name="${escapeHtml(g.genre)}">
+                <span>${escapeHtml(g.genre)}</span>
+                <span class="g-count">${g.album_count || 0}</span>
+              </button>`).join('');
+            list.hidden = items.length === 0;
+          })
+          .catch(() => { list.hidden = true; });
+      }, 200);
+    });
+
+    list.addEventListener('click', e => {
+      const item = e.target.closest('.genre-suggest-item');
+      if (!item) return;
+      const name = item.getAttribute('data-name');
+      const cur = screen._filters.genres || [];
+      if (!cur.includes(name)) cur.push(name);
+      screen._filters.genres = cur;
+      const existing = chips.querySelector(`.f-chip[data-value="${CSS.escape(name)}"]`);
+      if (existing) existing.classList.add('is-active');
+      else makeChip(name, true);
+      input.value = '';
+      list.hidden = true;
+      list.innerHTML = '';
+    });
+
+    // Hide the dropdown when focus leaves the widget (delay lets a click land).
+    input.addEventListener('blur', () => setTimeout(() => { list.hidden = true; }, 150));
   }
 
   function wireDiscoverySearch(screen) {
@@ -3024,6 +3127,12 @@
         el.addEventListener('click', () =>
           navigateToEntity('album', el.getAttribute('data-album-id')));
       });
+    } else if (descriptor.layout === 'genres') {
+      body.innerHTML = renderGenrePills(items);
+      body.querySelectorAll('[data-genre-id]').forEach(el => {
+        el.addEventListener('click', () =>
+          navigateToEntity('genre', el.getAttribute('data-genre-id')));
+      });
     } else {
       body.innerHTML = renderTrackList(items) + warmingNote;
       wireDetailHandlers(body);
@@ -3075,6 +3184,21 @@
                  style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}${score}</div>
             <div class="mosaic-title">${escapeHtml(a.album || a.title || '')}</div>
             <div class="mosaic-artist">${escapeHtml(a.artist || '')}</div>
+          </button>`;
+      }).join('')
+    }</div>`;
+  }
+
+  function renderGenrePills(items) {
+    return `<div class="d-genre-row">${
+      items.map(g => {
+        const phantom = g.is_owned === false ? ' is-phantom' : '';
+        const count = g.album_count
+          ? `<span class="g-count">${Number(g.album_count)}</span>` : '';
+        return `
+          <button class="d-genre-pill${phantom}" type="button"
+                  data-genre-id="${escapeHtml(g.genre_id || '')}">
+            ${escapeHtml(g.genre || '')}${count}
           </button>`;
       }).join('')
     }</div>`;

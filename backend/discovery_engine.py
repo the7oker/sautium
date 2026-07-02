@@ -65,6 +65,18 @@ ENTITIES: dict[str, EntityDef] = {
                         "(SELECT mf.id FROM album_variants av JOIN media_files mf ON mf.album_variant_id=av.id "
                         "WHERE av.album_id=al.id ORDER BY mf.disc_number NULLS FIRST, mf.track_number "
                         "LIMIT 1) AS media_file_id"),
+    # Genre is a CATEGORY level above the containment chain: reachable as a
+    # roll-up target from any atom ("romantic saxophone" → smooth jazz), plus two
+    # own-level identity sources (name trigram, description vector). Its albums
+    # live on the genre page — search only surfaces the genre itself (Valerii's
+    # entity-scoped rule).
+    "genre":  EntityDef("genre", "g.id", "g.name", "g.name", "genres g",
+                        "(SELECT COUNT(*) FROM album_genres ag WHERE ag.genre_id=g.id) DESC",
+                        surface=", (SELECT COUNT(DISTINCT ag.album_id) FROM album_genres ag "
+                        "JOIN album_variants av ON av.album_id=ag.album_id "
+                        "WHERE ag.genre_id=g.id) AS album_count, "
+                        "EXISTS (SELECT 1 FROM album_genres ag JOIN album_variants av "
+                        "ON av.album_id=ag.album_id WHERE ag.genre_id=g.id) AS is_owned"),
     "track":  EntityDef("track", "t.id", "t.title", "t.title_latin", "tracks t",
                         "t.title",
                         surface=", (SELECT a.name FROM track_artists ta JOIN artists a ON a.id=ta.artist_id "
@@ -155,13 +167,23 @@ TOOLS: dict[str, Tool] = {
                targets=("track",), floor=0.3, ceil=1.0, weight=1.0,
                retrieve="(t.title_latin % :ql OR t.title_latin LIKE :qlpfx)"),
         Source("clap", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
-               targets=("track", "album", "artist"),   # characteristic: aggregates up
+               targets=("track", "album", "artist", "genre"),   # characteristic: aggregates up
                floor=0.30, ceil=0.58, weight=0.8, model="clap",
                needs_join=frozenset({"embeddings"})),
         Source("lyrics_sem", "lyrics_embeddings", "1-(le.vector <=> CAST(:qlyr AS vector))",
-               targets=("track", "album", "artist"),
+               targets=("track", "album", "artist", "genre"),
                floor=0.47, ceil=0.62, weight=0.6, model="lyrics",
                needs_join=frozenset({"lyrics_embeddings"})),
+        # Genre identity: name + curated description (BGE-M3, same encoder/params
+        # as bio → same calibration) — "saxophone" reaches Jazz via its description.
+        Source("genre_name", "genres",
+               "GREATEST(similarity(g.name,:ql), "
+               "CASE WHEN lower(g.name) LIKE :qlpfx THEN 0.85 ELSE 0 END)",
+               targets=("genre",), level="genre", floor=0.3, ceil=1.0, weight=1.0,
+               retrieve="(g.name % :ql OR lower(g.name) LIKE :qlpfx)"),
+        Source("genre_desc", "genre_desc_embeddings", "1-(gde.vector <=> CAST(:qvec AS vector))",
+               targets=("genre",), level="genre", floor=0.47, ceil=0.57, weight=0.7,
+               model="enrichment", needs_join=frozenset({"genre_desc_embeddings"})),
     )),
     # Binary gates (artist-level).
     "vocalist": Tool("vocalist", sources=(
@@ -210,12 +232,12 @@ TOOLS: dict[str, Tool] = {
     # Semantic-only track relevance (no title): CLAP text→audio, lyrics text→lyrics.
     "sound": Tool("sound", sources=(
         Source("sound", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
-               targets=("track", "album", "artist"),
+               targets=("track", "album", "artist", "genre"),
                floor=0.30, ceil=0.58, weight=1.0, model="clap",
                needs_join=frozenset({"embeddings"})),)),
     "lyrics": Tool("lyrics", sources=(
         Source("lyrics", "lyrics_embeddings", "1-(le.vector <=> CAST(:qlyr AS vector))",
-               targets=("track", "album", "artist"),
+               targets=("track", "album", "artist", "genre"),
                floor=0.47, ceil=0.62, weight=1.0, model="lyrics",
                needs_join=frozenset({"lyrics_embeddings"})),)),
 }
@@ -245,6 +267,7 @@ EDGES: tuple = (
     Edge("tracks", "lyrics_embeddings", "le.track_id = t.id"),
     Edge("artists", "artist_bio_embeddings", "abe.artist_id = a.id"),
     Edge("artists", "artist_name_aliases", "ana.artist_id = a.id"),
+    Edge("genres", "genre_desc_embeddings", "gde.genre_id = g.id"),
     Edge("tracks", "album_tracks", "atr.track_id = t.id", corpus="phantom"),
     Edge("album_tracks", "albums", "atr.album_id = al.id", corpus="phantom"),
     Edge("tracks", "media_files", "mf.track_id = t.id", corpus="owned"),
@@ -262,6 +285,7 @@ _ALIAS = {
     "audio_features": "af", "embeddings": "e", "artist_bio_embeddings": "abe",
     "media_files": "mf", "album_variants": "av", "album_genres": "ag", "genres": "g",
     "artist_name_aliases": "ana", "lyrics_embeddings": "le",
+    "genre_desc_embeddings": "gde",
 }
 
 
@@ -342,6 +366,8 @@ _OWNED_GUARD = {
               "ON mf.track_id=ta.track_id WHERE ta.artist_id=a.id)",
     "album":  "EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id=al.id)",
     "track":  "EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id=t.id)",
+    "genre":  "EXISTS (SELECT 1 FROM album_genres ag JOIN album_variants av "
+              "ON av.album_id=ag.album_id WHERE ag.genre_id=g.id)",
 }
 
 
@@ -376,7 +402,11 @@ _TABLE_LEVEL = {
     "lyrics_embeddings": "track", "album_tracks": "track", "media_files": "track",
     "track_artists": "track",
 }
-_LEVEL_RANK = {"track": 0, "album": 1, "artist": 2}   # atom = the MIN (finest) rank
+# atom = the MIN (finest) rank. Genre tops the ladder: a category every lower
+# level rolls up into — never an atom itself (its gate is album-grain via
+# _TABLE_LEVEL["genres"]; only the genre_name/desc relevance sources carry
+# level="genre" explicitly).
+_LEVEL_RANK = {"track": 0, "album": 1, "artist": 2, "genre": 3}
 
 
 def _level(src: Source) -> str:
@@ -589,8 +619,15 @@ def _build_higher(atom, L, tools, active, corpus, limit, K=500):
     where = (" WHERE " + " AND ".join(gates_L)) if gates_L else ""
     # s_up > 0 keeps lexical-only matches out of the roll-up (they'd mint zero-score
     # candidates); NULL passes for browse mode, where roll-ups rank by count.
-    sql = (f"WITH {ctes}matched AS ({body}), "
-           f"rolled AS (SELECT lk.lid AS lid, AVG(m.s_up) AS s, COUNT(*) AS n "
+    # SUM/(n+3) = AVG shrunk toward 0 (Bayesian prior): one lucky strong atom no
+    # longer outranks a genre/artist with many solid ones (Space Rock beat Jazz on
+    # a single Pink Floyd sax track), and stray CLAP junk on an identity word damps
+    # to noise level instead of minting flat 0.40 candidates.
+    # MATERIALIZED is load-bearing: matched is referenced once, so PG12+ would
+    # inline it into rolled's nested loop and re-evaluate its per-row vector
+    # laterals for every (matched x link) pair — measured 9.2s vs 38ms isolated.
+    sql = (f"WITH {ctes}matched AS MATERIALIZED ({body}), "
+           f"rolled AS (SELECT lk.lid AS lid, SUM(m.s_up) / (COUNT(*) + 3.0) AS s, COUNT(*) AS n "
            f"FROM matched m {link} WHERE m.s_up > 0 OR m.s_up IS NULL GROUP BY lk.lid), "
            f"slim AS (SELECT {L.pk} AS id, ({score}) AS score, r.n AS n "
            f"FROM (SELECT DISTINCT lid FROM ({cand}) c0) cd "
