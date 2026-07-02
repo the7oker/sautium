@@ -209,6 +209,24 @@ _SHAPERS = {"artist": _artist_results, "album": _album_results,
             "track": _track_results, "genre": _genre_results}
 
 
+@router.get("/instrument-options")
+def instrument_options(q: str = Query("", max_length=50), limit: int = Query(8, ge=1, le=20)):
+    """Instrument labels present in the corpus (raw AST/PaSST tags) matching a
+    substring — the Instruments filter typeahead behind the 10 broad chips. The
+    engine's expand passes an unknown label through verbatim, so any suggested
+    tag gates correctly. Counts honour the tagger's threshold so a label only
+    suggests where the gate would actually match."""
+    from ensemble_instruments import DEFAULT_THRESHOLD
+    rows = db_query("""
+        SELECT e.k AS name, COUNT(*) AS track_count
+        FROM audio_features af, LATERAL jsonb_each_text(af.instruments) AS e(k, v)
+        WHERE (e.v)::float >= %(thr)s AND e.k ILIKE %(pat)s
+        GROUP BY e.k ORDER BY COUNT(*) DESC
+        LIMIT %(limit)s
+    """, {"thr": DEFAULT_THRESHOLD, "pat": f"%{q}%", "limit": limit})
+    return {"instruments": rows}
+
+
 @router.get("/search")
 def discovery_search(
     target: str = Query(..., pattern="^(artist|album|track|genre)$"),

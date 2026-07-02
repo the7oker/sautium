@@ -2765,10 +2765,17 @@
 
         <div class="filter-row">
           <span class="filter-label">Instruments</span>
-          <div class="filter-chips" data-filter-multi="instruments">
-            ${DISCOVERY_INSTRUMENTS.map(name =>
-              `<span class="f-chip" data-value="${escapeHtml(name.toLowerCase())}">${escapeHtml(name)}</span>`
-            ).join('')}
+          <div class="genre-filter">
+            <div class="filter-chips" data-filter-multi="instruments">
+              ${DISCOVERY_INSTRUMENTS.map(name =>
+                `<span class="f-chip" data-value="${escapeHtml(name.toLowerCase())}">${escapeHtml(name)}</span>`
+              ).join('')}
+            </div>
+            <div class="genre-suggest-wrap">
+              <input type="text" class="genre-suggest-input" id="discoveryInstrumentInput"
+                     placeholder="Find instrument…" autocomplete="off" spellcheck="false">
+              <div class="genre-suggest-list" id="discoveryInstrumentSuggest" hidden></div>
+            </div>
           </div>
         </div>
 
@@ -2894,6 +2901,7 @@
 
     wireGenreFilter(screen, panel);
     wireArtistFilter(screen, panel);
+    wireInstrumentSuggest(screen, panel);
     wireSeedFilter(screen, panel);
 
     // Numeric BPM bounds — clear-on-empty is OK, the filter is "any".
@@ -2939,6 +2947,37 @@
     });
   }
 
+  // Shared typeahead mechanics for the filter-panel suggest widgets (genre,
+  // artist, instruments): debounced fetch → dropdown → pick → clear. The chip
+  // handling stays per-widget (delegated vs statically-wired containers differ).
+  function wireSuggestInput(input, list, fetchItems, renderItem, onPick) {
+    let debounce = null;
+    input.addEventListener('input', () => {
+      clearTimeout(debounce);
+      const q = input.value.trim();
+      if (q.length < 2) { list.hidden = true; list.innerHTML = ''; return; }
+      debounce = setTimeout(() => {
+        fetchItems(q)
+          .then(items => {
+            if (input.value.trim() !== q) return;   // stale
+            list.innerHTML = items.map(renderItem).join('');
+            list.hidden = items.length === 0;
+          })
+          .catch(() => { list.hidden = true; });
+      }, 200);
+    });
+    list.addEventListener('click', e => {
+      const item = e.target.closest('.genre-suggest-item');
+      if (!item) return;
+      onPick(item);
+      input.value = '';
+      list.hidden = true;
+      list.innerHTML = '';
+    });
+    // Hide the dropdown when focus leaves the widget (delay lets a click land).
+    input.addEventListener('blur', () => setTimeout(() => { list.hidden = true; }, 150));
+  }
+
   // Genre filter: the library has 500+ owned genres — a fixed chip row can't
   // cover them. Top-N by owned-album coverage render as quick chips; everything
   // else is reachable through the typeahead (backed by the engine's genre
@@ -2980,47 +3019,73 @@
       .then(data => (data.genres || []).forEach(g => makeChip(g.genre, false)))
       .catch(err => console.warn('genre options failed:', err));
 
-    let debounce = null;
-    input.addEventListener('input', () => {
-      clearTimeout(debounce);
-      const q = input.value.trim();
-      if (q.length < 2) { list.hidden = true; list.innerHTML = ''; return; }
-      debounce = setTimeout(() => {
-        const params = new URLSearchParams({ target: 'genre', q, limit: '8' });
-        fetch('/api/discovery/search?' + params)
-          .then(r => r.ok ? r.json() : Promise.reject(r.status))
-          .then(data => {
-            const items = data.results || [];
-            if (input.value.trim() !== q) return;   // stale
-            list.innerHTML = items.map(g => `
-              <button type="button" class="genre-suggest-item"
-                      data-name="${escapeHtml(g.genre)}">
-                <span>${escapeHtml(g.genre)}</span>
-                <span class="g-count">${g.album_count || 0}</span>
-              </button>`).join('');
-            list.hidden = items.length === 0;
-          })
-          .catch(() => { list.hidden = true; });
-      }, 200);
-    });
+    wireSuggestInput(input, list,
+      q => fetch('/api/discovery/search?' + new URLSearchParams({ target: 'genre', q, limit: '8' }))
+        .then(r => r.ok ? r.json() : Promise.reject(r.status))
+        .then(data => data.results || []),
+      g => `
+        <button type="button" class="genre-suggest-item"
+                data-name="${escapeHtml(g.genre)}">
+          <span>${escapeHtml(g.genre)}</span>
+          <span class="g-count">${g.album_count || 0}</span>
+        </button>`,
+      item => {
+        const name = item.getAttribute('data-name');
+        const cur = screen._filters.genres || [];
+        if (!cur.includes(name)) cur.push(name);
+        screen._filters.genres = cur;
+        const existing = chips.querySelector(`.f-chip[data-value="${CSS.escape(name)}"]`);
+        if (existing) existing.classList.add('is-active');
+        else makeChip(name, true);
+      });
+  }
 
-    list.addEventListener('click', e => {
-      const item = e.target.closest('.genre-suggest-item');
-      if (!item) return;
-      const name = item.getAttribute('data-name');
-      const cur = screen._filters.genres || [];
-      if (!cur.includes(name)) cur.push(name);
-      screen._filters.genres = cur;
-      const existing = chips.querySelector(`.f-chip[data-value="${CSS.escape(name)}"]`);
-      if (existing) existing.classList.add('is-active');
-      else makeChip(name, true);
-      input.value = '';
-      list.hidden = true;
-      list.innerHTML = '';
-    });
+  // Instruments typeahead: the 10 broad chips map to curated tag GROUPS; the
+  // corpus carries more raw AST/PaSST labels (cello, trumpet, flute…). A picked
+  // raw label becomes a chip and passes to the gate verbatim (the engine's
+  // expand falls through unknown names).
+  function wireInstrumentSuggest(screen, panel) {
+    const chips = panel.querySelector('.filter-chips[data-filter-multi="instruments"]');
+    const input = panel.querySelector('#discoveryInstrumentInput');
+    const list = panel.querySelector('#discoveryInstrumentSuggest');
+    if (!chips || !input || !list) return;
 
-    // Hide the dropdown when focus leaves the widget (delay lets a click land).
-    input.addEventListener('blur', () => setTimeout(() => { list.hidden = true; }, 150));
+    wireSuggestInput(input, list,
+      q => fetch('/api/discovery/instrument-options?' + new URLSearchParams({ q, limit: '8' }))
+        .then(r => r.ok ? r.json() : Promise.reject(r.status))
+        .then(data => data.instruments || []),
+      it => `
+        <button type="button" class="genre-suggest-item"
+                data-name="${escapeHtml(it.name)}">
+          <span>${escapeHtml(it.name)}</span>
+          <span class="g-count">${it.track_count || 0}</span>
+        </button>`,
+      item => {
+        const name = item.getAttribute('data-name');
+        const cur = screen._filters.instruments || [];
+        if (!cur.includes(name)) cur.push(name);
+        screen._filters.instruments = cur;
+        const existing = chips.querySelector(`.f-chip[data-value="${CSS.escape(name)}"]`);
+        if (existing) { existing.classList.add('is-active'); return; }
+        // The static broad chips were wired individually at panel init — give
+        // the late-added raw-label chip the same toggle behaviour.
+        const el = document.createElement('span');
+        el.className = 'f-chip is-active';
+        el.setAttribute('data-value', name);
+        el.textContent = name.charAt(0).toUpperCase() + name.slice(1);
+        el.addEventListener('click', () => {
+          el.classList.toggle('is-active');
+          const arr = screen._filters.instruments || [];
+          const i = arr.indexOf(name);
+          if (el.classList.contains('is-active')) {
+            if (i < 0) arr.push(name);
+          } else if (i >= 0) {
+            arr.splice(i, 1);
+          }
+          screen._filters.instruments = arr;
+        });
+        chips.appendChild(el);
+      });
   }
 
   // Similar-to-now-playing context: one toggle chip. The seed track id is read
@@ -3070,52 +3135,31 @@
       screen._filters.artists = cur;
     });
 
-    let debounce = null;
-    input.addEventListener('input', () => {
-      clearTimeout(debounce);
-      const q = input.value.trim();
-      if (q.length < 2) { list.hidden = true; list.innerHTML = ''; return; }
-      debounce = setTimeout(() => {
-        const params = new URLSearchParams({ target: 'artist', q, limit: '8' });
-        fetch('/api/discovery/search?' + params)
-          .then(r => r.ok ? r.json() : Promise.reject(r.status))
-          .then(data => {
-            if (input.value.trim() !== q) return;   // stale
-            const items = data.results || [];
-            list.innerHTML = items.map(a => `
-              <button type="button" class="genre-suggest-item"
-                      data-id="${escapeHtml(a.artist_id)}"
-                      data-name="${escapeHtml(a.artist)}">
-                <span>${escapeHtml(a.artist)}</span>
-              </button>`).join('');
-            list.hidden = items.length === 0;
-          })
-          .catch(() => { list.hidden = true; });
-      }, 200);
-    });
-
-    list.addEventListener('click', e => {
-      const item = e.target.closest('.genre-suggest-item');
-      if (!item) return;
-      const id = item.getAttribute('data-id');
-      const cur = screen._filters.artists || [];
-      if (!cur.includes(id)) cur.push(id);
-      screen._filters.artists = cur;
-      const existing = chips.querySelector(`.f-chip[data-value="${CSS.escape(id)}"]`);
-      if (existing) existing.classList.add('is-active');
-      else {
-        const el = document.createElement('span');
-        el.className = 'f-chip is-active';
-        el.setAttribute('data-value', id);
-        el.textContent = item.getAttribute('data-name');
-        chips.appendChild(el);
-      }
-      input.value = '';
-      list.hidden = true;
-      list.innerHTML = '';
-    });
-
-    input.addEventListener('blur', () => setTimeout(() => { list.hidden = true; }, 150));
+    wireSuggestInput(input, list,
+      q => fetch('/api/discovery/search?' + new URLSearchParams({ target: 'artist', q, limit: '8' }))
+        .then(r => r.ok ? r.json() : Promise.reject(r.status))
+        .then(data => data.results || []),
+      a => `
+        <button type="button" class="genre-suggest-item"
+                data-id="${escapeHtml(a.artist_id)}"
+                data-name="${escapeHtml(a.artist)}">
+          <span>${escapeHtml(a.artist)}</span>
+        </button>`,
+      item => {
+        const id = item.getAttribute('data-id');
+        const cur = screen._filters.artists || [];
+        if (!cur.includes(id)) cur.push(id);
+        screen._filters.artists = cur;
+        const existing = chips.querySelector(`.f-chip[data-value="${CSS.escape(id)}"]`);
+        if (existing) existing.classList.add('is-active');
+        else {
+          const el = document.createElement('span');
+          el.className = 'f-chip is-active';
+          el.setAttribute('data-value', id);
+          el.textContent = item.getAttribute('data-name');
+          chips.appendChild(el);
+        }
+      });
   }
 
   function wireDiscoverySearch(screen) {
