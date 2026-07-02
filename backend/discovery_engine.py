@@ -173,8 +173,16 @@ TOOLS: dict[str, Tool] = {
     "energy": Tool("energy", broad=True, sources=(
         Source("energy", "audio_features", "af.energy_db BETWEEN :energy_lo AND :energy_hi",
                is_gate=True, needs_join=frozenset({"audio_features"})),)),
+    # instruments stores the RAW top-20 score distribution (no write-time
+    # cutoff) — presence is a read-time decision against per-label thresholds
+    # (ensemble_instruments.INSTRUMENT_THRESHOLDS). `?|` alone would match
+    # noise-level scores; it stays only as the GIN-indexed retrieve branch in
+    # front of the score check.
     "instruments": Tool("instruments", sources=(
-        Source("instruments", "audio_features", "af.instruments ?| :instruments",
+        Source("instruments", "audio_features",
+               "(af.instruments ?| :instruments AND EXISTS "
+               "(SELECT 1 FROM jsonb_each_text(CAST(:instruments_thr AS jsonb)) th "
+               "WHERE (af.instruments->>th.key)::float >= th.value::float))",
                is_gate=True, needs_join=frozenset({"audio_features"}),
                expand=lambda v: _expand_instruments(v)),)),
     "moods": Tool("moods", sources=(
@@ -689,8 +697,13 @@ def _bind_params(tools, active: dict) -> dict:
         elif tool.key == "moods":
             p["moods"] = list(v) if isinstance(v, (list, tuple)) else [v]
         elif tool.key == "instruments":
+            import json
+
+            from ensemble_instruments import threshold_for
             exp = tool.sources[0].expand
-            p["instruments"] = exp(v) if exp else (list(v) if isinstance(v, (list, tuple)) else [v])
+            labels = exp(v) if exp else (list(v) if isinstance(v, (list, tuple)) else [v])
+            p["instruments"] = labels
+            p["instruments_thr"] = json.dumps({lbl: threshold_for(lbl) for lbl in labels})
         elif tool.key == "energy":
             # energy_db buckets (mirror routers/discovery.ENERGY_BUCKETS)
             buckets = {"low": (-100.0, -25.0), "mid": (-25.0, -15.0), "high": (-15.0, 0.0)}
