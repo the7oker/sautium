@@ -76,9 +76,16 @@ DEFAULT_THRESHOLD = 0.10
 # Read-time presence thresholds, keyed by the lowercased DB label.
 # The single source of truth for every instruments reader (discovery
 # engine, search filters, MCP/CLI display, DJ prompt). Labels not
-# listed here use DEFAULT_THRESHOLD; calibrated per-class overrides
-# (e.g. saxophone, whose score is suppressed by vocals) go here.
-INSTRUMENT_THRESHOLDS: Dict[str, float] = {}
+# listed here use DEFAULT_THRESHOLD.
+INSTRUMENT_THRESHOLDS: Dict[str, float] = {
+    # Vocals suppress the class hard: vocal "Careless Whisper" scores
+    # 0.105-0.111 vs 0.342 on the instrumental mix of the same song.
+    # 0.08 keeps the canonical vocal versions plus "Us And Them" (0.09);
+    # the 0.08-0.10 band spot-checked clean (big bands, sax-led acts)
+    # while 0.05-0.08 already mixes in brass confusion. Calibrated
+    # 2026-07-02 on the full raw-score backfill.
+    "saxophone": 0.08,
+}
 
 
 def threshold_for(label: str) -> float:
