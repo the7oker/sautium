@@ -11,28 +11,27 @@ is stronger on synths and percussion detail.
 
 Output keys are lowercased AudioSet labels (e.g. "piano",
 "acoustic guitar", "drum kit") stored in audio_features.instruments
-JSONB. Threshold 0.10 is conservative; tracks without identifiable
-instrument events (dark ambient, drone) may yield an empty dict,
-which is the correct answer.
+JSONB. Storage keeps the RAW top-N score distribution (like moods and
+embeddings do) — "is this instrument present" is decided at READ time
+against INSTRUMENT_THRESHOLDS below, so thresholds are tunable without
+re-running the GPU ensemble. Vocals mask instruments (a saxophone
+scoring 0.35 on an instrumental mix scores ~0.11 on the vocal version
+of the same song), which is why a write-time cutoff destroys data.
+
+ML imports (torch/librosa/transformers) are lazy, inside the class:
+every instruments reader — including the MCP server running on the
+host without the ML stack — imports its presence thresholds from this
+module, so module import must stay lightweight.
 """
+
+from __future__ import annotations
 
 import contextlib
 import io
 import logging
 from typing import Dict, List, Optional, Set
 
-import librosa
-import numpy as np
-import torch
-from transformers import ASTFeatureExtractor, ASTForAudioClassification
-
 logger = logging.getLogger(__name__)
-
-try:
-    from hear21passt.base import get_basic_model as _passt_get_basic_model
-    _PASST_AVAILABLE = True
-except ImportError:
-    _PASST_AVAILABLE = False
 
 
 # AudioSet class names (exactly as in the model config) we treat as
@@ -68,7 +67,23 @@ AST_INSTRUMENT_LABELS: Set[str] = {
     "Musical ensemble",
 }
 
+# Storage cutoffs — noise floor, NOT a semantic presence threshold.
+STORE_TOP_N = 20
+STORE_MIN_SCORE = 0.01
+
 DEFAULT_THRESHOLD = 0.10
+
+# Read-time presence thresholds, keyed by the lowercased DB label.
+# The single source of truth for every instruments reader (discovery
+# engine, search filters, MCP/CLI display, DJ prompt). Labels not
+# listed here use DEFAULT_THRESHOLD; calibrated per-class overrides
+# (e.g. saxophone, whose score is suppressed by vocals) go here.
+INSTRUMENT_THRESHOLDS: Dict[str, float] = {}
+
+
+def threshold_for(label: str) -> float:
+    """Presence threshold for a lowercased instruments JSONB key."""
+    return INSTRUMENT_THRESHOLDS.get(label.lower(), DEFAULT_THRESHOLD)
 
 
 class InstrumentEnsembleTagger:
@@ -79,17 +94,12 @@ class InstrumentEnsembleTagger:
     PASST_SR = 32000
     WINDOW_SECONDS = 10
 
-    def __init__(
-        self,
-        device: Optional[str] = None,
-        threshold: float = DEFAULT_THRESHOLD,
-    ):
+    def __init__(self, device: Optional[str] = None):
         from device import get_device
         self.device = device or get_device()
         if self.device == "cpu":
             logger.warning("No GPU accelerator detected; AST/PaSST will be slow on CPU")
 
-        self.threshold = threshold
         self.ast = None
         self.ast_extractor = None
         self.passt = None
@@ -101,11 +111,15 @@ class InstrumentEnsembleTagger:
     def load(self):
         if self.ast is not None and self.passt is not None:
             return
-        if not _PASST_AVAILABLE:
+        try:
+            from hear21passt.base import get_basic_model as _passt_get_basic_model
+        except ImportError:
             raise RuntimeError(
                 "hear21passt not installed. "
                 "Add `hear21passt>=0.0.26` to requirements and rebuild the backend image."
             )
+        import torch
+        from transformers import ASTFeatureExtractor, ASTForAudioClassification
 
         from device import get_model_dtype
         dtype = get_model_dtype(self.device)
@@ -148,6 +162,7 @@ class InstrumentEnsembleTagger:
             logger.info("AST+PaSST loaded, GPU memory: %.2f GB", mem)
 
     def unload(self):
+        import torch
         if self.ast is not None:
             del self.ast, self.ast_extractor
             self.ast = None
@@ -159,7 +174,11 @@ class InstrumentEnsembleTagger:
             torch.cuda.empty_cache()
         logger.info("AST+PaSST unloaded")
 
-    def _run_ast(self, audio_48k: np.ndarray) -> np.ndarray:
+    def _run_ast(self, audio_48k):
+        import librosa
+        import numpy as np
+        import torch
+
         from device import autocast, cast_inputs
         audio_16k = librosa.resample(audio_48k, orig_sr=48000, target_sr=self.AST_SR)
         want = self.AST_SR * self.WINDOW_SECONDS
@@ -177,7 +196,11 @@ class InstrumentEnsembleTagger:
         # sigmoid in fp32 — fp16 saturates around |x|>10 and clips probabilities
         return torch.sigmoid(logits.float())[0].cpu().numpy()
 
-    def _run_passt(self, audio_48k: np.ndarray) -> np.ndarray:
+    def _run_passt(self, audio_48k):
+        import librosa
+        import numpy as np
+        import torch
+
         from device import autocast
         audio_32k = librosa.resample(audio_48k, orig_sr=48000, target_sr=self.PASST_SR)
         want = self.PASST_SR * self.WINDOW_SECONDS
@@ -191,11 +214,14 @@ class InstrumentEnsembleTagger:
             logits = self.passt(tensor)
         return torch.sigmoid(logits.float())[0].cpu().numpy()
 
-    def tag(self, audio_48k: np.ndarray) -> Dict[str, float]:
-        """Return {lowercase_label: max(ast_score, passt_score)} filtered by threshold.
+    def tag(self, audio_48k) -> Dict[str, float]:
+        """Return {lowercase_label: max(ast_score, passt_score)} — the raw
+        top-STORE_TOP_N distribution above the STORE_MIN_SCORE noise floor,
+        sorted by score descending.
 
-        Sorted by score descending. Empty dict is a valid result for
-        ambient/drone tracks with no identifiable instrument events.
+        Deliberately NOT presence-filtered: readers decide presence against
+        INSTRUMENT_THRESHOLDS. A near-empty dict is still a valid result for
+        silence-like audio where even the noise floor isn't reached.
         """
         if self.ast is None or self.passt is None:
             raise RuntimeError("Call load() before tag()")
@@ -206,7 +232,8 @@ class InstrumentEnsembleTagger:
         results: Dict[str, float] = {}
         for idx in self.instrument_ids:
             score = max(float(ast_probs[idx]), float(passt_probs[idx]))
-            if score >= self.threshold:
+            if score >= STORE_MIN_SCORE:
                 lowercase = self._label_lower[self.id2label[idx]]
                 results[lowercase] = round(score, 3)
-        return dict(sorted(results.items(), key=lambda x: -x[1]))
+        top = sorted(results.items(), key=lambda x: -x[1])[:STORE_TOP_N]
+        return dict(top)
