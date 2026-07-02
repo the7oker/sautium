@@ -443,12 +443,6 @@ def build(active: dict, query: dict, corpus: str = "all", limit: int = 20) -> di
             continue
         if rank > _LEVEL_RANK[atom_lvl] and skip_rollups:
             continue
-        # An identity-selecting gate suppresses its own level's target: with
-        # Genre:Trip-Hop active the genre roll-up can only echo the selection
-        # plus co-occurring tags (every album carries several) — it reads as
-        # "the filter was ignored". The user already answered that question.
-        if lvl == "genre" and active.get("genre"):
-            continue
         out[lvl] = (_build_atom(atom, tools, active, corpus, limit) if lvl == atom_lvl
                     else _build_higher(atom, ENTITIES[lvl], tools, active, corpus, limit))
     return out
