@@ -21,8 +21,12 @@ bridge edges) and the normalization expression. Stubbed with TODO: BFS routing,
 per-target assembly, relevance-vs-gate weaving, aggregable HAVING, cover/media
 surfacing. floor/ceil are placeholders — calibration is Phase 2.
 """
+import logging
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # ── Entities ────────────────────────────────────────────────────────────────
@@ -134,6 +138,9 @@ TOOLS: dict[str, Tool] = {
         Source("clap", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
                targets=("track",), floor=0.25, ceil=0.45, weight=0.8, model="clap",  # CLAP text→audio: low scale
                needs_join=frozenset({"embeddings"})),
+        Source("lyrics_sem", "lyrics_embeddings", "1-(le.vector <=> CAST(:qlyr AS vector))",
+               targets=("track",), floor=0.5, ceil=0.75, weight=0.6, model="lyrics",
+               needs_join=frozenset({"lyrics_embeddings"})),
     )),
     # Binary gates (artist-level).
     "vocalist": Tool("vocalist", targets=("artist",), sources=(
@@ -465,20 +472,82 @@ def _build_atom(atom, tools, active, corpus, limit):
     return sql, _bind_params(tools, active)
 
 
-def _build_higher(atom, L, tools, active, corpus, limit):
-    """Higher target: AVG(atom score) rolled up the bridge atom→L, then re-join L for
-    the tile surface. ORDER by AVG (relevance) then COUNT (browse: most matching
-    atoms — 'the albums with the most romantic-sax-female-vocal tracks')."""
-    gates, branches, tool_terms, lateral = _matched_core(atom, tools, active, corpus)
-    body, ctes = _matched_sql(atom, gates, branches, tool_terms, lateral, corpus)
+# Weight of the roll-up channel vs own-level relevance in a higher target's score.
+# Own-level identity (an artist MATCHING "Madonna" by name) must dominate incidental
+# roll-up (an artist who merely HAS a track titled "Madonna"). Calibration knob.
+_ROLLUP_W = 0.5
+
+
+def _build_higher(atom, L, tools, active, corpus, limit, K=500):
+    """Higher target = two channels. Roll-up: AVG(matched atom score) up the bridge
+    atom→L — 'the artists/albums whose catalogue matches the characteristic' (Sade
+    for romantic-sax-female-vocal). Own-level: relevance sources living at L's own
+    level (artist name/alias/bio on an artist target) scored on the L row directly —
+    identity matches, including track-less phantom stubs the roll-up can't reach.
+    Gates of level ≥ L re-apply on the L row itself (Gender:Female means the ARTIST
+    list holds only females, not males who share a matched track). ORDER by combined
+    score, then matched-atom COUNT (browse mode: most matching atoms)."""
+    gates_a, branches_a, terms_a, lat_a = _matched_core(atom, tools, active, corpus)
+    body, ctes = _matched_sql(atom, gates_a, branches_a, terms_a, lat_a, corpus)
     link = _agg_link(atom, L, corpus)
-    sql = (f"WITH {ctes}matched AS ({body}) "
-           f"SELECT {L.pk} AS id, {L.name_col} AS name, g.score{L.surface} "
-           f"FROM (SELECT lk.lid AS lid, AVG(m.score) AS score "
-           f"FROM matched m {link} GROUP BY lk.lid "
-           f"ORDER BY AVG(m.score) DESC NULLS LAST, COUNT(*) DESC LIMIT {int(limit)}) g "
-           f"JOIN {L.table} ON {L.pk}=g.lid "
-           f"ORDER BY g.score DESC NULLS LAST LIMIT {int(limit)}")
+    Lt = L.table.split()[0]
+    Lrank = _LEVEL_RANK[L.key]
+    gate_srcs = [s for t in tools for s in t.sources if s.is_gate]
+    gates_L = [s.score_sql if s.table == Lt else _exists_gate(s, L, corpus)
+               for s in gate_srcs if _LEVEL_RANK[_level(s)] >= Lrank]
+    cg = _corpus_clause(L, corpus)
+    if cg:
+        gates_L.append(cg)
+
+    own_terms: list[str] = []
+    own_branches: list[str] = []
+    own_lat: list[str] = []
+    for tool in tools:
+        norms: list[str] = []
+        weight = 0.0
+        for src in tool.sources:
+            if src.is_gate or _level(src) != L.key:
+                continue
+            if src.model and not _model_ready(src.model):
+                _kick_model(src.model)
+                continue
+            if src.table == Lt:
+                norms.append(_norm_expr(src))
+            else:
+                lat, ref, _ = _lateral_relevance(src, L, corpus)
+                own_lat.append(lat)
+                norms.append(ref)
+            weight = max(weight, src.weight)
+            own_branches.append(_retrieve_branch(src, L, corpus, gates_L, K))
+        if norms:
+            own_terms.append(f"{weight} * GREATEST({', '.join(norms)})")
+
+    # Strict conjunction: with a below-L gate active (sax, minor…) an L row must own
+    # a matched atom — an own-level candidate alone can't prove the gates hold on ONE
+    # atom together, so the own channel then only adds score, not candidacy.
+    if any(_LEVEL_RANK[_level(s)] < Lrank for s in gate_srcs):
+        own_branches = []
+
+    cand = "SELECT lid FROM rolled"
+    if own_branches:
+        cand += " UNION " + " UNION ".join(
+            f"SELECT id AS lid FROM ({b}) ob{i}" for i, b in enumerate(own_branches))
+    score = (" + ".join(own_terms + [f"{_ROLLUP_W} * COALESCE(r.s, 0)"])
+             if (terms_a or own_terms) else "NULL")
+    where = (" WHERE " + " AND ".join(gates_L)) if gates_L else ""
+    sql = (f"WITH {ctes}matched AS ({body}), "
+           f"rolled AS (SELECT lk.lid AS lid, AVG(m.score) AS s, COUNT(*) AS n "
+           f"FROM matched m {link} GROUP BY lk.lid), "
+           f"slim AS (SELECT {L.pk} AS id, ({score}) AS score, r.n AS n "
+           f"FROM (SELECT DISTINCT lid FROM ({cand}) c0) cd "
+           f"JOIN {L.table} ON {L.pk} = cd.lid "
+           f"LEFT JOIN rolled r ON r.lid = {L.pk} "
+           f"{' '.join(own_lat)}{where} "
+           f"ORDER BY 2 DESC NULLS LAST, r.n DESC NULLS LAST, {L.default_order} "
+           f"LIMIT {int(limit)}) "
+           f"SELECT {L.pk} AS id, {L.name_col} AS name, slim.score{L.surface} "
+           f"FROM slim JOIN {L.table} ON {L.pk} = slim.id "
+           f"ORDER BY slim.score DESC NULLS LAST, slim.n DESC NULLS LAST")
     return sql, _bind_params(tools, active)
 
 
@@ -529,6 +598,41 @@ def _encode_clap(q: str) -> str:
     return _to_vector_param(model_cache.get_model("clap", _load).text_to_embedding(q))
 
 
+def _to_english(q: str) -> str:
+    """CLAP's text encoder was trained on English captions only — translate
+    non-Latin queries before encoding (Latin-script queries bypass the call
+    entirely, per the rate-limit rule). Degrades to the raw query when no API
+    key is configured or the call fails: CLAP then contributes noise-level
+    scores, but the lexical + multilingual (BGE-M3 bio/lyrics) sources still
+    carry the search."""
+    if all(ord(c) < 0x250 for c in q):     # Latin incl. accents — no call
+        return q
+    return _translate_query(q)
+
+
+@lru_cache(maxsize=512)
+def _translate_query(q: str) -> str:
+    try:
+        from config import settings
+        if not settings.anthropic_api_key:
+            return q
+        import anthropic
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001", max_tokens=100,
+            system="Translate this music-search query to English. Reply with "
+                   "ONLY the translation — no quotes, no commentary. Keep proper "
+                   "names (artists, albums) as-is.",
+            messages=[{"role": "user", "content": q}],
+        )
+        out = "".join(b.text for b in resp.content if b.type == "text").strip()
+        logger.info("translated query %r -> %r", q, out)
+        return out or q
+    except Exception as e:
+        logger.warning("query translation failed (%s), using raw query", e)
+        return q
+
+
 def _encode_lyrics(q: str) -> str:
     import model_cache
     from search import _to_vector_param
@@ -557,9 +661,11 @@ def _bind_params(tools, active: dict) -> dict:
             p["q"] = q
             p["ql"], p["qlpfx"] = ql, ql + "%"
             if _model_ready("enrichment"):
-                p["qvec"] = _encode_bge(q)   # bio source (BGE-M3) — only if warm
+                p["qvec"] = _encode_bge(q)   # bio source (BGE-M3, multilingual) — only if warm
             if _model_ready("clap"):
-                p["qclap"] = _encode_clap(q)  # CLAP source (text→audio) — only if warm
+                p["qclap"] = _encode_clap(_to_english(q))  # CLAP is English-only
+            if _model_ready("lyrics"):
+                p["qlyr"] = _encode_lyrics(q)  # lyrics source (BGE-M3, multilingual)
         elif tool.key in ("gender", "vocalist", "key", "mode"):
             p[tool.key] = v
         elif tool.key == "bpm":
@@ -577,7 +683,7 @@ def _bind_params(tools, active: dict) -> dict:
             p["energy_lo"], p["energy_hi"] = buckets.get(v, (-100.0, 0.0))
         elif tool.key == "sound":
             if _model_ready("clap"):
-                p["qclap"] = _encode_clap(str(v)[:255])
+                p["qclap"] = _encode_clap(_to_english(str(v)[:255]))
         elif tool.key == "lyrics":
             if _model_ready("lyrics"):
                 p["qlyr"] = _encode_lyrics(str(v)[:255])
