@@ -213,6 +213,8 @@ _SHAPERS = {"artist": _artist_results, "album": _album_results,
 def discovery_search(
     target: str = Query(..., pattern="^(artist|album|track|genre)$"),
     q: Optional[str] = Query(None),
+    sound: Optional[str] = Query(None),   # semantic-only channels (MCP/AI-chat):
+    lyrics: Optional[str] = Query(None),  # CLAP text→audio / lyrics vectors, no lexical arm
     limit: int = Query(10, ge=1, le=30),
     bpm_min: Optional[float] = Query(None),
     bpm_max: Optional[float] = Query(None),
@@ -244,13 +246,17 @@ def discovery_search(
     active: dict = {}
     if q and q.strip():
         active["text"] = q.strip()[:255]
+    if sound and sound.strip():
+        active["sound"] = sound.strip()[:255]
+    if lyrics and lyrics.strip():
+        active["lyrics"] = lyrics.strip()[:255]
     if seed_track_id:
         active["seed"] = seed_track_id
     if artists:
         active["artist"] = artists
     active.update(_engine_filters(bpm_min, bpm_max, key, mode, vocalist,
                                   gender, danceable, energy, instruments, genres))
-    warming = bool(active.get("text")) and not all(
+    warming = any(k in active for k in ("text", "sound", "lyrics")) and not all(
         model_cache.is_loaded(k) for k in ("clap", "lyrics", "enrichment"))
     if not active:
         return {"status": "ok", "results": [], "warming": warming}

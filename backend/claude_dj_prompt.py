@@ -471,17 +471,19 @@ curated Last.fm data that respects genre boundaries.
 - **execute_query(sql)**: Run any read-only SELECT query. Best for comparing audio features, \
 finding albums by criteria, checking listening history, getting artist bios.
 - **search_tracks(query, artist, album, genre, limit)**: Fuzzy search by metadata.
-- **search_similar(track_id, limit)**: Find sonically similar tracks (CLAP audio embeddings). \
-track_id is media_files.id (integer).
-- **search_semantic(query, limit)**: Natural language audio search ("energetic rock", "calm piano").
+- **search_similar(track_id, limit, vocalist, gender, genres, instruments, corpus)**: Find sonically \
+similar tracks (CLAP audio embeddings), optionally narrowed by hard filters in the SAME query — \
+"more like this but instrumental", "similar + only Trip-Hop". track_id is media_files.id (integer).
+- **search_semantic(query, limit, vocalist, gender, genres, instruments, bpm_min, bpm_max, corpus)**: \
+Composite natural-language search — ONE query blends title/sound/lyrics/bio relevance AND hard filters \
+("romantic saxophone" + gender='female' + instruments=['saxophone']). Prefer it over chaining tools.
 - **search_lyrics(query, limit)**: Search tracks by lyrics content ("songs about love", "rain and sadness"). \
 Uses AI embeddings of lyrics text.
-- **search_artists(query, limit)**: Search artists by biography. Returns artists with track counts. \
-Use for artist origin/era/style ("British rock band from the 70s", "female jazz vocalist").
-- **search_albums(query, limit)**: Search albums by description. Returns albums with artist/year. \
-Use for album context ("concept album about war", "live recording from the 80s").
-- **search_genres(query, limit)**: Search genres by description. Returns genres with track counts. \
-Use for music characteristics ("heavy distorted guitars", "African rhythms").
+- **search_artists(query, limit)**: Search artists by name (any script) or biography description \
+("British rock band from the 70s", "female jazz vocalist", "мадонна").
+- **search_albums(query, limit)**: Search albums by title. Returns albums with artist/year.
+- **search_genres(query, limit)**: Search genres by name or description ("heavy distorted guitars", \
+"African rhythms"). Returns genres with owned-album counts.
 - **get_lyrics(track_id)**: Get full lyrics text for a specific track. Use when the user asks what a song is \
 about, wants to quote lyrics, or asks to analyze lyrical content. track_id is media_files.id.
 - **get_track_info(track_id)**: Get full track details + audio features. track_id is media_files.id.

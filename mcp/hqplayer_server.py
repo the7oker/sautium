@@ -13,9 +13,13 @@ Architecture:
 All logging goes to stderr (stdout is reserved for STDIO MCP transport).
 """
 
+import hashlib
+import hmac
 import logging
 import os
 import sys
+import time
+import urllib.parse
 
 import httpx
 import psycopg2
@@ -45,6 +49,47 @@ DB_NAME = os.getenv("DB_NAME", "music_ai")
 HQPLAYER_HOST = os.getenv("HQPLAYER_HOST", "172.26.80.1")
 HQPLAYER_PORT = int(os.getenv("HQPLAYER_PORT", "4321"))
 BACKEND_URL = os.getenv("BACKEND_URL", "https://localhost:8000")
+
+
+# -- Signed backend HTTP -------------------------------------------------------
+# The backend requires HMAC-SHA256 request signatures (backend/auth_hmac.py).
+# Reimplemented stdlib-only: importing auth_hmac would drag starlette into the
+# MCP environment. The secret file is shared via BACKEND_PATH (bind-mounted).
+
+_API_SECRET: bytes | None = None
+
+
+def _api_secret() -> bytes:
+    global _API_SECRET
+    if _API_SECRET is None:
+        path = os.path.join(backend_path, "data", ".api_secret")
+        with open(path, encoding="ascii") as f:
+            _API_SECRET = f.read().strip().encode("ascii")
+    return _API_SECRET
+
+
+def _backend_get(path: str, params: dict) -> dict:
+    """Signed GET to the FastAPI backend. The query string is built explicitly
+    so the signature covers the exact URL httpx sends (param order matters)."""
+    clean = {k: v for k, v in params.items() if v not in (None, "", [], ())}
+    qs = urllib.parse.urlencode(clean, doseq=True)
+    path_q = f"{path}?{qs}" if qs else path
+    ts = str(int(time.time()))
+    canonical = f"GET\n{path_q}\n{ts}\n{hashlib.sha256(b'').hexdigest()}"
+    sig = hmac.new(_api_secret(), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    with httpx.Client(base_url=BACKEND_URL, timeout=30.0, verify=False) as client:
+        resp = client.get(path_q, headers={"x-sautium-ts": ts, "x-sautium-sig": sig})
+        resp.raise_for_status()
+        return resp.json()
+
+
+def _discovery(target: str, **params) -> list[dict]:
+    """One composite discovery-engine query → one target's results. Same engine
+    as the Web UI's Discovery search (routers/discovery.py /api/discovery/search)."""
+    if "limit" in params:
+        params["limit"] = min(int(params["limit"]), 30)
+    data = _backend_get("/api/discovery/search", {"target": target, **params})
+    return data.get("results", [])
 TRACKER_URL = os.getenv("TRACKER_URL", "http://localhost:8765")  # playback tracker daemon
 
 # -- MCP Server ---------------------------------------------------------------
@@ -399,96 +444,84 @@ def search_tracks(
 
 
 @mcp.tool()
-def search_similar(track_id: int, limit: int = 15) -> str:
-    """Find tracks with similar sound/audio to a given track using AI audio embeddings (CLAP).
+def search_similar(
+    track_id: int,
+    limit: int = 15,
+    vocalist: str = "",
+    gender: str = "",
+    genres: list[str] = [],
+    instruments: list[str] = [],
+    corpus: str = "owned",
+) -> str:
+    """Find tracks similar in sound to a given track (CLAP audio embeddings),
+    optionally narrowed by hard filters — one composite engine query
+    ("more like this, but instrumental / only Trip-Hop / only by this artist's
+    genre").
 
     Args:
-        track_id: The ID of the source track
-        limit: Maximum number of similar tracks to return (default 15)
+        track_id: The media file ID of the source track
+        limit: Maximum number of similar tracks (default 15)
+        vocalist: 'vocal' | 'instrumental' (optional)
+        gender: 'male' | 'female' | 'mixed' (optional)
+        genres: Genre names to require, OR within the list (optional)
+        instruments: Broad instrument names to require (optional)
+        corpus: 'owned' (default, playable files) | 'all' (adds phantom discography)
     """
     try:
-        # Get track_id for the given media file
         track_row = _db_query_one("""
-            SELECT track_id FROM media_files WHERE id = %(track_id)s
+            SELECT mf.track_id::text AS tid, t.title, a.name AS artist
+            FROM media_files mf
+            JOIN tracks t ON t.id = mf.track_id
+            JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+            JOIN artists a ON a.id = ta.artist_id
+            WHERE mf.id = %(track_id)s
         """, {"track_id": track_id})
         if not track_row:
             return f"Track with ID {track_id} not found."
-        db_track_id = track_row["track_id"]
 
-        sql = """
-            WITH target AS (
-                SELECT e.vector FROM embeddings e WHERE e.track_id = %(db_track_id)s LIMIT 1
-            ),
-            nn AS (
-                SELECT e2.track_id,
-                       1 - (e2.vector <=> (SELECT vector FROM target)) as similarity
-                FROM embeddings e2
-                WHERE e2.track_id != %(db_track_id)s
-                ORDER BY e2.vector <=> (SELECT vector FROM target)
-                LIMIT %(nn_limit)s
-            )
-            SELECT sub.id, sub.title, sub.artist, sub.album,
-                   sub.genre, sub.is_lossless, sub.duration_seconds,
-                   nn.similarity
-            FROM nn
-            JOIN LATERAL (
-                SELECT mf.id, mf.duration_seconds, mf.is_lossless,
-                       a.name as artist, al.title as album,
-                       (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
-                        WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre,
-                       t.title
-                FROM media_files mf
-                JOIN tracks t ON mf.track_id = nn.track_id
-                JOIN track_artists ta ON nn.track_id = ta.track_id AND ta.role = 'primary'
-                JOIN artists a ON ta.artist_id = a.id
-                JOIN album_variants av ON mf.album_variant_id = av.id
-                JOIN albums al ON av.album_id = al.id
-                WHERE mf.track_id = nn.track_id
-                ORDER BY mf.id LIMIT 1
-            ) sub ON true
-            ORDER BY nn.similarity DESC
-            LIMIT %(limit)s
-        """
-        rows = _db_query(sql, {"db_track_id": db_track_id, "limit": limit, "nn_limit": limit * 2})
-
-        # Get source track info
-        source = _db_query_one("""
-            SELECT t.title, a.name as artist
-            FROM media_files mf
-            JOIN tracks t ON mf.track_id = t.id
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            WHERE mf.id = %(track_id)s
-        """, {"track_id": track_id})
-
-        header = f"Tracks similar to: {source['artist']} - {source['title']}" if source else "Similar tracks"
+        rows = _discovery("track", seed_track_id=track_row["tid"], limit=limit,
+                          vocalist=vocalist, gender=gender, genres=genres,
+                          instruments=instruments, corpus=corpus)
+        header = f"Tracks similar to: {track_row['artist']} - {track_row['title']}"
         return _format_track_list(rows, f"{header} ({len(rows)} results):")
     except Exception as e:
         return f"Error finding similar tracks: {e}"
 
 
 @mcp.tool()
-def search_semantic(query: str, limit: int = 15) -> str:
-    """Search music library by natural language description using AI semantic understanding.
+def search_semantic(
+    query: str,
+    limit: int = 15,
+    vocalist: str = "",
+    gender: str = "",
+    genres: list[str] = [],
+    instruments: list[str] = [],
+    bpm_min: float | None = None,
+    bpm_max: float | None = None,
+    corpus: str = "owned",
+) -> str:
+    """Search tracks by natural language, optionally with hard filters — ONE
+    composite discovery-engine query (the same engine as the Web UI search).
 
-    Uses CLAP text-to-audio embeddings to find tracks matching a description like
-    'energetic rock', 'calm piano music', 'heavy bass electronic'.
-    Requires the FastAPI backend to be running (ML models in Docker).
+    The text blends title match, CLAP text→audio sound similarity, lyrics
+    semantics and artist-bio signals; every filter is AND-composed. Example:
+    query='romantic saxophone', gender='female', vocalist='vocal'.
 
     Args:
-        query: Natural language description of the music you want
+        query: Natural language description or name ("energetic rock", "calm piano")
         limit: Maximum number of results (default 15)
+        vocalist: 'vocal' | 'instrumental' (optional)
+        gender: 'male' | 'female' | 'mixed' (optional)
+        genres: Genre names to require, OR within the list (optional)
+        instruments: Broad instrument names ("saxophone", "piano") (optional)
+        bpm_min: Lower BPM bound (optional)
+        bpm_max: Upper BPM bound (optional)
+        corpus: 'owned' (default, playable files) | 'all' (adds phantom discography)
     """
     try:
-        with httpx.Client(base_url=BACKEND_URL, timeout=30.0, verify=False) as client:
-            resp = client.post(
-                "/search/text",
-                params={"query": query, "limit": limit},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-        rows = data.get("results", [])
+        rows = _discovery("track", q=query, limit=limit, vocalist=vocalist,
+                          gender=gender, genres=genres, instruments=instruments,
+                          bpm_min=bpm_min, bpm_max=bpm_max, corpus=corpus)
         return _format_track_list(rows, f"Semantic search for '{query}' ({len(rows)} results):")
     except httpx.ConnectError:
         return (
@@ -511,15 +544,7 @@ def search_lyrics(query: str, limit: int = 15) -> str:
         limit: Maximum number of results (default 15)
     """
     try:
-        with httpx.Client(base_url=BACKEND_URL, timeout=30.0, verify=False) as client:
-            resp = client.post(
-                "/search/lyrics",
-                params={"query": query, "limit": limit},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-        rows = data.get("results", [])
+        rows = _discovery("track", lyrics=query, limit=limit)
         return _format_track_list(rows, f"Lyrics search for '{query}' ({len(rows)} results):")
     except httpx.ConnectError:
         return "Error: Cannot connect to backend for lyrics search."
@@ -539,12 +564,7 @@ def search_artists(query: str, limit: int = 10) -> str:
         limit: Maximum number of artists (default 10)
     """
     try:
-        with httpx.Client(base_url=BACKEND_URL, timeout=30.0, verify=False) as client:
-            resp = client.get("/search/artists", params={"query": query, "limit": limit})
-            resp.raise_for_status()
-            data = resp.json()
-
-        rows = data.get("results", [])
+        rows = _discovery("artist", q=query, limit=limit)
         lines = [f"Artist search for '{query}' ({len(rows)} results):"]
         for r in rows:
             tags = []
@@ -552,11 +572,11 @@ def search_artists(query: str, limit: int = 10) -> str:
                 tags.append(r["gender"])
             if r.get("is_vocalist") and r["is_vocalist"] != "unknown":
                 tags.append(r["is_vocalist"])
+            if r.get("is_owned") is False:
+                tags.append("phantom")
             tag_str = f" [{'/'.join(tags)}]" if tags else ""
-            line = f"  {r['similarity']:.4f} | {r['artist']}{tag_str} ({r['track_count']} tracks)"
-            if r.get("sample_tracks"):
-                line += f" — {r['sample_tracks']}"
-            lines.append(line)
+            sim = f"{r['similarity']:.2f}" if r.get("similarity") is not None else " —  "
+            lines.append(f"  {sim} | {r['artist']}{tag_str}")
         return "\n".join(lines) if rows else f"No artists found for '{query}'"
     except httpx.ConnectError:
         return "Error: Cannot connect to backend."
@@ -576,17 +596,13 @@ def search_albums(query: str, limit: int = 10) -> str:
         limit: Maximum number of albums (default 10)
     """
     try:
-        with httpx.Client(base_url=BACKEND_URL, timeout=30.0, verify=False) as client:
-            resp = client.get("/search/albums", params={"query": query, "limit": limit})
-            resp.raise_for_status()
-            data = resp.json()
-
-        rows = data.get("results", [])
+        rows = _discovery("album", q=query, limit=limit)
         lines = [f"Album search for '{query}' ({len(rows)} results):"]
         for r in rows:
             year_str = f" ({r['year']})" if r.get("year") else ""
-            line = f"  {r['similarity']:.4f} | {r['artist']} — {r['album']}{year_str} ({r['track_count']} tracks)"
-            lines.append(line)
+            phantom = " [phantom]" if r.get("is_owned") is False else ""
+            sim = f"{r['similarity']:.2f}" if r.get("similarity") is not None else " —  "
+            lines.append(f"  {sim} | {r.get('artist') or '?'} — {r['album']}{year_str}{phantom}")
         return "\n".join(lines) if rows else f"No albums found for '{query}'"
     except httpx.ConnectError:
         return "Error: Cannot connect to backend."
@@ -606,18 +622,11 @@ def search_genres(query: str, limit: int = 10) -> str:
         limit: Maximum number of genres (default 10)
     """
     try:
-        with httpx.Client(base_url=BACKEND_URL, timeout=30.0, verify=False) as client:
-            resp = client.get("/search/genres", params={"query": query, "limit": limit})
-            resp.raise_for_status()
-            data = resp.json()
-
-        rows = data.get("results", [])
+        rows = _discovery("genre", q=query, limit=limit)
         lines = [f"Genre search for '{query}' ({len(rows)} results):"]
         for r in rows:
-            line = f"  {r['similarity']:.4f} | {r['genre']} ({r['track_count']} tracks)"
-            if r.get("sample_artists"):
-                line += f" — {r['sample_artists']}"
-            lines.append(line)
+            sim = f"{r['similarity']:.2f}" if r.get("similarity") is not None else " —  "
+            lines.append(f"  {sim} | {r['genre']} ({r.get('album_count', 0)} albums)")
         return "\n".join(lines) if rows else f"No genres found for '{query}'"
     except httpx.ConnectError:
         return "Error: Cannot connect to backend."

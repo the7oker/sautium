@@ -534,16 +534,25 @@ def _matched_core(atom, tools, active, corpus, K=500):
     return gates, branches, at_terms, up_terms, lateral
 
 
-def _matched_sql(atom, gates, branches, at_terms, up_terms, lateral, corpus):
+def _relevance_requested(tools) -> bool:
+    return any(not s.is_gate for t in tools for s in t.sources)
+
+
+def _matched_sql(atom, tools, gates, branches, at_terms, up_terms, lateral, corpus):
     """(matched-body, ctes-prefix). matched exposes (id, s_at, s_up) at the atom
     level. Browse (no relevance branches) → every gate-matching atom, NULL scores
-    (roll-ups then rank by count). Relevance without any up-eligible source →
-    s_up = 0 so roll-ups pull in nothing (a title-only match must not mint
-    artist/album candidates)."""
+    (roll-ups then rank by count). Relevance REQUESTED but every source skipped
+    (cold models) → an EMPTY matched set, not a full-library browse (a cold
+    lyrics-only query must answer nothing + warming, not the catalog A-Z).
+    Relevance without any up-eligible source → s_up = 0 so roll-ups pull in
+    nothing (a title-only match must not mint artist/album candidates)."""
     cg = _corpus_clause(atom, corpus)
     filt = list(gates) + ([cg] if cg else [])
     where = (" WHERE " + " AND ".join(filt)) if filt else ""
     if not branches:
+        if _relevance_requested(tools):
+            return (f"SELECT {atom.pk} AS id, NULL::float AS s_at, NULL::float AS s_up "
+                    f"FROM {atom.table} WHERE false"), ""
         return (f"SELECT {atom.pk} AS id, NULL::float AS s_at, NULL::float AS s_up "
                 f"FROM {atom.table}{where}"), ""
     s_at = " + ".join(at_terms)
@@ -562,7 +571,11 @@ def _build_atom(atom, tools, active, corpus, limit):
     cg = _corpus_clause(atom, corpus)
     filt = list(gates) + ([cg] if cg else [])
     where = (" WHERE " + " AND ".join(filt)) if filt else ""
-    if not branches:                       # gates-only / browse
+    if not branches:
+        if _relevance_requested(tools):    # every relevance source cold-skipped → honest empty
+            return (f"SELECT {atom.pk} AS id, {atom.name_col} AS name, NULL AS score"
+                    f"{atom.surface} FROM {atom.table} WHERE false"), _bind_params(tools, active)
+        # gates-only / browse
         sql = (f"SELECT {atom.pk} AS id, {atom.name_col} AS name, NULL AS score{atom.surface} "
                f"FROM {atom.table}{where} ORDER BY {atom.default_order} LIMIT {int(limit)}")
         return sql, _bind_params(tools, active)
@@ -593,7 +606,7 @@ def _build_higher(atom, L, tools, active, corpus, limit, K=500):
     list holds only females, not males who share a matched track). ORDER by combined
     score, then matched-atom COUNT (browse mode: most matching atoms)."""
     gates_a, branches_a, at_terms, up_terms, lat_a = _matched_core(atom, tools, active, corpus)
-    body, ctes = _matched_sql(atom, gates_a, branches_a, at_terms, up_terms, lat_a, corpus)
+    body, ctes = _matched_sql(atom, tools, gates_a, branches_a, at_terms, up_terms, lat_a, corpus)
     link = _agg_link(atom, L, corpus)
     Lt = L.table.split()[0]
     Lrank = _LEVEL_RANK[L.key]
