@@ -61,15 +61,18 @@ def search(q: str, limit: int = 6) -> dict:
     if hit and time.time() - hit[0] < _TTL_SECONDS:
         return hit[1]
 
+    # The top artist hit contributes its discography whether or not the artist
+    # is local: a minted phantom artist has no canonization to fill his albums
+    # (the MB dump is optional; P2P canon is future work), so the Deezer tail IS
+    # his album-discovery surface. The per-album UUID dedup below does the real
+    # filtering — a well-stocked local artist's albums all vanish and only the
+    # locally-missing ones remain.
     disco = []
     for r in _get("/search/artist", {"q": q, "limit": 3}).get("data", []):
         name = (r.get("name") or "").strip()
         if not name:
             continue
-        if db_query_one("SELECT 1 AS x FROM artists WHERE id = %(id)s::uuid",
-                        {"id": str(artist_uuid(name))}):
-            break   # local artist — his albums are the local pipelines' business
-        disco = _get(f"/artist/{r['id']}/albums", {"limit": limit}).get("data") or []
+        disco = _get(f"/artist/{r['id']}/albums", {"limit": limit * 2}).get("data") or []
         for d in disco:
             d["artist"] = {"name": name}   # /artist/{id}/albums rows omit the artist
         break

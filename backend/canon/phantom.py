@@ -37,12 +37,20 @@ def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False
     stats = {"phantoms": 0, "not_in_mb": 0, "unambiguous": 0,
              "disambiguated": 0, "inconclusive": 0, "canonized": 0, "discarded": 0}
 
+    # Candidates: classic similar-artist stubs (track-less by construction) PLUS
+    # streaming-minted artists — a Deezer mint has tracks (its minted album) and
+    # no similar_artists edge, so neither original condition admits it, leaving
+    # it permanently uncanonized. Once resolved here, the regular
+    # stale_canonized_artists → missing-albums pipeline fills its MB discography;
+    # the MB phantom of an already-minted album lands on the SAME uuid5 row and
+    # simply gains its rg MBID.
     lim = "LIMIT %(lim)s" if limit else ""
     phantoms = db_query(f"""
         SELECT a.id::text AS id, a.name
         FROM artists a
-        WHERE EXISTS (SELECT 1 FROM similar_artists sa WHERE sa.similar_artist_id = a.id)
-          AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = a.id)
+        WHERE ((EXISTS (SELECT 1 FROM similar_artists sa WHERE sa.similar_artist_id = a.id)
+                AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = a.id))
+               OR EXISTS (SELECT 1 FROM streaming_mints sm WHERE sm.artist_id = a.id))
           AND NOT EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
         ORDER BY a.name
         {lim}
