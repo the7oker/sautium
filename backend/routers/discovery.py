@@ -224,11 +224,17 @@ def discovery_search(
     energy: Optional[str] = Query(None),
     instruments: list[str] = Query(default_factory=list),
     genres: list[str] = Query(default_factory=list),
+    seed_track_id: Optional[str] = Query(None),
+    artists: list[str] = Query(default_factory=list),
     corpus: str = Query("all"),
 ):
     """One composite query → one target block. Text + chips build the engine's
     `active` dict; the engine decides whether this target is reachable (atom and
     up) and how it's scored (direct relevance vs roll-up aggregation).
+
+    seed_track_id = the now-playing track's UUID: its CLAP vector becomes a
+    relevance source, so every block answers "similar to this" — AND-composable
+    with the gates. `artists` = typeahead-picked artist UUIDs (hard filter).
 
     `quality` is not an engine tool (owned-only file tiers were dropped; returns
     later as a two-source file+stream tool), so the chip row is gone from the UI.
@@ -238,6 +244,10 @@ def discovery_search(
     active: dict = {}
     if q and q.strip():
         active["text"] = q.strip()[:255]
+    if seed_track_id:
+        active["seed"] = seed_track_id
+    if artists:
+        active["artist"] = artists
     active.update(_engine_filters(bpm_min, bpm_max, key, mode, vocalist,
                                   gender, danceable, energy, instruments, genres))
     warming = bool(active.get("text")) and not all(

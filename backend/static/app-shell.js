@@ -2645,6 +2645,8 @@
       danceable: 'any', energy: 'any',
       instruments: [],   // multi-select
       genres: [],        // multi-select: genre names (top chips + typeahead adds)
+      artists: [],       // multi-select: artist UUIDs (typeahead adds)
+      seed: false,       // similar-to-now-playing context (track id read at search time)
     };
   }
 
@@ -2662,6 +2664,8 @@
     if (f.energy && f.energy !== 'any') return true;
     if (f.instruments && f.instruments.length) return true;
     if (f.genres && f.genres.length) return true;
+    if (f.artists && f.artists.length) return true;
+    if (f.seed) return true;
     return false;
   }
 
@@ -2681,6 +2685,13 @@
     if (f.energy && f.energy !== 'any') params.set('energy', f.energy);
     (f.instruments || []).forEach(v => params.append('instruments', v));
     (f.genres || []).forEach(v => params.append('genres', v));
+    (f.artists || []).forEach(v => params.append('artists', v));
+    // Seed reads the CURRENT track at search time — it follows what's playing
+    // now, not what played when the chip was toggled.
+    if (f.seed) {
+      const tid = window.currentStatus && window.currentStatus.track_id;
+      if (tid) params.set('seed_track_id', tid);
+    }
   }
 
   async function renderDiscovery(root) {
@@ -2709,6 +2720,14 @@
       </button>
 
       <div class="filters-panel" id="discoveryFiltersPanel" hidden>
+        <div class="filter-row">
+          <span class="filter-label">Context</span>
+          <div class="filter-chips">
+            <span class="f-chip" id="discoverySeedChip">Similar to now playing</span>
+            <span class="seed-track-name" id="discoverySeedName"></span>
+          </div>
+        </div>
+
         <div class="filter-row">
           <span class="filter-label">BPM range</span>
           <div class="bpm-inputs">
@@ -2763,6 +2782,19 @@
               <input type="text" class="genre-suggest-input" id="discoveryGenreInput"
                      placeholder="Find genre…" autocomplete="off" spellcheck="false">
               <div class="genre-suggest-list" id="discoveryGenreSuggest" hidden></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="filter-row">
+          <span class="filter-label">Artist</span>
+          <div class="genre-filter">
+            <div class="filter-chips" data-filter-multi="artists"
+                 id="discoveryArtistChips"></div>
+            <div class="genre-suggest-wrap">
+              <input type="text" class="genre-suggest-input" id="discoveryArtistInput"
+                     placeholder="Find artist…" autocomplete="off" spellcheck="false">
+              <div class="genre-suggest-list" id="discoveryArtistSuggest" hidden></div>
             </div>
           </div>
         </div>
@@ -2862,6 +2894,8 @@
     });
 
     wireGenreFilter(screen, panel);
+    wireArtistFilter(screen, panel);
+    wireSeedFilter(screen, panel);
 
     // Numeric BPM bounds — clear-on-empty is OK, the filter is "any".
     const bpmMin = panel.querySelector('#discoveryFilterBpmMin');
@@ -2885,6 +2919,10 @@
       });
       panel.querySelectorAll('.filter-chips[data-filter-multi] .f-chip')
         .forEach(c => c.classList.remove('is-active'));
+      const seedChip = panel.querySelector('#discoverySeedChip');
+      if (seedChip) seedChip.classList.remove('is-active');
+      const seedName = panel.querySelector('#discoverySeedName');
+      if (seedName) seedName.textContent = '';
       if (bpmMin) bpmMin.value = '';
       if (bpmMax) bpmMax.value = '';
     });
@@ -2983,6 +3021,101 @@
     });
 
     // Hide the dropdown when focus leaves the widget (delay lets a click land).
+    input.addEventListener('blur', () => setTimeout(() => { list.hidden = true; }, 150));
+  }
+
+  // Similar-to-now-playing context: one toggle chip. The seed track id is read
+  // off window.currentStatus AT SEARCH TIME (appendFilterParams), so it follows
+  // playback; the label just shows what it latched onto when toggled.
+  function wireSeedFilter(screen, panel) {
+    const chip = panel.querySelector('#discoverySeedChip');
+    const name = panel.querySelector('#discoverySeedName');
+    if (!chip || !name) return;
+    chip.addEventListener('click', () => {
+      const st = window.currentStatus;
+      if (!chip.classList.contains('is-active') && !(st && st.track_id)) {
+        window.notifyDialog({
+          title: 'Nothing playing',
+          message: 'Start playback to search around the current track.',
+          kind: 'info',
+        });
+        return;
+      }
+      const on = chip.classList.toggle('is-active');
+      screen._filters.seed = on;
+      name.textContent = on
+        ? [(st.artist || ''), (st.song || '')].filter(Boolean).join(' — ') : '';
+    });
+  }
+
+  // Artist filter (AND): typeahead only — 12k+ artists have no useful "top
+  // chips" row. A picked artist becomes an active chip carrying its UUID.
+  function wireArtistFilter(screen, panel) {
+    const chips = panel.querySelector('#discoveryArtistChips');
+    const input = panel.querySelector('#discoveryArtistInput');
+    const list = panel.querySelector('#discoveryArtistSuggest');
+    if (!chips || !input || !list) return;
+
+    chips.addEventListener('click', e => {
+      const chip = e.target.closest('.f-chip');
+      if (!chip) return;
+      chip.classList.toggle('is-active');
+      const v = chip.getAttribute('data-value');
+      const cur = screen._filters.artists || [];
+      if (chip.classList.contains('is-active')) {
+        if (!cur.includes(v)) cur.push(v);
+      } else {
+        const i = cur.indexOf(v);
+        if (i >= 0) cur.splice(i, 1);
+      }
+      screen._filters.artists = cur;
+    });
+
+    let debounce = null;
+    input.addEventListener('input', () => {
+      clearTimeout(debounce);
+      const q = input.value.trim();
+      if (q.length < 2) { list.hidden = true; list.innerHTML = ''; return; }
+      debounce = setTimeout(() => {
+        const params = new URLSearchParams({ target: 'artist', q, limit: '8' });
+        fetch('/api/discovery/search?' + params)
+          .then(r => r.ok ? r.json() : Promise.reject(r.status))
+          .then(data => {
+            if (input.value.trim() !== q) return;   // stale
+            const items = data.results || [];
+            list.innerHTML = items.map(a => `
+              <button type="button" class="genre-suggest-item"
+                      data-id="${escapeHtml(a.artist_id)}"
+                      data-name="${escapeHtml(a.artist)}">
+                <span>${escapeHtml(a.artist)}</span>
+              </button>`).join('');
+            list.hidden = items.length === 0;
+          })
+          .catch(() => { list.hidden = true; });
+      }, 200);
+    });
+
+    list.addEventListener('click', e => {
+      const item = e.target.closest('.genre-suggest-item');
+      if (!item) return;
+      const id = item.getAttribute('data-id');
+      const cur = screen._filters.artists || [];
+      if (!cur.includes(id)) cur.push(id);
+      screen._filters.artists = cur;
+      const existing = chips.querySelector(`.f-chip[data-value="${CSS.escape(id)}"]`);
+      if (existing) existing.classList.add('is-active');
+      else {
+        const el = document.createElement('span');
+        el.className = 'f-chip is-active';
+        el.setAttribute('data-value', id);
+        el.textContent = item.getAttribute('data-name');
+        chips.appendChild(el);
+      }
+      input.value = '';
+      list.hidden = true;
+      list.innerHTML = '';
+    });
+
     input.addEventListener('blur', () => setTimeout(() => { list.hidden = true; }, 150));
   }
 

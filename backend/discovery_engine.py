@@ -229,6 +229,27 @@ TOOLS: dict[str, Tool] = {
     "year": Tool("year", sources=(
         Source("year", "albums", "al.release_year BETWEEN :year_from AND :year_to",
                is_gate=True),)),
+    # Current-track context: the seed track's own CLAP vector as a relevance
+    # source (audio↔audio — no model needed, the vector is read from the DB).
+    # Characteristic ⇒ rolls up: similar tracks / albums / artists / genres from
+    # one checkbox, AND-composable with every gate ("similar + Trip-Hop only").
+    # floors from the audio↔audio probe (p90≈.68, top10≈.90 — a different scale
+    # than text→audio). The self-exclusion gate keeps the seed out of the matched
+    # set, so its own album/artist rank only via their OTHER similar content.
+    "seed": Tool("seed", sources=(
+        Source("seed", "embeddings", "1-(e.vector <=> CAST(:qseed AS vector))",
+               targets=("track", "album", "artist", "genre"),
+               floor=0.68, ceil=0.90, weight=1.0,
+               needs_join=frozenset({"embeddings"})),
+        Source("seed_not_self", "tracks", "t.id <> CAST(:seed_tid AS uuid)",
+               is_gate=True),
+    )),
+    # Artist filter (AND): typeahead-picked artist ids — "similar tracks, but
+    # only by these artists". Distinct from text relevance, which ranks and
+    # never narrows.
+    "artist": Tool("artist", sources=(
+        Source("artist_sel", "artists", "a.id = ANY(CAST(:artist_ids AS uuid[]))",
+               is_gate=True),)),
     # Semantic-only track relevance (no title): CLAP text→audio, lyrics text→lyrics.
     "sound": Tool("sound", sources=(
         Source("sound", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
@@ -745,6 +766,17 @@ def _bind_params(tools, active: dict) -> dict:
             # energy_db buckets (mirror routers/discovery.ENERGY_BUCKETS)
             buckets = {"low": (-100.0, -25.0), "mid": (-25.0, -15.0), "high": (-15.0, 0.0)}
             p["energy_lo"], p["energy_hi"] = buckets.get(v, (-100.0, 0.0))
+        elif tool.key == "seed":
+            from db_pool import db_query_one
+            p["seed_tid"] = str(v)
+            row = db_query_one(
+                "SELECT vector::text AS v FROM embeddings WHERE track_id = %(t)s::uuid LIMIT 1",
+                {"t": str(v)})
+            # No embedding (un-analyzed phantom) → NULL vector: the seed branch
+            # yields nothing and the search degrades to the other active tools.
+            p["qseed"] = row["v"] if row else None
+        elif tool.key == "artist":
+            p["artist_ids"] = [str(x) for x in (v if isinstance(v, (list, tuple)) else [v])]
         elif tool.key == "sound":
             if _model_ready("clap"):
                 p["qclap"] = _encode_clap(str(v)[:255])

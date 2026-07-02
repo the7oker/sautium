@@ -394,6 +394,9 @@ def _status_poller():
                     "process_speed": status.process_speed,
                     "track_index": status.track_index,
                     "media_file_id": pl_row["id"] if pl_row else None,
+                    # Universal track UUID (owned + phantom) — Discovery's
+                    # similar-to-now-playing seed reads it off currentStatus.
+                    "track_id": pl_row.get("track_id") if pl_row else None,
                     "cover_id": pl_row["cover_id"] if pl_row else None,
                     "cover_url": pl_row.get("cover_url") if pl_row else None,
                     "provider_cover_url": pl_row.get("provider_cover_url") if pl_row else None,

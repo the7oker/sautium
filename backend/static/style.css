@@ -2942,6 +2942,17 @@ body.has-miniplayer .ai-fab {
   font-weight: 600;
 }
 
+/* Similar-to-now-playing context: track label after the toggle chip */
+.discovery-screen .seed-track-name {
+  align-self: center;
+  font-size: calc(12 * var(--px));
+  color: var(--color-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: calc(180 * var(--px));
+}
+
 /* Genre filter: typeahead under the chip row (500+ genres — chips can't cover) */
 .discovery-screen .genre-filter {
   display: flex;
