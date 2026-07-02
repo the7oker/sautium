@@ -95,6 +95,7 @@ class Source:
     weight: float = 1.0        # importance in the cross-tool sum
     model: Optional[str] = None   # model_cache key this source needs; gracefully skipped if cold
     level: str = ""            # entity level (track/album/artist); default derived from .table
+    retrieve: str = ""         # index-friendly retrieve-branch predicate; default (score_sql) >= floor
     needs_join: frozenset = frozenset()
     expand: Optional[Callable[[Any], Any]] = None
 
@@ -110,15 +111,21 @@ TOOLS: dict[str, Tool] = {
     # Multi-source, multi-target relevance. Each source scored + normalized; the
     # tool's contribution is GREATEST(norm over its sources) — name OR bio OR ….
     "text": Tool("text", targets=("artist", "album", "track", "genre"), sources=(
+        # Trigram retrieve predicates use the GIN-indexed `%` operator (its
+        # pg_trgm.similarity_threshold default 0.3 == these sources' floor) +
+        # prefix LIKE — `similarity(col,q) >= x` can't use the index and
+        # seq-scans 3M-row joins under corpus=all (proven: shm blowup).
         Source("artist_name", "artists",
                "GREATEST(similarity(a.name_latin,:ql), "
                "CASE WHEN a.name_latin LIKE :qlpfx THEN 0.85 ELSE 0 END, "
                "similarity(a.name,:q))",     # original-script exact match too
-               targets=("artist",), floor=0.3, ceil=1.0, weight=1.0),
+               targets=("artist",), floor=0.3, ceil=1.0, weight=1.0,
+               retrieve="(a.name_latin % :ql OR a.name_latin LIKE :qlpfx OR a.name % :q)"),
         Source("artist_alias", "artist_name_aliases",   # 0b: CJK cutlet + human file-tag readings
                "GREATEST(similarity(ana.alias_latin,:ql), "
                "CASE WHEN ana.alias_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
                targets=("artist",), floor=0.3, ceil=1.0, weight=1.0,
+               retrieve="(ana.alias_latin % :ql OR ana.alias_latin LIKE :qlpfx)",
                needs_join=frozenset({"artist_name_aliases"})),
         Source("artist_bio", "artist_bio_embeddings", "1-(abe.vector <=> CAST(:qvec AS vector))",
                targets=("artist",), floor=0.5, ceil=0.85, weight=0.7, model="enrichment",
@@ -126,11 +133,13 @@ TOOLS: dict[str, Tool] = {
         Source("album_title", "albums",
                "GREATEST(similarity(al.title_latin,:ql), "
                "CASE WHEN al.title_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
-               targets=("album",), floor=0.3, ceil=1.0, weight=1.0),
+               targets=("album",), floor=0.3, ceil=1.0, weight=1.0,
+               retrieve="(al.title_latin % :ql OR al.title_latin LIKE :qlpfx)"),
         Source("track_title", "tracks",
                "GREATEST(similarity(t.title_latin,:ql), "
                "CASE WHEN t.title_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
-               targets=("track",), floor=0.3, ceil=1.0, weight=1.0),
+               targets=("track",), floor=0.3, ceil=1.0, weight=1.0,
+               retrieve="(t.title_latin % :ql OR t.title_latin LIKE :qlpfx)"),
         Source("clap", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
                targets=("track",), floor=0.25, ceil=0.45, weight=0.8, model="clap",  # CLAP text→audio: low scale
                needs_join=frozenset({"embeddings"})),
@@ -385,7 +394,7 @@ def _retrieve_branch(src: Source, entity: EntityDef, corpus: str, gates: list, K
     cg = _corpus_clause(entity, corpus)
     if cg:
         conds.append(cg)
-    conds.append(f"({src.score_sql}) >= {src.floor}")
+    conds.append(src.retrieve or f"({src.score_sql}) >= {src.floor}")
     if src.table == et:
         frm = entity.table
     else:
