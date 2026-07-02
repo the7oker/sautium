@@ -3289,49 +3289,35 @@
         .then(data => {
           if (queryId !== getActiveId()) return;
           if (!data.available) return;
-          const any = (data.artists || []).length + (data.albums || []).length;
-          renderStreamingTail(screen, 'artists', data.artists || []);
-          renderStreamingTail(screen, 'albums', data.albums || []);
-          if (any) onAnyResults();
+          renderStreamingTail(screen, data.albums || []);
+          if ((data.albums || []).length) onAnyResults();
         })
         .catch(err => console.warn('streaming search failed:', err));
     }, 300);
   }
 
-  // Provider rows under the local block: visually a phantom-dim tail with a
-  // "From Deezer" header. A click MINTS the phantom (deterministic UUID — an
-  // existing MB phantom is reused) and navigates to its page, which opens the
-  // path to streaming playback + enrichment.
-  function renderStreamingTail(screen, blockId, items) {
+  // Provider ALBUM rows under the local Albums block: a phantom-dim tail with a
+  // "From Deezer" header. Albums only — a bare minted artist landed on an empty
+  // page; an artist-name query answers with the artist's albums to pick and
+  // play (the backend merges the top artist's discography in). A click MINTS
+  // the phantom album + tracklist (deterministic UUID — an existing MB phantom
+  // is reused) and navigates to its page, which can stream and enrich.
+  function renderStreamingTail(screen, items) {
     if (!items.length) return;
-    const blk = screen.querySelector('#dBlock-' + blockId);
-    const body = screen.querySelector('#dBody-' + blockId);
+    const blk = screen.querySelector('#dBlock-albums');
+    const body = screen.querySelector('#dBody-albums');
     if (!blk || !body) return;
 
     const tail = document.createElement('div');
     tail.className = 'd-streaming-tail';
-    const tiles = blockId === 'artists'
-      ? `<div class="shuffle-row d-artist-row">${items.map(a => {
-          const ph = avatarPlaceholder(a.name || '?');
-          const inner = a.picture
-            ? `<img src="${escapeHtml(a.picture)}" alt="" loading="lazy" onerror="this.style.display='none'">`
-            : `<span class="d-artist-initials">${escapeHtml(ph.initials)}</span>`;
-          return `
-            <button class="d-artist-tile is-phantom" type="button"
-                    data-sprovider-type="artist"
-                    data-sprovider-id="${escapeHtml(a.provider_id)}">
-              <div class="d-artist-avatar" style="background: ${ph.bg};">${inner}</div>
-              <div class="d-artist-name">${escapeHtml(a.name || '')}</div>
-            </button>`;
-        }).join('')}</div>`
-      : `<div class="shuffle-row d-album-row">${items.map(a => {
+    tail.innerHTML = `<div class="d-streaming-head">From Deezer</div>`
+      + `<div class="shuffle-row d-album-row">${items.map(a => {
           const c = coverPlaceholderColors(a.title || '');
           const cover = a.cover
             ? `<img src="${escapeHtml(a.cover)}" alt="" loading="lazy" onerror="this.style.display='none'">`
             : '';
           return `
             <button class="mosaic-tile is-phantom" type="button"
-                    data-sprovider-type="album"
                     data-sprovider-id="${escapeHtml(a.provider_id)}">
               <div class="mosaic-cover"
                    style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}</div>
@@ -3339,7 +3325,6 @@
               <div class="mosaic-artist">${escapeHtml(a.artist || '')}</div>
             </button>`;
         }).join('')}</div>`;
-    tail.innerHTML = `<div class="d-streaming-head">From Deezer</div>` + tiles;
 
     tail.querySelectorAll('[data-sprovider-id]').forEach(el => {
       el.addEventListener('click', () => mintStreamingTile(el));
@@ -3351,16 +3336,14 @@
   function mintStreamingTile(el) {
     if (el.classList.contains('is-minting')) return;
     el.classList.add('is-minting');
-    const kind = el.getAttribute('data-sprovider-type');
     fetch('/api/discovery/streaming-mint', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: kind, provider_id: el.getAttribute('data-sprovider-id') }),
+      body: JSON.stringify({ type: 'album', provider_id: el.getAttribute('data-sprovider-id') }),
     })
       .then(r => r.ok ? r.json() : Promise.reject(r.status))
       .then(data => {
-        const id = kind === 'artist' ? data.artist_id : data.album_id;
-        if (id) navigateToEntity(kind, id);
+        if (data.album_id) navigateToEntity('album', data.album_id);
       })
       .catch(err => {
         el.classList.remove('is-minting');

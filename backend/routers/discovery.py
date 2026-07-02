@@ -221,31 +221,28 @@ def streaming_search(q: str = Query(..., min_length=2, max_length=100),
     the tail's problem, not the search's — the endpoint answers empty."""
     from streaming import search as provider_search
     if not provider_search.available():
-        return {"available": False, "artists": [], "albums": []}
+        return {"available": False, "albums": []}
     try:
         res = provider_search.search(q.strip(), limit=limit)
     except Exception as e:
         logger.warning("streaming search failed: %s", e)
-        return {"available": True, "artists": [], "albums": []}
+        return {"available": True, "albums": []}
     return {"available": True, **res}
 
 
 @router.post("/streaming-mint")
 def streaming_mint(body: dict = Body(...)):
-    """Mint a clicked streaming tile as a phantom (artist, or album + tracklist)
-    and answer the local UUID to navigate to. Deterministic identity: re-minting
-    is a no-op, an existing MB phantom is reused."""
+    """Mint a clicked streaming album tile as a phantom (artist + album + full
+    tracklist) and answer the local UUID to navigate to. Deterministic identity:
+    re-minting is a no-op, an existing MB phantom is reused."""
     from streaming import search as provider_search
-    kind = body.get("type")
     provider_id = str(body.get("provider_id") or "")
-    if kind not in ("artist", "album") or not provider_id:
-        raise HTTPException(status_code=422, detail="type must be artist|album with provider_id")
+    if body.get("type") != "album" or not provider_id:
+        raise HTTPException(status_code=422, detail="type must be album with provider_id")
     try:
-        if kind == "artist":
-            return {"artist_id": provider_search.mint_artist(provider_id)}
         return {"album_id": provider_search.mint_album(provider_id)}
     except Exception as e:
-        logger.error("streaming mint failed (%s %s): %s", kind, provider_id, e)
+        logger.error("streaming mint failed (album %s): %s", provider_id, e)
         raise HTTPException(status_code=502, detail=f"mint failed: {e}")
 
 

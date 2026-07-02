@@ -47,42 +47,53 @@ def _get(path: str, params: Optional[dict] = None) -> dict:
 
 
 def search(q: str, limit: int = 6) -> dict:
-    """Provider rows for the Discovery streaming tail, deduped against the local
-    DB via deterministic UUIDs — an entity we already have (owned OR phantom) is
-    hidden, the local engine already surfaced it. A pleasant side effect: Deezer's
-    empty namesake clones collapse onto the same UUID and vanish with it."""
+    """ALBUM rows for the Discovery streaming tail, deduped against the local DB
+    via deterministic UUIDs — an entity we already have (owned OR phantom) is
+    hidden, the local engine already surfaced it.
+
+    Albums ONLY, no artist tiles (Valerii): a bare minted artist landed on an
+    empty page — an artist-name query should answer with the artist's ALBUMS to
+    pick one and play. So the top artist hit that is NOT local contributes its
+    discography ahead of the generic album search (a local artist's discography
+    is the MB missing-albums pipeline's job)."""
     key = (q.lower(), limit)
     hit = _cache.get(key)
     if hit and time.time() - hit[0] < _TTL_SECONDS:
         return hit[1]
 
-    artists = []
-    for r in _get("/search/artist", {"q": q, "limit": limit}).get("data", []):
+    disco = []
+    for r in _get("/search/artist", {"q": q, "limit": 3}).get("data", []):
         name = (r.get("name") or "").strip()
         if not name:
             continue
         if db_query_one("SELECT 1 AS x FROM artists WHERE id = %(id)s::uuid",
                         {"id": str(artist_uuid(name))}):
-            continue
-        artists.append({"provider": "deezer", "provider_id": str(r["id"]),
-                        "name": name, "picture": r.get("picture_medium"),
-                        "nb_fan": r.get("nb_fan") or 0})
-    artists.sort(key=lambda a: -a["nb_fan"])   # fan count sinks empty clone profiles
+            break   # local artist — his albums are the local pipelines' business
+        disco = _get(f"/artist/{r['id']}/albums", {"limit": limit}).get("data") or []
+        for d in disco:
+            d["artist"] = {"name": name}   # /artist/{id}/albums rows omit the artist
+        break
 
-    albums = []
-    for r in _get("/search/album", {"q": q, "limit": limit}).get("data", []):
+    albums, seen = [], set()
+    for r in disco + (_get("/search/album", {"q": q, "limit": limit}).get("data") or []):
         title = (r.get("title") or "").strip()
         artist_name = ((r.get("artist") or {}).get("name") or "").strip()
         if not title or not artist_name:
             continue
+        alid = str(album_uuid(title, artist_name))
+        if alid in seen:
+            continue
+        seen.add(alid)
         if db_query_one("SELECT 1 AS x FROM albums WHERE id = %(id)s::uuid",
-                        {"id": str(album_uuid(title, artist_name))}):
+                        {"id": alid}):
             continue
         albums.append({"provider": "deezer", "provider_id": str(r["id"]),
                        "title": title, "artist": artist_name,
                        "cover": r.get("cover_medium")})
+        if len(albums) >= limit:
+            break
 
-    out = {"artists": artists, "albums": albums}
+    out = {"albums": albums}
     _cache[key] = (time.time(), out)
     if len(_cache) > 200:
         _cache.pop(next(iter(_cache)))
@@ -107,17 +118,6 @@ def _mint_artist_row(name: str, provider_id: str) -> str:
     """, {"id": aid, "n": name, "nl": latinize(name)})
     _record_mint(provider_id, artist_id=aid)
     return aid
-
-
-def mint_artist(provider_id: str) -> str:
-    """Phantom artist from a Deezer artist tile. The page starts sparse; the
-    existing enrichment pipelines (canon → missing-albums, Last.fm) fill it —
-    streaming_mints keeps the row alive even when MB can't resolve it."""
-    d = _get(f"/artist/{provider_id}")
-    name = (d.get("name") or "").strip()
-    if not name:
-        raise ValueError("deezer artist payload has no name")
-    return _mint_artist_row(name, provider_id)
 
 
 def mint_album(provider_id: str) -> str:

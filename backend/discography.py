@@ -367,6 +367,9 @@ def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
     pre-MB legacy), garbage-collect phantom albums nobody links to, and
     clear a stale external cover on albums that became owned — the
     frontend prefers `cover_url` over the local file cover."""
+    # Streaming-minted phantoms are OUTSIDE the MB source-of-truth: the user
+    # clicked a provider tile (explicit intent), the album has no rg MBID, and
+    # this reconcile used to nuke it on the very first artist-page view.
     if missing_rgs:
         db_execute("""
             DELETE FROM album_artists aa
@@ -374,6 +377,7 @@ def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
             WHERE al.id = aa.album_id
               AND aa.artist_id = %(id)s::uuid
               AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
+              AND NOT EXISTS (SELECT 1 FROM streaming_mints sm WHERE sm.album_id = al.id)
               AND (al.musicbrainz_id IS NULL
                    OR NOT (al.musicbrainz_id::text = ANY(%(rgs)s)))
         """, {"id": artist_id, "rgs": missing_rgs})
@@ -384,6 +388,7 @@ def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
             WHERE al.id = aa.album_id
               AND aa.artist_id = %(id)s::uuid
               AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
+              AND NOT EXISTS (SELECT 1 FROM streaming_mints sm WHERE sm.album_id = al.id)
         """, {"id": artist_id})
 
     db_execute("""
