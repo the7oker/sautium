@@ -6,11 +6,13 @@ docs/design/DISCOVERY-SEARCH-ENGINE.md (§Tools/§Bridges).
 
 Model:
   Tool   = one UI control (text search, Vocalist, Gender, Energy, Instruments…).
-           Declares its sources and the entity targets its results can resolve to.
+           Declares its sources; `broad` marks non-selective gates whose browse
+           roll-ups would rank by catalog size instead of signal.
   Source = one signal with a score contract: is_gate sources are binary filters
-           (WHERE, no rank); the rest are relevance sources scored to [0,1] and
-           normalized per-source (calibrated min-max) so heterogeneous signals
-           are comparable and can be summed for one ORDER BY.
+           (WHERE, no rank, ALL targets); the rest are relevance sources scored to
+           [0,1], normalized per-source (calibrated min-max), and scoped by
+           `targets` — lexical identity scores only its own entity level, the
+           characteristic signals (clap/lyrics) also aggregate up via AVG.
   Bridge = static, corpus-aware edge registry; BFS composes the shortest table
            path from a source's table to the target (dedup shared joins). corpus
            SELECTS a bridge (owned→media_files, phantom→album_tracks, all→both),
@@ -88,7 +90,13 @@ class Source:
     key: str
     table: str                 # table the score_sql reads (bridge routing anchor)
     score_sql: str             # raw score in [0,1] (relevance) OR a boolean predicate (gate)
-    targets: tuple = ()        # entity keys this source meaningfully serves (empty = all the tool's targets)
+    targets: tuple = ()        # entity levels this source's SCORE reaches (gates ignore this —
+                               # they always apply to every target via the atom conjunction).
+                               # Lexical identity sources score ONLY their own level: search
+                               # results are entity-scoped matches, the neighbourhood comes via
+                               # navigation (Valerii) — name-down flooded tracks/albums that
+                               # match the query in their OWN title. Characteristic sources
+                               # (clap/lyrics) score their level + aggregate UP via AVG.
     is_gate: bool = False      # binary filter: pure WHERE, contributes no rank
     floor: float = 0.0         # relevance threshold — also the WHERE cutoff (calibrate: Phase 2)
     ceil: float = 1.0          # "strong match" — norm caps here (calibrate: Phase 2)
@@ -104,13 +112,15 @@ class Source:
 class Tool:
     key: str
     sources: tuple             # tuple[Source, ...]
-    targets: tuple             # entity keys this tool's results can resolve to
+    broad: bool = False        # non-selective gate (mode ~51%): browse roll-ups above the
+                               # atom are skipped when every active tool is broad — ranking
+                               # by count then degenerates to catalog size (corr 0.94)
 
 
 TOOLS: dict[str, Tool] = {
-    # Multi-source, multi-target relevance. Each source scored + normalized; the
-    # tool's contribution is GREATEST(norm over its sources) — name OR bio OR ….
-    "text": Tool("text", targets=("artist", "album", "track", "genre"), sources=(
+    # Multi-source relevance. Each source scored + normalized; the tool's
+    # contribution is GREATEST(norm over its sources) — name OR bio OR ….
+    "text": Tool("text", sources=(
         # Trigram retrieve predicates use the GIN-indexed `%` operator (its
         # pg_trgm.similarity_threshold default 0.3 == these sources' floor) +
         # prefix LIKE — `similarity(col,q) >= x` can't use the index and
@@ -141,55 +151,60 @@ TOOLS: dict[str, Tool] = {
                targets=("track",), floor=0.3, ceil=1.0, weight=1.0,
                retrieve="(t.title_latin % :ql OR t.title_latin LIKE :qlpfx)"),
         Source("clap", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
-               targets=("track",), floor=0.25, ceil=0.45, weight=0.8, model="clap",  # CLAP text→audio: low scale
+               targets=("track", "album", "artist"),   # characteristic: aggregates up
+               floor=0.25, ceil=0.45, weight=0.8, model="clap",  # CLAP text→audio: low scale
                needs_join=frozenset({"embeddings"})),
         Source("lyrics_sem", "lyrics_embeddings", "1-(le.vector <=> CAST(:qlyr AS vector))",
-               targets=("track",), floor=0.5, ceil=0.75, weight=0.6, model="lyrics",
+               targets=("track", "album", "artist"),
+               floor=0.5, ceil=0.75, weight=0.6, model="lyrics",
                needs_join=frozenset({"lyrics_embeddings"})),
     )),
     # Binary gates (artist-level).
-    "vocalist": Tool("vocalist", targets=("artist",), sources=(
+    "vocalist": Tool("vocalist", sources=(
         Source("vocalist", "artists", "a.is_vocalist = :vocalist", is_gate=True),)),
-    "gender": Tool("gender", targets=("artist",), sources=(
+    "gender": Tool("gender", sources=(
         Source("gender", "artists", "a.gender = :gender", is_gate=True),)),
-    # Track-level. Energy is smooth (distance to bucket midpoint → 0..1), not a gate.
-    "energy": Tool("energy", targets=("track",), sources=(
+    # Track-level gates. mode/danceable/energy are BROAD (mode splits the library
+    # ~50/50) — see Tool.broad.
+    "energy": Tool("energy", broad=True, sources=(
         Source("energy", "audio_features", "af.energy_db BETWEEN :energy_lo AND :energy_hi",
                is_gate=True, needs_join=frozenset({"audio_features"})),)),
-    "instruments": Tool("instruments", targets=("track",), sources=(
+    "instruments": Tool("instruments", sources=(
         Source("instruments", "audio_features", "af.instruments ?| :instruments",
                is_gate=True, needs_join=frozenset({"audio_features"}),
                expand=lambda v: _expand_instruments(v)),)),
-    "moods": Tool("moods", targets=("track",), sources=(
+    "moods": Tool("moods", sources=(
         Source("moods", "audio_features", "af.moods ?| :moods", is_gate=True,
                needs_join=frozenset({"audio_features"})),)),
-    "bpm": Tool("bpm", targets=("track",), sources=(
+    "bpm": Tool("bpm", sources=(
         Source("bpm", "audio_features", "af.bpm BETWEEN :bpm_min AND :bpm_max",
                is_gate=True, needs_join=frozenset({"audio_features"})),)),
-    "key": Tool("key", targets=("track",), sources=(
+    "key": Tool("key", sources=(
         Source("key", "audio_features", "af.key = :key", is_gate=True,
                needs_join=frozenset({"audio_features"})),)),
-    "mode": Tool("mode", targets=("track",), sources=(
+    "mode": Tool("mode", broad=True, sources=(
         Source("mode", "audio_features", "af.mode = :mode", is_gate=True,
                needs_join=frozenset({"audio_features"})),)),
-    "danceable": Tool("danceable", targets=("track",), sources=(
+    "danceable": Tool("danceable", broad=True, sources=(
         Source("danceable", "audio_features", "af.danceability >= 0.5", is_gate=True,
                needs_join=frozenset({"audio_features"})),)),
     # Album-level.
-    "genre": Tool("genre", targets=("track", "album", "artist"), sources=(
+    "genre": Tool("genre", sources=(
         Source("genre", "genres", "g.name = ANY(:genre)", is_gate=True,
                needs_join=frozenset({"album_genres", "genres"})),)),
-    "year": Tool("year", targets=("album", "track"), sources=(
+    "year": Tool("year", sources=(
         Source("year", "albums", "al.release_year BETWEEN :year_from AND :year_to",
                is_gate=True),)),
     # Semantic-only track relevance (no title): CLAP text→audio, lyrics text→lyrics.
-    "sound": Tool("sound", targets=("track",), sources=(
+    "sound": Tool("sound", sources=(
         Source("sound", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
-               targets=("track",), floor=0.25, ceil=0.45, weight=1.0, model="clap",
+               targets=("track", "album", "artist"),
+               floor=0.25, ceil=0.45, weight=1.0, model="clap",
                needs_join=frozenset({"embeddings"})),)),
-    "lyrics": Tool("lyrics", targets=("track",), sources=(
+    "lyrics": Tool("lyrics", sources=(
         Source("lyrics", "lyrics_embeddings", "1-(le.vector <=> CAST(:qlyr AS vector))",
-               targets=("track",), floor=0.5, ceil=0.75, weight=1.0, model="lyrics",
+               targets=("track", "album", "artist"),
+               floor=0.5, ceil=0.75, weight=1.0, model="lyrics",
                needs_join=frozenset({"lyrics_embeddings"})),)),
 }
 
@@ -361,13 +376,16 @@ def _level(src: Source) -> str:
 def build(active: dict, query: dict, corpus: str = "all", limit: int = 20) -> dict:
     """active = {tool_key: value}. ATOM-CENTRIC composition: the atom is the LOWEST
     level among all active sources (track < album < artist). matched(atom) applies
-    every tool — text sources OR (union-retrieve), gates AND — with higher-level
-    sources bridged DOWN to the atom. Results are produced for the atom entity and
-    every level ABOVE it (never below): the atom target ranks by relevance; each
-    higher target is an AVG(atom score) aggregation up the bridge — so a
-    'romantic sax + female vocal' track match rolls up to the artists/albums whose
-    catalogue scores highest (Sade), and a Gender-only query (atom=artist) yields
-    only artists. Returns {target_key: (sql, params)}."""
+    every tool — atom-level relevance sources OR (union-retrieve), gates AND (all
+    levels, promoted via EXISTS). Results are produced for the atom entity and every
+    level ABOVE it (never below): the atom target ranks by relevance; each higher
+    target combines its OWN-level identity sources with an AVG roll-up of the
+    matched atoms' characteristic scores — 'romantic sax + female vocal' rolls up
+    to the artists whose catalogue sounds like that (Sade), while a Gender-only
+    query (atom=artist) yields only artists. Governor: a browse where every active
+    tool is broad (mode ~51% of the library) skips the above-atom roll-ups —
+    count-ranking there degenerates to catalog size (corr 0.94). Returns
+    {target_key: (sql, params)}."""
     tools = [TOOLS[k] for k in active
              if k in TOOLS and active.get(k) not in (None, "", "any", [])]
     if not tools:
@@ -375,9 +393,13 @@ def build(active: dict, query: dict, corpus: str = "all", limit: int = 20) -> di
     atom_lvl = min((_level(s) for t in tools for s in t.sources),
                    key=lambda lv: _LEVEL_RANK[lv])
     atom = ENTITIES[atom_lvl]
+    relevance_active = any(not s.is_gate for t in tools for s in t.sources)
+    skip_rollups = not relevance_active and all(t.broad for t in tools)
     out: dict = {}
     for lvl, rank in _LEVEL_RANK.items():
         if rank < _LEVEL_RANK[atom_lvl] or lvl not in ENTITIES:
+            continue
+        if rank > _LEVEL_RANK[atom_lvl] and skip_rollups:
             continue
         out[lvl] = (_build_atom(atom, tools, active, corpus, limit) if lvl == atom_lvl
                     else _build_higher(atom, ENTITIES[lvl], tools, active, corpus, limit))
@@ -408,20 +430,24 @@ def _matched_core(atom, tools, active, corpus, K=500):
     """The retrieve→rerank pieces at the atom level, shared by the atom target and
     every higher aggregation. Gates come from EVERY active tool (AND, promoted to the
     atom via _exists_gate) — NOT filtered by target, which is what let cross-level
-    filters (female+vocal on a track atom) silently drop out before. Relevance sources
-    union into indexed top-K branches, bridged DOWN to the atom (artist name → the
-    artist's tracks, etc). Returns (gates, branches, tool_terms, lateral)."""
+    filters (female+vocal on a track atom) silently drop out before. Relevance is
+    ATOM-LEVEL SOURCES ONLY (lexical identity doesn't cross levels — no name-down
+    flooding); each tool yields two score expressions: at_terms scores the atom
+    target, up_terms only the sources whose targets reach above the atom (the
+    characteristic channel that roll-ups AVG). Returns (gates, branches, at_terms,
+    up_terms, lateral)."""
     et = atom.table.split()[0]
     gates = [src.score_sql if src.table == et else _exists_gate(src, atom, corpus)
              for tool in tools for src in tool.sources if src.is_gate]
     branches: list[str] = []
-    tool_terms: list[str] = []
+    at_terms: list[str] = []
+    up_terms: list[str] = []
     lateral: list[str] = []
     for tool in tools:
-        norms: list[str] = []
-        weight = 0.0
+        at_norms: list[str] = []
+        up_norms: list[str] = []
         for src in tool.sources:
-            if src.is_gate:
+            if src.is_gate or _level(src) != atom.key:
                 continue
             if src.model and not _model_ready(src.model):
                 _kick_model(src.model)      # skip cold-model source, warm it for next request
@@ -432,25 +458,35 @@ def _matched_core(atom, tools, active, corpus, K=500):
                 lat, ref, _ = _lateral_relevance(src, atom, corpus)
                 lateral.append(lat)
                 norm = ref
-            norms.append(norm)
-            weight = max(weight, src.weight)
+            # Weight INSIDE the GREATEST: an exact title (w=1.0) must outrank a
+            # lyrics mention (w=0.6) — with an outer max-weight they tied at 1.0.
+            at_norms.append(f"{src.weight} * {norm}")
+            if any(_LEVEL_RANK[t] > _LEVEL_RANK[atom.key] for t in src.targets):
+                up_norms.append(f"{src.weight} * {norm}")
             branches.append(_retrieve_branch(src, atom, corpus, gates, K))
-        if norms:
-            tool_terms.append(f"{weight} * GREATEST({', '.join(norms)})")
-    return gates, branches, tool_terms, lateral
+        if at_norms:
+            at_terms.append(f"GREATEST({', '.join(at_norms)})")
+        if up_norms:
+            up_terms.append(f"GREATEST({', '.join(up_norms)})")
+    return gates, branches, at_terms, up_terms, lateral
 
 
-def _matched_sql(atom, gates, branches, tool_terms, lateral, corpus):
-    """(matched-body, ctes-prefix). matched exposes (id, score) at the atom level.
-    Browse (no relevance branches) → every gate-matching atom with NULL score."""
+def _matched_sql(atom, gates, branches, at_terms, up_terms, lateral, corpus):
+    """(matched-body, ctes-prefix). matched exposes (id, s_at, s_up) at the atom
+    level. Browse (no relevance branches) → every gate-matching atom, NULL scores
+    (roll-ups then rank by count). Relevance without any up-eligible source →
+    s_up = 0 so roll-ups pull in nothing (a title-only match must not mint
+    artist/album candidates)."""
     cg = _corpus_clause(atom, corpus)
     filt = list(gates) + ([cg] if cg else [])
     where = (" WHERE " + " AND ".join(filt)) if filt else ""
     if not branches:
-        return f"SELECT {atom.pk} AS id, NULL::float AS score FROM {atom.table}{where}", ""
-    score = " + ".join(tool_terms)
+        return (f"SELECT {atom.pk} AS id, NULL::float AS s_at, NULL::float AS s_up "
+                f"FROM {atom.table}{where}"), ""
+    s_at = " + ".join(at_terms)
+    s_up = " + ".join(up_terms) if up_terms else "0.0"
     cand = " UNION ".join(f"({b})" for b in branches)
-    body = (f"SELECT {atom.pk} AS id, ({score}) AS score "
+    body = (f"SELECT {atom.pk} AS id, ({s_at}) AS s_at, ({s_up}) AS s_up "
             f"FROM (SELECT DISTINCT id FROM cand) c JOIN {atom.table} ON {atom.pk}=c.id "
             f"{' '.join(lateral)}{where}")
     return body, f"cand AS ({cand}), "
@@ -459,7 +495,7 @@ def _matched_sql(atom, gates, branches, tool_terms, lateral, corpus):
 def _build_atom(atom, tools, active, corpus, limit):
     """Atom target: rerank the bounded candidate set on the full normalized score
     (GREATEST within a tool, weighted sum across tools), gates + corpus in WHERE."""
-    gates, branches, tool_terms, lateral = _matched_core(atom, tools, active, corpus)
+    gates, branches, at_terms, _, lateral = _matched_core(atom, tools, active, corpus)
     cg = _corpus_clause(atom, corpus)
     filt = list(gates) + ([cg] if cg else [])
     where = (" WHERE " + " AND ".join(filt)) if filt else ""
@@ -467,7 +503,7 @@ def _build_atom(atom, tools, active, corpus, limit):
         sql = (f"SELECT {atom.pk} AS id, {atom.name_col} AS name, NULL AS score{atom.surface} "
                f"FROM {atom.table}{where} ORDER BY {atom.default_order} LIMIT {int(limit)}")
         return sql, _bind_params(tools, active)
-    score = " + ".join(tool_terms)
+    score = " + ".join(at_terms)
     cand = " UNION ".join(f"({b})" for b in branches)
     sql = (f"WITH cand AS ({cand}) "
            f"SELECT {atom.pk} AS id, {atom.name_col} AS name, ({score}) AS score{atom.surface} "
@@ -484,16 +520,17 @@ _ROLLUP_W = 0.5
 
 
 def _build_higher(atom, L, tools, active, corpus, limit, K=500):
-    """Higher target = two channels. Roll-up: AVG(matched atom score) up the bridge
-    atom→L — 'the artists/albums whose catalogue matches the characteristic' (Sade
-    for romantic-sax-female-vocal). Own-level: relevance sources living at L's own
-    level (artist name/alias/bio on an artist target) scored on the L row directly —
+    """Higher target = two channels. Roll-up: AVG of the matched atoms' s_up — the
+    CHARACTERISTIC channel only (clap/lyrics), never lexical identity: 'the artists
+    whose catalogue sounds like this' (Sade for romantic-sax), NOT 'artists who have
+    a track titled like this'. Own-level: relevance sources whose targets include L
+    (artist name/alias/bio on an artist target) scored on the L row directly —
     identity matches, including track-less phantom stubs the roll-up can't reach.
     Gates of level ≥ L re-apply on the L row itself (Gender:Female means the ARTIST
     list holds only females, not males who share a matched track). ORDER by combined
     score, then matched-atom COUNT (browse mode: most matching atoms)."""
-    gates_a, branches_a, terms_a, lat_a = _matched_core(atom, tools, active, corpus)
-    body, ctes = _matched_sql(atom, gates_a, branches_a, terms_a, lat_a, corpus)
+    gates_a, branches_a, at_terms, up_terms, lat_a = _matched_core(atom, tools, active, corpus)
+    body, ctes = _matched_sql(atom, gates_a, branches_a, at_terms, up_terms, lat_a, corpus)
     link = _agg_link(atom, L, corpus)
     Lt = L.table.split()[0]
     Lrank = _LEVEL_RANK[L.key]
@@ -509,23 +546,21 @@ def _build_higher(atom, L, tools, active, corpus, limit, K=500):
     own_lat: list[str] = []
     for tool in tools:
         norms: list[str] = []
-        weight = 0.0
         for src in tool.sources:
-            if src.is_gate or _level(src) != L.key:
+            if src.is_gate or _level(src) != L.key or L.key not in src.targets:
                 continue
             if src.model and not _model_ready(src.model):
                 _kick_model(src.model)
                 continue
             if src.table == Lt:
-                norms.append(_norm_expr(src))
+                norms.append(f"{src.weight} * {_norm_expr(src)}")
             else:
                 lat, ref, _ = _lateral_relevance(src, L, corpus)
                 own_lat.append(lat)
-                norms.append(ref)
-            weight = max(weight, src.weight)
+                norms.append(f"{src.weight} * {ref}")
             own_branches.append(_retrieve_branch(src, L, corpus, gates_L, K))
         if norms:
-            own_terms.append(f"{weight} * GREATEST({', '.join(norms)})")
+            own_terms.append(f"GREATEST({', '.join(norms)})")
 
     # Strict conjunction: with a below-L gate active (sax, minor…) an L row must own
     # a matched atom — an own-level candidate alone can't prove the gates hold on ONE
@@ -538,11 +573,13 @@ def _build_higher(atom, L, tools, active, corpus, limit, K=500):
         cand += " UNION " + " UNION ".join(
             f"SELECT id AS lid FROM ({b}) ob{i}" for i, b in enumerate(own_branches))
     score = (" + ".join(own_terms + [f"{_ROLLUP_W} * COALESCE(r.s, 0)"])
-             if (terms_a or own_terms) else "NULL")
+             if (at_terms or own_terms) else "NULL")
     where = (" WHERE " + " AND ".join(gates_L)) if gates_L else ""
+    # s_up > 0 keeps lexical-only matches out of the roll-up (they'd mint zero-score
+    # candidates); NULL passes for browse mode, where roll-ups rank by count.
     sql = (f"WITH {ctes}matched AS ({body}), "
-           f"rolled AS (SELECT lk.lid AS lid, AVG(m.score) AS s, COUNT(*) AS n "
-           f"FROM matched m {link} GROUP BY lk.lid), "
+           f"rolled AS (SELECT lk.lid AS lid, AVG(m.s_up) AS s, COUNT(*) AS n "
+           f"FROM matched m {link} WHERE m.s_up > 0 OR m.s_up IS NULL GROUP BY lk.lid), "
            f"slim AS (SELECT {L.pk} AS id, ({score}) AS score, r.n AS n "
            f"FROM (SELECT DISTINCT lid FROM ({cand}) c0) cd "
            f"JOIN {L.table} ON {L.pk} = cd.lid "
