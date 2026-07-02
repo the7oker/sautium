@@ -34,14 +34,13 @@ class EntityDef:
     key: str
     pk: str
     name_col: str
-    latin_col: str
     table: str          # own table + alias, e.g. "artists a"
     default_order: str  # browse-mode ordering (no relevance signal active)
     surface: str = ""   # extra SELECT columns for tiles (is_owned, cover_id, media_file_id, …)
 
 
 ENTITIES: dict[str, EntityDef] = {
-    "artist": EntityDef("artist", "a.id", "a.name", "a.name_latin", "artists a",
+    "artist": EntityDef("artist", "a.id", "a.name", "artists a",
                         "(SELECT COUNT(*) FROM track_artists ta "
                         "WHERE ta.artist_id=a.id AND ta.role='primary') DESC",
                         surface=", a.gender, a.is_vocalist, "
@@ -53,7 +52,7 @@ ENTITIES: dict[str, EntityDef] = {
                         "(SELECT mf.id FROM track_artists ta JOIN media_files mf "
                         "ON mf.track_id=ta.track_id AND ta.role='primary' WHERE ta.artist_id=a.id "
                         "LIMIT 1) AS media_file_id"),
-    "album":  EntityDef("album", "al.id", "al.title", "al.title_latin", "albums al",
+    "album":  EntityDef("album", "al.id", "al.title", "albums al",
                         "al.release_year DESC NULLS LAST, al.title",
                         surface=", al.release_year AS year, al.cover_url, "
                         "(SELECT a.name FROM album_artists aa JOIN artists a ON a.id=aa.artist_id "
@@ -70,14 +69,14 @@ ENTITIES: dict[str, EntityDef] = {
     # own-level identity sources (name trigram, description vector). Its albums
     # live on the genre page — search only surfaces the genre itself (Valerii's
     # entity-scoped rule).
-    "genre":  EntityDef("genre", "g.id", "g.name", "g.name", "genres g",
+    "genre":  EntityDef("genre", "g.id", "g.name", "genres g",
                         "(SELECT COUNT(*) FROM album_genres ag WHERE ag.genre_id=g.id) DESC",
                         surface=", (SELECT COUNT(DISTINCT ag.album_id) FROM album_genres ag "
                         "JOIN album_variants av ON av.album_id=ag.album_id "
                         "WHERE ag.genre_id=g.id) AS album_count, "
                         "EXISTS (SELECT 1 FROM album_genres ag JOIN album_variants av "
                         "ON av.album_id=ag.album_id WHERE ag.genre_id=g.id) AS is_owned"),
-    "track":  EntityDef("track", "t.id", "t.title", "t.title_latin", "tracks t",
+    "track":  EntityDef("track", "t.id", "t.title", "tracks t",
                         "t.title",
                         surface=", (SELECT a.name FROM track_artists ta JOIN artists a ON a.id=ta.artist_id "
                         "WHERE ta.track_id=t.id AND ta.role='primary' LIMIT 1) AS artist, "
@@ -110,13 +109,12 @@ class Source:
                                # match the query in their OWN title. Characteristic sources
                                # (clap/lyrics) score their level + aggregate UP via AVG.
     is_gate: bool = False      # binary filter: pure WHERE, contributes no rank
-    floor: float = 0.0         # relevance threshold — also the WHERE cutoff (calibrate: Phase 2)
-    ceil: float = 1.0          # "strong match" — norm caps here (calibrate: Phase 2)
+    floor: float = 0.0         # relevance threshold — also the WHERE cutoff (calibrated 2026-07-02)
+    ceil: float = 1.0          # "strong match" — norm caps here (calibrated 2026-07-02)
     weight: float = 1.0        # importance in the cross-tool sum
     model: Optional[str] = None   # model_cache key this source needs; gracefully skipped if cold
     level: str = ""            # entity level (track/album/artist); default derived from .table
     retrieve: str = ""         # index-friendly retrieve-branch predicate; default (score_sql) >= floor
-    needs_join: frozenset = frozenset()
     expand: Optional[Callable[[Any], Any]] = None
 
 
@@ -147,15 +145,13 @@ TOOLS: dict[str, Tool] = {
                "GREATEST(similarity(ana.alias_latin,:ql), "
                "CASE WHEN ana.alias_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
                targets=("artist",), floor=0.3, ceil=1.0, weight=1.0,
-               retrieve="(ana.alias_latin % :ql OR ana.alias_latin LIKE :qlpfx)",
-               needs_join=frozenset({"artist_name_aliases"})),
+               retrieve="(ana.alias_latin % :ql OR ana.alias_latin LIKE :qlpfx)"),
         # Vector floors/ceils calibrated 2026-07-02 from live distributions (probe:
         # 8 characteristic queries): floor ≈ corpus p90 (noise → 0), ceil ≈ top-10
         # mean (strong match → ~1). The old bio/lyrics ceils (0.85/0.75) sat ABOVE
         # the best score either source can produce (top1 0.59/0.64) — both were mute.
         Source("artist_bio", "artist_bio_embeddings", "1-(abe.vector <=> CAST(:qvec AS vector))",
-               targets=("artist",), floor=0.47, ceil=0.57, weight=0.7, model="enrichment",
-               needs_join=frozenset({"artist_bio_embeddings"})),
+               targets=("artist",), floor=0.47, ceil=0.57, weight=0.7, model="enrichment"),
         Source("album_title", "albums",
                "GREATEST(similarity(al.title_latin,:ql), "
                "CASE WHEN al.title_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
@@ -168,12 +164,10 @@ TOOLS: dict[str, Tool] = {
                retrieve="(t.title_latin % :ql OR t.title_latin LIKE :qlpfx)"),
         Source("clap", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
                targets=("track", "album", "artist", "genre"),   # characteristic: aggregates up
-               floor=0.30, ceil=0.58, weight=0.8, model="clap",
-               needs_join=frozenset({"embeddings"})),
+               floor=0.30, ceil=0.58, weight=0.8, model="clap"),
         Source("lyrics_sem", "lyrics_embeddings", "1-(le.vector <=> CAST(:qlyr AS vector))",
                targets=("track", "album", "artist", "genre"),
-               floor=0.47, ceil=0.62, weight=0.6, model="lyrics",
-               needs_join=frozenset({"lyrics_embeddings"})),
+               floor=0.47, ceil=0.62, weight=0.6, model="lyrics"),
         # Genre identity: name + curated description (BGE-M3, same encoder/params
         # as bio → same calibration) — "saxophone" reaches Jazz via its description.
         Source("genre_name", "genres",
@@ -183,7 +177,7 @@ TOOLS: dict[str, Tool] = {
                retrieve="(g.name % :ql OR lower(g.name) LIKE :qlpfx)"),
         Source("genre_desc", "genre_desc_embeddings", "1-(gde.vector <=> CAST(:qvec AS vector))",
                targets=("genre",), level="genre", floor=0.47, ceil=0.57, weight=0.7,
-               model="enrichment", needs_join=frozenset({"genre_desc_embeddings"})),
+               model="enrichment"),
     )),
     # Binary gates (artist-level).
     "vocalist": Tool("vocalist", sources=(
@@ -194,7 +188,7 @@ TOOLS: dict[str, Tool] = {
     # ~50/50) — see Tool.broad.
     "energy": Tool("energy", broad=True, sources=(
         Source("energy", "audio_features", "af.energy_db BETWEEN :energy_lo AND :energy_hi",
-               is_gate=True, needs_join=frozenset({"audio_features"})),)),
+               is_gate=True),)),
     # instruments stores the RAW top-20 score distribution (no write-time
     # cutoff) — presence is a read-time decision against per-label thresholds
     # (ensemble_instruments.INSTRUMENT_THRESHOLDS). `?|` alone would match
@@ -205,27 +199,22 @@ TOOLS: dict[str, Tool] = {
                "(af.instruments ?| :instruments AND EXISTS "
                "(SELECT 1 FROM jsonb_each_text(CAST(:instruments_thr AS jsonb)) th "
                "WHERE (af.instruments->>th.key)::float >= th.value::float))",
-               is_gate=True, needs_join=frozenset({"audio_features"}),
+               is_gate=True,
                expand=lambda v: _expand_instruments(v)),)),
     "moods": Tool("moods", sources=(
-        Source("moods", "audio_features", "af.moods ?| :moods", is_gate=True,
-               needs_join=frozenset({"audio_features"})),)),
+        Source("moods", "audio_features", "af.moods ?| :moods", is_gate=True),)),
     "bpm": Tool("bpm", sources=(
         Source("bpm", "audio_features", "af.bpm BETWEEN :bpm_min AND :bpm_max",
-               is_gate=True, needs_join=frozenset({"audio_features"})),)),
+               is_gate=True),)),
     "key": Tool("key", sources=(
-        Source("key", "audio_features", "af.key = :key", is_gate=True,
-               needs_join=frozenset({"audio_features"})),)),
+        Source("key", "audio_features", "af.key = :key", is_gate=True),)),
     "mode": Tool("mode", broad=True, sources=(
-        Source("mode", "audio_features", "af.mode = :mode", is_gate=True,
-               needs_join=frozenset({"audio_features"})),)),
+        Source("mode", "audio_features", "af.mode = :mode", is_gate=True),)),
     "danceable": Tool("danceable", broad=True, sources=(
-        Source("danceable", "audio_features", "af.danceability >= 0.5", is_gate=True,
-               needs_join=frozenset({"audio_features"})),)),
+        Source("danceable", "audio_features", "af.danceability >= 0.5", is_gate=True),)),
     # Album-level.
     "genre": Tool("genre", sources=(
-        Source("genre", "genres", "g.name = ANY(:genre)", is_gate=True,
-               needs_join=frozenset({"album_genres", "genres"})),)),
+        Source("genre", "genres", "g.name = ANY(:genre)", is_gate=True),)),
     "year": Tool("year", sources=(
         Source("year", "albums", "al.release_year BETWEEN :year_from AND :year_to",
                is_gate=True),)),
@@ -239,8 +228,7 @@ TOOLS: dict[str, Tool] = {
     "seed": Tool("seed", sources=(
         Source("seed", "embeddings", "1-(e.vector <=> CAST(:qseed AS vector))",
                targets=("track", "album", "artist", "genre"),
-               floor=0.68, ceil=0.90, weight=1.0,
-               needs_join=frozenset({"embeddings"})),
+               floor=0.68, ceil=0.90, weight=1.0),
         Source("seed_not_self", "tracks", "t.id <> CAST(:seed_tid AS uuid)",
                is_gate=True),
     )),
@@ -254,13 +242,11 @@ TOOLS: dict[str, Tool] = {
     "sound": Tool("sound", sources=(
         Source("sound", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
                targets=("track", "album", "artist", "genre"),
-               floor=0.30, ceil=0.58, weight=1.0, model="clap",
-               needs_join=frozenset({"embeddings"})),)),
+               floor=0.30, ceil=0.58, weight=1.0, model="clap"),)),
     "lyrics": Tool("lyrics", sources=(
         Source("lyrics", "lyrics_embeddings", "1-(le.vector <=> CAST(:qlyr AS vector))",
                targets=("track", "album", "artist", "genre"),
-               floor=0.47, ceil=0.62, weight=1.0, model="lyrics",
-               needs_join=frozenset({"lyrics_embeddings"})),)),
+               floor=0.47, ceil=0.62, weight=1.0, model="lyrics"),)),
 }
 
 

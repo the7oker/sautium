@@ -2603,10 +2603,9 @@
     { id: 'genres',  title: 'Genres',  target: 'genre',  layout: 'genres'  },
   ];
 
-  // Filter rows for the advanced panel (Step 1.5c-a).
-  // Each row has a label and a chip set; selected value lives in the
-  // shared `discoveryFilters` state. Chip values map 1:1 to the
-  // /search/features query params we'll wire in 1.5c-b.
+  // Filter rows for the advanced panel. Each row has a label and a chip set;
+  // selected value lives in the shared `discoveryFilters` state. Chip values
+  // map 1:1 to /api/discovery/search query params.
   const DISCOVERY_FILTER_ROWS = [
     { key: 'mode',      label: 'Mode',
       chips: [['any','Any'], ['major','Major'], ['minor','Minor']] },
