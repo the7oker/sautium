@@ -6,9 +6,18 @@ Two variants:
   - API_DJ_SYSTEM_PROMPT: for API providers (Anthropic, OpenAI, Groq, etc.)
 """
 
+from ensemble_instruments import DEFAULT_THRESHOLD, INSTRUMENT_THRESHOLDS
+
 # ---------------------------------------------------------------------------
 # Shared blocks
 # ---------------------------------------------------------------------------
+
+# Keeps the prompt's threshold guidance in lockstep with the read-side table.
+_INSTR_THRESHOLDS_NOTE = f"{DEFAULT_THRESHOLD} for every label" + (
+    ", except calibrated overrides "
+    + ", ".join(f"`{k}` >= {v}" for k, v in sorted(INSTRUMENT_THRESHOLDS.items()))
+    if INSTRUMENT_THRESHOLDS else " (no calibrated overrides yet)"
+)
 
 _RULES_COMMON = """\
 - IMPORTANT: Always respond in the same language as the user's query. \
@@ -91,15 +100,19 @@ vocal_instrumental, vocal_score, instruments[jsonb], moods[jsonb])
 For vocal/instrumental queries, use `artists.is_vocalist` column. \
 For female/male vocal queries, combine `artists.gender` with `artists.is_vocalist`.
   - `instruments`: AudioSet multi-label tags (AST+PaSST ensemble, sigmoid probabilities). \
+Stored as the RAW top-20 score distribution (everything >= 0.01) — key presence does NOT \
+mean the instrument plays (a stored 0.011 is noise), so NEVER filter by bare `?`/`?|` \
+key presence. Presence = score at or above the per-label read threshold: \
+""" + _INSTR_THRESHOLDS_NOTE + """. \
 Lowercase keys, e.g. `{"piano": 0.62, "drum kit": 0.45, "acoustic guitar": 0.31}`. \
 Common tags: piano, electric piano, organ, synthesizer, drum kit, drum machine, \
 percussion, hi-hat, cymbal, acoustic guitar, electric guitar, bass guitar, \
-violin/fiddle, cello, double bass, string section, trumpet, trombone, saxophone, \
-flute, clarinet, harp, choir, orchestra, accordion, harmonica, sitar, banjo, \
-ukulele, mandolin, tabla, didgeridoo, theremin. \
-Empty dict means no identifiable instruments (common for ambient/drone). \
-Query: `WHERE af.instruments ? 'piano'` (key present) or \
-`WHERE (af.instruments->>'piano')::float > 0.3` (score threshold).
+`violin, fiddle` (one key, comma inside), cello, double bass, string section, \
+trumpet, trombone, saxophone, flute, clarinet, harp, choir, orchestra, accordion, \
+harmonica, sitar, banjo, ukulele, mandolin, tabla, didgeridoo, theremin. \
+Query: `WHERE (af.instruments->>'saxophone')::float >= 0.10`; for an any-of set OR the \
+per-label checks (optionally AND `af.instruments ?| ARRAY[...]` in front, as a \
+GIN-index retrieve branch only). A much higher score (0.3+) = high-confidence presence.
   - `moods`: CLAP zero-shot, e.g. `{"happy and upbeat": 0.35, "energetic and intense": 0.28}`.
 
 ## Embeddings (CLAP audio, linked to tracks)

@@ -25,6 +25,7 @@ from mcp.server.fastmcp import FastMCP
 # -- HQPlayer client import (stdlib only, safe to import from backend) --------
 backend_path = os.environ.get("BACKEND_PATH", os.path.join(os.path.dirname(__file__), "..", "backend"))
 sys.path.insert(0, backend_path)
+from ensemble_instruments import present_instruments
 from hqplayer_client import HQPlayerClient, PlaybackState, format_time, file_path_to_uri
 
 # -- Logging to stderr (NEVER stdout — would corrupt STDIO transport) ---------
@@ -728,14 +729,14 @@ def get_track_info(track_id: int) -> str:
             if af.get("vocal_instrumental"):
                 lines.append(f"  Type: {af['vocal_instrumental']}")
             if af.get("instruments"):
-                instr = af["instruments"]
-                if isinstance(instr, dict):
-                    top = sorted(instr.items(), key=lambda x: -x[1])[:5]
+                # storage is the raw top-20 score distribution — show only
+                # labels above their read thresholds
+                instr = present_instruments(af["instruments"])
+                top = sorted(instr.items(), key=lambda x: -x[1])[:5]
+                if top:
                     lines.append(
                         "  Instruments: " + ", ".join(f"{k} ({v:.2f})" for k, v in top)
                     )
-                elif isinstance(instr, list):
-                    lines.append(f"  Instruments: {', '.join(instr)}")
 
         return "\n".join(lines)
     except Exception as e:

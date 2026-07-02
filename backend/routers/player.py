@@ -24,6 +24,7 @@ from db_pool import (
     db_execute as _db_execute,
     get_conn as _get_conn,
 )
+from ensemble_instruments import present_instruments
 from hqplayer_client import HQPlayerClient, PlaybackState, format_time, file_path_to_uri
 from lrclib import LrclibService
 
@@ -1631,6 +1632,7 @@ def _preview_now_playing_detail(track_id: str, provider: Optional[str]) -> dict:
         raise HTTPException(status_code=404, detail="track not found")
     row["media_file_id"] = None
     row["cover_id"] = None
+    row["instruments"] = present_instruments(row.get("instruments"))
     row["genres"] = _db_query("""
         SELECT g.id::text, g.name
         FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
@@ -1699,6 +1701,7 @@ def now_playing_detail(media_file_id: int = None, track_id: str = None,
     if not row:
         raise HTTPException(status_code=404, detail="media_file not found")
 
+    row["instruments"] = present_instruments(row.get("instruments"))
     row["genres"] = _db_query("""
         SELECT g.id::text, g.name
         FROM album_genres ag

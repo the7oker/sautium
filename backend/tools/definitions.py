@@ -13,6 +13,7 @@ import psycopg2
 import psycopg2.extras
 
 from config import settings
+from ensemble_instruments import present_instruments
 from hqplayer_client import file_path_to_uri
 from tools.registry import REGISTRY, ToolDef, ToolParam
 
@@ -429,9 +430,14 @@ def _h_get_track_info(track_id: int) -> str:
             if af.get("vocal_instrumental"):
                 lines.append(f"  Type: {af['vocal_instrumental']}")
             if af.get("instruments"):
-                instr = af["instruments"]
-                if isinstance(instr, list):
-                    lines.append(f"  Instruments: {', '.join(instr)}")
+                # storage is the raw top-20 score distribution — show only
+                # labels above their read thresholds
+                instr = present_instruments(af["instruments"])
+                top = sorted(instr.items(), key=lambda x: -x[1])[:5]
+                if top:
+                    lines.append(
+                        "  Instruments: " + ", ".join(f"{k} ({v:.2f})" for k, v in top)
+                    )
 
         return "\n".join(lines)
     except Exception as e:

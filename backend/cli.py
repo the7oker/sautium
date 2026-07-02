@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from config import settings, LOGGING_CONFIG
 from database import get_db_context, engine
+from ensemble_instruments import present_instruments
 from scanner import scan_library
 from track_filter import get_filtered_track_ids, describe_filters, track_filter_options
 
@@ -723,7 +724,8 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
                         for row in rows:
                             instruments = ""
                             if row.instruments:
-                                top3 = sorted(row.instruments.items(), key=lambda x: -x[1])[:3]
+                                present = present_instruments(row.instruments)
+                                top3 = sorted(present.items(), key=lambda x: -x[1])[:3]
                                 instruments = ", ".join(k for k, v in top3)
                             click.echo(
                                 f"   • {row.artist} - {row.title}"

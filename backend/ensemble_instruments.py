@@ -86,6 +86,13 @@ def threshold_for(label: str) -> float:
     return INSTRUMENT_THRESHOLDS.get(label.lower(), DEFAULT_THRESHOLD)
 
 
+def present_instruments(instruments: Optional[Dict[str, float]]) -> Dict[str, float]:
+    """Stored raw-score dict → only the labels passing their read thresholds."""
+    if not instruments:
+        return {}
+    return {k: v for k, v in instruments.items() if v >= threshold_for(k)}
+
+
 class InstrumentEnsembleTagger:
     """AST + PaSST ensemble. Call load() once, then tag(audio_48k) per track."""
 

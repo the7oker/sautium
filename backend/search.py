@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config import settings
+from ensemble_instruments import present_instruments, threshold_for
 from sql_queries import (
     MEDIA_FILE_SELECT, MEDIA_FILE_FROM,
     EMBEDDING_SIMILARITY_SELECT, EMBEDDING_SIMILARITY_FROM,
@@ -100,8 +101,13 @@ def _apply_filters(filters: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
         params["f_mode"] = filters["mode"]
 
     if filters.get("instrument"):
-        clauses.append("af.instruments ? :f_instrument")
-        params["f_instrument"] = filters["instrument"]
+        # raw top-20 storage: key presence alone matches noise-level scores;
+        # `?` stays only as the GIN retrieve branch in front of the score check
+        lbl = filters["instrument"].lower()
+        clauses.append("(af.instruments ? :f_instrument"
+                       " AND (af.instruments->>:f_instrument)::float >= :f_instrument_thr)")
+        params["f_instrument"] = lbl
+        params["f_instrument_thr"] = threshold_for(lbl)
 
     if filters.get("vocalist"):
         clauses.append("a.is_vocalist = :f_vocalist")
@@ -477,7 +483,7 @@ def _build_feature_result(row) -> Dict[str, Any]:
         "mode": row.mode,
         "vocal_instrumental": row.vocal_instrumental,
         "danceability": float(row.danceability) if row.danceability else None,
-        "instruments": row.instruments if hasattr(row, "instruments") else None,
+        "instruments": present_instruments(row.instruments) if hasattr(row, "instruments") else None,
     }
 
 
