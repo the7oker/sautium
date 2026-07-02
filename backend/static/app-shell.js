@@ -2592,13 +2592,14 @@
   const SVG_SEARCH = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>';
   const SVG_ADV_CHEVRON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>';
 
-  // Per-block descriptors — endpoint, frontend block id, rendered title.
+  // Target blocks — ONE composite engine query per target. The engine blends
+  // every relevance signal (name/title trigram, bio, lyrics, CLAP sound) into
+  // each block, so the old per-signal blocks (titles vs sound vs lyrics) are
+  // gone: one Tracks list, and Albums/Artists aggregate the same matched set.
   const DISCOVERY_BLOCKS = [
-    { id: 'artists', title: 'Artists',           endpoint: '/api/discovery/artists',  layout: 'artists' },
-    { id: 'albums',  title: 'Albums',            endpoint: '/api/discovery/albums',   layout: 'albums'  },
-    { id: 'titles',  title: 'Title matches',     endpoint: '/api/discovery/titles',   layout: 'tracks'  },
-    { id: 'sound',   title: 'Closest in sound',  endpoint: '/api/discovery/sound',    layout: 'tracks'  },
-    { id: 'lyrics',  title: 'Closest in lyrics', endpoint: '/api/discovery/lyrics',   layout: 'tracks'  },
+    { id: 'artists', title: 'Artists', target: 'artist', layout: 'artists' },
+    { id: 'albums',  title: 'Albums',  target: 'album',  layout: 'albums'  },
+    { id: 'tracks',  title: 'Tracks',  target: 'track',  layout: 'tracks'  },
   ];
 
   // Filter rows for the advanced panel (Step 1.5c-a).
@@ -2616,15 +2617,6 @@
       chips: [['any','Any'], ['yes','Yes'], ['no','No']] },
     { key: 'energy',    label: 'Energy',
       chips: [['any','Any'], ['low','Low'], ['mid','Mid'], ['high','High']] },
-  ];
-
-  // Multi-select chip rows. Empty array = no filter; tapping any
-  // chip adds/removes it from the set. No explicit "Any" chip — the
-  // absence of selection IS "any".
-  const DISCOVERY_QUALITY_OPTIONS = [
-    ['lossy',    'Lossy'],
-    ['lossless', 'Lossless'],
-    ['hi-res',   'Hi-Res'],
   ];
 
   // Broad instrument chips. Each label is a category that 1.5c-b will
@@ -2650,7 +2642,6 @@
       key: '',
       mode: 'any', vocalist: 'any', gender: 'any',
       danceable: 'any', energy: 'any',
-      quality: [],       // multi-select: ['lossy','lossless','hi-res']
       instruments: [],   // multi-select
     };
   }
@@ -2668,14 +2659,13 @@
     if (f.danceable && f.danceable !== 'any') return true;
     if (f.energy && f.energy !== 'any') return true;
     if (f.instruments && f.instruments.length) return true;
-    if (f.quality && f.quality.length) return true;
     return false;
   }
 
   // Translate the screen-local filter object into URLSearchParams the
   // backend endpoints understand. Drops "any" / null / empty values
   // so the server sees only filters the user actually set; multi-
-  // selects (instruments, quality) become repeated query params.
+  // selects (instruments) become repeated query params.
   function appendFilterParams(params, f) {
     if (!f) return;
     if (f.bpm_min != null) params.set('bpm_min', f.bpm_min);
@@ -2687,7 +2677,6 @@
     if (f.danceable && f.danceable !== 'any') params.set('danceable', f.danceable);
     if (f.energy && f.energy !== 'any') params.set('energy', f.energy);
     (f.instruments || []).forEach(v => params.append('instruments', v));
-    (f.quality || []).forEach(v => params.append('quality', v));
   }
 
   async function renderDiscovery(root) {
@@ -2753,15 +2742,6 @@
         `).join('')}
 
         <div class="filter-row">
-          <span class="filter-label">Quality</span>
-          <div class="filter-chips" data-filter-multi="quality">
-            ${DISCOVERY_QUALITY_OPTIONS.map(([v, label]) =>
-              `<span class="f-chip" data-value="${escapeHtml(v)}">${escapeHtml(label)}</span>`
-            ).join('')}
-          </div>
-        </div>
-
-        <div class="filter-row">
           <span class="filter-label">Instruments</span>
           <div class="filter-chips" data-filter-multi="instruments">
             ${DISCOVERY_INSTRUMENTS.map(name =>
@@ -2811,7 +2791,7 @@
     wireDiscoveryFilters(screen);
   }
 
-  // Minimum query length before fanning out the 5-block search.
+  // Minimum query length before fanning out the target-block search.
   // Single-character queries are pure noise: trigram similarity is
   // ~0 against any real word and BGE-M3 has no semantic context to
   // work with. Below the floor we keep the shuffle mosaic visible.
@@ -2919,8 +2899,8 @@
   // Single entry point for "do a search now" — invoked by the
   // input-debounce timer (typing) and by Apply (filter commit).
   // Decides between three states based on what the user has set:
-  //   query >= MIN_QUERY_LEN          → unified 5-block search
-  //   no query, but filters active    → filter-only browse via /titles
+  //   query >= MIN_QUERY_LEN          → composite search (text + chips)
+  //   no query, but filters active    → filter-only browse (same path, no q)
   //   neither                         → fall back to the shuffle mosaic
   function triggerDiscoverySearch(screen) {
     const input = screen.querySelector('#discoverySearchInput');
@@ -2933,57 +2913,10 @@
     if (q.length >= DISCOVERY_MIN_QUERY_LEN) {
       runUnifiedSearch(screen, q, id, getActive);
     } else if (hasActiveFilters(filters)) {
-      runFilterOnlyBrowse(screen, id, getActive);
+      runUnifiedSearch(screen, '', id, getActive);
     } else {
       showShuffle(screen);
     }
-  }
-
-  // Browse mode: no text query, only filters. Fires /api/discovery/titles
-  // with an empty `q` so the backend returns tracks ordered by play
-  // count desc that satisfy the active filters. Renders into a
-  // single results block — artists/albums/sound/lyrics blocks
-  // require text to be meaningful and are skipped.
-  function runFilterOnlyBrowse(screen, queryId, getActiveId) {
-    const shuffle = screen.querySelector('#discoveryShuffle');
-    const results = screen.querySelector('#discoveryResults');
-    const empty = screen.querySelector('#dEmpty');
-    const searching = screen.querySelector('#dSearching');
-    if (!shuffle || !results || !empty || !searching) return;
-
-    shuffle.hidden = true;
-    results.hidden = false;
-    empty.hidden = true;
-    searching.hidden = false;
-
-    DISCOVERY_BLOCKS.forEach(b => {
-      const blk = screen.querySelector('#dBlock-' + b.id);
-      const body = screen.querySelector('#dBody-' + b.id);
-      if (blk) blk.hidden = true;
-      if (body) body.innerHTML = '';
-    });
-
-    const params = new URLSearchParams({ limit: '20' });
-    appendFilterParams(params, screen._filters);
-    fetch('/api/discovery/titles?' + params)
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then(data => {
-        if (queryId !== getActiveId()) return;
-        searching.hidden = true;
-        const titlesBlock = DISCOVERY_BLOCKS.find(b => b.id === 'titles');
-        // Override the block header to reflect browse semantics.
-        const blk = screen.querySelector('#dBlock-titles');
-        const head = blk && blk.querySelector('.discovery-section-head h3');
-        if (head) head.textContent = 'Tracks matching filters';
-        renderDiscoveryBlock(screen, titlesBlock, data);
-        if ((data.results || []).length === 0) empty.hidden = false;
-      })
-      .catch(err => {
-        if (queryId !== getActiveId()) return;
-        searching.hidden = true;
-        console.warn('filter-only browse failed:', err);
-        empty.hidden = false;
-      });
   }
 
   function showShuffle(screen) {
@@ -3020,22 +2953,24 @@
       if (!blk || !body) return;
       blk.hidden = true;
       body.innerHTML = '';
-      // Restore default header — browse mode rewrites titles' header
-      // to "Tracks matching filters", reset before each new search.
+      // Browse mode renames the tracks header to reflect its semantics.
       const head = blk.querySelector('.discovery-section-head h3');
-      if (head) head.textContent = b.title;
+      if (head) head.textContent = (!query && b.id === 'tracks')
+        ? 'Tracks matching filters' : b.title;
     });
 
     const completion = { remaining: DISCOVERY_BLOCKS.length, hadAnyResults: false };
 
     const filters = screen._filters || {};
     DISCOVERY_BLOCKS.forEach(b => {
-      const params = new URLSearchParams({ q: query, limit: '10' });
-      // Filters apply only to track-level blocks (titles/sound/lyrics);
-      // artists/albums are entity-level signals that don't carry the
-      // filter dimensions (BPM, key, instruments, etc.).
-      if (b.layout === 'tracks') appendFilterParams(params, filters);
-      fetch(b.endpoint + '?' + params)
+      // Every block carries the full composite query — the engine gates ALL
+      // targets on ALL filters (a Gender chip constrains the Tracks list, an
+      // Instruments chip constrains the Artists list) and decides per target
+      // whether it's reachable (a Gender-only browse yields artists only).
+      const params = new URLSearchParams({ target: b.target, limit: query ? '10' : '20' });
+      if (query) params.set('q', query);
+      appendFilterParams(params, filters);
+      fetch('/api/discovery/search?' + params)
         .then(r => r.ok ? r.json() : Promise.reject(r.status))
         .then(data => {
           if (queryId !== getActiveId()) return;  // stale; user typed again
@@ -3063,21 +2998,17 @@
     const body = screen.querySelector('#dBody-' + descriptor.id);
     if (!blk || !body) return;
 
-    if (data.status === 'loading') {
-      blk.hidden = false;
-      body.innerHTML = `
-        <p class="d-loading-notice">
-          ${descriptor.id === 'sound'
-            ? 'Audio model warming up — this takes ~20-30s on a fresh start. Try again shortly.'
-            : 'Search model warming up — try again in a moment.'}
-        </p>`;
-      return;
-    }
-
     const items = data.results || [];
+    // The engine gracefully skips cold vector models (kicking their load), so
+    // first-search-after-restart results are lexical-only. Surface that on the
+    // tracks block — the semantic channels are track-grain.
+    const warmingNote = (data.warming && descriptor.id === 'tracks')
+      ? '<p class="d-loading-notice">Semantic models are warming up — results are'
+        + ' name-matches only for now. Search again in a minute.</p>'
+      : '';
     if (items.length === 0) {
-      blk.hidden = true;
-      body.innerHTML = '';
+      blk.hidden = !warmingNote;
+      body.innerHTML = warmingNote;
       return;
     }
 
@@ -3094,7 +3025,7 @@
           navigateToEntity('album', el.getAttribute('data-album-id')));
       });
     } else {
-      body.innerHTML = renderTrackList(items);
+      body.innerHTML = renderTrackList(items) + warmingNote;
       wireDetailHandlers(body);
       updatePlayingHighlight();
     }
