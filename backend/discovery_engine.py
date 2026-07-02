@@ -18,10 +18,10 @@ Model:
            SELECTS a bridge (owned→media_files, phantom→album_tracks, all→both),
            not just a WHERE filter.
 
-STATUS: Phase 1 SKELETON for review. Real: registries (entities, tools/sources,
-bridge edges) and the normalization expression. Stubbed with TODO: BFS routing,
-per-target assembly, relevance-vs-gate weaving, aggregable HAVING, cover/media
-surfacing. floor/ceil are placeholders — calibration is Phase 2.
+Composition is ATOM-CENTRIC (see build()): gates AND on the lowest active level,
+relevance OR via indexed retrieve→rerank, higher targets = own-level identity +
+AVG roll-up of the characteristic channel. Vector floors/ceils calibrated from
+live score distributions 2026-07-02.
 """
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -137,8 +137,12 @@ TOOLS: dict[str, Tool] = {
                targets=("artist",), floor=0.3, ceil=1.0, weight=1.0,
                retrieve="(ana.alias_latin % :ql OR ana.alias_latin LIKE :qlpfx)",
                needs_join=frozenset({"artist_name_aliases"})),
+        # Vector floors/ceils calibrated 2026-07-02 from live distributions (probe:
+        # 8 characteristic queries): floor ≈ corpus p90 (noise → 0), ceil ≈ top-10
+        # mean (strong match → ~1). The old bio/lyrics ceils (0.85/0.75) sat ABOVE
+        # the best score either source can produce (top1 0.59/0.64) — both were mute.
         Source("artist_bio", "artist_bio_embeddings", "1-(abe.vector <=> CAST(:qvec AS vector))",
-               targets=("artist",), floor=0.5, ceil=0.85, weight=0.7, model="enrichment",
+               targets=("artist",), floor=0.47, ceil=0.57, weight=0.7, model="enrichment",
                needs_join=frozenset({"artist_bio_embeddings"})),
         Source("album_title", "albums",
                "GREATEST(similarity(al.title_latin,:ql), "
@@ -152,11 +156,11 @@ TOOLS: dict[str, Tool] = {
                retrieve="(t.title_latin % :ql OR t.title_latin LIKE :qlpfx)"),
         Source("clap", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
                targets=("track", "album", "artist"),   # characteristic: aggregates up
-               floor=0.25, ceil=0.45, weight=0.8, model="clap",  # CLAP text→audio: low scale
+               floor=0.30, ceil=0.58, weight=0.8, model="clap",
                needs_join=frozenset({"embeddings"})),
         Source("lyrics_sem", "lyrics_embeddings", "1-(le.vector <=> CAST(:qlyr AS vector))",
                targets=("track", "album", "artist"),
-               floor=0.5, ceil=0.75, weight=0.6, model="lyrics",
+               floor=0.47, ceil=0.62, weight=0.6, model="lyrics",
                needs_join=frozenset({"lyrics_embeddings"})),
     )),
     # Binary gates (artist-level).
@@ -199,12 +203,12 @@ TOOLS: dict[str, Tool] = {
     "sound": Tool("sound", sources=(
         Source("sound", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
                targets=("track", "album", "artist"),
-               floor=0.25, ceil=0.45, weight=1.0, model="clap",
+               floor=0.30, ceil=0.58, weight=1.0, model="clap",
                needs_join=frozenset({"embeddings"})),)),
     "lyrics": Tool("lyrics", sources=(
         Source("lyrics", "lyrics_embeddings", "1-(le.vector <=> CAST(:qlyr AS vector))",
                targets=("track", "album", "artist"),
-               floor=0.5, ceil=0.75, weight=1.0, model="lyrics",
+               floor=0.47, ceil=0.62, weight=1.0, model="lyrics",
                needs_join=frozenset({"lyrics_embeddings"})),)),
 }
 
