@@ -71,6 +71,11 @@ AST_INSTRUMENT_LABELS: Set[str] = {
 STORE_TOP_N = 20
 STORE_MIN_SCORE = 0.01
 
+# Full-track tagging: 10s windows tiled every STRIDE_SECONDS, max-aggregated
+# per label. Shared by the scanner and backfills so both produce comparable
+# scores.
+STRIDE_SECONDS = 30
+
 DEFAULT_THRESHOLD = 0.10
 
 # Read-time presence thresholds, keyed by the lowercased DB label.
@@ -188,66 +193,105 @@ class InstrumentEnsembleTagger:
             torch.cuda.empty_cache()
         logger.info("AST+PaSST unloaded")
 
-    def _run_ast(self, audio_48k):
-        import librosa
+    @staticmethod
+    def _fit_window(audio, sr: int, want_seconds: int):
         import numpy as np
+        want = sr * want_seconds
+        if len(audio) >= want:
+            return audio[:want]
+        return np.pad(audio, (0, want - len(audio)))
+
+    def _ast_probs(self, windows_16k) -> "np.ndarray":
+        """Sigmoid probs for a batch of 10s 16kHz windows → (N, classes)."""
         import torch
 
         from device import autocast, cast_inputs
-        audio_16k = librosa.resample(audio_48k, orig_sr=48000, target_sr=self.AST_SR)
-        want = self.AST_SR * self.WINDOW_SECONDS
-        if len(audio_16k) >= want:
-            audio_16k = audio_16k[:want]
-        else:
-            audio_16k = np.pad(audio_16k, (0, want - len(audio_16k)))
-        inputs = self.ast_extractor(
-            audio_16k, sampling_rate=self.AST_SR, return_tensors="pt"
-        )
+        wins = [self._fit_window(w, self.AST_SR, self.WINDOW_SECONDS) for w in windows_16k]
+        inputs = self.ast_extractor(wins, sampling_rate=self.AST_SR, return_tensors="pt")
         inputs = cast_inputs(inputs, self.ast.dtype)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         with torch.no_grad(), autocast(self.device):
             logits = self.ast(**inputs).logits
         # sigmoid in fp32 — fp16 saturates around |x|>10 and clips probabilities
-        return torch.sigmoid(logits.float())[0].cpu().numpy()
+        return torch.sigmoid(logits.float()).cpu().numpy()
 
-    def _run_passt(self, audio_48k):
-        import librosa
+    def _passt_probs(self, windows_32k) -> "np.ndarray":
         import numpy as np
         import torch
 
         from device import autocast
-        audio_32k = librosa.resample(audio_48k, orig_sr=48000, target_sr=self.PASST_SR)
-        want = self.PASST_SR * self.WINDOW_SECONDS
-        if len(audio_32k) >= want:
-            audio_32k = audio_32k[:want]
-        else:
-            audio_32k = np.pad(audio_32k, (0, want - len(audio_32k)))
+        wins = [self._fit_window(w, self.PASST_SR, self.WINDOW_SECONDS) for w in windows_32k]
         passt_dtype = next(self.passt.parameters()).dtype
-        tensor = torch.from_numpy(audio_32k).to(self.device, dtype=passt_dtype).unsqueeze(0)
+        tensor = torch.from_numpy(np.stack(wins)).to(self.device, dtype=passt_dtype)
         with torch.no_grad(), autocast(self.device), contextlib.redirect_stdout(io.StringIO()):
             logits = self.passt(tensor)
-        return torch.sigmoid(logits.float())[0].cpu().numpy()
+        return torch.sigmoid(logits.float()).cpu().numpy()
+
+    def _top_scores(self, ast_probs, passt_probs) -> Dict[str, float]:
+        """Per-window ensemble max over models, then max over windows, then
+        the storage cut (top-N above the noise floor)."""
+        results: Dict[str, float] = {}
+        for idx in self.instrument_ids:
+            score = max(float(ast_probs[:, idx].max()), float(passt_probs[:, idx].max()))
+            if score >= STORE_MIN_SCORE:
+                results[self._label_lower[self.id2label[idx]]] = round(score, 3)
+        top = sorted(results.items(), key=lambda x: -x[1])[:STORE_TOP_N]
+        return dict(top)
+
+    def _window_starts(self, total_seconds: float):
+        """Window start offsets (s): every STRIDE_SECONDS, plus a tail window
+        so an outro solo isn't missed when the last stride overshoots."""
+        w, stride = self.WINDOW_SECONDS, STRIDE_SECONDS
+        if total_seconds <= w:
+            return [0]
+        starts = list(range(0, int(total_seconds - w) + 1, stride))
+        tail = total_seconds - w
+        if tail - starts[-1] >= stride / 2:
+            starts.append(int(tail))
+        return starts
 
     def tag(self, audio_48k) -> Dict[str, float]:
-        """Return {lowercase_label: max(ast_score, passt_score)} — the raw
-        top-STORE_TOP_N distribution above the STORE_MIN_SCORE noise floor,
-        sorted by score descending.
+        """Single-window tag (first 10s of the given segment) — the scanner's
+        legacy entry point; see tag_full_track for whole-track coverage.
 
-        Deliberately NOT presence-filtered: readers decide presence against
-        INSTRUMENT_THRESHOLDS. A near-empty dict is still a valid result for
-        silence-like audio where even the noise floor isn't reached.
+        Returns {lowercase_label: max(ast, passt)} — the raw top-STORE_TOP_N
+        distribution above the STORE_MIN_SCORE noise floor, sorted by score
+        descending. Deliberately NOT presence-filtered: readers decide
+        presence against INSTRUMENT_THRESHOLDS. A near-empty dict is a valid
+        result for silence-like audio.
         """
         if self.ast is None or self.passt is None:
             raise RuntimeError("Call load() before tag()")
+        import librosa
+        a16 = librosa.resample(audio_48k, orig_sr=48000, target_sr=self.AST_SR)
+        a32 = librosa.resample(audio_48k, orig_sr=48000, target_sr=self.PASST_SR)
+        return self._top_scores(self._ast_probs([a16]), self._passt_probs([a32]))
 
-        ast_probs = self._run_ast(audio_48k)
-        passt_probs = self._run_passt(audio_48k)
+    def tag_full_track(self, audio_48k, batch_size: int = 12) -> Dict[str, float]:
+        """Whole-track tag: 10s windows every STRIDE_SECONDS (+tail window),
+        max-aggregated per label across windows. Same storage contract as
+        tag().
 
-        results: Dict[str, float] = {}
-        for idx in self.instrument_ids:
-            score = max(float(ast_probs[idx]), float(passt_probs[idx]))
-            if score >= STORE_MIN_SCORE:
-                lowercase = self._label_lower[self.id2label[idx]]
-                results[lowercase] = round(score, 3)
-        top = sorted(results.items(), key=lambda x: -x[1])[:STORE_TOP_N]
-        return dict(top)
+        A single 10s window misses instruments that only play in another part
+        of the piece (a sax solo two minutes later, the loud act of a
+        multi-act track) — max over tiled windows keeps the best moment of
+        every label. Windows are sliced AFTER one whole-track resample per
+        model rate; batched forwards keep the GPU fed.
+        """
+        if self.ast is None or self.passt is None:
+            raise RuntimeError("Call load() before tag_full_track()")
+        import librosa
+        import numpy as np
+
+        a16 = librosa.resample(audio_48k, orig_sr=48000, target_sr=self.AST_SR)
+        a32 = librosa.resample(audio_48k, orig_sr=48000, target_sr=self.PASST_SR)
+        starts = self._window_starts(len(audio_48k) / 48000.0)
+
+        ast_all, passt_all = [], []
+        for i in range(0, len(starts), batch_size):
+            chunk = starts[i:i + batch_size]
+            wins16 = [a16[s * self.AST_SR:(s + self.WINDOW_SECONDS) * self.AST_SR] for s in chunk]
+            wins32 = [a32[s * self.PASST_SR:(s + self.WINDOW_SECONDS) * self.PASST_SR] for s in chunk]
+            ast_all.append(self._ast_probs(wins16))
+            passt_all.append(self._passt_probs(wins32))
+        return self._top_scores(np.concatenate(ast_all), np.concatenate(passt_all))

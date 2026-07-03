@@ -2,15 +2,24 @@
 Audio feature extraction using librosa (DSP) + CLAP zero-shot
 + AST/PaSST ensemble.
 
-Extracts:
-- librosa: BPM, key/mode, energy, brightness, dynamic range, ZCR
-- CLAP zero-shot: moods, vocal/instrumental, danceability
-- AST + PaSST ensemble: instrument multi-label tags (AudioSet)
+Extracts (full-track methodology, aligned with backfill_instruments):
+- librosa amplitude block (energy, brightness, dynamic range, ZCR): the
+  WHOLE track — the middle 30s systematically overstates energy and
+  understates dynamic range on quiet-intro/loud-climax pieces
+- librosa BPM + key/mode: the middle 30s — a scalar can't express a
+  multi-act piece, and the middle is the most representative sample of
+  the "main body"
+- CLAP zero-shot (moods, vocal/instrumental, danceability): middle 30s
+  (its processor takes 10s internally; windowed CLAP is the segment-
+  embeddings stage)
+- AST + PaSST ensemble instruments: 10s windows tiled across the WHOLE
+  track, max per label (ensemble_instruments.tag_full_track)
 
 Operates on tracks (one analysis per track), using the analysis source media file.
 """
 
 import logging
+import subprocess
 from typing import Any, Dict, List, Optional
 
 import librosa
@@ -53,6 +62,60 @@ _MAJOR_PROFILE = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09,
 _MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53,
                             2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
 _KEY_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
+def load_full_track_48k(local_path: str) -> np.ndarray:
+    """Decode the whole file to 48kHz mono float32 via ffmpeg — one decode
+    path shared by the scanner and backfills so scores stay comparable.
+    ffmpeg outruns audioread severalfold on mp3 (which has no seek table and
+    must be decoded sequentially anyway)."""
+    cmd = ["ffmpeg", "-v", "error", "-i", local_path,
+           "-ac", "1", "-ar", "48000", "-f", "f32le", "pipe:1"]
+    out = subprocess.run(cmd, capture_output=True, check=True, timeout=300).stdout
+    audio = np.frombuffer(out, dtype=np.float32).copy()
+    if not len(audio):
+        raise ValueError(f"ffmpeg produced no samples for {local_path}")
+    return audio
+
+
+def middle_segment(audio: np.ndarray, sr: int, seconds: float) -> np.ndarray:
+    n = int(seconds * sr)
+    if len(audio) <= n:
+        return audio
+    start = (len(audio) - n) // 2
+    return audio[start:start + n]
+
+
+def amplitude_features(y: np.ndarray, sr: int) -> Dict[str, Any]:
+    """RMS/dynamic-range/brightness/zcr block, shared by the scanner and the
+    full-track backfill so both produce methodologically identical values.
+    brightness (centroid/nyquist) and zcr are SR-relative — callers must pass
+    the same 22050Hz signal the scanner has always used, or historic values
+    stop being comparable. Frame-wise stats over the WHOLE given signal: mean
+    for level/spectral features, p95-p5 for dynamic range (a mean would
+    erase exactly the quiet-intro-vs-loud-climax spread it measures)."""
+    features: Dict[str, Any] = {}
+
+    rms = librosa.feature.rms(y=y)[0]
+    features["energy"] = round(float(np.mean(rms)), 6)
+    rms_db = librosa.amplitude_to_db(rms)
+    features["energy_db"] = round(float(np.mean(rms_db)), 2)
+
+    if len(rms_db) > 1:
+        features["dynamic_range_db"] = round(
+            float(np.percentile(rms_db, 95) - np.percentile(rms_db, 5)), 2
+        )
+    else:
+        features["dynamic_range_db"] = 0.0
+
+    spectral_centroid = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
+    nyquist = sr / 2.0
+    features["brightness"] = round(float(np.mean(spectral_centroid) / nyquist), 4)
+
+    zcr = librosa.feature.zero_crossing_rate(y)[0]
+    features["zero_crossing_rate"] = round(float(np.mean(zcr)), 6)
+
+    return features
 
 
 class AudioAnalyzer:
@@ -113,30 +176,6 @@ class AudioAnalyzer:
 
         logger.info(f"Pre-encoded {sum(len(v) for v in label_sets.values())} text labels")
 
-    # --- Audio loading ---
-
-    def _load_middle_segment(self, file_path: str, sr: int, total_duration: float = None) -> Optional[np.ndarray]:
-        """Load the middle N seconds of an audio file at given sample rate.
-
-        When total_duration is known (from DB), uses librosa's offset/duration
-        to decode only the needed segment — avoids loading entire hi-res files
-        (DSD/192kHz can be 200+ MB per file).
-        """
-        try:
-            offset = 0.0
-            load_duration = None
-
-            if total_duration and total_duration > self.duration:
-                offset = (total_duration - self.duration) / 2.0
-                load_duration = float(self.duration)
-
-            audio, _ = librosa.load(file_path, sr=sr, mono=True,
-                                    offset=offset, duration=load_duration)
-            return audio
-        except Exception as e:
-            logger.error(f"Failed to load audio {file_path} at {sr}Hz: {e}")
-            return None
-
     # --- librosa DSP features ---
 
     def _detect_key(self, y: np.ndarray, sr: int) -> Dict[str, Any]:
@@ -172,44 +211,26 @@ class AudioAnalyzer:
             "key_confidence": round(float(confidence), 3),
         }
 
-    def _extract_librosa_features(self, y: np.ndarray, sr: int) -> Dict[str, Any]:
-        """Extract all librosa DSP features from audio."""
+    def _extract_tempo_key(self, y: np.ndarray, sr: int) -> Dict[str, Any]:
+        """BPM + key/mode — callers pass the middle segment, not the whole
+        track (see the module docstring)."""
         features = {}
 
-        # BPM
         tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
         # librosa may return an array; extract scalar
         if hasattr(tempo, '__len__'):
             tempo = float(tempo[0]) if len(tempo) > 0 else 0.0
         features["bpm"] = round(float(tempo), 2) if tempo > 0 else None
 
-        # Key detection
-        key_info = self._detect_key(y, sr)
-        features.update(key_info)
+        features.update(self._detect_key(y, sr))
+        return features
 
-        # Energy (RMS)
-        rms = librosa.feature.rms(y=y)[0]
-        features["energy"] = round(float(np.mean(rms)), 6)
-        rms_db = librosa.amplitude_to_db(rms)
-        features["energy_db"] = round(float(np.mean(rms_db)), 2)
-
-        # Dynamic range (95th - 5th percentile in dB)
-        if len(rms_db) > 1:
-            features["dynamic_range_db"] = round(
-                float(np.percentile(rms_db, 95) - np.percentile(rms_db, 5)), 2
-            )
-        else:
-            features["dynamic_range_db"] = 0.0
-
-        # Brightness (spectral centroid normalized to 0-1)
-        spectral_centroid = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
-        nyquist = sr / 2.0
-        features["brightness"] = round(float(np.mean(spectral_centroid) / nyquist), 4)
-
-        # Zero-crossing rate
-        zcr = librosa.feature.zero_crossing_rate(y)[0]
-        features["zero_crossing_rate"] = round(float(np.mean(zcr)), 6)
-
+    def _librosa_features(self, y22_full: np.ndarray) -> Dict[str, Any]:
+        """Tempo/key from the middle segment + amplitude block from the whole
+        given 22050Hz signal."""
+        y_mid = middle_segment(y22_full, self.librosa_sr, self.duration)
+        features = self._extract_tempo_key(y_mid, self.librosa_sr)
+        features.update(amplitude_features(y22_full, self.librosa_sr))
         return features
 
     # --- CLAP zero-shot classification ---
@@ -235,12 +256,14 @@ class AudioAnalyzer:
 
         return {label: round(float(prob), 3) for label, prob in zip(labels, probs)}
 
-    def _extract_clap_features(self, audio_48k: np.ndarray) -> Dict[str, Any]:
-        """CLAP moods/vocal/dance + AST+PaSST ensemble instruments."""
+    def _extract_clap_features(self, audio_full_48k: np.ndarray) -> Dict[str, Any]:
+        """CLAP moods/vocal/dance (middle segment) + AST+PaSST ensemble
+        instruments (whole track, windowed max)."""
         from device import autocast, cast_inputs
+        audio_mid = middle_segment(audio_full_48k, self.clap_sr, self.duration)
         # Encode audio
         inputs = self.processor(
-            audio=[audio_48k],
+            audio=[audio_mid],
             sampling_rate=self.clap_sr,
             return_tensors="pt",
             padding=True,
@@ -278,7 +301,7 @@ class AudioAnalyzer:
         )
 
         # Instruments via AST + PaSST ensemble (native multi-label)
-        features["instruments"] = self.ensemble.tag(audio_48k)
+        features["instruments"] = self.ensemble.tag_full_track(audio_full_48k)
 
         return features
 
@@ -293,7 +316,7 @@ class AudioAnalyzer:
 
         # Phase 1: librosa DSP — resample to 22kHz in memory (fast)
         y_librosa = librosa.resample(audio, orig_sr=sr, target_sr=self.librosa_sr)
-        features.update(self._extract_librosa_features(y_librosa, self.librosa_sr))
+        features.update(self._librosa_features(y_librosa))
         del y_librosa
 
         # Phase 2: CLAP zero-shot (audio already at 48kHz if sr matches)
@@ -310,43 +333,29 @@ class AudioAnalyzer:
     def analyze_track(self, file_path: str) -> Optional[Dict[str, Any]]:
         """
         Full analysis pipeline for a single audio file.
-        Phase 1: librosa DSP at 22kHz (CPU)
-        Phase 2: CLAP zero-shot at 48kHz (GPU)
+        Phase 1: whole-track decode + librosa DSP (CPU)
+        Phase 2: CLAP zero-shot + windowed ensemble (GPU)
         """
-        features = {}
-
-        # Phase 1: librosa
-        y_librosa = self._load_middle_segment(file_path, self.librosa_sr)
-        if y_librosa is None:
+        try:
+            y_48k = load_full_track_48k(file_path)
+        except Exception as e:
+            logger.error(f"Failed to load audio {file_path}: {e}")
             return None
-
-        features.update(self._extract_librosa_features(y_librosa, self.librosa_sr))
-        del y_librosa  # free memory before loading at 48kHz
-
-        # Phase 2: CLAP zero-shot (only if model is loaded)
-        if self.model is not None:
-            y_clap = self._load_middle_segment(file_path, self.clap_sr)
-            if y_clap is not None:
-                clap_features = self._extract_clap_features(y_clap)
-                features.update(clap_features)
-                del y_clap
-            else:
-                logger.warning(f"CLAP audio load failed for {file_path}, librosa features only")
-
-        return features
+        return self.analyze_from_array(y_48k, sr=self.clap_sr)
 
     def _extract_clap_features_batch(
         self, audio_arrays: List[np.ndarray]
     ) -> List[Dict[str, Any]]:
         """CLAP moods/vocal/dance for a batch + AST+PaSST per-track ensemble.
 
-        CLAP runs batched (single GPU pass for N tracks); the ensemble is
-        invoked per-track since AST/PaSST are cheap enough (~200 ms each)
-        and keeping the batch loader simple matters more than micro-gains.
+        audio_arrays hold WHOLE tracks: CLAP encodes their middle segments in
+        one batched GPU pass; the ensemble tags each full track with windowed
+        max (its windows are batched internally).
         """
         from device import autocast, cast_inputs
+        mids = [middle_segment(a, self.clap_sr, self.duration) for a in audio_arrays]
         inputs = self.processor(
-            audio=audio_arrays,
+            audio=mids,
             sampling_rate=self.clap_sr,
             return_tensors="pt",
             padding=True,
@@ -383,22 +392,20 @@ class AudioAnalyzer:
                 dance_probs.get("highly danceable music with strong beat", 0.5), 3
             )
 
-            features["instruments"] = self.ensemble.tag(audio_48k)
+            features["instruments"] = self.ensemble.tag_full_track(audio_48k)
 
             results.append(features)
 
         return results
 
     def _load_and_extract_librosa(self, file_path: str, duration_seconds: float = None) -> Optional[Dict]:
-        """Load audio + extract librosa features (I/O + CPU). Thread-safe."""
+        """Load the whole track + extract librosa features (I/O + CPU).
+        Thread-safe."""
         try:
             local_path = settings.translate_to_local_path(file_path)
-            y_48k = self._load_middle_segment(local_path, self.clap_sr, total_duration=duration_seconds)
-            if y_48k is None:
-                return None
-
+            y_48k = load_full_track_48k(local_path)
             y_librosa = librosa.resample(y_48k, orig_sr=self.clap_sr, target_sr=self.librosa_sr)
-            librosa_features = self._extract_librosa_features(y_librosa, self.librosa_sr)
+            librosa_features = self._librosa_features(y_librosa)
             del y_librosa
 
             return {"audio_48k": y_48k, "librosa_features": librosa_features}
@@ -500,12 +507,29 @@ class AudioAnalyzer:
             logger.info(f"Analyzing {total} tracks (librosa_only={librosa_only}, "
                         f"prefetch={prefetch_workers}, clap_batch={clap_batch_size})")
 
-            # Process in batches: prefetch + librosa in threads, CLAP on GPU
+            # Process in batches: prefetch + librosa in threads, CLAP on GPU.
+            # Batches are cut by BOTH row count and total audio duration —
+            # whole tracks are held decoded in RAM for the batch, and 16
+            # Schulze-length pieces at once would be ~14GB.
+            batch_budget_seconds = 40 * 60
+            batches = []
+            cur, cur_seconds = [], 0.0
+            for row in rows:
+                dur = float(row.duration_seconds) if row.duration_seconds else 300.0
+                if cur and (len(cur) >= clap_batch_size
+                            or cur_seconds + dur > batch_budget_seconds):
+                    batches.append(cur)
+                    cur, cur_seconds = [], 0.0
+                cur.append(row)
+                cur_seconds += dur
+            if cur:
+                batches.append(cur)
+
             pbar = tqdm(total=total, desc="Analyzing audio", unit="track")
             # Single thread pool for all batches (avoid 2000+ pool creations)
             _io_pool = ThreadPoolExecutor(max_workers=prefetch_workers)
 
-            for batch_start in range(0, total, clap_batch_size):
+            for batch_rows in batches:
                 if cancel_flag and cancel_flag():
                     logger.info("Audio analysis cancelled by user")
                     break
@@ -515,8 +539,6 @@ class AudioAnalyzer:
                     if elapsed >= max_duration_seconds:
                         logger.info(f"Time limit reached ({elapsed:.1f}s), stopping")
                         break
-
-                batch_rows = rows[batch_start:batch_start + clap_batch_size]
 
                 # Phase 1: parallel load + librosa (I/O + CPU)
                 prepared = []  # (row, librosa_features, audio_48k)
