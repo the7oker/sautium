@@ -82,14 +82,17 @@ DEFAULT_THRESHOLD = 0.10
 # The single source of truth for every instruments reader (discovery
 # engine, search filters, MCP/CLI display, DJ prompt). Labels not
 # listed here use DEFAULT_THRESHOLD.
+#
+# Recalibrated 2026-07-03 on the FULL-TRACK backfill (windowed max).
+# Whole-track coverage removed the vocal-masking that once forced a
+# lowered saxophone threshold (vocal "Careless Whisper" 0.111 -> 0.63,
+# "Smooth Operator" 0 -> 0.116): saxophone is back on the default, its
+# 0.10-0.15 band spot-checked 10/10 clean.
 INSTRUMENT_THRESHOLDS: Dict[str, float] = {
-    # Vocals suppress the class hard: vocal "Careless Whisper" scores
-    # 0.105-0.111 vs 0.342 on the instrumental mix of the same song.
-    # 0.08 keeps the canonical vocal versions plus "Us And Them" (0.09);
-    # the 0.08-0.10 band spot-checked clean (big bands, sax-led acts)
-    # while 0.05-0.08 already mixes in brass confusion. Calibrated
-    # 2026-07-02 on the full raw-score backfill.
-    "saxophone": 0.08,
+    # Synth pads/arpeggios read as accordion (Annie Lennox 0.15, Schulze
+    # 0.24): the 0.10-0.25 band is ~half noise. Real bandoneon/accordion
+    # (Gotan Project, Paul Mauriat) sits at the top of it.
+    "accordion": 0.25,
 }
 
 
