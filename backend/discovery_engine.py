@@ -762,8 +762,11 @@ def _bind_params(tools, active: dict) -> dict:
             p["instruments"] = labels
             p["instruments_thr"] = json.dumps({lbl: threshold_for(lbl) for lbl in labels})
         elif tool.key == "energy":
-            # energy_db buckets (mirror routers/discovery.ENERGY_BUCKETS)
-            buckets = {"low": (-100.0, -25.0), "mid": (-25.0, -15.0), "high": (-15.0, 0.0)}
+            # energy_db buckets — terciles of the full-track amplitude
+            # distribution (p33/p67 = -18.9/-13.9 measured 2026-07-03 after
+            # the whole-track backfill; the old -25/-15 middle-30s bounds
+            # left "low" with 7.6% of the library)
+            buckets = {"low": (-100.0, -19.0), "mid": (-19.0, -14.0), "high": (-14.0, 0.0)}
             p["energy_lo"], p["energy_hi"] = buckets.get(v, (-100.0, 0.0))
         elif tool.key == "seed":
             from db_pool import db_query_one
