@@ -21,7 +21,7 @@ from typing import Optional, List
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, Numeric, BigInteger, Float,
     Boolean, ForeignKey, CheckConstraint, Index, ARRAY, UniqueConstraint,
-    LargeBinary, func, text, event,
+    LargeBinary, SmallInteger, func, text, event,
 )
 from sqlalchemy.dialects.postgresql import BYTEA, ENUM, JSONB, UUID
 from sqlalchemy.ext.declarative import declarative_base
@@ -628,6 +628,29 @@ class Embedding(Base):
 
     def __repr__(self):
         return f"<Embedding(id={self.id}, track_id={self.track_id})>"
+
+
+class EmbeddingSegment(Base):
+    """Windowed CLAP segment embedding. segment_index addresses the canonical
+    10s grid (window i covers [i*10s, i*10s+10s)), so sampling strategies of
+    any density write compatible, top-uppable subsets of one grid. The
+    track-level Embedding row stays the materialized mean of these."""
+    __tablename__ = "embedding_segments"
+
+    id = Column(Integer, primary_key=True)
+    vector = Column(Vector(512), nullable=False)
+    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    segment_index = Column(SmallInteger, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("track_id", "model_id", "segment_index",
+                         name="uq_embedding_segments"),
+    )
+
+    def __repr__(self):
+        return f"<EmbeddingSegment(track_id={self.track_id}, i={self.segment_index})>"
 
 
 class TextEmbedding(Base):

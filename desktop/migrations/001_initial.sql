@@ -436,6 +436,22 @@ CREATE TABLE IF NOT EXISTS embeddings (
     UNIQUE (track_id, model_id)
 );
 
+-- Windowed CLAP segment embeddings (Stage 2 of the analysis refactor).
+-- segment_index addresses the CANONICAL 10s grid: window i covers
+-- [i*10s, i*10s+10s) from the track start, so sampling strategies of any
+-- density (economy/balanced/thorough, "deepen this artist") write
+-- compatible, top-uppable subsets of the same grid. The track-level
+-- embeddings row stays the materialized mean of these segments.
+CREATE TABLE IF NOT EXISTS embedding_segments (
+    id SERIAL PRIMARY KEY,
+    vector vector(512) NOT NULL,
+    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    segment_index SMALLINT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (track_id, model_id, segment_index)
+);
+
 CREATE TABLE IF NOT EXISTS text_embeddings (
     id SERIAL PRIMARY KEY,
     vector vector(1024) NOT NULL,
