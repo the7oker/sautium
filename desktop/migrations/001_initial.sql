@@ -1213,6 +1213,17 @@ CREATE TABLE IF NOT EXISTS user_profile (
 INSERT INTO user_profile (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 ALTER TABLE user_profile ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- Birth certificates issued by THIS node when it is the master authority
+-- (backend/birth_authority.py): the signed statement "the network first saw
+-- this identity at born_at". Issuance is idempotent — the first row wins and
+-- recreating an account on another device never changes the birth date.
+CREATE TABLE IF NOT EXISTS birth_certificates (
+    pubkey CHAR(64) PRIMARY KEY,       -- hex Ed25519 public key (raw 32B)
+    born_at TIMESTAMPTZ NOT NULL,
+    signature CHAR(128) NOT NULL,      -- hex Ed25519 signature by the master
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Peer profile fields, populated from the sync handshake. Avatar is
 -- referenced into the covers table — same blob-cache pattern as
 -- artist photos, so it survives peer offline and stays under our TLS.

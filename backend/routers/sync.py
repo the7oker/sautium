@@ -38,6 +38,34 @@ class PullRequest(BaseModel):
     uuids: list[str] = Field(default_factory=list, max_length=10000)
 
 
+class BirthCertRequest(BaseModel):
+    pubkey: str = Field(min_length=64, max_length=64)
+
+
+@router.post("/birth-certificate")
+async def birth_certificate(req: BirthCertRequest) -> dict:
+    """Issue (or return the existing) birth certificate for an identity.
+
+    Idempotent by design: the first request anchors born_at, every later
+    request returns the same signed statement — recreating an account on
+    another device never changes the birth date. Only the master authority
+    can sign; any other node answers 404 and the caller falls back to
+    certificate import / relay.
+    """
+    from birth_authority import issue_certificate
+    from db_pool import get_conn
+
+    try:
+        with get_conn() as conn:
+            cert = issue_certificate(conn, req.pubkey)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    if cert is None:
+        raise HTTPException(status_code=404,
+                            detail="this node is not the master authority")
+    return cert
+
+
 # ---------------------------------------------------------------------------
 # Inventory endpoint
 # ---------------------------------------------------------------------------
