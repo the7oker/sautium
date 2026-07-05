@@ -3,7 +3,9 @@ Audio embedding generation using CLAP model.
 Generates 512-dimensional audio embeddings for tracks using laion/clap-htsat-unfused.
 
 Uses the analysis source media file (is_analysis_source=TRUE) for each track.
-One embedding per track, not per file.
+Per track: the track-level embedding (search vector; becomes the materialized
+mean of segments after the Stage-2b flip) + windowed segment embeddings on
+the canonical 10s grid (embedding_segments).
 """
 
 import logging
@@ -17,12 +19,44 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 from tqdm import tqdm
 
+from audio_analysis import load_full_track_48k
 from config import settings
 from database import get_db_context
 from models import Embedding, EmbeddingModel, Track, MediaFile
 from uuid_utils import embedding_model_uuid
 
 logger = logging.getLogger(__name__)
+
+
+# ── Canonical segment grid ──────────────────────────────────────────────────
+# Window i covers [i*10s, i*10s+10s) from the track start. Every sampling
+# density (balanced default, full research grid, "deepen this artist") writes
+# a compatible, top-uppable SUBSET of this one grid — an absent index always
+# means "not analyzed", which the done-predicates rely on.
+
+WINDOW_SECONDS = 10
+
+
+def balanced_k(duration_seconds: float) -> int:
+    """Windows needed for a portrait within 0.99 cosine of the full-grid
+    centroid for >=99% of tracks — measured on a 303-track stratified
+    experiment 2026-07-04 (constant-concentration and variance-adaptive
+    strategies both measured worse at equal cost)."""
+    if duration_seconds <= 480:
+        return 12
+    if duration_seconds <= 1200:
+        return 16
+    return 24
+
+
+def segment_grid_indices(duration_seconds: float, full: bool = False) -> list:
+    """Evenly spaced canonical-grid indices (first window at the track start,
+    last at the end); the whole grid when full=True."""
+    n = max(1, int(duration_seconds) // WINDOW_SECONDS)
+    if full:
+        return list(range(n))
+    k = balanced_k(duration_seconds)
+    return np.unique(np.linspace(0, n - 1, min(k, n)).round().astype(int)).tolist()
 
 
 class AudioEmbeddingGenerator:
@@ -32,12 +66,10 @@ class AudioEmbeddingGenerator:
         self,
         model_name: Optional[str] = None,
         batch_size: Optional[int] = None,
-        sample_duration: Optional[int] = None,
         device: Optional[str] = None,
     ):
         self.model_name = model_name or settings.embedding_model
         self.batch_size = batch_size or settings.embedding_batch_size
-        self.sample_duration = sample_duration or settings.audio_sample_duration
         self.sample_rate = 48000  # CLAP expects 48kHz
 
         from device import get_device
@@ -83,35 +115,12 @@ class AudioEmbeddingGenerator:
 
         return text_features[0].cpu().numpy()
 
-    def _load_audio(self, file_path: str, duration_seconds: float = None) -> Optional[np.ndarray]:
-        """
-        Load audio file and extract middle segment.
-
-        Loads at 48kHz mono. Only decodes the middle `sample_duration` seconds
-        using librosa's offset/duration params to avoid reading the entire file.
-        Short tracks (<sample_duration) are used as-is.
-
-        Args:
-            file_path: Path to audio file.
-            duration_seconds: Total track duration (from DB) to calculate offset
-                without reading the full file. If None, loads entire file.
-        """
+    def _load_audio(self, file_path: str) -> Optional[np.ndarray]:
+        """Load the WHOLE track at 48kHz mono (shared scanner decode path) —
+        segments cover the full canonical grid; the track-level vector's
+        middle window is sliced from the same array."""
         try:
-            offset = 0.0
-            load_duration = None
-
-            if duration_seconds and duration_seconds > self.sample_duration:
-                # Only decode the middle segment — massive I/O savings
-                offset = (duration_seconds - self.sample_duration) / 2.0
-                load_duration = float(self.sample_duration)
-
-            audio, sr = librosa.load(
-                file_path, sr=self.sample_rate, mono=True,
-                offset=offset, duration=load_duration,
-            )
-
-            return audio
-
+            return load_full_track_48k(file_path)
         except Exception as e:
             logger.error(f"Failed to load audio {file_path}: {e}")
             return None
@@ -181,6 +190,35 @@ class AudioEmbeddingGenerator:
             db.flush()
             logger.info(f"Created embedding model record: {self.model_name}")
         return em
+
+    def _save_segments(self, db: Session, track_id, model: EmbeddingModel,
+                       indices, vectors) -> None:
+        for i, v in zip(indices, vectors):
+            db.execute(sa_text("""
+                INSERT INTO embedding_segments (track_id, model_id, segment_index, vector)
+                VALUES (:tid, :mid, :idx, CAST(:vec AS vector))
+                ON CONFLICT (track_id, model_id, segment_index)
+                DO UPDATE SET vector = EXCLUDED.vector
+            """), {"tid": str(track_id), "mid": str(model.id),
+                   "idx": int(i), "vec": str(v.tolist())})
+
+    def _generate_segments(self, db: Session, track_id, model: EmbeddingModel,
+                           audio_full: np.ndarray) -> Optional[np.ndarray]:
+        """Balanced-grid segment embeddings for one track from its already
+        decoded audio; windows of one track are encoded as one batch.
+        Returns the normalized mean of the segment vectors — the track-level
+        portrait (deterministic, whole-track; replaces the old random-crop
+        middle-window vector) — or None on failure."""
+        duration = len(audio_full) / self.sample_rate
+        idxs = segment_grid_indices(duration)
+        step = self.sample_rate * WINDOW_SECONDS
+        windows = [audio_full[i * step:(i + 1) * step] for i in idxs]
+        vecs = self._generate_batch_embeddings(windows)
+        if vecs is None:
+            return None
+        self._save_segments(db, track_id, model, idxs, vecs)
+        mean = vecs.mean(axis=0)
+        return mean / np.linalg.norm(mean)
 
     @staticmethod
     def _quality_score(bit_depth, is_lossless) -> int:
@@ -311,8 +349,7 @@ class AudioEmbeddingGenerator:
             # CPU threads decode batch N+1 while GPU processes batch N
             def _load_one(row):
                 local_path = settings.translate_to_local_path(row.file_path)
-                dur = float(row.duration_seconds) if row.duration_seconds else None
-                return row, self._load_audio(local_path, duration_seconds=dur)
+                return row, self._load_audio(local_path)
 
             def _load_batch(batch_rows):
                 """Load audio for a batch using thread pool. Returns (valid_rows, audio_arrays, failed_count)."""
@@ -330,8 +367,21 @@ class AudioEmbeddingGenerator:
                         logger.warning(f"Skipping track {row.track_id}: audio load failed")
                 return valid_rows, audio_arrays, failed
 
-            # Split into batch slices
-            batch_slices = [rows[i:i + self.batch_size] for i in range(0, total, self.batch_size)]
+            # Split into batch slices — bounded by BOTH row count and total
+            # audio duration: whole tracks are held decoded in RAM per batch,
+            # and a batch of Schulze-length pieces would be gigabytes.
+            batch_budget_seconds = 40 * 60
+            batch_slices, cur, cur_seconds = [], [], 0.0
+            for row in rows:
+                dur = float(row.duration_seconds) if row.duration_seconds else 300.0
+                if cur and (len(cur) >= self.batch_size
+                            or cur_seconds + dur > batch_budget_seconds):
+                    batch_slices.append(cur)
+                    cur, cur_seconds = [], 0.0
+                cur.append(row)
+                cur_seconds += dur
+            if cur:
+                batch_slices.append(cur)
             num_batches = len(batch_slices)
 
             # Persistent I/O thread pool (16 workers for i9-14900HX)
@@ -368,35 +418,24 @@ class AudioEmbeddingGenerator:
                     if not audio_arrays:
                         continue
 
-                    # Generate embeddings on GPU (next batch loads in parallel!)
-                    embeddings = self._generate_batch_embeddings(audio_arrays)
-
-                    if embeddings is None:
-                        logger.warning("Batch failed, falling back to single processing")
-                        for audio, row in zip(audio_arrays, valid_rows):
-                            single = self._generate_batch_embeddings([audio])
-                            if single is not None:
-                                self._save_embedding(
-                                    db, row.track_id, single[0], embedding_model,
-                                    source_media_file_id=row.media_file_id,
-                                    source_bit_depth=row.bit_depth,
-                                    source_sample_rate=row.sample_rate,
-                                    source_is_lossless=row.is_lossless,
-                                )
-                                stats["success"] += 1
-                            else:
-                                stats["failed"] += 1
-                                logger.error(f"Failed single embedding for track {row.track_id}")
-                    else:
-                        for row, vector in zip(valid_rows, embeddings):
-                            self._save_embedding(
-                                db, row.track_id, vector, embedding_model,
-                                source_media_file_id=row.media_file_id,
-                                source_bit_depth=row.bit_depth,
-                                source_sample_rate=row.sample_rate,
-                                source_is_lossless=row.is_lossless,
-                            )
-                            stats["success"] += 1
+                    # Per track: balanced-grid segments (one batched GPU pass
+                    # per track) → the track-level vector is their normalized
+                    # mean. Next batch decodes in parallel with the GPU work.
+                    for row, audio in zip(valid_rows, audio_arrays):
+                        portrait = self._generate_segments(db, row.track_id,
+                                                           embedding_model, audio)
+                        if portrait is None:
+                            stats["failed"] += 1
+                            logger.error(f"Failed embedding for track {row.track_id}")
+                            continue
+                        self._save_embedding(
+                            db, row.track_id, portrait, embedding_model,
+                            source_media_file_id=row.media_file_id,
+                            source_bit_depth=row.bit_depth,
+                            source_sample_rate=row.sample_rate,
+                            source_is_lossless=row.is_lossless,
+                        )
+                        stats["success"] += 1
 
                     db.commit()
             finally:

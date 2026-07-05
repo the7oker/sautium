@@ -105,18 +105,22 @@ class PreviewEnricher:
             return
 
         embedder, analyzer = self._models()
-        mid = self._middle(audio, 48000, float(settings.audio_sample_duration))
-
-        vec = embedder._generate_batch_embeddings([mid])     # (1, 512) L2-normed | None
-        feats = analyzer.analyze_from_array(mid, sr=48000)    # dict | None
+        # Full-track methodology, same as owned scans: amplitude block +
+        # windowed instruments over the whole streamed audio, bpm/key from
+        # its middle (analyze_from_array slices that itself).
+        feats = analyzer.analyze_from_array(audio, sr=48000)   # dict | None
 
         from sqlalchemy import text
 
         with SessionLocal() as db:
-            if vec is not None and len(vec):
-                model = embedder._get_or_create_embedding_model(db)
+            model = embedder._get_or_create_embedding_model(db)
+            # Balanced-grid segments from the full streamed audio (a later
+            # owned-file scan upserts the same canonical indices with the
+            # real-file vectors); the track vector is their normalized mean.
+            portrait = embedder._generate_segments(db, track_id, model, audio)
+            if portrait is not None:
                 embedder._save_embedding(
-                    db, track_id, vec[0], model,
+                    db, track_id, portrait, model,
                     source_media_file_id=None, source_bit_depth=None,
                     source_sample_rate=48000, source_is_lossless=lossless,
                     is_preview=True,
@@ -135,7 +139,7 @@ class PreviewEnricher:
         self._empty_cache()
         preview_events.ping()   # features committed → open album page re-fetches key·bpm
         logger.info("preview enriched %s (embedding=%s features=%s)",
-                    track_id, vec is not None, bool(feats))
+                    track_id, portrait is not None, bool(feats))
 
     @staticmethod
     def _save_features(db, track_id: str, feats: dict, lossless: bool) -> None:
@@ -165,14 +169,6 @@ class PreviewEnricher:
                 source_sample_rate=48000, source_is_lossless=lossless,
                 **{k: feats.get(k) for k in cols},
             ))
-
-    @staticmethod
-    def _middle(audio: np.ndarray, sr: int, seconds: float) -> np.ndarray:
-        n = int(seconds * sr)
-        if len(audio) <= n:
-            return audio
-        start = (len(audio) - n) // 2
-        return audio[start:start + n]
 
     def _models(self):
         # Lazy: load the singletons on first preview (CLAP + AST/PaSST). Reused
