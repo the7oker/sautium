@@ -10,6 +10,7 @@ Identity is derived in-memory at startup (no files saved).
 
 import hashlib
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,11 @@ ARGON2_TIME_COST = 4
 ARGON2_MEMORY_COST = 262144  # 256 MB
 ARGON2_PARALLELISM = 2
 ARGON2_HASH_LEN = 32
+
+# Mirrors desktop/node_identity.USERNAME_RE and worker/verify.js — the
+# username is embedded in invite codes and Worker KV keys, so it must stay
+# URL/CLI-safe at every identity-creation boundary.
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
 
 
 def derive_identity(username: str, password: str, email: str = "") -> dict:
@@ -29,6 +35,10 @@ def derive_identity(username: str, password: str, email: str = "") -> dict:
     from argon2.low_level import hash_secret_raw, Type
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives import serialization
+
+    if not USERNAME_RE.match(username):
+        raise ValueError(
+            "P2P username must be 3-32 characters: letters, digits, '-' or '_'")
 
     # Derive seed (same algorithm as desktop)
     salt = f"{username}:sautium".encode("utf-8")

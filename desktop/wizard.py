@@ -145,16 +145,26 @@ class SetupWizard(ctk.CTkToplevel):
 
     def _validate_step(self) -> bool:
         if self.current_step == 1:  # Account
-            # Phase 2: verify email code
+            # Phase 2: verify email code (the Worker holds the expected
+            # value — registration happens right here, with the birth
+            # certificate attached by register_verified_email)
             if getattr(self, "_account_verify_phase", False):
                 code = self._verify_code_var.get().strip().upper()
                 if not code:
                     self._account_error.configure(text="Enter the code from email")
                     return False
-                if code != self._account_verify_code:
-                    self._account_error.configure(text="Invalid code")
+                self._account_error.configure(
+                    text="Verifying code...", text_color="gray"
+                )
+                self.update()
+                from desktop.p2p.email_verify import register_verified_email
+                acct = self.config["_account"]
+                if not register_verified_email(
+                    self._account_email_val, code,
+                    acct["username"], acct["password"],
+                ):
+                    self._account_error.configure(text="Invalid or expired code")
                     return False
-                # Verified!
                 self.config["_account"]["email"] = self._account_email_val
                 self.config["_account"]["email_verified"] = True
                 self._account_verify_phase = False
@@ -188,10 +198,11 @@ class SetupWizard(ctk.CTkToplevel):
                 }
                 return True
 
-            if len(username) < 3:
-                self._account_error.configure(
-                    text="Username must be at least 3 characters"
-                )
+            from desktop.node_identity import validate_username
+            try:
+                validate_username(username)
+            except ValueError as e:
+                self._account_error.configure(text=str(e))
                 return False
 
             if not password:
@@ -225,7 +236,7 @@ class SetupWizard(ctk.CTkToplevel):
                 self.update()
 
                 from desktop.p2p.email_verify import (
-                    generate_code, send_verification_email,
+                    send_verification_email,
                     is_email_already_verified,
                 )
 
@@ -244,10 +255,10 @@ class SetupWizard(ctk.CTkToplevel):
                 )
                 self.update()
 
-                self._account_verify_code = generate_code()
                 sent = send_verification_email(
                     to_email=email,
-                    code=self._account_verify_code,
+                    username=username,
+                    password=password,
                     from_username=username,
                 )
                 if sent:
@@ -1355,14 +1366,17 @@ class SetupWizard(ctk.CTkToplevel):
                         f"Account created: {info['invite_code']}"
                     )
 
-                    # Register verified email on Worker (CA mapping)
-                    if account_data.get("email_verified") and account_data.get("email"):
-                        progress("Registering verified email...")
-                        from desktop.p2p.email_verify import register_verified_email
-                        if register_verified_email(account_data["email"]):
-                            logger.info("Email registered on Worker CA")
-                        else:
-                            logger.warning("Email registration on Worker failed")
+                    # Email registration already happened at code entry
+                    # (register_verified_email in phase 2). Fetch the birth
+                    # certificate — idempotent, so a recreated account gets
+                    # its original date back.
+                    progress("Fetching birth certificate...")
+                    from desktop.p2p.birth_cert import ensure_certificate
+                    if ensure_certificate() is None:
+                        logger.warning(
+                            "Birth certificate fetch failed (offline?) — "
+                            "will retry at P2P start"
+                        )
                 else:
                     progress("Generating node identity...")
                     from desktop.node_identity import (

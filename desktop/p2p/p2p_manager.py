@@ -104,6 +104,13 @@ class P2PManager:
         from desktop.node_identity import get_account_info
         account_info = get_account_info()
 
+        # Birth certificate: silent fetch when missing (idempotent issuance —
+        # a re-fetch after moving devices returns the original birth date;
+        # network failures degrade to None and are logged inside).
+        if account_info:
+            from desktop.p2p.birth_cert import ensure_certificate
+            ensure_certificate()
+
         backend_port = self.config.get("ports", {}).get("web", 0)
         self._sync_server = SyncServer(
             db_dsn=self.db_dsn,

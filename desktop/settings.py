@@ -99,6 +99,77 @@ class SettingsDialog(ctk.CTkToplevel):
             text_color="gray", font=ctk.CTkFont(size=11),
         ).pack(anchor="w", padx=10, pady=5)
 
+        # Identity — birth certificate transfer. The certificate is a public
+        # fact and re-fetchable from the Worker (idempotent issuance), so
+        # export/import is the offline fallback, not the primary path.
+        ctk.CTkLabel(tab, text="Identity", font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", pady=(12, 3)
+        )
+
+        self._cert_status = ctk.CTkLabel(
+            tab, text=self._cert_status_text(),
+            text_color="gray", font=ctk.CTkFont(size=11),
+        )
+        self._cert_status.pack(anchor="w", padx=10)
+
+        cert_btns = ctk.CTkFrame(tab, fg_color="transparent")
+        cert_btns.pack(fill="x", padx=10, pady=4)
+
+        ctk.CTkButton(
+            cert_btns, text="Export Birth Certificate…", width=200,
+            command=self._export_birth_cert,
+            fg_color="transparent", border_width=1,
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            cert_btns, text="Import…", width=90,
+            command=self._import_birth_cert,
+            fg_color="transparent", border_width=1,
+        ).pack(side="left")
+
+    def _cert_status_text(self) -> str:
+        from desktop.p2p.birth_cert import load_certificate
+        cert = load_certificate()
+        if cert:
+            return f"Birth certificate: born {cert['born_at']}"
+        return "Birth certificate: none (fetched automatically at P2P start)"
+
+    def _export_birth_cert(self):
+        from tkinter import filedialog
+
+        from desktop.p2p.birth_cert import export_certificate
+        path = filedialog.asksaveasfilename(
+            title="Export Birth Certificate",
+            defaultextension=".json",
+            initialfile="sautium_birth_certificate.json",
+            filetypes=[("JSON", "*.json")],
+        )
+        if not path:
+            return
+        ok = export_certificate(path)
+        self._cert_status.configure(
+            text="Certificate exported." if ok
+            else "Export failed — no certificate stored yet.",
+            text_color="#22c55e" if ok else "#ef4444",
+        )
+
+    def _import_birth_cert(self):
+        from tkinter import filedialog
+
+        from desktop.p2p.birth_cert import import_certificate
+        path = filedialog.askopenfilename(
+            title="Import Birth Certificate",
+            filetypes=[("JSON", "*.json")],
+        )
+        if not path:
+            return
+        ok = import_certificate(path)
+        self._cert_status.configure(
+            text=self._cert_status_text() if ok
+            else "Import failed — invalid certificate or wrong identity.",
+            text_color="#22c55e" if ok else "#ef4444",
+        )
+
     # ================================================================
     # Save
     # ================================================================

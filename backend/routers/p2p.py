@@ -7,10 +7,8 @@ Provides endpoints for account info, friend management, and messaging.
 import asyncio
 import json
 import logging
-import secrets
 import select
 import ssl
-import string
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -580,12 +578,28 @@ async def pending_accepts() -> Dict[str, Any]:
 
 # -- Email verification -------------------------------------------------------
 
-_pending_email_verify: dict = {}
+async def _get_own_birth_cert() -> Optional[dict]:
+    """This node's birth certificate from the Worker: public read first,
+    self-signed issuance when not yet issued. Verified before use."""
+    from birth_authority import verify_certificate
 
+    identity = _get_identity()
+    if not identity:
+        return None
+    pubkey = identity["public_key_hex"].lower()
 
-def _generate_verify_code(length: int = 6) -> str:
-    alphabet = string.ascii_uppercase + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(length))
+    cert = await _worker_get("/birth-certificate", {"pubkey": pubkey})
+    if not cert:
+        signature = _sign_message(f"birth:{pubkey}")
+        if not signature:
+            return None
+        cert = await _worker_post("/birth-certificate", {
+            "pubkey_hex": pubkey,
+            "signature": signature,
+        })
+    if cert and cert.get("pubkey") == pubkey and verify_certificate(cert):
+        return cert
+    return None
 
 
 @router.get("/email/status")
@@ -631,63 +645,65 @@ async def email_status() -> Dict[str, Any]:
 
 @router.post("/email/send-code")
 async def email_send_code() -> Dict[str, Any]:
-    """Generate and send a verification code to the configured P2P email."""
+    """Ask the Worker to generate and email a verification code.
+
+    The code exists only on the Worker (hash, 15 min TTL) — mailbox
+    ownership is proven server-side at /email/verify-code."""
     identity = _get_identity()
     if not identity or not identity.get("email"):
         raise HTTPException(400, "No email configured (set P2P_EMAIL in .env)")
 
     email = identity["email"]
-    code = _generate_verify_code()
+    invite_code = identity["invite_code"]
+    signature = _sign_message(f"sendcode:{invite_code}:{email}")
+    if not signature:
+        raise HTTPException(500, "Cannot sign request")
 
     result = await _worker_post("/send-verification", {
         "to": email,
-        "code": code,
+        "invite_code": invite_code,
+        "public_key_hex": identity["public_key_hex"],
+        "signature": signature,
         "from_username": identity["username"],
-        "invite_code": identity["invite_code"],
     })
 
     if not result or result.get("status") != "sent":
         raise HTTPException(502, "Failed to send verification email")
-
-    _pending_email_verify["code"] = code
-    _pending_email_verify["email"] = email
 
     return {"status": "sent", "email": email}
 
 
 @router.post("/email/verify-code")
 async def email_verify_code(req: VerifyCodeRequest) -> Dict[str, Any]:
-    """Verify entered code and register the email on the Worker."""
-    if not _pending_email_verify.get("code"):
-        raise HTTPException(400, "No verification in progress — send code first")
-
-    if req.code.strip().upper() != _pending_email_verify["code"]:
-        return {"verified": False, "error": "Invalid code"}
-
+    """Register the email on the Worker: it checks the entered code against
+    its stored hash and requires this node's birth certificate (the verified
+    record then carries born_at)."""
     identity = _get_identity()
-    if not identity:
-        raise HTTPException(500, "Identity not available")
+    if not identity or not identity.get("email"):
+        raise HTTPException(400, "No email configured")
 
-    email = _pending_email_verify["email"]
+    cert = await _get_own_birth_cert()
+    if cert is None:
+        raise HTTPException(502, "Birth certificate unavailable")
+
+    email = identity["email"]
     invite_code = identity["invite_code"]
-    public_key_hex = identity["public_key_hex"]
-
-    message = f"register:{invite_code}:{email}"
-    signature = _sign_message(message)
+    signature = _sign_message(f"register:{invite_code}:{email}")
     if not signature:
         raise HTTPException(500, "Cannot sign request")
 
     result = await _worker_post("/register-email", {
         "invite_code": invite_code,
         "email": email,
-        "public_key_hex": public_key_hex,
+        "public_key_hex": identity["public_key_hex"],
         "signature": signature,
+        "code": req.code.strip().upper(),
+        "birth_cert": cert,
     })
 
     if not result or result.get("status") != "registered":
-        raise HTTPException(502, "Failed to register email on verification server")
+        return {"verified": False, "error": "Invalid or expired code"}
 
-    _pending_email_verify.clear()
     # Persist so future /email/status checks return verified without a
     # Worker round-trip. Email-change and password-change flows (when
     # they land) must clear this flag.

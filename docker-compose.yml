@@ -118,9 +118,6 @@ services:
       # Self-signed TLS cert (generated on first start by entrypoint.py).
       # Persists across rebuilds so the phone doesn't need to re-accept it.
       - ./data/tls:/app/data/tls
-      # Master authority signing key (birth certificates). Generated once,
-      # gitignored, never derived from any password — see birth_authority.py.
-      - ./data/authority:/app/data/authority
       - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)
       # Mount music library as read-only
       # Windows path: E:\Music -> /music in container

@@ -9,9 +9,11 @@ certificate follows it either by re-requesting from the master (issuance
 is idempotent — same certificate comes back) or by this export/import
 path, which needs neither email nor connectivity.
 
-MASTER_PUBLIC_KEY_HEX and the payload format MIRROR
-backend/birth_authority.py — the launcher build cannot import backend
-modules. Update both together.
+Certificates are issued by the Cloudflare Worker (worker/verify.js) — the
+network's only always-on component. TRUSTED_AUTHORITIES and the payload
+format have THREE mirrors: this file, backend/birth_authority.py (launcher
+build cannot import backend modules) and worker/verify.js. Update all three
+together.
 """
 
 import json
@@ -21,7 +23,11 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-MASTER_PUBLIC_KEY_HEX = "a9f40f70a796926828d894d4384655963ae5bdce38d2c502ede75792552d33cd"
+# [0] is the active signing key (its private half is the Worker's
+# BIRTH_SIGNING_KEY secret); later entries would be co-authorities.
+TRUSTED_AUTHORITIES = [
+    "a9f40f70a796926828d894d4384655963ae5bdce38d2c502ede75792552d33cd",
+]
 
 CERT_VERSION = 1
 
@@ -31,20 +37,21 @@ def canonical_payload(pubkey_hex: str, born_at_iso: str) -> bytes:
 
 
 def verify_certificate(cert: dict,
-                       master_pubkey_hex: str = MASTER_PUBLIC_KEY_HEX) -> bool:
-    """Offline check that a certificate was signed by the master authority."""
+                       trusted: Optional[list] = None) -> bool:
+    """Offline check that a certificate was signed by a trusted authority."""
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     try:
-        if cert.get("v") != CERT_VERSION or cert.get("issuer") != master_pubkey_hex:
+        issuer = cert.get("issuer")
+        if cert.get("v") != CERT_VERSION or issuer not in (trusted or TRUSTED_AUTHORITIES):
             return False
         raw = bytes.fromhex(cert["pubkey"])
         if len(raw) != 32:
             return False
         Ed25519PublicKey.from_public_bytes(raw)
-        master = Ed25519PublicKey.from_public_bytes(bytes.fromhex(master_pubkey_hex))
-        master.verify(bytes.fromhex(cert["sig"]),
-                      canonical_payload(cert["pubkey"], cert["born_at"]))
+        authority = Ed25519PublicKey.from_public_bytes(bytes.fromhex(issuer))
+        authority.verify(bytes.fromhex(cert["sig"]),
+                         canonical_payload(cert["pubkey"], cert["born_at"]))
         return True
     except (InvalidSignature, KeyError, ValueError, TypeError):
         return False
@@ -107,3 +114,45 @@ def import_certificate(src_path: str) -> bool:
         logger.warning("birth cert import: unreadable file %s", src_path)
         return False
     return save_certificate(cert)
+
+
+def request_certificate(pubkey_hex: Optional[str] = None,
+                        sign_fn=None) -> Optional[dict]:
+    """Request (or idempotently re-fetch) a certificate from the Worker
+    authority. The request is signed by the subject key itself — only the
+    key's owner can trigger first issuance.
+
+    Defaults to this node's saved identity; pass pubkey_hex + sign_fn for a
+    derived-but-not-yet-saved identity (wizard flows). The verified result
+    is persisted next to the identity either way — the derivation is
+    deterministic, so the file stays valid after create_account()."""
+    if pubkey_hex is None:
+        from desktop.node_identity import get_account_info, sign_message
+        info = get_account_info()
+        if not info:
+            return None
+        pubkey_hex = info["public_key_hex"]
+        sign_fn = sign_message
+
+    pubkey = pubkey_hex.lower()
+    signature = sign_fn(f"birth:{pubkey}".encode("utf-8")).hex()
+
+    from desktop.p2p.email_verify import _post_worker
+    cert = _post_worker("/birth-certificate", {
+        "pubkey_hex": pubkey,
+        "signature": signature,
+    })
+    if not cert or cert.get("pubkey") != pubkey or not verify_certificate(cert):
+        logger.warning("birth cert request failed or returned invalid cert")
+        return None
+
+    _cert_path().write_text(json.dumps(cert, indent=2), encoding="utf-8")
+    logger.info("birth cert obtained (born_at=%s)", cert["born_at"])
+    return cert
+
+
+def ensure_certificate() -> Optional[dict]:
+    """This node's certificate: stored copy, or a silent fetch from the
+    Worker when missing (issuance is idempotent — a re-fetch after moving
+    devices returns the original birth date)."""
+    return load_certificate() or request_certificate()

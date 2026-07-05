@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import ssl
 import stat
 from pathlib import Path
@@ -129,6 +130,21 @@ def generate_identity() -> str:
 # Account identity (deterministic, portable)
 # ---------------------------------------------------------------------------
 
+# The username is embedded verbatim in the invite code (username#XXXX-…),
+# in Worker KV storage keys and in email templates. Restricting it to a
+# URL/CLI-safe alphabet at this boundary keeps every downstream format
+# unambiguous ('#' must appear exactly once in an invite code; ':' is the
+# KV key substitute for '#'). Mirrored by USERNAME_RE in worker/verify.js.
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
+
+
+def validate_username(username: str) -> None:
+    """Raise ValueError unless the username fits the network-wide format."""
+    if not USERNAME_RE.match(username):
+        raise ValueError(
+            "Username must be 3-32 characters: letters, digits, '-' or '_'")
+
+
 def derive_seed(username: str, password: str) -> bytes:
     """Derive 32-byte Ed25519 seed from username+password using Argon2id."""
     if not HAS_ARGON2:
@@ -150,6 +166,23 @@ def make_invite_code(username: str, public_key_raw: bytes) -> str:
     digest = hashlib.sha256(public_key_raw).digest()[:6]
     h = digest.hex().upper()
     return f"{username}#{h[:4]}-{h[4:8]}-{h[8:]}"
+
+
+def derive_account_identity(username: str, password: str):
+    """Derive (private_key, public_key_hex, invite_code) WITHOUT saving.
+
+    For wizard flows that must sign Worker requests (email verification,
+    birth-certificate issuance) before the account is persisted — the
+    derivation is deterministic, so the eventual create_account() yields
+    the same identity."""
+    validate_username(username)
+    seed = derive_seed(username, password)
+    private_key = Ed25519PrivateKey.from_private_bytes(seed)
+    pub_raw = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return private_key, pub_raw.hex(), make_invite_code(username, pub_raw)
 
 
 def parse_invite_code(invite_code: str) -> tuple[str, str]:
@@ -191,6 +224,7 @@ def create_account(
     if not HAS_CRYPTO:
         raise RuntimeError("cryptography package required")
 
+    validate_username(username)
     seed = derive_seed(username, password)
     private_key = Ed25519PrivateKey.from_private_bytes(seed)
     pub_raw = private_key.public_key().public_bytes(
