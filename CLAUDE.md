@@ -21,7 +21,7 @@ See:
 
 - **Python 3.11+** (best ML library support)
 - **FastAPI** backend (async)
-- **PostgreSQL 16 + pgvector** (vector similarity + relational data)
+- **PostgreSQL 15 + pgvector 0.8** (vector similarity + relational data; image `pgvector/pgvector:pg15` — the data volume is a PG15 datadir, keep the major)
 - **SQLAlchemy** ORM + `psycopg2` for raw SQL and batch operations
 - **Docker + Docker Compose** (WSL2 on Windows, native on macOS)
 - **NVIDIA RTX 4090** for GPU work (CLAP embeddings, BGE-M3 text encoding)

@@ -321,8 +321,11 @@ def discovery_search(
         return {"status": "ok", "results": [], "warming": warming}
     sql, params = built[target]
     with get_db_context() as db:
-        # pgvector 0.5 returns at most ef_search rows from an HNSW scan; the
-        # segment-KNN retrieve branch overscans to 1000 (see Source.knn).
+        # The segment-KNN retrieve branch overscans to 1000 rows (see Source.knn):
+        # ef_search must cover the LIMIT, and iterative_scan (pgvector 0.8+) keeps
+        # walking the graph when gates/floors filter the first wave — the exact
+        # ORDER BY in the branch re-sorts relaxed_order's stream anyway.
         db.execute(text("SET LOCAL hnsw.ef_search = 1000"))
+        db.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
         rows = db.execute(text(sql), params).fetchall()
     return {"status": "ok", "results": _SHAPERS[target](rows), "warming": warming}
