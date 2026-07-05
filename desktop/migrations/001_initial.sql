@@ -431,6 +431,12 @@ CREATE TABLE IF NOT EXISTS embeddings (
     source_bit_depth INTEGER,
     source_sample_rate INTEGER,
     source_is_lossless BOOLEAN,
+    -- Methodology version of the ANALYSIS that produced this row (not the
+    -- model): v1 = random 10s crop of the middle 30s, v2 = normalized mean
+    -- of canonical-grid segments (2026-07-05). Carried through P2P sync so
+    -- peers re-pull rows whose methodology is older than the source's —
+    -- existence-diff alone never delivers enrichment upgrades.
+    analysis_version SMALLINT NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (track_id, model_id)
@@ -490,6 +496,10 @@ CREATE TABLE IF NOT EXISTS audio_features (
     source_bit_depth INTEGER,
     source_sample_rate INTEGER,
     source_is_lossless BOOLEAN,
+    -- Analysis methodology version (v1 = middle-30s features + single-window
+    -- instruments; v2 = whole-track amplitude + windowed-max instruments,
+    -- 2026-07-03). Synced so peers re-pull methodology upgrades.
+    analysis_version SMALLINT NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_af_bpm CHECK (bpm IS NULL OR bpm > 0),
@@ -538,22 +548,6 @@ CREATE TABLE IF NOT EXISTS similar_artists (
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_similar_artists UNIQUE (artist_id, similar_artist_id, source),
     CONSTRAINT chk_not_self_similar CHECK (artist_id != similar_artist_id)
-);
-
--- Audio-similar albums (CLAP). Precomputed neighbours cached per album so the
--- album page is a plain indexed read. Filled lazily on first view (see
--- backend/album_similarity.py) and rebuildable via the CLI. Mirrors
--- similar_artists; `source` carries the scoring method for provenance.
-CREATE TABLE IF NOT EXISTS similar_albums (
-    id SERIAL PRIMARY KEY,
-    album_id         UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    similar_album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    match_score NUMERIC(5, 4) NOT NULL CHECK (match_score >= 0 AND match_score <= 1),
-    source VARCHAR(50) NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_similar_albums UNIQUE (album_id, similar_album_id, source),
-    CONSTRAINT chk_not_self_similar_album CHECK (album_id != similar_album_id)
 );
 
 CREATE TABLE IF NOT EXISTS genre_descriptions (
@@ -894,7 +888,6 @@ CREATE INDEX IF NOT EXISTS idx_artist_tags_weight ON artist_tags(weight);
 CREATE INDEX IF NOT EXISTS idx_similar_artists_similar ON similar_artists(similar_artist_id);
 CREATE INDEX IF NOT EXISTS idx_similar_artists_source ON similar_artists(source);
 CREATE INDEX IF NOT EXISTS idx_similar_artists_match ON similar_artists(match_score);
-CREATE INDEX IF NOT EXISTS idx_similar_albums_lookup ON similar_albums(album_id, match_score DESC);
 CREATE INDEX IF NOT EXISTS idx_genre_descriptions_source ON genre_descriptions(source);
 CREATE INDEX IF NOT EXISTS idx_track_stats_source ON track_stats(source);
 CREATE INDEX IF NOT EXISTS idx_track_stats_listeners ON track_stats(listeners);

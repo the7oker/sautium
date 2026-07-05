@@ -85,9 +85,3 @@ if __name__ == "__main__":
     else:
         result = apply_editions(dry_run=args.dry_run)
         print(result)
-        if not args.dry_run and result.get("albums"):
-            # Split albums whose content changed leave stale read-through similarity
-            # rows; flush the cache so the album screen recomputes against the new
-            # edition rows (CASCADE already cleared rows of GC'd source albums).
-            db_execute("DELETE FROM similar_albums")
-            logger.info("flushed similar_albums cache (lazy recompute on view)")

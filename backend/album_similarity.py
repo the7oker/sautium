@@ -1,7 +1,7 @@
 """
-Audio-similar albums via CLAP track embeddings.
+Audio-similar albums via CLAP track embeddings — computed per view, no cache.
 
-Two-stage retrieval, cached in `similar_albums`:
+Two-stage retrieval:
 
   1. Candidate generation (recall): per-track CLAP KNN over the existing
      `embeddings` HNSW index, aggregated to albums by hit count.
@@ -12,9 +12,12 @@ Two-stage retrieval, cached in `similar_albums`:
      impossible (a homogeneous album's tracks cannot all latch onto a single
      track of a diverse candidate).
 
-Filled lazily on first view of an album page (read-through cache in
-`routers/albums.py`) and rebuildable in bulk via the CLI. Track CLAP vectors
-are L2-normalized at generation time, so `A @ B.T` is the cosine matrix.
+The old `similar_albums` read-through cache is gone: it fossilised (new rips
+never joined old albums' neighbour lists) and silently went stale-space when
+the embedding methodology changed (the 2026-07 mean flip served pre-flip
+neighbours until manually flushed). A fresh compute is ~0.3s — an async shelf
+absorbs that. Track CLAP vectors are L2-normalized at generation time, so
+`A @ B.T` is the cosine matrix.
 """
 
 import logging
@@ -26,8 +29,6 @@ from scipy.optimize import linear_sum_assignment
 from db_pool import get_conn
 
 logger = logging.getLogger(__name__)
-
-SOURCE = "clap_assignment"
 
 # Album → its track ids, covering BOTH owned albums (physical files via
 # media_files/album_variants) AND phantom albums (the album_tracks tracklist, no
@@ -101,7 +102,20 @@ def _candidate_albums(cur, album_id) -> list[str]:
             ORDER BY e2.vector <=> src.vector
             LIMIT %(k)s
         ) nn
-        JOIN ({_ALBUM_TRACKS_SQL}) cm ON cm.track_id = nn.track_id
+        CROSS JOIN LATERAL (
+            -- Per-hit album lookup, both bridges index-probed per row. The old
+            -- `JOIN (owned UNION phantom)` forced the planner to materialize
+            -- and dedup-sort the whole 3.5M-row union (143MB on disk, ~1.7s)
+            -- before merging with a few hundred hits.
+            SELECT DISTINCT x.album_id FROM (
+                SELECT av.album_id FROM media_files mf
+                JOIN album_variants av ON av.id = mf.album_variant_id
+                WHERE mf.track_id = nn.track_id
+                UNION ALL
+                SELECT atr.album_id FROM album_tracks atr
+                WHERE atr.track_id = nn.track_id
+            ) x
+        ) cm
         WHERE cm.album_id <> %(id)s::uuid
         GROUP BY cm.album_id
         ORDER BY hits DESC
@@ -151,30 +165,3 @@ def compute_similar(album_id) -> list[dict]:
     ]
     scored.sort(key=lambda r: r["score"], reverse=True)
     return scored[:TOP_K]
-
-
-def compute_and_cache(album_id) -> list[dict]:
-    """Compute + persist top-K into `similar_albums`. Returns the stored rows.
-
-    Concurrent first-views may compute twice; the upsert is idempotent.
-    """
-    rows = compute_similar(album_id)
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM similar_albums WHERE album_id = %s::uuid AND source = %s",
-                (str(album_id), SOURCE),
-            )
-            if rows:
-                psycopg2.extras.execute_values(
-                    cur,
-                    "INSERT INTO similar_albums "
-                    "(album_id, similar_album_id, match_score, source) VALUES %s "
-                    "ON CONFLICT (album_id, similar_album_id, source) "
-                    "DO UPDATE SET match_score = EXCLUDED.match_score, updated_at = now()",
-                    [
-                        (str(album_id), r["similar_album_id"], round(r["score"], 4), SOURCE)
-                        for r in rows
-                    ],
-                )
-    return rows

@@ -152,9 +152,6 @@ def migrate(dry_run: bool = True) -> dict:
                 logger.error("reshape failed for %s: %s", dir_path, e)
     finally:
         db.close()
-    if not dry_run and st["reshaped"]:
-        db_execute("DELETE FROM similar_albums")   # read-through cache; recomputes on view
-        logger.info("flushed similar_albums cache")
     return st
 
 

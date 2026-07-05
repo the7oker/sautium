@@ -294,47 +294,21 @@ def get_similar_albums(
 ) -> dict:
     """Audio-similar albums (CLAP, one-to-one assignment scoring).
 
-    Read-through cache: served from `similar_albums` when present, otherwise
-    computed on first view and persisted (see backend/album_similarity.py).
-    The compute (~1s, sync → FastAPI threadpool) only happens once per album.
+    Computed per view (~0.3s in the FastAPI threadpool; the shelf loads async)
+    — the old read-through cache fossilised (new rips never joined old albums'
+    neighbour lists) and silently served a dead embedding space after the mean
+    flip. Owned AND phantom neighbours rank together purely by similarity;
+    tiles hydrate via the shared phantom-aware hydrator, so a phantom neighbour
+    renders with its CAA cover and routes to the streamable album page.
     """
-    from album_similarity import SOURCE, compute_and_cache
+    from album_similarity import compute_similar
 
-    cached = db_query_one(
-        "SELECT 1 AS ok FROM similar_albums WHERE album_id = %(id)s::uuid AND source = %(src)s LIMIT 1",
-        {"id": album_id, "src": SOURCE},
-    )
-    if not cached:
-        # Compute only when the album actually has embeddings; otherwise leave
-        # the cache empty so it recomputes once the album is analysed.
-        has_emb = db_query_one("""
-            SELECT 1 AS ok
-            FROM embeddings e
-            WHERE e.track_id IN (
-                SELECT mf.track_id FROM media_files mf
-                JOIN album_variants av ON av.id = mf.album_variant_id
-                WHERE av.album_id = %(id)s::uuid
-                UNION
-                SELECT atr.track_id FROM album_tracks atr
-                WHERE atr.album_id = %(id)s::uuid
-            )
-            LIMIT 1
-        """, {"id": album_id})
-        if has_emb:
-            compute_and_cache(album_id)
-
-    # Ordered candidate ids + scores (floor + cap in SQL); owned AND phantom
-    # neighbours rank together purely by similarity. Tiles hydrate via the shared
-    # phantom-aware hydrator, so a phantom neighbour renders with its CAA cover and
-    # routes to the streamable album page exactly like the chat blocks do.
-    rows = db_query("""
-        SELECT similar_album_id::text AS album_id, match_score::float AS sim
-        FROM similar_albums
-        WHERE album_id = %(id)s::uuid AND source = %(src)s AND match_score >= %(floor)s
-        ORDER BY match_score DESC
-        LIMIT %(cap)s
-    """, {"id": album_id, "src": SOURCE, "floor": min_similarity,
-          "cap": limit * 3 if exclude_same_artist else limit})
+    cap = limit * 3 if exclude_same_artist else limit
+    rows = [
+        {"album_id": r["similar_album_id"], "sim": r["score"]}
+        for r in compute_similar(album_id)
+        if r["score"] >= min_similarity
+    ][:cap]
     if not rows:
         return {"results": []}
 
