@@ -36,6 +36,12 @@ from models import AudioFeature, Track, MediaFile
 
 logger = logging.getLogger(__name__)
 
+# Methodology version stamped on audio_features rows and carried through P2P
+# sync (peers re-pull rows whose version is older than the source's):
+#   1 — middle-30s everything, single-window instruments
+#   2 — whole-track amplitude block + windowed-max instruments (2026-07-03)
+ANALYSIS_VERSION = 2
+
 
 # --- CLAP zero-shot label sets (instruments moved to ensemble_instruments) ---
 
@@ -605,6 +611,7 @@ class AudioAnalyzer:
                                 existing.source_bit_depth = row.bit_depth
                                 existing.source_sample_rate = row.mf_sample_rate
                                 existing.source_is_lossless = row.is_lossless
+                                existing.analysis_version = ANALYSIS_VERSION
                             else:
                                 af = AudioFeature(
                                     track_id=row.track_id,
@@ -626,6 +633,7 @@ class AudioAnalyzer:
                                     source_bit_depth=row.bit_depth,
                                     source_sample_rate=row.mf_sample_rate,
                                     source_is_lossless=row.is_lossless,
+                                    analysis_version=ANALYSIS_VERSION,
                                 )
                                 db.add(af)
                             savepoint.commit()

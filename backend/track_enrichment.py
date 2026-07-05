@@ -648,6 +648,7 @@ class TrackEnrichmentPipeline:
                 else:
                     features = None
                 if features is not None:
+                    from audio_analysis import ANALYSIS_VERSION
                     existing_af = db.query(AudioFeature).filter(
                         AudioFeature.track_id == track.id
                     ).first()
@@ -655,6 +656,7 @@ class TrackEnrichmentPipeline:
                         for k, v in features.items():
                             if hasattr(existing_af, k):
                                 setattr(existing_af, k, v)
+                        existing_af.analysis_version = ANALYSIS_VERSION
                     else:
                         af = AudioFeature(
                             track_id=track.id,
@@ -672,6 +674,7 @@ class TrackEnrichmentPipeline:
                             vocal_instrumental=features.get("vocal_instrumental"),
                             vocal_score=features.get("vocal_score"),
                             danceability=features.get("danceability"),
+                            analysis_version=ANALYSIS_VERSION,
                         )
                         db.add(af)
                     db.commit()

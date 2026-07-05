@@ -143,6 +143,7 @@ class PreviewEnricher:
 
     @staticmethod
     def _save_features(db, track_id: str, feats: dict, lossless: bool) -> None:
+        from audio_analysis import ANALYSIS_VERSION
         from models import AudioFeature
 
         existing = db.query(AudioFeature).filter(
@@ -162,11 +163,13 @@ class PreviewEnricher:
             existing.source_bit_depth = None
             existing.source_sample_rate = 48000
             existing.source_is_lossless = lossless
+            existing.analysis_version = ANALYSIS_VERSION
         else:
             db.add(AudioFeature(
                 track_id=track_id,
                 source_media_file_id=None, source_bit_depth=None,
                 source_sample_rate=48000, source_is_lossless=lossless,
+                analysis_version=ANALYSIS_VERSION,
                 **{k: feats.get(k) for k in cols},
             ))
 

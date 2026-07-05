@@ -67,7 +67,10 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
     """
     Check what enrichment data is available for the given track UUIDs.
 
-    Returns category -> uuid_list dict.
+    Returns category -> uuid_list dict. The versioned categories
+    (embeddings, audio_features) return [uuid, analysis_version] pairs
+    instead, so peers can re-pull rows produced by an older analysis
+    methodology — existence alone never delivers upgrades.
     """
     if not track_uuids:
         return dict(EMPTY_INVENTORY)
@@ -79,14 +82,17 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
     tracks = _uuid_list(
         q("SELECT id FROM tracks WHERE id = ANY(%s::uuid[])"), "id"
     )
-    embeddings = _uuid_list(
-        q("SELECT DISTINCT track_id FROM embeddings WHERE track_id = ANY(%s::uuid[])"),
-        "track_id",
-    )
-    audio_features = _uuid_list(
-        q("SELECT DISTINCT track_id FROM audio_features WHERE track_id = ANY(%s::uuid[])"),
-        "track_id",
-    )
+    embeddings = [
+        [r["track_id"], r["v"]] for r in
+        q("""SELECT track_id::text AS track_id, MAX(analysis_version) AS v
+             FROM embeddings WHERE track_id = ANY(%s::uuid[])
+             GROUP BY track_id""")
+    ]
+    audio_features = [
+        [r["track_id"], r["analysis_version"]] for r in
+        q("""SELECT track_id::text AS track_id, analysis_version
+             FROM audio_features WHERE track_id = ANY(%s::uuid[])""")
+    ]
     lyrics = _uuid_list(
         q("SELECT DISTINCT track_id FROM track_lyrics WHERE track_id = ANY(%s::uuid[])"),
         "track_id",
@@ -238,7 +244,8 @@ def pull_embeddings(conn, uuids: list[str]) -> dict:
         """SELECT e.track_id::text AS track_uuid,
                   em.id::text AS model_uuid, em.name AS model_name,
                   e.vector::text AS vector,
-                  e.source_bit_depth, e.source_sample_rate, e.source_is_lossless
+                  e.source_bit_depth, e.source_sample_rate, e.source_is_lossless,
+                  e.analysis_version
            FROM embeddings e
            INNER JOIN embedding_models em ON em.id = e.model_id
            WHERE e.track_id = ANY(%s::uuid[])""",
@@ -255,6 +262,7 @@ def pull_embeddings(conn, uuids: list[str]) -> dict:
             "source_bit_depth": r["source_bit_depth"],
             "source_sample_rate": r["source_sample_rate"],
             "source_is_lossless": r["source_is_lossless"],
+            "analysis_version": r["analysis_version"],
         })
 
     return {"category": "embeddings", "items": items}
@@ -268,7 +276,8 @@ def pull_audio_features(conn, uuids: list[str]) -> dict:
                   energy, energy_db, brightness, dynamic_range_db,
                   zero_crossing_rate, instruments, moods,
                   vocal_instrumental, vocal_score, danceability,
-                  source_bit_depth, source_sample_rate, source_is_lossless
+                  source_bit_depth, source_sample_rate, source_is_lossless,
+                  analysis_version
            FROM audio_features WHERE track_id = ANY(%s::uuid[])""",
         uuids,
     )

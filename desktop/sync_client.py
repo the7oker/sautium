@@ -107,6 +107,18 @@ class SyncClient:
             conn.rollback()
             return set()
 
+    def _get_existing_versions(self, table: str, uuid_col: str) -> dict[str, int]:
+        """uuid -> analysis_version for a versioned enrichment table."""
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {uuid_col}::text, MAX(analysis_version) "
+                            f"FROM {table} GROUP BY {uuid_col}")
+                return {row[0]: row[1] for row in cur.fetchall()}
+        except psycopg2.errors.UndefinedTable:
+            conn.rollback()
+            return {}
+
     def run_sync(self, track_uuids: list[str] = None) -> dict:
         """
         Run full synchronization.
@@ -194,12 +206,33 @@ class SyncClient:
             "genre_descriptions": ("genre_descriptions", "genre_id"),
         }
 
+        # Versioned categories: the inventory carries [uuid, analysis_version]
+        # pairs, and a locally-present row is still pulled when the source's
+        # methodology is newer — existence alone never delivers upgrades.
+        versioned = {"embeddings", "audio_features"}
+
         # Parent entity filters: only request enrichment for entities
         # that actually exist in our library (prevents orphaned records)
         parent_filters = {}
 
         needed = {}
         for cat_key, (table, uuid_col) in local_check.items():
+            if cat_key in versioned:
+                available_versions = {u: v for u, v in inventory.get(cat_key, [])}
+                if not available_versions:
+                    continue
+                local = self._get_existing_versions(table, uuid_col)
+                new = [u for u in available_versions if u not in local]
+                outdated = [u for u, v in available_versions.items()
+                            if u in local and local[u] < v]
+                if new or outdated:
+                    needed[cat_key] = new + outdated
+                    self._progress(
+                        f"  {cat_key}: {len(new)} new + {len(outdated)} outdated "
+                        f"/ {len(available_versions)} available"
+                    )
+                continue
+
             available = set(inventory.get(cat_key, []))
             if not available:
                 continue
@@ -356,6 +389,7 @@ class SyncClient:
                     item.get("source_bit_depth"),
                     item.get("source_sample_rate"),
                     item.get("source_is_lossless"),
+                    item.get("analysis_version", 1),
                 )
                 for item in items
             ]
@@ -363,13 +397,15 @@ class SyncClient:
                 cur,
                 """INSERT INTO embeddings
                    (track_id, model_id, vector,
-                    source_bit_depth, source_sample_rate, source_is_lossless)
+                    source_bit_depth, source_sample_rate, source_is_lossless,
+                    analysis_version)
                    VALUES %s
                    ON CONFLICT (track_id, model_id) DO UPDATE SET
                        vector = EXCLUDED.vector,
+                       analysis_version = EXCLUDED.analysis_version,
                        updated_at = CURRENT_TIMESTAMP""",
                 values,
-                template="(%s, %s, %s::vector, %s, %s, %s)",
+                template="(%s, %s, %s::vector, %s, %s, %s, %s)",
                 page_size=200,
             )
         return len(items)
@@ -389,6 +425,7 @@ class SyncClient:
                     item.get("danceability"),
                     item.get("source_bit_depth"), item.get("source_sample_rate"),
                     item.get("source_is_lossless"),
+                    item.get("analysis_version", 1),
                 )
                 for item in items
             ]
@@ -399,7 +436,8 @@ class SyncClient:
                     energy, energy_db, brightness, dynamic_range_db,
                     zero_crossing_rate, instruments, moods,
                     vocal_instrumental, vocal_score, danceability,
-                    source_bit_depth, source_sample_rate, source_is_lossless)
+                    source_bit_depth, source_sample_rate, source_is_lossless,
+                    analysis_version)
                    VALUES %s
                    ON CONFLICT (track_id) DO UPDATE SET
                        bpm = EXCLUDED.bpm, key = EXCLUDED.key,
@@ -412,9 +450,10 @@ class SyncClient:
                        vocal_instrumental = EXCLUDED.vocal_instrumental,
                        vocal_score = EXCLUDED.vocal_score,
                        danceability = EXCLUDED.danceability,
+                       analysis_version = EXCLUDED.analysis_version,
                        updated_at = CURRENT_TIMESTAMP""",
                 values,
-                template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 page_size=500,
             )
         return len(items)

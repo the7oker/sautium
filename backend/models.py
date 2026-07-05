@@ -612,6 +612,10 @@ class Embedding(Base):
     source_sample_rate = Column(Integer)
     source_is_lossless = Column(Boolean)
 
+    # Analysis methodology version (v2 = segment-mean portrait) — synced so
+    # peers re-pull methodology upgrades; see embeddings.EMBEDDING_ANALYSIS_VERSION
+    analysis_version = Column(SmallInteger, nullable=False, server_default="1")
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -795,6 +799,11 @@ class AudioFeature(Base):
     source_bit_depth = Column(Integer)
     source_sample_rate = Column(Integer)
     source_is_lossless = Column(Boolean)
+
+    # Analysis methodology version (v2 = whole-track amplitude + windowed
+    # instruments) — synced so peers re-pull methodology upgrades; see
+    # audio_analysis.ANALYSIS_VERSION
+    analysis_version = Column(SmallInteger, nullable=False, server_default="1")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())

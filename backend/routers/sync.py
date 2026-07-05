@@ -75,10 +75,13 @@ async def get_inventory(req: InventoryRequest) -> dict:
             SELECT
                 ARRAY(SELECT t.id::text FROM tracks t
                       WHERE t.id IN (SELECT id FROM uuids)) AS tracks,
-                ARRAY(SELECT DISTINCT e.track_id::text FROM embeddings e
-                      WHERE e.track_id IN (SELECT id FROM uuids)) AS embeddings,
-                ARRAY(SELECT DISTINCT af.track_id::text FROM audio_features af
-                      WHERE af.track_id IN (SELECT id FROM uuids)) AS audio_features,
+                (SELECT COALESCE(json_agg(json_build_array(x.tid, x.v)), '[]'::json)
+                 FROM (SELECT e.track_id::text AS tid, MAX(e.analysis_version) AS v
+                       FROM embeddings e WHERE e.track_id IN (SELECT id FROM uuids)
+                       GROUP BY e.track_id) x) AS embeddings,
+                (SELECT COALESCE(json_agg(json_build_array(af.track_id::text, af.analysis_version)), '[]'::json)
+                 FROM audio_features af
+                 WHERE af.track_id IN (SELECT id FROM uuids)) AS audio_features,
                 ARRAY(SELECT DISTINCT tl.track_id::text FROM track_lyrics tl
                       WHERE tl.track_id IN (SELECT id FROM uuids)) AS lyrics,
                 ARRAY(SELECT DISTINCT ts.track_id::text FROM track_stats ts
@@ -246,7 +249,8 @@ async def pull_embeddings(req: PullRequest) -> dict:
             """SELECT e.track_id::text AS track_uuid,
                       em.id::text AS model_uuid, em.name AS model_name,
                       e.vector::text AS vector,
-                      e.source_bit_depth, e.source_sample_rate, e.source_is_lossless
+                      e.source_bit_depth, e.source_sample_rate, e.source_is_lossless,
+                      e.analysis_version
                FROM embeddings e
                INNER JOIN embedding_models em ON em.id = e.model_id
                WHERE e.track_id = ANY(%s::uuid[])""",
@@ -263,6 +267,7 @@ async def pull_embeddings(req: PullRequest) -> dict:
                 "source_bit_depth": r["source_bit_depth"],
                 "source_sample_rate": r["source_sample_rate"],
                 "source_is_lossless": r["source_is_lossless"],
+                "analysis_version": r["analysis_version"],
             })
 
         return {"category": "embeddings", "items": items}
@@ -282,7 +287,8 @@ async def pull_audio_features(req: PullRequest) -> dict:
                   energy, energy_db, brightness, dynamic_range_db,
                   zero_crossing_rate, instruments, moods,
                   vocal_instrumental, vocal_score, danceability,
-                  source_bit_depth, source_sample_rate, source_is_lossless
+                  source_bit_depth, source_sample_rate, source_is_lossless,
+                  analysis_version
            FROM audio_features
            WHERE track_id = ANY(%s::uuid[])""",
         req.uuids,

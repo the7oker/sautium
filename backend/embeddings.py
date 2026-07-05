@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 
 WINDOW_SECONDS = 10
 
+# Methodology version stamped on embeddings rows and carried through P2P sync
+# (peers re-pull rows whose version is older than the source's):
+#   1 — random 10s crop of the middle 30s (CLAP rand_trunc)
+#   2 — normalized mean of canonical-grid segment embeddings (2026-07-05)
+EMBEDDING_ANALYSIS_VERSION = 2
+
 
 def balanced_k(duration_seconds: float) -> int:
     """Windows needed for a portrait within 0.99 cosine of the full-grid
@@ -259,6 +265,7 @@ class AudioEmbeddingGenerator:
             existing.source_bit_depth = source_bit_depth
             existing.source_sample_rate = source_sample_rate
             existing.source_is_lossless = source_is_lossless
+            existing.analysis_version = EMBEDDING_ANALYSIS_VERSION
         else:
             embedding = Embedding(
                 vector=vector.tolist(),
@@ -268,6 +275,7 @@ class AudioEmbeddingGenerator:
                 source_bit_depth=source_bit_depth,
                 source_sample_rate=source_sample_rate,
                 source_is_lossless=source_is_lossless,
+                analysis_version=EMBEDDING_ANALYSIS_VERSION,
             )
             db.add(embedding)
         db.flush()
