@@ -17,9 +17,16 @@ Key properties:
   or connectivity to the master.
 - MASTER_PUBLIC_KEY_HEX is committed to the repo so every node verifies
   certificates offline against the same authority.
+- The signing key is a GENERATED Ed25519 key in a gitignored file on the
+  master host (settings.master_signing_key_path) — deliberately NOT derived
+  from the node's P2P password: a password-derived authority key would be
+  offline-brute-forceable at password entropy, and the P2P account must
+  stay rotatable without invalidating the authority. Key rotation is
+  survivable regardless: the registry stores born_at itself, so a new key
+  can re-sign every certificate with the original dates.
 
-issue_certificate() runs ONLY on the master node — it derives the signing
-key from the node's own P2P credentials and refuses elsewhere.
+issue_certificate() runs ONLY on the master node — any node without the
+signing key file (or with a mismatching one) refuses.
 """
 
 import logging
@@ -28,9 +35,9 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# The network's certificate authority: Valerii's Docker master node
-# (identity "Sautium", derived via p2p_identity from its P2P credentials).
-MASTER_PUBLIC_KEY_HEX = "3aa2ae91bc41863468ea4df3346811bcb0f7e0d6a9644b931cfd628d81247042"
+# The network's certificate authority: the public half of the master node's
+# generated signing key (data/authority/master_signing.key on the master).
+MASTER_PUBLIC_KEY_HEX = "a9f40f70a796926828d894d4384655963ae5bdce38d2c502ede75792552d33cd"
 
 CERT_VERSION = 1
 
@@ -74,29 +81,26 @@ def verify_certificate(cert: dict,
 
 
 def _master_private_key():
-    """The master's signing key, derived in-memory from its P2P credentials.
-    Returns None when this node is not the master."""
-    from argon2.low_level import Type, hash_secret_raw
+    """The master's signing key, loaded from the gitignored key file.
+    Returns None when this node is not the master (no file, or a file whose
+    public half does not match the committed authority key)."""
+    import os
+
     from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     from config import settings
-    from p2p_identity import (ARGON2_HASH_LEN, ARGON2_MEMORY_COST,
-                              ARGON2_PARALLELISM, ARGON2_TIME_COST)
 
-    if not settings.p2p_username or not settings.p2p_password:
+    path = settings.master_signing_key_path
+    if not os.path.exists(path):
         return None
-    seed = hash_secret_raw(
-        secret=settings.p2p_password.encode("utf-8"),
-        salt=f"{settings.p2p_username}:sautium".encode("utf-8"),
-        time_cost=ARGON2_TIME_COST, memory_cost=ARGON2_MEMORY_COST,
-        parallelism=ARGON2_PARALLELISM, hash_len=ARGON2_HASH_LEN, type=Type.ID,
-    )
-    key = Ed25519PrivateKey.from_private_bytes(seed)
+    with open(path, "rb") as f:
+        key = serialization.load_pem_private_key(f.read(), password=None)
     pub = key.public_key().public_bytes(
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw).hex()
     if pub != MASTER_PUBLIC_KEY_HEX:
+        logger.warning("signing key file present but does not match the "
+                       "committed authority pubkey — refusing to issue")
         return None
     return key
 

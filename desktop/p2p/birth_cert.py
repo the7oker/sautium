@@ -21,7 +21,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-MASTER_PUBLIC_KEY_HEX = "3aa2ae91bc41863468ea4df3346811bcb0f7e0d6a9644b931cfd628d81247042"
+MASTER_PUBLIC_KEY_HEX = "a9f40f70a796926828d894d4384655963ae5bdce38d2c502ede75792552d33cd"
 
 CERT_VERSION = 1
 

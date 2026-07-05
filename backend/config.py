@@ -115,6 +115,10 @@ class Settings(BaseSettings):
     p2p_announce_port: int = 8800         # external HTTP port announced to peers
     p2p_username: str = ""
     p2p_password: str = ""
+
+    # Birth-certificate authority signing key (master node only; generated,
+    # gitignored — see birth_authority.py). Non-master nodes leave it absent.
+    master_signing_key_path: str = "data/authority/master_signing.key"
     p2p_email: str = ""
     p2p_identity_dir: str = ""  # Path to node_identity dir (desktop mode)
     p2p_listen_port: int = 0   # Desktop sync server port (direct chat delivery)
