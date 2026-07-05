@@ -605,11 +605,14 @@ def _build_atom(atom, tools, active, corpus, limit):
         return sql, _bind_params(tools, active)
     score = " + ".join(at_terms)
     cand = " UNION ".join(f"({b})" for b in branches)
-    sql = (f"WITH cand AS ({cand}) "
-           f"SELECT {atom.pk} AS id, {atom.name_col} AS name, ({score}) AS score{atom.surface} "
+    sql = (f"WITH cand AS ({cand}), "
+           f"scored AS (SELECT {atom.pk} AS id, {atom.name_col} AS name, "
+           f"({score}) AS score{atom.surface} "
            f"FROM (SELECT DISTINCT id FROM cand) c JOIN {atom.table} ON {atom.pk}=c.id "
-           f"{' '.join(lateral)}{where} "
-           f"ORDER BY ({score}) DESC, {atom.default_order} LIMIT {int(limit)}")
+           f"{' '.join(lateral)}{where}) "
+           f"SELECT * FROM scored "
+           f"WHERE score >= {_DOMINANCE_CUT} * (SELECT MAX(score) FROM scored) "
+           f"ORDER BY score DESC, name LIMIT {int(limit)}")
     return sql, _bind_params(tools, active)
 
 
@@ -617,6 +620,14 @@ def _build_atom(atom, tools, active, corpus, limit):
 # Own-level identity (an artist MATCHING "Madonna" by name) must dominate incidental
 # roll-up (an artist who merely HAS a track titled "Madonna"). Calibration knob.
 _ROLLUP_W = 0.5
+
+# Dominance cut: rows scoring below this fraction of the target's top score are
+# noise-in-the-presence-of-a-leader and are dropped — an identity query ("sade")
+# otherwise fills the block with the CLAP-junk tail (ambient artists at ~0.15
+# next to Sade at 1.0, and tiles don't display scores). With no clear leader
+# (a characteristic query where everything sits at 0.2-0.3) the bar drops with
+# the max and nothing is cut. Browse rows (NULL scores) are never touched.
+_DOMINANCE_CUT = 0.25
 
 
 def _build_higher(atom, L, tools, active, corpus, limit, K=500):
@@ -696,6 +707,8 @@ def _build_higher(atom, L, tools, active, corpus, limit, K=500):
            f"LIMIT {int(limit)}) "
            f"SELECT {L.pk} AS id, {L.name_col} AS name, slim.score{L.surface} "
            f"FROM slim JOIN {L.table} ON {L.pk} = slim.id "
+           f"WHERE slim.score IS NULL "
+           f"OR slim.score >= {_DOMINANCE_CUT} * (SELECT MAX(score) FROM slim) "
            f"ORDER BY slim.score DESC NULLS LAST, slim.n DESC NULLS LAST")
     return sql, _bind_params(tools, active)
 
