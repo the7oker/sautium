@@ -509,6 +509,65 @@ CREATE TABLE IF NOT EXISTS audio_features (
 );
 
 -- ============================================================
+-- Enrichment signing (phase 1) — see docs/design/P2P-SYNC-INTEGRITY.md
+-- Author signatures + Worker-timestamped batches over audio-derived records.
+-- The signed/verifiable unit is the SEGMENT (deterministic per index), not the
+-- mean vector (varies with the sampled K). Content-address is whole-track:
+-- pcm_hash of the decoded PCM, shared by a track's segments and audio_features.
+-- ============================================================
+
+-- Owned-official albums whose audio analysis may be signed (Bandcamp purchases
+-- now; streamed clean sources carry origin='stream' on the provenance instead).
+CREATE TABLE IF NOT EXISTS signing_whitelist (
+    album_id UUID PRIMARY KEY REFERENCES albums(id) ON DELETE CASCADE,
+    reason   TEXT NOT NULL DEFAULT 'bandcamp',
+    added_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS track_analysis_provenance (
+    track_id     UUID PRIMARY KEY REFERENCES tracks(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    pcm_hash     CHAR(64) NOT NULL,      -- BLAKE2b of NATIVELY-decoded PCM
+                                         -- (source rate/channels, pre-resample)
+                                         -- — stable across ffmpeg builds for
+                                         -- lossless; 48k frame = grid_version
+    chromaprint  TEXT,                   -- AcoustID fp (fpcalc); bound INTO the
+                                         -- signature from the start — adding it
+                                         -- later would forfeit priority. NULL
+                                         -- only if fpcalc fails for a track.
+    grid_version SMALLINT NOT NULL DEFAULT 1,
+    origin       TEXT NOT NULL DEFAULT 'local',   -- 'local' | 'stream'
+    computed_at  TIMESTAMPTZ DEFAULT now()
+);
+
+-- One row per Worker-timestamped signing batch (the daily notary root that
+-- anchors authorship priority for every record proving inclusion in it).
+CREATE TABLE IF NOT EXISTS signing_batches (
+    batch_root    CHAR(64) PRIMARY KEY,
+    author_pubkey CHAR(64) NOT NULL,
+    worker_date   TIMESTAMPTZ NOT NULL,
+    worker_sig    CHAR(128) NOT NULL,
+    authority     CHAR(64) NOT NULL,
+    created_at    TIMESTAMPTZ DEFAULT now()
+);
+
+-- Per-record author signature + Merkle inclusion in a timestamped batch.
+-- NULL = unsigned (every existing and non-signable record).
+ALTER TABLE embedding_segments
+    ADD COLUMN IF NOT EXISTS author_pubkey CHAR(64),
+    ADD COLUMN IF NOT EXISTS signature     CHAR(128),
+    ADD COLUMN IF NOT EXISTS batch_root    CHAR(64) REFERENCES signing_batches(batch_root),
+    ADD COLUMN IF NOT EXISTS merkle_proof  JSONB;
+
+ALTER TABLE audio_features
+    ADD COLUMN IF NOT EXISTS author_pubkey CHAR(64),
+    ADD COLUMN IF NOT EXISTS signature     CHAR(128),
+    ADD COLUMN IF NOT EXISTS batch_root    CHAR(64) REFERENCES signing_batches(batch_root),
+    ADD COLUMN IF NOT EXISTS merkle_proof  JSONB;
+
+CREATE INDEX IF NOT EXISTS idx_emb_segments_unsigned
+    ON embedding_segments (track_id) WHERE signature IS NULL;
+
+-- ============================================================
 -- Metadata tables (UUID FKs)
 -- ============================================================
 

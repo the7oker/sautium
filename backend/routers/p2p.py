@@ -172,39 +172,10 @@ _cached_private_key = None
 def _get_private_key():
     """Load or derive the Ed25519 private key for signing."""
     global _cached_private_key
-    if _cached_private_key is not None:
-        return _cached_private_key
-
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from cryptography.hazmat.primitives import serialization
-    from pathlib import Path
-
-    # Desktop mode: read PEM from identity dir
-    if settings.p2p_identity_dir:
-        key_path = Path(settings.p2p_identity_dir) / "node_ed25519.key"
-        if key_path.exists():
-            pem = key_path.read_bytes()
-            _cached_private_key = serialization.load_pem_private_key(pem, password=None)
-            return _cached_private_key
-
-    # Docker mode: derive from username + password
-    if settings.p2p_username and settings.p2p_password:
-        from p2p_identity import ARGON2_TIME_COST, ARGON2_MEMORY_COST, ARGON2_PARALLELISM, ARGON2_HASH_LEN
-        from argon2.low_level import hash_secret_raw, Type
-        salt = f"{settings.p2p_username}:sautium".encode("utf-8")
-        seed = hash_secret_raw(
-            secret=settings.p2p_password.encode("utf-8"),
-            salt=salt,
-            time_cost=ARGON2_TIME_COST,
-            memory_cost=ARGON2_MEMORY_COST,
-            parallelism=ARGON2_PARALLELISM,
-            hash_len=ARGON2_HASH_LEN,
-            type=Type.ID,
-        )
-        _cached_private_key = Ed25519PrivateKey.from_private_bytes(seed)
-        return _cached_private_key
-
-    return None
+    if _cached_private_key is None:
+        from p2p_identity import load_signing_key
+        _cached_private_key = load_signing_key(settings)
+    return _cached_private_key
 
 
 def _sign_message(message: str) -> Optional[str]:

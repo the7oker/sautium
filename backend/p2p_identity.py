@@ -73,3 +73,39 @@ def derive_identity(username: str, password: str, email: str = "") -> dict:
         "invite_code": invite_code,
         "email": email,
     }
+
+
+def derive_private_key(username: str, password: str):
+    """The Ed25519 private key for this account — same Argon2id derivation as
+    derive_identity, exposed for signing (enrichment records, requests)."""
+    from argon2.low_level import hash_secret_raw, Type
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    salt = f"{username}:sautium".encode("utf-8")
+    seed = hash_secret_raw(
+        secret=password.encode("utf-8"),
+        salt=salt,
+        time_cost=ARGON2_TIME_COST,
+        memory_cost=ARGON2_MEMORY_COST,
+        parallelism=ARGON2_PARALLELISM,
+        hash_len=ARGON2_HASH_LEN,
+        type=Type.ID,
+    )
+    return Ed25519PrivateKey.from_private_bytes(seed)
+
+
+def load_signing_key(settings):
+    """The node's Ed25519 signing key — desktop PEM or docker-derived — or
+    None when no identity is configured."""
+    from pathlib import Path
+
+    from cryptography.hazmat.primitives import serialization
+
+    if settings.p2p_identity_dir:
+        key_path = Path(settings.p2p_identity_dir) / "node_ed25519.key"
+        if key_path.exists():
+            return serialization.load_pem_private_key(
+                key_path.read_bytes(), password=None)
+    if settings.p2p_username and settings.p2p_password:
+        return derive_private_key(settings.p2p_username, settings.p2p_password)
+    return None

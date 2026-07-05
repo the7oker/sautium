@@ -25,6 +25,8 @@ RUN apt-get update && apt-get install -y software-properties-common \
     ffmpeg \
     libsndfile1 \
     libsndfile1-dev \
+    # Chromaprint fpcalc — acoustic fingerprint for signed-record content-address
+    libchromaprint-tools \
     # Build tools
     build-essential \
     git \

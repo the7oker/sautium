@@ -114,6 +114,10 @@ export default {
         return await handleBirthCertificateGet(url, env, corsHeaders);
       }
 
+      if (url.pathname === "/timestamp" && request.method === "POST") {
+        return await handleTimestamp(request, env, corsHeaders);
+      }
+
       return json({ error: "not found" }, corsHeaders, 404);
     } catch (e) {
       return json({ error: e.message }, corsHeaders, 500);
@@ -245,6 +249,56 @@ async function handleBirthCertificateGet(url, env, corsHeaders) {
     born_at: record.born_at,
     issuer: TRUSTED_AUTHORITIES[0],
     sig: record.sig,
+  }, corsHeaders);
+}
+
+// -----------------------------------------------------------------------
+// Timestamp notary (authorship priority for signed enrichment records)
+// -----------------------------------------------------------------------
+
+async function handleTimestamp(request, env, corsHeaders) {
+  /**
+   * Notarize a Merkle batch root at the current date — the "when" a signed
+   * enrichment record needs for authorship priority (see docs/design/
+   * P2P-SYNC-INTEGRITY.md: The karma curve / Notary scaling). The Worker
+   * signs roots, not records: a node submits one 32-byte root per batch.
+   *
+   * Body: {root}  (64-hex Merkle root)
+   * Returns {root, date, sig, authority}; sig is over
+   *   sautium-timestamp:v1:{root}:{date}
+   * by the master authority (BIRTH_SIGNING_KEY, domain-separated from birth
+   * certs by the payload prefix). Idempotent: a root is stamped once (the
+   * KV record is the transparency log entry). No auth — notarizing a hash
+   * reveals nothing; rate-limited against flooding.
+   */
+  const body = await request.json();
+  const root = (body.root || "").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(root)) {
+    return json({ error: "invalid root" }, corsHeaders, 400);
+  }
+
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  const rateLimitResult = await checkRateLimit(env, ip, `ts:${ip}`);
+  if (rateLimitResult) {
+    return json({ error: rateLimitResult }, corsHeaders, 429);
+  }
+
+  let record = await env.RATE_LIMITS.get(`ts:${root}`, "json");
+  if (!record) {
+    const date = nowIsoSeconds();
+    const key = await birthSigningKey(env);
+    const sig = bytesToHex(new Uint8Array(await crypto.subtle.sign(
+      "Ed25519", key,
+      new TextEncoder().encode(`sautium-timestamp:v${BIRTH_CERT_VERSION}:${root}:${date}`))));
+    record = { date, sig };
+    await env.RATE_LIMITS.put(`ts:${root}`, JSON.stringify(record));
+  }
+
+  return json({
+    root,
+    date: record.date,
+    sig: record.sig,
+    authority: TRUSTED_AUTHORITIES[0],
   }, corsHeaders);
 }
 
