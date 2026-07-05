@@ -2851,6 +2851,12 @@
   // work with. Below the floor we keep the shuffle mosaic visible.
   const DISCOVERY_MIN_QUERY_LEN = 2;
 
+  // Typing pause before the composite search fires. Per-keystroke searches got
+  // expensive with the engine (4 target queries + vector scoring + the
+  // streaming tail) — every keydown cancels the pending search, only a real
+  // pause schedules one. Enter and clearing the field bypass the wait.
+  const DISCOVERY_DEBOUNCE_MS = 700;
+
   function wireDiscoveryFilters(screen) {
     // Toggle: adv-row open/close → flip aria-expanded + chevron + panel.
     const toggle = screen.querySelector('#discoveryAdvToggle');
@@ -3167,10 +3173,18 @@
     screen._activeQueryId = 0;
     screen._debounceTimer = null;
 
+    input.addEventListener('keydown', e => {
+      clearTimeout(screen._debounceTimer);
+      if (e.key === 'Enter') triggerDiscoverySearch(screen);
+    });
     input.addEventListener('input', () => {
       clearTimeout(screen._debounceTimer);
+      if (!input.value.trim()) {
+        triggerDiscoverySearch(screen);   // field cleared — restore shuffle now
+        return;
+      }
       screen._debounceTimer = setTimeout(() =>
-        triggerDiscoverySearch(screen), 250);
+        triggerDiscoverySearch(screen), DISCOVERY_DEBOUNCE_MS);
     });
   }
 
