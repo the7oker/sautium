@@ -22,6 +22,7 @@ import os
 import subprocess
 import sys
 import urllib.request
+from datetime import timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -240,9 +241,89 @@ def run(limit=None, dry_run=False):
                 len(pending), root[:16], ts["date"])
 
 
+def verify_all() -> bool:
+    """Re-verify the seal of every signed record against the stored content.
+
+    For each signed segment / audio_features row it rebuilds the exact signed
+    payload FROM the stored data — the content hashes are recomputed from the
+    actual vector / feature values, so this also proves the stored data is what
+    was sealed — then runs the full chain (author signature → Merkle inclusion
+    → Worker timestamp by a trusted authority). Reports valid/invalid counts;
+    returns True iff every seal holds. (This is the seal check; a --deep audit
+    that also re-decodes the audio to confirm pcm_hash against the file is a
+    separate, heavier pass.)"""
+    from birth_authority import TRUSTED_AUTHORITIES
+
+    conn = psycopg2.connect(settings.database_url)
+    conn.cursor_factory = psycopg2.extras.RealDictCursor
+    cur = conn.cursor()
+
+    cur.execute("SELECT batch_root, worker_date, worker_sig, authority "
+                "FROM signing_batches")
+    batches = {
+        b["batch_root"]: (
+            b["worker_date"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            b["worker_sig"], b["authority"])
+        for b in cur.fetchall()
+    }
+
+    ok, bad, bad_samples = 0, 0, []
+
+    def _seal_ok(payload, r):
+        b = batches.get(r["batch_root"])
+        return bool(b and rs.verify_seal(
+            payload, r["signature"], r["author_pubkey"], r["merkle_proof"],
+            r["batch_root"], b[0], b[1], b[2], TRUSTED_AUTHORITIES))
+
+    cur.execute("""SELECT s.author_pubkey, s.signature, s.merkle_proof, s.batch_root,
+                          s.track_id::text tid, s.model_id::text model,
+                          s.segment_index idx, s.vector::text vec,
+                          p.pcm_hash, p.chromaprint
+                   FROM embedding_segments s
+                   JOIN track_analysis_provenance p ON p.track_id = s.track_id
+                   WHERE s.signature IS NOT NULL""")
+    for r in cur.fetchall():
+        vh = rs.vector_hash(_parse_vector(r["vec"]).tobytes())
+        payload = rs.segment_payload(r["author_pubkey"], r["tid"], r["pcm_hash"],
+                                     r["chromaprint"], r["model"], r["idx"], vh)
+        if _seal_ok(payload, r):
+            ok += 1
+        else:
+            bad += 1
+            if len(bad_samples) < 5:
+                bad_samples.append(f"segment {r['tid'][:8]}#{r['idx']}")
+
+    cur.execute(f"""SELECT a.author_pubkey, a.signature, a.merkle_proof, a.batch_root,
+                           a.track_id::text tid, a.analysis_version,
+                           {', '.join('a.' + c for c in FEATURE_ORDER)},
+                           p.pcm_hash, p.chromaprint
+                    FROM audio_features a
+                    JOIN track_analysis_provenance p ON p.track_id = a.track_id
+                    WHERE a.signature IS NOT NULL""")
+    for r in cur.fetchall():
+        fh = rs.blake2b_hex(canonical_features_blob(r))
+        payload = rs.features_payload(r["author_pubkey"], r["tid"], r["pcm_hash"],
+                                      r["chromaprint"], r["analysis_version"], fh)
+        if _seal_ok(payload, r):
+            ok += 1
+        else:
+            bad += 1
+            if len(bad_samples) < 5:
+                bad_samples.append(f"features {r['tid'][:8]}")
+
+    logger.info("seal verification: %d valid, %d invalid", ok, bad)
+    if bad_samples:
+        logger.warning("invalid: %s", bad_samples)
+    return bad == 0
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--verify", action="store_true",
+                    help="re-verify the seal of every signed record; sign nothing")
     a = ap.parse_args()
+    if a.verify:
+        sys.exit(0 if verify_all() else 1)
     run(limit=a.limit, dry_run=a.dry_run)

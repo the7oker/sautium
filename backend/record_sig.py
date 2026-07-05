@@ -174,6 +174,27 @@ def verify_timestamp(root_hex: str, date_iso: str, signature_hex: str,
                   authority_pubkey_hex)
 
 
+def verify_seal(payload: bytes, signature_hex: str, author_pubkey_hex: str,
+                merkle_proof: list, batch_root_hex: str,
+                worker_date: str, worker_sig_hex: str, worker_authority_hex: str,
+                trusted_authorities: list) -> bool:
+    """Full seal check for one record, in order:
+      1. the author signed this exact content (author_pubkey is bound in the
+         payload, so this also names the author),
+      2. the record is included in its batch (Merkle proof → batch_root),
+      3. that batch root was timestamped by a TRUSTED authority at worker_date.
+    Together they establish the priority claim: 'author_pubkey analyzed this
+    content, sealed no later than worker_date.' A re-signer of the same public
+    content necessarily lands in a different batch with a later stamp — the
+    seal is what a verifier checks to know who was first."""
+    return bool(
+        worker_authority_hex in trusted_authorities
+        and verify(payload, signature_hex, author_pubkey_hex)
+        and verify_proof(record_leaf(signature_hex), merkle_proof, batch_root_hex)
+        and verify_timestamp(batch_root_hex, worker_date, worker_sig_hex,
+                             worker_authority_hex))
+
+
 def sign(payload: bytes, private_key) -> str:
     """Ed25519-sign a canonical payload; returns hex signature."""
     return private_key.sign(payload).hex()
