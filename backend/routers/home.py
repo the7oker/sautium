@@ -38,32 +38,25 @@ RECENCY_TAU_HOURS = 168
 # A play from 4 months ago has tiny exp-weight anyway, but the cap keeps
 # the seed-pool query bounded and skips cold-cache reads.
 SEED_WINDOW_DAYS = 60
-# Top-N seed tracks by recency-weight. Beyond ~50 tracks every additional
-# seed dilutes the centroid more than it adds signal.
-SEED_TOP_N = 50
-# HNSW kNN pull: how many nearest tracks to the centroid we examine.
-# Stays in lockstep with HNSW_EF_SEARCH below — pgvector's index only
-# returns up to ef_search candidates regardless of LIMIT, so a higher
-# LIMIT without raising ef_search yields zero benefit. 500 over 35k
-# embeddings hits ~80-150 unique albums, plenty for a 20-item row;
-# going above 500 climbs into 200ms+ territory for marginal gains.
-KNN_CANDIDATE_TRACKS = 500
-# Session-local hnsw.ef_search override for the kNN query. pgvector's
-# default (40) is calibrated for "find the single nearest match" use
-# cases; for recommendation aggregation we need a wider net.
+# Seed selection: top candidates by recency-weight, then a diversity prune —
+# in the dense normalized-mean space five tracks of one album are ONE taste,
+# and a seed is dropped when it sits within SEED_DIVERSITY_CEIL cosine of a
+# heavier seed. What survives (~5-8 seeds) spans the week's distinct tastes.
+# No centroid: averaging the seeds (means of means) drifts into the manifold
+# centre and recommends the grey middle of the library; each taste gets its
+# own kNN instead and albums merge across tastes.
+SEED_CANDIDATES = 16
+SEED_KEPT = 8
+SEED_DIVERSITY_CEIL = 0.95
+# Per-seed HNSW pull. 8 seeds x 150 ~ 1200 hit rows before album folding.
+KNN_PER_SEED = 150
+# Session-local hnsw.ef_search override for the kNN LATERALs (pgvector's
+# default 40 is "single nearest match" tuning); iterative_scan keeps the
+# graph walk going when the self-exclusion filter eats into the first wave.
 HNSW_EF_SEARCH = 500
-# Per-album score = avg cosine over the top-K closest tracks of that
-# album. Top-3 favours albums where multiple tracks (not just one outlier)
-# match the seed direction.
-ALBUM_SCORE_TOP_K = 3
 # Tier 1 ("forgotten") threshold: albums whose last play was longer than
 # this ago — eligible to resurface once tier 0 (never played) is exhausted.
 FORGOTTEN_THRESHOLD_DAYS = 90
-
-
-def _vec_literal(vec) -> str:
-    """Format a Python iterable of floats as a pgvector text literal."""
-    return "[" + ",".join(str(float(x)) for x in vec) + "]"
 
 
 def _db_query_with_ef_search(sql: str, params: dict, ef_search: int) -> list[dict]:
@@ -80,6 +73,7 @@ def _db_query_with_ef_search(sql: str, params: dict, ef_search: int) -> list[dic
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("SET LOCAL hnsw.ef_search = %s", (ef_search,))
+                cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
                 cur.execute(sql, params)
                 rows = [dict(r) for r in cur.fetchall()]
             conn.commit()
@@ -243,29 +237,128 @@ def get_recommendations(
     limit: int = Query(20, ge=1, le=50),
 ) -> dict[str, list[dict[str, Any]]]:
     """
-    CLAP-similarity recommendations from recent listening.
+    CLAP multi-seed recommendations from recent listening — one SQL pass.
 
-    Pipeline:
-      1. Top-N seed tracks from listening_history within SEED_WINDOW_DAYS,
-         weighted by exp(-hours_since_play / RECENCY_TAU_HOURS); only
-         events flagged completed by the playback tracker count as seeds.
-      2. Weighted centroid in Python (pgvector has no weighted-avg op).
-      3. HNSW kNN: top KNN_CANDIDATE_TRACKS embeddings nearest to centroid.
-      4. Album aggregation, score = avg cosine over top-K tracks per album.
+    Pipeline (all in the query, no Python vector math):
+      1. Seed candidates: recent completed listens within SEED_WINDOW_DAYS,
+         weight = duration x exp(-hours_since_play / RECENCY_TAU_HOURS).
+      2. Diversity prune: drop a seed within SEED_DIVERSITY_CEIL cosine of a
+         heavier one — the survivors span the week's distinct tastes.
+      3. Per-seed HNSW kNN (parameterized LATERAL) — NO centroid: averaging
+         the seeds lands between tastes and recommends neither.
+      4. Album fold: score = SUM(seed_weight x sim) / (hits + 3) — an album
+         similar to SEVERAL of the week's tastes outranks a one-hit match;
+         the +3 is the same Bayesian shrink the search engine's roll-ups use.
       5. Two-tier ordering — never-played (tier 0) before forgotten albums
          whose last play is older than FORGOTTEN_THRESHOLD_DAYS (tier 1).
-      6. Random fill from the whole library if tier 0+1 came up short
-         (every album touched and not yet forgotten).
-      7. Cold start (empty seed pool) → newest-by-file_modified_at, which
-         on a fresh import degrades to random — acceptable until the first
-         listen lands.
+      6. Random fill if tier 0+1 came up short; cold start (no completed
+         listens in the window) → newest-by-file_modified_at.
     """
-    seeds = _fetch_seed_vectors()
-    if not seeds:
+    has_seeds = db_query_one(f"""
+        SELECT 1 AS x FROM listening_history lh
+        JOIN embeddings e ON e.track_id = lh.track_id
+        WHERE lh.started_at >= NOW() - INTERVAL '{SEED_WINDOW_DAYS} days'
+          AND lh.completed
+        LIMIT 1
+    """)
+    if not has_seeds:
         return {"albums": _cold_start_albums(limit)}
 
-    centroid = _weighted_centroid(seeds)
-    albums = _knn_recommend(centroid, limit)
+    albums = _db_query_with_ef_search(
+        f"""
+        WITH raw_seeds AS (
+            SELECT lh.track_id,
+                   SUM(
+                       lh.duration_listened *
+                       EXP(-EXTRACT(EPOCH FROM (NOW() - lh.started_at))
+                           / %(tau_sec)s)
+                   ) AS weight
+            FROM listening_history lh
+            WHERE lh.started_at >= NOW() - INTERVAL '{SEED_WINDOW_DAYS} days'
+              AND lh.completed
+            GROUP BY lh.track_id
+        ),
+        cand_seeds AS (
+            SELECT r.track_id, r.weight, e.vector,
+                   ROW_NUMBER() OVER (ORDER BY r.weight DESC) AS rk
+            FROM raw_seeds r
+            JOIN embeddings e ON e.track_id = r.track_id
+            ORDER BY r.weight DESC
+            LIMIT {SEED_CANDIDATES}
+        ),
+        seeds AS (
+            -- Diversity prune against every HEAVIER candidate (not only kept
+            -- ones): a chain of near-dupes over-prunes slightly, which is fine.
+            SELECT cs.track_id, cs.vector,
+                   cs.weight / SUM(cs.weight) OVER () AS w
+            FROM cand_seeds cs
+            WHERE NOT EXISTS (
+                SELECT 1 FROM cand_seeds h
+                WHERE h.rk < cs.rk
+                  AND 1 - (h.vector <=> cs.vector) > {SEED_DIVERSITY_CEIL}
+            )
+            ORDER BY cs.rk
+            LIMIT {SEED_KEPT}
+        ),
+        hits AS (
+            SELECT s.w, nn.track_id, nn.sim
+            FROM seeds s
+            CROSS JOIN LATERAL (
+                SELECT e.track_id, 1 - (e.vector <=> s.vector) AS sim
+                FROM embeddings e
+                WHERE e.track_id <> s.track_id
+                ORDER BY e.vector <=> s.vector
+                LIMIT {KNN_PER_SEED}
+            ) nn
+        ),
+        candidate_albums AS (
+            -- DISTINCT folds multi-edition variants of one album; the same
+            -- track hit from TWO seeds keeps two rows — cross-taste evidence.
+            SELECT DISTINCT av.album_id, h.w, h.track_id, h.sim
+            FROM hits h
+            JOIN media_files mf ON mf.track_id = h.track_id
+            JOIN album_variants av ON av.id = mf.album_variant_id
+        ),
+        -- Tier state derives from the SAME source as the seed
+        -- (listening_history, completed plays) so an album that seeds the
+        -- shelf also counts as "played" and leaves it. Reading play state
+        -- from local_play_stats here would split the source of truth.
+        album_state AS (
+            SELECT av.album_id,
+                   MAX(lh.started_at) AS last_touch,
+                   COUNT(lh.id) AS total_plays
+            FROM album_variants av
+            JOIN media_files mf ON mf.album_variant_id = av.id
+            LEFT JOIN listening_history lh
+                   ON lh.media_file_id = mf.id AND lh.completed
+            WHERE av.album_id IN (SELECT album_id FROM candidate_albums)
+            GROUP BY av.album_id
+        ),
+        scored AS (
+            SELECT ca.album_id,
+                   SUM(ca.w * ca.sim) / (COUNT(*) + 3.0) AS score,
+                   CASE
+                       WHEN als.total_plays = 0 THEN 0
+                       WHEN als.last_touch < NOW() - INTERVAL '{FORGOTTEN_THRESHOLD_DAYS} days' THEN 1
+                       ELSE 2
+                   END AS tier
+            FROM candidate_albums ca
+            JOIN album_state als ON als.album_id = ca.album_id
+            GROUP BY ca.album_id, als.total_plays, als.last_touch
+        )
+        SELECT al.id::text AS id,
+               al.title,
+               al.release_year AS year,
+               {_ALBUM_TILE_SUBQUERIES}
+        FROM scored s
+        JOIN albums al ON al.id = s.album_id
+        WHERE s.tier <= 1
+        ORDER BY s.tier ASC, s.score DESC
+        LIMIT %(limit)s
+        """,
+        {"tau_sec": RECENCY_TAU_HOURS * 3600, "limit": limit},
+        ef_search=HNSW_EF_SEARCH,
+    )
 
     if len(albums) < limit:
         existing = {a["id"] for a in albums}
@@ -355,126 +448,8 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
     return session
 
 
-def _fetch_seed_vectors() -> list[dict[str, Any]]:
-    """Top-N recent completed tracks with their CLAP vectors and recency weight."""
-
-    return db_query(
-        f"""
-        WITH recent AS (
-            SELECT lh.track_id,
-                   SUM(
-                       lh.duration_listened *
-                       EXP(-EXTRACT(EPOCH FROM (NOW() - lh.started_at))
-                           / %(tau_sec)s)
-                   ) AS weight
-            FROM listening_history lh
-            WHERE lh.started_at >= NOW() - INTERVAL '{SEED_WINDOW_DAYS} days'
-              AND lh.completed
-            GROUP BY lh.track_id
-        )
-        SELECT r.track_id::text AS track_id,
-               r.weight::float AS weight,
-               e.vector::text  AS vector
-        FROM recent r
-        JOIN embeddings e ON e.track_id = r.track_id
-        ORDER BY r.weight DESC
-        LIMIT {SEED_TOP_N}
-        """,
-        {"tau_sec": RECENCY_TAU_HOURS * 3600},
-    )
 
 
-def _weighted_centroid(seeds: list[dict[str, Any]]) -> list[float]:
-    """Weighted mean of 512-d CLAP vectors keyed by recency weight."""
-
-    total_w = sum(s["weight"] for s in seeds)
-    if total_w <= 0:
-        return _parse_vector(seeds[0]["vector"])
-
-    dim = 512
-    accum = [0.0] * dim
-    for s in seeds:
-        w = s["weight"]
-        v = _parse_vector(s["vector"])
-        for i in range(dim):
-            accum[i] += w * v[i]
-    return [x / total_w for x in accum]
-
-
-def _parse_vector(v_text: str) -> list[float]:
-    """Parse a pgvector text literal '[1.0,2.0,...]' into a list of floats."""
-
-    return [float(x) for x in v_text.strip("[]").split(",")]
-
-
-def _knn_recommend(centroid: list[float], limit: int) -> list[dict[str, Any]]:
-    """HNSW kNN + album aggregation + tiered ordering."""
-
-    qvec = _vec_literal(centroid)
-
-    rows = _db_query_with_ef_search(
-        f"""
-        WITH similar_tracks AS (
-            SELECT e.track_id,
-                   1 - (e.vector <=> %(qvec)s::vector) AS sim
-            FROM embeddings e
-            ORDER BY e.vector <=> %(qvec)s::vector
-            LIMIT {KNN_CANDIDATE_TRACKS}
-        ),
-        candidate_albums AS (
-            SELECT av.album_id,
-                   st.sim,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY av.album_id ORDER BY st.sim DESC
-                   ) AS rn
-            FROM similar_tracks st
-            JOIN media_files mf ON mf.track_id = st.track_id
-            JOIN album_variants av ON av.id = mf.album_variant_id
-        ),
-        -- Tier state derives from the SAME source as the seed
-        -- (listening_history, completed plays) so an album that seeds the
-        -- centroid also counts as "played" and leaves the shelf. Reading
-        -- play state from local_play_stats here would split the source of
-        -- truth: a just-played album could shift the centroid toward itself
-        -- yet keep tier 0 and resurface instead of dropping out.
-        album_state AS (
-            SELECT av.album_id,
-                   MAX(lh.started_at) AS last_touch,
-                   COUNT(lh.id) AS total_plays
-            FROM album_variants av
-            JOIN media_files mf ON mf.album_variant_id = av.id
-            LEFT JOIN listening_history lh
-                   ON lh.media_file_id = mf.id AND lh.completed
-            WHERE av.album_id IN (SELECT album_id FROM candidate_albums)
-            GROUP BY av.album_id
-        ),
-        scored AS (
-            SELECT ca.album_id,
-                   AVG(ca.sim) AS score,
-                   CASE
-                       WHEN als.total_plays = 0 THEN 0
-                       WHEN als.last_touch < NOW() - INTERVAL '{FORGOTTEN_THRESHOLD_DAYS} days' THEN 1
-                       ELSE 2
-                   END AS tier
-            FROM candidate_albums ca
-            JOIN album_state als ON als.album_id = ca.album_id
-            WHERE ca.rn <= {ALBUM_SCORE_TOP_K}
-            GROUP BY ca.album_id, als.total_plays, als.last_touch
-        )
-        SELECT al.id::text AS id,
-               al.title,
-               al.release_year AS year,
-               {_ALBUM_TILE_SUBQUERIES}
-        FROM scored s
-        JOIN albums al ON al.id = s.album_id
-        WHERE s.tier <= 1
-        ORDER BY s.tier ASC, s.score DESC
-        LIMIT %(limit)s
-        """,
-        {"qvec": qvec, "limit": limit},
-        ef_search=HNSW_EF_SEARCH,
-    )
-    return rows
 
 
 def _random_fill(needed: int, exclude: set[str]) -> list[dict[str, Any]]:
