@@ -452,6 +452,13 @@ CREATE TABLE IF NOT EXISTS embedding_segments (
     UNIQUE (track_id, model_id, segment_index)
 );
 
+-- Segment-level KNN is the text→audio retrieve channel: normalized track-MEAN
+-- vectors collapse toward the corpus centroid (text-query cosines span ~0.05),
+-- so text search retrieves AND scores against segments (MAX per track).
+CREATE INDEX IF NOT EXISTS idx_embedding_segments_vector
+    ON embedding_segments USING hnsw (vector vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
 CREATE TABLE IF NOT EXISTS text_embeddings (
     id SERIAL PRIMARY KEY,
     vector vector(1024) NOT NULL,

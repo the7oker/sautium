@@ -321,5 +321,8 @@ def discovery_search(
         return {"status": "ok", "results": [], "warming": warming}
     sql, params = built[target]
     with get_db_context() as db:
+        # pgvector 0.5 returns at most ef_search rows from an HNSW scan; the
+        # segment-KNN retrieve branch overscans to 1000 (see Source.knn).
+        db.execute(text("SET LOCAL hnsw.ef_search = 1000"))
         rows = db.execute(text(sql), params).fetchall()
     return {"status": "ok", "results": _SHAPERS[target](rows), "warming": warming}

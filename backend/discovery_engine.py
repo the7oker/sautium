@@ -115,6 +115,11 @@ class Source:
     model: Optional[str] = None   # model_cache key this source needs; gracefully skipped if cold
     level: str = ""            # entity level (track/album/artist); default derived from .table
     retrieve: str = ""         # index-friendly retrieve-branch predicate; default (score_sql) >= floor
+    knn: str = ""              # HNSW-served distance ORDER expr (e.g. "es.vector <=> CAST(:q AS vector)"):
+                               # the retrieve branch becomes inner-KNN-first — a bare
+                               # `ORDER BY vector <=> q LIMIT n` uses the index, the wrapped
+                               # `1-(...)` score form never does. pgvector 0.5 returns at most
+                               # hnsw.ef_search rows, so executors SET LOCAL hnsw.ef_search=1000.
     expand: Optional[Callable[[Any], Any]] = None
 
 
@@ -162,9 +167,19 @@ TOOLS: dict[str, Tool] = {
                "CASE WHEN t.title_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
                targets=("track",), floor=0.3, ceil=1.0, weight=1.0,
                retrieve="(t.title_latin % :ql OR t.title_latin LIKE :qlpfx)"),
-        Source("clap", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
+        # CLAP text→audio works against SEGMENTS (10s windows), not track means:
+        # normalized means collapse toward the corpus centroid — text-query
+        # cosines span ~0.05 across 37k tracks (top-370 tie within 0.002) and
+        # HNSW breaks down in that space. Retrieve = segment KNN (knn=), score =
+        # MAX over the track's segments (the two-tier rerank — catches tracks
+        # where the query sounds in one act only). Floors from the 2026-07-05
+        # segment-MAX probe: floor = corpus p90 (.42); ceil sits ABOVE the probe's
+        # max top-1 (.726) — in a dense space a top-10 ceil clamps dozens of rows
+        # into 1.00 ties and the order degrades to the alphabet.
+        Source("clap", "embedding_segments", "1-(es.vector <=> CAST(:qclap AS vector))",
                targets=("track", "album", "artist", "genre"),   # characteristic: aggregates up
-               floor=0.30, ceil=0.58, weight=0.8, model="clap"),
+               floor=0.42, ceil=0.74, weight=0.8, model="clap",
+               knn="es.vector <=> CAST(:qclap AS vector)"),
         Source("lyrics_sem", "lyrics_embeddings", "1-(le.vector <=> CAST(:qlyr AS vector))",
                targets=("track", "album", "artist", "genre"),
                floor=0.47, ceil=0.62, weight=0.6, model="lyrics"),
@@ -222,13 +237,16 @@ TOOLS: dict[str, Tool] = {
     # source (audio↔audio — no model needed, the vector is read from the DB).
     # Characteristic ⇒ rolls up: similar tracks / albums / artists / genres from
     # one checkbox, AND-composable with every gate ("similar + Trip-Hop only").
-    # floors from the audio↔audio probe (p90≈.68, top10≈.90 — a different scale
-    # than text→audio). The self-exclusion gate keeps the seed out of the matched
-    # set, so its own album/artist rank only via their OTHER similar content.
+    # Track-MEAN↔mean space stays healthy for seed (unlike text↔mean): the
+    # 2026-07-05 post-mean-flip probe reads p90≈.76. Ceil .97 = above the
+    # tie-mass — a real seed had 404 tracks ≥.93 and 0 ≥.97; a top-10 ceil
+    # would clamp them all into 1.00 and the list would go alphabetical. The
+    # self-exclusion gate keeps the seed out of the matched set, so its own
+    # album/artist rank only via their OTHER similar content.
     "seed": Tool("seed", sources=(
         Source("seed", "embeddings", "1-(e.vector <=> CAST(:qseed AS vector))",
                targets=("track", "album", "artist", "genre"),
-               floor=0.68, ceil=0.90, weight=1.0),
+               floor=0.76, ceil=0.97, weight=1.0),
         Source("seed_not_self", "tracks", "t.id <> CAST(:seed_tid AS uuid)",
                is_gate=True),
     )),
@@ -240,9 +258,10 @@ TOOLS: dict[str, Tool] = {
                is_gate=True),)),
     # Semantic-only track relevance (no title): CLAP text→audio, lyrics text→lyrics.
     "sound": Tool("sound", sources=(
-        Source("sound", "embeddings", "1-(e.vector <=> CAST(:qclap AS vector))",
+        Source("sound", "embedding_segments", "1-(es.vector <=> CAST(:qclap AS vector))",
                targets=("track", "album", "artist", "genre"),
-               floor=0.30, ceil=0.58, weight=1.0, model="clap"),)),
+               floor=0.42, ceil=0.74, weight=1.0, model="clap",
+               knn="es.vector <=> CAST(:qclap AS vector)"),)),
     "lyrics": Tool("lyrics", sources=(
         Source("lyrics", "lyrics_embeddings", "1-(le.vector <=> CAST(:qlyr AS vector))",
                targets=("track", "album", "artist", "genre"),
@@ -271,6 +290,7 @@ EDGES: tuple = (
     Edge("album_artists", "albums", "aa.album_id = al.id"),
     Edge("tracks", "audio_features", "af.track_id = t.id"),
     Edge("tracks", "embeddings", "e.track_id = t.id"),
+    Edge("tracks", "embedding_segments", "es.track_id = t.id"),
     Edge("tracks", "lyrics_embeddings", "le.track_id = t.id"),
     Edge("artists", "artist_bio_embeddings", "abe.artist_id = a.id"),
     Edge("artists", "artist_name_aliases", "ana.artist_id = a.id"),
@@ -292,6 +312,7 @@ _ALIAS = {
     "audio_features": "af", "embeddings": "e", "artist_bio_embeddings": "abe",
     "media_files": "mf", "album_variants": "av", "album_genres": "ag", "genres": "g",
     "artist_name_aliases": "ana", "lyrics_embeddings": "le",
+    "embedding_segments": "es",
     "genre_desc_embeddings": "gde",
 }
 
@@ -406,6 +427,7 @@ _TABLE_LEVEL = {
     "artists": "artist", "artist_name_aliases": "artist", "artist_bio_embeddings": "artist",
     "albums": "album", "album_artists": "album", "album_genres": "album", "genres": "album",
     "tracks": "track", "audio_features": "track", "embeddings": "track",
+    "embedding_segments": "track",
     "lyrics_embeddings": "track", "album_tracks": "track", "media_files": "track",
     "track_artists": "track",
 }
@@ -465,6 +487,20 @@ def _retrieve_branch(src: Source, entity: EntityDef, corpus: str, gates: list, K
     cg = _corpus_clause(entity, corpus)
     if cg:
         conds.append(cg)
+    if src.knn:
+        # Inner KNN first — HNSW serves only the bare `ORDER BY vector <=> q`
+        # form, never the wrapped score expression. Gates + floor prune the
+        # ≤1000-row overscan OUTSIDE the KNN (pgvector 0.5 caps the result at
+        # hnsw.ef_search rows — the executor SET LOCALs it to 1000).
+        path = _route(src.table, entity, corpus)
+        if len(path) != 1:
+            raise ValueError(f"knn retrieve supports 1-hop sources, got {src.table}")
+        alias = _ALIAS[src.table]
+        frm = (f"(SELECT * FROM {src.table} {alias} ORDER BY {src.knn} LIMIT 1000) {alias} "
+               f"JOIN {entity.table} ON {path[0][1]}")
+        conds.append(f"({src.score_sql}) >= {src.floor}")
+        return (f"SELECT {entity.pk} AS id FROM {frm} WHERE {' AND '.join(conds)} "
+                f"ORDER BY ({src.score_sql}) DESC LIMIT {K}")
     conds.append(src.retrieve or f"({src.score_sql}) >= {src.floor}")
     if src.table == et:
         frm = entity.table
