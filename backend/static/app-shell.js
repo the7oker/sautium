@@ -883,16 +883,28 @@
       }
     },
 
-    async fetchSimilarByTrack(tid) {
+    // One similar path for owned AND preview tracks: the discovery engine's
+    // seed tool (track UUID → CLAP mean↔mean with calibrated norm + two-path
+    // owned/phantom bridges). Engine rows carry the playable id as `id` —
+    // renderSimilar's contract wants `media_file_id`.
+    async fetchSimilarSeed(tid) {
+      if (!tid) return;
       try {
-        const params = new URLSearchParams({ track_uuid: tid, limit: '7', include_phantom: 'true' });
-        const resp = await fetch('/search/similar-by-track?' + params, { method: 'POST' });
+        const params = new URLSearchParams({
+          target: 'track', seed_track_id: tid, limit: '7', corpus: 'all',
+        });
+        const resp = await fetch('/api/discovery/search?' + params);
         if (!resp.ok) return;
         const data = await resp.json();
-        this.renderSimilar(data.results || data.tracks || []);
+        this.renderSimilar((data.results || []).map(r =>
+          Object.assign({}, r, { media_file_id: r.id })));
       } catch (err) {
-        console.warn('preview similar fetch failed:', err);
+        console.warn('similar fetch failed:', err);
       }
+    },
+
+    fetchSimilarByTrack(tid) {
+      return this.fetchSimilarSeed(tid);
     },
 
     // Enrichment landed (key/BPM/embedding) for the streamed track — re-fetch its
@@ -918,7 +930,8 @@
         this.lastDetail = detail;
         this.lastDetailFetchedMfId = mfId;
         this.renderDetail(detail);
-        this.fetchSimilar(mfId);
+        this.fetchSimilarSeed(detail.track_id
+          || (window.currentStatus && window.currentStatus.track_id));
         // Share detail with other surfaces (mini-player needs cover_id
         // which is not in the SSE status payload).
         document.dispatchEvent(new CustomEvent('np-detail', { detail }));
@@ -926,20 +939,6 @@
         console.warn('now-playing-detail failed:', err);
       } finally {
         if (this.inflightMfId === mfId) this.inflightMfId = null;
-      }
-    },
-
-    async fetchSimilar(mfId) {
-      try {
-        const params = new URLSearchParams({ track_id: String(mfId), limit: '7', include_phantom: 'true' });
-        const resp = await fetch('/search/similar?' + params, { method: 'POST' });
-        if (!resp.ok) return;
-        const data = await resp.json();
-        // /search/similar returns `results` (the legacy contract); keep
-        // the `tracks` fallback in case the endpoint shape evolves.
-        this.renderSimilar(data.results || data.tracks || []);
-      } catch (err) {
-        console.warn('similar fetch failed:', err);
       }
     },
 
@@ -3468,7 +3467,7 @@
     return `<div class="track-list">${
       items.map(t => {
         const c = coverPlaceholderColors(t.title || t.album || '');
-        const url = coverUrl({cover_id: t.cover_id, media_file_id: t.id});
+        const url = coverUrl({cover_id: t.cover_id, media_file_id: t.id, cover_url: t.cover_url});
         const inner = url
           ? `<img src="${url}" alt="" loading="lazy" onerror="this.style.display='none'">`
           : '';

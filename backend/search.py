@@ -312,41 +312,6 @@ def _similar_by_track_embedding(
     return {"results": results, "count": len(results), "query_track": query_track}
 
 
-def search_similar_tracks_by_uuid(
-    db: Session,
-    track_uuid: str,
-    limit: int = None,
-    min_similarity: float = None,
-    filters: Optional[Dict[str, Any]] = None,
-    include_phantom: bool = False,
-) -> Dict[str, Any]:
-    """Like search_similar_tracks but keyed by a track UUID (no media_file) — for
-    the Now Playing screen of a streamed phantom track. Needs the track's CLAP
-    embedding to exist (only present once the preview has been analysed)."""
-    limit = limit or settings.default_search_limit
-    min_similarity = min_similarity if min_similarity is not None else settings.min_similarity_threshold
-    filters = filters or {}
-
-    src = db.execute(text("""
-        SELECT t.title,
-               (SELECT a.name FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
-                WHERE ta.track_id = t.id AND ta.role = 'primary' LIMIT 1) AS artist
-        FROM tracks t WHERE t.id = :tid
-    """), {"tid": track_uuid}).fetchone()
-    if not src:
-        return {"error": f"Track {track_uuid} not found", "results": [], "count": 0}
-
-    emb = db.execute(text("SELECT id FROM embeddings WHERE track_id = :tid"),
-                     {"tid": track_uuid}).fetchone()
-    if not emb:
-        return {"results": [], "count": 0,
-                "query_track": {"id": track_uuid, "title": src.title, "artist": src.artist}}
-
-    query_track = {"id": track_uuid, "title": src.title, "artist": src.artist}
-    return _similar_by_track_embedding(
-        db, track_uuid, query_track, limit, min_similarity, filters,
-        include_phantom=include_phantom)
-
 
 def search_by_text(
     db: Session,

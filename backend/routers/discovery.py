@@ -193,6 +193,7 @@ def _track_results(rows) -> list:
         "year": r.year,
         "duration_seconds": float(r.duration_seconds) if r.duration_seconds else None,
         "cover_id": r.cover_id,
+        "cover_url": r.cover_url,       # phantom rows: album art (no media_files)
         "is_owned": bool(r.is_owned),
         "similarity": round(float(r.score), 4) if r.score is not None else None,
     } for r in rows]

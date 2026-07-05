@@ -85,6 +85,8 @@ ENTITIES: dict[str, EntityDef] = {
                         "ORDER BY mf.is_analysis_source DESC LIMIT 1) AS media_file_id, "
                         "(SELECT mf.cover_id::text FROM media_files mf WHERE mf.track_id=t.id "
                         "AND mf.cover_id IS NOT NULL LIMIT 1) AS cover_id, "
+                        "(SELECT al.cover_url FROM album_tracks atr JOIN albums al ON al.id=atr.album_id "
+                        "WHERE atr.track_id=t.id AND al.cover_url IS NOT NULL LIMIT 1) AS cover_url, "
                         "(SELECT mf.duration_seconds FROM media_files mf WHERE mf.track_id=t.id LIMIT 1) "
                         "AS duration_seconds, "
                         "(SELECT al.title FROM media_files mf JOIN album_variants av ON av.id=mf.album_variant_id "
