@@ -36,7 +36,15 @@ launcher build cannot import backend modules) and keep both in step.
 import hashlib
 from typing import Optional
 
-RECORD_VERSION = 1
+# Record payload format. v2 (2026-07-06): the source material's
+# duration_seconds joins the content-address section (after chromaprint) —
+# it feeds the receiver's cheap import gate, so it must be tamper-evident.
+# v1 records were re-signed as v2 pre-launch; no verifier supports v1.
+RECORD_VERSION = 2
+
+# The Worker timestamp string format — coupled to BIRTH_CERT_VERSION in
+# worker/verify.js (they must match), NOT to the record format above.
+TIMESTAMP_VERSION = 1
 
 # Canonical grid identity: WINDOW_SECONDS=10, evenly-spaced-subset strategy
 # (embeddings.segment_grid_indices). Bump when the grid definition changes so
@@ -72,11 +80,19 @@ def _guard_chromaprint(chromaprint: Optional[str]) -> str:
     return chromaprint
 
 
+def _fmt_duration(duration_seconds: Optional[int]) -> str:
+    """Whole seconds as a byte-stable string ('-' when unknown). Integer by
+    design — the field feeds a ±5% import gate, and floats are a determinism
+    hazard in signed strings."""
+    return "-" if duration_seconds is None else str(int(duration_seconds))
+
+
 def segment_payload(
     author_pubkey_hex: str,
     track_uuid: str,
     pcm_hash_hex: str,
     chromaprint: Optional[str],
+    duration_seconds: Optional[int],
     model_uuid: str,
     segment_index: int,
     vector_hash_hex: str,
@@ -86,10 +102,12 @@ def segment_payload(
     bound INTO the payload so the signature is an intrinsic statement by a named
     identity — evidence in a flag report names its author without relying on an
     external column. (It does not, and cannot, prevent re-signing deterministic
-    public content; authorship theft is caught by timestamp priority.)"""
+    public content; authorship theft is caught by timestamp priority.)
+    pcm_hash + chromaprint + duration form the material declaration."""
     return ":".join([
         "sautium-record", f"v{RECORD_VERSION}", "segment", author_pubkey_hex.lower(),
         track_uuid.lower(), pcm_hash_hex.lower(), _guard_chromaprint(chromaprint),
+        _fmt_duration(duration_seconds),
         model_uuid.lower(), str(grid_version), str(segment_index),
         vector_hash_hex.lower(),
     ]).encode("utf-8")
@@ -100,6 +118,7 @@ def features_payload(
     track_uuid: str,
     pcm_hash_hex: str,
     chromaprint: Optional[str],
+    duration_seconds: Optional[int],
     analysis_version: int,
     features_hash_hex: str,
 ) -> bytes:
@@ -108,6 +127,7 @@ def features_payload(
     return ":".join([
         "sautium-record", f"v{RECORD_VERSION}", "features", author_pubkey_hex.lower(),
         track_uuid.lower(), pcm_hash_hex.lower(), _guard_chromaprint(chromaprint),
+        _fmt_duration(duration_seconds),
         str(analysis_version), features_hash_hex.lower(),
     ]).encode("utf-8")
 
@@ -165,8 +185,10 @@ def verify_proof(leaf_hex: str, proof: list, root_hex: str) -> bool:
 
 def timestamp_payload(root_hex: str, date_iso: str) -> bytes:
     """The bytes the Worker (master authority) signs to notarize a batch
-    root at a date — domain-separated from birth certs by the prefix."""
-    return f"sautium-timestamp:v{RECORD_VERSION}:{root_hex.lower()}:{date_iso}".encode("utf-8")
+    root at a date — domain-separated from birth certs by the prefix.
+    Versioned by TIMESTAMP_VERSION (in step with worker/verify.js), not by
+    the record format — a record-format bump must not desync the Worker."""
+    return f"sautium-timestamp:v{TIMESTAMP_VERSION}:{root_hex.lower()}:{date_iso}".encode("utf-8")
 
 
 def verify_timestamp(root_hex: str, date_iso: str, signature_hex: str,

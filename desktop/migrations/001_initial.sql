@@ -443,6 +443,9 @@ CREATE TABLE IF NOT EXISTS analysis_sources (
     media_file_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
     pcm_hash      CHAR(64) NOT NULL,
     chromaprint   TEXT,                   -- NULL only if fpcalc failed
+    duration_seconds INTEGER,             -- whole seconds; part of the signed
+                                          -- material declaration (cheap
+                                          -- no-decode import gate)
     grid_version  SMALLINT NOT NULL DEFAULT 1,
     sample_rate   INTEGER,
     bit_depth     INTEGER,                -- NULL for lossy sources

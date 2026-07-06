@@ -141,7 +141,8 @@ def run(limit=None, dry_run=False):
         cur.execute(f"""
             SELECT s.id, s.segment_index, s.vector::text AS vec,
                    e.model_id::text AS model,
-                   src.pcm_hash, src.chromaprint, src.grid_version
+                   src.pcm_hash, src.chromaprint, src.duration_seconds,
+                   src.grid_version
             FROM embedding_segments s
             JOIN embeddings e         ON e.id = s.embedding_id
             JOIN analysis_sources src ON src.id = e.analysis_source_id
@@ -152,6 +153,7 @@ def run(limit=None, dry_run=False):
             vh = rs.vector_hash(_parse_vector(seg["vec"]).tobytes())
             payload = rs.segment_payload(
                 author, tid, seg["pcm_hash"], seg["chromaprint"],
+                seg["duration_seconds"],
                 seg["model"], seg["segment_index"], vh,
                 grid_version=seg["grid_version"])
             pending.append(("embedding_segments", seg["id"], rs.sign(payload, key)))
@@ -159,7 +161,7 @@ def run(limit=None, dry_run=False):
 
         cur.execute(f"""
             SELECT a.id, a.analysis_version, {', '.join(FEATURE_ORDER)},
-                   src.pcm_hash, src.chromaprint
+                   src.pcm_hash, src.chromaprint, src.duration_seconds
             FROM audio_features a
             JOIN analysis_sources src ON src.id = a.analysis_source_id
             WHERE a.track_id = %(tid)s AND a.signature IS NULL
@@ -169,6 +171,7 @@ def run(limit=None, dry_run=False):
             fh = rs.blake2b_hex(canonical_features_blob(feat))
             payload = rs.features_payload(author, tid, feat["pcm_hash"],
                                           feat["chromaprint"],
+                                          feat["duration_seconds"],
                                           feat["analysis_version"], fh)
             pending.append(("audio_features", feat["id"], rs.sign(payload, key)))
             touched = True
@@ -247,7 +250,8 @@ def verify_all() -> bool:
     cur.execute("""SELECT s.author_pubkey, s.signature, s.merkle_proof, s.batch_root,
                           e.track_id::text tid, e.model_id::text model,
                           s.segment_index idx, s.vector::text vec,
-                          p.pcm_hash, p.chromaprint, p.grid_version
+                          p.pcm_hash, p.chromaprint, p.duration_seconds,
+                          p.grid_version
                    FROM embedding_segments s
                    JOIN embeddings e ON e.id = s.embedding_id
                    LEFT JOIN analysis_sources p ON p.id = e.analysis_source_id
@@ -260,7 +264,8 @@ def verify_all() -> bool:
             continue
         vh = rs.vector_hash(_parse_vector(r["vec"]).tobytes())
         payload = rs.segment_payload(r["author_pubkey"], r["tid"], r["pcm_hash"],
-                                     r["chromaprint"], r["model"], r["idx"], vh,
+                                     r["chromaprint"], r["duration_seconds"],
+                                     r["model"], r["idx"], vh,
                                      grid_version=r["grid_version"])
         if _seal_ok(payload, r):
             ok += 1
@@ -272,7 +277,7 @@ def verify_all() -> bool:
     cur.execute(f"""SELECT a.author_pubkey, a.signature, a.merkle_proof, a.batch_root,
                            a.track_id::text tid, a.analysis_version,
                            {', '.join('a.' + c for c in FEATURE_ORDER)},
-                           p.pcm_hash, p.chromaprint
+                           p.pcm_hash, p.chromaprint, p.duration_seconds
                     FROM audio_features a
                     LEFT JOIN analysis_sources p ON p.id = a.analysis_source_id
                     WHERE a.signature IS NOT NULL""")
@@ -284,7 +289,8 @@ def verify_all() -> bool:
             continue
         fh = rs.blake2b_hex(canonical_features_blob(r))
         payload = rs.features_payload(r["author_pubkey"], r["tid"], r["pcm_hash"],
-                                      r["chromaprint"], r["analysis_version"], fh)
+                                      r["chromaprint"], r["duration_seconds"],
+                                      r["analysis_version"], fh)
         if _seal_ok(payload, r):
             ok += 1
         else:

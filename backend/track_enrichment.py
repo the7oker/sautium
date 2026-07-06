@@ -644,7 +644,8 @@ class TrackEnrichmentPipeline:
                     src_id = provenance.get_or_create_local(
                         db, track.id, analysis_file.id,
                         analysis_file.file_path, analysis_file.sample_rate,
-                        analysis_file.bit_depth, analysis_file.is_lossless)
+                        analysis_file.bit_depth, analysis_file.is_lossless,
+                        analysis_file.duration_seconds)
                     existing_af = db.query(AudioFeature).filter(
                         AudioFeature.track_id == track.id
                     ).first()

@@ -288,7 +288,7 @@ class AudioEmbeddingGenerator:
         src_id = provenance.get_or_create_local(
             db, track_id, media_file.id, media_file.file_path,
             media_file.sample_rate, media_file.bit_depth,
-            media_file.is_lossless)
+            media_file.is_lossless, media_file.duration_seconds)
         computed = self._compute_segments(audio_full)
         if computed is None:
             return False
@@ -457,7 +457,8 @@ class AudioEmbeddingGenerator:
                     for row, audio in zip(valid_rows, audio_arrays):
                         src_id = provenance.get_or_create_local(
                             db, row.track_id, row.media_file_id, row.file_path,
-                            row.sample_rate, row.bit_depth, row.is_lossless)
+                            row.sample_rate, row.bit_depth, row.is_lossless,
+                            row.duration_seconds)
                         computed = self._compute_segments(audio)
                         if computed is None:
                             stats["failed"] += 1

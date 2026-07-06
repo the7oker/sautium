@@ -244,6 +244,7 @@ def _provenance_item(r: dict):
         "origin": r["p_origin"],
         "pcm_hash": r["p_pcm_hash"],
         "chromaprint": r["p_chromaprint"],
+        "duration_seconds": r["p_duration_seconds"],
         "grid_version": r["p_grid_version"],
         "sample_rate": r["p_sample_rate"],
         "bit_depth": r["p_bit_depth"],
@@ -252,7 +253,9 @@ def _provenance_item(r: dict):
 
 
 _PROVENANCE_COLS = """s.origin::text AS p_origin, s.pcm_hash AS p_pcm_hash,
-                      s.chromaprint AS p_chromaprint, s.grid_version AS p_grid_version,
+                      s.chromaprint AS p_chromaprint,
+                      s.duration_seconds AS p_duration_seconds,
+                      s.grid_version AS p_grid_version,
                       s.sample_rate AS p_sample_rate, s.bit_depth AS p_bit_depth,
                       s.is_lossless AS p_is_lossless"""
 

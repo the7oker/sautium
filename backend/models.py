@@ -618,6 +618,10 @@ class AnalysisSource(Base):
     media_file_id = Column(Integer, ForeignKey("media_files.id", ondelete="SET NULL"))
     pcm_hash = Column(CHAR(64), nullable=False)
     chromaprint = Column(Text)
+    # Whole seconds of the source material — with pcm_hash + chromaprint it
+    # forms the signed material declaration; receivers use it as the cheap
+    # (no-decode) import gate against their own file's duration.
+    duration_seconds = Column(Integer)
     grid_version = Column(SmallInteger, nullable=False, server_default="1")
     sample_rate = Column(Integer)
     bit_depth = Column(Integer)

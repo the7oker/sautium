@@ -613,7 +613,8 @@ class AudioAnalyzer:
                             src_id = provenance.get_or_create_local(
                                 db, row.track_id, row.media_file_id,
                                 row.file_path, row.mf_sample_rate,
-                                row.bit_depth, row.is_lossless)
+                                row.bit_depth, row.is_lossless,
+                                row.duration_seconds)
                             existing = db.query(AudioFeature).filter(
                                 AudioFeature.track_id == row.track_id
                             ).first()

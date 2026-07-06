@@ -377,6 +377,7 @@ class SyncClient:
             return {}
         values = [
             (tid, p["origin"], p["pcm_hash"], p.get("chromaprint"),
+             p.get("duration_seconds"),
              p.get("grid_version", 1), p.get("sample_rate"),
              p.get("bit_depth"), p.get("is_lossless"))
             for (tid, _), p in prov.items()
@@ -384,15 +385,17 @@ class SyncClient:
         rows = psycopg2.extras.execute_values(
             cur,
             """INSERT INTO analysis_sources
-               (track_id, origin, pcm_hash, chromaprint, grid_version,
-                sample_rate, bit_depth, is_lossless)
+               (track_id, origin, pcm_hash, chromaprint, duration_seconds,
+                grid_version, sample_rate, bit_depth, is_lossless)
                VALUES %s
                ON CONFLICT (track_id, pcm_hash) DO UPDATE SET
                    chromaprint = COALESCE(analysis_sources.chromaprint,
-                                          EXCLUDED.chromaprint)
+                                          EXCLUDED.chromaprint),
+                   duration_seconds = COALESCE(analysis_sources.duration_seconds,
+                                               EXCLUDED.duration_seconds)
                RETURNING id, track_id::text, pcm_hash""",
             values,
-            template="(%s::uuid, %s::analysis_origin, %s, %s, %s, %s, %s, %s)",
+            template="(%s::uuid, %s::analysis_origin, %s, %s, %s, %s, %s, %s, %s)",
             fetch=True,
         )
         return {(r[1], r[2]): r[0] for r in rows}

@@ -41,14 +41,16 @@ ORIGIN_RANK = {"local": 2, "deezer": 1, "youtube": 0}
 _UPSERT_SQL = sa_text("""
     INSERT INTO analysis_sources
         (track_id, origin, media_file_id, pcm_hash, chromaprint,
-         sample_rate, bit_depth, is_lossless)
+         duration_seconds, sample_rate, bit_depth, is_lossless)
     VALUES (:tid, CAST(:origin AS analysis_origin), :mfid, :ph, :fp,
-            :sr, :bd, :ll)
+            :dur, :sr, :bd, :ll)
     ON CONFLICT (track_id, pcm_hash) DO UPDATE
        SET origin = EXCLUDED.origin,
            media_file_id = EXCLUDED.media_file_id,
            chromaprint = COALESCE(analysis_sources.chromaprint,
-                                  EXCLUDED.chromaprint)
+                                  EXCLUDED.chromaprint),
+           duration_seconds = COALESCE(analysis_sources.duration_seconds,
+                                       EXCLUDED.duration_seconds)
     WHERE EXCLUDED.origin = 'local' OR analysis_sources.origin <> 'local'
     RETURNING id
 """)
@@ -92,10 +94,12 @@ def chromaprint_file(local_path: str) -> Optional[str]:
 
 def get_or_create_local(db: Session, track_id, media_file_id: int,
                         file_path: str, sample_rate, bit_depth,
-                        is_lossless) -> Optional[int]:
+                        is_lossless, duration_seconds=None) -> Optional[int]:
     """analysis_sources.id for a local analysis-source file, fingerprinting it
-    on first sight. Returns None when the file can't be decoded (the analysis
-    row then saves unlinked and the staleness predicate retries next run)."""
+    on first sight. duration_seconds is the scan-known material duration
+    (media_files.duration_seconds) — part of the signed material declaration.
+    Returns None when the file can't be decoded (the analysis row then saves
+    unlinked and the staleness predicate retries next run)."""
     sid = db.execute(sa_text(
         "SELECT id FROM analysis_sources "
         "WHERE track_id = :tid AND media_file_id = :mfid "
@@ -114,8 +118,9 @@ def get_or_create_local(db: Session, track_id, media_file_id: int,
 
     return db.execute(_UPSERT_SQL, {
         "tid": str(track_id), "origin": "local", "mfid": media_file_id,
-        "ph": ph, "fp": fp, "sr": sample_rate, "bd": bit_depth,
-        "ll": is_lossless,
+        "ph": ph, "fp": fp,
+        "dur": int(round(float(duration_seconds))) if duration_seconds else None,
+        "sr": sample_rate, "bd": bit_depth, "ll": is_lossless,
     }).scalar()
 
 
@@ -135,7 +140,7 @@ def create_stream_source(db: Session, track_id, audio_bytes: bytes,
         tmp.close()
         ph = pcm_hash_file(tmp.name)
         fp = chromaprint_file(tmp.name)
-        sample_rate, bit_depth = _probe_audio(tmp.name)
+        sample_rate, bit_depth, duration = _probe_audio(tmp.name)
     except Exception as e:
         logger.warning("stream provenance failed for track %s (%s): %s",
                        track_id, provider_id, e)
@@ -145,8 +150,8 @@ def create_stream_source(db: Session, track_id, audio_bytes: bytes,
 
     sid = db.execute(_UPSERT_SQL, {
         "tid": str(track_id), "origin": provider_id, "mfid": None,
-        "ph": ph, "fp": fp, "sr": sample_rate, "bd": bit_depth,
-        "ll": is_lossless,
+        "ph": ph, "fp": fp, "dur": duration,
+        "sr": sample_rate, "bd": bit_depth, "ll": is_lossless,
     }).scalar()
     if sid is None:
         # The upsert's anti-downgrade WHERE skipped the update: these exact
@@ -159,18 +164,24 @@ def create_stream_source(db: Session, track_id, audio_bytes: bytes,
 
 
 def _probe_audio(local_path: str):
-    """(sample_rate, bit_depth) of the container's audio stream; bit_depth is
-    None for lossy codecs that carry no raw sample size."""
+    """(sample_rate, bit_depth, duration_seconds) of the container's audio
+    stream; bit_depth is None for lossy codecs that carry no raw sample size,
+    duration rounds to whole seconds (the signed-declaration granularity)."""
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "a:0",
-         "-show_entries", "stream=sample_rate,bits_per_raw_sample,bits_per_sample",
+         "-show_entries",
+         "stream=sample_rate,bits_per_raw_sample,bits_per_sample,duration",
+         "-show_entries", "format=duration",
          "-of", "json", local_path],
         capture_output=True, text=True, timeout=30, check=True)
-    stream = json.loads(out.stdout)["streams"][0]
+    probed = json.loads(out.stdout)
+    stream = probed["streams"][0]
     rate = int(stream["sample_rate"]) if stream.get("sample_rate") else None
     bits = int(stream.get("bits_per_raw_sample") or
                stream.get("bits_per_sample") or 0) or None
-    return rate, bits
+    raw_dur = stream.get("duration") or probed.get("format", {}).get("duration")
+    duration = int(round(float(raw_dur))) if raw_dur else None
+    return rate, bits, duration
 
 
 def origin_of(db: Session, analysis_source_id: Optional[int]) -> Optional[str]:
