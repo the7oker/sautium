@@ -1556,3 +1556,5 @@ def fix_analysis_source(dry_run):
             click.echo(f"  {row.file_format} (lossless={row.is_lossless}): {row.cnt}")
 
 
+if __name__ == "__main__":
+    cli()
