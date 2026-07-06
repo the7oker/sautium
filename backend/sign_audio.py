@@ -56,10 +56,13 @@ FEATURE_ORDER = [
     "vocal_instrumental", "vocal_score", "instruments", "moods",
 ]
 
-# A record signs only when its linked source is signable-classed; 'local'
-# additionally requires the track to be whitelisted (bound as %(wl)s).
-_SIGNABLE_SRC = """((src.origin = 'deezer' AND src.is_lossless)
-                   OR (src.origin = 'local' AND %(wl)s))"""
+# A record signs only when its linked source is signable-classed AND
+# first-hand (imported sources arrived over sync — signing analysis this node
+# never computed would be authorship theft in reverse); 'local' additionally
+# requires the track to be whitelisted (bound as %(wl)s).
+_SIGNABLE_SRC = """(NOT src.imported
+                    AND ((src.origin = 'deezer' AND src.is_lossless)
+                         OR (src.origin = 'local' AND %(wl)s)))"""
 
 
 def _pubkey_hex(key) -> str:
@@ -110,7 +113,7 @@ def _signable_tracks(cur) -> dict:
     cur.execute("""
         SELECT DISTINCT track_id::text AS tid
         FROM analysis_sources
-        WHERE origin = 'deezer' AND is_lossless
+        WHERE origin = 'deezer' AND is_lossless AND NOT imported
     """)
     deezer = {r["tid"] for r in cur.fetchall()}
     return {tid: (tid in whitelisted) for tid in whitelisted | deezer}

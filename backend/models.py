@@ -626,6 +626,10 @@ class AnalysisSource(Base):
     sample_rate = Column(Integer)
     bit_depth = Column(Integer)
     is_lossless = Column(Boolean)
+    # True = this row arrived over P2P sync (the sender's material, not ours).
+    # Imported sources are never signable; a first-hand registration of the
+    # same bytes flips it back to false.
+    imported = Column(Boolean, nullable=False, server_default="false")
     computed_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (

@@ -450,6 +450,10 @@ CREATE TABLE IF NOT EXISTS analysis_sources (
     sample_rate   INTEGER,
     bit_depth     INTEGER,                -- NULL for lossy sources
     is_lossless   BOOLEAN,
+    imported      BOOLEAN NOT NULL DEFAULT false,  -- arrived over P2P sync:
+                                          -- the sender's material, never
+                                          -- signable here; a first-hand
+                                          -- registration flips it back
     computed_at   TIMESTAMPTZ DEFAULT now(),
     CONSTRAINT chk_asrc_stream_no_file CHECK (origin = 'local' OR media_file_id IS NULL),
     UNIQUE (track_id, pcm_hash)

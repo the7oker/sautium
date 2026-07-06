@@ -365,9 +365,11 @@ class SyncClient:
     def _upsert_analysis_sources(cur, items: list[dict]) -> dict:
         """Upsert the distinct provenance rows carried by analysis items and
         return {(track_uuid, pcm_hash): analysis_sources.id}. media_file_id is
-        always NULL on import — the sender's file is not ours; origin/values
-        of an already-known source are kept (local knowledge wins), only a
-        missing chromaprint is filled in."""
+        always NULL and imported=true — the sender's material is not ours, so
+        these sources are never signable here (sign_audio excludes imported).
+        Origin/values of an already-known source are kept (local knowledge
+        wins, imported stays false for first-hand rows); only missing
+        chromaprint/duration are filled in."""
         prov = {}
         for item in items:
             p = item.get("provenance")
@@ -386,7 +388,7 @@ class SyncClient:
             cur,
             """INSERT INTO analysis_sources
                (track_id, origin, pcm_hash, chromaprint, duration_seconds,
-                grid_version, sample_rate, bit_depth, is_lossless)
+                grid_version, sample_rate, bit_depth, is_lossless, imported)
                VALUES %s
                ON CONFLICT (track_id, pcm_hash) DO UPDATE SET
                    chromaprint = COALESCE(analysis_sources.chromaprint,
@@ -395,10 +397,25 @@ class SyncClient:
                                                EXCLUDED.duration_seconds)
                RETURNING id, track_id::text, pcm_hash""",
             values,
-            template="(%s::uuid, %s::analysis_origin, %s, %s, %s, %s, %s, %s, %s)",
+            template="(%s::uuid, %s::analysis_origin, %s, %s, %s, %s, %s, %s, %s, true)",
             fetch=True,
         )
         return {(r[1], r[2]): r[0] for r in rows}
+
+    @staticmethod
+    def _drop_protected(cur, items: list[dict], protected_sql: str,
+                        what: str) -> list[dict]:
+        """Filter out items whose EXISTING local row must not be replaced by
+        an unsigned import. Tier-0 lite: my own complete/signed analysis
+        always outranks a peer's copy of anything."""
+        if not items:
+            return items
+        cur.execute(protected_sql, ([i["track_uuid"] for i in items],))
+        protected = {r[0] for r in cur.fetchall()}
+        if protected:
+            logger.debug("sync import: %d %s rows protected (own analysis)",
+                         len(protected), what)
+        return [i for i in items if i["track_uuid"] not in protected]
 
     @staticmethod
     def _source_id(source_map: dict, item: dict):
@@ -427,7 +444,22 @@ class SyncClient:
                     template="(%s, %s, %s)",
                 )
 
+            # Provenance registers for ALL items (universal material facts);
+            # the data write skips rows that carry MY OWN segments — importing
+            # only the mean would re-point the provenance those segments
+            # inherit through their embeddings row (lying segments, broken
+            # segment seals). Peer-imported rows have no segments, so imports
+            # keep refreshing each other freely.
             source_map = self._upsert_analysis_sources(cur, items)
+            items = self._drop_protected(
+                cur, items,
+                """SELECT e.track_id::text FROM embeddings e
+                   WHERE e.track_id = ANY(%s::uuid[])
+                     AND EXISTS (SELECT 1 FROM embedding_segments es
+                                 WHERE es.embedding_id = e.id)""",
+                "embeddings")
+            if not items:
+                return 0
 
             # Batch upsert embeddings
             values = [
@@ -458,7 +490,21 @@ class SyncClient:
 
     def _import_audio_features(self, conn, items: list[dict]) -> int:
         with conn.cursor() as cur:
+            # Provenance registers for ALL items; the data write never
+            # replaces a SIGNED row (peer data is unsigned — overwriting
+            # would strip my seal via the guard trigger) nor my own
+            # first-hand local analysis.
             source_map = self._upsert_analysis_sources(cur, items)
+            items = self._drop_protected(
+                cur, items,
+                """SELECT a.track_id::text FROM audio_features a
+                   LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
+                   WHERE a.track_id = ANY(%s::uuid[])
+                     AND (a.signature IS NOT NULL
+                          OR (s.origin = 'local' AND NOT s.imported))""",
+                "audio_features")
+            if not items:
+                return 0
             values = [
                 (
                     item["track_uuid"], item.get("bpm"), item.get("key"),

@@ -50,7 +50,11 @@ _UPSERT_SQL = sa_text("""
            chromaprint = COALESCE(analysis_sources.chromaprint,
                                   EXCLUDED.chromaprint),
            duration_seconds = COALESCE(analysis_sources.duration_seconds,
-                                       EXCLUDED.duration_seconds)
+                                       EXCLUDED.duration_seconds),
+           -- any registration through this module means THIS node decoded
+           -- the material itself: a previously synced-in row for the same
+           -- bytes becomes first-hand (and thus signable)
+           imported = false
     WHERE EXCLUDED.origin = 'local' OR analysis_sources.origin <> 'local'
     RETURNING id
 """)
