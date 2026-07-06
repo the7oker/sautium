@@ -16,11 +16,13 @@ PCM, the index and the model. So we sign per segment; a peer recomputes any
 segment and confirms it. Each node computes its own mean locally from the
 segments it holds.
 
-CONTENT-ADDRESS STAYS WHOLE-TRACK: pcm_hash = BLAKE2b of the decoded
-48kHz-mono PCM (load_full_track_48k), because segment_index is only definable
-in the whole-track frame. Per-segment signing needs no Merkle root — nodes
-hold different subsets, so each segment is signed independently and travels
-self-contained.
+CONTENT-ADDRESS STAYS WHOLE-TRACK: pcm_hash = BLAKE2b of the NATIVELY-decoded
+PCM (source rate & channels, f32le — before the -ac1 -ar48000 analysis
+conversion; lossless decode is deterministic across ffmpeg builds where the
+48k resample is not). Whole-track because segment_index is only definable in
+the whole-track frame; the 48k-mono analysis frame is a derivation defined by
+grid_version. Per-segment signing needs no Merkle root — nodes hold different
+subsets, so each segment is signed independently and travels self-contained.
 
 Only hashes and IDs enter the signed string — never raw floats — so the
 payload is byte-stable across signer and verifier. Float determinism lives

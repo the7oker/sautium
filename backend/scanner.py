@@ -363,9 +363,12 @@ class LibraryScanner:
         """Set is_analysis_source for the best quality file per track.
 
         Priority: CD (16bit lossless) > other lossless > lossy.
+        Two statements, losers cleared first: a single UPDATE that flips both
+        rows can transiently hold two TRUE rows mid-statement, which the
+        partial unique index uq_media_files_analysis_source rejects.
         """
         from sqlalchemy import text
-        db.execute(text("""
+        ranked = """
             WITH ranked AS (
                 SELECT id,
                        ROW_NUMBER() OVER (
@@ -377,9 +380,18 @@ class LibraryScanner:
                 FROM media_files
                 WHERE track_id = :tid
             )
+        """
+        db.execute(text(ranked + """
             UPDATE media_files
-            SET is_analysis_source = (id = (SELECT id FROM ranked WHERE rn = 1))
-            WHERE track_id = :tid
+            SET is_analysis_source = false
+            WHERE track_id = :tid AND is_analysis_source
+              AND id <> (SELECT id FROM ranked WHERE rn = 1)
+        """), {"tid": track_id})
+        db.execute(text(ranked + """
+            UPDATE media_files
+            SET is_analysis_source = true
+            WHERE id = (SELECT id FROM ranked WHERE rn = 1)
+              AND NOT is_analysis_source
         """), {"tid": track_id})
 
     def scan_and_import(
