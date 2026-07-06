@@ -20,6 +20,12 @@ _cache: dict[str, object] = {}
 # Per-key Event so concurrent get_model callers wait on a single load
 # without holding `_lock` for the entire 30-180s factory call.
 _load_events: dict[str, threading.Event] = {}
+# ALL factory() calls serialize on this lock: HuggingFace loading machinery
+# (accelerate's init_empty_weights meta-device context under the default
+# low_cpu_mem_usage path) mutates process-global state and is not
+# thread-safe — two concurrent from_pretrained calls can hand one loader
+# meta tensors ("Cannot copy out of meta tensor" on .to(device)).
+_factory_lock = threading.Lock()
 
 
 def is_loaded(key: str) -> bool:
@@ -93,7 +99,8 @@ def get_model(key: str, factory):
 
     logger.info(f"Loading model '{key}' into cache")
     try:
-        instance = factory()
+        with _factory_lock:
+            instance = factory()
     except BaseException:
         with _lock:
             _load_events.pop(key, None)

@@ -130,6 +130,13 @@ def _clap_loader():
     return gen
 
 
+def _translate_loader():
+    from translation import QueryTranslator
+    gen = QueryTranslator()
+    gen.load_model()
+    return gen
+
+
 def _engine_filters(bpm_min, bpm_max, key, mode, vocalist, gender,
                     danceable, energy, instruments, genres=()) -> dict:
     """Map the Discovery filter chips to engine tool values."""
@@ -312,8 +319,12 @@ def discovery_search(
         active["artist"] = artists
     active.update(_engine_filters(bpm_min, bpm_max, key, mode, vocalist,
                                   gender, danceable, energy, instruments, genres))
+    needed = {"clap", "lyrics", "enrichment"}
+    from translation import has_cyrillic
+    if has_cyrillic(str(active.get("sound") or active.get("text") or "")):
+        needed.add("translate")   # English-only CLAP needs the translator warm
     warming = any(k in active for k in ("text", "sound", "lyrics")) and not all(
-        model_cache.is_loaded(k) for k in ("clap", "lyrics", "enrichment"))
+        model_cache.is_loaded(k) for k in needed)
     if not active:
         return {"status": "ok", "results": [], "warming": warming}
 

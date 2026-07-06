@@ -540,9 +540,8 @@ def _matched_core(atom, tools, active, corpus, K=500):
         for src in tool.sources:
             if src.is_gate or _level(src) != atom.key:
                 continue
-            if src.model and not _model_ready(src.model):
-                _kick_model(src.model)      # skip cold-model source, warm it for next request
-                continue
+            if src.model and not _source_ready(src, active):
+                continue                    # cold-model source skipped, warming kicked
             if src.table == et:
                 norm = _norm_expr(src)
             else:
@@ -664,8 +663,7 @@ def _build_higher(atom, L, tools, active, corpus, limit, K=500):
         for src in tool.sources:
             if src.is_gate or _level(src) != L.key or L.key not in src.targets:
                 continue
-            if src.model and not _model_ready(src.model):
-                _kick_model(src.model)
+            if src.model and not _source_ready(src, active):
                 continue
             if src.table == Lt:
                 norms.append(f"{src.weight} * {_norm_expr(src)}")
@@ -740,9 +738,10 @@ def _model_ready(key: str) -> bool:
 
 def _kick_model(key: str) -> None:
     import model_cache
-    from routers.discovery import _enrichment_loader, _clap_loader, _lyrics_loader
+    from routers.discovery import (_clap_loader, _enrichment_loader,
+                                   _lyrics_loader, _translate_loader)
     factory = {"enrichment": _enrichment_loader, "clap": _clap_loader,
-               "lyrics": _lyrics_loader}.get(key)
+               "lyrics": _lyrics_loader, "translate": _translate_loader}.get(key)
     if factory:
         model_cache.kick_load(key, factory)
 
@@ -761,7 +760,12 @@ def _encode_clap(q: str) -> str:
         g = AudioEmbeddingGenerator()
         g.load_model()
         return g
-    return _to_vector_param(model_cache.get_model("clap", _load).text_to_embedding(q))
+    # CLAP's RoBERTa text encoder is savagely case-sensitive ('Romantic …'
+    # vs 'romantic …' = cos 0.65, measured 2026-07-06): canonicalize to
+    # lowercase and drop sentence punctuation (NLLB appends periods) so
+    # typed caps and MT output land on the calibrated lowercase form.
+    qn = q.strip().strip(".!?").strip().lower()
+    return _to_vector_param(model_cache.get_model("clap", _load).text_to_embedding(qn))
 
 
 def _encode_lyrics(q: str) -> str:
@@ -774,6 +778,53 @@ def _encode_lyrics(q: str) -> str:
         g.load_model()
         return g
     return _to_vector_param(model_cache.get_model("lyrics", _load).query_to_embedding(q))
+
+
+def _clap_query(active: dict) -> str:
+    """The effective CLAP text — sound owns the shared qclap channel over text.
+    Mirrors build()'s tool-activation predicate so the bind side never encodes
+    for a tool the SQL side dropped."""
+    for k in ("sound", "text"):
+        v = active.get(k)
+        if v not in (None, "", "any", []):
+            return str(v)[:255]
+    return ""
+
+
+def _clap_servable(active: dict) -> bool:
+    """CLAP's text encoder is English-only: a Cyrillic query is servable only
+    once the local translator (translation.py) is warm too. Latin queries
+    need CLAP alone. Must agree between SQL assembly and _bind_params —
+    model_cache loads are monotonic, so a mid-build flip can only ADD an
+    unused bind param, never leave a referenced one missing."""
+    if not _model_ready("clap"):
+        return False
+    from translation import has_cyrillic
+    return not has_cyrillic(_clap_query(active)) or _model_ready("translate")
+
+
+def _source_ready(src, active: dict) -> bool:
+    """Skip-or-serve for a model-backed source; kicks every cold piece
+    (the model, and the translator when the CLAP query needs it) so the
+    next request can serve."""
+    if not _model_ready(src.model):
+        _kick_model(src.model)
+        return False
+    if src.model == "clap" and not _clap_servable(active):
+        _kick_model("translate")
+        return False
+    return True
+
+
+def _to_english(q: str) -> str:
+    """Cyrillic → English for CLAP encoding; Latin passes through. Callers
+    sit behind _clap_servable, so the translator is warm here."""
+    from translation import has_cyrillic
+    if not has_cyrillic(q):
+        return q
+    import model_cache
+    from routers.discovery import _translate_loader
+    return model_cache.get_model("translate", _translate_loader).to_english(q)
 
 
 def _bind_params(tools, active: dict) -> dict:
@@ -793,11 +844,6 @@ def _bind_params(tools, active: dict) -> dict:
             p["ql"], p["qlpfx"] = ql, ql + "%"
             if _model_ready("enrichment"):
                 p["qvec"] = _encode_bge(q)   # bio source (BGE-M3, multilingual) — only if warm
-            if _model_ready("clap"):
-                # CLAP's text encoder is English-only — non-Latin queries score
-                # noise-level here until the planned LOCAL translation model
-                # lands; the multilingual BGE sources (bio, lyrics) carry them.
-                p["qclap"] = _encode_clap(q)
             if _model_ready("lyrics"):
                 p["qlyr"] = _encode_lyrics(q)  # lyrics source (BGE-M3, multilingual)
         elif tool.key in ("gender", "vocalist", "key", "mode"):
@@ -834,12 +880,15 @@ def _bind_params(tools, active: dict) -> dict:
             p["qseed"] = row["v"] if row else None
         elif tool.key == "artist":
             p["artist_ids"] = [str(x) for x in (v if isinstance(v, (list, tuple)) else [v])]
-        elif tool.key == "sound":
-            if _model_ready("clap"):
-                p["qclap"] = _encode_clap(str(v)[:255])
         elif tool.key == "lyrics":
             if _model_ready("lyrics"):
                 p["qlyr"] = _encode_lyrics(str(v)[:255])
+    # qclap is one channel shared by the text and sound tools (sound wins).
+    # CLAP's text encoder is English-only — Cyrillic queries go through the
+    # local NLLB translator; until it's warm _clap_servable skips the source.
+    qc = _clap_query(active)
+    if qc and _clap_servable(active):
+        p["qclap"] = _encode_clap(_to_english(qc))
     return p
 
 

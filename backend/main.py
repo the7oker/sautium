@@ -241,6 +241,7 @@ async def lifespan(app: FastAPI):
     import embeddings as _eager_embeddings
     import enrichment_embeddings as _eager_enrichment
     import lyrics_embeddings as _eager_lyrics
+    import translation as _eager_translation
 
     def _clap_factory():
         gen = _eager_embeddings.AudioEmbeddingGenerator()
@@ -257,9 +258,22 @@ async def lifespan(app: FastAPI):
         gen.load_model()
         return gen
 
-    asyncio.create_task(_prewarm("CLAP",       "clap",       _clap_factory))
-    asyncio.create_task(_prewarm("BGE-M3",     "enrichment", _enrichment_factory))
-    asyncio.create_task(_prewarm("Lyrics-BGE", "lyrics",     _lyrics_factory))
+    def _translate_factory():
+        gen = _eager_translation.QueryTranslator()
+        gen.load_model()
+        return gen
+
+    # Sequential, search-critical first: loads serialize anyway on
+    # model_cache._factory_lock (HF loading is not thread-safe across
+    # concurrent from_pretrained calls), and chaining pins the order so
+    # NLLB's one-time 2.4GB download can never delay CLAP/BGE.
+    async def _prewarm_all():
+        await _prewarm("CLAP",       "clap",       _clap_factory)
+        await _prewarm("BGE-M3",     "enrichment", _enrichment_factory)
+        await _prewarm("Lyrics-BGE", "lyrics",     _lyrics_factory)
+        await _prewarm("NLLB",       "translate",  _translate_factory)
+
+    asyncio.create_task(_prewarm_all())
 
     # Background (network-only) enrichment — gated by the
     # `enrichment.background_enabled` user_settings flag. The toggle in
