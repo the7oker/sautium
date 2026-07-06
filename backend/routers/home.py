@@ -17,10 +17,9 @@ import logging
 from datetime import datetime
 from typing import Any
 
-import psycopg2.extras
 from fastapi import APIRouter, HTTPException, Query
 
-from db_pool import db_query, db_query_one, get_conn
+from db_pool import db_query, db_query_one, db_query_with_ef_search
 
 logger = logging.getLogger(__name__)
 
@@ -57,32 +56,6 @@ HNSW_EF_SEARCH = 500
 # Tier 1 ("forgotten") threshold: albums whose last play was longer than
 # this ago — eligible to resurface once tier 0 (never played) is exhausted.
 FORGOTTEN_THRESHOLD_DAYS = 90
-
-
-def _db_query_with_ef_search(sql: str, params: dict, ef_search: int) -> list[dict]:
-    """
-    Run a SELECT with hnsw.ef_search raised for the statement.
-
-    db_pool's connections are autocommit; SET LOCAL only takes effect
-    inside an explicit transaction, so we toggle autocommit off, set
-    the GUC, run the query, commit, and restore the pooled connection
-    to its expected autocommit state for the next caller.
-    """
-    with get_conn() as conn:
-        conn.autocommit = False
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SET LOCAL hnsw.ef_search = %s", (ef_search,))
-                cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
-                cur.execute(sql, params)
-                rows = [dict(r) for r in cur.fetchall()]
-            conn.commit()
-            return rows
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.autocommit = True
 
 
 # Subqueries shared by new-in-library and recommendations to fetch the
@@ -264,7 +237,7 @@ def get_recommendations(
     if not has_seeds:
         return {"albums": _cold_start_albums(limit)}
 
-    albums = _db_query_with_ef_search(
+    albums = db_query_with_ef_search(
         f"""
         WITH raw_seeds AS (
             SELECT lh.track_id,

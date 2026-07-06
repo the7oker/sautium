@@ -22,6 +22,7 @@ from db_pool import (
     db_query as _db_query,
     db_query_one as _db_query_one,
     db_execute as _db_execute,
+    db_query_with_ef_search as _db_query_with_ef_search,
     get_conn as _get_conn,
 )
 from ensemble_instruments import present_instruments
@@ -829,7 +830,7 @@ def _archive_and_open_session(
     """Archive the current active session against `old_pairs` (track_id,
     media_file_id) and open a new one — atomically. db_pool connections are
     autocommit, so toggle it off for this multi-statement transaction (mirrors
-    routers.home._db_query_with_ef_search). With open_new=False (end-of-queue
+    db_pool.db_query_with_ef_search). With open_new=False (end-of-queue
     completion) the active session is archived but no new one is opened.
     Returns the archived session id IFF it was a mix needing a background
     title, else None."""
@@ -1135,11 +1136,6 @@ class PlayTracksRequest(BaseModel):
     # so a played-whole-album isn't labelled "Mix". Defaults to 'mix'.
     origin: Optional[str] = None
     origin_album_id: Optional[str] = None
-
-class QueueNextRequest(BaseModel):
-    track_id: int
-    limit: int = 5
-    exclude_ids: list[int] = []
 
 class QueueTracksRequest(BaseModel):
     track_ids: list[int]
@@ -3023,7 +3019,7 @@ def queue_tracks(req: QueueTracksRequest):
     """Append the given tracks to the current queue, in order, without
     clearing. Used by the per-track "+" button and the "Queue album"
     action — these expect "add exactly these tracks", not the
-    similarity-driven Radio Mode that `/queue-next` provides."""
+    similarity-driven batches Radio Mode appends."""
     if not req.track_ids:
         raise HTTPException(status_code=400, detail="No track IDs provided")
 
@@ -3064,76 +3060,6 @@ def queue_tracks(req: QueueTracksRequest):
         raise HTTPException(status_code=503, detail=str(e))
 
 
-@router.post("/queue-next")
-def queue_next(req: QueueNextRequest):
-    """Append similar tracks to the current queue (Radio Mode)."""
-    source = _db_query_one("""
-        SELECT mf.id, t.id as db_track_id
-        FROM media_files mf
-        JOIN tracks t ON mf.track_id = t.id
-        WHERE mf.id = %(track_id)s
-    """, {"track_id": req.track_id})
-
-    if not source:
-        raise HTTPException(status_code=404, detail="Track not found")
-
-    exclude_clause = ""
-    params = {"db_track_id": source["db_track_id"], "limit": req.limit}
-    if req.exclude_ids:
-        exclude_clause = "AND mf_rep.id != ALL(%(exclude_ids)s)"
-        params["exclude_ids"] = req.exclude_ids
-
-    rows = _db_query(f"""
-        WITH target AS (
-            SELECT e.vector
-            FROM embeddings e
-            WHERE e.track_id = %(db_track_id)s
-        )
-        SELECT mf_rep.id, mf_rep.file_path, t.title, a.name as artist,
-               mf_rep.album_title as album
-        FROM tracks t
-        JOIN embeddings e ON e.track_id = t.id
-        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-        JOIN artists a ON ta.artist_id = a.id
-        JOIN LATERAL (
-            SELECT mf.id, mf.file_path, al.title as album_title
-            FROM media_files mf
-            JOIN album_variants av ON mf.album_variant_id = av.id
-            JOIN albums al ON av.album_id = al.id
-            WHERE mf.track_id = t.id
-            ORDER BY mf.is_analysis_source DESC, mf.id
-            LIMIT 1
-        ) mf_rep ON true
-        WHERE t.id != %(db_track_id)s
-          {exclude_clause}
-        ORDER BY e.vector <=> (SELECT vector FROM target)
-        LIMIT %(limit)s
-    """, params)
-
-    if not rows:
-        return {"ok": True, "count": 0, "tracks": []}
-
-    try:
-        uris = [file_path_to_uri(r["file_path"]) for r in rows]
-        with _hqp_lock:
-            added = _add_uris_with_retry(uris)
-
-        _invalidate_playlist()
-
-        # Best-effort radio fill: report the real count rather than 503 on a
-        # short add — the queue still grows and the next track-end re-fills.
-        return {
-            "ok": added > 0,
-            "count": added,
-            "tracks": [
-                {"id": r["id"], "title": r["title"], "artist": r["artist"], "album": r["album"]}
-                for r in rows
-            ],
-        }
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
-
-
 # -- Radio mode (mixed: owned + streamed phantom) -----------------------------
 #
 # Radio drifts: each batch is CLAP-similar to the CURRENTLY playing track, mixing
@@ -3148,8 +3074,20 @@ _RADIO_MAX_PHANTOM = 4          # cap streamed tracks per batch — owned ones b
                                 # so a slow stream can't starve the playhead
 _RADIO_PHANTOM_EVERY = 2        # place a phantom only after this many owned (spacing)
 _RADIO_REFILL_AT = 3            # refill when <= this many tracks remain ahead
+_RADIO_POOL = 100               # nearest-neighbour pool a batch draws from — the
+                                # drift radius; caps + jitter reshuffle inside it
+_RADIO_ARTIST_CAP = 2           # tracks per artist within one pool — raw KNN
+                                # clusters hard (a Tangerine Dream seed put Edgar
+                                # Froese in 10 of the top 30) and radio must not
+                                # collapse into a single-artist run
+_RADIO_JITTER = 0.2             # ORDER BY dist * (1 + JITTER*random()): reshuffles
+                                # near-ties so the same seed never yields the same
+                                # station twice, while distant pool members still
+                                # rank behind close ones in sparse library corners
 _radio_played: set = set()      # track UUIDs added this session — never repeat
 _radio_refilling = False        # one fill thread at a time
+_radio_last_artist: Optional[str] = None   # artist of the last queued track — the
+                                # next batch avoids opening with the same artist
 
 
 def _radio_seed_uuid(pl_row) -> Optional[str]:
@@ -3169,39 +3107,78 @@ def _radio_seed_uuid(pl_row) -> Optional[str]:
 
 
 def _radio_similar(seed_uuid: str, exclude: set, limit: int) -> list:
-    """Mixed (owned + phantom) CLAP-similar to the seed, by embedding KNN. Each row
-    carries what the batch builder needs: identity + file_path (owned) or the MB
-    tracklist fields (phantom). Excludes the seed and already-played UUIDs."""
-    return _db_query("""
-        WITH target AS (SELECT vector FROM embeddings WHERE track_id = %(seed)s::uuid)
-        SELECT t.id::text AS track_id,
-               mf_rep.id AS media_file_id, mf_rep.file_path, mf_rep.file_format,
-               (mf_rep.id IS NOT NULL) AS is_owned,
-               t.title, a.name AS artist,
-               ph_rep.album AS phantom_album, ph_rep.length_ms,
-               1 - (e.vector <=> (SELECT vector FROM target)) AS similarity
-        FROM tracks t
-        JOIN embeddings e ON e.track_id = t.id
-        JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
-        JOIN artists a ON a.id = ta.artist_id
-        LEFT JOIN LATERAL (
-            SELECT mf.id, mf.file_path, mf.file_format
-            FROM media_files mf
-            WHERE mf.track_id = t.id
-            ORDER BY mf.is_analysis_source DESC, mf.id LIMIT 1
-        ) mf_rep ON true
-        LEFT JOIN LATERAL (
-            SELECT atr.length_ms, al.title AS album
-            FROM album_tracks atr JOIN albums al ON al.id = atr.album_id
-            WHERE atr.track_id = t.id
-            ORDER BY (al.cover_url IS NOT NULL) DESC, al.id LIMIT 1
-        ) ph_rep ON true
-        WHERE t.id != %(seed)s::uuid
-          AND t.id <> ALL(%(exclude)s::uuid[])
-          AND (mf_rep.id IS NOT NULL OR ph_rep.album IS NOT NULL)
-        ORDER BY e.vector <=> (SELECT vector FROM target)
+    """Mixed (owned + phantom) CLAP-similar to the seed. Draws the _RADIO_POOL
+    nearest neighbours (HNSW with iterative scan — the default 40-candidate wave
+    dries up once the exclude list outgrows it and radio would silently die
+    mid-session), then caps each artist at _RADIO_ARTIST_CAP inside the pool and
+    jitters near-ties so the station varies between runs. Each row carries what
+    the batch builder needs: identity + file fields (owned) or the MB tracklist
+    fields (phantom). Excludes the seed and already-played UUIDs; empty when the
+    seed has no embedding (a NULL target would otherwise order arbitrarily)."""
+    return _db_query_with_ef_search("""
+        WITH target AS (SELECT vector FROM embeddings WHERE track_id = %(seed)s::uuid),
+        pool AS (
+            SELECT t.id::text AS track_id,
+                   mf_rep.id AS media_file_id, mf_rep.file_path, mf_rep.file_format,
+                   (mf_rep.id IS NOT NULL) AS is_owned,
+                   t.title, a.name AS artist, ta.artist_id,
+                   ph_rep.album AS phantom_album, ph_rep.length_ms,
+                   e.vector <=> (SELECT vector FROM target) AS dist
+            FROM tracks t
+            JOIN embeddings e ON e.track_id = t.id
+            JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+            JOIN artists a ON a.id = ta.artist_id
+            LEFT JOIN LATERAL (
+                SELECT mf.id, mf.file_path, mf.file_format
+                FROM media_files mf
+                WHERE mf.track_id = t.id
+                ORDER BY mf.is_analysis_source DESC, mf.id LIMIT 1
+            ) mf_rep ON true
+            LEFT JOIN LATERAL (
+                SELECT atr.length_ms, al.title AS album
+                FROM album_tracks atr JOIN albums al ON al.id = atr.album_id
+                WHERE atr.track_id = t.id
+                ORDER BY (al.cover_url IS NOT NULL) DESC, al.id LIMIT 1
+            ) ph_rep ON true
+            WHERE t.id != %(seed)s::uuid
+              AND t.id <> ALL(%(exclude)s::uuid[])
+              AND (mf_rep.id IS NOT NULL OR ph_rep.album IS NOT NULL)
+              AND EXISTS (SELECT 1 FROM target)
+            ORDER BY e.vector <=> (SELECT vector FROM target)
+            LIMIT %(pool)s
+        )
+        SELECT track_id, media_file_id, file_path, file_format, is_owned,
+               title, artist, phantom_album, length_ms
+        FROM (SELECT pool.*, ROW_NUMBER() OVER (PARTITION BY artist_id
+                                                ORDER BY dist) AS artist_rank
+              FROM pool) ranked
+        WHERE artist_rank <= %(artist_cap)s
+        ORDER BY dist * (1 + %(jitter)s * random())
         LIMIT %(limit)s
-    """, {"seed": seed_uuid, "exclude": list(exclude), "limit": limit})
+    """, {"seed": seed_uuid, "exclude": list(exclude), "limit": limit,
+          "pool": _RADIO_POOL, "artist_cap": _RADIO_ARTIST_CAP,
+          "jitter": _RADIO_JITTER},
+        ef_search=500)
+
+
+def _radio_interleave(owned: list, phantom: list, prev_artist: Optional[str]) -> list:
+    """Order one batch: phantoms spaced out between owned tracks (never first,
+    never adjacent — owned tracks between streams give the single-lane fetcher
+    buffer time), and consecutive same-artist rows avoided when another candidate
+    can take the slot. `prev_artist` is the artist already at the queue tail, so
+    a batch doesn't open by echoing the currently playing artist — with a drifting
+    seed its own artist is usually the nearest neighbour."""
+    owned, phantom = list(owned), list(phantom)
+    batch, owned_since, last_artist = [], 0, prev_artist
+    while len(batch) < _RADIO_BATCH_SIZE and (owned or phantom):
+        take_phantom = not owned or (phantom and owned_since >= _RADIO_PHANTOM_EVERY)
+        src = phantom if take_phantom else owned
+        pick = next((i for i, r in enumerate(src) if r["artist"] != last_artist), 0)
+        row = src.pop(pick)
+        batch.append(row)
+        owned_since = 0 if take_phantom else owned_since + 1
+        last_artist = row["artist"]
+    return batch
 
 
 def _radio_build_batch(seed_uuid: str) -> list:
@@ -3221,18 +3198,7 @@ def _radio_build_batch(seed_uuid: str) -> list:
         phantom = []
     phantom = phantom[:_RADIO_MAX_PHANTOM]
 
-    # Interleave: start with owned, drop in a phantom only after _RADIO_PHANTOM_EVERY
-    # owned since the last one — never first, never adjacent.
-    batch_rows, oi, pi, owned_since = [], 0, 0, 0
-    while len(batch_rows) < _RADIO_BATCH_SIZE and (oi < len(owned) or pi < len(phantom)):
-        if pi < len(phantom) and owned_since >= _RADIO_PHANTOM_EVERY:
-            batch_rows.append(phantom[pi]); pi += 1; owned_since = 0
-        elif oi < len(owned):
-            batch_rows.append(owned[oi]); oi += 1; owned_since += 1
-        elif pi < len(phantom):
-            batch_rows.append(phantom[pi]); pi += 1   # owned ran out (phantom-heavy seed)
-        else:
-            break
+    batch_rows = _radio_interleave(owned, phantom, _radio_last_artist)
 
     # Resolve the batch's phantoms (one waterfall pass) and submit the resolvable
     # ones to the proxy for sequential buffering; keep a token per batch position.
@@ -3254,10 +3220,10 @@ def _radio_build_batch(seed_uuid: str) -> list:
         if r["is_owned"]:
             batch.append({"kind": "owned", "media_file_id": r["media_file_id"],
                           "file_path": r["file_path"], "file_format": r["file_format"],
-                          "track_uuid": r["track_id"]})
+                          "track_uuid": r["track_id"], "artist": r["artist"]})
         elif i in pos_token:
             batch.append({"kind": "phantom", "token": pos_token[i],
-                          "track_uuid": r["track_id"]})
+                          "track_uuid": r["track_id"], "artist": r["artist"]})
         # a phantom no provider resolved → dropped (radio keeps flowing)
     return batch
 
@@ -3268,6 +3234,7 @@ def _radio_append_batch(batch: list, gen: int) -> None:
     batch order, so the playhead never reaches a not-yet-ready stream. A phantom
     that never buffers is skipped. Stops if radio is turned off or a new playback
     session supersedes this one (generation)."""
+    global _radio_last_artist
     from streaming import service as streaming_service
     proxy = streaming_service.get_proxy()
     for item in batch:
@@ -3291,6 +3258,7 @@ def _radio_append_batch(batch: list, gen: int) -> None:
                 return
             _add_uris_with_retry([uri], clear_first=False)
         _radio_played.add(item["track_uuid"])
+        _radio_last_artist = item["artist"]
         _invalidate_playlist()
         _notify_update()
 
@@ -3313,7 +3281,6 @@ def _radio_fill(seed_uuid: str, gen: int) -> None:
 class RadioStartRequest(BaseModel):
     track_id: Optional[int] = None    # media_file_id of an owned seed
     track_uuid: Optional[str] = None  # track UUID of a phantom (streamed) seed
-    limit: int = 20                   # legacy — batches are fixed-size and refilled now
 
 
 @router.post("/radio/start")
@@ -3323,7 +3290,7 @@ def radio_start(req: RadioStartRequest):
     phantom) CLAP-similar batch. The poller refills near the end so it runs on.
     Async — the phantom resolve + buffer is slow; the toggle returns at once and the
     queue grows behind the seed (owned instantly, phantoms as they buffer)."""
-    global _radio_mode, _radio_played, _radio_refilling
+    global _radio_mode, _radio_played, _radio_refilling, _radio_last_artist
     global _playback_generation, _status_version
 
     # Seed by track UUID (a streamed phantom row has no media_file) or by
@@ -3342,9 +3309,17 @@ def radio_start(req: RadioStartRequest):
 
     # Radio needs the seed's audio embedding to find similar tracks. A just-started
     # phantom may not be analysed yet — fail clearly instead of an empty station.
-    if not _db_query_one(
-            "SELECT 1 FROM embeddings WHERE track_id = %(t)s::uuid LIMIT 1",
-            {"t": seed_uuid}):
+    # The same lookup grabs the seed's artist: the first batch avoids opening with
+    # it (the playing track's own artist is usually its nearest neighbour).
+    seed_row = _db_query_one("""
+        SELECT a.name AS artist
+        FROM tracks t
+        JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+        JOIN artists a ON a.id = ta.artist_id
+        WHERE t.id = %(t)s::uuid
+          AND EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = t.id)
+    """, {"t": seed_uuid})
+    if not seed_row:
         raise HTTPException(
             status_code=409,
             detail="This track isn't analysed yet — play it a moment, then start radio.")
@@ -3363,6 +3338,7 @@ def radio_start(req: RadioStartRequest):
     _invalidate_playlist()
 
     _radio_played = {seed_uuid}
+    _radio_last_artist = seed_row["artist"]
     _radio_mode = True
     _radio_refilling = True                 # hold the poller until the first batch lands
     _status_version += 1                    # flip the UI toggle now, don't wait a tick
@@ -3387,8 +3363,8 @@ def _exit_radio_mode() -> None:
     snaps off immediately. Called from every endpoint that
     replaces the queue with explicit user-picked content (play-
     track, play-album, play-tracks, play-similar). Append-only
-    paths like queue-tracks and queue-next don't touch the flag —
-    they extend the radio rather than ending it."""
+    paths like queue-tracks don't touch the flag — they extend
+    the radio rather than ending it."""
     global _radio_mode, _status_version
     if _radio_mode:
         _radio_mode = False

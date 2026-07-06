@@ -72,6 +72,33 @@ def db_query_one(sql: str, params=None) -> Optional[dict]:
     return rows[0] if rows else None
 
 
+def db_query_with_ef_search(sql: str, params, ef_search: int) -> list[dict]:
+    """
+    Run a SELECT with hnsw.ef_search raised for the statement (pgvector's
+    default 40 is "single nearest match" tuning); iterative_scan keeps the
+    graph walk going when post-scan filters eat into the first wave.
+
+    Pool connections are autocommit; SET LOCAL only takes effect inside an
+    explicit transaction, so toggle autocommit off, set the GUCs, run the
+    query, commit, and restore the connection for the next caller.
+    """
+    with get_conn() as conn:
+        conn.autocommit = False
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SET LOCAL hnsw.ef_search = %s", (ef_search,))
+                cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
+                cur.execute(sql, params)
+                rows = [dict(r) for r in cur.fetchall()]
+            conn.commit()
+            return rows
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.autocommit = True
+
+
 def db_execute(sql: str, params=None) -> Optional[dict]:
     """Execute INSERT/UPDATE/DELETE. Returns first row if RETURNING is used."""
     with get_conn() as conn:
