@@ -30,6 +30,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 from tqdm import tqdm
 
+import provenance
 from config import settings
 from database import get_db_context
 from models import AudioFeature, Track, MediaFile
@@ -472,6 +473,10 @@ class AudioAnalyzer:
                     WHERE mf.is_analysis_source = true
                 """
             else:
+                # Pending = no features yet, OR unlinked provenance (legacy
+                # rows and failed fingerprints), OR linked to material other
+                # than the current analysis source (source moved to a better
+                # rip, or a stream preview awaiting its owned upgrade).
                 query_sql = """
                     SELECT t.id as track_id, mf.id as media_file_id,
                            mf.file_path, mf.bit_depth,
@@ -480,10 +485,11 @@ class AudioAnalyzer:
                     FROM media_files mf
                     JOIN tracks t ON t.id = mf.track_id
                     LEFT JOIN audio_features af ON af.track_id = t.id
+                    LEFT JOIN analysis_sources asrc ON asrc.id = af.analysis_source_id
                     WHERE mf.is_analysis_source = true
                       AND (af.id IS NULL
-                           OR (af.source_media_file_id IS NOT NULL
-                               AND af.source_media_file_id != mf.id))
+                           OR af.analysis_source_id IS NULL
+                           OR asrc.media_file_id IS DISTINCT FROM mf.id)
                 """
 
             params = {}
@@ -601,16 +607,20 @@ class AudioAnalyzer:
 
                         savepoint = db.begin_nested()
                         try:
+                            # Registered before the results it describes; a
+                            # fingerprint failure saves unlinked (src_id NULL)
+                            # and the pending predicate retries next run.
+                            src_id = provenance.get_or_create_local(
+                                db, row.track_id, row.media_file_id,
+                                row.file_path, row.mf_sample_rate,
+                                row.bit_depth, row.is_lossless)
                             existing = db.query(AudioFeature).filter(
                                 AudioFeature.track_id == row.track_id
                             ).first()
                             if existing:
                                 for k, v in features.items():
                                     setattr(existing, k, v)
-                                existing.source_media_file_id = row.media_file_id
-                                existing.source_bit_depth = row.bit_depth
-                                existing.source_sample_rate = row.mf_sample_rate
-                                existing.source_is_lossless = row.is_lossless
+                                existing.analysis_source_id = src_id
                                 existing.analysis_version = ANALYSIS_VERSION
                             else:
                                 af = AudioFeature(
@@ -629,10 +639,7 @@ class AudioAnalyzer:
                                     vocal_instrumental=features.get("vocal_instrumental"),
                                     vocal_score=features.get("vocal_score"),
                                     danceability=features.get("danceability"),
-                                    source_media_file_id=row.media_file_id,
-                                    source_bit_depth=row.bit_depth,
-                                    source_sample_rate=row.mf_sample_rate,
-                                    source_is_lossless=row.is_lossless,
+                                    analysis_source_id=src_id,
                                     analysis_version=ANALYSIS_VERSION,
                                 )
                                 db.add(af)

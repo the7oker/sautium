@@ -6,18 +6,21 @@ a preview we already hold the whole FLAC in memory; tee it through the SAME
 analysis the scanner runs on owned files (CLAP 512-d embedding + librosa DSP +
 AST/PaSST instruments), keyed to the phantom's track_id.
 
-Provenance: features carry source_media_file_id=NULL + source_is_lossless=False
-(a preview is lossy, from no local file). The embedding quality guard then treats
-them as low priority — an owned rip later OVERWRITES them, and a preview never
-overwrites a real-file analysis (explicit guards below).
+Provenance: the streamed bytes are content-addressed exactly like a local file
+(analysis_sources row with origin='deezer'|'youtube', media_file_id NULL,
+pcm_hash + chromaprint of the fetched audio) — this is what makes a
+Deezer-lossless analysis signable against the STREAM's material without
+claiming possession of any local rip (tier 3 in P2P-SYNC-INTEGRITY.md). The
+origin rank (local > deezer > youtube) means an owned rip later OVERWRITES a
+preview analysis, and a preview never overwrites a real-file one.
 
 GATE: only tracks with a known duration (TrackQuery.duration, i.e. local
 album_tracks.length_ms) are enriched. Without it the YouTube match isn't
 length-verified, so the audio may be the wrong recording and its features would
 poison similarity search.
 
-Windowing matches the scanner exactly (middle ``audio_sample_duration`` seconds)
-so the vector lands in the same embedding space and cosine stays comparable.
+Full-track methodology, same as owned scans (balanced-grid segments, whole-track
+amplitude block), so vectors land in the same embedding space.
 
 GPU work is serialised on a single worker and reuses the process-wide CLAP and
 AST/PaSST singletons (no duplicate model load — VRAM)."""
@@ -48,30 +51,35 @@ class PreviewEnricher:
         self._analyzer = None
 
     def submit(self, track_id: Optional[str], flac: Optional[bytes],
-               duration: Optional[float], lossless: bool = False) -> None:
+               duration: Optional[float], lossless: bool = False,
+               provider_id: Optional[str] = None) -> None:
         """Queue a previewed track for enrichment. No-ops without a track_id, a
         duration (unverified match — see GATE) or audio, or if already queued.
-        ``lossless`` is the provider's source-quality flag (Deezer FLAC=True,
-        YouTube=False) — it sets the feature provenance + embedding quality tier."""
+        ``lossless`` is the ACTUAL fetch quality (Deezer FLAC=True, degraded
+        tiers/YouTube=False); ``provider_id`` (manifest id, 'deezer'|'youtube')
+        becomes the provenance origin."""
         if not track_id or not duration or not flac:
             return
         with self._lock:
             if track_id in self._inflight:
                 return
             self._inflight.add(track_id)
-        self._pool.submit(self._run, track_id, flac, duration, lossless)
+        self._pool.submit(self._run, track_id, flac, duration, lossless,
+                          provider_id)
 
     # ---- worker ----------------------------------------------------------
-    def _run(self, track_id: str, flac: bytes, duration: float, lossless: bool) -> None:
+    def _run(self, track_id: str, flac: bytes, duration: float, lossless: bool,
+             provider_id: Optional[str]) -> None:
         try:
-            self._enrich(track_id, flac, duration, lossless)
+            self._enrich(track_id, flac, duration, lossless, provider_id)
         except Exception:
             logger.exception("preview enrichment failed for %s", track_id)
         finally:
             with self._lock:
                 self._inflight.discard(track_id)
 
-    def _enrich(self, track_id: str, flac: bytes, duration: float, lossless: bool) -> None:
+    def _enrich(self, track_id: str, flac: bytes, duration: float,
+                lossless: bool, provider_id: Optional[str]) -> None:
         import librosa
         from config import settings
         from database import SessionLocal
@@ -110,21 +118,28 @@ class PreviewEnricher:
         # its middle (analyze_from_array slices that itself).
         feats = analyzer.analyze_from_array(audio, sr=48000)   # dict | None
 
+        import provenance
         from sqlalchemy import text
 
         with SessionLocal() as db:
+            # Content-address the STREAMED bytes before saving anything they
+            # produced; a fingerprint failure saves unlinked (src_id NULL) and
+            # the owned-upgrade predicate eventually replaces the rows.
+            src_id = provenance.create_stream_source(
+                db, track_id, flac, provider_id, lossless)
             model = embedder._get_or_create_embedding_model(db)
-            # Balanced-grid segments from the full streamed audio (a later
-            # owned-file scan upserts the same canonical indices with the
-            # real-file vectors); the track vector is their normalized mean.
-            portrait = embedder._generate_segments(db, track_id, model, audio)
-            if portrait is not None:
-                embedder._save_embedding(
-                    db, track_id, portrait, model,
-                    source_media_file_id=None, source_bit_depth=None,
-                    source_sample_rate=48000, source_is_lossless=lossless,
-                    is_preview=True,
-                )
+            # Balanced-grid segments from the full streamed audio; the track
+            # vector is their normalized mean. _persist_analysis decides the
+            # overwrite by origin rank BEFORE writing, so a preview never
+            # touches a real-file analysis (segments included).
+            saved = False
+            computed = embedder._compute_segments(audio)
+            if computed is not None:
+                idxs, vecs, portrait = computed
+                saved = embedder._persist_analysis(
+                    db, track_id, model, idxs, vecs, portrait, src_id,
+                    origin=provider_id or "", is_lossless=lossless)
+            if saved:
                 # New CLAP vector → the track's album(s) audio-similarity cache is
                 # stale; drop it so /similar recomputes with the richer vector set
                 # (a phantom album becomes similarity-eligible only as it enriches).
@@ -133,23 +148,28 @@ class PreviewEnricher:
                     "AND album_id IN (SELECT album_id FROM album_tracks "
                     "WHERE track_id = :tid)"), {"tid": track_id})
             if feats:
-                self._save_features(db, track_id, feats, lossless)
+                self._save_features(db, track_id, feats, src_id, provider_id)
             db.commit()
 
         self._empty_cache()
         preview_events.ping()   # features committed → open album page re-fetches key·bpm
         logger.info("preview enriched %s (embedding=%s features=%s)",
-                    track_id, portrait is not None, bool(feats))
+                    track_id, saved, bool(feats))
 
     @staticmethod
-    def _save_features(db, track_id: str, feats: dict, lossless: bool) -> None:
+    def _save_features(db, track_id: str, feats: dict, src_id,
+                       provider_id: Optional[str]) -> None:
+        import provenance
         from audio_analysis import ANALYSIS_VERSION
         from models import AudioFeature
 
         existing = db.query(AudioFeature).filter(
             AudioFeature.track_id == track_id).first()
-        if existing and existing.source_media_file_id is not None:
-            return   # never let a preview overwrite a real-file analysis
+        if existing and existing.analysis_source_id is not None:
+            old_origin = provenance.origin_of(db, existing.analysis_source_id)
+            if (provenance.ORIGIN_RANK.get(old_origin, -1)
+                    > provenance.ORIGIN_RANK.get(provider_id, -1)):
+                return   # never let a preview overwrite a better-origin analysis
 
         cols = ("bpm", "key", "mode", "key_confidence", "energy", "energy_db",
                 "brightness", "dynamic_range_db", "zero_crossing_rate",
@@ -159,16 +179,12 @@ class PreviewEnricher:
             for k in cols:
                 if k in feats:
                     setattr(existing, k, feats[k])
-            existing.source_media_file_id = None
-            existing.source_bit_depth = None
-            existing.source_sample_rate = 48000
-            existing.source_is_lossless = lossless
+            existing.analysis_source_id = src_id
             existing.analysis_version = ANALYSIS_VERSION
         else:
             db.add(AudioFeature(
                 track_id=track_id,
-                source_media_file_id=None, source_bit_depth=None,
-                source_sample_rate=48000, source_is_lossless=lossless,
+                analysis_source_id=src_id,
                 analysis_version=ANALYSIS_VERSION,
                 **{k: feats.get(k) for k in cols},
             ))

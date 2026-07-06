@@ -19,6 +19,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 from tqdm import tqdm
 
+import provenance
 from audio_analysis import load_full_track_48k
 from config import settings
 from database import get_db_context
@@ -197,24 +198,11 @@ class AudioEmbeddingGenerator:
             logger.info(f"Created embedding model record: {self.model_name}")
         return em
 
-    def _save_segments(self, db: Session, track_id, model: EmbeddingModel,
-                       indices, vectors) -> None:
-        for i, v in zip(indices, vectors):
-            db.execute(sa_text("""
-                INSERT INTO embedding_segments (track_id, model_id, segment_index, vector)
-                VALUES (:tid, :mid, :idx, CAST(:vec AS vector))
-                ON CONFLICT (track_id, model_id, segment_index)
-                DO UPDATE SET vector = EXCLUDED.vector
-            """), {"tid": str(track_id), "mid": str(model.id),
-                   "idx": int(i), "vec": str(v.tolist())})
-
-    def _generate_segments(self, db: Session, track_id, model: EmbeddingModel,
-                           audio_full: np.ndarray) -> Optional[np.ndarray]:
+    def _compute_segments(self, audio_full: np.ndarray):
         """Balanced-grid segment embeddings for one track from its already
-        decoded audio; windows of one track are encoded as one batch.
-        Returns the normalized mean of the segment vectors — the track-level
-        portrait (deterministic, whole-track; replaces the old random-crop
-        middle-window vector) — or None on failure."""
+        decoded audio; windows of one track are encoded as one batch. Pure
+        compute, no DB. Returns (indices, vectors, normalized mean) — the
+        mean is the track-level portrait — or None on failure."""
         duration = len(audio_full) / self.sample_rate
         idxs = segment_grid_indices(duration)
         step = self.sample_rate * WINDOW_SECONDS
@@ -222,9 +210,8 @@ class AudioEmbeddingGenerator:
         vecs = self._generate_batch_embeddings(windows)
         if vecs is None:
             return None
-        self._save_segments(db, track_id, model, idxs, vecs)
         mean = vecs.mean(axis=0)
-        return mean / np.linalg.norm(mean)
+        return idxs, vecs, mean / np.linalg.norm(mean)
 
     @staticmethod
     def _quality_score(bit_depth, is_lossless) -> int:
@@ -235,52 +222,83 @@ class AudioEmbeddingGenerator:
             return 50   # Hi-Res / DSD / Vinyl
         return 10       # MP3, OGG, M4A
 
-    def _save_embedding(
-        self, db: Session, track_id, vector: np.ndarray, model: EmbeddingModel,
-        source_media_file_id: Optional[int] = None,
-        source_bit_depth: Optional[int] = None,
-        source_sample_rate: Optional[int] = None,
-        source_is_lossless: Optional[bool] = None,
-        is_preview: bool = False,
-    ):
-        """Create or update Embedding record. Won't overwrite higher quality source."""
-        existing = db.query(Embedding).filter(
-            Embedding.track_id == track_id,
-            Embedding.model_id == model.id,
-        ).first()
+    def _persist_analysis(
+        self, db: Session, track_id, model: EmbeddingModel,
+        idxs, vecs, portrait: np.ndarray,
+        analysis_source_id: Optional[int], origin: str,
+        bit_depth: Optional[int] = None, is_lossless: Optional[bool] = None,
+    ) -> bool:
+        """Upsert the track's embedding row and REPLACE its segments, in one
+        transaction unit. The overwrite decision happens before anything is
+        written — origin rank first (local > deezer > youtube; unlinked legacy
+        rows rank below everything), source quality within the same origin —
+        so a lower-ranked pass (e.g. a stream preview racing an owned scan)
+        can no longer clobber segments while the mean survives. Replaced
+        segments are deleted, not updated: fresh rows are unsigned by
+        construction, which is the seal-invalidation model for segments.
+        Returns False when the existing row outranks the incoming analysis."""
+        existing = db.execute(sa_text("""
+            SELECT e.id, s.origin::text AS origin, s.bit_depth, s.is_lossless
+            FROM embeddings e
+            LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
+            WHERE e.track_id = :tid AND e.model_id = :mid
+        """), {"tid": str(track_id), "mid": str(model.id)}).first()
+        if existing and existing.origin is not None:
+            old_rank = (provenance.ORIGIN_RANK.get(existing.origin, -1),
+                        self._quality_score(existing.bit_depth, existing.is_lossless))
+            new_rank = (provenance.ORIGIN_RANK.get(origin, -1),
+                        self._quality_score(bit_depth, is_lossless))
+            if new_rank < old_rank:
+                return False
 
-        # A preview (lossy, no media_file) must never replace a real-file
-        # embedding — both score at the lossy floor, so the quality guard alone
-        # would let it through. Guard on the source explicitly.
-        if is_preview and existing and existing.source_media_file_id is not None:
-            return
+        eid = db.execute(sa_text("""
+            INSERT INTO embeddings (track_id, model_id, vector,
+                                    analysis_source_id, analysis_version)
+            VALUES (:tid, :mid, CAST(:vec AS vector), :sid, :ver)
+            ON CONFLICT (track_id, model_id) DO UPDATE
+               SET vector = EXCLUDED.vector,
+                   analysis_source_id = EXCLUDED.analysis_source_id,
+                   analysis_version = EXCLUDED.analysis_version
+            RETURNING id
+        """), {"tid": str(track_id), "mid": str(model.id),
+               "vec": str(portrait.tolist()), "sid": analysis_source_id,
+               "ver": EMBEDDING_ANALYSIS_VERSION}).scalar()
+        db.execute(sa_text(
+            "DELETE FROM embedding_segments WHERE embedding_id = :eid"),
+            {"eid": eid})
+        for i, v in zip(idxs, vecs):
+            db.execute(sa_text("""
+                INSERT INTO embedding_segments (embedding_id, segment_index, vector)
+                VALUES (:eid, :idx, CAST(:vec AS vector))
+            """), {"eid": eid, "idx": int(i), "vec": str(v.tolist())})
+        return True
 
-        if existing:
-            old_score = self._quality_score(existing.source_bit_depth, existing.source_is_lossless)
-            new_score = self._quality_score(source_bit_depth, source_is_lossless)
-            if new_score < old_score:
-                return  # Don't overwrite better quality embedding
-            existing.vector = vector.tolist()
-            existing.source_media_file_id = source_media_file_id
-            existing.source_bit_depth = source_bit_depth
-            existing.source_sample_rate = source_sample_rate
-            existing.source_is_lossless = source_is_lossless
-            existing.analysis_version = EMBEDDING_ANALYSIS_VERSION
-        else:
-            embedding = Embedding(
-                vector=vector.tolist(),
-                model_id=model.id,
-                track_id=track_id,
-                source_media_file_id=source_media_file_id,
-                source_bit_depth=source_bit_depth,
-                source_sample_rate=source_sample_rate,
-                source_is_lossless=source_is_lossless,
-                analysis_version=EMBEDDING_ANALYSIS_VERSION,
-            )
-            db.add(embedding)
-        db.flush()
+    def embed_track(self, db: Session, track_id, media_file,
+                    audio_full: Optional[np.ndarray] = None) -> bool:
+        """Full per-track pipeline for a local file: provenance + balanced-grid
+        segments + mean portrait. `media_file` is a MediaFile row/namespace
+        (id, file_path, sample_rate, bit_depth, is_lossless); audio decodes
+        here unless the caller already holds it."""
+        if audio_full is None:
+            audio_full = self._load_audio(
+                settings.translate_to_local_path(media_file.file_path))
+            if audio_full is None:
+                return False
+        model = self._get_or_create_embedding_model(db)
+        src_id = provenance.get_or_create_local(
+            db, track_id, media_file.id, media_file.file_path,
+            media_file.sample_rate, media_file.bit_depth,
+            media_file.is_lossless)
+        computed = self._compute_segments(audio_full)
+        if computed is None:
+            return False
+        idxs, vecs, portrait = computed
+        return self._persist_analysis(
+            db, track_id, model, idxs, vecs, portrait, src_id,
+            origin="local", bit_depth=media_file.bit_depth,
+            is_lossless=media_file.is_lossless)
 
-    def generate_embeddings(self, limit: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[list] = None, worker_id: Optional[int] = None, worker_count: Optional[int] = None, cancel_flag=None) -> Dict[str, int]:
+    def generate_embeddings(self, limit: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[list] = None, worker_id: Optional[int] = None, worker_count: Optional[int] = None, cancel_flag=None, force: bool = False) -> Dict[str, int]:
         """
         Generate embeddings for tracks that don't have them yet.
 
@@ -294,6 +312,7 @@ class AudioEmbeddingGenerator:
             track_ids: If provided, only process these track IDs.
             worker_id: Worker index (0-based) for parallel processing.
             worker_count: Total number of workers for parallel processing.
+            force: Re-embed every analysis-source track regardless of state.
 
         Returns:
             Statistics dict with keys: processed, success, failed, skipped.
@@ -306,8 +325,10 @@ class AudioEmbeddingGenerator:
         with get_db_context() as db:
             embedding_model = self._get_or_create_embedding_model(db)
 
-            # Query tracks without embeddings OR with stale embeddings
-            # (analysis source changed since embedding was generated)
+            # Pending = no embedding yet, OR unlinked provenance (legacy rows
+            # and failed fingerprints — re-analysis links them), OR linked to
+            # material other than the current analysis source (source moved to
+            # a better rip, or a stream preview awaiting its owned upgrade).
             # Driven from media_files (is_analysis_source) — the OWNED set.
             # tracks now holds millions of trackless phantom rows; driving from
             # tracks would scan them all to find owned ones needing an embedding.
@@ -319,10 +340,14 @@ class AudioEmbeddingGenerator:
                 FROM media_files mf
                 JOIN tracks t ON t.id = mf.track_id
                 LEFT JOIN embeddings e ON e.track_id = t.id
+                LEFT JOIN analysis_sources asrc ON asrc.id = e.analysis_source_id
                 WHERE mf.is_analysis_source = true
+            """
+            if not force:
+                query_sql += """
                   AND (e.id IS NULL
-                       OR (e.source_media_file_id IS NOT NULL
-                           AND e.source_media_file_id != mf.id))
+                       OR e.analysis_source_id IS NULL
+                       OR asrc.media_file_id IS DISTINCT FROM mf.id)
             """
             params = {}
 
@@ -430,20 +455,23 @@ class AudioEmbeddingGenerator:
                     # per track) → the track-level vector is their normalized
                     # mean. Next batch decodes in parallel with the GPU work.
                     for row, audio in zip(valid_rows, audio_arrays):
-                        portrait = self._generate_segments(db, row.track_id,
-                                                           embedding_model, audio)
-                        if portrait is None:
+                        src_id = provenance.get_or_create_local(
+                            db, row.track_id, row.media_file_id, row.file_path,
+                            row.sample_rate, row.bit_depth, row.is_lossless)
+                        computed = self._compute_segments(audio)
+                        if computed is None:
                             stats["failed"] += 1
                             logger.error(f"Failed embedding for track {row.track_id}")
                             continue
-                        self._save_embedding(
-                            db, row.track_id, portrait, embedding_model,
-                            source_media_file_id=row.media_file_id,
-                            source_bit_depth=row.bit_depth,
-                            source_sample_rate=row.sample_rate,
-                            source_is_lossless=row.is_lossless,
-                        )
-                        stats["success"] += 1
+                        idxs, vecs, portrait = computed
+                        if self._persist_analysis(
+                                db, row.track_id, embedding_model, idxs, vecs,
+                                portrait, src_id, origin="local",
+                                bit_depth=row.bit_depth,
+                                is_lossless=row.is_lossless):
+                            stats["success"] += 1
+                        else:
+                            stats["skipped"] += 1
 
                     db.commit()
             finally:
@@ -462,6 +490,7 @@ class AudioEmbeddingGenerator:
 def generate_embeddings(
     limit: Optional[int] = None, batch_size: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[list] = None,
     worker_id: Optional[int] = None, worker_count: Optional[int] = None,
+    force: bool = False,
 ) -> Dict[str, int]:
     """
     Convenience function to generate embeddings.
@@ -479,4 +508,4 @@ def generate_embeddings(
         Statistics dictionary.
     """
     generator = AudioEmbeddingGenerator(batch_size=batch_size)
-    return generator.generate_embeddings(limit=limit, order_by_date=order_by_date, max_duration_seconds=max_duration_seconds, track_ids=track_ids, worker_id=worker_id, worker_count=worker_count)
+    return generator.generate_embeddings(limit=limit, order_by_date=order_by_date, max_duration_seconds=max_duration_seconds, track_ids=track_ids, worker_id=worker_id, worker_count=worker_count, force=force)

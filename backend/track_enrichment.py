@@ -117,7 +117,7 @@ def run_parallel_enrichment(
             pipeline_progress["gpu"] = "GPU: embeddings..."
             _update_progress()
             emb_stats = AudioEmbeddingGenerator().generate_embeddings(
-                **gpu_kwargs, cancel_flag=cancel_flag
+                **gpu_kwargs, cancel_flag=cancel_flag, force=force_embeddings
             )
             combined["embeddings"] = emb_stats
             pipeline_progress["gpu"] = f"GPU: {emb_stats.get('success', 0)} embeddings"
@@ -570,16 +570,14 @@ class TrackEnrichmentPipeline:
                 status['needs_audio_embedding'] = False
                 status['needs_audio_features'] = False
             else:
-                # Load audio ONCE at 48kHz — reuse for embedding + CLAP classify
-                import librosa
+                # Decode the WHOLE track ONCE at 48kHz (shared scanner decode)
+                # — reused for the segment embeddings and the feature pass, so
+                # this per-track path produces the same full-track v2 analysis
+                # as the bulk scanner, not a middle-30s approximation.
+                from audio_analysis import load_full_track_48k
                 local_path = settings.translate_to_local_path(analysis_file.file_path)
                 try:
-                    audio_48k, _ = librosa.load(local_path, sr=48000, mono=True)
-                    # Extract middle 30s segment
-                    target_samples = 30 * 48000
-                    if len(audio_48k) > target_samples:
-                        start = (len(audio_48k) - target_samples) // 2
-                        audio_48k = audio_48k[start:start + target_samples]
+                    audio_48k = load_full_track_48k(local_path)
                 except Exception as e:
                     logger.error(f"Failed to load audio {local_path}: {e}")
                     audio_48k = None
@@ -591,15 +589,8 @@ class TrackEnrichmentPipeline:
             try:
                 if audio_48k is not None:
                     generator = self._get_audio_embedding_generator()
-                    embeddings = generator._generate_batch_embeddings([audio_48k])
-                    if embeddings is not None:
-                        embedding_model = generator._get_or_create_embedding_model(db)
-                        generator._save_embedding(
-                            db, track.id, embeddings[0], embedding_model,
-                            source_bit_depth=analysis_file.bit_depth,
-                            source_sample_rate=analysis_file.sample_rate,
-                            source_is_lossless=analysis_file.is_lossless,
-                        )
+                    if generator.embed_track(db, track.id, analysis_file,
+                                             audio_full=audio_48k):
                         db.commit()
                         results['audio_embedding'] = 'success'
                     else:
@@ -648,7 +639,12 @@ class TrackEnrichmentPipeline:
                 else:
                     features = None
                 if features is not None:
+                    import provenance
                     from audio_analysis import ANALYSIS_VERSION
+                    src_id = provenance.get_or_create_local(
+                        db, track.id, analysis_file.id,
+                        analysis_file.file_path, analysis_file.sample_rate,
+                        analysis_file.bit_depth, analysis_file.is_lossless)
                     existing_af = db.query(AudioFeature).filter(
                         AudioFeature.track_id == track.id
                     ).first()
@@ -656,6 +652,7 @@ class TrackEnrichmentPipeline:
                         for k, v in features.items():
                             if hasattr(existing_af, k):
                                 setattr(existing_af, k, v)
+                        existing_af.analysis_source_id = src_id
                         existing_af.analysis_version = ANALYSIS_VERSION
                     else:
                         af = AudioFeature(
@@ -674,6 +671,7 @@ class TrackEnrichmentPipeline:
                             vocal_instrumental=features.get("vocal_instrumental"),
                             vocal_score=features.get("vocal_score"),
                             danceability=features.get("danceability"),
+                            analysis_source_id=src_id,
                             analysis_version=ANALYSIS_VERSION,
                         )
                         db.add(af)

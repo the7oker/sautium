@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
 """Sign a node's audio-analysis records and Worker-timestamp the batch.
 
-Phase 1 of enrichment signing (docs/design/P2P-SYNC-INTEGRITY.md). For every
-SIGNABLE track — owned-official (signing_whitelist) or a streamed clean source
-(provenance.origin='stream') — this author-signs each unsigned CLAP segment and
-audio_features row against the track's whole-track content-address (pcm_hash of
-the decoded PCM), then batches all new signatures into one Merkle tree and has
-the Worker timestamp the root. Authorship priority = the Worker date.
+Phase 1 of enrichment signing (docs/design/P2P-SYNC-INTEGRITY.md). A record is
+signable when its LINKED analysis_sources row (registered at analysis time by
+the scanner / stream enricher — never recomputed here) is signable material:
 
-Incremental & idempotent: it only touches records whose signature IS NULL, so a
-re-run signs whatever became signable since (e.g. streamed enrichments). Run it
-on a daily cadence — one batch, one Worker timestamp per run (notary scaling).
+  - origin='local'  AND the track's album is in signing_whitelist
+    (owned-official purchases; grey rips stay unsigned — privacy), or
+  - origin='deezer' AND is_lossless — tier 3: a streamed clean source signs
+    against the STREAM's pcm_hash, claiming no possession of any local rip.
+    YouTube / lossy tiers never sign (decode-varying pcm_hash, lossy master).
+
+Each unsigned CLAP segment (via its embeddings row) and audio_features row is
+author-signed against that source's content-address; all new signatures batch
+into one Merkle tree and the Worker timestamps the root. Authorship priority =
+the Worker date. Records not yet linked to a source are skipped, not hashed
+lazily — the link is the statement of WHAT was analyzed, and only the analysis
+pass itself can make it.
+
+Incremental & idempotent: only records whose signature IS NULL are touched, so
+a re-run signs whatever became signable since. Run it on a daily cadence — one
+batch, one Worker timestamp per run (notary scaling).
 
     docker exec sautium-backend python /app/sign_audio.py [--limit N] [--dry-run]
 """
@@ -19,7 +29,6 @@ import argparse
 import json
 import logging
 import os
-import subprocess
 import sys
 import urllib.request
 from datetime import timezone
@@ -40,13 +49,17 @@ logger = logging.getLogger("sign_audio")
 WORKER_URL = "https://sautium-verify.sautium.workers.dev"
 
 # Fixed order for the audio_features content hash — signer and verifier must
-# agree byte-for-byte. Source_* columns describe provenance, not the analysis,
-# and are excluded; analysis_version rides in the payload, not the blob.
+# agree byte-for-byte. analysis_version rides in the payload, not the blob.
 FEATURE_ORDER = [
     "bpm", "key", "mode", "key_confidence", "energy", "energy_db", "brightness",
     "dynamic_range_db", "zero_crossing_rate", "danceability",
     "vocal_instrumental", "vocal_score", "instruments", "moods",
 ]
+
+# A record signs only when its linked source is signable-classed; 'local'
+# additionally requires the track to be whitelisted (bound as %(wl)s).
+_SIGNABLE_SRC = """((src.origin = 'deezer' AND src.is_lossless)
+                   OR (src.origin = 'local' AND %(wl)s))"""
 
 
 def _pubkey_hex(key) -> str:
@@ -75,37 +88,6 @@ def canonical_features_blob(row: dict) -> bytes:
     return "|".join(_fmt(row[c]) for c in FEATURE_ORDER).encode("utf-8")
 
 
-def _native_pcm_bytes(local_path: str) -> bytes:
-    """Raw decoded PCM at the source's NATIVE rate & channels (f32le), before
-    the -ac1 -ar48000 analysis conversion. Lossless decoding is deterministic
-    across ffmpeg builds, so this is the stable content-address; the resample
-    to the 48k-mono analysis frame (defined by grid_version) is a separate,
-    tolerance-verified derivation. (Lossy sources still decode-vary — the
-    chromaprint covers that.)"""
-    out = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", local_path, "-f", "f32le", "pipe:1"],
-        capture_output=True, check=True, timeout=300).stdout
-    if not out:
-        raise ValueError("ffmpeg produced no samples")
-    return out
-
-
-def _chromaprint(local_path: str):
-    """AcoustID fingerprint of the recording (fpcalc, default 120s). The robust
-    recording-identity anchor for cross-rip (step-2) verification — bound INTO
-    the signature so it can never be added later without forfeiting the
-    authorship-priority timestamp. Base64, ':'-free. None on failure (the
-    record still signs against pcm_hash alone)."""
-    try:
-        out = subprocess.run(["fpcalc", "-plain", local_path],
-                             capture_output=True, text=True, timeout=120, check=True)
-        fp = out.stdout.strip()
-        return fp or None
-    except Exception as e:
-        logger.warning("fpcalc failed for %s: %s", local_path, e)
-        return None
-
-
 def _timestamp_root(root: str) -> dict:
     req = urllib.request.Request(
         f"{WORKER_URL}/timestamp", method="POST",
@@ -114,46 +96,24 @@ def _timestamp_root(root: str) -> dict:
     return json.loads(urllib.request.urlopen(req, timeout=30).read())
 
 
-def _signable_track_ids(cur) -> list:
+def _signable_tracks(cur) -> dict:
+    """{track_id: is_whitelisted} over both signable classes. A whitelisted
+    track whose current analysis is still stream-linked signs the stream
+    source now and re-signs after the owned re-analysis replaces it."""
     cur.execute("""
         SELECT DISTINCT mf.track_id::text AS tid
         FROM signing_whitelist sw
         JOIN album_variants av ON av.album_id = sw.album_id
         JOIN media_files mf    ON mf.album_variant_id = av.id
-        UNION
-        SELECT track_id::text FROM track_analysis_provenance WHERE origin = 'stream'
     """)
-    return [r["tid"] for r in cur.fetchall()]
-
-
-def _provenance(cur, track_id: str):
-    """Return (pcm_hash, chromaprint) for a track, computing+storing it on the
-    first call. None when the analysis-source file can't be decoded."""
-    cur.execute("SELECT pcm_hash, chromaprint FROM track_analysis_provenance "
-                "WHERE track_id = %s", (track_id,))
-    row = cur.fetchone()
-    if row:
-        return row["pcm_hash"], row["chromaprint"]
-
-    cur.execute("SELECT file_path FROM media_files "
-                "WHERE track_id = %s AND is_analysis_source LIMIT 1", (track_id,))
-    src = cur.fetchone()
-    if not src:
-        return None
-    local_path = settings.translate_to_local_path(src["file_path"])
-    try:
-        pcm_bytes = _native_pcm_bytes(local_path)
-    except Exception as e:
-        logger.warning("decode failed for %s: %s", track_id[:8], e)
-        return None
-
-    ph = rs.pcm_hash(pcm_bytes)
-    chromaprint = _chromaprint(local_path)
-    cur.execute("""INSERT INTO track_analysis_provenance
-                     (track_id, pcm_hash, chromaprint, origin)
-                   VALUES (%s, %s, %s, 'local')
-                   ON CONFLICT (track_id) DO NOTHING""", (track_id, ph, chromaprint))
-    return ph, chromaprint
+    whitelisted = {r["tid"] for r in cur.fetchall()}
+    cur.execute("""
+        SELECT DISTINCT track_id::text AS tid
+        FROM analysis_sources
+        WHERE origin = 'deezer' AND is_lossless
+    """)
+    deezer = {r["tid"] for r in cur.fetchall()}
+    return {tid: (tid in whitelisted) for tid in whitelisted | deezer}
 
 
 def run(limit=None, dry_run=False):
@@ -166,40 +126,49 @@ def run(limit=None, dry_run=False):
     conn.cursor_factory = psycopg2.extras.RealDictCursor
     cur = conn.cursor()
 
-    tracks = _signable_track_ids(cur)
+    tracks = _signable_tracks(cur)
+    track_ids = sorted(tracks)
     if limit:
-        tracks = tracks[:limit]
-    logger.info("signable tracks: %d", len(tracks))
+        track_ids = track_ids[:limit]
+    logger.info("signable tracks: %d", len(track_ids))
 
     # pending: (table, pk, signature) collected across all tracks -> one batch
     pending, tracks_touched = [], 0
-    for tid in tracks:
-        prov = _provenance(cur, tid)
-        if prov is None:
-            continue
-        pcm_hash, chromaprint = prov
+    for tid in track_ids:
+        params = {"tid": tid, "wl": tracks[tid]}
         touched = False
 
-        cur.execute("""SELECT id, model_id::text AS model, segment_index,
-                              vector::text AS vec
-                       FROM embedding_segments
-                       WHERE track_id = %s AND signature IS NULL
-                       ORDER BY model_id, segment_index""", (tid,))
+        cur.execute(f"""
+            SELECT s.id, s.segment_index, s.vector::text AS vec,
+                   e.model_id::text AS model,
+                   src.pcm_hash, src.chromaprint, src.grid_version
+            FROM embedding_segments s
+            JOIN embeddings e         ON e.id = s.embedding_id
+            JOIN analysis_sources src ON src.id = e.analysis_source_id
+            WHERE e.track_id = %(tid)s AND s.signature IS NULL
+              AND {_SIGNABLE_SRC}
+            ORDER BY s.segment_index""", params)
         for seg in cur.fetchall():
             vh = rs.vector_hash(_parse_vector(seg["vec"]).tobytes())
-            payload = rs.segment_payload(author, tid, pcm_hash, chromaprint,
-                                         seg["model"], seg["segment_index"], vh)
+            payload = rs.segment_payload(
+                author, tid, seg["pcm_hash"], seg["chromaprint"],
+                seg["model"], seg["segment_index"], vh,
+                grid_version=seg["grid_version"])
             pending.append(("embedding_segments", seg["id"], rs.sign(payload, key)))
             touched = True
 
-        cur.execute(f"""SELECT id, analysis_version,
-                               {', '.join(FEATURE_ORDER)}
-                        FROM audio_features
-                        WHERE track_id = %s AND signature IS NULL""", (tid,))
+        cur.execute(f"""
+            SELECT a.id, a.analysis_version, {', '.join(FEATURE_ORDER)},
+                   src.pcm_hash, src.chromaprint
+            FROM audio_features a
+            JOIN analysis_sources src ON src.id = a.analysis_source_id
+            WHERE a.track_id = %(tid)s AND a.signature IS NULL
+              AND {_SIGNABLE_SRC}""", params)
         feat = cur.fetchone()
         if feat:
             fh = rs.blake2b_hex(canonical_features_blob(feat))
-            payload = rs.features_payload(author, tid, pcm_hash, chromaprint,
+            payload = rs.features_payload(author, tid, feat["pcm_hash"],
+                                          feat["chromaprint"],
                                           feat["analysis_version"], fh)
             pending.append(("audio_features", feat["id"], rs.sign(payload, key)))
             touched = True
@@ -208,7 +177,6 @@ def run(limit=None, dry_run=False):
 
     if not pending:
         logger.info("nothing to sign")
-        conn.commit()  # persist any provenance rows computed this run
         return
 
     leaves = [rs.record_leaf(sig) for _, _, sig in pending]
@@ -248,10 +216,11 @@ def verify_all() -> bool:
     payload FROM the stored data — the content hashes are recomputed from the
     actual vector / feature values, so this also proves the stored data is what
     was sealed — then runs the full chain (author signature → Merkle inclusion
-    → Worker timestamp by a trusted authority). Reports valid/invalid counts;
-    returns True iff every seal holds. (This is the seal check; a --deep audit
-    that also re-decodes the audio to confirm pcm_hash against the file is a
-    separate, heavier pass.)"""
+    → Worker timestamp by a trusted authority). A signed row whose provenance
+    link is missing counts as INVALID: the seal asserts a content-address the
+    row no longer carries. Reports valid/invalid counts; returns True iff every
+    seal holds. (This is the seal check; a --deep audit that also re-decodes
+    the audio to confirm pcm_hash against the file is a separate, heavier pass.)"""
     from birth_authority import TRUSTED_AUTHORITIES
 
     conn = psycopg2.connect(settings.database_url)
@@ -276,16 +245,23 @@ def verify_all() -> bool:
             r["batch_root"], b[0], b[1], b[2], TRUSTED_AUTHORITIES))
 
     cur.execute("""SELECT s.author_pubkey, s.signature, s.merkle_proof, s.batch_root,
-                          s.track_id::text tid, s.model_id::text model,
+                          e.track_id::text tid, e.model_id::text model,
                           s.segment_index idx, s.vector::text vec,
-                          p.pcm_hash, p.chromaprint
+                          p.pcm_hash, p.chromaprint, p.grid_version
                    FROM embedding_segments s
-                   JOIN track_analysis_provenance p ON p.track_id = s.track_id
+                   JOIN embeddings e ON e.id = s.embedding_id
+                   LEFT JOIN analysis_sources p ON p.id = e.analysis_source_id
                    WHERE s.signature IS NOT NULL""")
     for r in cur.fetchall():
+        if r["pcm_hash"] is None:
+            bad += 1
+            if len(bad_samples) < 5:
+                bad_samples.append(f"segment {r['tid'][:8]}#{r['idx']} UNLINKED")
+            continue
         vh = rs.vector_hash(_parse_vector(r["vec"]).tobytes())
         payload = rs.segment_payload(r["author_pubkey"], r["tid"], r["pcm_hash"],
-                                     r["chromaprint"], r["model"], r["idx"], vh)
+                                     r["chromaprint"], r["model"], r["idx"], vh,
+                                     grid_version=r["grid_version"])
         if _seal_ok(payload, r):
             ok += 1
         else:
@@ -298,9 +274,14 @@ def verify_all() -> bool:
                            {', '.join('a.' + c for c in FEATURE_ORDER)},
                            p.pcm_hash, p.chromaprint
                     FROM audio_features a
-                    JOIN track_analysis_provenance p ON p.track_id = a.track_id
+                    LEFT JOIN analysis_sources p ON p.id = a.analysis_source_id
                     WHERE a.signature IS NOT NULL""")
     for r in cur.fetchall():
+        if r["pcm_hash"] is None:
+            bad += 1
+            if len(bad_samples) < 5:
+                bad_samples.append(f"features {r['tid'][:8]} UNLINKED")
+            continue
         fh = rs.blake2b_hex(canonical_features_blob(r))
         payload = rs.features_payload(r["author_pubkey"], r["tid"], r["pcm_hash"],
                                       r["chromaprint"], r["analysis_version"], fh)

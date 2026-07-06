@@ -292,7 +292,7 @@ EDGES: tuple = (
     Edge("album_artists", "albums", "aa.album_id = al.id"),
     Edge("tracks", "audio_features", "af.track_id = t.id"),
     Edge("tracks", "embeddings", "e.track_id = t.id"),
-    Edge("tracks", "embedding_segments", "es.track_id = t.id"),
+    Edge("embeddings", "embedding_segments", "es.embedding_id = e.id"),
     Edge("tracks", "lyrics_embeddings", "le.track_id = t.id"),
     Edge("artists", "artist_bio_embeddings", "abe.artist_id = a.id"),
     Edge("artists", "artist_name_aliases", "ana.artist_id = a.id"),
@@ -493,13 +493,17 @@ def _retrieve_branch(src: Source, entity: EntityDef, corpus: str, gates: list, K
         # Inner KNN first — HNSW serves only the bare `ORDER BY vector <=> q`
         # form, never the wrapped score expression. Gates + floor prune the
         # ≤1000-row overscan OUTSIDE the KNN (pgvector 0.5 caps the result at
-        # hnsw.ef_search rows — the executor SET LOCALs it to 1000).
+        # hnsw.ef_search rows — the executor SET LOCALs it to 1000). The bridge
+        # path back to the target is walked OUTSIDE the KNN subquery too —
+        # each hop is a pkey/unique-index lookup over ≤1000 rows (segments
+        # reach tracks via their embeddings row).
         path = _route(src.table, entity, corpus)
-        if len(path) != 1:
-            raise ValueError(f"knn retrieve supports 1-hop sources, got {src.table}")
         alias = _ALIAS[src.table]
-        frm = (f"(SELECT * FROM {src.table} {alias} ORDER BY {src.knn} LIMIT 1000) {alias} "
-               f"JOIN {entity.table} ON {path[0][1]}")
+        frm = f"(SELECT * FROM {src.table} {alias} ORDER BY {src.knn} LIMIT 1000) {alias}"
+        for i in range(len(path) - 1, 0, -1):
+            tbl = path[i - 1][0]
+            frm += f" JOIN {tbl} {_ALIAS[tbl]} ON {path[i][1]}"
+        frm += f" JOIN {entity.table} ON {path[0][1]}"
         conds.append(f"({src.score_sql}) >= {src.floor}")
         return (f"SELECT {entity.pk} AS id FROM {frm} WHERE {' AND '.join(conds)} "
                 f"ORDER BY ({src.score_sql}) DESC LIMIT {K}")

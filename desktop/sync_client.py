@@ -361,6 +361,49 @@ class SyncClient:
             )
         return len(items)
 
+    @staticmethod
+    def _upsert_analysis_sources(cur, items: list[dict]) -> dict:
+        """Upsert the distinct provenance rows carried by analysis items and
+        return {(track_uuid, pcm_hash): analysis_sources.id}. media_file_id is
+        always NULL on import — the sender's file is not ours; origin/values
+        of an already-known source are kept (local knowledge wins), only a
+        missing chromaprint is filled in."""
+        prov = {}
+        for item in items:
+            p = item.get("provenance")
+            if p and p.get("pcm_hash") and p.get("origin"):
+                prov[(item["track_uuid"], p["pcm_hash"])] = p
+        if not prov:
+            return {}
+        values = [
+            (tid, p["origin"], p["pcm_hash"], p.get("chromaprint"),
+             p.get("grid_version", 1), p.get("sample_rate"),
+             p.get("bit_depth"), p.get("is_lossless"))
+            for (tid, _), p in prov.items()
+        ]
+        rows = psycopg2.extras.execute_values(
+            cur,
+            """INSERT INTO analysis_sources
+               (track_id, origin, pcm_hash, chromaprint, grid_version,
+                sample_rate, bit_depth, is_lossless)
+               VALUES %s
+               ON CONFLICT (track_id, pcm_hash) DO UPDATE SET
+                   chromaprint = COALESCE(analysis_sources.chromaprint,
+                                          EXCLUDED.chromaprint)
+               RETURNING id, track_id::text, pcm_hash""",
+            values,
+            template="(%s::uuid, %s::analysis_origin, %s, %s, %s, %s, %s, %s)",
+            fetch=True,
+        )
+        return {(r[1], r[2]): r[0] for r in rows}
+
+    @staticmethod
+    def _source_id(source_map: dict, item: dict):
+        p = item.get("provenance")
+        if not p or not p.get("pcm_hash"):
+            return None
+        return source_map.get((item["track_uuid"], p["pcm_hash"]))
+
     def _import_embeddings(self, conn, items: list[dict]) -> int:
         with conn.cursor() as cur:
             # Batch upsert embedding models (deduplicated)
@@ -381,14 +424,14 @@ class SyncClient:
                     template="(%s, %s, %s)",
                 )
 
+            source_map = self._upsert_analysis_sources(cur, items)
+
             # Batch upsert embeddings
             values = [
                 (
                     item["track_uuid"], item.get("model_uuid"),
                     str(item.get("vector", [])),
-                    item.get("source_bit_depth"),
-                    item.get("source_sample_rate"),
-                    item.get("source_is_lossless"),
+                    self._source_id(source_map, item),
                     item.get("analysis_version", 1),
                 )
                 for item in items
@@ -396,22 +439,23 @@ class SyncClient:
             psycopg2.extras.execute_values(
                 cur,
                 """INSERT INTO embeddings
-                   (track_id, model_id, vector,
-                    source_bit_depth, source_sample_rate, source_is_lossless,
+                   (track_id, model_id, vector, analysis_source_id,
                     analysis_version)
                    VALUES %s
                    ON CONFLICT (track_id, model_id) DO UPDATE SET
                        vector = EXCLUDED.vector,
+                       analysis_source_id = EXCLUDED.analysis_source_id,
                        analysis_version = EXCLUDED.analysis_version,
                        updated_at = CURRENT_TIMESTAMP""",
                 values,
-                template="(%s, %s, %s::vector, %s, %s, %s, %s)",
+                template="(%s, %s, %s::vector, %s, %s)",
                 page_size=200,
             )
         return len(items)
 
     def _import_audio_features(self, conn, items: list[dict]) -> int:
         with conn.cursor() as cur:
+            source_map = self._upsert_analysis_sources(cur, items)
             values = [
                 (
                     item["track_uuid"], item.get("bpm"), item.get("key"),
@@ -423,8 +467,7 @@ class SyncClient:
                     psycopg2.extras.Json(item.get("moods")),
                     item.get("vocal_instrumental"), item.get("vocal_score"),
                     item.get("danceability"),
-                    item.get("source_bit_depth"), item.get("source_sample_rate"),
-                    item.get("source_is_lossless"),
+                    self._source_id(source_map, item),
                     item.get("analysis_version", 1),
                 )
                 for item in items
@@ -436,8 +479,7 @@ class SyncClient:
                     energy, energy_db, brightness, dynamic_range_db,
                     zero_crossing_rate, instruments, moods,
                     vocal_instrumental, vocal_score, danceability,
-                    source_bit_depth, source_sample_rate, source_is_lossless,
-                    analysis_version)
+                    analysis_source_id, analysis_version)
                    VALUES %s
                    ON CONFLICT (track_id) DO UPDATE SET
                        bpm = EXCLUDED.bpm, key = EXCLUDED.key,
@@ -450,10 +492,11 @@ class SyncClient:
                        vocal_instrumental = EXCLUDED.vocal_instrumental,
                        vocal_score = EXCLUDED.vocal_score,
                        danceability = EXCLUDED.danceability,
+                       analysis_source_id = EXCLUDED.analysis_source_id,
                        analysis_version = EXCLUDED.analysis_version,
                        updated_at = CURRENT_TIMESTAMP""",
                 values,
-                template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 page_size=500,
             )
         return len(items)

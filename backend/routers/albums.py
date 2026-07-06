@@ -75,7 +75,8 @@ def _phantom_album(album_id: str) -> dict:
     # Tracklist from album_tracks. No media_file_id (no local audio → rows are
     # display-only, playback via play-phantom-album), but bpm/key/mode DO appear
     # once a preview has streamed and the enricher analysed the track
-    # (audio_features keyed by track_id, source_media_file_id NULL).
+    # (audio_features keyed by track_id, provenance = a stream-origin
+    # analysis_sources row).
     album["tracks"] = db_query("""
         SELECT t.id::text AS track_id,
                NULL::int    AS media_file_id,

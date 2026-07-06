@@ -21,7 +21,7 @@ from typing import Optional, List
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, Numeric, BigInteger, Float,
     Boolean, ForeignKey, CheckConstraint, Index, ARRAY, UniqueConstraint,
-    LargeBinary, SmallInteger, func, text, event,
+    LargeBinary, SmallInteger, CHAR, func, text, event,
 )
 from sqlalchemy.dialects.postgresql import BYTEA, ENUM, JSONB, UUID
 from sqlalchemy.ext.declarative import declarative_base
@@ -545,8 +545,8 @@ class MediaFile(Base):
         Index("idx_media_files_track_id", "track_id"),
         Index("idx_media_files_album_variant_id", "album_variant_id"),
         Index("idx_media_files_play_count", "play_count"),
-        Index("idx_media_files_analysis_source", "track_id", "is_analysis_source",
-              postgresql_where="is_analysis_source = true"),
+        Index("uq_media_files_analysis_source", "track_id", unique=True,
+              postgresql_where="is_analysis_source"),
         Index("idx_media_files_cover_id", "cover_id"),
         Index("idx_media_files_cover_pending", "id",
               postgresql_where="cover_processed_at IS NULL"),
@@ -597,8 +597,48 @@ class Cover(Base):
 # Embeddings & Analysis (linked to tracks, not files)
 # ───────────────────────────────────────────────────────────────────────────
 
+AnalysisOriginEnum = ENUM(
+    "local", "deezer", "youtube",
+    name="analysis_origin",
+    create_type=False,
+)
+
+
+class AnalysisSource(Base):
+    """Provenance of one audio-analysis pass: the physical source material
+    (local file or streamed provider audio) content-addressed by pcm_hash +
+    chromaprint. embeddings / audio_features rows link here; segments inherit
+    it through their embeddings row. Record signatures bind these values, so
+    a row is written once at analysis time and never mutated afterwards."""
+    __tablename__ = "analysis_sources"
+
+    id = Column(Integer, primary_key=True)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    origin = Column(AnalysisOriginEnum, nullable=False)
+    media_file_id = Column(Integer, ForeignKey("media_files.id", ondelete="SET NULL"))
+    pcm_hash = Column(CHAR(64), nullable=False)
+    chromaprint = Column(Text)
+    grid_version = Column(SmallInteger, nullable=False, server_default="1")
+    sample_rate = Column(Integer)
+    bit_depth = Column(Integer)
+    is_lossless = Column(Boolean)
+    computed_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("track_id", "pcm_hash"),
+        Index("idx_analysis_sources_media_file", "media_file_id"),
+        CheckConstraint("origin = 'local' OR media_file_id IS NULL",
+                        name="chk_asrc_stream_no_file"),
+    )
+
+    def __repr__(self):
+        return f"<AnalysisSource(id={self.id}, track_id={self.track_id}, origin={self.origin})>"
+
+
 class Embedding(Base):
-    """Audio embedding (512-dimensional vectors for CLAP). One per track."""
+    """Audio embedding (512-dimensional vectors for CLAP). One per track.
+    Seal columns (author_pubkey/signature/...) live only on the signed tables
+    (embedding_segments, audio_features) and stay raw-SQL — see 001_initial.sql."""
     __tablename__ = "embeddings"
 
     id = Column(Integer, primary_key=True)
@@ -606,11 +646,7 @@ class Embedding(Base):
     model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
 
-    # Source quality info (from the media_file used for analysis)
-    source_media_file_id = Column(Integer, ForeignKey("media_files.id", ondelete="SET NULL"))
-    source_bit_depth = Column(Integer)
-    source_sample_rate = Column(Integer)
-    source_is_lossless = Column(Boolean)
+    analysis_source_id = Column(Integer, ForeignKey("analysis_sources.id", ondelete="SET NULL"))
 
     # Analysis methodology version (v2 = segment-mean portrait) — synced so
     # peers re-pull methodology upgrades; see embeddings.EMBEDDING_ANALYSIS_VERSION
@@ -628,6 +664,7 @@ class Embedding(Base):
               postgresql_with={"m": 16, "ef_construction": 64},
               postgresql_ops={"vector": "vector_cosine_ops"}),
         Index("idx_embeddings_model_id", "model_id"),
+        Index("idx_embeddings_analysis_source", "analysis_source_id"),
     )
 
     def __repr__(self):
@@ -637,24 +674,27 @@ class Embedding(Base):
 class EmbeddingSegment(Base):
     """Windowed CLAP segment embedding. segment_index addresses the canonical
     10s grid (window i covers [i*10s, i*10s+10s)), so sampling strategies of
-    any density write compatible, top-uppable subsets of one grid. The
-    track-level Embedding row stays the materialized mean of these."""
+    any density write compatible, top-uppable subsets of one grid. Keyed to
+    the track-level Embedding row (whose vector is the materialized mean of
+    these); track/model/provenance resolve through it. Seal columns
+    (author_pubkey/signature/batch_root/merkle_proof) are raw-SQL only —
+    written by sign_audio.py, cleared by the seal-guard trigger — see
+    001_initial.sql."""
     __tablename__ = "embedding_segments"
 
     id = Column(Integer, primary_key=True)
     vector = Column(Vector(512), nullable=False)
-    model_id = Column(UUID(as_uuid=True), ForeignKey("embedding_models.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
-    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    embedding_id = Column(Integer, ForeignKey("embeddings.id", ondelete="CASCADE"), nullable=False)
     segment_index = Column(SmallInteger, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
-        UniqueConstraint("track_id", "model_id", "segment_index",
+        UniqueConstraint("embedding_id", "segment_index",
                          name="uq_embedding_segments"),
     )
 
     def __repr__(self):
-        return f"<EmbeddingSegment(track_id={self.track_id}, i={self.segment_index})>"
+        return f"<EmbeddingSegment(embedding_id={self.embedding_id}, i={self.segment_index})>"
 
 
 class TextEmbedding(Base):
@@ -794,15 +834,12 @@ class AudioFeature(Base):
     vocal_score = Column(Float)
     danceability = Column(Float)
 
-    # Source quality info
-    source_media_file_id = Column(Integer, ForeignKey("media_files.id", ondelete="SET NULL"))
-    source_bit_depth = Column(Integer)
-    source_sample_rate = Column(Integer)
-    source_is_lossless = Column(Boolean)
+    analysis_source_id = Column(Integer, ForeignKey("analysis_sources.id", ondelete="SET NULL"))
 
     # Analysis methodology version (v2 = whole-track amplitude + windowed
     # instruments) — synced so peers re-pull methodology upgrades; see
-    # audio_analysis.ANALYSIS_VERSION
+    # audio_analysis.ANALYSIS_VERSION. Seal columns are raw-SQL only (written
+    # by sign_audio.py, cleared by the seal-guard trigger) — see 001_initial.sql.
     analysis_version = Column(SmallInteger, nullable=False, server_default="1")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -816,6 +853,7 @@ class AudioFeature(Base):
         Index("idx_audio_features_energy", "energy_db"),
         Index("idx_audio_features_danceability", "danceability"),
         Index("idx_audio_features_vocal", "vocal_instrumental"),
+        Index("idx_audio_features_analysis_source", "analysis_source_id"),
         CheckConstraint("bpm IS NULL OR bpm > 0", name="chk_af_bpm"),
         CheckConstraint("key_confidence IS NULL OR (key_confidence >= 0 AND key_confidence <= 1)", name="chk_af_key_confidence"),
         CheckConstraint("danceability IS NULL OR (danceability >= 0 AND danceability <= 1)", name="chk_af_danceability"),

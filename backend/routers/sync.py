@@ -238,22 +238,44 @@ async def pull_lyrics(req: PullRequest) -> dict:
     )
 
 
+def _provenance_item(r: dict) -> Optional[dict]:
+    """Nested provenance payload from p_-prefixed LEFT JOIN columns; None for
+    rows not linked to an analysis_sources row (legacy / failed fingerprints)."""
+    if r.get("p_pcm_hash") is None:
+        return None
+    return {
+        "origin": r["p_origin"],
+        "pcm_hash": r["p_pcm_hash"],
+        "chromaprint": r["p_chromaprint"],
+        "grid_version": r["p_grid_version"],
+        "sample_rate": r["p_sample_rate"],
+        "bit_depth": r["p_bit_depth"],
+        "is_lossless": r["p_is_lossless"],
+    }
+
+
+_PROVENANCE_COLS = """s.origin::text AS p_origin, s.pcm_hash AS p_pcm_hash,
+                      s.chromaprint AS p_chromaprint, s.grid_version AS p_grid_version,
+                      s.sample_rate AS p_sample_rate, s.bit_depth AS p_bit_depth,
+                      s.is_lossless AS p_is_lossless"""
+
+
 @router.post("/pull/embeddings")
 async def pull_embeddings(req: PullRequest) -> dict:
-    """Pull audio embeddings (CLAP 512d vectors)."""
+    """Pull audio embeddings (CLAP 512d vectors) with their provenance."""
     if not req.uuids:
         return {"category": "embeddings", "items": []}
 
     try:
         rows = _db_query(
-            """SELECT e.track_id::text AS track_uuid,
-                      em.id::text AS model_uuid, em.name AS model_name,
-                      e.vector::text AS vector,
-                      e.source_bit_depth, e.source_sample_rate, e.source_is_lossless,
-                      e.analysis_version
-               FROM embeddings e
-               INNER JOIN embedding_models em ON em.id = e.model_id
-               WHERE e.track_id = ANY(%s::uuid[])""",
+            f"""SELECT e.track_id::text AS track_uuid,
+                       em.id::text AS model_uuid, em.name AS model_name,
+                       e.vector::text AS vector, e.analysis_version,
+                       {_PROVENANCE_COLS}
+                FROM embeddings e
+                INNER JOIN embedding_models em ON em.id = e.model_id
+                LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
+                WHERE e.track_id = ANY(%s::uuid[])""",
             [req.uuids],
         )
 
@@ -264,10 +286,8 @@ async def pull_embeddings(req: PullRequest) -> dict:
                 "model_uuid": r["model_uuid"],
                 "model_name": r["model_name"],
                 "vector": _parse_vector(r["vector"]),
-                "source_bit_depth": r["source_bit_depth"],
-                "source_sample_rate": r["source_sample_rate"],
-                "source_is_lossless": r["source_is_lossless"],
                 "analysis_version": r["analysis_version"],
+                "provenance": _provenance_item(r),
             })
 
         return {"category": "embeddings", "items": items}
@@ -279,20 +299,34 @@ async def pull_embeddings(req: PullRequest) -> dict:
 
 @router.post("/pull/audio-features")
 async def pull_audio_features(req: PullRequest) -> dict:
-    """Pull audio analysis features."""
-    return _pull_handler(
-        "audio_features",
-        """SELECT track_id::text AS track_uuid,
-                  bpm, key, mode, key_confidence,
-                  energy, energy_db, brightness, dynamic_range_db,
-                  zero_crossing_rate, instruments, moods,
-                  vocal_instrumental, vocal_score, danceability,
-                  source_bit_depth, source_sample_rate, source_is_lossless,
-                  analysis_version
-           FROM audio_features
-           WHERE track_id = ANY(%s::uuid[])""",
-        req.uuids,
-    )
+    """Pull audio analysis features with their provenance."""
+    if not req.uuids:
+        return {"category": "audio_features", "items": []}
+
+    try:
+        rows = _db_query(
+            f"""SELECT a.track_id::text AS track_uuid,
+                       a.bpm, a.key, a.mode, a.key_confidence,
+                       a.energy, a.energy_db, a.brightness, a.dynamic_range_db,
+                       a.zero_crossing_rate, a.instruments, a.moods,
+                       a.vocal_instrumental, a.vocal_score, a.danceability,
+                       a.analysis_version,
+                       {_PROVENANCE_COLS}
+                FROM audio_features a
+                LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
+                WHERE a.track_id = ANY(%s::uuid[])""",
+            [req.uuids],
+        )
+        items = []
+        for r in rows:
+            item = {k: v for k, v in r.items() if not k.startswith("p_")}
+            item["provenance"] = _provenance_item(r)
+            items.append(item)
+        return {"category": "audio_features", "items": items}
+
+    except Exception as e:
+        logger.error(f"Pull audio features failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/pull/track-stats")

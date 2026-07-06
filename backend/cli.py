@@ -120,9 +120,10 @@ def scan(limit, no_skip, path, prune):
 @click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 1800 for 30 minutes)")
 @click.option("--worker-id", type=int, default=None, help="Worker index (0-based) for parallel processing")
 @click.option("--worker-count", type=int, default=None, help="Total number of workers for parallel processing")
+@click.option("--force", is_flag=True, help="Re-embed every analysis-source track regardless of state")
 @track_filter_options
 def generate_embeddings(limit, batch_size, newest_first, max_duration,
-                        worker_id, worker_count,
+                        worker_id, worker_count, force,
                         filter_artist, filter_album, filter_genre, filter_path,
                         filter_tag, filter_track_number, filter_lossless):
     """Generate audio embeddings for tracks using CLAP model."""
@@ -134,6 +135,9 @@ def generate_embeddings(limit, batch_size, newest_first, max_duration,
 
     if limit:
         click.echo(f"⚠️  Limited to {limit} tracks (testing mode)")
+
+    if force:
+        click.echo("🔄 Force: re-embedding all analysis-source tracks")
 
     if newest_first:
         click.echo(f"🆕 Processing newest tracks first (by file modification date)")
@@ -163,7 +167,7 @@ def generate_embeddings(limit, batch_size, newest_first, max_duration,
         return
 
     try:
-        stats = do_generate(limit=limit, batch_size=batch_size, order_by_date=newest_first, max_duration_seconds=max_duration, track_ids=track_ids, worker_id=worker_id, worker_count=worker_count)
+        stats = do_generate(limit=limit, batch_size=batch_size, order_by_date=newest_first, max_duration_seconds=max_duration, track_ids=track_ids, worker_id=worker_id, worker_count=worker_count, force=force)
 
         click.echo("\n✅ Embedding generation complete!")
         click.echo(f"📊 Statistics:")

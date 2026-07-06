@@ -63,6 +63,10 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
+    CREATE TYPE analysis_origin AS ENUM ('local', 'deezer', 'youtube');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
     CREATE TYPE audio_file_format AS ENUM ('FLAC', 'APE', 'WAV', 'AIFF', 'WV', 'TTA', 'DSF', 'DFF', 'MP3', 'OGG', 'M4A');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
@@ -422,15 +426,41 @@ CREATE TABLE IF NOT EXISTS media_files (
 -- Embeddings & Analysis (linked to tracks)
 -- ============================================================
 
+-- Provenance of one audio-analysis pass: the physical source material (local
+-- file or streamed provider audio), content-addressed by pcm_hash (BLAKE2b of
+-- the NATIVELY-decoded PCM — source rate/channels, pre-resample; deterministic
+-- for lossless across ffmpeg builds) + chromaprint (AcoustID fp — the robust
+-- cross-rip recording anchor, bound INTO record signatures from the start).
+-- Registered AT ANALYSIS TIME by the scanner / stream enricher; never
+-- recomputed after the fact. Content-keyed on (track_id, pcm_hash): unchanged
+-- material reuses its row, a re-rip mints a new one. media_file_id survives
+-- file deletion as NULL — the row remains the durable statement of WHAT was
+-- analyzed.
+CREATE TABLE IF NOT EXISTS analysis_sources (
+    id            SERIAL PRIMARY KEY,
+    track_id      UUID NOT NULL REFERENCES tracks(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    origin        analysis_origin NOT NULL,
+    media_file_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
+    pcm_hash      CHAR(64) NOT NULL,
+    chromaprint   TEXT,                   -- NULL only if fpcalc failed
+    grid_version  SMALLINT NOT NULL DEFAULT 1,
+    sample_rate   INTEGER,
+    bit_depth     INTEGER,                -- NULL for lossy sources
+    is_lossless   BOOLEAN,
+    computed_at   TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT chk_asrc_stream_no_file CHECK (origin = 'local' OR media_file_id IS NULL),
+    UNIQUE (track_id, pcm_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_sources_media_file ON analysis_sources(media_file_id);
+
 CREATE TABLE IF NOT EXISTS embeddings (
     id SERIAL PRIMARY KEY,
     vector vector(512) NOT NULL,
     model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE ON UPDATE CASCADE,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    source_media_file_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
-    source_bit_depth INTEGER,
-    source_sample_rate INTEGER,
-    source_is_lossless BOOLEAN,
+    -- What material this analysis came from. SET NULL degrade = "stale, will
+    -- re-analyze"; the enrichment pending-predicates key on this link.
+    analysis_source_id INTEGER REFERENCES analysis_sources(id) ON DELETE SET NULL,
     -- Methodology version of the ANALYSIS that produced this row (not the
     -- model): v1 = random 10s crop of the middle 30s, v2 = normalized mean
     -- of canonical-grid segments (2026-07-05). Carried through P2P sync so
@@ -446,16 +476,18 @@ CREATE TABLE IF NOT EXISTS embeddings (
 -- segment_index addresses the CANONICAL 10s grid: window i covers
 -- [i*10s, i*10s+10s) from the track start, so sampling strategies of any
 -- density (economy/balanced/thorough, "deepen this artist") write
--- compatible, top-uppable subsets of the same grid. The track-level
--- embeddings row stays the materialized mean of these segments.
+-- compatible, top-uppable subsets of the same grid. Keyed to the track's
+-- embeddings row — track/model/provenance resolve through it, so segments
+-- and their mean can never disagree about what material they came from.
+-- Re-analysis DELETEs and re-inserts segments (fresh rows are unsigned by
+-- construction — the seal-invalidation model for this table).
 CREATE TABLE IF NOT EXISTS embedding_segments (
     id SERIAL PRIMARY KEY,
     vector vector(512) NOT NULL,
-    model_id UUID NOT NULL REFERENCES embedding_models(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    embedding_id INTEGER NOT NULL REFERENCES embeddings(id) ON DELETE CASCADE,
     segment_index SMALLINT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (track_id, model_id, segment_index)
+    UNIQUE (embedding_id, segment_index)
 );
 
 -- Segment-level KNN is the text→audio retrieve channel: normalized track-MEAN
@@ -492,10 +524,7 @@ CREATE TABLE IF NOT EXISTS audio_features (
     vocal_instrumental vocal_class,
     vocal_score DOUBLE PRECISION,
     danceability DOUBLE PRECISION,
-    source_media_file_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
-    source_bit_depth INTEGER,
-    source_sample_rate INTEGER,
-    source_is_lossless BOOLEAN,
+    analysis_source_id INTEGER REFERENCES analysis_sources(id) ON DELETE SET NULL,
     -- Analysis methodology version (v1 = middle-30s features + single-window
     -- instruments; v2 = whole-track amplitude + windowed-max instruments,
     -- 2026-07-03). Synced so peers re-pull methodology upgrades.
@@ -512,31 +541,20 @@ CREATE TABLE IF NOT EXISTS audio_features (
 -- Enrichment signing (phase 1) — see docs/design/P2P-SYNC-INTEGRITY.md
 -- Author signatures + Worker-timestamped batches over audio-derived records.
 -- The signed/verifiable unit is the SEGMENT (deterministic per index), not the
--- mean vector (varies with the sampled K). Content-address is whole-track:
--- pcm_hash of the decoded PCM, shared by a track's segments and audio_features.
+-- mean vector (varies with the sampled K). The content-address a record signs
+-- against is its LINKED analysis_sources row (registered at analysis time).
+-- Signable material: origin='local' + album in signing_whitelist, or
+-- origin='deezer' AND is_lossless (tier 3 — a clean stream signs against the
+-- STREAM's pcm_hash, claiming no possession of any local rip).
 -- ============================================================
 
--- Owned-official albums whose audio analysis may be signed (Bandcamp purchases
--- now; streamed clean sources carry origin='stream' on the provenance instead).
+-- Owned-official albums whose audio analysis may be signed (Bandcamp
+-- purchases now; grey/vinyl rips stay unsigned — an author signature is a
+-- permanent possession proof).
 CREATE TABLE IF NOT EXISTS signing_whitelist (
     album_id UUID PRIMARY KEY REFERENCES albums(id) ON DELETE CASCADE,
     reason   TEXT NOT NULL DEFAULT 'bandcamp',
     added_at TIMESTAMPTZ DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS track_analysis_provenance (
-    track_id     UUID PRIMARY KEY REFERENCES tracks(id) ON UPDATE CASCADE ON DELETE CASCADE,
-    pcm_hash     CHAR(64) NOT NULL,      -- BLAKE2b of NATIVELY-decoded PCM
-                                         -- (source rate/channels, pre-resample)
-                                         -- — stable across ffmpeg builds for
-                                         -- lossless; 48k frame = grid_version
-    chromaprint  TEXT,                   -- AcoustID fp (fpcalc); bound INTO the
-                                         -- signature from the start — adding it
-                                         -- later would forfeit priority. NULL
-                                         -- only if fpcalc fails for a track.
-    grid_version SMALLINT NOT NULL DEFAULT 1,
-    origin       TEXT NOT NULL DEFAULT 'local',   -- 'local' | 'stream'
-    computed_at  TIMESTAMPTZ DEFAULT now()
 );
 
 -- One row per Worker-timestamped signing batch (the daily notary root that
@@ -565,7 +583,63 @@ ALTER TABLE audio_features
     ADD COLUMN IF NOT EXISTS merkle_proof  JSONB;
 
 CREATE INDEX IF NOT EXISTS idx_emb_segments_unsigned
-    ON embedding_segments (track_id) WHERE signature IS NULL;
+    ON embedding_segments (embedding_id) WHERE signature IS NULL;
+
+-- Seal invalidation at the data layer: any UPDATE that changes a signed
+-- payload column without presenting a new signature loses the seal. This is
+-- the invariant, not a convenience — writers (ORM, raw scripts, sync imports)
+-- need no seal awareness and cannot silently break a sealed record. Linking
+-- columns (embedding_id, analysis_source_id) are deliberately NOT payload:
+-- re-keying/linking migrations must not shed seals. sign_audio.py's UPDATE
+-- sets a new signature explicitly, so the guard leaves it alone.
+CREATE OR REPLACE FUNCTION seal_guard_embedding_segments() RETURNS trigger AS $$
+BEGIN
+    IF (NEW.vector IS DISTINCT FROM OLD.vector
+        OR NEW.segment_index IS DISTINCT FROM OLD.segment_index)
+       AND NEW.signature IS NOT DISTINCT FROM OLD.signature THEN
+        NEW.author_pubkey := NULL;
+        NEW.signature     := NULL;
+        NEW.batch_root    := NULL;
+        NEW.merkle_proof  := NULL;
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_embedding_segments_seal_guard ON embedding_segments;
+CREATE TRIGGER trg_embedding_segments_seal_guard
+BEFORE UPDATE ON embedding_segments
+FOR EACH ROW EXECUTE FUNCTION seal_guard_embedding_segments();
+
+CREATE OR REPLACE FUNCTION seal_guard_audio_features() RETURNS trigger AS $$
+BEGIN
+    IF (NEW.bpm IS DISTINCT FROM OLD.bpm
+        OR NEW.key IS DISTINCT FROM OLD.key
+        OR NEW.mode IS DISTINCT FROM OLD.mode
+        OR NEW.key_confidence IS DISTINCT FROM OLD.key_confidence
+        OR NEW.energy IS DISTINCT FROM OLD.energy
+        OR NEW.energy_db IS DISTINCT FROM OLD.energy_db
+        OR NEW.brightness IS DISTINCT FROM OLD.brightness
+        OR NEW.dynamic_range_db IS DISTINCT FROM OLD.dynamic_range_db
+        OR NEW.zero_crossing_rate IS DISTINCT FROM OLD.zero_crossing_rate
+        OR NEW.danceability IS DISTINCT FROM OLD.danceability
+        OR NEW.vocal_instrumental IS DISTINCT FROM OLD.vocal_instrumental
+        OR NEW.vocal_score IS DISTINCT FROM OLD.vocal_score
+        OR NEW.instruments IS DISTINCT FROM OLD.instruments
+        OR NEW.moods IS DISTINCT FROM OLD.moods
+        OR NEW.analysis_version IS DISTINCT FROM OLD.analysis_version)
+       AND NEW.signature IS NOT DISTINCT FROM OLD.signature THEN
+        NEW.author_pubkey := NULL;
+        NEW.signature     := NULL;
+        NEW.batch_root    := NULL;
+        NEW.merkle_proof  := NULL;
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_audio_features_seal_guard ON audio_features;
+CREATE TRIGGER trg_audio_features_seal_guard
+BEFORE UPDATE ON audio_features
+FOR EACH ROW EXECUTE FUNCTION seal_guard_audio_features();
 
 -- ============================================================
 -- Metadata tables (UUID FKs)
@@ -825,7 +899,7 @@ CREATE TABLE IF NOT EXISTS genre_desc_embeddings (
 
 -- Embedding indexes (single-column indexes on leading PK/UNIQUE columns omitted — covered by constraint indexes)
 CREATE INDEX IF NOT EXISTS idx_embeddings_model_id ON embeddings(model_id);
-CREATE INDEX IF NOT EXISTS idx_embeddings_source_mf ON embeddings(source_media_file_id);
+CREATE INDEX IF NOT EXISTS idx_embeddings_analysis_source ON embeddings(analysis_source_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_vector ON embeddings
     USING hnsw (vector vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
@@ -910,8 +984,11 @@ CREATE INDEX IF NOT EXISTS idx_album_variants_file_modified_at_desc
 CREATE INDEX IF NOT EXISTS idx_media_files_track_id ON media_files(track_id);
 CREATE INDEX IF NOT EXISTS idx_media_files_album_variant_id ON media_files(album_variant_id);
 CREATE INDEX IF NOT EXISTS idx_media_files_play_count ON media_files(play_count);
-CREATE INDEX IF NOT EXISTS idx_media_files_analysis_source ON media_files(track_id, is_analysis_source)
-    WHERE is_analysis_source = true;
+-- One analysis source per track, enforced at the type level. Writers flip the
+-- flag in two statements (clear losers, then set the winner) — a single
+-- UPDATE can transiently hold two TRUE rows mid-statement and trip this.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_media_files_analysis_source
+    ON media_files(track_id) WHERE is_analysis_source;
 CREATE INDEX IF NOT EXISTS idx_media_files_cover_id ON media_files(cover_id);
 CREATE INDEX IF NOT EXISTS idx_media_files_cover_pending ON media_files(id)
     WHERE cover_processed_at IS NULL;
@@ -928,7 +1005,7 @@ CREATE INDEX IF NOT EXISTS idx_external_metadata_status ON external_metadata(fet
 CREATE INDEX IF NOT EXISTS idx_external_metadata_data ON external_metadata USING gin (data);
 
 -- Audio feature indexes
-CREATE INDEX IF NOT EXISTS idx_audio_features_source_mf ON audio_features(source_media_file_id);
+CREATE INDEX IF NOT EXISTS idx_audio_features_analysis_source ON audio_features(analysis_source_id);
 CREATE INDEX IF NOT EXISTS idx_audio_features_bpm ON audio_features(bpm);
 CREATE INDEX IF NOT EXISTS idx_audio_features_key ON audio_features(key, mode);
 CREATE INDEX IF NOT EXISTS idx_audio_features_energy ON audio_features(energy_db);
