@@ -20,6 +20,7 @@ Tiers:
 import contextlib
 import logging
 import functools
+from typing import Optional
 
 import torch
 
@@ -74,3 +75,19 @@ def cast_inputs(inputs: dict, dtype: torch.dtype) -> dict:
         else:
             out[k] = v
     return out
+
+
+def empty_cache(device: Optional[str] = None) -> None:
+    """Return the accelerator caching-allocator's free blocks to the OS.
+
+    CUDA and MPS both keep a high-water pool of freed buffers for reuse and do
+    not hand it back on their own; over a long enrichment run the process then
+    holds its peak footprint (measured ~28 GB on MPS unified memory, 24 GB Mac)
+    instead of the live per-batch working set. Call at batch seams. Model
+    weights stay resident — only the free cache is released. No-op on CPU;
+    `device` defaults to the detected accelerator."""
+    dev = device or get_device()
+    if dev == "cuda":
+        torch.cuda.empty_cache()
+    elif dev == "mps":
+        torch.mps.empty_cache()

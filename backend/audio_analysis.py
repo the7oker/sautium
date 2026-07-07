@@ -599,6 +599,13 @@ class AudioAnalyzer:
                 for _, prep in prepared:
                     del prep["audio_48k"]
 
+                # Batch GPU work (CLAP + AST/PaSST) is done — return the
+                # allocator's free blocks so the footprint tracks the live
+                # per-batch working set, not the run's cumulative peak (MPS
+                # unified memory otherwise holds ~28 GB for the whole run).
+                from device import empty_cache
+                empty_cache(self.device)
+
                 # Phase 3: merge features + save to DB (savepoint per track, commit per batch)
                 for (row, prep), clap_feat in zip(prepared, clap_results):
                     try:

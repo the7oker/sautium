@@ -176,7 +176,8 @@ class AudioEmbeddingGenerator:
 
         except torch.cuda.OutOfMemoryError:
             logger.error("GPU OOM during batch embedding generation")
-            torch.cuda.empty_cache()
+            from device import empty_cache
+            empty_cache(self.device)
             return None
         except Exception as e:
             logger.error(f"Embedding generation failed: {e}")
@@ -475,6 +476,11 @@ class AudioEmbeddingGenerator:
                             stats["skipped"] += 1
 
                     db.commit()
+                    # Hand the allocator's free blocks back each batch — else
+                    # the caching allocator holds its peak for the whole run
+                    # (~28 GB on MPS unified memory; heavy swap on a 16 GB Mac).
+                    from device import empty_cache
+                    empty_cache(self.device)
             finally:
                 io_pool.shutdown(wait=True, cancel_futures=True)
                 prefetch_pool.shutdown(wait=True, cancel_futures=True)

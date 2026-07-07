@@ -192,8 +192,8 @@ class InstrumentEnsembleTagger:
         if self.passt is not None:
             del self.passt
             self.passt = None
-        if self.device == "cuda":
-            torch.cuda.empty_cache()
+        from device import empty_cache
+        empty_cache(self.device)
         logger.info("AST+PaSST unloaded")
 
     @staticmethod

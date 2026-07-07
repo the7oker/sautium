@@ -272,8 +272,9 @@ def run_parallel_enrichment(
     # back to the driver before Phase 2 so the text encoder isn't squeezed into
     # a full allocator arena on the 16 GB laptop GPU. Singleton model weights
     # stay resident — only the allocator's free cache is returned.
-    if torch is not None and torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    if torch is not None:
+        from device import empty_cache
+        empty_cache()
 
     # === Phase 2: Text embeddings (sentence-transformers, needs GPU) ===
     logger.info("=== Phase 2: text embeddings ===")
