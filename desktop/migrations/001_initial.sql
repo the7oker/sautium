@@ -11,9 +11,15 @@ CREATE EXTENSION IF NOT EXISTS unaccent;
 -- IMMUTABLE unaccent wrapper (pins the dictionary) so it can back an expression
 -- index — bridges ASCII-tagged names to MB's accented canonical in canon matching
 -- ('Tomas Dvorak' → 'Tomáš Dvořák'). See canon.match._unaccent_gids.
+-- Function and dictionary are schema-qualified because PostgreSQL 17 builds
+-- functional indexes under a restricted search_path (pg_catalog only); an
+-- unqualified unaccent()/'unaccent' dictionary then fails to resolve at index
+-- build time even though the extension lives in public. Qualifying keeps the
+-- body inlinable (a SET search_path clause would disable inlining). PG15/16
+-- tolerated the unqualified form; PG17 does not.
 CREATE OR REPLACE FUNCTION f_unaccent(text) RETURNS text
   LANGUAGE sql IMMUTABLE PARALLEL SAFE STRICT AS
-$$ SELECT lower(unaccent('unaccent', $1)) $$;
+$$ SELECT lower(public.unaccent('public.unaccent'::regdictionary, $1)) $$;
 
 -- ============================================================
 -- Enum types (created before referencing tables)
@@ -550,19 +556,12 @@ CREATE TABLE IF NOT EXISTS audio_features (
 -- The signed/verifiable unit is the SEGMENT (deterministic per index), not the
 -- mean vector (varies with the sampled K). The content-address a record signs
 -- against is its LINKED analysis_sources row (registered at analysis time).
--- Signable material: origin='local' + album in signing_whitelist, or
--- origin='deezer' AND is_lossless (tier 3 — a clean stream signs against the
--- STREAM's pcm_hash, claiming no possession of any local rip).
+-- Signable material: every first-hand origin='local' analysis (the per-album
+-- signing whitelist was dropped 2026-07-07 — an unsigned network breaks
+-- integrity testing and the sync verify chain), or origin='deezer' AND
+-- is_lossless (tier 3 — a clean stream signs against the STREAM's pcm_hash,
+-- claiming no possession of any local rip).
 -- ============================================================
-
--- Owned-official albums whose audio analysis may be signed (Bandcamp
--- purchases now; grey/vinyl rips stay unsigned — an author signature is a
--- permanent possession proof).
-CREATE TABLE IF NOT EXISTS signing_whitelist (
-    album_id UUID PRIMARY KEY REFERENCES albums(id) ON DELETE CASCADE,
-    reason   TEXT NOT NULL DEFAULT 'bandcamp',
-    added_at TIMESTAMPTZ DEFAULT now()
-);
 
 -- One row per Worker-timestamped signing batch (the daily notary root that
 -- anchors authorship priority for every record proving inclusion in it).

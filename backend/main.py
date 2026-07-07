@@ -641,6 +641,15 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                 except Exception as e:
                     logger.error(f"Post-scan MB canonicalization failed: {e}")
 
+            # Sign whatever analysis this scan produced (idempotent — exits
+            # without a Worker call when nothing is unsigned).
+            if not state["cancel_requested"]:
+                try:
+                    import sign_audio
+                    sign_audio.run()
+                except Exception as e:
+                    logger.warning(f"Post-scan signing failed: {e}")
+
             if prune and not state["cancel_requested"]:
                 state["progress"] = "Pruning missing files..."
                 try:
@@ -923,6 +932,18 @@ def _enrich_worker(limit: Optional[int], skip_embeddings: bool,
         ]
         state["progress"] = " | ".join(parts)
         state["result"] = {"success": True, "statistics": result}
+
+        # Sign the freshly-analyzed records — every first-hand analysis signs
+        # (no whitelist gate). Non-fatal: a Worker/network failure leaves
+        # records unsigned and the next run picks them up (idempotent).
+        if not state["cancel_requested"] and not skip_audio_analysis:
+            try:
+                import sign_audio
+                state["progress"] = "Signing analysis records..."
+                _notify_library_subs_safe()
+                sign_audio.run()
+            except Exception as e:
+                logger.warning(f"Post-enrichment signing failed: {e}")
 
     except Exception as e:
         logger.error(f"Enrichment failed: {e}", exc_info=True)

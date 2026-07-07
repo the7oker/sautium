@@ -5,8 +5,10 @@ Phase 1 of enrichment signing (docs/design/P2P-SYNC-INTEGRITY.md). A record is
 signable when its LINKED analysis_sources row (registered at analysis time by
 the scanner / stream enricher — never recomputed here) is signable material:
 
-  - origin='local'  AND the track's album is in signing_whitelist
-    (owned-official purchases; grey rips stay unsigned — privacy), or
+  - origin='local' — ALL first-hand local analysis signs (the per-album
+    signing_whitelist gate was dropped 2026-07-07: an unsigned network breaks
+    integrity testing and the sync verify chain; selective privacy policy is
+    off), or
   - origin='deezer' AND is_lossless — tier 3: a streamed clean source signs
     against the STREAM's pcm_hash, claiming no possession of any local rip.
     YouTube / lossy tiers never sign (decode-varying pcm_hash, lossy master).
@@ -58,11 +60,10 @@ FEATURE_ORDER = [
 
 # A record signs only when its linked source is signable-classed AND
 # first-hand (imported sources arrived over sync — signing analysis this node
-# never computed would be authorship theft in reverse); 'local' additionally
-# requires the track to be whitelisted (bound as %(wl)s).
+# never computed would be authorship theft in reverse).
 _SIGNABLE_SRC = """(NOT src.imported
                     AND ((src.origin = 'deezer' AND src.is_lossless)
-                         OR (src.origin = 'local' AND %(wl)s)))"""
+                         OR src.origin = 'local'))"""
 
 
 def _pubkey_hex(key) -> str:
@@ -99,38 +100,32 @@ def _timestamp_root(root: str) -> dict:
     return json.loads(urllib.request.urlopen(req, timeout=30).read())
 
 
-def _signable_tracks(cur) -> dict:
-    """{track_id: is_whitelisted} over both signable classes. A whitelisted
-    track whose current analysis is still stream-linked signs the stream
-    source now and re-signs after the owned re-analysis replaces it."""
-    cur.execute("""
-        SELECT DISTINCT mf.track_id::text AS tid
-        FROM signing_whitelist sw
-        JOIN album_variants av ON av.album_id = sw.album_id
-        JOIN media_files mf    ON mf.album_variant_id = av.id
-    """)
-    whitelisted = {r["tid"] for r in cur.fetchall()}
+def _signable_tracks(cur) -> list:
+    """Track ids with at least one first-hand signable source."""
     cur.execute("""
         SELECT DISTINCT track_id::text AS tid
         FROM analysis_sources
-        WHERE origin = 'deezer' AND is_lossless AND NOT imported
+        WHERE NOT imported
+          AND (origin = 'local' OR (origin = 'deezer' AND is_lossless))
     """)
-    deezer = {r["tid"] for r in cur.fetchall()}
-    return {tid: (tid in whitelisted) for tid in whitelisted | deezer}
+    return [r["tid"] for r in cur.fetchall()]
 
 
 def run(limit=None, dry_run=False):
     key = load_signing_key(settings)
     if key is None:
-        sys.exit("no signing identity — set P2P_USERNAME / P2P_PASSWORD")
+        # Callable from post-enrichment hooks — a node without an identity
+        # just skips signing, it must not kill the worker thread.
+        logger.info("no signing identity (P2P_USERNAME/P2P_PASSWORD) — "
+                    "signing skipped")
+        return
     author = _pubkey_hex(key)
 
     conn = psycopg2.connect(settings.database_url)
     conn.cursor_factory = psycopg2.extras.RealDictCursor
     cur = conn.cursor()
 
-    tracks = _signable_tracks(cur)
-    track_ids = sorted(tracks)
+    track_ids = sorted(_signable_tracks(cur))
     if limit:
         track_ids = track_ids[:limit]
     logger.info("signable tracks: %d", len(track_ids))
@@ -138,7 +133,7 @@ def run(limit=None, dry_run=False):
     # pending: (table, pk, signature) collected across all tracks -> one batch
     pending, tracks_touched = [], 0
     for tid in track_ids:
-        params = {"tid": tid, "wl": tracks[tid]}
+        params = {"tid": tid}
         touched = False
 
         cur.execute(f"""
@@ -198,7 +193,7 @@ def run(limit=None, dry_run=False):
     ts = _timestamp_root(root)
     if not rs.verify_timestamp(root, ts["date"], ts["sig"], ts["authority"]):
         conn.rollback()
-        sys.exit("Worker timestamp failed verification — aborting")
+        raise RuntimeError("Worker timestamp failed verification — aborting")
 
     cur.execute("""INSERT INTO signing_batches
                      (batch_root, author_pubkey, worker_date, worker_sig, authority)
