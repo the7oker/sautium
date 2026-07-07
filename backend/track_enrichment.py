@@ -231,6 +231,18 @@ def run_parallel_enrichment(
         _update_progress()
         return stats
 
+    def _sign_analysis(progress_cb):
+        """Author-sign + Worker-timestamp whatever first-hand analysis is now
+        signable, the moment the audio pipeline commits. Idempotent and
+        non-fatal — a Worker/network failure leaves records for the next run."""
+        try:
+            import sign_audio
+            if progress_cb:
+                progress_cb("Signing analysis records...")
+            sign_audio.run()
+        except Exception as e:
+            logger.warning(f"Signing failed (records left for next run): {e}")
+
     # === Phase 1: Run A, B, C in parallel ===
     if progress_cb:
         progress_cb("Phase 1: GPU + Last.fm + Lyrics (parallel)...")
@@ -253,6 +265,14 @@ def run_parallel_enrichment(
         except Exception as e:
             logger.error(f"Pipeline gpu failed: {e}", exc_info=True)
             result_parts["gpu"] = {"error": str(e)}
+        finally:
+            # Seal the first-hand analysis the moment the audio pipeline has
+            # committed — BEFORE the slow lyrics tail (minutes) and independent
+            # of any later manual cancel of it. _run_gpu_pipeline returns what
+            # it committed even on cancel/error, so a mid-run stop still seals
+            # its completed tracks. Idempotent — touches only unsigned records.
+            if not (skip_embeddings and skip_audio_analysis):
+                _sign_analysis(progress_cb)
 
         for future in as_completed(futures):
             name = futures[future]

@@ -932,18 +932,9 @@ def _enrich_worker(limit: Optional[int], skip_embeddings: bool,
         ]
         state["progress"] = " | ".join(parts)
         state["result"] = {"success": True, "statistics": result}
-
-        # Sign the freshly-analyzed records — every first-hand analysis signs
-        # (no whitelist gate). Non-fatal: a Worker/network failure leaves
-        # records unsigned and the next run picks them up (idempotent).
-        if not state["cancel_requested"] and not skip_audio_analysis:
-            try:
-                import sign_audio
-                state["progress"] = "Signing analysis records..."
-                _notify_library_subs_safe()
-                sign_audio.run()
-            except Exception as e:
-                logger.warning(f"Post-enrichment signing failed: {e}")
+        # Signing moved into run_parallel_enrichment (right after the audio
+        # pipeline commits) so it survives a manual cancel of the slow lyrics
+        # tail and is not gated on the whole run finishing.
 
     except Exception as e:
         logger.error(f"Enrichment failed: {e}", exc_info=True)
