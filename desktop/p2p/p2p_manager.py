@@ -1961,6 +1961,17 @@ class P2PManager:
         finally:
             conn.close()
 
+    def _local_dump_available_sync(self):
+        """Full dump in THIS node's DB (VERSION marker + mb_artist rows on
+        our DSN). The file alone is not enough: on a dev host the Docker
+        loader stamps VERSION through the repo bind-mount while the
+        launcher's embedded PG has empty mb_* — fetch must not be fooled."""
+        conn = psycopg2.connect(self.db_dsn)
+        try:
+            return mb_slice_queries.local_dump_available(conn)
+        finally:
+            conn.close()
+
     def _local_backend_api(self) -> Optional[BackendAPIClient]:
         port = self.config.get("ports", {}).get("web", 0)
         if not port:
@@ -2035,17 +2046,21 @@ class P2PManager:
         the periodic loop, post-sync trigger and manual runs merge."""
         cfg = self.config.get("mb_slice", {})
         if not cfg.get("fetch", True):
+            logger.debug("MB slice: fetch disabled in config")
             return {}
-        if mb_slice_queries.dump_version_file():
-            return {}  # full local dump — nothing to fetch over P2P
+        loop = asyncio.get_event_loop()
+        if await loop.run_in_executor(None, self._local_dump_available_sync):
+            logger.debug("MB slice: full local dump — nothing to fetch")
+            return {}
         if self._mb_slice_lock.locked():
             return {}
 
         async with self._mb_slice_lock:
-            loop = asyncio.get_event_loop()
             names = await loop.run_in_executor(
                 None, self._pending_slice_names_sync)
             if not names:
+                logger.info("MB slice: no pending names — all canon inputs "
+                            "already fetched")
                 return {}
 
             peers = await self._find_dump_peers()
