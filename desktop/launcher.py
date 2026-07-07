@@ -42,7 +42,7 @@ class LauncherApp(ctk.CTk):
         self.service_manager = ServiceManager(self.config)
         self.api_client = BackendAPIClient()
         self.p2p_manager = None
-        # Set while _start_p2p_if_enabled's background thread is between
+        # Set while _start_p2p's background thread is between
         # "thread launched" and "self.p2p_manager assigned". Prevents a
         # second _on_services_ready call (from a Scan-driven backend
         # restart) from launching a parallel P2PManager that races on the
@@ -327,7 +327,7 @@ class LauncherApp(ctk.CTk):
         # two managers to the same port. Update path explicitly nulls
         # p2p_manager itself before calling _on_services_ready.
         if self.p2p_manager is None and not self._p2p_starting:
-            self._start_p2p_if_enabled()
+            self._start_p2p()
 
         # Auto-trigger Last.fm auth if pending from wizard
         self._check_lastfm_pending_auth()
@@ -480,14 +480,11 @@ class LauncherApp(ctk.CTk):
                 except Exception as e:
                     logger.debug(f"Reload {name}: {e}")
 
-    def _start_p2p_if_enabled(self):
-        """Start P2P services (DHT always starts for peer discovery).
-
-        When p2p.enabled=True, the node also announces its artists so
-        other peers can discover and sync from it.
-        When p2p.enabled=False, DHT still starts in discovery-only mode
-        so "Sync Library" can find peers automatically.
-        """
+    def _start_p2p(self):
+        """Start P2P services unconditionally: sync server, DHT + LAN
+        discovery, chat, MB slice loop. A privacy connect/disconnect
+        switch (don't announce/serve) is future work — the old
+        p2p.enabled config flag was dead and got removed."""
         if self._p2p_starting or self.p2p_manager is not None:
             return
         self._p2p_starting = True
