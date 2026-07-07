@@ -226,6 +226,7 @@ class SyncServer:
 
         try:
             result = await self._run_query(mb_slice_queries.get_slice, names)
+            self._attach_slice_receipt(result)
             return self._json_response(request, result)
         except ValueError as e:
             return self._json_response(request, {"error": str(e)}, status=400)
@@ -238,6 +239,23 @@ class SyncServer:
             return self._json_response(
                 request, {"error": "internal error"}, status=500
             )
+
+    @staticmethod
+    def _attach_slice_receipt(result: dict) -> None:
+        """Sign the response with the node's Ed25519 identity — the authorship
+        receipt. Content stays unsigned (it's public MB data); one signature
+        binds "this node produced this answer for this dump". Requesters
+        reject unsigned responses, so a signing failure just makes this node
+        useless as a slice source rather than silently unattributable."""
+        from desktop.node_identity import get_node_id, sign_message
+        try:
+            result["author_pubkey"] = get_node_id()
+            result["receipt"] = sign_message(
+                mb_slice_queries.receipt_message(result)).hex()
+        except Exception as e:
+            logger.warning(f"MB slice receipt signing failed: {e}")
+            result.pop("author_pubkey", None)
+            result.pop("receipt", None)
 
     # -----------------------------------------------------------------------
     # Chat handlers

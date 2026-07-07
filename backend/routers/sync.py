@@ -12,7 +12,9 @@ Protocol:
 
 import json
 import logging
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -25,13 +27,26 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
 
-# Single source: desktop/p2p/mb_slice_queries.py, bind-mounted to /app by
-# docker-compose. Absent outside Docker (launcher-mode backends serve slices
-# through the launcher's own sync server instead) — the endpoint 404s then.
-try:
-    import mb_slice_queries
-except ImportError:
-    mb_slice_queries = None
+# Single source: desktop/p2p/mb_slice_queries.py. In Docker the desktop/p2p
+# dir is bind-mounted at /app/desktop_p2p; a native repo run finds it at
+# ../desktop/p2p. Loaded by file path (not sys.path) so desktop modules can
+# never shadow backend ones. Absent → the endpoint 404s (launcher-mode
+# backends serve slices through the launcher's own sync server instead).
+def _load_mb_slice_queries():
+    import importlib.util
+    here = Path(__file__).parent.parent
+    for candidate in (here / "desktop_p2p" / "mb_slice_queries.py",
+                      here.parent / "desktop" / "p2p" / "mb_slice_queries.py"):
+        if candidate.exists():
+            spec = importlib.util.spec_from_file_location(
+                "mb_slice_queries", candidate)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+    return None
+
+
+mb_slice_queries = _load_mb_slice_queries()
 
 mb_router = APIRouter(prefix="/api/mb", tags=["sync"])
 
@@ -50,6 +65,57 @@ def mb_dump_version() -> Optional[str]:
         return None
 
 
+# The backend's own Ed25519 node identity — a Docker deployment has no
+# launcher identity dir, so authorship of served slices is anchored to this
+# key instead. Lives beside .api_secret (backend/data/, bind-mounted →
+# survives container recreates). Lazy: generated on first use.
+_NODE_KEY_PATH = Path(__file__).parent.parent / "data" / ".node_key"
+
+
+def _node_signing_key():
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    if _NODE_KEY_PATH.exists():
+        seed = bytes.fromhex(_NODE_KEY_PATH.read_text().strip())
+    else:
+        key = Ed25519PrivateKey.generate()
+        from cryptography.hazmat.primitives import serialization
+        seed = key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        _NODE_KEY_PATH.write_text(seed.hex())
+        os.chmod(_NODE_KEY_PATH, 0o600)
+        logger.info("Generated backend node identity (.node_key)")
+    return Ed25519PrivateKey.from_private_bytes(seed)
+
+
+def node_pubkey_hex() -> Optional[str]:
+    from cryptography.hazmat.primitives import serialization
+    try:
+        return _node_signing_key().public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        ).hex()
+    except Exception as e:
+        logger.warning(f"Backend node key unavailable: {e}")
+        return None
+
+
+def _attach_slice_receipt(result: dict) -> None:
+    """Authorship receipt: one Ed25519 signature over the canonical payload
+    hash. Mirrors desktop/p2p/sync_server._attach_slice_receipt."""
+    try:
+        key = _node_signing_key()
+        result["author_pubkey"] = node_pubkey_hex()
+        result["receipt"] = key.sign(
+            mb_slice_queries.receipt_message(result)).hex()
+    except Exception as e:
+        logger.warning(f"MB slice receipt signing failed: {e}")
+        result.pop("author_pubkey", None)
+        result.pop("receipt", None)
+
+
 class MBSliceRequest(BaseModel):
     names: list[str] = Field(default_factory=list, max_length=50)
 
@@ -63,7 +129,9 @@ def mb_slice(req: MBSliceRequest) -> dict:
         raise HTTPException(status_code=404, detail="no MB dump on this node")
     try:
         with get_conn() as conn:
-            return mb_slice_queries.get_slice(conn, req.names)
+            result = mb_slice_queries.get_slice(conn, req.names)
+        _attach_slice_receipt(result)
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except mb_slice_queries.DumpBusy:

@@ -121,8 +121,10 @@ services:
       - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)
       # Single-source P2P slice module (desktop/p2p owns it; the launcher sync
       # server imports the same file) — lets the Docker backend serve
-      # /api/mb/slice to dump-less peers.
-      - ./desktop/p2p/mb_slice_queries.py:/app/mb_slice_queries.py:ro
+      # /api/mb/slice to dump-less peers. Directory mount on purpose: a
+      # single-FILE bind mount breaks on docker restart after the host file
+      # is edited (WSL2 inode swap).
+      - ./desktop/p2p:/app/desktop_p2p:ro
       # Mount music library as read-only
       # Windows path: E:\Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro

@@ -1803,12 +1803,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_mb_release_group_tag  ON mb_release_group_t
 -- world per name, so "no such artist" is an answer, not a retry. A later full
 -- dump load supersedes slice rows (TRUNCATE+COPY) but this log stays — it only
 -- gates re-asking peers, which the VERSION marker disables anyway.
+-- Authorship: slice content is public MB data and is NOT signed per row; the
+-- serving node signs the whole response (Ed25519 over the canonical payload
+-- hash, see mb_slice_queries.receipt_message). source_pubkey + receipt +
+-- payload_sha256 are the verified, durable evidence of who produced the batch
+-- this name arrived in.
 CREATE TABLE IF NOT EXISTS mb_slice_fetches (
-    name_key     TEXT PRIMARY KEY,           -- lower(trim(name))
-    source_node  TEXT,
-    dump_version TEXT,
-    matched_ids  INTEGER NOT NULL DEFAULT 0,
-    fetched_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    name_key       TEXT PRIMARY KEY,           -- lower(trim(name))
+    source_node    TEXT,
+    dump_version   TEXT,
+    matched_ids    INTEGER NOT NULL DEFAULT 0,
+    source_pubkey  TEXT,                       -- hex Ed25519, verified before import
+    receipt        TEXT,                       -- hex signature over payload_sha256
+    payload_sha256 TEXT,
+    fetched_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- ============================================================

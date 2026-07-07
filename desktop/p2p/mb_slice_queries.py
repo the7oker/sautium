@@ -13,6 +13,8 @@ dump nodes cheap (every probe here is an indexed exact lookup).
 Framework-agnostic like sync_queries: functions take a psycopg2 connection.
 """
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -118,6 +120,40 @@ _DICT_TABLES = ("mb_release_group_primary_type", "mb_release_group_secondary_typ
 
 class DumpBusy(Exception):
     """A full dump load is in progress on the serving node — retry later."""
+
+
+# ---------------------------------------------------------------------------
+# Authorship receipt
+# ---------------------------------------------------------------------------
+# The slice content is public MB data — it is NOT signed per row. What IS
+# signed is the whole response: one Ed25519 signature by the serving node
+# over the canonical payload hash. That binds authorship cryptographically
+# ("node with key K produced answer H for dump V") without any per-row keys,
+# timestamps or Worker involvement. The requester verifies before importing
+# and stores (pubkey, receipt, hash) in mb_slice_fetches as durable evidence.
+
+# Domain-separation prefix — a receipt signature can never be replayed as a
+# chat/sync/birth signature and vice versa.
+RECEIPT_CONTEXT = b"sautium-mb-slice-v1:"
+
+_SIGNED_FIELDS = ("dump_version", "artists_matched", "columns", "tables",
+                  "truncated")
+
+
+def payload_hash(resp: dict) -> bytes:
+    """Deterministic sha256 over the signable core of a slice response.
+    The server computes it from the dict it built, the requester from the
+    parsed JSON — canonical serialization (sorted keys, compact separators,
+    ensure_ascii=False) makes both byte-identical."""
+    core = {k: resp.get(k) for k in _SIGNED_FIELDS}
+    blob = json.dumps(core, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).digest()
+
+
+def receipt_message(resp: dict) -> bytes:
+    """The exact bytes the serving node signs / the requester verifies."""
+    return RECEIPT_CONTEXT + payload_hash(resp)
 
 
 # ---------------------------------------------------------------------------

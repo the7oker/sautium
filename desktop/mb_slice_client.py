@@ -20,7 +20,9 @@ import psycopg2
 import psycopg2.extras
 
 from desktop.api_client import BackendAPIClient
-from desktop.p2p.mb_slice_queries import MB_LOAD_LOCK_KEY, SLICE_TABLES
+from desktop.node_identity import verify_signature
+from desktop.p2p.mb_slice_queries import (MB_LOAD_LOCK_KEY, SLICE_TABLES,
+                                          payload_hash, receipt_message)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,27 @@ class MBSliceClient:
                                f"{self.source_node} runs an incompatible version")
                 return {"error": f"column mismatch: {t}"}
 
+        # Authorship receipt — strict: an unsigned or mis-signed response is
+        # unattributable, and attribution is the whole trust model here
+        # (content is public MB data, verified by spot-checks against
+        # musicbrainz.org; the receipt pins WHO answered).
+        pubkey = resp.get("author_pubkey")
+        receipt = resp.get("receipt")
+        if not pubkey or not receipt:
+            logger.warning(f"MB slice from {self.source_node}: unsigned "
+                           f"response — rejected")
+            return {"error": "unsigned response"}
+        try:
+            valid = verify_signature(receipt_message(resp),
+                                     bytes.fromhex(receipt), pubkey)
+        except Exception as e:
+            logger.warning(f"MB slice receipt malformed: {e}")
+            return {"error": "malformed receipt"}
+        if not valid:
+            logger.warning(f"MB slice from {self.source_node}: receipt does "
+                           f"not verify against {pubkey[:16]}… — rejected")
+            return {"error": "receipt verification failed"}
+
         matched = resp.get("artists_matched", {})
         stats = {"names": len(names),
                  "matched": sum(len(v) for v in matched.values()),
@@ -111,18 +134,25 @@ class MBSliceClient:
                     )
                     stats["rows_inserted"] += len(inserted)
 
+                sha_hex = payload_hash(resp).hex()
                 for name in names:
                     cur.execute("""
                         INSERT INTO mb_slice_fetches
-                            (name_key, source_node, dump_version, matched_ids)
-                        VALUES (lower(btrim(%s)), %s, %s, %s)
+                            (name_key, source_node, dump_version, matched_ids,
+                             source_pubkey, receipt, payload_sha256)
+                        VALUES (lower(btrim(%s)), %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (name_key) DO UPDATE SET
                             source_node = EXCLUDED.source_node,
                             dump_version = EXCLUDED.dump_version,
                             matched_ids = EXCLUDED.matched_ids,
+                            source_pubkey = EXCLUDED.source_pubkey,
+                            receipt = EXCLUDED.receipt,
+                            payload_sha256 = EXCLUDED.payload_sha256,
                             fetched_at = now()
-                    """, (name, self.source_node, resp.get("dump_version"),
-                          len(matched.get(name, []))))
+                    """, (name, self.source_node or pubkey,
+                          resp.get("dump_version"),
+                          len(matched.get(name, [])),
+                          pubkey, receipt, sha_hex))
             conn.commit()
         except Exception:
             conn.rollback()
