@@ -1352,14 +1352,16 @@ class SetupWizard(ctk.CTkToplevel):
                 # Install crypto dependencies if missing
                 self._ensure_crypto_deps(progress)
 
-                # Ensure ffmpeg — the audio decode dependency for embeddings
-                # and audio analysis. Non-fatal: setup continues without it,
-                # only audio analysis stays unavailable until it is present.
-                from desktop.db_init import ensure_ffmpeg
-                if not ensure_ffmpeg(progress):
+                # Ensure the media CLI tools (ffmpeg, fpcalc, flac). Non-fatal:
+                # setup continues; a missing tool only degrades that step
+                # (ffmpeg -> no audio analysis, fpcalc -> no fingerprint).
+                from desktop.db_init import ensure_media_tools
+                _tools = ensure_media_tools(progress)
+                _missing = [b for b, ok in _tools.items() if not ok]
+                if _missing:
                     logger.warning(
-                        "ffmpeg not installed — audio embeddings and analysis "
-                        "will be unavailable until it is present"
+                        "Media tools not installed: %s — related features "
+                        "degraded until present", ", ".join(_missing)
                     )
 
                 # Create account identity (or random if skipped)

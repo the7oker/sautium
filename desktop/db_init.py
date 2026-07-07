@@ -399,118 +399,132 @@ def _link_pgvector_to_pg(brew: str) -> None:
 
 
 # ================================================================
-# ffmpeg (audio decode dependency)
+# Media CLI tools (audio decode / fingerprint / transcode)
 # ================================================================
-# audio_analysis.load_full_track_48k shells out to the `ffmpeg` binary —
-# the shared 48kHz decode path for BOTH audio embeddings and audio
-# analysis. A fresh node without it fails every track on decode
-# ([Errno 2] ... 'ffmpeg') and silently produces 0 embeddings.
+# The audio pipeline shells out to external binaries: ffmpeg (+ ffprobe) for
+# the shared 48kHz decode path (embeddings + analysis), fpcalc (Chromaprint)
+# for the content-address fingerprint, and flac for stream->FLAC transcode.
+# A fresh node missing any fails those steps silently (ffmpeg: 0 embeddings;
+# fpcalc: no fingerprint provenance). The launcher installs them all at first
+# run so the app is self-contained.
 
-FFMPEG_WINDOWS_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+# (binary, macOS brew formula, Windows static-build zip URL). The ffmpeg zip
+# also carries ffprobe; the Windows extractor copies every .exe beside it.
+_MEDIA_TOOLS = [
+    ("ffmpeg", "ffmpeg",
+     "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"),
+    ("fpcalc", "chromaprint",
+     "https://github.com/acoustid/chromaprint/releases/download/v1.5.1/"
+     "chromaprint-fpcalc-1.5.1-windows-x86_64.zip"),
+    ("flac", "flac",
+     "https://ftp.osuosl.org/pub/xiph/releases/flac/flac-1.4.3-win.zip"),
+]
 
-# Where a brew-installed ffmpeg lives on macOS. A GUI-launched .app has a
-# minimal PATH omitting these, so child processes (the backend) must add
-# them explicitly — see service_manager.start_backend and ffmpeg_search_dirs.
-_MACOS_FFMPEG_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"]
+# brew installs into these on macOS; a GUI-launched .app has a minimal PATH
+# omitting them, so the backend must add them explicitly (service_manager).
+_MACOS_BREW_BIN_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"]
 
 
-def ffmpeg_search_dirs() -> list:
-    """Dirs to prepend to a child-process PATH so `ffmpeg` resolves,
+def media_tool_dirs() -> list:
+    """Dirs to prepend to a child-process PATH so the media binaries resolve,
     independent of how the launcher itself was started."""
     if IS_MACOS:
-        return [d for d in _MACOS_FFMPEG_DIRS if os.path.isdir(d)]
+        return [d for d in _MACOS_BREW_BIN_DIRS if os.path.isdir(d)]
     if IS_WINDOWS:
         from desktop.utils import get_project_root
-        d = get_project_root() / "ffmpeg" / "bin"
-        return [str(d)] if d.exists() else []
+        root = get_project_root()
+        return [str(root / b / "bin") for b, _, _ in _MEDIA_TOOLS
+                if (root / b / "bin").exists()]
     return []
 
 
-def _which_ffmpeg() -> Optional[str]:
-    """ffmpeg on PATH, or in the platform's known install dirs."""
-    found = shutil.which("ffmpeg")
+def _which_tool(binary: str) -> Optional[str]:
+    """A media binary on PATH, or in the platform's known install dirs."""
+    found = shutil.which(binary)
     if found:
         return found
-    exe = "ffmpeg.exe" if IS_WINDOWS else "ffmpeg"
-    for d in ffmpeg_search_dirs():
+    exe = binary + ".exe" if IS_WINDOWS else binary
+    for d in media_tool_dirs():
         cand = Path(d) / exe
         if cand.exists():
             return str(cand)
     return None
 
 
-def ensure_ffmpeg(progress_cb: Optional[Callable] = None) -> bool:
-    """Ensure the ffmpeg binary is available. Idempotent — a no-op when it
-    already resolves. Non-fatal: callers treat False as "audio analysis
-    unavailable until installed", never as a hard setup error."""
-    if _which_ffmpeg():
-        return True
-    if IS_MACOS:
-        return _install_ffmpeg_macos(progress_cb)
-    if IS_WINDOWS:
-        return _install_ffmpeg_windows(progress_cb)
-    logger.warning("ffmpeg not found on PATH — install it via your package manager")
-    return False
+def ensure_media_tools(progress_cb: Optional[Callable] = None) -> dict:
+    """Ensure every media CLI binary (ffmpeg, fpcalc, flac) is present.
+    Idempotent per tool. Non-fatal — a failure leaves that one step degraded,
+    never blocks setup. Returns {binary: present?}."""
+    result = {}
+    for binary, formula, win_url in _MEDIA_TOOLS:
+        if _which_tool(binary):
+            result[binary] = True
+            continue
+        if IS_MACOS:
+            result[binary] = _brew_install(binary, formula, progress_cb)
+        elif IS_WINDOWS:
+            result[binary] = _download_win_tool(binary, win_url, progress_cb)
+        else:
+            logger.warning("%s not found on PATH — install it via your package manager", binary)
+            result[binary] = False
+    return result
 
 
-def _install_ffmpeg_macos(progress_cb: Optional[Callable] = None) -> bool:
+def _brew_install(binary: str, formula: str, progress_cb: Optional[Callable] = None) -> bool:
     brew = _find_brew()
     if not brew:
-        logger.error("Homebrew not found — cannot auto-install ffmpeg")
+        logger.error("Homebrew not found — cannot auto-install %s", formula)
         if progress_cb:
             progress_cb("Homebrew not found — install it from https://brew.sh, then reopen Sautium")
         return False
     if progress_cb:
-        progress_cb("Installing ffmpeg (audio decoder)...")
-    logger.info("Installing ffmpeg via Homebrew...")
+        progress_cb(f"Installing {binary}...")
+    logger.info("Installing %s via Homebrew...", formula)
     env = os.environ.copy()
     env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
     try:
         result = subprocess.run(
-            [brew, "install", "ffmpeg"],
+            [brew, "install", formula],
             capture_output=True, text=True, timeout=1800, env=env,
         )
     except subprocess.TimeoutExpired:
-        logger.error("brew install ffmpeg timed out")
-        if progress_cb:
-            progress_cb("ffmpeg install timed out (audio analysis disabled)")
+        logger.error("brew install %s timed out", formula)
         return False
     if result.returncode != 0:
-        logger.error(f"brew install ffmpeg failed: {result.stderr[-500:]}")
-        if progress_cb:
-            progress_cb("ffmpeg install failed (audio analysis disabled)")
+        logger.error("brew install %s failed: %s", formula, result.stderr[-500:])
         return False
-    logger.info("ffmpeg installed via Homebrew")
+    logger.info("%s installed via Homebrew", formula)
     return True
 
 
-def _install_ffmpeg_windows(progress_cb: Optional[Callable] = None) -> bool:
+def _download_win_tool(binary: str, url: str, progress_cb: Optional[Callable] = None) -> bool:
     import tempfile
     from desktop.utils import get_project_root
-    bin_dir = get_project_root() / "ffmpeg" / "bin"
-    if (bin_dir / "ffmpeg.exe").exists():
+    bin_dir = get_project_root() / binary / "bin"
+    exe = binary + ".exe"
+    if (bin_dir / exe).exists():
         return True
-    zip_path = get_project_root() / "_ffmpeg_download.zip"
+    zip_path = get_project_root() / f"_{binary}_download.zip"
     try:
         if progress_cb:
-            progress_cb("Downloading ffmpeg (audio decoder, ~100 MB)...")
-        urllib.request.urlretrieve(FFMPEG_WINDOWS_URL, str(zip_path))
+            progress_cb(f"Downloading {binary}...")
+        urllib.request.urlretrieve(url, str(zip_path))
         bin_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory() as tmp:
             with zipfile.ZipFile(zip_path, "r") as zf:
                 zf.extractall(tmp)
-            exes = list(Path(tmp).rglob("ffmpeg.exe"))
-            if not exes:
-                logger.error("ffmpeg.exe not found in downloaded archive")
+            hits = list(Path(tmp).rglob(exe))
+            if not hits:
+                logger.error("%s not found in downloaded archive", exe)
                 return False
-            for exe in exes[0].parent.glob("*.exe"):
-                shutil.copy2(exe, bin_dir / exe.name)
-        logger.info(f"ffmpeg installed to {bin_dir}")
-        return (bin_dir / "ffmpeg.exe").exists()
+            for f in hits[0].parent.glob("*.exe"):   # ffmpeg ships ffprobe alongside
+                shutil.copy2(f, bin_dir / f.name)
+        logger.info("%s installed to %s", binary, bin_dir)
+        return (bin_dir / exe).exists()
     except Exception as e:
-        logger.error(f"Failed to download ffmpeg: {e}")
+        logger.error("Failed to download %s: %s", binary, e)
         if progress_cb:
-            progress_cb(f"ffmpeg download failed (audio analysis disabled): {e}")
+            progress_cb(f"{binary} download failed: {e}")
         return False
     finally:
         zip_path.unlink(missing_ok=True)
