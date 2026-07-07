@@ -767,6 +767,66 @@ async def normalize_artists_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+_canon_trigger_lock = threading.Lock()
+_canon_trigger_running = False
+
+
+def _canon_trigger_worker():
+    global _canon_trigger_running
+    try:
+        # Re-evaluate the MB data source: the caller (P2P slice import) may have
+        # just inserted the FIRST mb_artist rows into a dump-less node.
+        import mb_backend as mb
+        mb.refresh()
+        if not mb.LOCAL_DUMP:
+            logger.info("Canonicalize trigger: no local MB data — skipped")
+            return
+        # Phantom disambiguation joins through the curated genre vocabulary,
+        # which slices never carry (it comes from the MB web API, not the dump).
+        from db_pool import db_query
+        if not db_query("SELECT 1 FROM mb_genre LIMIT 1"):
+            import mb_dump_load
+            try:
+                mb_dump_load.load_genre_list()
+            except Exception as e:
+                logger.warning(f"Genre vocabulary fetch failed (phantom "
+                               f"disambiguation degraded): {e}")
+        from canon import algo_canon, canonize_phantom_similars
+        from canon.content import (canonicalize_pending, distill_album_residue,
+                                   distill_album_coverage)
+        canon = {}
+        with algo_canon() as _ok:
+            if _ok:
+                canon = canonicalize_pending()
+                canon["album_residue_bound"] = (
+                    distill_album_residue().get("bound", 0)
+                    + distill_album_coverage().get("bound", 0))
+                # Slice-fed phantoms (similar-artist stubs, streaming mints)
+                # are consumed here — their only other chance is the slow
+                # background distill loop.
+                canon["phantom"] = canonize_phantom_similars(dry_run=False)
+        logger.info(f"Triggered canon: {canon}")
+    except Exception:
+        logger.exception("canonicalize trigger worker crashed")
+    finally:
+        with _canon_trigger_lock:
+            _canon_trigger_running = False
+
+
+@app.post("/canonicalize")
+async def canonicalize_endpoint() -> Dict[str, Any]:
+    """Kick deterministic canonicalization in the background — the event hook
+    for P2P MB slice imports (the launcher calls this after landing a slice).
+    Single-flight; returns immediately."""
+    global _canon_trigger_running
+    with _canon_trigger_lock:
+        if _canon_trigger_running:
+            return {"started": False, "running": True}
+        _canon_trigger_running = True
+    threading.Thread(target=_canon_trigger_worker, daemon=True).start()
+    return {"started": True}
+
+
 @app.post("/embeddings/generate")
 async def generate_embeddings_endpoint(
     limit: Optional[int] = None,

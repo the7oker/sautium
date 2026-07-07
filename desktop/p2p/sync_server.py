@@ -23,7 +23,7 @@ import psycopg2
 
 from aiohttp import web
 
-from desktop.p2p import sync_queries
+from desktop.p2p import mb_slice_queries, sync_queries
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +40,14 @@ class SyncServer:
 
     def __init__(self, db_dsn: str, port: int = 19000, node_id: str = "",
                  account_info: Optional[dict] = None,
-                 backend_port: int = 0):
+                 backend_port: int = 0,
+                 mb_dump_version: Optional[str] = None):
         self.db_dsn = db_dsn
         self.port = port
         self.node_id = node_id
         self.account_info = account_info  # {username, public_key_hex, invite_code}
         self._backend_port = backend_port
+        self.mb_dump_version = mb_dump_version  # full-dump version served via /api/mb/slice
         self._chat_service = None  # set via set_chat_service()
         self._on_message_cb: Optional[Callable] = None
         self._delivery_trigger_cb: Optional[Callable] = None
@@ -126,6 +128,7 @@ class SyncServer:
             "status": "ok",
             "node_id": self.node_id,
             "type": "sautium-peer",
+            "mb_dump": self.mb_dump_version,
         })
 
     async def handle_inventory(self, request: web.Request) -> web.Response:
@@ -195,6 +198,43 @@ class SyncServer:
             return self._json_response(request, result)
         except Exception as e:
             logger.error(f"Pull {category} failed: {e}")
+            return self._json_response(
+                request, {"error": "internal error"}, status=500
+            )
+
+    async def handle_mb_slice(self, request: web.Request) -> web.Response:
+        """POST /api/mb/slice — serve raw mb_* rows for a batch of artist names
+        (dump holders only; see mb_slice_queries.get_slice)."""
+        ip = request.remote or "unknown"
+        if not self._check_rate_limit(ip):
+            return self._json_response(
+                request, {"error": "rate limited"}, status=429
+            )
+
+        if not self.mb_dump_version:
+            return self._json_response(
+                request, {"error": "no MB dump on this node"}, status=404
+            )
+
+        try:
+            body = await request.json()
+            names = body.get("names", [])
+        except (json.JSONDecodeError, Exception):
+            return self._json_response(
+                request, {"error": "invalid JSON"}, status=400
+            )
+
+        try:
+            result = await self._run_query(mb_slice_queries.get_slice, names)
+            return self._json_response(request, result)
+        except ValueError as e:
+            return self._json_response(request, {"error": str(e)}, status=400)
+        except mb_slice_queries.DumpBusy:
+            return self._json_response(
+                request, {"error": "dump_reloading"}, status=503
+            )
+        except Exception as e:
+            logger.error(f"MB slice query failed: {e}")
             return self._json_response(
                 request, {"error": "internal error"}, status=500
             )
@@ -667,6 +707,7 @@ class SyncServer:
         self._app.router.add_post(
             "/api/sync/pull/{category}", self.handle_pull
         )
+        self._app.router.add_post("/api/mb/slice", self.handle_mb_slice)
         # Chat endpoints
         self._app.router.add_post(
             "/api/chat/handshake", self.handle_chat_handshake

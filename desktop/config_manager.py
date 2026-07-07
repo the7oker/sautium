@@ -60,6 +60,12 @@ DEFAULT_CONFIG = {
         "chat_enabled": True,
     },
     "sync": {},
+    "mb_slice": {
+        "serve": True,   # answer /api/mb/slice (effective only with a full local dump)
+        "fetch": True,   # request slices from dump peers when we have no dump
+        "batch_size": 20,
+        "auto_interval_min": 360,
+    },
 }
 
 

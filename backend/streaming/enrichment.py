@@ -119,7 +119,6 @@ class PreviewEnricher:
         feats = analyzer.analyze_from_array(audio, sr=48000)   # dict | None
 
         import provenance
-        from sqlalchemy import text
 
         with SessionLocal() as db:
             # Content-address the STREAMED bytes before saving anything they
@@ -139,14 +138,6 @@ class PreviewEnricher:
                 saved = embedder._persist_analysis(
                     db, track_id, model, idxs, vecs, portrait, src_id,
                     origin=provider_id or "", is_lossless=lossless)
-            if saved:
-                # New CLAP vector → the track's album(s) audio-similarity cache is
-                # stale; drop it so /similar recomputes with the richer vector set
-                # (a phantom album becomes similarity-eligible only as it enriches).
-                db.execute(text(
-                    "DELETE FROM similar_albums WHERE source = 'clap_assignment' "
-                    "AND album_id IN (SELECT album_id FROM album_tracks "
-                    "WHERE track_id = :tid)"), {"tid": track_id})
             if feats:
                 self._save_features(db, track_id, feats, src_id, provider_id)
             db.commit()

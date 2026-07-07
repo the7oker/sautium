@@ -22,7 +22,8 @@ import psycopg2
 import psycopg2.extensions
 
 from desktop.api_client import BackendAPIClient
-from desktop.p2p import sync_queries
+from desktop.mb_slice_client import MBSliceClient
+from desktop.p2p import mb_slice_queries, sync_queries
 from desktop.p2p.chat_service import ChatService
 from desktop.p2p.dht_service import DHTService
 from desktop.p2p.lan_discovery import LANDiscovery
@@ -64,6 +65,9 @@ class P2PManager:
         self._auto_sync_task: Optional[asyncio.Task] = None
         self._sync_request_notify: Optional[asyncio.Event] = None
         self._sync_lock: Optional[asyncio.Lock] = None
+        self._mb_slice_task: Optional[asyncio.Task] = None
+        self._mb_slice_lock: Optional[asyncio.Lock] = None
+        self._mb_dump_version: Optional[str] = None
         self._running = False
         self._on_message_cb: Optional[Callable] = None
         # Peer address cache: friend_id -> peers_list
@@ -112,12 +116,27 @@ class P2PManager:
             ensure_certificate()
 
         backend_port = self.config.get("ports", {}).get("web", 0)
+        # MB dump capability: serve slices only with a completed FULL dump
+        # (VERSION marker + mb_artist rows on this DSN) — partial slice
+        # holders must never advertise, they'd hand out incomplete worlds.
+        self._mb_dump_version = None
+        if self.config.get("mb_slice", {}).get("serve", True):
+            try:
+                conn = psycopg2.connect(self.db_dsn)
+                try:
+                    self._mb_dump_version = (
+                        mb_slice_queries.local_dump_available(conn))
+                finally:
+                    conn.close()
+            except Exception as e:
+                logger.debug(f"MB dump capability check failed: {e}")
         self._sync_server = SyncServer(
             db_dsn=self.db_dsn,
             port=http_port,
             node_id=node_id,
             account_info=account_info,
             backend_port=backend_port,
+            mb_dump_version=self._mb_dump_version,
         )
         self._dht_service = DHTService(
             listen_port=dht_port,
@@ -218,6 +237,7 @@ class P2PManager:
         self._chat_notify = asyncio.Event()
         self._sync_request_notify = asyncio.Event()
         self._sync_lock = asyncio.Lock()
+        self._mb_slice_lock = asyncio.Lock()
 
         def _progress(msg):
             logger.info(msg)
@@ -279,6 +299,11 @@ class P2PManager:
                 else:
                     _progress("P2P online: no enriched artists yet")
 
+                # Advertise the MB dump capability so dump-less nodes can
+                # find this node beyond LAN/manual peers
+                if self._mb_dump_version:
+                    await self._dht_service.announce_capability("mbdump")
+
                 # Start periodic re-announce
                 self._reannounce_task = asyncio.create_task(
                     self._dht_service.periodic_reannounce()
@@ -317,6 +342,9 @@ class P2PManager:
             )
             self._auto_sync_task = asyncio.create_task(
                 self._auto_sync_loop()
+            )
+            self._mb_slice_task = asyncio.create_task(
+                self._mb_slice_loop()
             )
 
             self._running = True
@@ -418,7 +446,7 @@ class P2PManager:
                      self._resolve_friends_task, self._db_listen_task,
                      self._pending_accepts_task, self._lan_discovery_task,
                      self._sync_request_listen_task, self._sync_request_task,
-                     self._auto_sync_task):
+                     self._auto_sync_task, self._mb_slice_task):
             if task:
                 task.cancel()
                 try:
@@ -1847,6 +1875,195 @@ class P2PManager:
                 f"P2P sync complete (trigger={trigger}): "
                 f"{items} items, stats={stats}"
             )
+
+        # A sync may have imported new artists/phantoms whose canon is now
+        # blocked on missing MB facts — fetch their slices right away instead
+        # of waiting for the periodic loop (fire-and-forget; merges with a
+        # concurrent run via _mb_slice_lock).
+        asyncio.create_task(self._request_mb_slices_safe())
+
+    async def _request_mb_slices_safe(self):
+        try:
+            await self._request_mb_slices()
+        except Exception:
+            logger.exception("post-sync MB slice fetch failed")
+
+    # -------------------------------------------------------------------
+    # MB dump slices (P2P canonicalization for dump-less nodes)
+    # -------------------------------------------------------------------
+
+    # Fallback default when user_settings has no mb_slice.auto_interval_min
+    # row and the config block is absent.
+    _MB_SLICE_INTERVAL_DEFAULT_MIN = 360
+
+    async def _mb_slice_loop(self):
+        """Periodic MB slice fetch for dump-less nodes. The post-sync trigger
+        covers the common case (new content arrives via sync/scan); this loop
+        is the fallback cadence and the retry path after peer failures."""
+        try:
+            await asyncio.sleep(120)
+        except asyncio.CancelledError:
+            return
+
+        while self._running:
+            interval_min = self._read_mb_slice_interval()
+            if interval_min and interval_min > 0:
+                try:
+                    await self._request_mb_slices()
+                except Exception:
+                    logger.exception("MB slice cycle failed")
+                sleep_for = interval_min * 60
+            else:
+                sleep_for = 300  # disabled — re-check the setting later
+            try:
+                await asyncio.sleep(sleep_for)
+            except asyncio.CancelledError:
+                break
+
+    def _read_mb_slice_interval(self) -> Optional[int]:
+        """mb_slice.auto_interval_min from user_settings (None = disabled),
+        falling back to the config block on a fresh install."""
+        default = self.config.get("mb_slice", {}).get(
+            "auto_interval_min", self._MB_SLICE_INTERVAL_DEFAULT_MIN)
+        try:
+            conn = psycopg2.connect(self.db_dsn)
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT value FROM user_settings WHERE key = %s",
+                        ("mb_slice.auto_interval_min",),
+                    )
+                    row = cur.fetchone()
+                    if row is None:
+                        return default
+                    if row[0] is None:
+                        return None  # explicitly disabled
+                    return int(row[0]) if row[0] else None
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug(f"Failed to read mb_slice.auto_interval_min: {e}")
+        return default
+
+    def request_mb_slices(self) -> bool:
+        """Manual trigger from the launcher/UI thread (thread-safe)."""
+        if not self._running or not self._loop:
+            return False
+        asyncio.run_coroutine_threadsafe(
+            self._request_mb_slices(), self._loop)
+        return True
+
+    def _pending_slice_names_sync(self) -> list[str]:
+        conn = psycopg2.connect(self.db_dsn)
+        try:
+            return mb_slice_queries.pending_slice_names(conn, limit=200)
+        finally:
+            conn.close()
+
+    def _local_backend_api(self) -> Optional[BackendAPIClient]:
+        port = self.config.get("ports", {}).get("web", 0)
+        if not port:
+            return None
+        return BackendAPIClient(f"https://127.0.0.1:{port}")
+
+    async def _find_dump_peers(self) -> list[tuple[BackendAPIClient, str]]:
+        """Reachable peers advertising the MB dump: manual peers and LAN
+        first (cheap, likely friends), then a DHT capability lookup."""
+        loop = asyncio.get_event_loop()
+        found: list[tuple[BackendAPIClient, str]] = []
+        seen_addrs: set[str] = set()
+
+        candidates: list[str] = list(
+            self.config.get("p2p", {}).get("manual_peers", []))
+        if self._lan_discovery:
+            for ip, port in self._lan_discovery.peers:
+                info = self._lan_discovery.get_peer_info(ip, port) or {}
+                scheme = info.get("scheme", "https")
+                candidates.append(f"{scheme}://{ip}:{port}")
+        if self._dht_service:
+            for ip, port in await self._dht_service.lookup_capability("mbdump"):
+                candidates.append(f"{ip}:{port}")
+
+        for addr in candidates:
+            if addr in seen_addrs:
+                continue
+            seen_addrs.add(addr)
+            api = await self._try_connect_peer(addr)
+            if not api:
+                continue
+            health = await loop.run_in_executor(None, api.get_health)
+            if health and health.get("mb_dump"):
+                found.append((api, health.get("node_id", "")))
+        return found
+
+    async def _request_mb_slices(self) -> dict:
+        """Fetch MB slices for every canon-pending artist name and hand the
+        imported facts to the backend canon. Serialised via _mb_slice_lock so
+        the periodic loop, post-sync trigger and manual runs merge."""
+        cfg = self.config.get("mb_slice", {})
+        if not cfg.get("fetch", True):
+            return {}
+        if mb_slice_queries.dump_version_file():
+            return {}  # full local dump — nothing to fetch over P2P
+        if self._mb_slice_lock.locked():
+            return {}
+
+        async with self._mb_slice_lock:
+            loop = asyncio.get_event_loop()
+            names = await loop.run_in_executor(
+                None, self._pending_slice_names_sync)
+            if not names:
+                return {}
+
+            peers = await self._find_dump_peers()
+            if not peers:
+                logger.info("MB slice: no dump-holding peers reachable")
+                return {}
+
+            batch_size = max(1, min(int(cfg.get("batch_size", 20)),
+                                    mb_slice_queries.MAX_NAMES_PER_REQUEST))
+            batches = [names[i:i + batch_size]
+                       for i in range(0, len(names), batch_size)]
+            logger.info(f"MB slice: {len(names)} pending names, "
+                        f"{len(batches)} batches, {len(peers)} dump peers")
+
+            backend_api = self._local_backend_api()
+            peer_iter = iter(peers)
+            api, node = next(peer_iter)
+            client = MBSliceClient(api, db_dsn=self.db_dsn, source_node=node,
+                                   backend_api=backend_api)
+            total = {"names": 0, "matched": 0, "rows_inserted": 0}
+            imported_any = False
+            i = 0
+            while i < len(batches):
+                stats = await loop.run_in_executor(None, client.run, batches[i])
+                if "error" in stats:
+                    # Provenance is written per successful batch, so retrying
+                    # this batch against the next peer is idempotent.
+                    nxt = next(peer_iter, None)
+                    if nxt is None:
+                        logger.warning("MB slice: all dump peers failed — "
+                                       "remaining names retry next cycle")
+                        break
+                    client.close()
+                    api, node = nxt
+                    client = MBSliceClient(api, db_dsn=self.db_dsn,
+                                           source_node=node,
+                                           backend_api=backend_api)
+                    continue
+                imported_any = True
+                for k in total:
+                    total[k] += stats.get(k, 0)
+                i += 1
+
+            if imported_any:
+                # ANALYZE + backend POST /canonicalize — once per run
+                await loop.run_in_executor(None, client.finalize)
+                logger.info(f"MB slice run done: {total}")
+            else:
+                client.close()
+            return total
 
     def _write_sync_status(self, started: datetime, items: int) -> None:
         """Persist sync.last_at + items_received, fire sautium_sync_done."""

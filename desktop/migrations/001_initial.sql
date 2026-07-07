@@ -1209,10 +1209,6 @@ DO $$ BEGIN CREATE TRIGGER trg_similar_artists_updated_at BEFORE UPDATE ON simil
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-DO $$ BEGIN CREATE TRIGGER trg_similar_albums_updated_at BEFORE UPDATE ON similar_albums
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
 DO $$ BEGIN CREATE TRIGGER trg_genre_descriptions_updated_at BEFORE UPDATE ON genre_descriptions
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -1792,6 +1788,28 @@ CREATE INDEX IF NOT EXISTS idx_mb_artist_tag_artist     ON mb_artist_tag(artist)
 CREATE INDEX IF NOT EXISTS idx_mb_tag_id                ON mb_tag(id);
 CREATE INDEX IF NOT EXISTS idx_mb_rg_tag_rg             ON mb_release_group_tag(release_group);
 CREATE INDEX IF NOT EXISTS idx_mb_genre_name_lower      ON mb_genre(lower(name));
+
+-- P2P MB slices land via INSERT ... ON CONFLICT DO NOTHING, which needs a
+-- conflict target on every shipped table — these four have no PK in the dump
+-- schema. (idx_mb_tag_id above is redundant with uq_mb_tag_id but kept: live
+-- DBs already have it and 001 must stay idempotent against them.)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_mb_track_id           ON mb_track(id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_mb_tag_id             ON mb_tag(id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_mb_artist_tag         ON mb_artist_tag(artist, tag);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_mb_release_group_tag  ON mb_release_group_tag(release_group, tag);
+
+-- Provenance of P2P-fetched MB slices (dump-less nodes). One row per queried
+-- artist name, including zero-match (matched_ids = 0): the slice is a closed
+-- world per name, so "no such artist" is an answer, not a retry. A later full
+-- dump load supersedes slice rows (TRUNCATE+COPY) but this log stays — it only
+-- gates re-asking peers, which the VERSION marker disables anyway.
+CREATE TABLE IF NOT EXISTS mb_slice_fetches (
+    name_key     TEXT PRIMARY KEY,           -- lower(trim(name))
+    source_node  TEXT,
+    dump_version TEXT,
+    matched_ids  INTEGER NOT NULL DEFAULT 0,
+    fetched_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- ============================================================
 -- Streaming-minted phantoms

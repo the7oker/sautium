@@ -30,6 +30,7 @@ except ImportError:
 # Prefix for artist infohash computation
 INFOHASH_PREFIX = "Sautium-artist:"
 INFOHASH_PREFIX_USER = "Sautium-user:"
+INFOHASH_PREFIX_CAP = "Sautium-cap:"
 
 # DHT re-announce interval (seconds)
 REANNOUNCE_INTERVAL = 15 * 60  # 15 minutes
@@ -65,6 +66,15 @@ def user_infohash(invite_code: str) -> bytes:
     ).digest()
 
 
+def capability_infohash(capability: str) -> bytes:
+    """Compute SHA1 infohash for a node capability (e.g. 'mbdump' — the node
+    serves MB dump slices). One well-known infohash per capability lets
+    dump-less nodes discover volunteer dump holders beyond known peers."""
+    return hashlib.sha1(
+        f"{INFOHASH_PREFIX_CAP}{capability}".encode()
+    ).digest()
+
+
 class DHTService:
     """libtorrent-based DHT service for per-artist peer discovery."""
 
@@ -80,6 +90,7 @@ class DHTService:
         self._session: Optional[object] = None  # lt.session
         self._announced: set[str] = set()  # artist UUIDs currently announced
         self._user_invite_code: Optional[str] = None  # user's invite code
+        self._capabilities: set[str] = set()  # announced node capabilities
         self._peer_cache: dict[str, list[tuple[str, int, float]]] = {}
         self._running = False
         self._alert_task: Optional[asyncio.Task] = None
@@ -215,6 +226,51 @@ class DHTService:
         ]
         return peers
 
+    async def announce_capability(self, capability: str):
+        """Announce a node capability (e.g. 'mbdump') on its well-known infohash."""
+        if not self._session:
+            return
+        self._capabilities.add(capability)
+        sha1 = lt.sha1_hash(capability_infohash(capability))
+        self._session.dht_announce(sha1, self._announce_port, 0)
+        logger.info(f"DHT: capability announced ({capability})")
+
+    async def lookup_capability(self, capability: str) -> list[tuple[str, int]]:
+        """Find nodes announcing a capability. Returns list of (ip, port)."""
+        cache_key = f"cap:{capability}"
+        cached = self._get_cached_peers(cache_key)
+        if cached is not None:
+            return cached
+
+        if not self._session:
+            return []
+
+        sha1 = lt.sha1_hash(capability_infohash(capability))
+        ih_hex = sha1.to_string().hex()
+
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        self._pending_lookups.setdefault(ih_hex, []).append(future)
+        self._session.dht_get_peers(sha1)
+
+        try:
+            peers = await asyncio.wait_for(future, timeout=GET_PEERS_TIMEOUT)
+        except asyncio.TimeoutError:
+            if ih_hex in self._pending_lookups:
+                futures = self._pending_lookups[ih_hex]
+                if future in futures:
+                    futures.remove(future)
+                if not futures:
+                    del self._pending_lookups[ih_hex]
+            logger.debug(f"DHT lookup timeout for capability {capability}")
+            return []
+
+        now = time.time()
+        self._peer_cache[cache_key] = [
+            (ip, port, now) for ip, port in peers
+        ]
+        return peers
+
     async def announce_artists(self, artist_uuids: list[str]):
         """Announce all enriched artists in DHT."""
         if not self._session:
@@ -333,6 +389,11 @@ class DHTService:
             if self._user_invite_code:
                 ih = user_infohash(self._user_invite_code)
                 sha1 = lt.sha1_hash(ih)
+                self._session.dht_announce(sha1, self._announce_port, 0)
+
+            # Re-announce capabilities
+            for cap in list(self._capabilities):
+                sha1 = lt.sha1_hash(capability_infohash(cap))
                 self._session.dht_announce(sha1, self._announce_port, 0)
 
             # Re-announce artists

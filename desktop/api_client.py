@@ -12,6 +12,7 @@ that the backend whitelists (e.g. ``/api/sync/*``) tolerate
 unsigned requests — see backend/auth_hmac.py.
 """
 
+import gzip
 import hashlib
 import hmac
 import json
@@ -72,6 +73,16 @@ def _sign_headers(method: str, path_and_query: str, body: bytes) -> dict:
     return {"X-Sautium-Ts": ts, "X-Sautium-Sig": sig}
 
 
+def _read_json_body(resp) -> dict:
+    """Read a (possibly gzip-encoded) JSON response body. Both servers we
+    talk to compress large payloads when the client advertises gzip: the
+    backend via GZipMiddleware, the P2P sync server in _json_response."""
+    data = resp.read()
+    if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
+        data = gzip.decompress(data)
+    return json.loads(data.decode("utf-8"))
+
+
 def _get_ssl_context() -> ssl.SSLContext:
     """Get or create SSL context that accepts self-signed certificates."""
     global _p2p_ssl_ctx
@@ -102,12 +113,13 @@ class BackendAPIClient:
         url = f"{self.base_url}{path}"
         try:
             req = urllib.request.Request(url, method="GET")
+            req.add_header("Accept-Encoding", "gzip")
             for k, v in _sign_headers("GET", path, b"").items():
                 req.add_header(k, v)
             resp = urllib.request.urlopen(
                 req, timeout=timeout, context=self._ssl_ctx
             )
-            return json.loads(resp.read().decode("utf-8"))
+            return _read_json_body(resp)
         except Exception as e:
             logger.debug(f"API request failed: {url} — {e}")
             return None
@@ -125,15 +137,16 @@ class BackendAPIClient:
             else:
                 data = b""
                 req = urllib.request.Request(url, method="POST", data=data)
+            req.add_header("Accept-Encoding", "gzip")
             for k, v in _sign_headers("POST", path, data).items():
                 req.add_header(k, v)
             resp = urllib.request.urlopen(
                 req, timeout=timeout, context=self._ssl_ctx
             )
-            return json.loads(resp.read().decode("utf-8"))
+            return _read_json_body(resp)
         except urllib.error.HTTPError as e:
             try:
-                body_resp = json.loads(e.read().decode("utf-8"))
+                body_resp = _read_json_body(e)
                 logger.warning(f"API POST {url} returned {e.code}: {body_resp}")
                 return body_resp
             except Exception:
@@ -190,6 +203,10 @@ class BackendAPIClient:
         """Run artist normalization (deterministic Pass 1 — feat./vs. splits only)."""
         return self._post_json("/normalize-artists", timeout=120)
 
+    def canonicalize(self) -> Optional[dict]:
+        """Trigger backend canonicalization in the background (returns immediately)."""
+        return self._post_json("/canonicalize", timeout=10)
+
     # -- Sync API ----------------------------------------------------------
 
     def sync_inventory(self, track_uuids: list[str]) -> Optional[dict]:
@@ -206,4 +223,13 @@ class BackendAPIClient:
             f"/api/sync/pull/{category}",
             body={"uuids": uuids},
             timeout=300,
+        )
+
+    def mb_slice(self, names: list[str]) -> Optional[dict]:
+        """Fetch raw mb_* rows for artist names from a dump-holding peer.
+        Long timeout: a batch of prolific namesakes is a large payload."""
+        return self._post_json(
+            "/api/mb/slice",
+            body={"names": names},
+            timeout=600,
         )
