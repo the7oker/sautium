@@ -74,6 +74,19 @@ def run_parallel_enrichment(
     if cancel_flag is None:
         cancel_flag = lambda: False
 
+    # Preflight: audio embeddings + analysis decode via the `ffmpeg` binary
+    # (audio_analysis.load_full_track_48k). Missing ffmpeg fails every track
+    # silently ("0 / N"); surface it once and skip the audio pipeline instead
+    # of logging N identical per-file errors. Metadata enrichment still runs.
+    import shutil
+    if (not skip_embeddings or not skip_audio_analysis) and not shutil.which("ffmpeg"):
+        logger.error(
+            "ffmpeg not found on PATH — audio embeddings and analysis disabled "
+            "for this run. Install ffmpeg (macOS: brew install ffmpeg) and re-run."
+        )
+        skip_embeddings = True
+        skip_audio_analysis = True
+
     _skip_lastfm = skip_lastfm or not settings.lastfm_api_key
 
     result_parts = {}

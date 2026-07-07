@@ -398,6 +398,124 @@ def _link_pgvector_to_pg(brew: str) -> None:
             break
 
 
+# ================================================================
+# ffmpeg (audio decode dependency)
+# ================================================================
+# audio_analysis.load_full_track_48k shells out to the `ffmpeg` binary —
+# the shared 48kHz decode path for BOTH audio embeddings and audio
+# analysis. A fresh node without it fails every track on decode
+# ([Errno 2] ... 'ffmpeg') and silently produces 0 embeddings.
+
+FFMPEG_WINDOWS_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+
+# Where a brew-installed ffmpeg lives on macOS. A GUI-launched .app has a
+# minimal PATH omitting these, so child processes (the backend) must add
+# them explicitly — see service_manager.start_backend and ffmpeg_search_dirs.
+_MACOS_FFMPEG_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"]
+
+
+def ffmpeg_search_dirs() -> list:
+    """Dirs to prepend to a child-process PATH so `ffmpeg` resolves,
+    independent of how the launcher itself was started."""
+    if IS_MACOS:
+        return [d for d in _MACOS_FFMPEG_DIRS if os.path.isdir(d)]
+    if IS_WINDOWS:
+        from desktop.utils import get_project_root
+        d = get_project_root() / "ffmpeg" / "bin"
+        return [str(d)] if d.exists() else []
+    return []
+
+
+def _which_ffmpeg() -> Optional[str]:
+    """ffmpeg on PATH, or in the platform's known install dirs."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    exe = "ffmpeg.exe" if IS_WINDOWS else "ffmpeg"
+    for d in ffmpeg_search_dirs():
+        cand = Path(d) / exe
+        if cand.exists():
+            return str(cand)
+    return None
+
+
+def ensure_ffmpeg(progress_cb: Optional[Callable] = None) -> bool:
+    """Ensure the ffmpeg binary is available. Idempotent — a no-op when it
+    already resolves. Non-fatal: callers treat False as "audio analysis
+    unavailable until installed", never as a hard setup error."""
+    if _which_ffmpeg():
+        return True
+    if IS_MACOS:
+        return _install_ffmpeg_macos(progress_cb)
+    if IS_WINDOWS:
+        return _install_ffmpeg_windows(progress_cb)
+    logger.warning("ffmpeg not found on PATH — install it via your package manager")
+    return False
+
+
+def _install_ffmpeg_macos(progress_cb: Optional[Callable] = None) -> bool:
+    brew = _find_brew()
+    if not brew:
+        logger.error("Homebrew not found — cannot auto-install ffmpeg")
+        if progress_cb:
+            progress_cb("Homebrew not found — install it from https://brew.sh, then reopen Sautium")
+        return False
+    if progress_cb:
+        progress_cb("Installing ffmpeg (audio decoder)...")
+    logger.info("Installing ffmpeg via Homebrew...")
+    env = os.environ.copy()
+    env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
+    try:
+        result = subprocess.run(
+            [brew, "install", "ffmpeg"],
+            capture_output=True, text=True, timeout=1800, env=env,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error("brew install ffmpeg timed out")
+        if progress_cb:
+            progress_cb("ffmpeg install timed out (audio analysis disabled)")
+        return False
+    if result.returncode != 0:
+        logger.error(f"brew install ffmpeg failed: {result.stderr[-500:]}")
+        if progress_cb:
+            progress_cb("ffmpeg install failed (audio analysis disabled)")
+        return False
+    logger.info("ffmpeg installed via Homebrew")
+    return True
+
+
+def _install_ffmpeg_windows(progress_cb: Optional[Callable] = None) -> bool:
+    import tempfile
+    from desktop.utils import get_project_root
+    bin_dir = get_project_root() / "ffmpeg" / "bin"
+    if (bin_dir / "ffmpeg.exe").exists():
+        return True
+    zip_path = get_project_root() / "_ffmpeg_download.zip"
+    try:
+        if progress_cb:
+            progress_cb("Downloading ffmpeg (audio decoder, ~100 MB)...")
+        urllib.request.urlretrieve(FFMPEG_WINDOWS_URL, str(zip_path))
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(tmp)
+            exes = list(Path(tmp).rglob("ffmpeg.exe"))
+            if not exes:
+                logger.error("ffmpeg.exe not found in downloaded archive")
+                return False
+            for exe in exes[0].parent.glob("*.exe"):
+                shutil.copy2(exe, bin_dir / exe.name)
+        logger.info(f"ffmpeg installed to {bin_dir}")
+        return (bin_dir / "ffmpeg.exe").exists()
+    except Exception as e:
+        logger.error(f"Failed to download ffmpeg: {e}")
+        if progress_cb:
+            progress_cb(f"ffmpeg download failed (audio analysis disabled): {e}")
+        return False
+    finally:
+        zip_path.unlink(missing_ok=True)
+
+
 def get_pg_data_dir() -> Path:
     """Get the PostgreSQL data directory."""
     from desktop.config_manager import get_data_dir
@@ -543,6 +661,20 @@ logging_collector = off
     conf_path.write_text(existing + additions)
 
 
+def _log_server_log_tail(data_dir: Path, lines: int = 15) -> None:
+    """Surface why a start failed. The real cause (a port bind conflict, a bad
+    config line) is written to server.log, not to the connection timeout —
+    without this the launcher only ever says 'did not become ready', hiding
+    e.g. 'could not bind ... Address already in use'."""
+    try:
+        content = (data_dir / "server.log").read_text(errors="replace").splitlines()
+    except OSError:
+        return
+    tail = [ln for ln in content[-lines:] if ln.strip()]
+    if tail:
+        logger.error("PostgreSQL server.log (tail):\n%s", "\n".join(tail))
+
+
 def start_postgres(port: int = 5432) -> bool:
     """Start PostgreSQL server using pg_ctl."""
     pg_bin = get_pg_bin_dir()
@@ -610,6 +742,7 @@ def start_postgres(port: int = 5432) -> bool:
             time.sleep(1)
 
     logger.error("PostgreSQL did not become ready in time")
+    _log_server_log_tail(data_dir)
     return False
 
 

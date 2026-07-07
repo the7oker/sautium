@@ -302,6 +302,13 @@ class ServiceManager:
 
         env = os.environ.copy()
         env["PYTHONPATH"] = str(self._backend_dir)
+        # Ensure ffmpeg resolves for the backend even when the launcher was
+        # started as a GUI .app (minimal PATH without Homebrew/bundled bins).
+        # audio_analysis.load_full_track_48k shells out to `ffmpeg`.
+        from desktop.db_init import ffmpeg_search_dirs
+        ff_dirs = ffmpeg_search_dirs()
+        if ff_dirs:
+            env["PATH"] = os.pathsep.join(ff_dirs + [env.get("PATH", "")])
         # Load .env vars into environment
         self._load_env_file(env_path, env)
         # CUDA caching-allocator: expandable segments curb the VRAM

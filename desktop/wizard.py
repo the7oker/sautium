@@ -1352,6 +1352,16 @@ class SetupWizard(ctk.CTkToplevel):
                 # Install crypto dependencies if missing
                 self._ensure_crypto_deps(progress)
 
+                # Ensure ffmpeg — the audio decode dependency for embeddings
+                # and audio analysis. Non-fatal: setup continues without it,
+                # only audio analysis stays unavailable until it is present.
+                from desktop.db_init import ensure_ffmpeg
+                if not ensure_ffmpeg(progress):
+                    logger.warning(
+                        "ffmpeg not installed — audio embeddings and analysis "
+                        "will be unavailable until it is present"
+                    )
+
                 # Create account identity (or random if skipped)
                 if account_data:
                     progress("Creating account identity...")
@@ -1396,6 +1406,15 @@ class SetupWizard(ctk.CTkToplevel):
                 self.after(0, self._init_complete)
             except Exception as e:
                 logger.error(f"Initialization failed: {e}")
+                # A partial init may have started PostgreSQL. Stop it so it
+                # doesn't outlive the failed wizard and hold the port — a later
+                # retry (or a data-dir wipe) would otherwise collide with it
+                # ("could not bind ... Address already in use").
+                try:
+                    from desktop.db_init import stop_postgres
+                    stop_postgres()
+                except Exception as se:
+                    logger.warning(f"Cleanup stop_postgres failed: {se}")
                 self.after(
                     0,
                     lambda: self._progress_label.configure(
