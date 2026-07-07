@@ -20,6 +20,7 @@ Tiers:
 import contextlib
 import logging
 import functools
+import os
 from typing import Optional
 
 import torch
@@ -91,3 +92,30 @@ def empty_cache(device: Optional[str] = None) -> None:
         torch.cuda.empty_cache()
     elif dev == "mps":
         torch.mps.empty_cache()
+
+
+def memory_budget_gb() -> float:
+    """Accelerator memory budget in GB. CUDA reports dedicated VRAM; MPS and
+    CPU report system RAM (MPS unified memory is shared with the OS)."""
+    if torch.cuda.is_available():
+        return torch.cuda.get_device_properties(0).total_memory / 1e9
+    import psutil
+    return psutil.virtual_memory().total / 1e9
+
+
+@functools.lru_cache(maxsize=1)
+def is_low_memory() -> bool:
+    """Whether the audio pipeline must shrink its batches to avoid swapping.
+
+    MPS unified memory is shared with the OS and the whole-track audio buffers,
+    so a 16 GB Mac is far tighter than a 16 GB *dedicated* card — hence a higher
+    threshold on MPS/CPU than on CUDA. A 24 GB Mac keeps the throughput-tuned
+    defaults (measured fine); the 16 GB laptop 4090 (dedicated VRAM) also keeps
+    them (see reference_vram_allocator_arena_thrash). Force with
+    SAUTIUM_LOW_MEMORY=1 to test the profile on a larger machine."""
+    override = os.environ.get("SAUTIUM_LOW_MEMORY")
+    if override is not None:
+        return override.strip().lower() in ("1", "true", "yes", "on")
+    if torch.cuda.is_available():
+        return memory_budget_gb() < 12.0   # only genuine low-VRAM cards
+    return memory_budget_gb() < 18.0        # MPS/CPU: 16 GB machines

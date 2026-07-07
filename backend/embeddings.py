@@ -77,6 +77,9 @@ class AudioEmbeddingGenerator:
     ):
         self.model_name = model_name or settings.embedding_model
         self.batch_size = batch_size or settings.embedding_batch_size
+        from device import is_low_memory
+        if is_low_memory():
+            self.batch_size = min(self.batch_size, 8)
         self.sample_rate = 48000  # CLAP expects 48kHz
 
         from device import get_device
@@ -404,7 +407,8 @@ class AudioEmbeddingGenerator:
             # Split into batch slices — bounded by BOTH row count and total
             # audio duration: whole tracks are held decoded in RAM per batch,
             # and a batch of Schulze-length pieces would be gigabytes.
-            batch_budget_seconds = 40 * 60
+            from device import is_low_memory
+            batch_budget_seconds = (10 if is_low_memory() else 40) * 60
             batch_slices, cur, cur_seconds = [], [], 0.0
             for row in rows:
                 dur = float(row.duration_seconds) if row.duration_seconds else 300.0
