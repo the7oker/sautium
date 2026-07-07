@@ -121,14 +121,15 @@ def available_accel_memory_gb() -> float:
 
 
 # Cost model for the audio pipeline: peak ≈ FIXED + COST_PER_MIN × batch_minutes.
-# MPS calibrated on an M-series node (12 GB @ 10 min, 21 GB @ 40 min → fixed 9,
-# cost 0.30 — unified memory holds the whole-track audio buffers too, so the
-# per-minute cost is high). CUDA sizes to free VRAM (audio buffers live in
-# system RAM there, so the VRAM per-minute cost is low); its budget is capped
-# at the tuned 40-min default so the master node is unchanged and only low-VRAM
-# cards shrink. CUDA/CPU coefficients are provisional pending calibration.
+# MPS calibrated on an M-series node: a full 759-track run at a 10-min budget
+# peaked 13 GB, and the default 40-min budget peaks ~21 GB → fixed 10, cost 0.30
+# (unified memory holds the whole-track audio buffers too, so the per-minute
+# cost is high). CUDA sizes to free VRAM (audio buffers live in system RAM
+# there, so the VRAM per-minute cost is low); its budget is capped at the tuned
+# 40-min default so the master node is unchanged and only low-VRAM cards shrink.
+# CUDA/CPU coefficients are provisional pending calibration.
 _BUDGET_PARAMS = {
-    "mps":  dict(fixed=9.0, cost_per_min=0.30, min_min=5, max_min=60),
+    "mps":  dict(fixed=10.0, cost_per_min=0.30, min_min=5, max_min=60),
     "cuda": dict(fixed=4.0, cost_per_min=0.12, min_min=5, max_min=40),
     "cpu":  dict(fixed=6.0, cost_per_min=0.30, min_min=5, max_min=40),
 }
