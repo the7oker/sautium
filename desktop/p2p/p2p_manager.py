@@ -1967,10 +1967,33 @@ class P2PManager:
             return None
         return BackendAPIClient(f"https://127.0.0.1:{port}")
 
+    def _load_p2p_bans(self) -> tuple[set, set]:
+        """Local ban list: (pubkeys, addr_sha256s). The pubkey ban is the
+        anchor (proven by slice receipts); the address hash catches a banned
+        key returning under a fresh identity from the same place."""
+        try:
+            conn = psycopg2.connect(self.db_dsn)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT pubkey, addr_sha256 FROM p2p_node_bans")
+                    rows = cur.fetchall()
+                return ({r[0] for r in rows if r[0]},
+                        {r[1] for r in rows if r[1]})
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug(f"Failed to load p2p bans: {e}")
+            return set(), set()
+
     async def _find_dump_peers(self) -> list[tuple[BackendAPIClient, str]]:
         """Reachable peers advertising the MB dump: manual peers and LAN
-        first (cheap, likely friends), then a DHT capability lookup."""
+        first (cheap, likely friends), then a DHT capability lookup.
+        Locally-banned nodes are skipped before connecting (by address) and
+        after health (by pubkey)."""
         loop = asyncio.get_event_loop()
+        banned_keys, banned_addrs = await loop.run_in_executor(
+            None, self._load_p2p_bans)
         found: list[tuple[BackendAPIClient, str]] = []
         seen_addrs: set[str] = set()
 
@@ -1989,12 +2012,21 @@ class P2PManager:
             if addr in seen_addrs:
                 continue
             seen_addrs.add(addr)
+            if mb_slice_queries.addr_hash(addr) in banned_addrs:
+                logger.info(f"MB slice: skipping banned address {addr}")
+                continue
             api = await self._try_connect_peer(addr)
             if not api:
                 continue
             health = await loop.run_in_executor(None, api.get_health)
-            if health and health.get("mb_dump"):
-                found.append((api, health.get("node_id", "")))
+            if not health or not health.get("mb_dump"):
+                continue
+            node_id = health.get("node_id", "")
+            if node_id and node_id in banned_keys:
+                logger.info(f"MB slice: skipping banned node "
+                            f"{node_id[:16]}… at {addr}")
+                continue
+            found.append((api, node_id))
         return found
 
     async def _request_mb_slices(self) -> dict:

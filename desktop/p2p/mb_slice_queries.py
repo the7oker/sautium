@@ -19,6 +19,7 @@ import logging
 import os
 import re
 from datetime import date, datetime
+from urllib.parse import urlsplit
 from uuid import UUID
 
 logger = logging.getLogger(__name__)
@@ -154,6 +155,17 @@ def payload_hash(resp: dict) -> bytes:
 def receipt_message(resp: dict) -> bytes:
     """The exact bytes the serving node signs / the requester verifies."""
     return RECEIPT_CONTEXT + payload_hash(resp)
+
+
+def addr_hash(url_or_addr: str) -> str:
+    """sha256 hex of the peer HOST (scheme/port stripped). Pseudonymized
+    address for ban correlation: the ban anchor is the pubkey (proven by
+    receipts), the address hash catches a banned key returning under a fresh
+    identity from the same place. Reversible by IPv4 enumeration — that is
+    accepted; it is uniform storage, not privacy."""
+    s = url_or_addr if "://" in url_or_addr else "//" + url_or_addr
+    host = (urlsplit(s).hostname or "").lower()
+    return hashlib.sha256(host.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------

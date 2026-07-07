@@ -22,7 +22,8 @@ import psycopg2.extras
 from desktop.api_client import BackendAPIClient
 from desktop.node_identity import verify_signature
 from desktop.p2p.mb_slice_queries import (MB_LOAD_LOCK_KEY, SLICE_TABLES,
-                                          payload_hash, receipt_message)
+                                          addr_hash, payload_hash,
+                                          receipt_message)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ class MBSliceClient:
         self.peer_api = peer_api
         self.db_dsn = db_dsn
         self.source_node = source_node
+        self.source_addr_sha256 = addr_hash(getattr(peer_api, "base_url", ""))
         self.backend_api = backend_api
         self.progress_cb = progress_cb
         self._conn: Optional[psycopg2.extensions.connection] = None
@@ -139,8 +141,9 @@ class MBSliceClient:
                     cur.execute("""
                         INSERT INTO mb_slice_fetches
                             (name_key, source_node, dump_version, matched_ids,
-                             source_pubkey, receipt, payload_sha256)
-                        VALUES (lower(btrim(%s)), %s, %s, %s, %s, %s, %s)
+                             source_pubkey, receipt, payload_sha256,
+                             source_addr_sha256)
+                        VALUES (lower(btrim(%s)), %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (name_key) DO UPDATE SET
                             source_node = EXCLUDED.source_node,
                             dump_version = EXCLUDED.dump_version,
@@ -148,11 +151,13 @@ class MBSliceClient:
                             source_pubkey = EXCLUDED.source_pubkey,
                             receipt = EXCLUDED.receipt,
                             payload_sha256 = EXCLUDED.payload_sha256,
+                            source_addr_sha256 = EXCLUDED.source_addr_sha256,
                             fetched_at = now()
                     """, (name, self.source_node or pubkey,
                           resp.get("dump_version"),
                           len(matched.get(name, [])),
-                          pubkey, receipt, sha_hex))
+                          pubkey, receipt, sha_hex,
+                          self.source_addr_sha256))
             conn.commit()
         except Exception:
             conn.rollback()
