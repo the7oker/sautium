@@ -444,6 +444,11 @@ async def health_check() -> Dict[str, Any]:
             "enabled": settings.p2p_enabled,
         }
 
+    # MB dump capability — dump-less peers pick slice sources by this field
+    # (same contract as the launcher sync server's /health)
+    from routers.sync import mb_dump_version
+    health_status["mb_dump"] = mb_dump_version()
+
     return health_status
 
 
@@ -1167,8 +1172,9 @@ app.include_router(chat_router)
 from routers.eq import router as eq_router
 app.include_router(eq_router)
 
-from routers.sync import router as sync_router
+from routers.sync import router as sync_router, mb_router as mb_sync_router
 app.include_router(sync_router)
+app.include_router(mb_sync_router)
 
 from routers.p2p import router as p2p_router
 app.include_router(p2p_router)

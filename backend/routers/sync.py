@@ -7,6 +7,7 @@ enrichment data between Sautium nodes.
 Protocol:
   1. POST /api/sync/inventory  — what enrichment data is available for given tracks?
   2. POST /api/sync/pull/{category} — retrieve enrichment data by UUIDs (batched)
+  3. POST /api/mb/slice — raw mb_* rows for artist names (dump holders only)
 """
 
 import json
@@ -18,11 +19,55 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from config import settings
-from db_pool import db_query as _db_query, db_query_one as _db_query_one
+from db_pool import db_query as _db_query, db_query_one as _db_query_one, get_conn
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
+
+# Single source: desktop/p2p/mb_slice_queries.py, bind-mounted to /app by
+# docker-compose. Absent outside Docker (launcher-mode backends serve slices
+# through the launcher's own sync server instead) — the endpoint 404s then.
+try:
+    import mb_slice_queries
+except ImportError:
+    mb_slice_queries = None
+
+mb_router = APIRouter(prefix="/api/mb", tags=["sync"])
+
+
+def mb_dump_version() -> Optional[str]:
+    """Full-dump version this node can serve slices from, or None. Requires
+    the VERSION marker (MB_DUMP_DIR) AND mb_artist rows — see
+    mb_slice_queries.local_dump_available."""
+    if mb_slice_queries is None:
+        return None
+    try:
+        with get_conn() as conn:
+            return mb_slice_queries.local_dump_available(conn)
+    except Exception as e:
+        logger.debug(f"MB dump capability check failed: {e}")
+        return None
+
+
+class MBSliceRequest(BaseModel):
+    names: list[str] = Field(default_factory=list, max_length=50)
+
+
+@mb_router.post("/slice")
+def mb_slice(req: MBSliceRequest) -> dict:
+    """Serve raw mb_* subtrees for a batch of artist names — the P2P
+    canonicalization source for dump-less peers. Mirrors
+    desktop/p2p/sync_server.handle_mb_slice."""
+    if not mb_dump_version():
+        raise HTTPException(status_code=404, detail="no MB dump on this node")
+    try:
+        with get_conn() as conn:
+            return mb_slice_queries.get_slice(conn, req.names)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except mb_slice_queries.DumpBusy:
+        raise HTTPException(status_code=503, detail="dump_reloading")
 
 
 

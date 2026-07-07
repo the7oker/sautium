@@ -64,6 +64,7 @@ WHITELIST_PREFIX = (
     "/static/",
     "/api/covers/",
     "/api/sync/",
+    "/api/mb/",
     "/sync/",
 )
 

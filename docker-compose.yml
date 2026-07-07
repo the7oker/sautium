@@ -119,6 +119,10 @@ services:
       # Persists across rebuilds so the phone doesn't need to re-accept it.
       - ./data/tls:/app/data/tls
       - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)
+      # Single-source P2P slice module (desktop/p2p owns it; the launcher sync
+      # server imports the same file) — lets the Docker backend serve
+      # /api/mb/slice to dump-less peers.
+      - ./desktop/p2p/mb_slice_queries.py:/app/mb_slice_queries.py:ro
       # Mount music library as read-only
       # Windows path: E:\Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro
