@@ -20,7 +20,7 @@ import os
 import re
 from datetime import date, datetime
 from urllib.parse import urlsplit
-from uuid import UUID
+from uuid import UUID, uuid5
 
 logger = logging.getLogger(__name__)
 
@@ -157,15 +157,23 @@ def receipt_message(resp: dict) -> bytes:
     return RECEIPT_CONTEXT + payload_hash(resp)
 
 
-def addr_hash(url_or_addr: str) -> str:
-    """sha256 hex of the peer HOST (scheme/port stripped). Pseudonymized
-    address for ban correlation: the ban anchor is the pubkey (proven by
-    receipts), the address hash catches a banned key returning under a fresh
-    identity from the same place. Reversible by IPv4 enumeration — that is
-    accepted; it is uniform storage, not privacy."""
+# Sautium UUID v5 namespace — mirrors backend/uuid_utils.py (desktop must not
+# import the backend package; the constant is fixed by design).
+_SAUTIUM_NAMESPACE = UUID("adc1ec0b-2c81-5e26-9938-a369c6f7a5e1")
+
+
+def addr_uuid(url_or_addr: str) -> str:
+    """UUID v5 of the peer HOST (scheme/port stripped), per the project
+    formula uuid5(NS, "node_addr:{host}") — deterministic on every node, so
+    ban/evidence correlation across nodes stays possible. Pseudonymized
+    address for ban lists: the ban anchor is the pubkey (proven by receipts);
+    the address id catches a banned key returning under a fresh identity from
+    the same place. An IPv4 is enumerable from it by design — uniform
+    storage, not privacy. Collisions are irrelevant at this population and
+    fail open (a collided ban just skips one more peer)."""
     s = url_or_addr if "://" in url_or_addr else "//" + url_or_addr
     host = (urlsplit(s).hostname or "").lower()
-    return hashlib.sha256(host.encode("utf-8")).hexdigest()
+    return str(uuid5(_SAUTIUM_NAMESPACE, f"node_addr:{host}"))
 
 
 # ---------------------------------------------------------------------------

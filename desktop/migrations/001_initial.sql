@@ -1816,24 +1816,25 @@ CREATE TABLE IF NOT EXISTS mb_slice_fetches (
     source_pubkey  TEXT,                       -- hex Ed25519, verified before import
     receipt        TEXT,                       -- hex signature over payload_sha256
     payload_sha256 TEXT,
-    source_addr_sha256 TEXT,                   -- sha256(peer host) — pseudonymized, ban correlation
+    source_addr    UUID,                       -- uuid5(NS, 'node_addr:{host}') — pseudonymized, ban correlation
     fetched_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- Local ban list for P2P slice sources. Ban anchor is the PUBKEY (proven by
--- receipts); addr_sha256 is the secondary net: it catches a banned key
--- returning under a fresh identity from the same address. sha256 of an IPv4
--- is reversible by enumeration — it's pseudonymization for uniform storage,
--- not privacy. Bans are LOCAL by design (no global blacklist — see
--- P2P-SYNC-INTEGRITY); rows are inserted manually or by the future
--- spot-check/flag flow.
+-- receipts); addr is the secondary net: it catches a banned key returning
+-- under a fresh identity from the same address. The address id is
+-- uuid5(NS, 'node_addr:{host}') — deterministic on every node (cross-node
+-- evidence correlation), enumerable back to an IPv4 by design
+-- (pseudonymization for uniform storage, not privacy). Bans are LOCAL
+-- (no global blacklist — see P2P-SYNC-INTEGRITY); rows are inserted manually
+-- or by the future spot-check/flag flow.
 CREATE TABLE IF NOT EXISTS p2p_node_bans (
     id          SERIAL PRIMARY KEY,
     pubkey      TEXT,
-    addr_sha256 TEXT,
+    addr        UUID,
     reason      TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK (pubkey IS NOT NULL OR addr_sha256 IS NOT NULL)
+    CHECK (pubkey IS NOT NULL OR addr IS NOT NULL)
 );
 
 -- ============================================================

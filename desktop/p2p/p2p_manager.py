@@ -1968,15 +1968,15 @@ class P2PManager:
         return BackendAPIClient(f"https://127.0.0.1:{port}")
 
     def _load_p2p_bans(self) -> tuple[set, set]:
-        """Local ban list: (pubkeys, addr_sha256s). The pubkey ban is the
-        anchor (proven by slice receipts); the address hash catches a banned
+        """Local ban list: (pubkeys, addr uuids). The pubkey ban is the
+        anchor (proven by slice receipts); the address id catches a banned
         key returning under a fresh identity from the same place."""
         try:
             conn = psycopg2.connect(self.db_dsn)
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT pubkey, addr_sha256 FROM p2p_node_bans")
+                        "SELECT pubkey, addr::text FROM p2p_node_bans")
                     rows = cur.fetchall()
                 return ({r[0] for r in rows if r[0]},
                         {r[1] for r in rows if r[1]})
@@ -2012,7 +2012,7 @@ class P2PManager:
             if addr in seen_addrs:
                 continue
             seen_addrs.add(addr)
-            if mb_slice_queries.addr_hash(addr) in banned_addrs:
+            if mb_slice_queries.addr_uuid(addr) in banned_addrs:
                 logger.info(f"MB slice: skipping banned address {addr}")
                 continue
             api = await self._try_connect_peer(addr)
