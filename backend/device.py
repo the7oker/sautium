@@ -94,28 +94,56 @@ def empty_cache(device: Optional[str] = None) -> None:
         torch.mps.empty_cache()
 
 
-def memory_budget_gb() -> float:
-    """Accelerator memory budget in GB. CUDA reports dedicated VRAM; MPS and
-    CPU report system RAM (MPS unified memory is shared with the OS)."""
+def available_accel_memory_gb() -> float:
+    """Memory actually usable for a batch, in GB.
+
+    - CUDA: FREE dedicated VRAM (mem_get_info). We size to fit VRAM and avoid
+      spilling to WDDM shared memory, which is 10-100x slower than VRAM.
+    - MPS: the recommended working set on unified memory (shared with the OS;
+      there is no hard limit — overshoot silently swaps — so we stay under it).
+    - CPU: available system RAM.
+
+    Override with SAUTIUM_ACCEL_MEMORY_GB to test another machine's profile
+    (e.g. simulate a 16 GB laptop on a 32 GB dev box)."""
+    override = os.environ.get("SAUTIUM_ACCEL_MEMORY_GB")
+    if override:
+        return float(override)
     if torch.cuda.is_available():
-        return torch.cuda.get_device_properties(0).total_memory / 1e9
+        free, _total = torch.cuda.mem_get_info()
+        return free / 1e9
+    if get_device() == "mps":
+        try:
+            return torch.mps.recommended_max_memory() / 1e9
+        except Exception:
+            pass
     import psutil
-    return psutil.virtual_memory().total / 1e9
+    return psutil.virtual_memory().available / 1e9
 
 
-@functools.lru_cache(maxsize=1)
-def is_low_memory() -> bool:
-    """Whether the audio pipeline must shrink its batches to avoid swapping.
+# Cost model for the audio pipeline: peak ≈ FIXED + COST_PER_MIN × batch_minutes.
+# MPS calibrated on an M-series node (12 GB @ 10 min, 21 GB @ 40 min → fixed 9,
+# cost 0.30 — unified memory holds the whole-track audio buffers too, so the
+# per-minute cost is high). CUDA sizes to free VRAM (audio buffers live in
+# system RAM there, so the VRAM per-minute cost is low); its budget is capped
+# at the tuned 40-min default so the master node is unchanged and only low-VRAM
+# cards shrink. CUDA/CPU coefficients are provisional pending calibration.
+_BUDGET_PARAMS = {
+    "mps":  dict(fixed=9.0, cost_per_min=0.30, min_min=5, max_min=60),
+    "cuda": dict(fixed=4.0, cost_per_min=0.12, min_min=5, max_min=40),
+    "cpu":  dict(fixed=6.0, cost_per_min=0.30, min_min=5, max_min=40),
+}
 
-    MPS unified memory is shared with the OS and the whole-track audio buffers,
-    so a 16 GB Mac is far tighter than a 16 GB *dedicated* card — hence a higher
-    threshold on MPS/CPU than on CUDA. A 24 GB Mac keeps the throughput-tuned
-    defaults (measured fine); the 16 GB laptop 4090 (dedicated VRAM) also keeps
-    them (see reference_vram_allocator_arena_thrash). Force with
-    SAUTIUM_LOW_MEMORY=1 to test the profile on a larger machine."""
-    override = os.environ.get("SAUTIUM_LOW_MEMORY")
-    if override is not None:
-        return override.strip().lower() in ("1", "true", "yes", "on")
-    if torch.cuda.is_available():
-        return memory_budget_gb() < 12.0   # only genuine low-VRAM cards
-    return memory_budget_gb() < 18.0        # MPS/CPU: 16 GB machines
+
+def audio_batch_budget_seconds() -> int:
+    """Per-batch audio-seconds sized to the accelerator's free memory so the
+    predicted peak stays under it: big machines get big batches (throughput),
+    tight ones get small batches (no swap/OOM). Replaces the static 40/10-min
+    split. Force a fixed value with SAUTIUM_AUDIO_BUDGET_MIN (minutes)."""
+    override = os.environ.get("SAUTIUM_AUDIO_BUDGET_MIN")
+    if override:
+        return int(float(override) * 60)
+    p = _BUDGET_PARAMS.get(get_device(), _BUDGET_PARAMS["cpu"])
+    usable = available_accel_memory_gb() * 0.85 - p["fixed"]
+    minutes = usable / p["cost_per_min"] if usable > 0 else 0.0
+    minutes = max(p["min_min"], min(p["max_min"], minutes))
+    return int(minutes * 60)

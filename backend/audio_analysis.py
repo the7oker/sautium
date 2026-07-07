@@ -457,9 +457,7 @@ class AudioAnalyzer:
 
         stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0}
         start_time = time.time()
-        from device import is_low_memory
-        _low_mem = is_low_memory()
-        clap_batch_size = 4 if _low_mem else 16
+        clap_batch_size = 16
         prefetch_workers = 4
 
         with get_db_context() as db:
@@ -525,7 +523,8 @@ class AudioAnalyzer:
             # Batches are cut by BOTH row count and total audio duration —
             # whole tracks are held decoded in RAM for the batch, and 16
             # Schulze-length pieces at once would be ~14GB.
-            batch_budget_seconds = (10 if _low_mem else 40) * 60
+            from device import audio_batch_budget_seconds
+            batch_budget_seconds = audio_batch_budget_seconds()
             batches = []
             cur, cur_seconds = [], 0.0
             for row in rows:
