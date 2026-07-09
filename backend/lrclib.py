@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Any
 import httpx
 from sqlalchemy.orm import Session
 
+import api_cooldown
 from models import TrackLyrics, ExternalMetadata
 
 logger = logging.getLogger(__name__)
@@ -51,11 +52,17 @@ class LrclibService:
             try:
                 resp = self.client.get(path, params=params)
                 if resp.status_code == 404:
+                    api_cooldown.clear('lrclib')   # lrclib responded — not banned
                     return resp
                 if (resp.status_code == 429 or resp.status_code >= 500) and attempt < max_retries:
                     time.sleep(base_delay * (2 ** attempt))
                     continue
+                if resp.status_code == 429:
+                    # Retries exhausted on a rate-limit — arm the persistent
+                    # cooldown so the lyrics loop skips lrclib until it clears.
+                    api_cooldown.arm('lrclib', "HTTP 429")
                 resp.raise_for_status()
+                api_cooldown.clear('lrclib')
                 return resp
             except httpx.TransportError:
                 if attempt < max_retries:

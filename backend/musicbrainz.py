@@ -21,6 +21,8 @@ from typing import List, Optional
 
 import httpx
 
+import api_cooldown
+
 logger = logging.getLogger(__name__)
 
 _BASE = "https://musicbrainz.org/ws/2"
@@ -28,11 +30,9 @@ _BASE = "https://musicbrainz.org/ws/2"
 _UA = "Sautium/0.1 ( valery.grygorash@gmail.com )"
 
 _MIN_INTERVAL = 1.05            # >1s between calls (MB hard limit is 1/s)
-_COOLDOWN_SEC = 60.0           # back off this long after a 503
 
 _lock = threading.Lock()
 _last_call = 0.0
-_cooldown_until = 0.0
 
 
 class MBRateLimited(Exception):
@@ -40,12 +40,15 @@ class MBRateLimited(Exception):
 
 
 def cooldown_active() -> bool:
-    return time.monotonic() < _cooldown_until
+    # Backed by the persistent cross-source cooldown (source 'musicbrainz')
+    # so a restart doesn't resume hammering MB. mb_backend re-exports this,
+    # so mb_canonicalize/mb_audit pick up persistence with zero changes.
+    return api_cooldown.cooling_down('musicbrainz') is not None
 
 
 def _get(path: str, params: dict) -> dict:
     """Single paced MB GET. Serialized process-wide at <1 req/s."""
-    global _last_call, _cooldown_until
+    global _last_call
     if cooldown_active():
         raise MBRateLimited("MB cooldown active")
     params = {**params, "fmt": "json"}
@@ -59,9 +62,10 @@ def _get(path: str, params: dict) -> dict:
         finally:
             _last_call = time.monotonic()
     if resp.status_code == 503:
-        _cooldown_until = time.monotonic() + _COOLDOWN_SEC
+        api_cooldown.arm('musicbrainz', "MB 503")
         raise MBRateLimited("MB 503")
     resp.raise_for_status()
+    api_cooldown.clear('musicbrainz')
     return resp.json()
 
 

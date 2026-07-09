@@ -377,6 +377,11 @@ def _step_sync_discographies(limit: int) -> Dict[str, int]:
 
     stats = {"processed": 0, "new_albums": 0, "errors": 0}
 
+    # Dump-less nodes hit the MB HTTP API — skip the whole step while it's
+    # cooling down (no-op on dump nodes, which never arm the cooldown).
+    if cooling_down('musicbrainz'):
+        return stats
+
     rows = stale_canonized_artists(limit=int(limit),
                                    stale_days=_DISCOGRAPHY_STALE_DAYS)
     if not rows:

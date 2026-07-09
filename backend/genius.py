@@ -13,6 +13,7 @@ import re
 from datetime import datetime
 from typing import Dict, Optional, Any
 
+import api_cooldown
 from sqlalchemy.orm import Session
 
 from models import TrackLyrics, ExternalMetadata
@@ -163,6 +164,7 @@ class GeniusService:
             song = self.genius.search_song(
                 title=title, artist=artist, get_full_info=False
             )
+            api_cooldown.clear('genius')   # Genius responded — not throttling us
             if song is None:
                 return None
 
@@ -196,6 +198,11 @@ class GeniusService:
                 "lyrics": cleaned,
             }
         except Exception as e:
+            # lyricsgenius uses `requests`; a 429 surfaces as HTTPError with a
+            # .response. Arm the persistent cooldown so the lyrics loop skips
+            # Genius until it clears instead of hammering a throttling API.
+            if getattr(getattr(e, "response", None), "status_code", None) == 429:
+                api_cooldown.arm('genius', "HTTP 429")
             logger.error(f"Genius search failed for {artist} - {title}: {e}")
             return None
 

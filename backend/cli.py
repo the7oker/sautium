@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from config import settings, LOGGING_CONFIG
 from database import get_db_context, engine
+from api_cooldown import cooling_down
 from ensemble_instruments import present_instruments
 from scanner import scan_library
 from track_filter import get_filtered_track_ids, describe_filters, track_filter_options
@@ -1219,8 +1220,8 @@ def fetch_lyrics(limit, no_skip, delay, source):
                 status = None
 
                 try:
-                    # Try LRCLIB first (if enabled)
-                    if lrclib_service:
+                    # Try LRCLIB first (if enabled and not rate-limited)
+                    if lrclib_service and not cooling_down('lrclib'):
                         result = lrclib_service.fetch_and_store(
                             db, track_id=track_id, track_name=title,
                             artist_name=artist, album_name=album, duration=duration,
@@ -1232,8 +1233,8 @@ def fetch_lyrics(limit, no_skip, delay, source):
                         if lrclib_delay > 0:
                             time.sleep(lrclib_delay)
 
-                    # Try Genius fallback (if enabled and not found yet)
-                    if genius_service and found_by is None:
+                    # Try Genius fallback (if enabled, not found yet, not rate-limited)
+                    if genius_service and found_by is None and not cooling_down('genius'):
                         result = genius_service.fetch_and_store(
                             db, track_id=track_id, track_name=title,
                             artist_name=artist, album_name=album, duration=duration,

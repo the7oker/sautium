@@ -427,8 +427,15 @@ def _fetch_lyrics_batch(
                     eta_str = f", ETA {int(eta)}s"
                 progress_cb(f"{i+1}/{total}{eta_str}")
 
+            # Skip a lyrics source while it's rate-limited; stop the whole batch
+            # only when BOTH available sources are cooling (nothing left to do).
+            lrclib_ok = use_lrclib and lrclib_service and not cooling_down('lrclib')
+            genius_ok = use_genius and genius_service and not cooling_down('genius')
+            if not lrclib_ok and not genius_ok:
+                break
+
             found = False
-            if use_lrclib and lrclib_service:
+            if lrclib_ok:
                 try:
                     result = lrclib_service.fetch_and_store(
                         db, row.track_id, row.title, row.artist,
@@ -441,7 +448,7 @@ def _fetch_lyrics_batch(
                 except Exception as e:
                     logger.debug(f"LRCLIB failed for {row.artist} - {row.title}: {e}")
 
-            if not found and use_genius and genius_service:
+            if not found and genius_ok:
                 try:
                     result = genius_service.fetch_and_store(
                         db, row.track_id, row.title, row.artist,
