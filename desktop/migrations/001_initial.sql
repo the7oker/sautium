@@ -137,7 +137,7 @@ CREATE TABLE IF NOT EXISTS artists (
     is_vocalist artist_vocalist DEFAULT 'unknown',
     verification_status verification_status DEFAULT 'unverified',
     raw_name VARCHAR(500),
-    name_latin VARCHAR(500),                -- Latin transliteration of name for cross-script fuzzy search (Phase 0a)
+    name_latin TEXT,                        -- Latin transliteration of name for cross-script fuzzy search (Phase 0a); TEXT not VARCHAR(500) — transliteration can exceed the source length (CJK→romaji expands ~1.4x)
     -- MB identity lives in artist_mbids (1:N — name-UUID may conflate namesakes)
     last_album_sync TIMESTAMPTZ,            -- freshness gate for new-album discovery
     last_mb_sync TIMESTAMPTZ,              -- freshness gate for MB canonicalization pass
@@ -150,7 +150,7 @@ CREATE TABLE IF NOT EXISTS artists (
 CREATE TABLE IF NOT EXISTS albums (
     id UUID PRIMARY KEY,
     title VARCHAR(500) NOT NULL,
-    title_latin VARCHAR(500),               -- Latin transliteration of title for cross-script fuzzy search (Phase 0a)
+    title_latin TEXT,                       -- Latin transliteration of title for cross-script fuzzy search (Phase 0a); TEXT not VARCHAR(500) — transliteration can exceed the source length
     release_year INTEGER,
     label VARCHAR(200),
     catalog_number VARCHAR(100),
@@ -166,7 +166,7 @@ CREATE TABLE IF NOT EXISTS albums (
 CREATE TABLE IF NOT EXISTS tracks (
     id UUID PRIMARY KEY,
     title VARCHAR(500) NOT NULL,
-    title_latin VARCHAR(500),               -- Latin transliteration of title for cross-script fuzzy search (Phase 0a)
+    title_latin TEXT,                       -- Latin transliteration of title for cross-script fuzzy search (Phase 0a); TEXT not VARCHAR(500) — transliteration can exceed the source length
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
@@ -969,7 +969,7 @@ CREATE INDEX IF NOT EXISTS idx_tracks_title_latin_trgm ON tracks USING gin (titl
 -- backfill; searched alongside artists.name_latin in /discovery/artists.
 CREATE TABLE IF NOT EXISTS artist_name_aliases (
     artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    alias_latin VARCHAR(500) NOT NULL,
+    alias_latin TEXT NOT NULL,
     source VARCHAR(20) NOT NULL DEFAULT 'cutlet',
     PRIMARY KEY (artist_id, alias_latin)
 );
