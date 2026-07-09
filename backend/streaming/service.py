@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import api_cooldown
 from .base import ProviderRegistry, StreamProvider
 from .proxy import MediaProxy
 from .youtube import YouTubeProvider
@@ -95,11 +96,27 @@ def get_proxy() -> Optional[MediaProxy]:
 def providers_preferred() -> list:
     """All enabled providers, lossless-first (Deezer FLAC before YouTube lossy).
     The per-track resolve waterfall tries each in order, so a track absent from
-    Deezer still streams from YouTube instead of showing up as unavailable."""
+    Deezer still streams from YouTube instead of showing up as unavailable.
+
+    Deezer stream shares api.deezer.com with photo enrichment, so a 429 there
+    (from a photo backfill or our own resolve) surfaces as an armed 'deezer'
+    cooldown. We react by ROUTING, never blocking: while Deezer is cooling,
+    demote it below the lossy fallback so playback starts immediately on
+    YouTube; if it's chronically banned (>=3 strikes), drop it this round
+    entirely. Consumer-side policy over api_cooldown — enrichment pauses on
+    cooling_down(), streaming reorders on status()."""
     if _registry is None:
         return []
-    return sorted(_registry.enabled(),
-                  key=lambda p: (not p.manifest.lossless, p.manifest.id))
+    provs = sorted(_registry.enabled(),
+                   key=lambda p: (not p.manifest.lossless, p.manifest.id))
+    # cooling_down() is the cheap cache gate; only read the richer status()
+    # (a DB hit) on the rare occasions Deezer is actually cooling.
+    if api_cooldown.cooling_down('deezer'):
+        st = api_cooldown.status('deezer')
+        deezer = [p for p in provs if p.manifest.id == 'deezer']
+        others = [p for p in provs if p.manifest.id != 'deezer']
+        provs = others if (st and st.strikes >= 3) else others + deezer
+    return provs
 
 
 def get_provider(provider_id: Optional[str] = None) -> Optional[StreamProvider]:
