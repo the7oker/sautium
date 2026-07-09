@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from api_cooldown import cooling_down
 from config import settings
 from db_pool import (
     db_query as _db_query,
@@ -187,6 +188,8 @@ def _scrobble_async(method: str, **kwargs) -> None:
     net = _get_scrobbler()
     if net is None:
         return
+    if cooling_down('lastfm'):
+        return  # Last.fm is rate-limiting us — skip the scrobble, keep polling
 
     def _work():
         try:

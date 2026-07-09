@@ -1,18 +1,19 @@
-"""Deezer artist photo lookup — the primary artist-image source.
+"""Deezer artist photo lookup — the sole artist-image source.
 
 Last.fm dropped artist images from its REST API in 2019, leaving only
 fragile HTML scraping that rate-limits (and ultimately bans) the whole
-IP. Deezer's public JSON API needs no key and returns clean artist
-images via `search/artist` → `picture_xl` (1000x1000), with far more
-generous limits. We try Deezer first and fall back to the Last.fm
-scrape (`lastfm_photos`) only when Deezer has no match.
+IP — so that fallback was retired and we rely on Deezer alone. A
+library-wide probe found Deezer covers 100% of artists that previously
+had a resolved photo, so nothing was lost. Deezer's public JSON API
+needs no key and returns clean artist images via `search/artist` →
+`picture_xl` (1000x1000), with far more generous limits.
 
 Deezer signals overload two ways: HTTP 429, or — more commonly — an
 in-band `{"error": {"code": 4, ...}}` body served with HTTP 200 ("Quota
 limit exceeded", code 4; "Service busy", code 700). Both surface as
 RateLimitError so the caller enters its global cooldown rather than
-hammering the API. Like Last.fm, lookups run behind the shared throttle
-in `routers/covers.py` — never call this in an unthrottled loop.
+hammering the API. Lookups run behind the shared throttle in
+`routers/covers.py` — never call this in an unthrottled loop.
 """
 
 import logging
@@ -20,7 +21,7 @@ from typing import Optional
 
 import httpx
 
-from lastfm_photos import RateLimitError, TransientFetchError
+from photo_fetch import RateLimitError, TransientFetchError
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +35,9 @@ def fetch_deezer_photo_url(artist_name: str) -> Optional[str]:
     """Return the best-match artist's `picture_xl` URL, or None.
 
     None = Deezer has no match or only a silhouette placeholder; the
-    caller falls back to Last.fm, then pins SENTINEL. Raises
-    RateLimitError on quota/429 and TransientFetchError on network
-    errors so the caller backs off instead of marking the artist
-    permanently photo-less.
+    caller pins SENTINEL. Raises RateLimitError on quota/429 and
+    TransientFetchError on network errors so the caller backs off
+    instead of marking the artist permanently photo-less.
     """
     if not artist_name or not artist_name.strip():
         return None

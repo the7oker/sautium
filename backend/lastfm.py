@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from decimal import Decimal
 
 from config import settings
-from lastfm_photos import TransientFetchError
+from photo_fetch import TransientFetchError
 from models import (
     ExternalMetadata, Artist, SimilarArtist, Genre, GenreDescription,
     ArtistBio, Tag, ArtistTag, Album, TrackArtist
@@ -22,6 +22,22 @@ from models import (
 from uuid_utils import tag_uuid
 
 logger = logging.getLogger(__name__)
+
+# Single throttle point for every Last.fm API call. pylast's built-in
+# limiter (enabled per-network in LastFmService.__init__) sleeps
+# DELAY_TIME between consecutive web-service calls. We raise the module
+# default from 0.2s (== the published 5 req/s/IP ceiling, zero headroom)
+# to 0.34s (~3 req/s): comfortably under the cap, and — crucially — it
+# spaces out the ~5 back-to-back calls inside get_artist_info (bio, tags,
+# stats, similar, mbid) that previously burst against the API with no gap.
+pylast.DELAY_TIME = 0.34
+
+
+class RateLimitExhausted(Exception):
+    """A Last.fm API rate-limit (error 29) survived every retry in
+    _with_retry, and the persistent 'lastfm' cooldown has been armed.
+    Callers surface status='rate_limited' and end the batch rather than
+    keep hammering a source that is actively refusing us."""
 
 
 class LastFmService:
@@ -36,6 +52,10 @@ class LastFmService:
             api_key=settings.lastfm_api_key,
             api_secret=None,  # Not needed for read-only access
         )
+        # Route every call through pylast's rate limiter (see DELAY_TIME
+        # above). Without this, each enrich_artist fired ~5 requests
+        # back-to-back — the kind of micro-burst anti-abuse systems flag.
+        self.network.enable_rate_limit()
         logger.info("Last.fm service initialized")
 
     @staticmethod
@@ -44,17 +64,26 @@ class LastFmService:
 
         Last.fm error code 29 = "Rate limit exceeded".
         Also retries on network-level failures (timeout, connection reset).
+
+        A rate-limit that survives every retry arms the persistent 'lastfm'
+        cooldown and raises RateLimitExhausted, so the caller ends the batch
+        instead of continuing to hit an API that is actively banning us.
         """
         for attempt in range(max_retries + 1):
             try:
                 return fn()
             except pylast.WSError as e:
                 err_str = str(e).lower()
-                if ('rate limit' in err_str or 'try again' in err_str) and attempt < max_retries:
+                is_rate_limit = 'rate limit' in err_str or 'try again' in err_str
+                if is_rate_limit and attempt < max_retries:
                     delay = base_delay * (2 ** attempt)
                     logger.warning(f"Rate limited, retry {attempt + 1}/{max_retries} in {delay:.0f}s")
                     time.sleep(delay)
                     continue
+                if is_rate_limit:
+                    from api_cooldown import arm
+                    arm('lastfm', str(e))
+                    raise RateLimitExhausted(str(e)) from e
                 raise
             except (pylast.NetworkError, ConnectionError, TimeoutError, OSError) as e:
                 if attempt < max_retries:
@@ -626,6 +655,17 @@ class LastFmService:
                 "similar_count": len(data.get("similar", [])),
             }
 
+        except RateLimitExhausted as e:
+            # Not a per-artist failure — skip the external_metadata error
+            # upsert (no negative-caching) and surface a distinct status so
+            # the batch ends and retries after the cooldown clears.
+            db.rollback()
+            return {
+                "status": "rate_limited",
+                "artist_id": artist_id,
+                "artist_name": artist_name,
+                "error": str(e),
+            }
         except Exception as e:
             logger.error(f"Failed to enrich artist {artist_name}: {e}")
             db.rollback()
@@ -750,6 +790,14 @@ class LastFmService:
                 "content_length": len(data.get("content") or ""),
             }
 
+        except RateLimitExhausted as e:
+            db.rollback()
+            return {
+                "status": "rate_limited",
+                "genre_id": genre_id,
+                "genre_name": genre_name,
+                "error": str(e),
+            }
         except Exception as e:
             logger.error(f"Failed to enrich genre {genre_name}: {e}")
             db.rollback()
@@ -1060,6 +1108,15 @@ class LastFmService:
                 "playcount": stats.get("playcount"),
             }
 
+        except RateLimitExhausted as e:
+            db.rollback()
+            return {
+                "status": "rate_limited",
+                "track_id": track_id,
+                "artist_name": artist_name,
+                "track_title": track_title,
+                "error": str(e),
+            }
         except Exception as e:
             logger.error(f"Failed to enrich track {artist_name} - {track_title}: {e}")
             db.rollback()

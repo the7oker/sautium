@@ -24,11 +24,11 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from sqlalchemy import text
 
+from api_cooldown import cooling_down
 from covers import (
     SENTINEL_COVER_ID,
     resolve_cover_for_folder,
     resolve_artist_photo,
-    photo_cooldown_active,
     _split_folder,
 )
 from database import get_db_context
@@ -223,7 +223,7 @@ async def get_cover_by_artist(artist_id: str = FPath(..., min_length=36, max_len
         return _serve_cover_bytes(str(cover_id))
 
     # A source recently rate-limited us — don't queue more work, defer.
-    if photo_cooldown_active():
+    if cooling_down('deezer'):
         return _defer_cover()
 
     lock = await _get_artist_lock(artist_id)
@@ -243,7 +243,7 @@ async def get_cover_by_artist(artist_id: str = FPath(..., min_length=36, max_len
         except asyncio.TimeoutError:
             return _defer_cover()
         try:
-            if photo_cooldown_active():
+            if cooling_down('deezer'):
                 # Cooldown was armed while we queued — don't fire.
                 return _defer_cover()
             global _photo_last_call

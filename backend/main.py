@@ -107,6 +107,14 @@ async def lifespan(app: FastAPI):
     # only reads .env at startup; the OAuth callback persists to DB).
     _load_lastfm_from_db()
 
+    # Warm the external-API rate-limit cooldown cache from its table so a
+    # restart mid-cooldown doesn't resume hammering a still-banning source.
+    try:
+        import api_cooldown
+        api_cooldown.load_from_db()
+    except Exception as e:
+        logger.warning(f"Failed to load API cooldowns at startup: {e}")
+
     # Same idea for AI provider API keys — Web UI writes them to DB,
     # but providers/__init__.py reads `settings.anthropic_api_key`
     # etc. Without this overlay AnthropicProvider would not register

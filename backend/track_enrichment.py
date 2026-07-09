@@ -29,6 +29,7 @@ try:
 except ImportError:
     torch = None
 
+from api_cooldown import cooling_down
 from config import settings
 from database import get_db_context
 from models import (
@@ -190,7 +191,7 @@ def run_parallel_enrichment(
             logger.info(f"Last.fm: {total_artists} artists to enrich")
 
             for i, (artist_id, artist_name) in enumerate(artists):
-                if cancel_flag and cancel_flag():
+                if (cancel_flag and cancel_flag()) or cooling_down('lastfm'):
                     break
                 if max_duration_seconds:
                     if time.time() - start_time >= max_duration_seconds:
@@ -203,6 +204,9 @@ def run_parallel_enrichment(
                 try:
                     result = lastfm.enrich_artist(db, artist_id, artist_name)
                     stats["artists_processed"] += 1
+                    if result.get("status") == "rate_limited":
+                        logger.info("Last.fm: rate-limited — ending pipeline")
+                        break
                     if result.get("status") == "success":
                         stats["artists_success"] += 1
                     time.sleep(lastfm_delay)

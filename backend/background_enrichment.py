@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from sqlalchemy import text
 
+from api_cooldown import cooling_down
 from database import get_db_context
 
 logger = logging.getLogger(__name__)
@@ -188,6 +189,9 @@ def _step_track_stats(limit: int) -> Dict[str, int]:
                 result = lastfm.enrich_track(
                     db, row.track_id, row.artist_name, row.track_title,
                 )
+                if result["status"] == "rate_limited":
+                    logger.info("Background track_stats: Last.fm rate-limited — ending batch")
+                    break
                 if result["status"] == "success":
                     stats["success"] += 1
                 elif result["status"] == "not_found":
@@ -251,6 +255,9 @@ def _step_missing_artists(limit: int) -> Dict[str, int]:
             stats["processed"] += 1
             try:
                 result = lastfm.enrich_artist(db, row.id, row.name)
+                if result["status"] == "rate_limited":
+                    logger.info("Background artists: Last.fm rate-limited — ending batch")
+                    break
                 if result["status"] == "success":
                     stats["success"] += 1
                 elif result["status"] == "not_found":
@@ -305,6 +312,9 @@ def _step_missing_genres(limit: int) -> Dict[str, int]:
             try:
                 result = lastfm.enrich_genre(db, row.id, row.name)
                 status = result.get("status")
+                if status == "rate_limited":
+                    logger.info("Background genres: Last.fm rate-limited — ending batch")
+                    break
                 if status == "success":
                     stats["success"] += 1
                 elif status == "not_found":
@@ -431,8 +441,9 @@ def _run_once() -> Dict[str, Any]:
         return summary
 
     _set(current_step="track_stats")
-    summary["track_stats"] = _step_track_stats(_TRACK_STATS_PER_BATCH)
-    _bump("track_stats", summary["track_stats"].get("success", 0))
+    if not cooling_down('lastfm'):
+        summary["track_stats"] = _step_track_stats(_TRACK_STATS_PER_BATCH)
+        _bump("track_stats", summary["track_stats"].get("success", 0))
 
     if _cancel_flag():
         return summary
@@ -445,15 +456,17 @@ def _run_once() -> Dict[str, Any]:
         return summary
 
     _set(current_step="artists")
-    summary["artists"] = _step_missing_artists(_ARTISTS_PER_BATCH)
-    _bump("artists", summary["artists"].get("success", 0))
+    if not cooling_down('lastfm'):
+        summary["artists"] = _step_missing_artists(_ARTISTS_PER_BATCH)
+        _bump("artists", summary["artists"].get("success", 0))
 
     if _cancel_flag():
         return summary
 
     _set(current_step="genres")
-    summary["genres"] = _step_missing_genres(_GENRES_PER_BATCH)
-    _bump("genres", summary["genres"].get("success", 0))
+    if not cooling_down('lastfm'):
+        summary["genres"] = _step_missing_genres(_GENRES_PER_BATCH)
+        _bump("genres", summary["genres"].get("success", 0))
 
     if _cancel_flag():
         return summary

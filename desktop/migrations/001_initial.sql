@@ -1859,6 +1859,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_streaming_mints_album
 CREATE INDEX IF NOT EXISTS idx_streaming_mints_artist ON streaming_mints (artist_id);
 CREATE INDEX IF NOT EXISTS idx_streaming_mints_album ON streaming_mints (album_id);
 
+-- Persistent rate-limit cooldown for external APIs (Last.fm error 29,
+-- Deezer 429/quota). One row per source; the backend arms a row with
+-- exponential backoff (30m→24h) on a rate-limit and honors cooldown_until
+-- before every call, so a restart mid-cooldown doesn't resume hammering a
+-- still-banning source. See backend/api_cooldown.py.
+CREATE TABLE IF NOT EXISTS external_api_cooldown (
+    source          TEXT PRIMARY KEY,
+    cooldown_until  TIMESTAMP WITH TIME ZONE NOT NULL,
+    reason          TEXT,
+    strikes         INTEGER NOT NULL DEFAULT 1,
+    updated_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- ============================================================
 -- Views
 -- ============================================================
