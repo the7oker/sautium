@@ -164,6 +164,10 @@ def _get_identity():
 
 
 VERIFY_WORKER_URL = "https://sautium-verify.sautium.workers.dev"
+# Descriptive UA — Cloudflare challenges default python-httpx/urllib agents,
+# which would surface as spurious Worker failures. Matches sign_audio.py /
+# desktop email_verify.py so every Worker call speaks with the same identity.
+_WORKER_HEADERS = {"User-Agent": "Sautium/1.0"}
 
 # Cached private key for signing Worker requests
 _cached_private_key = None
@@ -188,34 +192,51 @@ def _sign_message(message: str) -> Optional[str]:
 
 
 async def _worker_post(path: str, payload: dict) -> Optional[dict]:
-    """POST to the Cloudflare Worker. Returns response dict or None."""
+    """POST to the Cloudflare Worker. Returns the response dict, or None on a
+    non-200. A 429 (Worker anti-spam) surfaces as HTTPException so the calling
+    endpoint returns a clear 'service busy, retry' instead of a misleading
+    result (e.g. register-email would otherwise read as 'invalid code')."""
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
             resp = await client.post(
                 f"{VERIFY_WORKER_URL}{path}",
                 json=payload,
+                headers=_WORKER_HEADERS,
             )
             if resp.status_code == 200:
                 return resp.json()
+            if resp.status_code == 429:
+                logger.warning(f"Worker {path} rate-limited (429): {resp.text}")
+                raise HTTPException(429, "The verification service is busy — please wait a minute and try again.")
             logger.warning(f"Worker {path} returned {resp.status_code}: {resp.text}")
             return None
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Worker {path} failed: {e}")
         return None
 
 
 async def _worker_get(path: str, params: dict) -> Optional[dict]:
-    """GET from the Cloudflare Worker. Returns response dict or None."""
+    """GET from the Cloudflare Worker. Returns the response dict, or None on a
+    non-200. A 429 (Worker anti-spam) surfaces as HTTPException — see
+    _worker_post."""
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
             resp = await client.get(
                 f"{VERIFY_WORKER_URL}{path}",
                 params=params,
+                headers=_WORKER_HEADERS,
             )
             if resp.status_code == 200:
                 return resp.json()
+            if resp.status_code == 429:
+                logger.warning(f"Worker GET {path} rate-limited (429): {resp.text}")
+                raise HTTPException(429, "The verification service is busy — please wait a minute and try again.")
             logger.warning(f"Worker GET {path} returned {resp.status_code}: {resp.text}")
             return None
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Worker GET {path} failed: {e}")
         return None
