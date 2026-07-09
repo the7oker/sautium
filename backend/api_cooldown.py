@@ -22,6 +22,7 @@ Sources are free-form; current callers use 'lastfm' and 'deezer'.
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -36,6 +37,30 @@ _CAP_SEC = 24 * 60 * 60      # ceiling: 24 hours
 _cache: dict[str, datetime] = {}
 
 
+@dataclass
+class CooldownState:
+    """Full known state of a source's rate-limit history — richer than the
+    binary cooling_down() guard. Each consumer applies its OWN policy from it:
+    enrichment just pauses while `active`, but a latency-sensitive consumer
+    (e.g. streaming) can read `strikes` / `seconds_since_last_strike` to judge
+    whether a source is chronically unstable and route around it in its
+    fallback waterfall — even between cooldown windows."""
+    source: str
+    strikes: int                 # consecutive bans without an intervening success
+    last_strike_at: datetime     # when arm() last fired
+    cooldown_until: datetime     # deadline (may be in the past → expired, not yet cleared)
+    reason: str
+
+    @property
+    def active(self) -> bool:
+        """True while the cooldown window has not elapsed."""
+        return self.cooldown_until > datetime.now(timezone.utc)
+
+    @property
+    def seconds_since_last_strike(self) -> float:
+        return (datetime.now(timezone.utc) - self.last_strike_at).total_seconds()
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -48,6 +73,32 @@ def cooling_down(source: str) -> Optional[datetime]:
     if deadline is not None and deadline > _now():
         return deadline
     return None
+
+
+def status(source: str) -> Optional[CooldownState]:
+    """The full persisted state for a source (read from the table, so it
+    survives even after the cooldown window lapses — the row lingers until a
+    success clears it). Returns None only when the source has never been armed
+    or a later success cleared it.
+
+    Use this — not cooling_down() — when a caller needs the strike history to
+    make its own routing decision (e.g. streaming skipping a chronically-banned
+    provider in its fallback waterfall). cooling_down() stays the cheap
+    in-memory guard for enrichment's simple pause-while-active behavior."""
+    row = db_query_one(
+        "SELECT source, strikes, updated_at, cooldown_until, reason "
+        "FROM external_api_cooldown WHERE source = %(s)s",
+        {"s": source},
+    )
+    if not row:
+        return None
+    return CooldownState(
+        source=row["source"],
+        strikes=row["strikes"],
+        last_strike_at=row["updated_at"],
+        cooldown_until=row["cooldown_until"],
+        reason=row["reason"] or "",
+    )
 
 
 def arm(source: str, reason: str = "") -> datetime:
