@@ -544,6 +544,7 @@ responsibility).
 | File | Purpose |
 |------|---------|
 | `backend/main.py` | FastAPI entry point |
+| `backend/playback/` | Output-backend abstraction: PlaybackManager + canonical queue, HQPlayer backend, play tracker, listening sessions (HARDWARE-TIERS §2.6) |
 | `backend/models.py` | SQLAlchemy ORM models |
 | `backend/uuid_utils.py` | UUID v5 generators + normalization |
 | `backend/lastfm.py` | Last.fm enrichment + bio-derived classifiers |

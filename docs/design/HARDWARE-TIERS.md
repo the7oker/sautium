@@ -331,10 +331,15 @@ Unsupported: <8 GB RAM, HDD, 32-bit, 4 GB Ampere cards until the bf16 fix lands.
     nodes (§2.4 sizing note applies).
 
 **P2 — polish:**
-12. ◐ Status poller now gated on a configured HQPlayer endpoint (env-enabled
-    or UI-saved host; settings PUT starts/stops it event-driven). The full
-    per-output-backend abstraction (§2.6) remains future work with the
-    built-in player / DLNA.
+12. ✅ Per-output-backend abstraction (§2.6) SHIPPED 2026-07-10:
+    `backend/playback/` — `PlayerBackend` (transport + capabilities() +
+    status emit), `PlaybackManager` (activation lifecycle, SSE payload +
+    `output` field, tracker feed above the abstraction), Sautium-canonical
+    `CanonicalQueue` with a one-way HQP mirror (adopt-on-attach restores
+    the queue after a backend restart; a 30-tick drift canary logs external
+    HQPlayer edits, never reconciles). HQPlayer = 1 s poll (documented
+    boundary exception), gated on a configured endpoint as before. The
+    built-in player / DLNA / browser backends plug into this next.
 13. ✅ Per-tier Postgres tuning (SHIPPED 2026-07-10): compose files run
     `postgres -c` with env-overridable defaults targeting the 16GB+ Docker
     host (`PG_SHARED_BUFFERS:-1GB`, `PG_EFFECTIVE_CACHE_SIZE:-6GB`,
