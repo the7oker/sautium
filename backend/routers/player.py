@@ -10,25 +10,37 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from api_cooldown import cooling_down
 from config import settings
 from db_pool import (
     db_query as _db_query,
     db_query_one as _db_query_one,
-    db_execute as _db_execute,
     db_query_with_ef_search as _db_query_with_ef_search,
-    get_conn as _get_conn,
 )
 from ensemble_instruments import present_instruments
-from hqplayer_client import HQPlayerClient, PlaybackState, format_time, file_path_to_uri
+from hqplayer_client import PlaybackState, format_time, file_path_to_uri
 from lrclib import LrclibService
+from playback import hqp_backend, tracker
+from playback.hqp_backend import (
+    _hqp_lock,
+    _hqp_status_lock,
+    _get_hqp,
+    _get_hqp_status,
+    _reset_hqp_status,
+    _add_uris_with_retry,
+    _hqp_cmd,
+    _hqp_safe,
+)
+from playback.sessions import (
+    _SESSION_ORIGINS,
+    _archive_and_open_session,
+    _schedule_mix_title,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,241 +109,6 @@ def _register_status_failure():
         _wake_sse_clients()
 
 
-# -- Play-event tracking (listening_history + local_play_stats + Last.fm) ------
-#
-# Consolidated into the status poller (was a separate playback_tracker.py
-# daemon resolving the playing track by file_path → media_files.id, which
-# silently dropped phantom http previews). The poller already reads HQPlayer
-# <Status/> every tick and resolves the playing row's SOURCE-AGNOSTIC identity
-# from the playlist cache — `_build_playlist_payload` now gives every row a
-# `track_id` UUID (owned AND phantom), with `media_files.id` as the optional
-# physical file. Keying play events on that UUID makes streamed phantom plays
-# first-class: they land in listening_history / local_play_stats and scrobble
-# exactly like owned files, with no per-source code.
-
-_SCROBBLE_MIN_SECONDS = 240  # Last.fm: scrobble after >50% OR >4 min, whichever first
-
-_play_session: "Optional[_PlaySession]" = None
-_play_track_index: Optional[int] = None
-_scrobbler = None
-_scrobbler_init = False
-
-
-class _PlaySession:
-    """One listening session for the currently-playing track, keyed on the
-    track UUID (source-agnostic). `media_file_id` is the optional physical file
-    (owned only; None for phantom previews)."""
-
-    def __init__(self, ident: dict, started_at: datetime, track_length: float):
-        self.track_id = ident["track_id"]
-        self.media_file_id = ident.get("media_file_id")
-        self.artist = ident.get("artist") or ""
-        self.title = ident.get("title") or ""
-        self.album = ident.get("album") or None
-        self.duration = ident.get("duration")
-        self.started_at = started_at
-        self.track_length = track_length
-        self.max_position = 0.0
-        self.scrobbled = False
-
-    @property
-    def percent_listened(self) -> float:
-        if self.track_length > 0:
-            return min(100.0, (self.max_position / self.track_length) * 100)
-        return 0.0
-
-    @property
-    def scrobble_ready(self) -> bool:
-        if self.max_position < 30:
-            return False
-        return (self.percent_listened >= 50
-                or self.max_position >= _SCROBBLE_MIN_SECONDS)
-
-    @property
-    def completed(self) -> bool:
-        return self.scrobble_ready or (
-            self.track_length > 0 and self.max_position >= self.track_length - 5)
-
-    def update_position(self, position: float) -> None:
-        self.max_position = max(self.max_position, position)
-
-
-def _get_scrobbler():
-    """Lazy Last.fm network from env credentials (LASTFM_API_KEY/_API_SECRET/
-    _SESSION_KEY/_USERNAME). None when scrobbling isn't configured."""
-    global _scrobbler, _scrobbler_init
-    if _scrobbler_init:
-        return _scrobbler
-    _scrobbler_init = True
-    import os
-    key = os.environ.get("LASTFM_API_KEY")
-    secret = os.environ.get("LASTFM_API_SECRET")
-    session_key = os.environ.get("LASTFM_SESSION_KEY")
-    username = os.environ.get("LASTFM_USERNAME") or ""
-    if key and secret and session_key:
-        try:
-            import pylast
-            _scrobbler = pylast.LastFMNetwork(
-                api_key=key, api_secret=secret,
-                session_key=session_key, username=username)
-            logger.info("Last.fm scrobbler initialized (user=%s)", username or "?")
-        except Exception as e:
-            logger.error("Last.fm scrobbler init failed: %s", e)
-    else:
-        logger.info("Last.fm scrobbling disabled (missing credentials)")
-    return _scrobbler
-
-
-def _scrobble_async(method: str, **kwargs) -> None:
-    """Fire a Last.fm call (scrobble / update_now_playing) off the poller thread
-    — the network round-trip must never stall status polling."""
-    net = _get_scrobbler()
-    if net is None:
-        return
-    if cooling_down('lastfm'):
-        return  # Last.fm is rate-limiting us — skip the scrobble, keep polling
-
-    def _work():
-        try:
-            getattr(net, method)(**kwargs)
-            logger.info("Last.fm %s: %s — %s", method,
-                        kwargs.get("artist"), kwargs.get("title"))
-        except Exception as e:
-            logger.error("Last.fm %s failed: %s", method, e)
-
-    threading.Thread(target=_work, daemon=True, name="lastfm").start()
-
-
-def _scrobbling_enabled() -> bool:
-    from routers.profile import _read_scrobbling
-    try:
-        return _read_scrobbling()
-    except Exception as e:
-        logger.warning("scrobbling toggle read failed: %s", e)
-        return True
-
-
-def _play_identity(pl_row: Optional[dict]) -> Optional[dict]:
-    """Source-agnostic identity for the playing playlist row: its track UUID
-    (owned AND phantom carry it) + optional media_file_id. None when the row is
-    not a known Sautium track (a foreign / out-of-library URI in the queue)."""
-    if not pl_row:
-        return None
-    tid = pl_row.get("track_id")
-    if not tid:
-        return None
-    return {
-        "track_id": tid,
-        "media_file_id": pl_row.get("id"),
-        "artist": pl_row.get("artist"),
-        "title": pl_row.get("title"),
-        "album": pl_row.get("album"),
-        "duration": pl_row.get("duration_seconds"),
-    }
-
-
-def _save_play_session(s: "_PlaySession") -> None:
-    """Persist a finished session to listening_history + local_play_stats and
-    scrobble. Source-agnostic: keys on the track UUID, so phantom plays persist
-    exactly like owned (media_file_id is NULL for phantoms)."""
-    try:
-        completed = s.completed
-        skipped = not s.scrobble_ready
-        _db_execute(
-            "INSERT INTO listening_history "
-            "(media_file_id, track_id, started_at, ended_at, "
-            " duration_listened, percent_listened, completed, skipped) "
-            "VALUES (%(mf)s, %(tid)s::uuid, %(start)s, now(), "
-            "        %(dur)s, %(pct)s, %(comp)s, %(skip)s)",
-            {"mf": s.media_file_id, "tid": s.track_id, "start": s.started_at,
-             "dur": s.max_position, "pct": s.percent_listened,
-             "comp": completed, "skip": skipped},
-        )
-        if completed:
-            _db_execute(
-                "INSERT INTO local_play_stats "
-                "(track_id, play_count, skip_count, total_listen_time, "
-                " avg_percent_listened, last_played_at) "
-                "VALUES (%(tid)s::uuid, 1, 0, %(dur)s, %(pct)s, now()) "
-                "ON CONFLICT (track_id) DO UPDATE SET "
-                "  play_count = local_play_stats.play_count + 1, "
-                "  total_listen_time = local_play_stats.total_listen_time "
-                "                      + EXCLUDED.total_listen_time, "
-                "  avg_percent_listened = (local_play_stats.avg_percent_listened "
-                "      * local_play_stats.play_count + EXCLUDED.avg_percent_listened) "
-                "      / (local_play_stats.play_count + 1), "
-                "  last_played_at = EXCLUDED.last_played_at, "
-                "  updated_at = now()",
-                {"tid": s.track_id, "dur": s.max_position, "pct": s.percent_listened},
-            )
-            if not s.scrobbled and _scrobbling_enabled():
-                _scrobble_async(
-                    "scrobble", artist=s.artist, title=s.title,
-                    timestamp=int(s.started_at.timestamp()), album=s.album,
-                    duration=int(s.duration) if s.duration else None)
-                s.scrobbled = True
-            logger.info("play: %s — %s (%.0f%%) track=%s",
-                        s.artist, s.title, s.percent_listened, s.track_id)
-        else:
-            _db_execute(
-                "INSERT INTO local_play_stats "
-                "(track_id, play_count, skip_count, total_listen_time, "
-                " avg_percent_listened, last_played_at) "
-                "VALUES (%(tid)s::uuid, 0, 1, %(dur)s, %(pct)s, now()) "
-                "ON CONFLICT (track_id) DO UPDATE SET "
-                "  skip_count = local_play_stats.skip_count + 1, "
-                "  updated_at = now()",
-                {"tid": s.track_id, "dur": s.max_position, "pct": s.percent_listened},
-            )
-            logger.info("skip: %s — %s (%.0f%%) track=%s",
-                        s.artist, s.title, s.percent_listened, s.track_id)
-    except Exception as e:
-        logger.error("save play session failed: %s", e)
-
-
-def _track_play_event(state_name: str, position: float, length: float,
-                      track_index, pl_row: Optional[dict]) -> None:
-    """Advance listening-history / scrobble state from one status tick. Mirrors
-    the retired daemon's _handle_event, but resolves identity from the
-    already-built playlist payload (source-agnostic) — so phantom previews are
-    tracked too. Runs in the poller thread, OUTSIDE the HQPlayer status lock;
-    DB writes go through the autocommit pool, Last.fm calls are fired async."""
-    global _play_session, _play_track_index
-
-    if state_name != "playing":
-        if _play_session is not None:
-            _save_play_session(_play_session)
-            _play_session = None
-            _play_track_index = None
-        return
-
-    if track_index != _play_track_index:
-        if _play_session is not None:
-            _save_play_session(_play_session)
-        ident = _play_identity(pl_row)
-        if ident is None:
-            _play_session = None
-            _play_track_index = track_index
-            return
-        _play_session = _PlaySession(ident, datetime.now(), length)
-        _play_track_index = track_index
-        _scrobble_async(
-            "update_now_playing", artist=ident["artist"] or "",
-            title=ident["title"] or "", album=ident.get("album"),
-            duration=int(ident["duration"]) if ident.get("duration") else None)
-
-    if _play_session is not None:
-        _play_session.update_position(position)
-        if (not _play_session.scrobbled and _play_session.scrobble_ready
-                and _scrobbling_enabled()):
-            _scrobble_async(
-                "scrobble", artist=_play_session.artist, title=_play_session.title,
-                timestamp=int(_play_session.started_at.timestamp()),
-                album=_play_session.album,
-                duration=int(_play_session.duration) if _play_session.duration else None)
-            _play_session.scrobbled = True
-
-
 def _status_poller():
     """Background thread: poll HQPlayer every ~1s, update cache, wake SSE clients.
     Also refreshes the playlist cache every PLAYLIST_REFRESH_EVERY ticks (or
@@ -356,7 +133,7 @@ def _status_poller():
                 # old daemon's per-track-change PlaylistGet — no 5-tick staleness
                 # window where a phantom/owned row could be misattributed).
                 _track_changed = (status is not None
-                                  and status.track_index != _play_track_index)
+                                  and status.track_index != tracker.current_track_index())
                 if _playlist_dirty or _track_changed or (tick % PLAYLIST_REFRESH_EVERY == 0):
                     _refresh_playlist_cache()
 
@@ -418,8 +195,8 @@ def _status_poller():
                 # owned files and streamed phantoms both resolve via pl_row's
                 # track UUID). Separate from the session/Home-shelf archival
                 # below — that snapshots the whole queue, this records each play.
-                _track_play_event(new_data["state"], status.position,
-                                  status.length, status.track_index, pl_row)
+                tracker.track_play_event(new_data["state"], status.position,
+                                         status.length, status.track_index, pl_row)
 
                 # Natural end-of-queue: HQPlayer stopped on the last track.
                 # Archive the active session so a fully-listened album/queue
@@ -447,7 +224,7 @@ def _status_poller():
                     if _seed:
                         _radio_refilling = True
                         threading.Thread(
-                            target=_radio_fill, args=(_seed, _playback_generation),
+                            target=_radio_fill, args=(_seed, hqp_backend.generation()),
                             daemon=True, name="radio-refill").start()
 
                 if new_data != _latest_status:
@@ -518,240 +295,6 @@ def stop_status_poller():
     logger.info("SSE status poller stopped")
 
 
-# -- Lazy singletons ----------------------------------------------------------
-#
-# Two independent HQPlayer connections so the background status poller and
-# user-initiated commands never contend for the same socket / lock:
-#
-#   * `_hqp_status_client` + `_hqp_status_lock`
-#       Owned exclusively by `_status_poller`. Fast 2 s socket timeout so a
-#       lagging HQPlayer is detected quickly without freezing the rest of
-#       the request flow.
-#
-#   * `_hqp_client` + `_hqp_lock`
-#       Owned by all command endpoints (play / pause / next / play-track /
-#       /api/player/playlist etc). 5 s timeout for write operations that
-#       may take longer to acknowledge (e.g. play-album loads many URIs).
-#
-# HQPlayer's control API accepts multiple concurrent TCP clients, so the
-# two sockets co-exist cleanly on the HQP side.
-
-_hqp_client: Optional[HQPlayerClient] = None
-_hqp_lock = threading.Lock()  # cmd commands
-
-# Bumped every time a NEW playback queue is started (any clear_first add). A
-# background phantom-album filler captures it and stops appending the instant the
-# user moves to another queue, so a slow album fill never bleeds tracks into an
-# unrelated session. Only ever mutated under _hqp_lock.
-_playback_generation = 0
-
-_hqp_status_client: Optional[HQPlayerClient] = None
-_hqp_status_lock = threading.Lock()  # status poller
-
-
-def _make_client(timeout: float) -> HQPlayerClient:
-    return HQPlayerClient(
-        host=settings.hqplayer_host,
-        port=settings.hqplayer_port,
-        timeout=timeout,
-    )
-
-
-# Circuit breaker for a stalled HQPlayer control port. A control-port stall
-# (HQPlayer accepts the TCP connect but never replies, or stops accepting
-# connects) makes every reconnect block for the full socket timeout. Without
-# this, one play action fans out into rotate + stop + add × retries = tens of
-# seconds of stacked connect timeouts while holding _hqp_lock, which also
-# blocks every other request queued behind that lock. After a failed connect
-# we "open" the breaker for a short cooldown: further reconnects fail fast
-# instead of stacking timeouts. The next successful connect (e.g. the status
-# poller once HQPlayer answers again) closes it.
-_hqp_unreachable_until: float = 0.0
-HQP_CIRCUIT_COOLDOWN = 6.0
-
-
-def _ensure_connected(client: Optional[HQPlayerClient], timeout: float, label: str
-                      ) -> HQPlayerClient:
-    """Return a healthy HQPlayer client; reconnect if the cached one is stale.
-
-    Caller must hold the appropriate lock. `client` is the previous instance
-    (may be None). Returns the (possibly new) instance. Raises ConnectionError
-    if the connection cannot be established.
-    """
-    need_reconnect = client is None or not client.is_connected()
-
-    # Detect remote-side close by peeking the socket.
-    if not need_reconnect and client and client.socket:
-        import select
-        try:
-            ready = select.select([client.socket], [], [], 0)
-            if ready[0]:
-                peek = client.socket.recv(1, 0x02)  # MSG_PEEK
-                if not peek:
-                    logger.info(f"HQPlayer ({label}) closed by remote, reconnecting...")
-                    need_reconnect = True
-        except Exception:
-            need_reconnect = True
-
-    if need_reconnect:
-        global _hqp_unreachable_until
-        # Breaker open — fail fast rather than eat another connect timeout.
-        if time.monotonic() < _hqp_unreachable_until:
-            raise ConnectionError("HQPlayer unreachable (circuit open)")
-        if client:
-            try:
-                client.disconnect()
-            except Exception:
-                pass
-        client = _make_client(timeout=timeout)
-        if not client.connect():
-            _hqp_unreachable_until = time.monotonic() + HQP_CIRCUIT_COOLDOWN
-            raise ConnectionError(
-                f"Cannot connect to HQPlayer at {settings.hqplayer_host}:{settings.hqplayer_port}"
-            )
-        _hqp_unreachable_until = 0.0  # connected — close the breaker
-        logger.info(f"HQPlayer ({label}) connected")
-    return client
-
-
-def _get_hqp() -> HQPlayerClient:
-    """Get or create HQPlayer command client. Must be called inside _hqp_lock."""
-    global _hqp_client
-    _hqp_client = _ensure_connected(_hqp_client, timeout=5.0, label="cmd")
-    return _hqp_client
-
-
-def _get_hqp_status() -> HQPlayerClient:
-    """Get or create HQPlayer status-poller client. Must be called inside _hqp_status_lock."""
-    global _hqp_status_client
-    # 4s, not 2s: HQPlayer's control thread can lag a few seconds behind a
-    # <Status/> while busy rendering. A tight timeout turns a slow-but-alive
-    # reply into a needless disconnect + reconnect churn cycle.
-    _hqp_status_client = _ensure_connected(_hqp_status_client, timeout=4.0, label="status")
-    return _hqp_status_client
-
-
-def _reset_hqp():
-    """Force-close HQPlayer command client so next _get_hqp() reconnects."""
-    global _hqp_client
-    if _hqp_client:
-        try:
-            _hqp_client.disconnect()
-        except Exception:
-            pass
-        _hqp_client = None
-
-
-def _reset_hqp_status():
-    """Force-close HQPlayer status client so next _get_hqp_status() reconnects."""
-    global _hqp_status_client
-    if _hqp_status_client:
-        try:
-            _hqp_status_client.disconnect()
-        except Exception:
-            pass
-        _hqp_status_client = None
-
-
-def reset_all_clients() -> None:
-    """Public entry point — called by /api/settings/hqplayer after the
-    host or port changes so the next status/command call reconnects
-    against the new address instead of holding onto the old socket."""
-    with _hqp_lock:
-        _reset_hqp()
-    with _hqp_status_lock:
-        _reset_hqp_status()
-
-
-def _hqp_cmd(func):
-    """Execute a function with HQPlayer client under lock. Auto-reconnects on broken pipe."""
-    with _hqp_lock:
-        try:
-            hqp = _get_hqp()
-            return func(hqp)
-        except (BrokenPipeError, ConnectionError, OSError) as e:
-            logger.warning(f"HQPlayer connection lost ({e}), reconnecting...")
-            _reset_hqp()
-            hqp = _get_hqp()
-            return func(hqp)
-
-
-def _uri_in_playlist(uri: str) -> bool:
-    """Best-effort: is `uri` already in HQPlayer's playlist? Used to avoid
-    re-adding (duplicating) a track whose add LANDED but whose response was lost
-    to a slow read-timeout. Returns False if the playlist can't be read. Call
-    while holding `_hqp_lock`."""
-    try:
-        return any(t.get("uri") == uri for t in (_get_hqp().get_playlist() or []))
-    except Exception:
-        return False
-
-
-def _add_uris_with_retry(uris: list[str], *, clear_first: bool = False) -> int:
-    """Append URIs to the HQPlayer playlist, surviving a mid-batch
-    connection drop. MUST be called while holding `_hqp_lock`.
-
-    `playlist_add` returns False (it does not raise) when the control
-    socket is down, so a plain `for` loop silently drops tracks while the
-    endpoint still reports success — exactly the failure that made a Queue
-    action add only the one track that landed before HQPlayer stalled.
-    Here every add is verified: on a falsey result or a dropped socket we
-    reset the connection and retry that one URI once. Returns the count
-    actually added so the caller can surface a short count instead of a
-    fake 'ok'.
-
-    `clear_first=True` issues clear=True on the first URI (replace-queue
-    semantics); the rest append. The clear only ever fires on i == 0, so a
-    mid-batch reconnect never re-clears already-added tracks.
-    """
-    if clear_first:
-        # New queue = new playback generation (retires any phantom filler).
-        global _playback_generation
-        _playback_generation += 1
-    added = 0
-    for i, uri in enumerate(uris):
-        clear = clear_first and i == 0
-        ok = False
-        for attempt in (1, 2):
-            try:
-                ok = _get_hqp().playlist_add(uri, clear=clear)
-            except (BrokenPipeError, ConnectionError, OSError):
-                ok = False
-            if ok:
-                break
-            if attempt == 1:
-                # The add may have LANDED but its response was lost (slow
-                # HQPlayer read-timeout); re-adding an append would DUPLICATE the
-                # track. Verify first — preview URIs are unique, so a present URI
-                # means the first add took.
-                if not clear and _uri_in_playlist(uri):
-                    ok = True
-                    break
-                _reset_hqp()  # force a fresh socket before the single retry
-        if ok:
-            added += 1
-        else:
-            logger.warning(f"playlist_add failed after reconnect: {uri}")
-    return added
-
-
-def _hqp_safe(action) -> None:
-    """Run one HQPlayer command (stop / play / clear / select_track)
-    tolerantly inside an existing `_hqp_lock`: one reconnect-and-retry,
-    never raises. Frames a resilient multi-add so a churning control port
-    can't abort the whole operation at its stop()/play() bookends before
-    the add even runs."""
-    for attempt in (1, 2):
-        try:
-            action(_get_hqp())
-            return
-        except (BrokenPipeError, ConnectionError, OSError):
-            if attempt == 1:
-                _reset_hqp()
-
-
-
-
 # -- Listening sessions (queue-lifetime snapshots) ----------------------------
 #
 # Each destructive play endpoint archives the live queue as an immutable
@@ -760,14 +303,6 @@ def _hqp_safe(action) -> None:
 # archived snapshots, captured at the instant the queue is replaced. `origin`
 # (how the queue started) is the one fact HQPlayer doesn't know, so it rides
 # on the active-session marker.
-
-_SESSION_ORIGINS = ("album", "track", "radio", "mix")
-# Idempotent-replay window: a destructive play of the same origin within this
-# many seconds of the active session opening is treated as a duplicate (double-
-# tapped "Play all", a retried request) and skipped. Beyond it, replaying the
-# same album/track is a genuinely new listen and opens a fresh session — so
-# re-playing a track minutes later isn't swallowed into the stale one.
-_SESSION_DEDUP_WINDOW_SEC = 30
 
 
 def _rotate_session(
@@ -839,298 +374,6 @@ def _close_active_session() -> None:
     )
     if archived_mix_id is not None:
         _schedule_mix_title(archived_mix_id)
-
-
-def _archive_and_open_session(
-    old_pairs: list[tuple[str, Optional[int]]],
-    origin: str,
-    seed_track_id: Optional[str],
-    seed_media_file_id: Optional[int],
-    origin_album_id: Optional[str],
-    *,
-    open_new: bool = True,
-) -> Optional[str]:
-    """Archive the current active session against `old_pairs` (track_id,
-    media_file_id) and open a new one — atomically. db_pool connections are
-    autocommit, so toggle it off for this multi-statement transaction (mirrors
-    db_pool.db_query_with_ef_search). With open_new=False (end-of-queue
-    completion) the active session is archived but no new one is opened.
-    Returns the archived session id IFF it was a mix needing a background
-    title, else None."""
-    import psycopg2.extras
-
-    archived_mix_id: Optional[str] = None
-    with _get_conn() as conn:
-        conn.autocommit = False
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Owned play endpoints pass only the seed's media_file_id; the
-                # session keys on the logical track UUID, so derive it here (one
-                # query) — keeps every owned call-site untouched. Phantom callers
-                # pass seed_track_id directly (they have no media_file).
-                if seed_track_id is None and seed_media_file_id is not None:
-                    cur.execute(
-                        "SELECT track_id::text AS tid FROM media_files WHERE id = %s",
-                        (seed_media_file_id,))
-                    r = cur.fetchone()
-                    seed_track_id = r["tid"] if r else None
-
-                cur.execute(
-                    "SELECT id::text AS id, origin, "
-                    "origin_album_id::text AS origin_album_id, "
-                    "seed_track_id::text AS seed_track_id, seed_media_file_id, "
-                    "EXTRACT(EPOCH FROM (now() - started_at)) AS age_sec "
-                    "FROM listening_sessions WHERE ended_at IS NULL FOR UPDATE"
-                )
-                active = cur.fetchone()
-
-                # Idempotent re-play: a repeated destructive play of the same
-                # thing within _SESSION_DEDUP_WINDOW_SEC (double-tapped "Play
-                # all", a retried/duplicated request) must NOT archive the
-                # just-opened session against the still-old HQPlayer queue and
-                # spawn a duplicate. FOR UPDATE serialises concurrent calls so
-                # the second sees the first's freshly-inserted active row. The
-                # time window keeps this to genuine duplicates: re-playing the
-                # same album/track minutes later is a new listen and opens a
-                # fresh session instead of being swallowed into the stale one.
-                if open_new and active is not None and (
-                    active["age_sec"] is not None
-                    and active["age_sec"] < _SESSION_DEDUP_WINDOW_SEC
-                    and active["origin"] == origin
-                    and active["origin_album_id"] == origin_album_id
-                    and active["seed_track_id"] == seed_track_id
-                ):
-                    conn.commit()
-                    return None
-
-                if active is not None:
-                    snapshot = _snapshot_pairs_for(cur, active, old_pairs)
-                    if snapshot:
-                        psycopg2.extras.execute_values(
-                            cur,
-                            "INSERT INTO session_tracks "
-                            "(session_id, position, track_id, media_file_id) VALUES %s",
-                            [(active["id"], i, tid, mid)
-                             for i, (tid, mid) in enumerate(snapshot)],
-                        )
-                        title, subtitle, cover_id, cover_url = _compute_session_card(
-                            cur, active, snapshot,
-                        )
-                        cur.execute(
-                            "UPDATE listening_sessions SET ended_at = now(), "
-                            "track_count = %s, title = %s, subtitle = %s, "
-                            "cover_id = %s::uuid, cover_url = %s WHERE id = %s::uuid",
-                            (len(snapshot), title, subtitle,
-                             cover_id, cover_url, active["id"]),
-                        )
-                        if active["origin"] == "mix":
-                            archived_mix_id = active["id"]
-                    else:
-                        # Dangling empty active row — never show an empty card.
-                        cur.execute(
-                            "DELETE FROM listening_sessions WHERE id = %s::uuid",
-                            (active["id"],),
-                        )
-
-                if open_new:
-                    cur.execute(
-                        "INSERT INTO listening_sessions "
-                        "(origin, seed_track_id, seed_media_file_id, origin_album_id) "
-                        "VALUES (%s, %s::uuid, %s, %s::uuid)",
-                        (origin, seed_track_id, seed_media_file_id, origin_album_id),
-                    )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.autocommit = True
-    return archived_mix_id
-
-
-def _snapshot_pairs_for(cur, active: dict, old_pairs: list[tuple[str, Optional[int]]]
-                        ) -> list[tuple[str, Optional[int]]]:
-    """Resolve which (track_id, media_file_id) pairs to snapshot into the
-    archived session.
-
-    For album/track sessions the content is deterministic from the origin, so
-    guard against the live queue being replaced out-of-band (e.g. HQPlayer
-    reopened with a different album, leaving a foreign queue): if the captured
-    queue no longer overlaps the origin's own tracks, snapshot the origin's
-    tracks so the card's cover/tracks match its title. A queue that still
-    overlaps is trusted — it reflects in-app edits (queued/removed tracks).
-    radio/mix content is dynamic (similar picks / an explicit list) with no
-    origin reference, so the captured queue is the only source.
-
-    Album tracks come from the canonical album_tracks list (owned AND phantom
-    albums), LEFT-joined to media_files for the physical id; a phantom album's
-    tracks carry media_file_id None."""
-    origin = active["origin"]
-    old_tids = {tid for tid, _mid in old_pairs}
-
-    if origin == "album" and active["origin_album_id"]:
-        cur.execute(
-            "SELECT t.id::text AS track_id, mf.id AS media_file_id "
-            "FROM album_tracks atk "
-            "JOIN tracks t ON t.id = atk.track_id "
-            "LEFT JOIN media_files mf ON mf.track_id = t.id "
-            "WHERE atk.album_id = %s::uuid "
-            "ORDER BY atk.disc, atk.position",
-            (active["origin_album_id"],),
-        )
-        album_pairs = [(r["track_id"], r["media_file_id"]) for r in cur.fetchall()]
-        album_tids = {tid for tid, _mid in album_pairs}
-        if album_tids and not (old_tids & album_tids):
-            return album_pairs
-        return old_pairs
-
-    if origin == "track" and active["seed_track_id"]:
-        # A single-track session is exactly its seed; don't let an out-of-band
-        # queue swap put a foreign track in it.
-        if active["seed_track_id"] not in old_tids:
-            return [(active["seed_track_id"], active.get("seed_media_file_id"))]
-        return old_pairs
-
-    return old_pairs
-
-
-def _cover_for_track(cur, track_id: Optional[str], media_file_id: Optional[int]
-                     ) -> tuple[Optional[str], Optional[str]]:
-    """(cover_id, cover_url) for a snapshot track — owned art is a covers(id)
-    via media_files; a phantom track's art is its album's CAA cover_url. The
-    session card renders cover_id (owned) OR cover_url (phantom)."""
-    if media_file_id is not None:
-        cur.execute("SELECT cover_id::text AS c FROM media_files WHERE id = %s",
-                    (media_file_id,))
-        r = cur.fetchone()
-        if r and r["c"]:
-            return (r["c"], None)
-    if track_id is not None:
-        cur.execute(
-            "SELECT al.cover_url FROM album_tracks atk "
-            "JOIN albums al ON al.id = atk.album_id "
-            "WHERE atk.track_id = %s::uuid AND al.cover_url IS NOT NULL LIMIT 1",
-            (track_id,))
-        r = cur.fetchone()
-        if r:
-            return (None, r["cover_url"])
-    return (None, None)
-
-
-def _compute_session_card(cur, active: dict, snapshot: list[tuple[str, Optional[int]]]):
-    """Title / subtitle / (cover_id, cover_url) for an archived session, derived
-    from its origin (NOT the snapshot's first row — album/track/radio titles
-    come from the stored origin columns; only mix uses the snapshot). Cover is
-    source-agnostic via _cover_for_track. Per-row label formatting is the
-    Python-side case the project allows; the lookups are SQL. Uses the cursor
-    already inside the archive transaction."""
-    origin = active["origin"]
-    first = snapshot[0] if snapshot else (None, None)
-
-    if origin == "album" and active["origin_album_id"]:
-        # Source-agnostic primary artist: owned via media_files, phantom via the
-        # canonical album_tracks list (COALESCE picks whichever the album has).
-        cur.execute("""
-            SELECT al.title,
-                   COALESCE(
-                     (SELECT a.name FROM artists a
-                      JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
-                      JOIN tracks t ON t.id = ta.track_id
-                      JOIN media_files mf ON mf.track_id = t.id
-                      JOIN album_variants av ON av.id = mf.album_variant_id
-                      WHERE av.album_id = al.id
-                      GROUP BY a.id, a.name ORDER BY COUNT(*) DESC LIMIT 1),
-                     (SELECT a.name FROM artists a
-                      JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
-                      JOIN album_tracks atk ON atk.track_id = ta.track_id
-                      WHERE atk.album_id = al.id
-                      GROUP BY a.id, a.name ORDER BY COUNT(*) DESC LIMIT 1)
-                   ) AS artist
-            FROM albums al WHERE al.id = %s::uuid
-        """, (active["origin_album_id"],))
-        r = cur.fetchone()
-        cover_id, cover_url = _cover_for_track(cur, first[0], first[1])
-        return (
-            r["title"] if r else "Album",
-            r["artist"] if r else None,
-            cover_id, cover_url,
-        )
-
-    if origin in ("track", "radio") and active["seed_track_id"]:
-        cur.execute("""
-            SELECT t.title, a.name AS artist
-            FROM tracks t
-            LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
-            LEFT JOIN artists a ON a.id = ta.artist_id
-            WHERE t.id = %s::uuid
-            LIMIT 1
-        """, (active["seed_track_id"],))
-        r = cur.fetchone()
-        title = r["title"] if r else "Track"
-        subtitle = "Radio" if origin == "radio" else (r["artist"] if r else None)
-        cover_id, cover_url = _cover_for_track(
-            cur, active["seed_track_id"], active.get("seed_media_file_id"))
-        if not cover_id and not cover_url:   # seed missing → fall back to the first row
-            cover_id, cover_url = _cover_for_track(cur, first[0], first[1])
-        return (title, subtitle, cover_id, cover_url)
-
-    # mix — or album/track/radio with a NULL seed (degrade gracefully).
-    n = len(snapshot)
-    cover_id, cover_url = _cover_for_track(cur, first[0], first[1])
-    return ("Mix", f"{n} track{'s' if n != 1 else ''}", cover_id, cover_url)
-
-
-def _schedule_mix_title(session_id: str) -> None:
-    """Generate an AI title for an archived mix in a background daemon thread
-    (the codebase's background-work idiom — chat-stream-worker, status poller).
-    Graceful no-op when no AI provider is configured: the card stays 'Mix'."""
-    def _worker():
-        try:
-            from routers.chat import (
-                _resolve_provider, _title_via_provider,
-                _title_via_claude_code, _clean_title,
-            )
-            try:
-                provider = _resolve_provider(None)
-            except Exception:
-                return  # no provider → leave 'Mix'
-
-            rows = _db_query("""
-                SELECT a.name AS artist, t.title AS title
-                FROM session_tracks st
-                JOIN tracks t ON t.id = st.track_id
-                JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
-                JOIN artists a ON a.id = ta.artist_id
-                WHERE st.session_id = %(sid)s::uuid
-                ORDER BY st.position
-                LIMIT 30
-            """, {"sid": str(session_id)})
-            if not rows:
-                return
-
-            lines = "\n".join(f"{r['artist']} — {r['title']}" for r in rows)
-            prompt = (
-                "Below is a playlist of tracks. Produce a short, evocative "
-                "playlist name — 2-4 words, max 6 — in the same language as the "
-                "track titles. No quotes, no trailing punctuation, do not use "
-                "the words 'playlist' or 'mix'. Output ONLY the name.\n\n" + lines
-            )
-            title = (
-                _title_via_claude_code(prompt) if provider == "claude_code"
-                else _title_via_provider(provider, prompt)
-            )
-            title = _clean_title(title) if title else None
-            if title:
-                # Only overwrite the placeholder — a later user edit wins.
-                _db_execute(
-                    "UPDATE listening_sessions SET title = %(t)s "
-                    "WHERE id = %(id)s::uuid AND title = 'Mix'",
-                    {"t": title, "id": str(session_id)},
-                )
-        except Exception as e:
-            logger.warning(f"mix title generation failed for {session_id}: {e}")
-
-    threading.Thread(target=_worker, daemon=True, name="mix-title-worker").start()
 
 
 # -- Request models -----------------------------------------------------------
@@ -2115,11 +1358,11 @@ def _owned_filler(rows: list, gen: int) -> None:
     instantly, an m4a after its in-memory transcode — in order, stopping if a new
     playback supersedes this one (generation)."""
     for r in rows:
-        if _playback_generation != gen:
+        if hqp_backend.generation() != gen:
             return
         uri = _owned_play_uri(r["id"], r["file_path"], r["file_format"])
         with _hqp_lock:
-            if _playback_generation != gen:
+            if hqp_backend.generation() != gen:
                 return
             _add_uris_with_retry([uri], clear_first=False)
         _invalidate_playlist()
@@ -2183,12 +1426,12 @@ def _add_owned(rows: list, *, clear_first: bool, position: str = "end") -> int:
         with _hqp_lock:
             _hqp_safe(lambda h: h.stop())
             added = _add_uris_with_retry([uri0], clear_first=True)   # bumps generation
-            gen = _playback_generation
+            gen = hqp_backend.generation()
             if added:
                 _hqp_safe(lambda h: h.play())
     else:
         added = _queue_uris([uri0], position)
-        gen = _playback_generation
+        gen = hqp_backend.generation()
     _invalidate_playlist()
     _notify_update()
     if added and len(rows) > 1:
@@ -2366,7 +1609,7 @@ def _phantom_filler(proxy, tokens: list, start_index: int, gen: int) -> None:
         if e is None or e.audio is None:
             continue
         with _hqp_lock:
-            if _playback_generation != gen:
+            if hqp_backend.generation() != gen:
                 return   # user moved to another queue → stop appending
             _add_uris_with_retry([proxy.url_for(tokens[j])], clear_first=False)
         _invalidate_playlist()
@@ -2700,7 +1943,7 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
         with _hqp_lock:
             _hqp_safe(lambda h: h.stop())
             added = _add_uris_with_retry(prefix_urls, clear_first=True)
-            gen = _playback_generation          # capture under lock, after the clear
+            gen = hqp_backend.generation()          # capture under lock, after the clear
             if added:
                 _hqp_safe(lambda h: h.play())
         _invalidate_playlist()
@@ -2890,7 +2133,7 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
                                 detail="HQPlayer unavailable — preview not queued. Try again.")
         # A queue-append doesn't start a new session, so capture the CURRENT
         # generation; the filler aborts if the user replaces the queue meanwhile.
-        gen = _playback_generation
+        gen = hqp_backend.generation()
     threading.Thread(target=_phantom_filler, args=(proxy, list(tokens), 0, gen),
                      daemon=True, name="phantom-queue").start()
     return {"ok": True, "provider": _provider_label(items),
@@ -3261,7 +2504,7 @@ def _radio_append_batch(batch: list, gen: int) -> None:
     from streaming import service as streaming_service
     proxy = streaming_service.get_proxy()
     for item in batch:
-        if not _radio_mode or _playback_generation != gen:
+        if not _radio_mode or hqp_backend.generation() != gen:
             return
         if item["kind"] == "phantom":
             if proxy is None:
@@ -3277,7 +2520,7 @@ def _radio_append_batch(batch: list, gen: int) -> None:
             # owned: native file:// or, for an m4a, transcode to FLAC via the proxy
             uri = _owned_play_uri(item["media_file_id"], item["file_path"], item["file_format"])
         with _hqp_lock:
-            if not _radio_mode or _playback_generation != gen:
+            if not _radio_mode or hqp_backend.generation() != gen:
                 return
             _add_uris_with_retry([uri], clear_first=False)
         _radio_played.add(item["track_uuid"])
@@ -3291,7 +2534,7 @@ def _radio_fill(seed_uuid: str, gen: int) -> None:
     resolve + buffer is slow); clears the one-at-a-time guard on exit."""
     global _radio_refilling
     try:
-        if _radio_mode and _playback_generation == gen:
+        if _radio_mode and hqp_backend.generation() == gen:
             batch = _radio_build_batch(seed_uuid)
             if batch:
                 _radio_append_batch(batch, gen)
@@ -3314,7 +2557,7 @@ def radio_start(req: RadioStartRequest):
     Async — the phantom resolve + buffer is slow; the toggle returns at once and the
     queue grows behind the seed (owned instantly, phantoms as they buffer)."""
     global _radio_mode, _radio_played, _radio_refilling, _radio_last_artist
-    global _playback_generation, _status_version
+    global _status_version
 
     # Seed by track UUID (a streamed phantom row has no media_file) or by
     # media_file_id (owned). Either way radio keys on the track's CLAP embedding.
@@ -3356,8 +2599,7 @@ def radio_start(req: RadioStartRequest):
         # PlaylistClear keeps the reading slot intact — it erases everything queued
         # AFTER the current track while the seed plays on; the batch flows in behind.
         _hqp_safe(lambda h: h.playlist_clear())
-        _playback_generation += 1          # new session — supersede any prior stream
-        gen = _playback_generation
+        gen = hqp_backend.bump_generation()   # new session — supersede any prior stream
     _invalidate_playlist()
 
     _radio_played = {seed_uuid}

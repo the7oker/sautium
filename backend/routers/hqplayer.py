@@ -23,7 +23,7 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 from db_pool import db_execute, db_query_one
-from routers.player import (
+from playback.hqp_backend import (
     _hqp_lock,
     _hqp_status_lock,
     _get_hqp,

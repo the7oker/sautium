@@ -1132,7 +1132,7 @@ def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
     # Drop cached HQPlayer sockets so the next status/command call
     # reconnects against the new address.
     try:
-        from routers.player import reset_all_clients as _reset_hqp
+        from playback.hqp_backend import reset_all_clients as _reset_hqp
         _reset_hqp()
         logger.info("HQPlayer cached clients reset")
     except Exception as e:
