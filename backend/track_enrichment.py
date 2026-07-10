@@ -295,8 +295,16 @@ def run_parallel_enrichment(
     # Phase 1's CLAP/instrument tensors are finished; hand their cached blocks
     # back to the driver before Phase 2 so the text encoder isn't squeezed into
     # a full allocator arena on the 16 GB laptop GPU. Singleton model weights
-    # stay resident — only the allocator's free cache is returned.
+    # stay resident — only the allocator's free cache is returned. On the
+    # standard/lite profiles the AST+PaSST pair is released entirely: nothing
+    # after Phase 1 needs it, and those machines want the memory back more
+    # than they want an instant next run.
     if torch is not None:
+        from hardware_profile import resolve as _hw
+        if _hw().unload_instruments_after_run:
+            from device import get_device
+            from instrument_tagger import release_instrument_tagger
+            release_instrument_tagger(get_device())
         from device import empty_cache
         empty_cache()
 

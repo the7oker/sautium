@@ -40,6 +40,11 @@ logger = logging.getLogger(__name__)
 
 
 class PreviewEnricher:
+    # Trickle idle: release AST+PaSST after this long without a preview.
+    # Long enough to span between-track gaps and a paused album, short
+    # enough that a lite node doesn't hold ~2GB of tagger weights all day.
+    _IDLE_UNLOAD_SECONDS = 600.0
+
     def __init__(self) -> None:
         # One worker: serialise GPU passes. Previews trickle in per album, so a
         # single lane is plenty and keeps VRAM contention with the bulk
@@ -49,12 +54,23 @@ class PreviewEnricher:
         self._lock = threading.Lock()
         self._embedder = None
         self._analyzer = None
+        # Trickle mode (CPU-only / lite profile — §2.7 HARDWARE-TIERS): the
+        # per-track pipeline runs near listening pace there, so backlog is
+        # bounded (1 running + 1 queued) and excess is DROPPED — enrichment
+        # is idempotent and a dropped track gets another chance on its next
+        # stream. Idle unloads the instrument pair; CLAP/BGE stay resident
+        # (shared with search).
+        from hardware_profile import resolve as _hw
+        self._trickle = _hw().stream_enrich_mode == "trickle"
+        self._max_pending = 2 if self._trickle else None
+        self._idle_timer: Optional[threading.Timer] = None
 
     def submit(self, track_id: Optional[str], flac: Optional[bytes],
                duration: Optional[float], lossless: bool = False,
                provider_id: Optional[str] = None) -> None:
         """Queue a previewed track for enrichment. No-ops without a track_id, a
         duration (unverified match — see GATE) or audio, or if already queued.
+        In trickle mode a full backlog drops the track instead of queueing.
         ``lossless`` is the ACTUAL fetch quality (Deezer FLAC=True, degraded
         tiers/YouTube=False); ``provider_id`` (manifest id, 'deezer'|'youtube')
         becomes the provenance origin."""
@@ -63,7 +79,15 @@ class PreviewEnricher:
         with self._lock:
             if track_id in self._inflight:
                 return
+            if self._max_pending is not None and len(self._inflight) >= self._max_pending:
+                logger.info(
+                    "preview enrich DROP %s: trickle backlog (%d pending) — "
+                    "will retry on next stream", track_id, len(self._inflight))
+                return
             self._inflight.add(track_id)
+            if self._idle_timer is not None:
+                self._idle_timer.cancel()
+                self._idle_timer = None
         self._pool.submit(self._run, track_id, flac, duration, lossless,
                           provider_id)
 
@@ -77,6 +101,27 @@ class PreviewEnricher:
         finally:
             with self._lock:
                 self._inflight.discard(track_id)
+                if self._trickle and not self._inflight:
+                    self._idle_timer = threading.Timer(
+                        self._IDLE_UNLOAD_SECONDS, self._idle_unload)
+                    self._idle_timer.daemon = True
+                    self._idle_timer.start()
+
+    def _idle_unload(self) -> None:
+        """One-shot idle timeout (event-scheduled after the last completion,
+        cancelled by new work — not a poll). Drops the analyzer so its
+        AST+PaSST reference dies, then releases the singleton weights."""
+        with self._lock:
+            if self._inflight:
+                return
+            self._idle_timer = None
+            analyzer, self._analyzer = self._analyzer, None
+        if analyzer is not None:
+            from device import get_device
+            from instrument_tagger import release_instrument_tagger
+            release_instrument_tagger(get_device())
+            self._empty_cache()
+            logger.info("preview enrich idle — instrument models released (trickle)")
 
     def _enrich(self, track_id: str, flac: bytes, duration: float,
                 lossless: bool, provider_id: Optional[str]) -> None:

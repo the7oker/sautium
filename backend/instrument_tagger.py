@@ -52,3 +52,17 @@ def get_instrument_tagger(device: str):
         _load_events.pop(key, None)
     evt.set()
     return tagger
+
+
+def release_instrument_tagger(device: str) -> None:
+    """Drop the singleton and free its weights (AST+PaSST, ~0.5-2GB).
+
+    Used on the standard/lite profiles after a bulk enrichment run and on
+    trickle-mode idle — machines where the resident pair costs more than
+    the reload latency. The next get_instrument_tagger() reloads. No-op if
+    not loaded; never called on the full profile (keeps re-runs instant,
+    and repeated load/unload cycles fragment the caching allocator)."""
+    with _lock:
+        tagger = _cache.pop(device, None)
+    if tagger is not None:
+        tagger.unload()

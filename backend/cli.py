@@ -1557,5 +1557,87 @@ def fix_analysis_source(dry_run):
             click.echo(f"  {row.file_format} (lossless={row.is_lossless}): {row.cnt}")
 
 
+@cli.command()
+@click.option("--tracks", "-n", type=int, default=5,
+              help="Sample size (random owned tracks, 2-8 min long)")
+def bench(tracks):
+    """Measure the full per-track analysis pipeline on THIS machine.
+
+    Times decode + CLAP segments + librosa features + AST/PaSST instruments
+    on a random sample and prints tracks/hour plus a whole-library ETA —
+    the honest number behind the "analyze locally vs import via P2P"
+    decision (docs/design/HARDWARE-TIERS.md)."""
+    import time as _time
+
+    from sqlalchemy import text as sql_text
+
+    from config import settings
+    from hardware_profile import resolve as hw_resolve
+
+    profile = hw_resolve()
+    click.echo(f"Profile: {profile.name} ({profile.device}, "
+               f"{profile.accel_memory_gb:.1f} GB accel, {profile.cores} cores)")
+
+    with get_db_context() as db:
+        rows = db.execute(sql_text("""
+            SELECT mf.file_path, mf.duration_seconds
+            FROM media_files mf
+            WHERE mf.is_analysis_source = true
+              AND mf.duration_seconds BETWEEN 120 AND 480
+            ORDER BY random()
+            LIMIT :n
+        """), {"n": tracks}).fetchall()
+        library_total = db.execute(sql_text(
+            "SELECT count(*) FROM media_files WHERE is_analysis_source = true"
+        )).scalar()
+    if not rows:
+        click.echo("No owned tracks to sample — scan the library first.")
+        return
+
+    click.echo("Loading models (first run may download/cold-load)...")
+    from audio_analysis import AudioAnalyzer, load_full_track_48k
+    from embeddings import AudioEmbeddingGenerator
+    embedder = AudioEmbeddingGenerator()
+    embedder.load_model()
+    analyzer = AudioAnalyzer()
+    analyzer.load_model()
+
+    audio_seconds = 0.0
+    wall_seconds = 0.0
+    for row in rows:
+        local_path = settings.translate_to_local_path(row.file_path)
+        t0 = _time.monotonic()
+        try:
+            audio = load_full_track_48k(local_path)
+            embedder._compute_segments(audio)
+            analyzer.analyze_from_array(audio, sr=48000)
+        except Exception as e:
+            click.echo(f"  SKIP {local_path[-60:]}: {e}")
+            continue
+        dt = _time.monotonic() - t0
+        wall_seconds += dt
+        audio_seconds += float(row.duration_seconds)
+        rt = float(row.duration_seconds) / dt
+        click.echo(f"  {dt:6.1f}s for {row.duration_seconds:.0f}s of audio "
+                   f"({rt:.1f}x realtime)  {row.file_path[-60:]}")
+
+    if not wall_seconds:
+        click.echo("Every sample failed — check ffmpeg and the music mount.")
+        return
+
+    realtime_factor = audio_seconds / wall_seconds
+    avg_track = audio_seconds / max(1, len(rows))
+    tracks_per_hour = 3600.0 / (wall_seconds / max(1, len(rows)))
+    eta_hours = library_total / tracks_per_hour if tracks_per_hour else 0
+    click.echo(f"\nThroughput: {realtime_factor:.1f}x realtime "
+               f"≈ {tracks_per_hour:.0f} tracks/hour (avg {avg_track:.0f}s track)")
+    click.echo(f"Library ETA: {library_total} tracks ≈ {eta_hours:.1f} h "
+               f"({eta_hours/24:.1f} days) of continuous analysis")
+    if realtime_factor < 1.0:
+        click.echo("NOTE: slower than realtime — stream trickle-enrichment "
+                   "will drop tracks under sustained listening; P2P import "
+                   "is the right analysis source for this machine.")
+
+
 if __name__ == "__main__":
     cli()

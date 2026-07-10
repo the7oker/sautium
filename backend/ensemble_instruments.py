@@ -171,12 +171,15 @@ class InstrumentEnsembleTagger:
 
         # PaSST: hear21passt's get_basic_model() doesn't expose torch_dtype,
         # so build in fp32 then convert. The model is small (~340MB) — the
-        # transient peak is fine.
+        # transient peak is fine. Convert on BOTH half tiers (historically
+        # only fp16, which left PaSST at fp32 on Ampere/MPS); the mel
+        # frontend stays fp32 — torch.stft has no half kernels and bf16 mel
+        # would shift scores vs the fp32-computed library baseline anyway.
         logger.info("Loading PaSST model (hear21passt, logits mode)")
         with contextlib.redirect_stdout(io.StringIO()):
             self.passt = _passt_get_basic_model(mode="logits")
-        if dtype == torch.float16:
-            self.passt = self.passt.half()
+        if dtype in (torch.float16, torch.bfloat16):
+            self.passt.net = self.passt.net.to(dtype)
         self.passt = self.passt.to(self.device).eval()
 
         if self.device == "cuda":

@@ -477,10 +477,30 @@ def _notify_update():
     _status_changed.set()
 
 
+def _hqp_configured() -> bool:
+    """An HQPlayer endpoint is actually configured — env-enabled (Docker
+    .env) or a host saved from the Web UI. Nodes without HQPlayer skip the
+    1s poll loop entirely; the settings PUT starts it the moment a host is
+    saved (precursor of the per-output-backend status loop, HARDWARE-TIERS
+    §2.6)."""
+    from config import settings as app_settings
+    if app_settings.hqplayer_enabled:
+        return True
+    try:
+        from routers.settings import _read
+        return bool(_read("hqplayer.host"))
+    except Exception:
+        return False
+
+
 def start_status_poller():
-    """Start the background status polling thread."""
+    """Start the background status polling thread (no-op without an
+    HQPlayer endpoint — see _hqp_configured)."""
     global _poller_thread, _poller_running
     if _poller_thread and _poller_thread.is_alive():
+        return
+    if not _hqp_configured():
+        logger.info("No HQPlayer configured — status poller idle")
         return
     _poller_running = True
     _poller_thread = threading.Thread(target=_status_poller, daemon=True, name="sse-poller")

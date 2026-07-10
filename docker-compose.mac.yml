@@ -9,8 +9,15 @@
 
 services:
   postgres:
-    image: ankane/pgvector:latest
+    # Official pgvector image (ankane/pgvector is abandoned at 0.5.1). Same
+    # pg15 series as the main compose so a datadir initialized on either
+    # machine stays interchangeable.
+    image: pgvector/pgvector:pg15
     container_name: sautium-postgres
+    # Docker's default /dev/shm is 64MB — parallel hash joins / pgvector ops
+    # allocate dynamic shared memory there and die with "could not resize
+    # shared memory segment: No space left on device" on an 18GB database.
+    shm_size: 1gb
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-music_ai}
       POSTGRES_USER: ${POSTGRES_USER:-musicai}

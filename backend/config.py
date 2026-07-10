@@ -50,7 +50,6 @@ class Settings(BaseSettings):
     # Audio Analysis Configuration
     audio_analysis_sample_rate: int = 22050     # librosa features (lower = faster)
     audio_analysis_duration: int = 30           # seconds (middle segment)
-    audio_analysis_batch_size: int = 8          # CLAP batch size for zero-shot
 
     # Search Configuration
     default_search_limit: int = 20

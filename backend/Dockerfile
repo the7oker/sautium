@@ -68,6 +68,17 @@ RUN curl -fsSL https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
 # Set working directory
 WORKDIR /app
 
+# Torch trio in its own layer, pinned to the verified GPU-working set and
+# pulled from the cu130 index explicitly. PyPI's linux wheel is a different
+# variant (no +cu130 local tag) — a plain `-r requirements.txt` install would
+# silently swap the verified build; with the trio pre-installed, the
+# `torch==2.12.0` pin in requirements.txt is already satisfied and pip
+# leaves it alone. Separate layer = requirements.txt edits don't re-download
+# multi-GB torch wheels.
+RUN pip install --no-cache-dir \
+    torch==2.12.0 torchvision==0.27.0 torchaudio==2.11.0 \
+    --index-url https://download.pytorch.org/whl/cu130
+
 # Copy requirements first for better Docker layer caching
 COPY requirements.txt .
 

@@ -9,6 +9,7 @@ Manages three processes:
 
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -175,32 +176,51 @@ class ServiceManager:
         _cflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         is_macos = sys.platform == "darwin"
 
-        # Install PyTorch only if absent — once it's in the venv, we leave it
-        # alone (re-installing on every requirements.txt edit would cost minutes
-        # and re-download multi-GB wheels for no reason).
+        # Install PyTorch only if absent or built for the wrong accelerator —
+        # once a correct build is in the venv, we leave it alone (re-installing
+        # on every requirements.txt edit would cost minutes and re-download
+        # multi-GB wheels for no reason).
+        #
+        # Versions are pinned to the same trio as backend/requirements.txt
+        # (torch._dynamo is sensitive to the torch×stdlib pair — see the
+        # comment there). The CUDA index must carry those exact versions:
+        # cu124 stopped at torch 2.6, which used to make a fresh install grab
+        # 2.6+cu124 and then let requirements.txt replace it with the CPU-only
+        # 2.12.0 wheel from PyPI — silently killing GPU on new nodes. cu126
+        # has the full trio and needs only driver R525+.
+        _TORCH_PINS = ["torch==2.12.0", "torchvision==0.27.0", "torchaudio==2.11.0"]
+        _CUDA_INDEX = "https://download.pytorch.org/whl/cu126"
+        _CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+
+        from desktop.utils import detect_gpu
+        has_nvidia = (not is_macos) and shutil.which("nvidia-smi") is not None \
+            and detect_gpu()[0]
+
+        # A CPU-only build on an NVIDIA machine is the wrong-build failure a
+        # plain `import torch` check can't see — torch.version.cuda is a build
+        # property (None on +cpu wheels), so it detects it deterministically.
         torch_check = subprocess.run(
-            [python, "-c", "import torch"],
+            [python, "-c", "import torch; print(torch.version.cuda or 'cpu')"],
             capture_output=True, text=True, timeout=30,
             creationflags=_cflags,
         )
-        if torch_check.returncode != 0:
+        torch_missing = torch_check.returncode != 0
+        torch_wrong_build = (
+            not torch_missing and has_nvidia
+            and torch_check.stdout.strip() == "cpu"
+        )
+        if torch_missing or torch_wrong_build:
             if progress_cb:
                 progress_cb("Installing PyTorch (first run, may take a few minutes)...")
-            logger.info("PyTorch not found, installing...")
+            logger.info(
+                "PyTorch %s, installing...",
+                "not found" if torch_missing else "is a CPU build on a CUDA machine",
+            )
 
-            if is_macos:
-                torch_cmd = [
-                    python, "-m", "pip", "install",
-                    "torch", "torchvision", "torchaudio",
-                    "--quiet",
-                ]
-            else:
-                torch_cmd = [
-                    python, "-m", "pip", "install",
-                    "torch", "torchvision", "torchaudio",
-                    "--index-url", "https://download.pytorch.org/whl/cu124",
-                    "--quiet",
-                ]
+            torch_cmd = [python, "-m", "pip", "install", *_TORCH_PINS, "--quiet"]
+            if not is_macos:
+                index = _CUDA_INDEX if has_nvidia else _CPU_INDEX
+                torch_cmd += ["--index-url", index]
 
             torch_kwargs = {"capture_output": True, "text": True, "timeout": 600, "env": os.environ.copy()}
             if sys.platform == "win32":
@@ -306,7 +326,20 @@ class ServiceManager:
         # backend even when the launcher was started as a GUI .app (minimal
         # PATH without Homebrew/bundled bins). The audio pipeline shells out
         # to them (audio_analysis, provenance, streaming).
-        from desktop.db_init import media_tool_dirs
+        #
+        # ensure_media_tools first: it's idempotent-fast when the binaries
+        # exist, and it's the only retry path if the wizard's media step
+        # failed or the tools were deleted — without it a missing ffmpeg
+        # degrades to a silent "0/N enriched" with no recovery on relaunch.
+        from desktop.db_init import ensure_media_tools, media_tool_dirs
+        tools = ensure_media_tools(progress_cb)
+        missing = [name for name, ok in tools.items() if not ok]
+        if missing:
+            logger.warning(
+                "Media tools missing after ensure: %s — audio analysis/"
+                "fingerprinting will be degraded until installed",
+                ", ".join(missing),
+            )
         tool_dirs = media_tool_dirs()
         if tool_dirs:
             env["PATH"] = os.pathsep.join(tool_dirs + [env.get("PATH", "")])

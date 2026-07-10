@@ -458,7 +458,8 @@ class AudioAnalyzer:
         stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0}
         start_time = time.time()
         clap_batch_size = 16
-        prefetch_workers = 4
+        from hardware_profile import resolve as _hw
+        prefetch_workers = _hw().prefetch_workers
 
         with get_db_context() as db:
             # Query tracks to analyze

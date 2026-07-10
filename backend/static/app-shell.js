@@ -8969,6 +8969,27 @@
       <div data-mb-actions>${actions}</div>`;
   }
 
+  /* Hardware profile block (Library screen) — read-only info. Selection is
+     automatic (backend auto-detects full/standard/lite; SAUTIUM_PROFILE env
+     is the only override, for diagnostics). Loads itself after render. */
+  async function _loadHwBlock(root) {
+    const holder = root.querySelector('[data-hw-block]');
+    if (!holder) return;
+    let hw = null;
+    try {
+      const r = await fetch('/api/settings/hardware');
+      if (r.ok) hw = await r.json();
+    } catch (_) {}
+    if (!hw) { holder.innerHTML = ''; return; }
+    const d = hw.detected || {};
+    holder.innerHTML = `
+      <div class="profile-group-label">Hardware profile</div>
+      <div class="form-group">
+        <div class="form-row"><span class="form-label">Active</span><span class="form-value">${escapeProfileHtml(String(hw.profile || '?'))}${hw.source === 'env' ? ' · env override' : ''}</span></div>
+        <div class="form-row stacked"><div class="row-stack-sub">Auto-selected from this machine: ${escapeProfileHtml(String(d.device || '?'))} · ${escapeProfileHtml(String(d.accel_memory_gb ?? '?'))} GB · ${escapeProfileHtml(String(d.cores ?? '?'))} cores. Scales analysis, model pre-warm and background load.</div></div>
+      </div>`;
+  }
+
   function _wireMb(root) {
     const onA = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
     onA('[data-action="mb-update"]', async () => {
@@ -9115,12 +9136,14 @@
         </div>
 
         ${libraryStats}
+        <div data-hw-block></div>
         <div data-mb-block>${_mbBlockHTML(lib.musicbrainz)}</div>
         ${emptyState}
         ${actions}
       </section>
     `;
     _wireBack(root);
+    _loadHwBlock(root);
 
     const onAction = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
     onAction('[data-action="scan"]',       async () => { await fetch('/api/settings/library/scan',          { method: 'POST' }); render(); });

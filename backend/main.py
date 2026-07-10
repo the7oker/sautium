@@ -103,6 +103,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Database connection failed: {e}")
 
+    # Resolve the hardware profile (full/standard/lite — HARDWARE-TIERS.md).
+    # Drives the pre-warm set below plus pool sizes, phantom minting and
+    # stream-enrichment mode at their call sites.
+    import hardware_profile
+    _profile = hardware_profile.resolve()
+    if _profile.torch_cpu_threads and torch:
+        # Without a cap torch claims every core for intra-op parallelism and
+        # starves the decode pool + event loop on small CPU-only machines.
+        torch.set_num_threads(_profile.torch_cpu_threads)
+        logger.info(f"torch CPU threads capped at {_profile.torch_cpu_threads}")
+
     # Overlay Last.fm credentials from user_settings (Pydantic Settings
     # only reads .env at startup; the OAuth callback persists to DB).
     _load_lastfm_from_db()
@@ -275,11 +286,22 @@ async def lifespan(app: FastAPI):
     # model_cache._factory_lock (HF loading is not thread-safe across
     # concurrent from_pretrained calls), and chaining pins the order so
     # NLLB's one-time 2.4GB download can never delay CLAP/BGE.
+    #
+    # The set comes from the hardware profile: full warms everything,
+    # standard drops NLLB (it lazy-loads on the first Cyrillic Discovery
+    # query via kick_load), lite warms nothing — every model cold-loads on
+    # first use and Discovery serves its non-ML blocks meanwhile.
+    _prewarm_factories = {
+        "clap":       ("CLAP",       _clap_factory),
+        "enrichment": ("BGE-M3",     _enrichment_factory),
+        "lyrics":     ("Lyrics-BGE", _lyrics_factory),
+        "translate":  ("NLLB",       _translate_factory),
+    }
+
     async def _prewarm_all():
-        await _prewarm("CLAP",       "clap",       _clap_factory)
-        await _prewarm("BGE-M3",     "enrichment", _enrichment_factory)
-        await _prewarm("Lyrics-BGE", "lyrics",     _lyrics_factory)
-        await _prewarm("NLLB",       "translate",  _translate_factory)
+        for key in _profile.prewarm_keys:
+            label, factory = _prewarm_factories[key]
+            await _prewarm(label, key, factory)
 
     asyncio.create_task(_prewarm_all())
 
@@ -975,6 +997,14 @@ async def enrich_start(
     skip_audio_analysis: bool = False,
 ) -> Dict[str, Any]:
     """Start enrichment as a background task. Poll /enrich/status for progress."""
+    # Lite profile: no bulk local analysis — the GPU steps are skipped and
+    # embeddings/features arrive via P2P import; the network steps (Last.fm,
+    # lyrics) still run. Explicit skip flags from the caller are additive.
+    import hardware_profile
+    if not hardware_profile.resolve().local_analysis:
+        skip_embeddings = True
+        skip_audio_analysis = True
+
     with _enrich_lock:
         if _enrich_state["running"]:
             raise HTTPException(status_code=409, detail="Enrichment already running")

@@ -54,9 +54,15 @@ def get_text_embedder(model_name: str, device: str):
         dtype = get_model_dtype(device)
         logger.info(f"Loading text embedding model: {model_name} on {device} ({dtype})")
         model = SentenceTransformer(model_name, device=device)
-        if dtype == torch.float16:
-            model.half()
-        logger.info("Text embedding model loaded")
+        # Convert weights on BOTH half tiers. Historically only fp16 (Turing)
+        # was halved, leaving BGE-M3 at fp32 on bf16 tiers (Ampere/MPS) —
+        # +1.1 GB VRAM for nothing; a 6 GB Turing card held the resident set
+        # while a 4 GB Ampere OOMed on prewarm. ST >=5.x casts bf16 back to
+        # float32 before the numpy conversion in encode(), so callers see
+        # identical output dtype.
+        if dtype in (torch.float16, torch.bfloat16):
+            model.to(dtype)
+        logger.info(f"Text embedding model loaded ({dtype})")
     except BaseException:
         with _lock:
             _load_events.pop(key, None)

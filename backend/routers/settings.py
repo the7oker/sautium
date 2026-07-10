@@ -259,10 +259,24 @@ _DEFAULTS: Dict[str, Any] = {
 }
 
 
+# Defaults that depend on the hardware profile — computed at read time so
+# the UI and the startup autostart see the same value. An explicit
+# user_settings row always wins.
+def _background_enrichment_default() -> bool:
+    import hardware_profile
+    return hardware_profile.resolve().background_enrichment_default
+
+
+_DYNAMIC_DEFAULTS = {
+    "enrichment.background_enabled": _background_enrichment_default,
+}
+
+
 def _read(key: str) -> Any:
     row = db_query_one("SELECT value FROM user_settings WHERE key = %(k)s", {"k": key})
     if row is None:
-        return _DEFAULTS.get(key)
+        dyn = _DYNAMIC_DEFAULTS.get(key)
+        return dyn() if dyn else _DEFAULTS.get(key)
     return row.get("value")
 
 
@@ -1067,6 +1081,18 @@ def put_albums_sort(req: AlbumsSortUpdate) -> Dict[str, Any]:
 
 
 # ============================================================
+# Hardware profile (full / standard / lite — HARDWARE-TIERS.md)
+# ============================================================
+
+@router.get("/hardware")
+def get_hardware_profile() -> Dict[str, Any]:
+    """Read-only: selection is automatic (SAUTIUM_PROFILE env is the only
+    override, for diagnostics). Feeds the info block on the Library screen."""
+    import hardware_profile
+    return hardware_profile.resolve().describe()
+
+
+# ============================================================
 # HQPlayer connection
 # ============================================================
 
@@ -1111,6 +1137,18 @@ def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
         logger.info("HQPlayer cached clients reset")
     except Exception as e:
         logger.warning(f"HQPlayer client reset failed: {e}")
+    # The status poller is gated on a configured endpoint — saving a host
+    # is the event that starts it (idempotent when already running);
+    # clearing the host stops the 1s loop on HQP-less nodes.
+    try:
+        from routers.player import (start_status_poller, stop_status_poller,
+                                    _hqp_configured)
+        if _hqp_configured():
+            start_status_poller()
+        else:
+            stop_status_poller()
+    except Exception as e:
+        logger.warning(f"Status poller toggle failed: {e}")
     return get_hqplayer_prefs()
 
 

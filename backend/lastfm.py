@@ -397,6 +397,12 @@ class LastFmService:
         from uuid_utils import artist_uuid
         from canon.split import detect_compound_type
         from transliterate import latinize
+        from hardware_profile import resolve as _hw
+
+        # Lite profile keeps the phantom layer off: edges are stored only
+        # between artists that already exist; unknown similars are dropped
+        # instead of minted (FK requires the row).
+        mint_phantoms = _hw().phantom_minting
 
         seed = str(artist_id)
         seen: set = set()   # sids already handled this batch — pending db.add()s
@@ -425,10 +431,15 @@ class LastFmService:
 
                 # Mint the phantom row if absent. id derives from normalize(name),
                 # so a namesake collapses to the same bucket — intended.
-                db.execute(text(
-                    "INSERT INTO artists (id, name, name_latin) VALUES (:id, :name, :nl) "
-                    "ON CONFLICT (id) DO NOTHING"
-                ), {"id": str(sid), "name": name, "nl": latinize(name)})
+                if mint_phantoms:
+                    db.execute(text(
+                        "INSERT INTO artists (id, name, name_latin) VALUES (:id, :name, :nl) "
+                        "ON CONFLICT (id) DO NOTHING"
+                    ), {"id": str(sid), "name": name, "nl": latinize(name)})
+                elif not db.execute(text(
+                    "SELECT 1 FROM artists WHERE id = :id"
+                ), {"id": str(sid)}).first():
+                    continue
 
                 existing = db.query(SimilarArtist).filter(
                     SimilarArtist.artist_id == artist_id,

@@ -43,7 +43,6 @@ DEFAULT_CONFIG = {
         "web": 18000,
         "tracker": 18765,
     },
-    "install_mode": "full_gpu",
     "claude_code_available": False,
     "first_run_complete": False,
     "postgres_password": None,  # auto-generated on first run

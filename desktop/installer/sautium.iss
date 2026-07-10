@@ -44,8 +44,13 @@ Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Sautium P2P
 Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Sautium P2P"" dir=in action=allow protocol=TCP localport=20000-29999 profile=private"; StatusMsg: "Adding firewall rule (TCP)..."; Flags: runhidden waituntilterminated
 ; Clone repository on first install
 Filename: "git"; Parameters: "clone https://github.com/user/sautium.git ""{app}\repo"""; StatusMsg: "Cloning repository..."; Flags: runhidden waituntilterminated
-; Install PyTorch with CUDA support (PyPI default is CPU-only on Windows)
-Filename: "{app}\python312\python.exe"; Parameters: "-m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 --quiet"; StatusMsg: "Installing PyTorch with CUDA..."; Flags: runhidden waituntilterminated
+; Install PyTorch with CUDA support (PyPI default is CPU-only on Windows).
+; Pins must match backend/requirements.txt; cu126 is the oldest index that
+; carries this trio (cu124 stopped at torch 2.6 — unpinned installs from it
+; ended up replaced by the CPU wheel when requirements.txt forced ==2.12.0).
+; service_manager re-checks the build at startup and self-heals a CPU build
+; on a CUDA machine, so a failed/skipped step here is recoverable.
+Filename: "{app}\python312\python.exe"; Parameters: "-m pip install torch==2.12.0 torchvision==0.27.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu126 --quiet"; StatusMsg: "Installing PyTorch with CUDA..."; Flags: runhidden waituntilterminated
 ; Install base Python requirements
 Filename: "{app}\python312\python.exe"; Parameters: "-m pip install -r ""{app}\repo\backend\requirements-base.txt"" --quiet"; StatusMsg: "Installing dependencies..."; Flags: runhidden waituntilterminated
 ; Install desktop requirements

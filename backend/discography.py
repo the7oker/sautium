@@ -433,6 +433,13 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
     stats = {"status": "success", "found": 0, "new": 0, "skipped_owned": 0,
              "tracks": 0}
 
+    from hardware_profile import resolve as _hw
+    if not _hw().phantom_minting:
+        # Lite nodes skip the phantom layer entirely (~2.5 GB of heap+index
+        # on the reference library) — the shelf stays owned-albums-only.
+        stats["status"] = "disabled"
+        return stats
+
     mbids = _artist_mbids(artist_id)
     if not mbids:
         # Not canonized (yet): no shelf. Self-heal a revoked canonization —

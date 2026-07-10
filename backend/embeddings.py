@@ -419,8 +419,11 @@ class AudioEmbeddingGenerator:
                 batch_slices.append(cur)
             num_batches = len(batch_slices)
 
-            # Persistent I/O thread pool (16 workers for i9-14900HX)
-            io_pool = ThreadPoolExecutor(max_workers=16)
+            # Persistent I/O thread pool. Each worker is a whole ffmpeg
+            # subprocess — 16 of them saturate a 24-core dev box but thrash
+            # a 4-core laptop, so the size comes from the hardware profile.
+            from hardware_profile import resolve as _hw
+            io_pool = ThreadPoolExecutor(max_workers=_hw().io_workers)
             # Prefetch pool runs _load_batch in background
             prefetch_pool = ThreadPoolExecutor(max_workers=1)
 
