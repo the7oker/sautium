@@ -1110,6 +1110,19 @@
       const playing = data && data.state === 'playing';
       const paused = data && data.state === 'paused';
       const stopped = data && data.state === 'stopped';
+      // Stopped HQPlayer reports no track metadata (index 0) even though
+      // the canonical queue is intact — e.g. after a heavy DSP-filter
+      // rebuild. Per the IA the bar stays visible while the queue is
+      // non-empty, so fall back to the first queued track (the one Play
+      // will start).
+      if (stopped && !data.song
+          && Array.isArray(window.currentPlaylist) && window.currentPlaylist.length) {
+        const first = window.currentPlaylist[0];
+        data = { ...data, song: first.title, artist: first.artist,
+                 album: first.album || '', cover_id: first.cover_id,
+                 media_file_id: first.id, cover_url: first.cover_url,
+                 provider_cover_url: first.provider_cover_url };
+      }
       const hasTrack = !!(data && data.song);
       const visible = hasTrack && (playing || paused || stopped);
 

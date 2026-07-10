@@ -14,6 +14,8 @@ up the new values.
 """
 
 import logging
+import threading
+import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -31,6 +33,7 @@ from playback.hqp_backend import (
     _reset_hqp,
     _reset_hqp_status,
 )
+from playback.manager import manager
 
 router = APIRouter(prefix="/api/hqplayer", tags=["hqplayer"])
 
@@ -137,6 +140,43 @@ def get_state() -> Dict[str, Any]:
 
 # -- Config -------------------------------------------------------------------
 
+# Applying a heavy DSP change mid-play (e.g. a long-initialisation filter
+# like sinc-MGa) makes HQPlayer STOP the transport while it rebuilds the
+# pipeline — and it never resumes on its own (light filters hot-swap with a
+# sub-second dropout). The watcher below restores the exact pre-change spot
+# once HQPlayer answers again. The 1 s wait-loop is the same documented
+# boundary exception as the status poller: HQPlayer cannot push "I'm ready".
+_RESUME_WATCH_DEADLINE_S = 90.0
+
+
+def _resume_after_dsp_change(pre_index: int, pre_position: int, generation: int) -> None:
+    deadline = time.monotonic() + _RESUME_WATCH_DEADLINE_S
+    while time.monotonic() < deadline:
+        time.sleep(1.0)
+        if manager.queue.generation != generation:
+            return                      # user started a new queue — back off
+        state = manager.latest_status.get("state")
+        if state in ("playing", "paused"):
+            return                      # hot-swapped / user already resumed
+        if state == "stopped":
+            backend = manager.active
+            if backend is None or backend.id != "hqplayer":
+                return
+            try:
+                backend.select(pre_index)
+                if pre_position > 0:
+                    backend.seek(pre_position)
+                backend.play()
+                logger.info("resumed playback after DSP rebuild "
+                            "(track %d @ %ds)", pre_index, pre_position)
+            except Exception as e:
+                logger.warning("post-DSP resume failed: %s", e)
+            return
+        # "disconnected" — HQPlayer is still rebuilding; keep waiting.
+    logger.warning("post-DSP resume: HQPlayer did not come back within %.0fs",
+                   _RESUME_WATCH_DEADLINE_S)
+
+
 @router.post("/config")
 def set_config(req: ConfigRequest) -> Dict[str, Any]:
     """Apply any subset of the DSP knobs.
@@ -144,7 +184,9 @@ def set_config(req: ConfigRequest) -> Dict[str, Any]:
     Each non-None field triggers exactly one HQPlayer Set* command;
     the request is rejected as 503 on connection trouble. Successful
     fields are reported back so the client can reconcile partial
-    failures (e.g. wrong index for the current mode)."""
+    failures (e.g. wrong index for the current mode). A change applied
+    mid-play arms a resume watcher — see _resume_after_dsp_change."""
+    pre = dict(manager.latest_status)
     applied: Dict[str, Any] = {}
     failed: Dict[str, str] = {}
     try:
@@ -188,6 +230,14 @@ def set_config(req: ConfigRequest) -> Dict[str, Any]:
                     failed["matrix_profile"] = "matrix_set_profile rejected"
     except (BrokenPipeError, ConnectionError, OSError) as e:
         raise HTTPException(status_code=503, detail=f"HQPlayer not reachable: {e}")
+
+    if applied and pre.get("state") == "playing":
+        threading.Thread(
+            target=_resume_after_dsp_change,
+            args=(int(pre.get("track_index") or 1),
+                  int(pre.get("position") or 0),
+                  manager.queue.generation),
+            daemon=True, name="hqp-dsp-resume").start()
 
     return {"ok": not failed, "applied": applied, "failed": failed}
 
