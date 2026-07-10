@@ -28,6 +28,7 @@ import logging
 import queue as queue_lib
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -209,6 +210,13 @@ class Engine:
     # -- player loop -----------------------------------------------------------
 
     def _loop(self) -> None:
+        if sys.platform == "win32":
+            # WASAPI is COM-based and PortAudio opens the device on the
+            # CALLING thread — without COM initialized here, stream start
+            # fails with CO_E_NOTINITIALIZED. MTA (0) matches PortAudio's
+            # own internal COM usage.
+            import ctypes
+            ctypes.windll.ole32.CoInitializeEx(None, 0)
         last_emit = 0.0
         self._emit_status()   # announce the idle backend as soon as it attaches
         while self._running:
