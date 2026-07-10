@@ -243,13 +243,16 @@ async def lifespan(app: FastAPI):
                     _p2p_identity["invite_code"]
                 )
 
-            # Query and announce enriched artists
+            # Query and announce enriched artists. Announces are PACED
+            # (dht_service.ANNOUNCE_CHUNK) so a full sweep takes minutes —
+            # run it as a background task; awaiting it here would hold the
+            # whole app startup (uvicorn accepts no requests mid-lifespan).
             artist_uuids = await asyncio.to_thread(_get_enriched_artist_uuids)
             if artist_uuids:
-                await _dht_service.announce_artists(artist_uuids)
+                asyncio.create_task(_dht_service.announce_artists(artist_uuids))
                 logger.info(
-                    f"P2P online: {len(artist_uuids)} artists announced "
-                    f"(HTTP port {settings.p2p_announce_port})"
+                    f"P2P online: {len(artist_uuids)} artists queued for DHT "
+                    f"announce (HTTP port {settings.p2p_announce_port})"
                 )
             else:
                 logger.info("P2P online: no enriched artists to announce")
@@ -515,17 +518,19 @@ async def health_check() -> Dict[str, Any]:
 
 @app.post("/dht/reannounce")
 async def dht_reannounce() -> Dict[str, Any]:
-    """Re-query enriched artists and announce new ones in DHT."""
+    """Re-query enriched artists and announce new ones in DHT. Paced —
+    the announce sweep runs in the background, the response returns the
+    queued count immediately."""
     if not _dht_service:
         return {"success": False, "message": "DHT not running"}
 
     artist_uuids = await asyncio.to_thread(_get_enriched_artist_uuids)
     new_count = len(set(artist_uuids) - _dht_service._announced)
-    await _dht_service.announce_artists(artist_uuids)
+    asyncio.create_task(_dht_service.announce_artists(artist_uuids))
     return {
         "success": True,
         "total_announced": _dht_service.announced_count,
-        "new": new_count,
+        "queued": new_count,
     }
 
 

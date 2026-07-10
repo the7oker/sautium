@@ -41,7 +41,12 @@ INFOHASH_PREFIX_USER = "Sautium-user:"
 # cluster, while a probe from the WSL host stayed clean. Pacing spreads
 # ~3.2k announces over ~2 min; DHT entries live 15-30 min, so staggered
 # refresh costs nothing in discoverability.
-ANNOUNCE_CHUNK = 25
+# 5/s: initiation must stay under the DHT's traversal-completion rate or the
+# backlog of concurrent traversals accumulates through the window and
+# saturates the path anyway (measured: 25/s still produced timeout bursts
+# near the END of the paced window and ~1 min past it). 3173 announces at
+# 5/s = ~10.6 min, still inside the 15-min re-announce cycle.
+ANNOUNCE_CHUNK = 5
 ANNOUNCE_CHUNK_PAUSE = 1.0
 
 # DHT re-announce interval (seconds)
@@ -118,6 +123,9 @@ class DHTService:
             "enable_lsd": False,
             "enable_upnp": False,   # Phase P3
             "enable_natpmp": False,  # Phase P3
+            # Cap aggregate DHT UDP egress — a get_peers traversal fans out
+            # exponentially and bursts above the paced initiation rate.
+            "dht_upload_rate_limit": 16000,
             "alert_mask": int(
                 lt.alert.category_t.dht_notification
                 | lt.alert.category_t.dht_operation_notification

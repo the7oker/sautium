@@ -289,19 +289,21 @@ class P2PManager:
                         f"User announced: {account_info['invite_code']}"
                     )
 
-                # Announce enriched artists
+                # Announce enriched artists. Paced (dht_service.ANNOUNCE_CHUNK)
+                # — a full sweep takes minutes, so it runs as a background
+                # task; awaiting it would stall the whole P2P startup.
                 _progress("Querying enriched artists...")
                 artist_uuids = await self._get_enriched_artists()
                 if artist_uuids:
-                    _progress(
-                        f"Announcing {len(artist_uuids)} artists in DHT..."
+                    asyncio.create_task(
+                        self._dht_service.announce_artists(artist_uuids)
                     )
-                    await self._dht_service.announce_artists(artist_uuids)
                     self._lan_discovery.update_enriched_count(
                         len(artist_uuids)
                     )
                     _progress(
-                        f"P2P online: {len(artist_uuids)} artists announced"
+                        f"P2P online: {len(artist_uuids)} artists queued "
+                        f"for DHT announce"
                     )
                 else:
                     _progress("P2P online: no enriched artists yet")
@@ -871,11 +873,12 @@ class P2PManager:
                 after = set(await self._get_unenriched_artists())
                 unreachable.update(a for a in search_slice if a in after)
 
-        # Re-announce newly enriched artists
+        # Re-announce newly enriched artists (paced — background task, the
+        # sync result must not wait ~minutes for the announce sweep)
         if total_stats and self._dht_service:
             _progress("Re-announcing newly enriched artists...")
             new_enriched = await self._get_enriched_artists()
-            await self._dht_service.announce_artists(new_enriched)
+            asyncio.create_task(self._dht_service.announce_artists(new_enriched))
 
         total_items = sum(
             v for v in total_stats.values() if isinstance(v, int)

@@ -93,6 +93,13 @@ services:
       P2P_PASSWORD: ${P2P_PASSWORD:-}
       P2P_EMAIL: ${P2P_EMAIL:-}
 
+      # Phantom streaming preview (Deezer/YouTube → in-memory proxy → player).
+      # Parity with docker-compose.wsl.yml — this block was missing here, so a
+      # container recreated from this file silently lost streaming (2026-07-10).
+      STREAMING_PREVIEW_ENABLED: ${STREAMING_PREVIEW_ENABLED:-false}
+      MEDIA_PROXY_PORT: ${MEDIA_PROXY_PORT:-8830}
+      MEDIA_PROXY_ADVERTISED_HOST: ${MEDIA_PROXY_ADVERTISED_HOST:-127.0.0.1}
+
       # Multi-provider LLM support
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -172,6 +179,8 @@ services:
       - "8800:8000"
       # P2P DHT MUST stay on 0.0.0.0 — that's the public peer surface.
       - "${P2P_DHT_PORT:-19001}:${P2P_DHT_PORT:-19001}/udp"
+      # Phantom-preview media proxy (plain http — HQPlayer pulls from it).
+      - "${MEDIA_PROXY_PORT:-8830}:${MEDIA_PROXY_PORT:-8830}"
     networks:
       - sautium-network
     depends_on:
