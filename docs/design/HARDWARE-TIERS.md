@@ -49,6 +49,18 @@ plus user-facing minimum/recommended configurations.
 - 5 singletons (`model_cache.py`), **never unloaded**; `InstrumentEnsembleTagger.unload()` exists with zero callers (`ensemble_instruments.py:186`).
 - 4 models pre-warmed unconditionally at every boot (`main.py:278-284`), no toggle.
 - dtype tiers (`device.py:41-52`): CUDA Ampere+ → bf16, Turing → fp16, MPS → bf16, CPU → fp32.
+- **dtype variance is an accepted property, not corruption.** Vectors were
+  never bit-deterministic across the network — the tier policy itself gives
+  different nodes different dtypes, and GPU inference isn't bit-stable even
+  at a fixed dtype. Measured on the reference node (2026-07-10) after the
+  BGE-M3 bf16 switch: cos(fp32, bf16) for identical texts mean ≈ 1.000 /
+  min 0.998, and top-20 ranking overlap of a bf16 query against the stored
+  fp32 corpus = 19–20/20 — i.e. the drift sits 2–3 orders of magnitude
+  below inter-candidate ranking gaps. Consequences: (a) NO re-embedding
+  after dtype changes — a mixed-precision corpus is fine, and the stored
+  fp32 vectors are strictly higher-precision than a bf16 re-run would be;
+  (b) any P2P verify-by-recompute (P2P-SYNC-INTEGRITY: "recompute is the
+  detector") must compare with a tolerance, never byte-equality.
 - **fp32 holes on the bf16 tiers:** BGE-M3 (`text_embedder.py:56-58`) and PaSST
   (`ensemble_instruments.py:178-179`) call `.half()` only on the fp16 tier, so on
   Ampere/MPS they run fp32 → ~+1.5 GB VRAM vs what the tiering intends.
