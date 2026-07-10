@@ -18,6 +18,7 @@ mutations so canonical and mirrored order can't interleave.
 
 import logging
 import threading
+from dataclasses import asdict
 from typing import Callable, Optional
 
 from hqplayer_client import format_time
@@ -42,6 +43,7 @@ class PlaybackManager:
         self._sse_clients: list = []      # (asyncio.Event, asyncio.AbstractEventLoop)
         self._sse_clients_lock = threading.Lock()
         self._observers: list[Callable] = []
+        self._persist_timer: Optional[threading.Timer] = None
 
     # -- backend lifecycle ---------------------------------------------------
 
@@ -55,7 +57,8 @@ class PlaybackManager:
     def active(self) -> Optional[PlayerBackend]:
         return self._active
 
-    def activate(self, output_type: Optional[str], *, stop_old: bool = True) -> None:
+    def activate(self, output_type: Optional[str], *, stop_old: bool = True,
+                 **cfg) -> None:
         """Switch the active output. The old backend is stopped and shut
         down; the canonical queue survives the switch; playback does NOT
         auto-resume — the user presses play on the new output.
@@ -85,11 +88,40 @@ class PlaybackManager:
             if output_type == "hqplayer":
                 from playback.hqp_backend import HqpBackend
                 backend = HqpBackend(emit=self._on_backend_status, queue=self.queue)
+            elif output_type == "local":
+                from playback.local.backend import LocalBackend
+                backend = LocalBackend(emit=self._on_backend_status, queue=self.queue,
+                                       device_id=cfg.get("device_id"),
+                                       exclusive=bool(cfg.get("exclusive")))
             else:
                 raise ValueError(f"unknown output type: {output_type}")
             self._active = backend
             backend.start()
             logger.info("playback backend activated: %s", backend.id)
+
+    def init_from_settings(self) -> None:
+        """Boot-time output activation from persisted settings. output.type
+        unset → HQPlayer when an endpoint is configured (legacy behavior),
+        else no active output at all (§2.6)."""
+        from routers.settings import _read
+        from routers.player import _hqp_configured
+        otype = _read("output.type")
+        if otype is None:
+            otype = "hqplayer" if _hqp_configured() else None
+        if otype == "local":
+            self._restore_persisted_queue()
+            try:
+                self.activate("local", device_id=_read("output.local_device"),
+                              exclusive=bool(_read("output.local_exclusive")))
+            except Exception as e:
+                logger.error("local output activation failed: %s", e)
+        elif otype == "hqplayer":
+            if _hqp_configured():
+                self.activate("hqplayer")
+            else:
+                logger.info("output=hqplayer but no endpoint configured — idle")
+        else:
+            logger.info("No playback output configured — idle")
 
     # -- SSE plumbing ----------------------------------------------------------
 
@@ -236,10 +268,13 @@ class PlaybackManager:
         """Replace the queue (and start playback). Returns (added, generation);
         generation is what background fillers must guard their appends with."""
         with self._mutate_lock:
-            added = self.backend().queue_replace(items, play=play,
-                                                 probe_first=probe_first)
+            backend = self.backend()
+            added = backend.queue_replace(items, play=play,
+                                          probe_first=probe_first)
             if added:
                 gen = self.queue.replace(items[:added])
+                backend.queue_changed("replace", play=play)
+                self._schedule_persist()
             else:
                 gen = self.queue.generation
             return added, gen
@@ -264,19 +299,26 @@ class PlaybackManager:
                 added = backend.queue_insert_next(items, anchor)
                 if added:
                     self.queue.insert_after(anchor, items[:added])
+                    backend.queue_changed("insert_next")
+                    self._schedule_persist()
             else:
                 added = backend.queue_append(items)
                 if added:
                     self.queue.append(items[:added])
+                    backend.queue_changed("append")
+                    self._schedule_persist()
             return added
 
     def remove(self, index: int) -> bool:
         with self._mutate_lock:
             if self.queue.item_at(index) is None:
                 return False
-            ok = self.backend().queue_remove(index)
+            backend = self.backend()
+            ok = backend.queue_remove(index)
             if ok:
                 self.queue.remove(index)
+                backend.queue_changed("remove")
+                self._schedule_persist()
             return ok
 
     def apply_reorder(self, plan: ReorderPlan) -> dict:
@@ -285,8 +327,11 @@ class PlaybackManager:
         canary flags the divergence; a retry reconverges); on success the
         canonical queue adopts the new order."""
         with self._mutate_lock:
-            result = self.backend().queue_reorder(plan)
+            backend = self.backend()
+            result = backend.queue_reorder(plan)
             self.queue.reorder_by_media_ids(plan.order)
+            backend.queue_changed("reorder")
+            self._schedule_persist()
             return result
 
     def jump(self, index: int) -> bool:
@@ -300,8 +345,51 @@ class PlaybackManager:
         """Radio start: clear everything after the playing slot (the seed
         plays on). Returns the new generation for the radio filler."""
         with self._mutate_lock:
-            self.backend().queue_clear_after_current()
-            return self.queue.clear_for_radio(self._latest_status.get("track_index"))
+            backend = self.backend()
+            backend.queue_clear_after_current()
+            gen = self.queue.clear_for_radio(self._latest_status.get("track_index"))
+            backend.queue_changed("clear")
+            self._schedule_persist()
+            return gen
+
+    # -- queue persistence -------------------------------------------------------
+    #
+    # The HQPlayer output survives backend restarts through adopt-on-attach
+    # (the external player still holds the playlist). Engine-rendered outputs
+    # have no external keeper, so the canonical queue is snapshotted into
+    # user_settings (debounced) and restored on boot — stopped, never
+    # auto-playing. Proxy-backed items are skipped: their in-memory stream
+    # sessions die with the process and would restore as dead tokens.
+
+    def _schedule_persist(self) -> None:
+        if self._persist_timer is not None:
+            self._persist_timer.cancel()
+        t = threading.Timer(1.0, self._persist_queue)
+        t.daemon = True
+        self._persist_timer = t
+        t.start()
+
+    def _persist_queue(self) -> None:
+        try:
+            from routers.settings import _write
+            items = [asdict(it) for it in self.queue.snapshot()
+                     if it.source.get("kind") == "file"]
+            _write("player.queue", {"items": items})
+        except Exception as e:
+            logger.warning("queue persist failed: %s", e)
+
+    def _restore_persisted_queue(self) -> None:
+        try:
+            from routers.settings import _read
+            data = _read("player.queue") or {}
+            items = [QueueItem(**d) for d in (data.get("items") or [])]
+        except Exception as e:
+            logger.warning("queue restore failed: %s", e)
+            return
+        if items and len(self.queue) == 0:
+            self.queue.replace(items)
+            logger.info("restored %d queued tracks from the previous session",
+                        len(items))
 
 
 manager = PlaybackManager()

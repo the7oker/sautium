@@ -106,6 +106,12 @@ collapses back to mini-player bar.
 A **bottom-up sheet** with a vertical list of entries:
 
 - HQPlayer (status, host, port, quick-access to DSP)
+- Audio output (`#more/output`) — the Output picker (HARDWARE-TIERS
+  §2.6): HQPlayer vs local devices via the built-in engine
+  (WASAPI / ASIO / CoreAudio; listed only where the backend runs
+  natively), exclusive-mode toggle, device rescan; DLNA renderers and
+  browser playback join this screen in later phases. The drawer row's
+  hint shows the active output's label from the SSE `output` field.
 - DSP / Signal Chain (filter, matrix, dither, digital attenuation)
 - Profile (identity, account, Last.fm, audio chain)
 - About / version

@@ -113,11 +113,17 @@ class PlayerBackend(ABC):
         return False
 
     # -- canonical-queue mirror hooks --------------------------------------
-    # Called by the manager after it decides a mutation; the return value is
-    # how much the backend actually applied (HQPlayer can short-add on a
-    # dropped control socket — the manager trims the canonical queue to
-    # match). Defaults: the backend renders the canonical queue directly, so
-    # there is nothing to mirror.
+    # Two-step protocol. The queue_* hooks run BEFORE the canonical queue
+    # mutates (mirror-first): the return value is how much the backend
+    # actually applied (HQPlayer can short-add on a dropped control socket —
+    # the manager commits only that prefix). `queue_changed` runs AFTER the
+    # canonical commit — backends that render the canonical queue directly
+    # (local engine) act here, when the queue is already in its new shape.
+
+    def queue_changed(self, kind: str, *, play: bool = False) -> None:
+        """Post-commit notification: kind ∈ replace|append|insert_next|
+        remove|reorder|clear. Default: nothing to do (HQPlayer acted in the
+        mirror hooks)."""
 
     def queue_replace(self, items: list, *, play: bool, probe_first: bool = False) -> int:
         return len(items)

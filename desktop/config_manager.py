@@ -215,6 +215,11 @@ def generate_env_file(config: dict, env_path: Path) -> None:
         "LOG_LEVEL=INFO",
         "CUDA_VISIBLE_DEVICES=0",
         "",
+        "# Built-in player: load the ASIO-enabled PortAudio DLL. Must be in",
+        "# the environment BEFORE sounddevice is first imported; harmless on",
+        "# macOS/Linux and for users without ASIO drivers.",
+        "SD_ENABLE_ASIO=1",
+        "",
     ]
 
     try:

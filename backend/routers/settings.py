@@ -256,6 +256,11 @@ _DEFAULTS: Dict[str, Any] = {
     # AI canonicalization (the judgment tier). null = use the computed default
     # (On when the AI provider is free/subscription, Off when it's a paid API key).
     "ai.canonization_enabled":   None,
+    # Playback output selection (Output picker). null type = legacy resolution:
+    # HQPlayer when an endpoint is configured, otherwise no active output.
+    "output.type":               None,   # 'hqplayer' | 'local'
+    "output.local_device":       None,   # "{hostapi}::{device name}"
+    "output.local_exclusive":    False,  # WASAPI exclusive / bit-perfect claim
 }
 
 
@@ -1137,19 +1142,83 @@ def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
         logger.info("HQPlayer cached clients reset")
     except Exception as e:
         logger.warning(f"HQPlayer client reset failed: {e}")
-    # The status poller is gated on a configured endpoint — saving a host
-    # is the event that starts it (idempotent when already running);
-    # clearing the host stops the 1s loop on HQP-less nodes.
+    # The HQPlayer backend is gated on a configured endpoint — saving a host
+    # is the event that activates it (idempotent when already running);
+    # clearing the host detaches it on HQP-less nodes. When another output
+    # type is explicitly selected, saving an HQPlayer address must NOT
+    # hijack the active output.
     try:
         from routers.player import (start_status_poller, stop_status_poller,
                                     _hqp_configured)
-        if _hqp_configured():
-            start_status_poller()
-        else:
-            stop_status_poller()
+        if _read("output.type") in (None, "hqplayer"):
+            if _hqp_configured():
+                start_status_poller()
+            else:
+                stop_status_poller()
     except Exception as e:
         logger.warning(f"Status poller toggle failed: {e}")
     return get_hqplayer_prefs()
+
+
+class OutputPrefs(BaseModel):
+    type: Optional[str] = None          # 'hqplayer' | 'local'
+    device_id: Optional[str] = None     # local: "{hostapi}::{name}"
+    exclusive: Optional[bool] = None    # local: WASAPI exclusive mode
+
+
+@router.get("/output")
+def get_output_prefs() -> Dict[str, Any]:
+    return {
+        "type": _read("output.type"),
+        "device_id": _read("output.local_device"),
+        "exclusive": bool(_read("output.local_exclusive")),
+    }
+
+
+@router.put("/output")
+def put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
+    """Select the playback output (Output picker). Persisted, then applied
+    live: the old backend stops, the canonical queue survives, playback does
+    not auto-resume — the user presses play on the new output."""
+    from playback.manager import manager
+
+    if req.type is not None and req.type not in ("hqplayer", "local"):
+        raise HTTPException(status_code=400, detail=f"unknown output type: {req.type}")
+    if req.type == "local":
+        from playback.local import devices as local_devices
+        if not local_devices.list_devices():
+            raise HTTPException(
+                status_code=409,
+                detail="No local audio devices — the backend must run natively "
+                       "(launcher mode) for WASAPI/ASIO/CoreAudio output")
+    if req.type is not None:
+        _write("output.type", req.type)
+    if req.device_id is not None:
+        _write("output.local_device", req.device_id or None)
+    if req.exclusive is not None:
+        _write("output.local_exclusive", bool(req.exclusive))
+
+    otype = _read("output.type")
+    try:
+        if otype == "local":
+            # Deactivate first — re-selecting "local" with a different device
+            # must reconstruct the engine, and activate() is idempotent per type.
+            manager.activate(None)
+            manager.activate("local",
+                             device_id=_read("output.local_device"),
+                             exclusive=bool(_read("output.local_exclusive")))
+        elif otype == "hqplayer":
+            from routers.player import _hqp_configured
+            if not _hqp_configured():
+                raise HTTPException(status_code=409,
+                                    detail="HQPlayer host is not configured")
+            manager.activate(None)
+            manager.activate("hqplayer")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return get_output_prefs()
 
 
 def load_hqplayer_from_db() -> None:

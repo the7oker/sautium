@@ -5971,6 +5971,7 @@
     const segs = (hash || '').split('/').filter(Boolean);
     const sub = segs[1] || '';
     if (sub === 'hqplayer') return renderHqplayerSettings(root);
+    if (sub === 'output')  return renderOutputSettings(root);
     if (sub === 'profile') return renderProfile(root);
     if (sub === 'library') return renderLibrary(root);
     if (sub === 'ai')      return renderAI(root);
@@ -6022,6 +6023,12 @@
       });
       updateFabVisibility(currentRoute);
       this._refreshHqpStatus();
+      // Active-output hint straight off the last SSE status — no fetch.
+      const outputHint = this.el.querySelector('#outputHint');
+      if (outputHint) {
+        const out = (window.currentStatus || {}).output;
+        outputHint.textContent = (out && out.label) || '';
+      }
     },
     close() {
       if (!this.el) return;
@@ -6088,6 +6095,13 @@
           <path d="M21 12a9 9 0 11-3-6.7M21 4v5h-5"/>
           <path d="M3 12a9 9 0 003 6.7M3 20v-5h5"/>
         </svg>`;
+      const ICON_OUTPUT = `
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+          <path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13"/>
+        </svg>`;
       const CHEV = `
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
              stroke="currentColor" stroke-width="2" stroke-linecap="round"
@@ -6104,6 +6118,12 @@
               <span class="more-icon">${ICON_HQP}</span>
               <span class="more-label">HQPlayer</span>
               <span class="more-hint" id="hqpHint">…</span>
+              <span class="more-chev">${CHEV}</span>
+            </button>
+            <button class="more-row" type="button" data-go="more/output">
+              <span class="more-icon">${ICON_OUTPUT}</span>
+              <span class="more-label">Audio output</span>
+              <span class="more-hint" id="outputHint"></span>
               <span class="more-chev">${CHEV}</span>
             </button>
             <button class="more-row" type="button" data-go="more/profile">
@@ -8861,68 +8881,159 @@
   let _syncInFlight = false;
   let _syncBaselineLastAt = null;
 
-  function _renderHqpRow(ao, connected) {
-    const host = ao.hqplayer_host || '—';
-    const port = ao.hqplayer_port || '—';
-    let statusBlock;
-    if (connected === null || connected === undefined) {
-      // unknown — initial render, waiting on /api/hqplayer/state
-      statusBlock = `<span style="color:var(--color-text-muted);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;">checking…</span>
-                     <span style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(11.5*var(--px));letter-spacing:0.02em;">${escapeProfileHtml(host)}:${escapeProfileHtml(String(port))}</span>`;
-    } else if (connected) {
-      statusBlock = `<span style="color:var(--color-positive);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;"><span class="status-dot green"></span>Connected</span>
-                     <span style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(11.5*var(--px));letter-spacing:0.02em;">${escapeProfileHtml(host)}:${escapeProfileHtml(String(port))}</span>`;
-    } else {
-      statusBlock = `<span style="color:var(--color-negative);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;"><span class="status-dot red"></span>Disconnected</span>
-                     <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">— check launcher</span>`;
+  /* ---------- Audio output (Output picker) ----------
+     #more/output — select where Sautium plays: HQPlayer (external, its
+     own DSP chain) or a local device through the built-in bit-perfect
+     engine (WASAPI / ASIO / CoreAudio — offered only where the backend
+     runs natively; a Docker backend shows an explainer instead). Reads
+     state on mount; every selection PUTs /api/settings/output and
+     repaints from the fresh state. Visual vocabulary follows the
+     reference Settings.html "Audio output" group. */
+
+  async function renderOutputSettings(root) {
+    let data = null;
+    try {
+      const r = await fetch('/api/player/outputs');
+      if (r.ok) data = await r.json();
+    } catch (_) {}
+    if (!data) {
+      root.innerHTML = `<section class="screen screen-settings">${_settingsHeader('Audio output')}<div class="placeholder">Не вдалося завантажити налаштування.</div></section>`;
+      _wireBack(root);
+      return;
     }
-    return `
-      <div class="form-row stacked" data-action="open-hqplayer" data-row="hqp" style="cursor:pointer;">
+    root.innerHTML = `
+      <section class="screen screen-settings">
+        ${_settingsHeader('Audio output')}
+        <div data-output-content style="margin-top:calc(14*var(--px));">${_renderOutputs(data)}</div>
+      </section>`;
+    _wireBack(root);
+    _wireOutputActions(root);
+    _refreshOutputHqpDot(root);
+  }
+
+  function _renderOutputs(data) {
+    const active = data.active || {};
+    const hqp = (data.outputs || []).find(o => o.type === 'hqplayer') || {};
+    const local = (data.outputs || []).find(o => o.type === 'local');
+    const mark = (sel) => sel
+      ? `<span style="color:var(--color-amber);display:inline-flex;">${SETTINGS_ICONS.check}</span>`
+      : `<span style="color:var(--color-text-dim);display:inline-flex;">${SETTINGS_ICONS.rightCh}</span>`;
+
+    const hqpRow = `
+      <div class="form-row stacked" data-action="select-hqp" style="cursor:pointer;">
         <div class="row-stack">
           <span class="row-stack-label">HQPlayer</span>
-          <span style="color:var(--color-text-dim);display:inline-flex;">${SETTINGS_ICONS.rightCh}</span>
+          ${mark(active.type === 'hqplayer')}
         </div>
         <div class="row-stack-value" style="display:flex;align-items:center;gap:calc(8*var(--px));flex-wrap:wrap;">
-          ${statusBlock}
+          <span data-hqp-dot style="color:var(--color-text-muted);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;">checking…</span>
+          <span data-action="open-hqplayer" style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(11.5*var(--px));letter-spacing:0.02em;cursor:pointer;">${escapeProfileHtml(String(hqp.host || '—'))}:${escapeProfileHtml(String(hqp.port || '—'))}</span>
         </div>
       </div>`;
-  }
-  function _renderAudioOutput(ao) {
-    return `
-      <div class="form-group">
-        ${_renderHqpRow(ao, null)}
+
+    let deviceRows;
+    if (local && local.devices.length) {
+      deviceRows = local.devices.map(d => {
+        const sel = active.type === 'local' && active.device_id === d.device_id;
+        const dflt = d.is_default
+          ? ` <span style="color:var(--color-text-dim);font-size:calc(11*var(--px));">· default</span>` : '';
+        return `
+        <div class="form-row stacked" data-action="select-device" data-device-id="${escapeProfileHtml(d.device_id)}" style="cursor:pointer;">
+          <div class="row-stack">
+            <span class="row-stack-label">${escapeProfileHtml(d.name)}${dflt}</span>
+            ${mark(sel)}
+          </div>
+          <div class="row-stack-value">
+            <span style="font-family:var(--font-mono);font-size:calc(11.5*var(--px));color:var(--color-text-dim);letter-spacing:0.04em;">${escapeProfileHtml(d.hostapi)}</span>
+          </div>
+        </div>`;
+      }).join('');
+    } else {
+      deviceRows = `
         <div class="form-row disabled stacked">
           <div class="row-stack">
-            <span class="row-stack-label">Native output<span class="coming-soon-tag">Coming soon</span></span>
+            <span class="row-stack-label">Native output</span>
             <span></span>
           </div>
           <div class="row-stack-value">
-            <span style="font-family:var(--font-mono);font-size:calc(11.5*var(--px));color:var(--color-text-dim);letter-spacing:0.04em;">WASAPI · ASIO · CoreAudio · NAA</span>
+            <span style="font-family:var(--font-mono);font-size:calc(11.5*var(--px));color:var(--color-text-dim);letter-spacing:0.04em;">WASAPI · ASIO · CoreAudio</span>
           </div>
+          <div class="row-stack-sub">No local audio devices on this backend — a Docker node plays through HQPlayer; run the launcher for native device output.</div>
+        </div>`;
+    }
+
+    const exclusiveGroup = (local && local.devices.length) ? `
+      <div class="form-group">
+        <div class="form-row">
+          <span class="form-label">Exclusive mode (bit-perfect)</span>
+          <button class="toggle ${active.exclusive ? 'on' : ''}" data-action="toggle-exclusive"><span class="knob"></span></button>
         </div>
+        <div class="form-row stacked">
+          <div class="row-stack-sub">Takes the device over (WASAPI exclusive): other apps go silent and the device follows each track's sample rate. ASIO is exclusive by nature.</div>
+        </div>
+      </div>` : '';
+
+    return `
+      <div class="form-group">
+        ${hqpRow}
+        ${deviceRows}
       </div>
-    `;
+      ${exclusiveGroup}
+      <div class="btn-row single">
+        <button class="btn btn-secondary" data-action="refresh-outputs">Rescan devices</button>
+      </div>`;
   }
-  async function _refreshHqpRow(root, ao) {
-    let connected = null;
+
+  function _wireOutputActions(root) {
+    const putOutput = async (body) => {
+      try {
+        const r = await fetch('/api/settings/output', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          await window.notifyDialog({
+            title: 'Audio output',
+            message: escapeProfileHtml(err.detail || 'Failed to switch output'),
+            kind: 'error',
+          });
+        }
+      } catch (_) {}
+      renderOutputSettings(root);
+    };
+    root.querySelectorAll('[data-action="select-hqp"]').forEach(el =>
+      el.addEventListener('click', () => putOutput({ type: 'hqplayer' })));
+    root.querySelectorAll('[data-action="select-device"]').forEach(el =>
+      el.addEventListener('click', () =>
+        putOutput({ type: 'local', device_id: el.dataset.deviceId })));
+    const excl = root.querySelector('[data-action="toggle-exclusive"]');
+    if (excl) {
+      excl.addEventListener('click', () =>
+        putOutput({ exclusive: !excl.classList.contains('on') }));
+    }
+    const refresh = root.querySelector('[data-action="refresh-outputs"]');
+    if (refresh) refresh.addEventListener('click', () => renderOutputSettings(root));
+    root.querySelectorAll('[data-action="open-hqplayer"]').forEach(el =>
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        navigate('more/hqplayer');
+      }));
+  }
+
+  async function _refreshOutputHqpDot(root) {
+    const el = root.querySelector('[data-hqp-dot]');
+    if (!el) return;
+    let connected = false;
     try {
       const r = await fetch('/api/hqplayer/state');
-      if (r.ok) {
-        const data = await r.json();
-        connected = !!data.connected;
-      } else {
-        connected = false;
-      }
-    } catch (_) {
-      connected = false;
-    }
-    const old = root.querySelector('[data-row="hqp"]');
-    if (!old) return;
-    const wrap = document.createElement('template');
-    wrap.innerHTML = _renderHqpRow(ao, connected).trim();
-    const fresh = wrap.content.firstElementChild;
-    fresh.addEventListener('click', () => navigate('more/hqplayer'));
-    old.replaceWith(fresh);
+      if (r.ok) connected = !!(await r.json()).connected;
+    } catch (_) {}
+    el.style.color = connected ? 'var(--color-positive)' : 'var(--color-negative)';
+    el.innerHTML = connected
+      ? '<span class="status-dot green"></span>Connected'
+      : '<span class="status-dot red"></span>Disconnected';
   }
 
   /* Render entrypoint. */

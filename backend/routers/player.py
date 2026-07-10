@@ -110,6 +110,42 @@ class RemoveRequest(BaseModel):
 class ReorderRequest(BaseModel):
     order: list[int]  # full new order of media_file_ids, current track included at its original position
 
+class SeekRequest(BaseModel):
+    position: float  # seconds into the current track
+
+
+# -- Outputs -------------------------------------------------------------------
+
+@router.get("/outputs")
+def get_outputs():
+    """Available playback outputs + the active selection — feeds the Output
+    picker. Local devices appear only where the backend runs natively
+    (PortAudio finds nothing inside the Docker container)."""
+    from playback.local import devices as local_devices
+    from routers.settings import _read
+    from config import settings as app_settings
+
+    outputs = [{
+        "type": "hqplayer",
+        "available": _hqp_configured(),
+        "host": _read("hqplayer.host") or app_settings.hqplayer_host,
+        "port": _read("hqplayer.port") or app_settings.hqplayer_port,
+    }]
+    devices = local_devices.list_devices()
+    if devices:
+        outputs.append({"type": "local", "available": True, "devices": devices})
+
+    backend = manager.active
+    return {
+        "active": {
+            "type": backend.id if backend else None,
+            "label": backend.label if backend else None,
+            "device_id": _read("output.local_device"),
+            "exclusive": bool(_read("output.local_exclusive")),
+        },
+        "outputs": outputs,
+    }
+
 
 # -- Search -------------------------------------------------------------------
 
@@ -552,6 +588,18 @@ def volume_down():
 def set_volume(req: VolumeRequest):
     try:
         return {"ok": manager.backend().set_volume(req.level)}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@router.post("/seek")
+def seek(req: SeekRequest):
+    """Seek within the current track (outputs whose capabilities().seek is
+    true — the built-in engine and HQPlayer both support it)."""
+    if req.position < 0:
+        raise HTTPException(status_code=400, detail="position must be >= 0")
+    try:
+        return {"ok": manager.backend().seek(int(req.position))}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 

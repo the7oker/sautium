@@ -150,15 +150,17 @@ library**, served visually.
    Deviate only when a deliberate subversion serves a product principle
    — convention-literacy is a free UX win, and breaking it must be paid
    for with a clear reason.
-9. **Sautium is a remote, not a playback device.** The phone / web UI
-   does not produce audio itself — audio flows through HQPlayer (on a
-   separate machine) → DAC → amplifier → speakers. Therefore no UI
-   affordance may imply device-local control: no system volume slider,
-   no equaliser applied to web-UI output, no "audio output device"
-   picker on the phone, no mute toggle. Controls that have no technical
-   effect on the actual signal chain must not appear at all, even if
-   they are conventional in generic music players — their presence is
-   a UI lie.
+9. **Controls must reflect the real signal chain of the selected
+   output.** (Revised 2026-07-10 — the original "Sautium is a remote,
+   not a playback device" premise was superseded by the built-in player,
+   HARDWARE-TIERS §2.6: with local/DLNA/browser outputs Sautium DOES
+   originate audio, so an Output picker stopped being a UI lie and
+   became the honest representation of the chain.) The invariant that
+   survives: no control may appear unless it has a technical effect on
+   the audio actually playing. Volume, seek and exclusive-mode toggles
+   are shown per the active output's capabilities() — an output that
+   can't seek shows no seek affordance; when HQPlayer is the output, the
+   web UI still never pretends to produce audio itself.
 
 ---
 
