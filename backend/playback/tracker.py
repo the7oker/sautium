@@ -72,13 +72,6 @@ class _PlaySession:
         self.max_position = max(self.max_position, position)
 
 
-def current_track_index() -> Optional[int]:
-    """Playlist index of the in-flight play session (None between tracks).
-    The poller compares it against the live status to force a playlist
-    refresh the moment the track changes."""
-    return _play_track_index
-
-
 def _get_scrobbler():
     """Lazy Last.fm network from env credentials (LASTFM_API_KEY/_API_SECRET/
     _SESSION_KEY/_USERNAME). None when scrobbling isn't configured."""
@@ -134,22 +127,19 @@ def _scrobbling_enabled() -> bool:
         return True
 
 
-def _play_identity(pl_row: Optional[dict]) -> Optional[dict]:
-    """Source-agnostic identity for the playing playlist row: its track UUID
-    (owned AND phantom carry it) + optional media_file_id. None when the row is
-    not a known Sautium track (a foreign / out-of-library URI in the queue)."""
-    if not pl_row:
-        return None
-    tid = pl_row.get("track_id")
-    if not tid:
+def _play_identity(item) -> Optional[dict]:
+    """Source-agnostic identity for the playing QueueItem: its track UUID
+    (owned AND phantom carry it) + optional media_file_id. None when the item
+    is not a known Sautium track (a foreign / out-of-library URI in the queue)."""
+    if item is None or not item.track_id:
         return None
     return {
-        "track_id": tid,
-        "media_file_id": pl_row.get("id"),
-        "artist": pl_row.get("artist"),
-        "title": pl_row.get("title"),
-        "album": pl_row.get("album"),
-        "duration": pl_row.get("duration_seconds"),
+        "track_id": item.track_id,
+        "media_file_id": item.media_file_id,
+        "artist": item.artist,
+        "title": item.title,
+        "album": item.album or None,
+        "duration": item.duration_seconds,
     }
 
 
@@ -213,11 +203,11 @@ def _save_play_session(s: "_PlaySession") -> None:
 
 
 def track_play_event(state_name: str, position: float, length: float,
-                     track_index, pl_row: Optional[dict]) -> None:
+                     track_index, item) -> None:
     """Advance listening-history / scrobble state from one status tick. Mirrors
     the retired daemon's _handle_event, but resolves identity from the
-    already-built playlist payload (source-agnostic) — so phantom previews are
-    tracked too. Runs in the poller thread, OUTSIDE the HQPlayer status lock;
+    canonical queue item (source-agnostic) — so phantom previews are tracked
+    too. Runs on the active backend's status thread, outside its locks;
     DB writes go through the autocommit pool, Last.fm calls are fired async."""
     global _play_session, _play_track_index
 
@@ -231,7 +221,7 @@ def track_play_event(state_name: str, position: float, length: float,
     if track_index != _play_track_index:
         if _play_session is not None:
             _save_play_session(_play_session)
-        ident = _play_identity(pl_row)
+        ident = _play_identity(item)
         if ident is None:
             _play_session = None
             _play_track_index = track_index

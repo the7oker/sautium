@@ -30,6 +30,46 @@ _SESSION_ORIGINS = ("album", "track", "radio", "mix")
 _SESSION_DEDUP_WINDOW_SEC = 30
 
 
+def _queue_pairs(queue) -> list:
+    """(track_id, media_file_id) pairs from the canonical queue — phantom
+    (streamed) tracks carry a track UUID with media_file_id None, so they
+    land in the session just like owned files."""
+    return [(it.track_id, it.media_file_id)
+            for it in queue.snapshot() if it.track_id]
+
+
+def rotate_session(
+    queue,
+    origin: str,
+    *,
+    seed_track_id: Optional[str] = None,
+    seed_media_file_id: Optional[int] = None,
+    origin_album_id: Optional[str] = None,
+) -> None:
+    """Archive the live queue as a session snapshot, then open a new active
+    session. Called at the TOP of every destructive play endpoint, BEFORE
+    the queue is replaced, so the OLD queue is captured intact. Owned play
+    endpoints pass only seed_media_file_id; _archive_and_open_session
+    derives seed_track_id from it."""
+    archived_mix_id = _archive_and_open_session(
+        _queue_pairs(queue), origin,
+        seed_track_id, seed_media_file_id, origin_album_id,
+    )
+    if archived_mix_id is not None:
+        _schedule_mix_title(archived_mix_id)
+
+
+def close_active_session(queue) -> None:
+    """Archive the active session on a natural end-of-queue (the player
+    stopped on the last track) WITHOUT opening a new one, so a fully-
+    listened album lands in history without a follow-up play."""
+    archived_mix_id = _archive_and_open_session(
+        _queue_pairs(queue), "mix", None, None, None, open_new=False,
+    )
+    if archived_mix_id is not None:
+        _schedule_mix_title(archived_mix_id)
+
+
 def _archive_and_open_session(
     old_pairs: list[tuple[str, Optional[int]]],
     origin: str,

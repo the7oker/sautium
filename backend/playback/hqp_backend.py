@@ -26,36 +26,19 @@ import time
 from typing import Optional
 
 from config import settings
-from hqplayer_client import HQPlayerClient
+from hqplayer_client import HQPlayerClient, PlaybackState, file_path_to_uri
+
+from playback import queue as queue_mod
+from playback.base import Capabilities, PlaybackStatus, PlayerBackend, ReorderPlan
+from playback.queue import CanonicalQueue, QueueItem
 
 logger = logging.getLogger(__name__)
 
 _hqp_client: Optional[HQPlayerClient] = None
 _hqp_lock = threading.Lock()  # cmd commands
 
-# Bumped every time a NEW playback queue is started (any clear_first add). A
-# background phantom-album filler captures it and stops appending the instant the
-# user moves to another queue, so a slow album fill never bleeds tracks into an
-# unrelated session. Only ever mutated under _hqp_lock.
-_playback_generation = 0
-
 _hqp_status_client: Optional[HQPlayerClient] = None
 _hqp_status_lock = threading.Lock()  # status poller
-
-
-def generation() -> int:
-    """Current playback generation — background fillers capture it and stop
-    appending the moment a new queue supersedes theirs."""
-    return _playback_generation
-
-
-def bump_generation() -> int:
-    """Start a new playback generation (retires any running filler). Caller
-    must hold `_hqp_lock` — same rule as the implicit bump inside
-    `_add_uris_with_retry(clear_first=True)`."""
-    global _playback_generation
-    _playback_generation += 1
-    return _playback_generation
 
 
 def _make_client(timeout: float) -> HQPlayerClient:
@@ -213,10 +196,6 @@ def _add_uris_with_retry(uris: list[str], *, clear_first: bool = False) -> int:
     semantics); the rest append. The clear only ever fires on i == 0, so a
     mid-batch reconnect never re-clears already-added tracks.
     """
-    if clear_first:
-        # New queue = new playback generation (retires any phantom filler).
-        global _playback_generation
-        _playback_generation += 1
     added = 0
     for i, uri in enumerate(uris):
         clear = clear_first and i == 0
@@ -257,3 +236,472 @@ def _hqp_safe(action) -> None:
         except (BrokenPipeError, ConnectionError, OSError):
             if attempt == 1:
                 _reset_hqp()
+
+
+def _skip_to_first_playable(added: int) -> None:
+    """If the first queued track didn't start (e.g. a [Vinyl] placeholder path that
+    isn't real audio), skip ahead until one plays. Best-effort; holds _hqp_lock."""
+    try:
+        hqp = _get_hqp()
+        time.sleep(0.5)
+        status = hqp.get_status()
+        if status and status.state == PlaybackState.STOPPED and added > 1:
+            logger.warning("play: first track didn't start, skipping ahead")
+            for skip_idx in range(2, min(added + 1, 6)):
+                hqp.select_track(skip_idx)
+                hqp.play()
+                time.sleep(0.5)
+                status = hqp.get_status()
+                if status and status.state != PlaybackState.STOPPED:
+                    logger.info(f"play: track {skip_idx} started")
+                    break
+    except (BrokenPipeError, ConnectionError, OSError):
+        pass
+
+
+_local_provider = None
+
+
+def _owned_play_uri(media_file_id: int, db_path: str, file_format: str) -> str:
+    """HQPlayer URI for an owned track. Native file:// for formats HQPlayer decodes;
+    for an m4a (which it can't — MP4 container, AAC or ALAC) transcode to FLAC in
+    memory and return the media-proxy http URL so it plays anyway, displayed as
+    owned. Falls back to file:// if streaming/proxy is off or the transcode fails.
+    HQPlayer-only workaround: engine-rendered backends decode m4a natively."""
+    global _local_provider
+    from streaming.local import TRANSCODE_FORMATS
+    if (file_format or "").upper() not in TRANSCODE_FORMATS:
+        return file_path_to_uri(db_path)
+
+    from streaming import service as streaming_service
+    proxy = streaming_service.get_proxy() if streaming_service.is_enabled() else None
+    if proxy is None:
+        return file_path_to_uri(db_path)
+
+    if _local_provider is None:
+        from streaming.local import LocalTranscodeProvider
+        _local_provider = LocalTranscodeProvider()
+    from streaming.base import TrackQuery
+    container_path = settings.translate_to_local_path(db_path)
+    # artist/title are required but unused for display here — the playlist payload
+    # renders this entry from media_file_id (a real owned row), not the query.
+    q = TrackQuery(artist="", title="", media_file_id=media_file_id)
+    tokens = proxy.add_tracks([(q, [(_local_provider, container_path)])])
+    try:
+        e = proxy.wait_ready(tokens[0])
+    except (TimeoutError, KeyError):
+        e = None
+    if e is None or e.audio is None:
+        return file_path_to_uri(db_path)
+    return proxy.url_for(tokens[0])
+
+
+# -- The HQPlayer output backend ------------------------------------------------
+
+STATE_NAMES = {
+    PlaybackState.STOPPED: "stopped",
+    PlaybackState.PAUSED: "paused",
+    PlaybackState.PLAYING: "playing",
+    PlaybackState.STOPREQ: "stopping",
+}
+
+# A single status read can stall past the socket timeout — the WSL2→Windows
+# hop to HQPlayer routinely does. Blanking the status on one miss tears down
+# the whole Now Playing UI, so the last-known-good status keeps being served
+# until this many polls fail in a row, then "disconnected" is emitted.
+STATUS_FAILURE_THRESHOLD = 3
+
+# Every N poll ticks: read HQPlayer's playlist and compare against the
+# canonical queue (drift canary). One-way mirror per §2.6 — external edits
+# in HQPlayer's own GUI are logged, never reconciled.
+DRIFT_CHECK_EVERY = 30
+
+
+class HqpBackend(PlayerBackend):
+    """HQPlayer output. Status acquisition = 1 s poll on a dedicated socket —
+    the control protocol cannot push; documented boundary exception to the
+    no-polling rule (HARDWARE-TIERS §2.6). The canonical queue is mirrored
+    one-way INTO HQPlayer's native playlist via the queue_* hooks."""
+
+    id = "hqplayer"
+    label = "HQPlayer"
+
+    def __init__(self, emit, queue: CanonicalQueue):
+        super().__init__(emit)
+        self._queue = queue
+        self._wake = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._running = False
+        self._failures = 0
+        self._drift_logged = False
+
+    # -- lifecycle -------------------------------------------------------------
+
+    def start(self) -> None:
+        self._adopt_hqp_playlist()
+        self._running = True
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True,
+                                        name="hqp-status-poller")
+        self._thread.start()
+        logger.info("HQPlayer status poller started")
+
+    def shutdown(self) -> None:
+        self._running = False
+        self._wake.set()
+        if self._thread:
+            self._thread.join(timeout=3)
+        logger.info("HQPlayer status poller stopped")
+
+    def capabilities(self) -> Capabilities:
+        return Capabilities(volume=True, volume_kind="db", seek=True, gapless=True)
+
+    def poke(self) -> None:
+        """Wake the poller for an immediate re-poll after a command."""
+        self._wake.set()
+
+    # -- restart resilience -------------------------------------------------------
+
+    def _adopt_hqp_playlist(self) -> None:
+        """One-time bootstrap on attach: when OUR queue is empty but HQPlayer
+        still holds a playlist (backend restarted mid-listening — a normal
+        operation), import it so Now Playing and play tracking resume. This
+        is NOT bidirectional sync; after adoption the canonical queue is
+        authoritative again."""
+        if len(self._queue):
+            return
+        try:
+            with _hqp_status_lock:
+                hqp_tracks = _get_hqp_status().get_playlist()
+        except Exception as e:
+            logger.info("adopt: HQPlayer playlist unavailable (%s)", e)
+            return
+        if not hqp_tracks:
+            return
+        items = _items_from_hqp_tracks(hqp_tracks)
+        if items:
+            self._queue.replace(items)
+            logger.info("adopted %d tracks from the running HQPlayer playlist",
+                        len(items))
+
+    # -- status poll loop ------------------------------------------------------------
+
+    def _poll_loop(self) -> None:
+        tick = 0
+        while self._running:
+            try:
+                hqp_playlist = None
+                with _hqp_status_lock:
+                    try:
+                        hqp = _get_hqp_status()
+                        status = hqp.get_status()
+                    except (BrokenPipeError, ConnectionError, OSError):
+                        _reset_hqp_status()
+                        hqp = _get_hqp_status()
+                        status = hqp.get_status()
+                    if status is not None and tick % DRIFT_CHECK_EVERY == 0:
+                        try:
+                            hqp_playlist = hqp.get_playlist()
+                        except (BrokenPipeError, ConnectionError, OSError) as e:
+                            logger.debug("drift check playlist read failed: %s", e)
+
+                if status is None:
+                    # Transient read miss (e.g. HQPlayer stalled past the
+                    # socket timeout). Keep serving the last good status.
+                    self._register_failure()
+                else:
+                    self._failures = 0
+                    self._emit(PlaybackStatus(
+                        state=STATE_NAMES.get(status.state, "unknown"),
+                        position=status.position,
+                        length=status.length,
+                        queue_index=status.track_index,
+                        volume=status.volume,
+                        extra={
+                            "artist": status.artist,
+                            "album": status.album,
+                            "song": status.song,
+                            "genre": status.genre,
+                            "process_speed": status.process_speed,
+                        },
+                    ))
+                    if hqp_playlist is not None:
+                        self._check_drift(hqp_playlist)
+            except Exception:
+                self._register_failure()
+
+            # Back off when HQPlayer stops answering. It accepts the TCP
+            # connect but doesn't reply to <Status/> (control thread busy
+            # under DSP load), so each retry is a connect->read-timeout->
+            # disconnect churn cycle that only piles load onto an already-
+            # struggling control port. Exponential backoff (2,4,8..30s) lets
+            # it recover; a successful poll resets to 1s.
+            if self._failures > 0:
+                poll_interval = min(2.0 ** self._failures, 30.0)
+            else:
+                poll_interval = 1.0
+            self._wake.wait(timeout=poll_interval)
+            self._wake.clear()
+            tick += 1
+
+    def _register_failure(self) -> None:
+        """Tolerate a short burst of misses; emit 'disconnected' only past
+        the threshold (the manager dedupes repeats)."""
+        self._failures += 1
+        if self._failures >= STATUS_FAILURE_THRESHOLD:
+            self._emit(PlaybackStatus(state="disconnected"))
+
+    def _check_drift(self, hqp_tracks: list) -> None:
+        """Compare HQPlayer's playlist against the canonical queue. Proxy-
+        and transcode-backed slots are skipped (their tokens are re-minted
+        across restarts); plain file slots must resolve to the same db path
+        (compared through `_uri_db_path` — HQPlayer percent-escapes brackets
+        in the URIs it returns, so raw URI equality would false-positive)."""
+        snapshot = self._queue.snapshot()
+        drift = len(hqp_tracks) != len(snapshot)
+        if not drift:
+            from streaming.local import TRANSCODE_FORMATS
+            for t, it in zip(hqp_tracks, snapshot):
+                if (it.source["kind"] != "file"
+                        or (it.source.get("format") or "").upper() in TRANSCODE_FORMATS):
+                    continue
+                uri = t.get("uri") or ""
+                if (not uri.startswith("file://")
+                        or _uri_db_path(uri) != it.source["path"]):
+                    drift = True
+                    break
+        if drift and not self._drift_logged:
+            logger.warning(
+                "HQPlayer playlist drifted from the canonical queue "
+                "(external edit?) — the Sautium queue is authoritative")
+            self._drift_logged = True
+        elif not drift:
+            self._drift_logged = False
+
+    # -- transport -----------------------------------------------------------------
+
+    def play(self) -> bool:
+        ok = _hqp_cmd(lambda h: h.play())
+        self.poke()
+        return ok
+
+    def pause(self) -> bool:
+        ok = _hqp_cmd(lambda h: h.pause())
+        self.poke()
+        return ok
+
+    def stop(self) -> bool:
+        ok = _hqp_cmd(lambda h: h.stop())
+        self.poke()
+        return ok
+
+    def next(self) -> bool:
+        ok = _hqp_cmd(lambda h: h.next())
+        self.poke()
+        return ok
+
+    def previous(self) -> bool:
+        ok = _hqp_cmd(lambda h: h.previous())
+        self.poke()
+        return ok
+
+    def select(self, index: int) -> bool:
+        ok = _hqp_cmd(lambda h: h.select_track(index))
+        self.poke()
+        return ok
+
+    def seek(self, seconds: int) -> bool:
+        ok = _hqp_cmd(lambda h: h.seek(int(seconds)))
+        self.poke()
+        return ok
+
+    def set_volume(self, level: float) -> bool:
+        ok = _hqp_cmd(lambda h: h.set_volume(level))
+        self.poke()
+        return ok
+
+    def volume_up(self) -> bool:
+        ok = _hqp_cmd(lambda h: h.volume_up())
+        self.poke()
+        return ok
+
+    def volume_down(self) -> bool:
+        ok = _hqp_cmd(lambda h: h.volume_down())
+        self.poke()
+        return ok
+
+    # -- canonical-queue mirror -------------------------------------------------------
+
+    def _uri_for(self, item: QueueItem) -> str:
+        """Playable HQPlayer URI for a queue item. May transcode (m4a) —
+        call OUTSIDE `_hqp_lock`; a slow transcode must never hold the
+        command socket hostage."""
+        src = item.source
+        if src["kind"] == "file":
+            return _owned_play_uri(item.media_file_id, src["path"], src.get("format"))
+        if src["kind"] == "proxy":
+            from streaming import service as streaming_service
+            return streaming_service.get_proxy().url_for(src["token"])
+        return src["uri"]
+
+    def queue_replace(self, items: list, *, play: bool, probe_first: bool = False) -> int:
+        uris = [self._uri_for(it) for it in items]
+        with _hqp_lock:
+            _hqp_safe(lambda h: h.stop())
+            added = _add_uris_with_retry(uris, clear_first=True)
+            if added and play:
+                _hqp_safe(lambda h: h.play())
+                if probe_first:
+                    _skip_to_first_playable(added)
+        self.poke()
+        return added
+
+    def queue_append(self, items: list) -> int:
+        uris = [self._uri_for(it) for it in items]
+        with _hqp_lock:
+            added = _add_uris_with_retry(uris, clear_first=False)
+        self.poke()
+        return added
+
+    def queue_insert_next(self, items: list, anchor_index: Optional[int]) -> int:
+        """Insert right after the playing slot via the seamless remove-after /
+        re-append trick — the reading slot is never touched, so audio plays
+        through. URI-based so it works for preview streams too."""
+        uris = [self._uri_for(it) for it in items]
+        with _hqp_lock:
+            try:
+                raw = _get_hqp().get_playlist() or []
+            except Exception:
+                raw = []
+            idx = anchor_index or 0
+            if idx < 1 or idx > len(raw):
+                added = _add_uris_with_retry(uris, clear_first=False)
+            else:
+                # Remove the after-segment (always slot idx+1, which the rest
+                # shift down into), then re-append it behind the new tracks.
+                after = [t.get("uri") for t in raw[idx:] if t.get("uri")]
+                for _ in range(len(after)):
+                    _hqp_safe(lambda h: h.playlist_remove(idx + 1))
+                added = _add_uris_with_retry(uris, clear_first=False)
+                if after:
+                    _add_uris_with_retry(after, clear_first=False)
+        self.poke()
+        return added
+
+    def queue_remove(self, index: int) -> bool:
+        ok = _hqp_cmd(lambda h: h.playlist_remove(index))
+        self.poke()
+        return ok
+
+    def queue_clear_after_current(self) -> bool:
+        # PlaylistClear keeps the reading slot intact — it erases everything
+        # queued around the current track while the seed plays on.
+        with _hqp_lock:
+            _hqp_safe(lambda h: h.playlist_clear())
+        self.poke()
+        return True
+
+    def queue_reorder(self, plan: ReorderPlan) -> dict:
+        """Execute a validated reorder plan against HQPlayer's append/remove
+        primitives (no insert/move in the protocol — see the /reorder
+        endpoint docstring for the seamless-feasibility rules)."""
+        if plan.seamless:
+            # Sequence (current at slot K = status_idx throughout, then
+            # shifts left as we shrink the before-segment in step 3):
+            #
+            # 1. Empty the after-segment by repeatedly removing slot K+1.
+            #    K never changes: every remove targets a slot above K.
+            # 2. Append new_after in target order. All appends land at the
+            #    very end, after the current slot, so K stays put.
+            # 3. Walk old_before slot by slot. Tracks present in new_before
+            #    (matched in subsequence order) stay; the rest are removed
+            #    by remove(slot). When the last "drop" track is removed, K
+            #    has shifted down by exactly (len(old_before) -
+            #    len(new_before)), landing on new_status_idx as required.
+            with _hqp_lock:
+                hqp = _get_hqp()
+                for _ in range(len(plan.old_after)):
+                    hqp.playlist_remove(plan.status_idx + 1)
+                for mid in plan.new_after:
+                    hqp.playlist_add(
+                        file_path_to_uri(plan.items_by_id[mid].source["path"]))
+                cursor = 1
+                new_before_remaining = list(plan.new_before)
+                for old_track in plan.old_before:
+                    if (new_before_remaining
+                            and new_before_remaining[0] == old_track):
+                        new_before_remaining.pop(0)
+                        cursor += 1
+                    else:
+                        hqp.playlist_remove(cursor)
+            self.poke()
+            return {
+                "removed": len(plan.old_after) + (len(plan.old_before) - len(plan.new_before)),
+                "added": len(plan.new_after),
+                "interrupted": False,
+            }
+
+        # Fallback: clear+rebuild. Required for cases that need an insert
+        # (swap inside before, after→before crossing, current right-shift).
+        # hqp.stop() is mandatory — HQPlayer ignores PlaylistAdd(clear=True)
+        # while playing, silently appending instead, which would double every
+        # track and land select_track on the wrong slot.
+        with _hqp_lock:
+            hqp = _get_hqp()
+            hqp.stop()
+            hqp.playlist_add(
+                file_path_to_uri(plan.items_by_id[plan.order[0]].source["path"]),
+                clear=True)
+            for mid in plan.order[1:]:
+                hqp.playlist_add(
+                    file_path_to_uri(plan.items_by_id[mid].source["path"]))
+            hqp.select_track(plan.new_status_idx)
+            if plan.position > 0:
+                hqp.seek(plan.position)
+            if plan.resume:
+                hqp.play()
+        self.poke()
+        return {
+            "removed": len(plan.order),
+            "added": len(plan.order),
+            "interrupted": True,
+        }
+
+
+def _uri_db_path(uri: str) -> str:
+    """file:// URI → the stored media_files.file_path form (forward slashes,
+    HQPlayer's %5B/%5D bracket escapes undone)."""
+    p = uri[8:] if uri.startswith("file:///") else uri[7:]
+    p = p.replace("\\", "/")
+    return p.replace("%5B", "[").replace("%5D", "]")
+
+
+def _items_from_hqp_tracks(hqp_tracks: list) -> list[QueueItem]:
+    """Reverse-map HQPlayer's raw playlist into QueueItems (adopt-on-attach):
+    file:// URIs resolve through media_files, proxy URLs through the
+    streaming session's metadata, anything else becomes a foreign
+    pass-through item with HQPlayer's own labels."""
+    from streaming import service as streaming_service
+
+    paths = [_uri_db_path(t["uri"]) for t in hqp_tracks
+             if t.get("uri", "").startswith("file://")]
+    by_path = queue_mod.items_for_file_paths(paths)
+
+    items: list[QueueItem] = []
+    for t in hqp_tracks:
+        uri = t.get("uri", "")
+        item = None
+        if uri.startswith("file://"):
+            item = by_path.get(_uri_db_path(uri))
+        elif uri.startswith("http://") and "/preview/" in uri:
+            token = uri.rsplit("/preview/", 1)[-1].split("?", 1)[0]
+            try:
+                item = queue_mod.item_for_proxy_token(token)
+            except Exception:
+                item = None
+        if item is None:
+            item = QueueItem(
+                track_id=None, media_file_id=None,
+                source={"kind": "uri", "uri": uri},
+                title=t.get("song") or "", artist=t.get("artist") or "")
+        items.append(item)
+    return items
