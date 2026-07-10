@@ -323,9 +323,21 @@ Unsupported: <8 GB RAM, HDD, 32-bit, 4 GB Ampere cards until the bf16 fix lands.
     or UI-saved host; settings PUT starts/stops it event-driven). The full
     per-output-backend abstraction (§2.6) remains future work with the
     built-in player / DLNA.
-13. Per-tier Postgres tuning (`shared_buffers`, `maintenance_work_mem` for dump loads) — document or template into compose/db_init.
-14. Phantom-layer cap/prune for lite nodes (3M phantom track rows ≈ 2.5 GB).
-    (New minting IS profile-gated now — `sync_artist_discography` +
-    similar-artist minting no-op on lite; prune of existing rows TODO.)
-15. UPnP lease renewal loop.
+13. ✅ Per-tier Postgres tuning (SHIPPED 2026-07-10): compose files run
+    `postgres -c` with env-overridable defaults targeting the 16GB+ Docker
+    host (`PG_SHARED_BUFFERS:-1GB`, `PG_EFFECTIVE_CACHE_SIZE:-6GB`,
+    `PG_MAINTENANCE_WORK_MEM:-512MB`, `PG_WORK_MEM:-16MB`; weak hosts
+    override via .env); embedded PG gets RAM-tiered values written by
+    `db_init._pg_memory_tier()` (≥24GB / ≥15GB / stock below).
+14. ✅ Phantom prune for lite (SHIPPED 2026-07-10): startup background job
+    reuses `_reconcile_phantoms(artist, [], spare_analyzed=True)` per
+    artist — spares owned rows, streaming mints, and analysis-carrying
+    phantoms (the node's own streamed-enrichment contribution). Guarded by
+    a **3-consecutive-lite-boots streak** (`hardware.lite_streak`) so a GPU
+    node that transiently loses CUDA (driver-update WSL failure mode) never
+    auto-nukes 3M re-derivable-but-hours-to-re-mint rows.
+15. ✅ UPnP lease renewal (SHIPPED 2026-07-10): `renew_ports()` re-adds each
+    mapping at 75% of the 1h lease from a p2p_manager task; falls back to
+    full re-discover on failure and pushes a changed external port into the
+    DHT announce state.
 16. ✅ Dead `audio_analysis_batch_size` removed.

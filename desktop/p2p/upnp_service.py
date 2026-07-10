@@ -112,6 +112,33 @@ class UPnPService:
         logger.warning(f"UPnP: could not map port {internal_port}")
         return None
 
+    def renew_ports(self) -> bool:
+        """Refresh the lease on existing mappings. Routers drop a mapping
+        after LEASE_DURATION; re-adding the same (ext, int) pair resets the
+        timer. Without this the node silently loses internet reachability
+        one hour after launch — outbound still works, so it looks like
+        'the friend is offline'. On failure (router rebooted, IGD gone)
+        falls back to a full re-discover + re-map. Returns True while at
+        least one mapping is active."""
+        if not HAS_UPNP:
+            return False
+        if not self._upnp or not self._mapped:
+            return self.open_ports() is not None
+        try:
+            for ext, intn in list(self._mapped):
+                self._upnp.addportmapping(
+                    ext, "TCP", self._upnp.lanaddr, intn,
+                    f"Sautium ({intn})", "", LEASE_DURATION,
+                )
+            logger.debug("UPnP: %d mappings renewed", len(self._mapped))
+            return True
+        except Exception as e:
+            logger.info(f"UPnP renewal failed ({e}) — re-discovering")
+            self._mapped.clear()
+            self._upnp = None
+            self._external_ip = None
+            return self.open_ports() is not None
+
     def close_ports(self):
         """Remove all UPnP port mappings."""
         if not self._upnp:

@@ -32,6 +32,12 @@ services:
     # allocate dynamic shared memory there and die with "could not resize
     # shared memory segment: No space left on device" on an 18GB database.
     shm_size: 1gb
+    # Tiered PG memory settings — see docker-compose.yml for rationale.
+    command: postgres
+      -c shared_buffers=${PG_SHARED_BUFFERS:-1GB}
+      -c effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-6GB}
+      -c maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-512MB}
+      -c work_mem=${PG_WORK_MEM:-16MB}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-music_ai}
       POSTGRES_USER: ${POSTGRES_USER:-musicai}

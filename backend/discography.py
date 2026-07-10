@@ -361,34 +361,47 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
     return len(slot_rows)
 
 
-def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
+def _reconcile_phantoms(artist_id: str, missing_rgs: List[str],
+                        spare_analyzed: bool = False) -> None:
     """Drop this artist's phantom links that no longer correspond to a
     missing release-group (ripped since the last sync, MB reclassified,
     pre-MB legacy), garbage-collect phantom albums nobody links to, and
     clear a stale external cover on albums that became owned — the
-    frontend prefers `cover_url` over the local file cover."""
+    frontend prefers `cover_url` over the local file cover.
+
+    ``spare_analyzed`` (lite prune only): keep phantom albums that carry a
+    track with an embedding — a streamed-then-enriched phantom is the
+    node's own analysis contribution, and the track cascade would delete
+    it. Normal reconcile keeps the resolve-or-discard semantics."""
     # Streaming-minted phantoms are OUTSIDE the MB source-of-truth: the user
     # clicked a provider tile (explicit intent), the album has no rg MBID, and
     # this reconcile used to nuke it on the very first artist-page view.
+    analyzed_guard = """
+              AND NOT EXISTS (SELECT 1 FROM album_tracks at
+                              JOIN embeddings e ON e.track_id = at.track_id
+                              WHERE at.album_id = al.id)
+    """ if spare_analyzed else ""
     if missing_rgs:
-        db_execute("""
+        db_execute(f"""
             DELETE FROM album_artists aa
             USING albums al
             WHERE al.id = aa.album_id
               AND aa.artist_id = %(id)s::uuid
               AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
               AND NOT EXISTS (SELECT 1 FROM streaming_mints sm WHERE sm.album_id = al.id)
+              {analyzed_guard}
               AND (al.musicbrainz_id IS NULL
                    OR NOT (al.musicbrainz_id::text = ANY(%(rgs)s)))
         """, {"id": artist_id, "rgs": missing_rgs})
     else:
-        db_execute("""
+        db_execute(f"""
             DELETE FROM album_artists aa
             USING albums al
             WHERE al.id = aa.album_id
               AND aa.artist_id = %(id)s::uuid
               AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
               AND NOT EXISTS (SELECT 1 FROM streaming_mints sm WHERE sm.album_id = al.id)
+              {analyzed_guard}
         """, {"id": artist_id})
 
     db_execute("""
@@ -408,15 +421,47 @@ def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
 
     # Orphan phantom tracks of this artist: their album was GC'd above and
     # no file ever materialized (a ripped phantom track has media_files and
-    # is protected). Enrichment rows cascade with the track.
-    db_execute("""
+    # is protected). Enrichment rows cascade with the track — the embedding
+    # guard is the secondary net behind the album-level spare_analyzed one.
+    track_guard = """
+          AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = t.id)
+    """ if spare_analyzed else ""
+    db_execute(f"""
         DELETE FROM tracks t
         USING track_artists ta
         WHERE ta.track_id = t.id
           AND ta.artist_id = %(id)s::uuid
           AND NOT EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
           AND NOT EXISTS (SELECT 1 FROM album_tracks at WHERE at.track_id = t.id)
+          {track_guard}
     """, {"id": artist_id})
+
+
+def prune_phantom_layer(cancel_flag=None) -> Dict[str, int]:
+    """Delete the MB-derived phantom album/track layer — lite-profile
+    cleanup (HARDWARE-TIERS §6.14). ~3M phantom track rows + album_tracks
+    cost ~2.5 GB of heap+index the lite tier promises not to carry.
+
+    Spares: owned rows, streaming mints (explicit user intent), and
+    analysis-carrying phantoms (the node's own streamed-enrichment
+    contribution). Everything deleted is re-derivable — a later
+    full-profile boot re-mints from the MB dump / Last.fm. Per-artist
+    commits: resumable and error-isolated."""
+    artists = db_query("""
+        SELECT DISTINCT aa.artist_id
+        FROM album_artists aa
+        JOIN albums al ON al.id = aa.album_id
+        WHERE NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
+          AND NOT EXISTS (SELECT 1 FROM streaming_mints sm WHERE sm.album_id = al.id)
+    """)
+    stats = {"artists": 0}
+    for row in artists:
+        if cancel_flag and cancel_flag():
+            break
+        _reconcile_phantoms(str(row["artist_id"]), [], spare_analyzed=True)
+        stats["artists"] += 1
+    logger.info("phantom prune: reconciled %d artists", stats["artists"])
+    return stats
 
 
 def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:

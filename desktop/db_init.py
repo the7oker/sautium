@@ -657,21 +657,43 @@ host    all       all   ::1/128       md5
     hba_path.write_text(hba_content)
 
 
+def _pg_memory_tier() -> str:
+    """RAM-tiered memory settings for the embedded PG (HARDWARE-TIERS §6.13).
+    Stock initdb values (128MB/64MB) starve a big-library node — MB-slice
+    ANALYZE and HNSW scans thrash the buffer pool — while a low-RAM machine
+    must keep them. Tier by total RAM, mirroring the hardware-profile
+    thresholds; psutil is a desktop-venv dependency so it's always present
+    here."""
+    import psutil
+    ram_gb = psutil.virtual_memory().total / 1e9
+    if ram_gb >= 24:
+        return ("shared_buffers = '1GB'\n"
+                "effective_cache_size = '6GB'\n"
+                "maintenance_work_mem = '512MB'\n"
+                "work_mem = '16MB'\n")
+    if ram_gb >= 15:
+        return ("shared_buffers = '512MB'\n"
+                "effective_cache_size = '4GB'\n"
+                "maintenance_work_mem = '256MB'\n"
+                "work_mem = '8MB'\n")
+    return ""   # <15GB: stock defaults are the safe choice
+
+
 def _configure_postgresql_conf(data_dir: Path) -> None:
-    """Configure postgresql.conf for local-only connections."""
+    """Configure postgresql.conf for local-only connections + tiered memory."""
     conf_path = data_dir / "postgresql.conf"
 
     # Read existing and append our settings
     existing = conf_path.read_text() if conf_path.exists() else ""
 
-    additions = """
+    additions = f"""
 # Sautium settings
 listen_addresses = '127.0.0.1'
 timezone = 'UTC'
 shared_preload_libraries = ''
 log_destination = 'stderr'
 logging_collector = off
-"""
+{_pg_memory_tier()}"""
     conf_path.write_text(existing + additions)
 
 

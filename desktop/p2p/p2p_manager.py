@@ -55,6 +55,7 @@ class P2PManager:
         self._stop_event: Optional[asyncio.Event] = None
         self._chat_notify: Optional[asyncio.Event] = None
         self._reannounce_task: Optional[asyncio.Task] = None
+        self._upnp_renewal_task: Optional[asyncio.Task] = None
         self._pending_retry_task: Optional[asyncio.Task] = None
         self._resolve_friends_task: Optional[asyncio.Task] = None
         self._pending_accepts_task: Optional[asyncio.Task] = None
@@ -265,6 +266,12 @@ class P2PManager:
                     if ext_port:
                         self._dht_service.set_announce_port(ext_port)
                     _progress(f"UPnP: {ext_ip}")
+                # Renewal loop regardless of the first attempt's outcome —
+                # renew_ports() retries a full open when nothing is mapped,
+                # so a router that appears later still gets picked up.
+                self._upnp_renewal_task = asyncio.create_task(
+                    self._upnp_renewal_loop()
+                )
 
             # Start DHT
             if self._dht_service.is_available:
@@ -440,13 +447,41 @@ class P2PManager:
                 except OSError:
                     pass
 
+    async def _upnp_renewal_loop(self):
+        """Re-map before the 1-hour UPnP lease expires (at 75% of
+        LEASE_DURATION). Lease renewal is a timer-based protocol
+        requirement, not state polling: without it the router silently
+        drops the mapping after an hour and the node loses internet
+        reachability until relaunch (outbound still works, so it just
+        looks like 'the friend is offline'). renew_ports() also recovers
+        a rebooted router via full re-discover; a changed external port
+        is pushed into the DHT announce state, which the 15-min periodic
+        re-announce then publishes."""
+        from desktop.p2p.upnp_service import LEASE_DURATION
+        interval = LEASE_DURATION * 0.75
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                ok = await asyncio.get_event_loop().run_in_executor(
+                    None, self._upnp.renew_ports
+                )
+                if ok:
+                    ext_port = self._upnp.get_external_port(self._http_port)
+                    if ext_port:
+                        self._dht_service.set_announce_port(ext_port)
+                else:
+                    logger.info("UPnP: no active mapping after renewal attempt")
+            except Exception as e:
+                logger.warning(f"UPnP renewal loop error: {e}")
+
     async def _cleanup(self):
         """Clean shutdown of all services."""
         for task in (self._reannounce_task, self._pending_retry_task,
                      self._resolve_friends_task, self._db_listen_task,
                      self._pending_accepts_task, self._lan_discovery_task,
                      self._sync_request_listen_task, self._sync_request_task,
-                     self._auto_sync_task, self._mb_slice_task):
+                     self._auto_sync_task, self._mb_slice_task,
+                     self._upnp_renewal_task):
             if task:
                 task.cancel()
                 try:
