@@ -227,6 +227,10 @@ class PlaybackManager:
             "output": {"type": backend.id if backend else None,
                        "label": backend.label if backend else None},
         }
+        # Engine failure surface (device open/start failed, unplayable
+        # tracks) — additive; absent when everything is healthy.
+        if s.extra.get("error"):
+            new_data["error"] = s.extra["error"]
 
         # Per-track listening history + scrobble (source-agnostic: owned and
         # streamed phantom items both carry the track UUID). Separate from the

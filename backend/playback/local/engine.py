@@ -289,21 +289,31 @@ class Engine:
         self._position_offset = seek_to
         self._boundaries = [(index, 0, self._length, item)]
         self._spawn_ffmpeg(src, rate, channels, seek_to)
-        self._prefill_and_start()
+        if not self._prefill_and_start():
+            return
         self._track_failures = 0
         self._set_state("playing")
 
-    def _prefill_and_start(self) -> None:
+    def _prefill_and_start(self) -> bool:
         """Block (player-loop only) until ~1 s of audio is buffered — or the
         decoder already finished / timed out — then start the callback so it
-        never starves at t=0."""
+        never starves at t=0. WASAPI surfaces format rejections at START, not
+        open — fail loudly with the device error in the status."""
         target = int(_PREFILL_SECONDS * self._stream_rate)
         deadline = time.monotonic() + _PREFILL_TIMEOUT
         while (self._ring.available_read() < target
                and self._ffmpeg is not None and self._ffmpeg.poll() is None
                and time.monotonic() < deadline):
             time.sleep(0.02)
-        self._stream.start()
+        try:
+            self._stream.start()
+        except Exception as e:
+            logger.error("stream start failed (rate=%d exclusive=%s): %s",
+                         self._stream_rate, self._exclusive, e)
+            self._teardown_pipeline()
+            self._set_state("stopped", error=f"device start failed: {e}")
+            return False
+        return True
 
     def _source_url(self, item: QueueItem) -> Optional[str]:
         src = item.source
@@ -371,8 +381,14 @@ class Engine:
         hostapi = sd.query_hostapis(
             sd.query_devices(device_index)["hostapi"])["name"]
         extra = None
-        if hostapi == "Windows WASAPI" and self._exclusive:
-            extra = sd.WasapiSettings(exclusive=True)
+        if hostapi == "Windows WASAPI":
+            # Shared mode MUST auto-convert: the OS mixer accepts only the
+            # device mix format (typically 48k float), and a native-rate
+            # int32 stream fails at stream.start() with
+            # AUDCLNT_E_UNSUPPORTED_FORMAT. Bit-perfect shared doesn't exist
+            # anyway — exclusive is the bit-perfect path, native format only.
+            extra = (sd.WasapiSettings(exclusive=True) if self._exclusive
+                     else sd.WasapiSettings(auto_convert=True))
         ring = _Ring(int(_RING_SECONDS * rate), channels)
 
         def callback(outdata, frames, _time_info, status_flags):
@@ -390,25 +406,14 @@ class Engine:
                 # At 100 this branch never runs: bit-perfect passthrough.
                 np.multiply(out, vol / 100.0, out=out, casting="unsafe")
 
-        def open_with(extra_settings):
-            return sd.RawOutputStream(
+        try:
+            stream = sd.RawOutputStream(
                 samplerate=rate, channels=channels, dtype="int32",
                 device=device_index, callback=callback,
-                extra_settings=extra_settings)
-
-        try:
-            try:
-                stream = open_with(extra)
-            except Exception:
-                if hostapi == "Windows WASAPI" and not self._exclusive:
-                    # Shared mode rejected the native rate — let WASAPI
-                    # convert instead of failing the track.
-                    stream = open_with(sd.WasapiSettings(auto_convert=True))
-                else:
-                    raise
+                extra_settings=extra)
         except Exception as e:
-            logger.error("stream open failed (%s ch=%d rate=%d): %s",
-                         hostapi, channels, rate, e)
+            logger.error("stream open failed (%s ch=%d rate=%d exclusive=%s): %s",
+                         hostapi, channels, rate, self._exclusive, e)
             self._set_state("stopped", error=f"device open failed: {e}")
             return False
 
