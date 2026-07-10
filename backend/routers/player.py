@@ -749,12 +749,31 @@ def jump(req: JumpRequest):
         raise HTTPException(status_code=503, detail=str(e))
 
 
+def _filler_append(item, gen: int) -> Optional[bool]:
+    """Append one filler item, retrying through control-link blips — a DHT
+    announce window can drop a single add while the audio stream itself rides
+    on, and silently losing an already-fetched track leaves a "buffering"
+    ghost in the album UI. None = generation superseded (caller must stop);
+    False = dropped after retries."""
+    for attempt in range(4):
+        if attempt:
+            time.sleep(5)
+        added = manager.append([item], generation=gen)
+        if added is None:
+            return None
+        if added:
+            return True
+    logger.warning("filler: dropped %s — %s after add retries",
+                   item.artist, item.title)
+    return False
+
+
 def _owned_filler(items: list, gen: int) -> None:
     """Append the rest of an owned set as each item is ready — file:// instantly,
     an m4a after its in-memory transcode (inside the HQP mirror) — in order,
     stopping if a new playback supersedes this one (generation)."""
     for item in items:
-        if manager.append([item], generation=gen) is None:
+        if _filler_append(item, gen) is None:
             return
 
 
@@ -959,7 +978,7 @@ def _phantom_filler(proxy, tokens: list, start_index: int, gen: int) -> None:
         item = queue_mod.item_for_proxy_token(tokens[j])
         if item is None:
             continue
-        if manager.append([item], generation=gen) is None:
+        if _filler_append(item, gen) is None:
             return   # user moved to another queue → stop appending
 
 
@@ -1792,7 +1811,7 @@ def _radio_append_batch(batch: list, gen: int) -> None:
             item = owned[0] if owned else None
         if item is None:
             continue
-        if manager.append([item], generation=gen) is None:
+        if _filler_append(item, gen) is None:
             return
         _radio_played.add(entry["track_uuid"])
         _radio_last_artist = entry["artist"]

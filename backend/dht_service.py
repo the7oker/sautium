@@ -95,7 +95,9 @@ class DHTService:
         self.listen_port = listen_port
         self.http_port = http_port
         self._session: Optional[object] = None  # lt.session
-        self._announced: set[str] = set()  # artist UUIDs currently announced
+        self._announced: set[str] = set()  # artist UUIDs announced at least once
+        self._artist_uuids: set[str] = set()  # full announce target set
+        self._rotation_cursor = 0  # round-robin position for budgeted re-announces
         self._user_invite_code: Optional[str] = None
         self._peer_cache: dict[str, list[tuple[str, int, float]]] = {}
         self._running = False
@@ -189,20 +191,45 @@ class DHTService:
         self._session.dht_announce(sha1, self.http_port, 0)
         logger.info(f"DHT: user announced ({invite_code})")
 
+    @staticmethod
+    def _announce_budget() -> Optional[int]:
+        """Per-cycle announce budget from user settings (sync.announce_limit;
+        null = announce everything). Even the PACED full sweep degrades the
+        container↔host path for its whole ~10-min window — a budget keeps the
+        window short and rotation still refreshes every artist over a few
+        cycles."""
+        from routers.settings import _read
+        limit = _read("sync.announce_limit")
+        return int(limit) if limit else None
+
     async def announce_artists(self, artist_uuids: list[str]):
-        """Announce all enriched artists in DHT."""
+        """Register artists for DHT announcing and announce up to the budget
+        now; the rest are covered by the rotating periodic re-announce."""
         if not self._session:
             return
 
-        new_uuids = set(artist_uuids) - self._announced
+        self._artist_uuids.update(artist_uuids)
+        new_uuids = list(set(artist_uuids) - self._announced)
         if not new_uuids:
             logger.info("No new artists to announce")
             return
 
-        logger.info(
-            f"Announcing {len(new_uuids)} artists in DHT "
-            f"(HTTP port {self.http_port})"
-        )
+        try:
+            budget = await asyncio.to_thread(self._announce_budget)
+        except Exception as e:
+            logger.warning(f"announce budget read failed: {e}")
+            budget = None
+        if budget and len(new_uuids) > budget:
+            logger.info(
+                f"Announcing {budget}/{len(new_uuids)} new artists in DHT "
+                f"(budget; rotation covers the rest, HTTP port {self.http_port})"
+            )
+            new_uuids = new_uuids[:budget]
+        else:
+            logger.info(
+                f"Announcing {len(new_uuids)} artists in DHT "
+                f"(HTTP port {self.http_port})"
+            )
         for i, uuid in enumerate(new_uuids):
             ih = artist_infohash(uuid)
             sha1 = lt.sha1_hash(ih)
@@ -301,7 +328,11 @@ class DHTService:
         return valid
 
     async def periodic_reannounce(self):
-        """Re-announce all artists and user every REANNOUNCE_INTERVAL seconds."""
+        """Re-announce artists and user every REANNOUNCE_INTERVAL seconds.
+        With an announce budget (sync.announce_limit) each cycle refreshes a
+        rotating window of the full set — never-announced artists included —
+        so every artist comes around every ceil(N/budget) cycles while the
+        per-cycle network window stays short."""
         while self._running:
             await asyncio.sleep(REANNOUNCE_INTERVAL)
             if not self._running or not self._session:
@@ -313,15 +344,29 @@ class DHTService:
                 sha1 = lt.sha1_hash(ih)
                 self._session.dht_announce(sha1, self.http_port, 0)
 
-            # Re-announce artists
-            logger.info(
-                f"Re-announcing {len(self._announced)} artists "
-                f"+ user in DHT"
-            )
-            for i, uuid in enumerate(list(self._announced)):
+            try:
+                budget = await asyncio.to_thread(self._announce_budget)
+            except Exception as e:
+                logger.warning(f"announce budget read failed: {e}")
+                budget = None
+            uuids = sorted(self._artist_uuids or self._announced)
+            if budget and len(uuids) > budget:
+                start = self._rotation_cursor % len(uuids)
+                uuids = [uuids[(start + k) % len(uuids)] for k in range(budget)]
+                self._rotation_cursor = (start + budget) % len(self._artist_uuids)
+                logger.info(
+                    f"Re-announcing {len(uuids)}/{len(self._artist_uuids)} artists "
+                    f"(rotating budget) + user in DHT"
+                )
+            else:
+                logger.info(
+                    f"Re-announcing {len(uuids)} artists + user in DHT"
+                )
+            for i, uuid in enumerate(uuids):
                 ih = artist_infohash(uuid)
                 sha1 = lt.sha1_hash(ih)
                 self._session.dht_announce(sha1, self.http_port, 0)
+                self._announced.add(uuid)
                 if (i + 1) % ANNOUNCE_CHUNK == 0:
                     await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE)
                     if not self._running or not self._session:

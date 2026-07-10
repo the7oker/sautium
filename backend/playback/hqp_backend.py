@@ -306,10 +306,13 @@ STATE_NAMES = {
 }
 
 # A single status read can stall past the socket timeout — the WSL2→Windows
-# hop to HQPlayer routinely does. Blanking the status on one miss tears down
-# the whole Now Playing UI, so the last-known-good status keeps being served
-# until this many polls fail in a row, then "disconnected" is emitted.
-STATUS_FAILURE_THRESHOLD = 3
+# hop to HQPlayer routinely does, and container-network blips (DHT announce
+# windows) stall it for tens of seconds while the AUDIO stream itself rides
+# through on its long-lived connection. Blanking the status tears down the
+# whole Now Playing UI mid-music, so the last-known-good status keeps being
+# served until this many polls fail in a row (~30 s with the 2,4,8,15 s
+# backoff), then "disconnected" is emitted.
+STATUS_FAILURE_THRESHOLD = 5
 
 # Every N poll ticks: read HQPlayer's playlist and compare against the
 # canonical queue (drift canary). One-way mirror per §2.6 — external edits
