@@ -569,6 +569,12 @@ CREATE TABLE IF NOT EXISTS signing_batches (
     batch_root    CHAR(64) PRIMARY KEY,
     author_pubkey CHAR(64) NOT NULL,
     worker_date   TIMESTAMPTZ NOT NULL,
+    -- uuid5(NAMESPACE, "ip:"+ip) of the batch submitter, computed by the Worker
+    -- (the only party that sees the client IP) and bound into the timestamp
+    -- signature — accountability for who notarized the batch, not a claim about
+    -- who analyzed the audio. NULL only for pre-v2 batches awaiting re-timestamp
+    -- (sign_audio.py --resign).
+    ip_hash       UUID,
     worker_sig    CHAR(128) NOT NULL,
     authority     CHAR(64) NOT NULL,
     created_at    TIMESTAMPTZ DEFAULT now()

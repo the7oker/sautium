@@ -58,6 +58,15 @@ const TRUSTED_AUTHORITIES = [
 ];
 const BIRTH_CERT_VERSION = 1;
 
+// Timestamp-notary payload version. v2 binds the submitter's ip_hash into the
+// signed root (accountability for who notarized a batch). Decoupled from
+// BIRTH_CERT_VERSION — they were incidentally equal at v1 — and mirrored by
+// TIMESTAMP_VERSION in backend/record_sig.py; bump both together. UUID_NAMESPACE
+// MIRRORS backend/uuid_utils.py NAMESPACE so ip_hash is identical on Worker and
+// backend.
+const TIMESTAMP_VERSION = 2;
+const UUID_NAMESPACE = "adc1ec0b-2c81-5e26-9938-a369c6f7a5e1";
+
 // Enforced on account creation client-side; re-checked here because invite
 // codes arrive from the network. Guarantees '#' appears exactly once in an
 // invite code and keeps kvKey() substitution unambiguous.
@@ -283,20 +292,27 @@ async function handleTimestamp(request, env, corsHeaders) {
     return json({ error: rateLimitResult }, corsHeaders, 429);
   }
 
+  // Idempotent per root, but re-sign any record still in an older format so a
+  // re-submitted v1 root upgrades to v2 (adds ip_hash). The date is the
+  // FIRST-issuance moment — preserved across a re-sign so authorship priority
+  // never regresses; only ip_hash reflects whoever re-submits.
   let record = await env.RATE_LIMITS.get(`ts:${root}`, "json");
-  if (!record) {
-    const date = nowIsoSeconds();
+  if (!record || record.v !== TIMESTAMP_VERSION) {
+    const date = record?.date || nowIsoSeconds();
+    const ipHash = await ipHashUuid(ip);
     const key = await birthSigningKey(env);
     const sig = bytesToHex(new Uint8Array(await crypto.subtle.sign(
       "Ed25519", key,
-      new TextEncoder().encode(`sautium-timestamp:v${BIRTH_CERT_VERSION}:${root}:${date}`))));
-    record = { date, sig };
+      new TextEncoder().encode(
+        `sautium-timestamp:v${TIMESTAMP_VERSION}:${root}:${date}:${ipHash}`))));
+    record = { v: TIMESTAMP_VERSION, date, ip_hash: ipHash, sig };
     await env.RATE_LIMITS.put(`ts:${root}`, JSON.stringify(record));
   }
 
   return json({
     root,
     date: record.date,
+    ip_hash: record.ip_hash,
     sig: record.sig,
     authority: TRUSTED_AUTHORITIES[0],
   }, corsHeaders);
@@ -860,6 +876,33 @@ function hexToBytes(hex) {
 
 function bytesToHex(bytes) {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function normalizeText(text) {
+  // Mirror backend/uuid_utils.py normalize(): strip, lowercase, NFC, collapse
+  // whitespace — same input canonicalisation feeds the same UUID.
+  return text.trim().toLowerCase().normalize("NFC").replace(/\s+/g, " ");
+}
+
+async function uuid5(namespaceUuid, name) {
+  // Deterministic UUID v5 (SHA-1), byte-identical to Python uuid.uuid5 for the
+  // same namespace+name — the network's shared id primitive.
+  const ns = hexToBytes(namespaceUuid.replace(/-/g, ""));
+  const nameBytes = new TextEncoder().encode(name);
+  const data = new Uint8Array(ns.length + nameBytes.length);
+  data.set(ns);
+  data.set(nameBytes, ns.length);
+  const h = new Uint8Array(await crypto.subtle.digest("SHA-1", data)).slice(0, 16);
+  h[6] = (h[6] & 0x0f) | 0x50; // version 5
+  h[8] = (h[8] & 0x3f) | 0x80; // RFC 4122 variant
+  const x = bytesToHex(h);
+  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20)}`;
+}
+
+async function ipHashUuid(ip) {
+  // Deterministic pseudonym for the notary submitter's IP — accountability
+  // without storing the raw address. Same uuid5 shape as artist/track ids.
+  return await uuid5(UUID_NAMESPACE, `ip:${normalizeText(ip)}`);
 }
 
 function isValidEmail(email) {

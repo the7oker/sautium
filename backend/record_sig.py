@@ -42,9 +42,13 @@ from typing import Optional
 # v1 records were re-signed as v2 pre-launch; no verifier supports v1.
 RECORD_VERSION = 2
 
-# The Worker timestamp string format — coupled to BIRTH_CERT_VERSION in
-# worker/verify.js (they must match), NOT to the record format above.
-TIMESTAMP_VERSION = 1
+# The Worker timestamp string format. v2 (2026-07-10) appends the submitter's
+# ip_hash (uuid5(NAMESPACE, "ip:"+ip), computed by the Worker) after the date —
+# accountability for who notarized a batch. MIRRORS worker/verify.js
+# TIMESTAMP_VERSION (they must match); decoupled from BIRTH_CERT_VERSION and
+# from the record format above, so neither a birth-cert nor a record-format
+# bump desyncs the notary.
+TIMESTAMP_VERSION = 2
 
 # Canonical grid identity: WINDOW_SECONDS=10, evenly-spaced-subset strategy
 # (embeddings.segment_grid_indices). Bump when the grid definition changes so
@@ -183,30 +187,35 @@ def verify_proof(leaf_hex: str, proof: list, root_hex: str) -> bool:
         return False
 
 
-def timestamp_payload(root_hex: str, date_iso: str) -> bytes:
-    """The bytes the Worker (master authority) signs to notarize a batch
-    root at a date — domain-separated from birth certs by the prefix.
-    Versioned by TIMESTAMP_VERSION (in step with worker/verify.js), not by
-    the record format — a record-format bump must not desync the Worker."""
-    return f"sautium-timestamp:v{TIMESTAMP_VERSION}:{root_hex.lower()}:{date_iso}".encode("utf-8")
+def timestamp_payload(root_hex: str, date_iso: str, ip_hash: str) -> bytes:
+    """The bytes the Worker (master authority) signs to notarize a batch root
+    at a date, bound to the submitter's ip_hash — domain-separated from birth
+    certs by the prefix. ip_hash is uuid5(NAMESPACE, "ip:"+ip) computed by the
+    Worker (the only party that sees the client IP): accountability for who
+    notarized the batch, not a claim about who analyzed the audio. Versioned by
+    TIMESTAMP_VERSION (in step with worker/verify.js), not by the record
+    format — a record-format bump must not desync the Worker."""
+    return (f"sautium-timestamp:v{TIMESTAMP_VERSION}:{root_hex.lower()}:"
+            f"{date_iso}:{ip_hash.lower()}").encode("utf-8")
 
 
-def verify_timestamp(root_hex: str, date_iso: str, signature_hex: str,
-                     authority_pubkey_hex: str) -> bool:
-    """Check the Worker's countersignature over {root, date}."""
-    return verify(timestamp_payload(root_hex, date_iso), signature_hex,
+def verify_timestamp(root_hex: str, date_iso: str, ip_hash: str,
+                     signature_hex: str, authority_pubkey_hex: str) -> bool:
+    """Check the Worker's countersignature over {root, date, ip_hash}."""
+    return verify(timestamp_payload(root_hex, date_iso, ip_hash), signature_hex,
                   authority_pubkey_hex)
 
 
 def verify_seal(payload: bytes, signature_hex: str, author_pubkey_hex: str,
                 merkle_proof: list, batch_root_hex: str,
-                worker_date: str, worker_sig_hex: str, worker_authority_hex: str,
-                trusted_authorities: list) -> bool:
+                worker_date: str, worker_ip_hash: str, worker_sig_hex: str,
+                worker_authority_hex: str, trusted_authorities: list) -> bool:
     """Full seal check for one record, in order:
       1. the author signed this exact content (author_pubkey is bound in the
          payload, so this also names the author),
       2. the record is included in its batch (Merkle proof → batch_root),
-      3. that batch root was timestamped by a TRUSTED authority at worker_date.
+      3. that batch root was timestamped by a TRUSTED authority at worker_date,
+         bound to the submitter's worker_ip_hash.
     Together they establish the priority claim: 'author_pubkey analyzed this
     content, sealed no later than worker_date.' A re-signer of the same public
     content necessarily lands in a different batch with a later stamp — the
@@ -215,8 +224,8 @@ def verify_seal(payload: bytes, signature_hex: str, author_pubkey_hex: str,
         worker_authority_hex in trusted_authorities
         and verify(payload, signature_hex, author_pubkey_hex)
         and verify_proof(record_leaf(signature_hex), merkle_proof, batch_root_hex)
-        and verify_timestamp(batch_root_hex, worker_date, worker_sig_hex,
-                             worker_authority_hex))
+        and verify_timestamp(batch_root_hex, worker_date, worker_ip_hash,
+                             worker_sig_hex, worker_authority_hex))
 
 
 def sign(payload: bytes, private_key) -> str:

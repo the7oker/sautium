@@ -191,14 +191,17 @@ def run(limit=None, dry_run=False):
         return
 
     ts = _timestamp_root(root)
-    if not rs.verify_timestamp(root, ts["date"], ts["sig"], ts["authority"]):
+    if not rs.verify_timestamp(root, ts["date"], ts["ip_hash"], ts["sig"],
+                               ts["authority"]):
         conn.rollback()
         raise RuntimeError("Worker timestamp failed verification — aborting")
 
     cur.execute("""INSERT INTO signing_batches
-                     (batch_root, author_pubkey, worker_date, worker_sig, authority)
-                   VALUES (%s, %s, %s, %s, %s)""",
-                (root, author, ts["date"], ts["sig"], ts["authority"]))
+                     (batch_root, author_pubkey, worker_date, ip_hash,
+                      worker_sig, authority)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (root, author, ts["date"], ts["ip_hash"], ts["sig"],
+                 ts["authority"]))
     for (table, pk, sig), proof in zip(pending, proofs):
         cur.execute(f"""UPDATE {table}
                         SET author_pubkey=%s, signature=%s, batch_root=%s,
@@ -228,12 +231,12 @@ def verify_all() -> bool:
     conn.cursor_factory = psycopg2.extras.RealDictCursor
     cur = conn.cursor()
 
-    cur.execute("SELECT batch_root, worker_date, worker_sig, authority "
+    cur.execute("SELECT batch_root, worker_date, ip_hash, worker_sig, authority "
                 "FROM signing_batches")
     batches = {
         b["batch_root"]: (
             b["worker_date"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            b["worker_sig"], b["authority"])
+            str(b["ip_hash"]), b["worker_sig"], b["authority"])
         for b in cur.fetchall()
     }
 
@@ -243,7 +246,7 @@ def verify_all() -> bool:
         b = batches.get(r["batch_root"])
         return bool(b and rs.verify_seal(
             payload, r["signature"], r["author_pubkey"], r["merkle_proof"],
-            r["batch_root"], b[0], b[1], b[2], TRUSTED_AUTHORITIES))
+            r["batch_root"], b[0], b[1], b[2], b[3], TRUSTED_AUTHORITIES))
 
     cur.execute("""SELECT s.author_pubkey, s.signature, s.merkle_proof, s.batch_root,
                           e.track_id::text tid, e.model_id::text model,
@@ -302,13 +305,53 @@ def verify_all() -> bool:
     return bad == 0
 
 
+def resign_timestamps():
+    """Re-timestamp existing batches under the current format (adds ip_hash).
+
+    Author signatures and Merkle roots depend on neither the IP nor the date,
+    so re-submitting the same root refreshes ONLY the Worker countersignature —
+    the per-record seals (488k rows) are untouched. The Worker preserves each
+    root's original date and re-signs it bound to the submitter's ip_hash.
+    Idempotent: only batches still missing an ip_hash are re-submitted."""
+    conn = psycopg2.connect(settings.database_url)
+    conn.cursor_factory = psycopg2.extras.RealDictCursor
+    cur = conn.cursor()
+
+    cur.execute("SELECT batch_root FROM signing_batches "
+                "WHERE ip_hash IS NULL ORDER BY created_at")
+    roots = [r["batch_root"] for r in cur.fetchall()]
+    if not roots:
+        logger.info("no batches to re-timestamp")
+        return
+    logger.info("re-timestamping %d batch(es)", len(roots))
+
+    for root in roots:
+        ts = _timestamp_root(root)
+        if not rs.verify_timestamp(root, ts["date"], ts["ip_hash"], ts["sig"],
+                                   ts["authority"]):
+            conn.rollback()
+            raise RuntimeError(f"re-timestamp failed verification: {root[:16]}")
+        cur.execute("""UPDATE signing_batches
+                       SET worker_date=%s, ip_hash=%s, worker_sig=%s, authority=%s
+                       WHERE batch_root=%s""",
+                    (ts["date"], ts["ip_hash"], ts["sig"], ts["authority"], root))
+    conn.commit()
+    logger.info("re-timestamped %d batch(es)", len(roots))
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--verify", action="store_true",
                     help="re-verify the seal of every signed record; sign nothing")
+    ap.add_argument("--resign", action="store_true",
+                    help="re-timestamp existing batches under the current format "
+                         "(adds ip_hash); signs no new records")
     a = ap.parse_args()
     if a.verify:
         sys.exit(0 if verify_all() else 1)
+    if a.resign:
+        resign_timestamps()
+        sys.exit(0)
     run(limit=a.limit, dry_run=a.dry_run)
