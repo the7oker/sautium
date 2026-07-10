@@ -33,6 +33,17 @@ except ImportError:
 INFOHASH_PREFIX = "Sautium-artist:"
 INFOHASH_PREFIX_USER = "Sautium-user:"
 
+# dht_announce initiations per pacing pause. Announcing thousands of
+# infohashes in a tight loop floods the docker-bridge/WSL2 NAT with UDP
+# (each announce fans out into a get_peers traversal) and starves every
+# other network flow in the container — measured 2026-07-10: each 15-min
+# re-announce burst lined up with an HQPlayer control-socket timeout
+# cluster, while a probe from the WSL host stayed clean. Pacing spreads
+# ~3.2k announces over ~2 min; DHT entries live 15-30 min, so staggered
+# refresh costs nothing in discoverability.
+ANNOUNCE_CHUNK = 25
+ANNOUNCE_CHUNK_PAUSE = 1.0
+
 # DHT re-announce interval (seconds)
 REANNOUNCE_INTERVAL = 15 * 60  # 15 minutes
 
@@ -184,11 +195,15 @@ class DHTService:
             f"Announcing {len(new_uuids)} artists in DHT "
             f"(HTTP port {self.http_port})"
         )
-        for uuid in new_uuids:
+        for i, uuid in enumerate(new_uuids):
             ih = artist_infohash(uuid)
             sha1 = lt.sha1_hash(ih)
             self._session.dht_announce(sha1, self.http_port, 0)
             self._announced.add(uuid)
+            if (i + 1) % ANNOUNCE_CHUNK == 0:
+                await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE)
+                if not self._running or not self._session:
+                    return
 
         logger.info(
             f"DHT: {len(self._announced)} artists announced total"
@@ -295,10 +310,14 @@ class DHTService:
                 f"Re-announcing {len(self._announced)} artists "
                 f"+ user in DHT"
             )
-            for uuid in list(self._announced):
+            for i, uuid in enumerate(list(self._announced)):
                 ih = artist_infohash(uuid)
                 sha1 = lt.sha1_hash(ih)
                 self._session.dht_announce(sha1, self.http_port, 0)
+                if (i + 1) % ANNOUNCE_CHUNK == 0:
+                    await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE)
+                    if not self._running or not self._session:
+                        return
             logger.info("DHT re-announce complete")
 
     async def _poll_alerts(self):

@@ -433,10 +433,12 @@ class HqpBackend(PlayerBackend):
             # connect but doesn't reply to <Status/> (control thread busy
             # under DSP load), so each retry is a connect->read-timeout->
             # disconnect churn cycle that only piles load onto an already-
-            # struggling control port. Exponential backoff (2,4,8..30s) lets
-            # it recover; a successful poll resets to 1s.
+            # struggling control port. Exponential backoff (2,4,8..15s) lets
+            # it recover; a successful poll resets to 1s. Capped at 15 s —
+            # the WSL2→Windows hop flaps for seconds at a time, and a 30 s
+            # cap kept the UI on "disconnected" long after HQP was back.
             if self._failures > 0:
-                poll_interval = min(2.0 ** self._failures, 30.0)
+                poll_interval = min(2.0 ** self._failures, 15.0)
             else:
                 poll_interval = 1.0
             self._wake.wait(timeout=poll_interval)

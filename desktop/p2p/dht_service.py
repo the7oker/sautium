@@ -35,6 +35,15 @@ INFOHASH_PREFIX_CAP = "Sautium-cap:"
 # DHT re-announce interval (seconds)
 REANNOUNCE_INTERVAL = 15 * 60  # 15 minutes
 
+# dht_announce initiations per pacing pause. A tight announce loop over
+# thousands of infohashes floods the host NAT with UDP (each announce fans
+# out into a get_peers traversal) and starves concurrent flows — on the
+# Docker master it measurably knocked out the HQPlayer control socket every
+# 15 minutes. Pacing spreads ~3k announces over ~2 min; DHT entries live
+# 15-30 min, so a staggered refresh costs nothing in discoverability.
+ANNOUNCE_CHUNK = 25
+ANNOUNCE_CHUNK_PAUSE = 1.0
+
 # How long to wait for DHT bootstrap (seconds)
 DHT_BOOTSTRAP_TIMEOUT = 30
 
@@ -285,11 +294,15 @@ class DHTService:
             f"Announcing {len(new_uuids)} artists in DHT "
             f"(announce port {self._announce_port})"
         )
-        for uuid in new_uuids:
+        for i, uuid in enumerate(new_uuids):
             ih = artist_infohash(uuid)
             sha1 = lt.sha1_hash(ih)
             self._session.dht_announce(sha1, self._announce_port, 0)
             self._announced.add(uuid)
+            if (i + 1) % ANNOUNCE_CHUNK == 0:
+                await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE)
+                if not self._running or not self._session:
+                    return
 
         logger.info(
             f"DHT: {len(self._announced)} artists announced total"
@@ -401,10 +414,14 @@ class DHTService:
                 f"Re-announcing {len(self._announced)} artists "
                 f"+ user in DHT"
             )
-            for uuid in list(self._announced):
+            for i, uuid in enumerate(list(self._announced)):
                 ih = artist_infohash(uuid)
                 sha1 = lt.sha1_hash(ih)
                 self._session.dht_announce(sha1, self._announce_port, 0)
+                if (i + 1) % ANNOUNCE_CHUNK == 0:
+                    await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE)
+                    if not self._running or not self._session:
+                        return
             logger.info("DHT re-announce complete")
 
     async def _poll_alerts(self):

@@ -100,6 +100,22 @@ class HQPlayerClient:
             self.socket.settimeout(min(self.timeout, 2.0))
             self.socket.connect((self.host, self.port))
             self.socket.settimeout(self.timeout)
+            # Tight TCP keepalive: the WSL2→Windows NAT silently drops idle
+            # TCP mappings (no RST) — an idle command socket then surfaces
+            # only as the NEXT command's full read-timeout + reconnect cycle.
+            # Keepalive probes hold the mapping open and detect a dead peer
+            # in ~35 s instead. Timer constants are per-platform (Linux:
+            # KEEPIDLE/KEEPINTVL/KEEPCNT; macOS: TCP_KEEPALIVE; availability
+            # probed with hasattr — plain SO_KEEPALIVE everywhere else).
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            for opt, val in (("TCP_KEEPIDLE", 20), ("TCP_KEEPINTVL", 5),
+                             ("TCP_KEEPCNT", 3), ("TCP_KEEPALIVE", 20)):
+                if hasattr(socket, opt):
+                    try:
+                        self.socket.setsockopt(socket.IPPROTO_TCP,
+                                               getattr(socket, opt), val)
+                    except OSError:
+                        pass  # platform exposes the constant but rejects it
             logger.info(f"Connected to HQPlayer at {self.host}:{self.port}")
             return True
         except Exception as e:
