@@ -30,6 +30,7 @@ from database import get_db_context
 from db_pool import db_query
 from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, is_lossless as check_lossless
 from album_identity import assign_dir_albums
+from canon.identity import elect_analysis_source
 
 logger = logging.getLogger(__name__)
 
@@ -357,42 +358,6 @@ class LibraryScanner:
             logger.debug(f"Created album: {album_title} ({uid})")
 
         return album
-
-    @staticmethod
-    def _update_analysis_source(db: Session, track_id):
-        """Set is_analysis_source for the best quality file per track.
-
-        Priority: CD (16bit lossless) > other lossless > lossy.
-        Two statements, losers cleared first: a single UPDATE that flips both
-        rows can transiently hold two TRUE rows mid-statement, which the
-        partial unique index uq_media_files_analysis_source rejects.
-        """
-        from sqlalchemy import text
-        ranked = """
-            WITH ranked AS (
-                SELECT id,
-                       ROW_NUMBER() OVER (
-                           ORDER BY
-                               (bit_depth = 16 AND is_lossless) DESC,
-                               is_lossless DESC,
-                               id
-                       ) as rn
-                FROM media_files
-                WHERE track_id = :tid
-            )
-        """
-        db.execute(text(ranked + """
-            UPDATE media_files
-            SET is_analysis_source = false
-            WHERE track_id = :tid AND is_analysis_source
-              AND id <> (SELECT id FROM ranked WHERE rn = 1)
-        """), {"tid": track_id})
-        db.execute(text(ranked + """
-            UPDATE media_files
-            SET is_analysis_source = true
-            WHERE id = (SELECT id FROM ranked WHERE rn = 1)
-              AND NOT is_analysis_source
-        """), {"tid": track_id})
 
     def scan_and_import(
         self,
@@ -770,7 +735,7 @@ class LibraryScanner:
                         db.add(media_file)
                         db.flush()
 
-                        self._update_analysis_source(db, track.id)
+                        elect_analysis_source(db, track.id)
 
                         savepoint.commit()
                     except Exception as e:

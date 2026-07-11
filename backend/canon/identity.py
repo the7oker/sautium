@@ -63,6 +63,46 @@ def _ensure_artist(db: Session, name: str):
     return uid
 
 
+def elect_analysis_source(db: Session, track_id) -> None:
+    """Designate the best-quality media_file of a track as its analysis source.
+
+    Priority: CD (16-bit lossless) > other lossless > lossy. Two statements —
+    losers cleared before the winner is set — because a single UPDATE that flips
+    both rows transiently holds two TRUE rows for one track_id, which the partial
+    unique index uq_media_files_analysis_source rejects. When the elected file
+    differs from the one the current embedding was analyzed from, the embeddings
+    pending predicate re-analyzes on the next pass (media_file_id mismatch).
+
+    The media_files one-source-per-track invariant belongs to this base layer;
+    the scanner and the merge path (_update_track_uuid) are both callers.
+    """
+    ranked = """
+        WITH ranked AS (
+            SELECT id,
+                   ROW_NUMBER() OVER (
+                       ORDER BY
+                           (bit_depth = 16 AND is_lossless) DESC,
+                           is_lossless DESC,
+                           id
+                   ) as rn
+            FROM media_files
+            WHERE track_id = :tid
+        )
+    """
+    db.execute(text(ranked + """
+        UPDATE media_files
+        SET is_analysis_source = false
+        WHERE track_id = :tid AND is_analysis_source
+          AND id <> (SELECT id FROM ranked WHERE rn = 1)
+    """), {"tid": track_id})
+    db.execute(text(ranked + """
+        UPDATE media_files
+        SET is_analysis_source = true
+        WHERE id = (SELECT id FROM ranked WHERE rn = 1)
+          AND NOT is_analysis_source
+    """), {"tid": track_id})
+
+
 def _update_track_uuid(db: Session, old_id, new_id) -> str:
     """
     Update track UUID via ON UPDATE CASCADE, or merge if target exists.
@@ -85,7 +125,15 @@ def _update_track_uuid(db: Session, old_id, new_id) -> str:
             {"new_id": new_str, "old_id": old_str},
         )
     else:
-        # Merge: move per-user data to target track, delete old
+        # Merge: move per-user data to target track, delete old. Drop the moving
+        # files' analysis-source flag first — the target keeps its own single
+        # source, so the repoint can't trip uq_media_files_analysis_source with
+        # two TRUE rows on one track_id (the crash this guards against).
+        db.execute(
+            text("UPDATE media_files SET is_analysis_source = false "
+                 "WHERE track_id = :old AND is_analysis_source"),
+            {"old": old_str},
+        )
         db.execute(
             text("UPDATE media_files SET track_id = :new WHERE track_id = :old"),
             {"new": new_str, "old": old_str},
@@ -118,6 +166,10 @@ def _update_track_uuid(db: Session, old_id, new_id) -> str:
         db.execute(text("DELETE FROM local_play_stats WHERE track_id = :old"), {"old": old_str})
         # CASCADE deletes old associations, embeddings, features, stats, lyrics
         db.execute(text("DELETE FROM tracks WHERE id = :old"), {"old": old_str})
+        # Re-elect one analysis source across the merged files (best quality
+        # wins; a better rip that moved in schedules re-analysis via the
+        # embeddings pending predicate — asrc.media_file_id no longer matches).
+        elect_analysis_source(db, new_str)
 
     return new_str
 
