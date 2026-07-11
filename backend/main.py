@@ -352,6 +352,26 @@ async def lifespan(app: FastAPI):
         for key in _profile.prewarm_keys:
             label, factory = _prewarm_factories[key]
             await _prewarm(label, key, factory)
+        # Model loads stage tensors through the caching allocator (HF
+        # from_pretrained staging, dtype conversions); the freed blocks
+        # otherwise sit reserved for the process lifetime and read as
+        # startup VRAM growth in nvidia-smi. Weights stay resident. The
+        # log line reports the BACKEND'S OWN footprint — the whole-GPU
+        # nvidia-smi number also contains host apps (HQPlayer's CUDA DSP)
+        # and WSL can't attribute per-process, so this is the only ground
+        # truth for "what does Sautium itself hold".
+        if _profile.prewarm_keys:
+            from device import empty_cache
+            empty_cache()
+            if torch is not None and torch.cuda.is_available():
+                logger.info(
+                    "Pre-warm chain complete — backend VRAM: %.2f GB "
+                    "allocated, %.2f GB reserved",
+                    torch.cuda.memory_allocated() / 1e9,
+                    torch.cuda.memory_reserved() / 1e9,
+                )
+            else:
+                logger.info("Pre-warm chain complete")
 
     asyncio.create_task(_prewarm_all())
 

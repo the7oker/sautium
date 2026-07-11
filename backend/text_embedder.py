@@ -53,15 +53,16 @@ def get_text_embedder(model_name: str, device: str):
         import torch
         dtype = get_model_dtype(device)
         logger.info(f"Loading text embedding model: {model_name} on {device} ({dtype})")
-        model = SentenceTransformer(model_name, device=device)
-        # Convert weights on BOTH half tiers. Historically only fp16 (Turing)
-        # was halved, leaving BGE-M3 at fp32 on bf16 tiers (Ampere/MPS) —
-        # +1.1 GB VRAM for nothing; a 6 GB Turing card held the resident set
-        # while a 4 GB Ampere OOMed on prewarm. ST >=5.x casts bf16 back to
-        # float32 before the numpy conversion in encode(), so callers see
-        # identical output dtype.
+        # Load directly at the tier dtype (historically fp32-always on bf16
+        # tiers — +1.1 GB VRAM; then briefly load-fp32-then-convert, which
+        # left the freed fp32 weights parked in the caching allocator as
+        # ~2.3 GB of reserved-but-idle VRAM until an empty_cache). ST >=5.x
+        # casts bf16 back to float32 before the numpy conversion in
+        # encode(), so callers see identical output dtype.
+        load_kwargs = {}
         if dtype in (torch.float16, torch.bfloat16):
-            model.to(dtype)
+            load_kwargs["model_kwargs"] = {"torch_dtype": dtype}
+        model = SentenceTransformer(model_name, device=device, **load_kwargs)
         logger.info(f"Text embedding model loaded ({dtype})")
     except BaseException:
         with _lock:
