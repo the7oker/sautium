@@ -288,7 +288,10 @@ class DlnaBackend(PlayerBackend):
         own UI (a bare title left them as "unknown artist/album")."""
         meta = {}
         if item.artist:
+            # Both spellings: renderers disagree on which one feeds the
+            # "artist" line (upnp:artist per spec, dc:creator in practice).
             meta["artist"] = item.artist
+            meta["creator"] = item.artist
         if item.album:
             meta["album"] = item.album
         if item.track_number:
