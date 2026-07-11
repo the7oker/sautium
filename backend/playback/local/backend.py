@@ -53,6 +53,12 @@ class LocalBackend(PlayerBackend):
         return Capabilities(volume=True, volume_kind="percent", seek=True,
                             gapless=True, exclusive_mode=True)
 
+    @property
+    def stream_open(self) -> bool:
+        """A live PortAudio stream exists — a device rescan (PortAudio
+        reinit) would invalidate it."""
+        return self._engine._stream is not None
+
     # -- transport ---------------------------------------------------------
 
     def play(self) -> bool:

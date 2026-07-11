@@ -61,6 +61,21 @@ def list_devices() -> list[dict]:
     return devices
 
 
+def rescan() -> None:
+    """Re-enumerate hardware. PortAudio snapshots the device list at library
+    init — a DAC plugged in AFTER the backend started is invisible until a
+    terminate+initialize cycle (hotplug is not tracked). Reinit invalidates
+    any open stream, so callers must ensure the engine is idle first."""
+    if sd is None:
+        return
+    try:
+        sd._terminate()
+        sd._initialize()
+        logger.info("PortAudio reinitialized (device rescan)")
+    except Exception as e:
+        logger.error("PortAudio reinit failed: %s", e)
+
+
 def resolve_device(device_id: Optional[str]) -> int:
     """PortAudio device index for a stored device_id, resolved at stream-open
     time. None picks the default WASAPI/CoreAudio output. Raises LookupError

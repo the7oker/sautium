@@ -8903,10 +8903,10 @@
      repaints from the fresh state. Visual vocabulary follows the
      reference Settings.html "Audio output" group. */
 
-  async function renderOutputSettings(root) {
+  async function renderOutputSettings(root, rescan) {
     let data = null;
     try {
-      const r = await fetch('/api/player/outputs');
+      const r = await fetch('/api/player/outputs' + (rescan ? '?rescan=1' : ''));
       if (r.ok) data = await r.json();
     } catch (_) {}
     if (!data) {
@@ -9027,7 +9027,7 @@
         putOutput({ exclusive: !excl.classList.contains('on') }));
     }
     const refresh = root.querySelector('[data-action="refresh-outputs"]');
-    if (refresh) refresh.addEventListener('click', () => renderOutputSettings(root));
+    if (refresh) refresh.addEventListener('click', () => renderOutputSettings(root, true));
     root.querySelectorAll('[data-action="open-hqplayer"]').forEach(el =>
       el.addEventListener('click', (e) => {
         e.stopPropagation();
