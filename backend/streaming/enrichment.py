@@ -61,8 +61,13 @@ class PreviewEnricher:
         # stream. Idle unloads the instrument pair; CLAP/BGE stay resident
         # (shared with search).
         from hardware_profile import resolve as _hw
-        self._trickle = _hw().stream_enrich_mode == "trickle"
+        profile = _hw()
+        self._trickle = profile.stream_enrich_mode == "trickle"
         self._max_pending = 2 if self._trickle else None
+        # Idle unload follows the profile property, not trickle mode:
+        # MPS-full is NOT trickle but must still release the tagger —
+        # unified memory (see hardware_profile.unload_instruments_after_run).
+        self._idle_unload = profile.unload_instruments_after_run
         self._idle_timer: Optional[threading.Timer] = None
 
     def submit(self, track_id: Optional[str], flac: Optional[bytes],
@@ -101,13 +106,13 @@ class PreviewEnricher:
         finally:
             with self._lock:
                 self._inflight.discard(track_id)
-                if self._trickle and not self._inflight:
+                if self._idle_unload and not self._inflight:
                     self._idle_timer = threading.Timer(
-                        self._IDLE_UNLOAD_SECONDS, self._idle_unload)
+                        self._IDLE_UNLOAD_SECONDS, self._do_idle_unload)
                     self._idle_timer.daemon = True
                     self._idle_timer.start()
 
-    def _idle_unload(self) -> None:
+    def _do_idle_unload(self) -> None:
         """One-shot idle timeout (event-scheduled after the last completion,
         cancelled by new work — not a poll). Drops the analyzer so its
         AST+PaSST reference dies, then releases the singleton weights."""
@@ -121,7 +126,7 @@ class PreviewEnricher:
             from instrument_tagger import release_instrument_tagger
             release_instrument_tagger(get_device())
             self._empty_cache()
-            logger.info("preview enrich idle — instrument models released (trickle)")
+            logger.info("preview enrich idle — instrument models released")
 
     def _enrich(self, track_id: str, flac: bytes, duration: float,
                 lossless: bool, provider_id: Optional[str]) -> None:
@@ -243,9 +248,11 @@ class PreviewEnricher:
     @staticmethod
     def _empty_cache() -> None:
         try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            # device.empty_cache handles MPS too — the direct cuda call
+            # was a no-op on Mac nodes and left the preview-enrichment
+            # pool parked in unified memory.
+            from device import empty_cache
+            empty_cache()
         except Exception:
             pass
 

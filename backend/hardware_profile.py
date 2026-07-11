@@ -82,9 +82,13 @@ class HardwareProfile:
 
     @property
     def unload_instruments_after_run(self) -> bool:
-        """Release AST+PaSST after a bulk run / trickle idle. On full the
-        resident pair is cheap next to the VRAM headroom and keeps
-        re-enrichment instant."""
+        """Release AST+PaSST after a bulk run / trickle idle. On CUDA-full
+        the resident pair is cheap next to dedicated VRAM headroom and keeps
+        re-enrichment instant. On MPS it is ALWAYS released — unified memory
+        is shared with the OS, and holding tagger weights between rare runs
+        is what a 24GB Mac notices as "memory never came back"."""
+        if self.device == "mps":
+            return True
         return self.name != "full"
 
     @property
