@@ -5,26 +5,41 @@ Orchestrates enrichment data synchronization from a remote source
 (backend API or future P2P peer) into the local database.
 
 Protocol:
-  1. Inventory — ask source what enrichment data it has for our tracks
-  2. Plan — determine what we need, split into batches
-  3. Pull — fetch data batch by batch
-  4. Import — insert into local PostgreSQL
+  1. Capabilities — GET /health, pick the audio category the peer speaks
+  2. Inventory — ask source what enrichment data it has for our tracks
+  3. Plan — determine what we need, split into batches
+  4. Pull — fetch data batch by batch
+  5. Import — verify seals, insert into local PostgreSQL
+
+Audio analysis arrives as SEGMENTS with their seals (author signature →
+Merkle proof → Worker timestamp, verified here before any write); the
+track-level mean is derived locally — it is a local aggregate, never wire
+data (see desktop/p2p/record_sig.py). Lyrics are deliberately NOT synced
+(2026-07-11): the one category that is verbatim copyrighted text — every
+node fetches its own from the public sources.
 """
 
+import base64
 import logging
+import math
+import struct
 from typing import Optional, Callable
 
 import psycopg2
 import psycopg2.extras
 
 from desktop.api_client import BackendAPIClient
+from desktop.p2p import record_sig as rs
+from desktop.p2p.birth_cert import TRUSTED_AUTHORITIES
 
 logger = logging.getLogger(__name__)
 
-# Categories and their pull endpoint names
+# Categories and their pull endpoint names. Exactly one of segments/embeddings
+# runs per sync: `segments` when the peer advertises the capability,
+# `embeddings` as the legacy mean-vector fallback.
 CATEGORIES = [
     # (category_key_in_inventory, pull_endpoint, uuid_column_hint)
-    ("lyrics", "lyrics", "track"),
+    ("segments", "segments", "track"),
     ("embeddings", "embeddings", "track"),
     ("audio_features", "audio-features", "track"),
     ("track_stats", "track-stats", "track"),
@@ -36,6 +51,12 @@ CATEGORIES = [
 ]
 
 DEFAULT_BATCH_SIZE = 500
+# A segments batch is K=12..24 vectors + proofs per track (~50KB) — keep the
+# per-request payload in the single-digit-MB range.
+SEGMENT_PULL_BATCH = 100
+# Both server implementations reject inventory requests above 10k UUIDs —
+# the client slices its library and merges the responses.
+INVENTORY_CHUNK = 10_000
 
 
 class SyncClient:
@@ -146,9 +167,17 @@ class SyncClient:
 
         self._progress(f"Syncing enrichment for {len(track_uuids)} tracks...")
 
-        # Step 2: Inventory — ask source what it has
+        # Step 2: Capability probe — which audio category does the peer speak?
+        health = self.api.get_health() or {}
+        peer_caps = set(health.get("capabilities") or [])
+        use_segments = "segments" in peer_caps
+        if not use_segments:
+            self._progress(
+                "  peer has no `segments` capability — legacy mean-vector pull")
+
+        # Step 3: Inventory — ask source what it has (chunked + merged)
         self._progress("Requesting inventory...")
-        inventory = self.api.sync_inventory(track_uuids)
+        inventory = self._fetch_inventory(track_uuids)
         if not inventory:
             self._progress("Inventory request failed.")
             return {"error": "inventory_failed"}
@@ -162,12 +191,15 @@ class SyncClient:
             )
             self._log_missing_tracks(not_found)
 
-        # Step 3: Filter out what we already have locally
-        needed = self._compute_needed(inventory)
+        # Step 4: Filter out what we already have locally
+        needed = self._compute_needed(inventory, use_segments)
 
-        # Step 4: Pull and import each category in batches
+        # Step 5: Pull and import each category in batches
         stats = {}
+        inactive = {"embeddings"} if use_segments else {"segments"}
         for cat_key, pull_endpoint, _ in CATEGORIES:
+            if cat_key in inactive:
+                continue
             uuids_to_pull = needed.get(cat_key, [])
             if not uuids_to_pull:
                 stats[cat_key] = 0
@@ -178,7 +210,7 @@ class SyncClient:
             )
             stats[cat_key] = imported
 
-        # Step 5: Recompute artist gender and vocalist status from imported bios
+        # Step 6: Recompute artist gender and vocalist status from imported bios
         if stats.get("artist_bios", 0) > 0:
             gender_updated = self._update_artist_gender(needed.get("artist_bios", []))
             if gender_updated:
@@ -191,12 +223,49 @@ class SyncClient:
         self._progress(f"Sync complete. Imported {total} items across {len(stats)} categories.")
         return stats
 
-    def _compute_needed(self, inventory: dict) -> dict:
+    def _fetch_inventory(self, track_uuids: list[str]) -> Optional[dict]:
+        """Inventory in ≤INVENTORY_CHUNK slices, merged. Chunks are disjoint
+        track sets, so list values concatenate; artist/genre categories may
+        repeat across chunks and are consumed as sets downstream."""
+        merged: Optional[dict] = None
+        for i in range(0, len(track_uuids), INVENTORY_CHUNK):
+            part = self.api.sync_inventory(track_uuids[i:i + INVENTORY_CHUNK])
+            if not part or "tracks" not in part:
+                return None
+            if merged is None:
+                merged = part
+            else:
+                for k, v in part.items():
+                    if isinstance(v, list):
+                        merged.setdefault(k, []).extend(v)
+        return merged
+
+    def _protected_analysis_tracks(self, uuids: list[str]) -> set:
+        """Tracks whose local analysis a peer import must never replace:
+        first-hand (my own decode) or already carrying segments. Gap-fill
+        only — densification / version upgrades of imported grids are the
+        deferred "deepen analysis" path."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT e.track_id::text FROM embeddings e
+                   LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
+                   WHERE e.track_id = ANY(%s::uuid[])
+                     AND (EXISTS (SELECT 1 FROM embedding_segments es
+                                  WHERE es.embedding_id = e.id)
+                          OR (s.id IS NOT NULL AND NOT s.imported))""",
+                [uuids],
+            )
+            return {row[0] for row in cur.fetchall()}
+
+    def _compute_needed(self, inventory: dict, use_segments: bool) -> dict:
         """Compare inventory with local data to find what's missing."""
-        # Map category to (table, uuid_column) for local existence check
+        emb_cat = "segments" if use_segments else "embeddings"
+        # Map category to (table, uuid_column) for local existence check.
+        # Both audio categories check the local `embeddings` table and read
+        # the `embeddings` inventory key.
         local_check = {
-            "lyrics": ("track_lyrics", "track_id"),
-            "embeddings": ("embeddings", "track_id"),
+            emb_cat: ("embeddings", "track_id"),
             "audio_features": ("audio_features", "track_id"),
             "track_stats": ("track_stats", "track_id"),
             "artist_bios": ("artist_bios", "artist_id"),
@@ -207,26 +276,35 @@ class SyncClient:
         }
 
         # Versioned categories: the inventory carries [uuid, analysis_version]
-        # pairs, and a locally-present row is still pulled when the source's
-        # methodology is newer — existence alone never delivers upgrades.
-        versioned = {"embeddings", "audio_features"}
-
-        # Parent entity filters: only request enrichment for entities
-        # that actually exist in our library (prevents orphaned records)
-        parent_filters = {}
+        # pairs — [uuid, analysis_version, segment_count] triples from
+        # segments-capable peers — and a locally-present row is still pulled
+        # when the source's methodology is newer: existence alone never
+        # delivers upgrades.
+        versioned = {emb_cat, "audio_features"}
 
         needed = {}
         for cat_key, (table, uuid_col) in local_check.items():
+            inv_key = "embeddings" if cat_key == "segments" else cat_key
             if cat_key in versioned:
-                available_versions = {u: v for u, v in inventory.get(cat_key, [])}
+                available_versions = {row[0]: row[1]
+                                      for row in inventory.get(inv_key, [])}
                 if not available_versions:
                     continue
                 local = self._get_existing_versions(table, uuid_col)
                 new = [u for u in available_versions if u not in local]
                 outdated = [u for u, v in available_versions.items()
                             if u in local and local[u] < v]
-                if new or outdated:
-                    needed[cat_key] = new + outdated
+                candidates = new + outdated
+                if cat_key == "segments" and candidates:
+                    protected = self._protected_analysis_tracks(candidates)
+                    if protected:
+                        self._progress(
+                            f"  segments: {len(protected)} protected "
+                            f"(own analysis) — not pulled")
+                        candidates = [u for u in candidates
+                                      if u not in protected]
+                if candidates:
+                    needed[cat_key] = candidates
                     self._progress(
                         f"  {cat_key}: {len(new)} new + {len(outdated)} outdated "
                         f"/ {len(available_versions)} available"
@@ -236,20 +314,6 @@ class SyncClient:
             available = set(inventory.get(cat_key, []))
             if not available:
                 continue
-
-            # Filter by parent entity existence (e.g., only albums we own)
-            if cat_key in parent_filters:
-                parent_table, parent_col = parent_filters[cat_key]
-                local_parents = self._get_existing_uuids(parent_table, parent_col)
-                skipped = available - local_parents
-                available = available & local_parents
-                if skipped:
-                    self._progress(
-                        f"  {cat_key}: skipped {len(skipped)} "
-                        f"(albums not in local library)"
-                    )
-                if not available:
-                    continue
 
             existing = self._get_existing_uuids(table, uuid_col)
             missing = available - existing
@@ -278,9 +342,11 @@ class SyncClient:
         """
         import time
         total_imported = 0
+        batch_size = (SEGMENT_PULL_BATCH if cat_key == "segments"
+                      else self.batch_size)
         batches = [
-            uuids[i: i + self.batch_size]
-            for i in range(0, len(uuids), self.batch_size)
+            uuids[i: i + batch_size]
+            for i in range(0, len(uuids), batch_size)
         ]
 
         for batch_idx, batch_uuids in enumerate(batches, 1):
@@ -311,13 +377,13 @@ class SyncClient:
             if not items:
                 continue
 
-            imported = self._import_items(cat_key, items)
+            imported = self._import_items(cat_key, result)
             total_imported += imported
 
         return total_imported
 
-    def _import_items(self, category: str, items: list[dict]) -> int:
-        """Import items into local database. Returns count of imported items."""
+    def _import_items(self, category: str, result: dict) -> int:
+        """Import a pull response into the local database."""
         importer = getattr(self, f"_import_{category}", None)
         if not importer:
             logger.warning(f"No importer for category: {category}")
@@ -325,7 +391,13 @@ class SyncClient:
 
         conn = self._get_conn()
         try:
-            count = importer(conn, items)
+            # Sealed categories also need the response-level Worker-timestamp
+            # map to verify (and re-serve) the full chain.
+            if category in ("segments", "audio_features"):
+                count = importer(conn, result["items"],
+                                 result.get("batches") or {})
+            else:
+                count = importer(conn, result["items"])
             conn.commit()
             return count
         except Exception as e:
@@ -333,33 +405,198 @@ class SyncClient:
             logger.error(f"Import {category} failed: {e}")
             return 0
 
+    # -- Seal verification (verify-on-import) -------------------------------
+
+    @staticmethod
+    def _batch_verifier(batches: dict):
+        """Per-import cache: batch_root -> Worker-timestamp chain verdict
+        (authority trusted + countersignature over {root, date, ip_hash})."""
+        cache: dict = {}
+
+        def ok(root) -> bool:
+            if not root:
+                return False
+            if root not in cache:
+                b = batches.get(root)
+                cache[root] = bool(
+                    b and b.get("authority") in TRUSTED_AUTHORITIES
+                    and rs.verify_timestamp(root, b["worker_date"], b["ip_hash"],
+                                            b["worker_sig"], b["authority"]))
+            return cache[root]
+
+        return ok
+
+    @staticmethod
+    def _insert_batches(cur, batches: dict, roots: set):
+        """Store the Worker-timestamp rows referenced by verified seals, so
+        this node re-serves the full chain (relay keeps authorship intact)."""
+        if not roots:
+            return
+        psycopg2.extras.execute_values(
+            cur,
+            """INSERT INTO signing_batches
+               (batch_root, author_pubkey, worker_date, ip_hash,
+                worker_sig, authority)
+               VALUES %s ON CONFLICT (batch_root) DO NOTHING""",
+            [(r, batches[r]["author_pubkey"], batches[r]["worker_date"],
+              batches[r]["ip_hash"], batches[r]["worker_sig"],
+              batches[r]["authority"]) for r in roots],
+            template="(%s, %s, %s::timestamptz, %s::uuid, %s, %s)",
+        )
+
+    @staticmethod
+    def _portrait(vectors: list) -> list:
+        """normalize(mean(segment vectors)) — the local mean derivation,
+        mirroring backend/embeddings.py _compute_segments. The mean is a
+        derived aggregate, never wire data (see desktop/p2p/record_sig.py)."""
+        dim = len(vectors[0])
+        n = len(vectors)
+        mean = [sum(v[i] for v in vectors) / n for i in range(dim)]
+        norm = math.sqrt(sum(x * x for x in mean)) or 1.0
+        return [x / norm for x in mean]
+
+    @staticmethod
+    def _vec_text(values: list) -> str:
+        """pgvector text literal; repr keeps the shortest float round-trip."""
+        return "[" + ",".join(repr(float(x)) for x in values) + "]"
+
     # -- Category importers (batch) ----------------------------------------
 
-    def _import_lyrics(self, conn, items: list[dict]) -> int:
+    def _import_segments(self, conn, items: list[dict], batches: dict) -> int:
+        """Import per-track segment bundles: verify every seal, store the
+        segments seal-intact, derive the track mean locally. A bundle with ANY
+        invalid seal is dropped whole — a broken seal on TLS-protected wire is
+        evidence of tampering, not data. Unsigned segments are accepted
+        (friends topology), identifiable by author_pubkey IS NULL +
+        analysis_sources.imported. Returns the count of imported tracks."""
+        batch_ok = self._batch_verifier(batches)
+
+        # Decode + verify outside the write path: (item, [(idx, floats, seal)])
+        decoded = []
+        for item in items:
+            prov = item.get("provenance") or {}
+            segs, bad = [], None
+            for s in item.get("segments", []):
+                try:
+                    raw = base64.b64decode(s["v"], validate=True)
+                    floats = rs.vector_from_bytes(raw)
+                except (KeyError, ValueError, struct.error):
+                    bad = f"segment {s.get('i')} undecodable"
+                    break
+                seal = None
+                if s.get("signature"):
+                    try:
+                        payload = rs.segment_payload(
+                            s.get("author_pubkey") or "", item["track_uuid"],
+                            prov.get("pcm_hash") or "", prov.get("chromaprint"),
+                            prov.get("duration_seconds"),
+                            item.get("model_uuid") or "", s["i"],
+                            rs.vector_hash(raw),
+                            grid_version=prov.get("grid_version")
+                                         or rs.GRID_VERSION)
+                    except ValueError:
+                        payload = None
+                    if not (payload
+                            and rs.verify(payload, s["signature"],
+                                          s.get("author_pubkey") or "")
+                            and rs.verify_proof(rs.record_leaf(s["signature"]),
+                                                s.get("proof") or [],
+                                                s.get("batch_root") or "")
+                            and batch_ok(s.get("batch_root"))):
+                        bad = f"segment {s['i']} seal invalid"
+                        break
+                    seal = (s["author_pubkey"], s["signature"], s["batch_root"],
+                            psycopg2.extras.Json(s.get("proof") or []))
+                segs.append((s["i"], floats, seal))
+            if bad:
+                logger.warning("sync import: dropping track %s — %s",
+                               item.get("track_uuid", "?")[:8], bad)
+            elif segs:
+                decoded.append((item, segs))
+
+        if not decoded:
+            return 0
+
         with conn.cursor() as cur:
-            values = [
-                (
-                    item["track_uuid"], item.get("source", "sync"),
-                    item.get("plain_lyrics"), item.get("synced_lyrics"),
-                    item.get("instrumental", False),
+            # Batch upsert embedding models (deduplicated)
+            models_seen = {}
+            for item, segs in decoded:
+                mid = item.get("model_uuid")
+                if mid and mid not in models_seen:
+                    models_seen[mid] = (mid, item.get("model_name", "unknown"),
+                                        len(segs[0][1]))
+            if models_seen:
+                psycopg2.extras.execute_values(
+                    cur,
+                    """INSERT INTO embedding_models (id, name, dimension)
+                       VALUES %s ON CONFLICT (id) DO NOTHING""",
+                    list(models_seen.values()),
+                    template="(%s, %s, %s)",
                 )
-                for item in items
-            ]
-            psycopg2.extras.execute_values(
-                cur,
-                """INSERT INTO track_lyrics
-                   (track_id, source, plain_lyrics, synced_lyrics, instrumental)
-                   VALUES %s
-                   ON CONFLICT (track_id, source) DO UPDATE SET
-                       plain_lyrics = EXCLUDED.plain_lyrics,
-                       synced_lyrics = EXCLUDED.synced_lyrics,
-                       instrumental = EXCLUDED.instrumental,
-                       updated_at = CURRENT_TIMESTAMP""",
-                values,
-                template="(%s, %s, %s, %s, %s)",
-                page_size=500,
-            )
-        return len(items)
+
+            source_items = [item for item, _ in decoded]
+            source_map = self._upsert_analysis_sources(cur, source_items)
+
+            # Import-side guard (the planner prefilters, the importer
+            # enforces): never replace first-hand analysis or a grid already
+            # present locally.
+            kept = self._drop_protected(
+                cur, source_items,
+                """SELECT e.track_id::text FROM embeddings e
+                   LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
+                   WHERE e.track_id = ANY(%s::uuid[])
+                     AND (EXISTS (SELECT 1 FROM embedding_segments es
+                                  WHERE es.embedding_id = e.id)
+                          OR (s.id IS NOT NULL AND NOT s.imported))""",
+                "segments")
+            kept_uuids = {i["track_uuid"] for i in kept}
+            if not kept_uuids:
+                return 0
+
+            self._insert_batches(cur, batches, {
+                seal[2]
+                for item, segs in decoded if item["track_uuid"] in kept_uuids
+                for _, _, seal in segs if seal})
+
+            imported = 0
+            for item, segs in decoded:
+                if item["track_uuid"] not in kept_uuids:
+                    continue
+                mean = self._portrait([floats for _, floats, _ in segs])
+                cur.execute(
+                    """INSERT INTO embeddings
+                       (track_id, model_id, vector, analysis_source_id,
+                        analysis_version)
+                       VALUES (%s, %s, %s::vector, %s, %s)
+                       ON CONFLICT (track_id, model_id) DO UPDATE SET
+                           vector = EXCLUDED.vector,
+                           analysis_source_id = EXCLUDED.analysis_source_id,
+                           analysis_version = EXCLUDED.analysis_version,
+                           updated_at = CURRENT_TIMESTAMP
+                       RETURNING id""",
+                    (item["track_uuid"], item["model_uuid"],
+                     self._vec_text(mean), self._source_id(source_map, item),
+                     item.get("analysis_version", 1)))
+                emb_id = cur.fetchone()[0]
+                # The grid is atomic — an upgraded imported-mean row never
+                # mixes leftover segments from another pull.
+                cur.execute(
+                    "DELETE FROM embedding_segments WHERE embedding_id = %s",
+                    (emb_id,))
+                psycopg2.extras.execute_values(
+                    cur,
+                    """INSERT INTO embedding_segments
+                       (embedding_id, segment_index, vector,
+                        author_pubkey, signature, batch_root, merkle_proof)
+                       VALUES %s""",
+                    [(emb_id, idx, self._vec_text(floats),
+                      *(seal or (None, None, None, None)))
+                     for idx, floats, seal in segs],
+                    template="(%s, %s, %s::vector, %s, %s, %s, %s)",
+                    page_size=200,
+                )
+                imported += 1
+        return imported
 
     @staticmethod
     def _upsert_analysis_sources(cur, items: list[dict]) -> dict:
@@ -488,12 +725,47 @@ class SyncClient:
             )
         return len(items)
 
-    def _import_audio_features(self, conn, items: list[dict]) -> int:
+    def _import_audio_features(self, conn, items: list[dict],
+                               batches: dict) -> int:
+        batch_ok = self._batch_verifier(batches)
+
+        # Verify-on-import: a signed row must verify end-to-end (author sig →
+        # Merkle proof → Worker timestamp over the transmitted values) or it
+        # drops. Unsigned rows pass (friends topology) and store without a
+        # seal.
+        verified = []
+        for item in items:
+            if item.get("signature"):
+                prov = item.get("provenance") or {}
+                try:
+                    payload = rs.features_payload(
+                        item.get("author_pubkey") or "", item["track_uuid"],
+                        prov.get("pcm_hash") or "", prov.get("chromaprint"),
+                        prov.get("duration_seconds"),
+                        item.get("analysis_version", 1),
+                        rs.blake2b_hex(rs.canonical_features_blob(item)))
+                except (KeyError, ValueError):
+                    payload = None
+                if not (payload
+                        and rs.verify(payload, item["signature"],
+                                      item.get("author_pubkey") or "")
+                        and rs.verify_proof(rs.record_leaf(item["signature"]),
+                                            item.get("merkle_proof") or [],
+                                            item.get("batch_root") or "")
+                        and batch_ok(item.get("batch_root"))):
+                    logger.warning(
+                        "sync import: dropping features %s — seal invalid",
+                        item.get("track_uuid", "?")[:8])
+                    continue
+            verified.append(item)
+        items = verified
+        if not items:
+            return 0
+
         with conn.cursor() as cur:
             # Provenance registers for ALL items; the data write never
-            # replaces a SIGNED row (peer data is unsigned — overwriting
-            # would strip my seal via the guard trigger) nor my own
-            # first-hand local analysis.
+            # replaces a SIGNED row (overwriting would strip my seal via the
+            # guard trigger) nor my own first-hand local analysis.
             source_map = self._upsert_analysis_sources(cur, items)
             items = self._drop_protected(
                 cur, items,
@@ -505,6 +777,9 @@ class SyncClient:
                 "audio_features")
             if not items:
                 return 0
+            self._insert_batches(
+                cur, batches,
+                {i["batch_root"] for i in items if i.get("signature")})
             values = [
                 (
                     item["track_uuid"], item.get("bpm"), item.get("key"),
@@ -518,6 +793,10 @@ class SyncClient:
                     item.get("danceability"),
                     self._source_id(source_map, item),
                     item.get("analysis_version", 1),
+                    item.get("author_pubkey"), item.get("signature"),
+                    item.get("batch_root"),
+                    psycopg2.extras.Json(item["merkle_proof"])
+                    if item.get("signature") else None,
                 )
                 for item in items
             ]
@@ -528,7 +807,8 @@ class SyncClient:
                     energy, energy_db, brightness, dynamic_range_db,
                     zero_crossing_rate, instruments, moods,
                     vocal_instrumental, vocal_score, danceability,
-                    analysis_source_id, analysis_version)
+                    analysis_source_id, analysis_version,
+                    author_pubkey, signature, batch_root, merkle_proof)
                    VALUES %s
                    ON CONFLICT (track_id) DO UPDATE SET
                        bpm = EXCLUDED.bpm, key = EXCLUDED.key,
@@ -543,9 +823,13 @@ class SyncClient:
                        danceability = EXCLUDED.danceability,
                        analysis_source_id = EXCLUDED.analysis_source_id,
                        analysis_version = EXCLUDED.analysis_version,
+                       author_pubkey = EXCLUDED.author_pubkey,
+                       signature = EXCLUDED.signature,
+                       batch_root = EXCLUDED.batch_root,
+                       merkle_proof = EXCLUDED.merkle_proof,
                        updated_at = CURRENT_TIMESTAMP""",
                 values,
-                template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 page_size=500,
             )
         return len(items)

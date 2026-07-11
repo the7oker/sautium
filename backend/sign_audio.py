@@ -37,26 +37,18 @@ from datetime import timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import numpy as np
 import psycopg2
 import psycopg2.extras
 
 import record_sig as rs
 from config import settings
 from p2p_identity import load_signing_key
+from record_sig import FEATURE_ORDER, canonical_features_blob
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("sign_audio")
 
 WORKER_URL = "https://sautium-verify.sautium.workers.dev"
-
-# Fixed order for the audio_features content hash — signer and verifier must
-# agree byte-for-byte. analysis_version rides in the payload, not the blob.
-FEATURE_ORDER = [
-    "bpm", "key", "mode", "key_confidence", "energy", "energy_db", "brightness",
-    "dynamic_range_db", "zero_crossing_rate", "danceability",
-    "vocal_instrumental", "vocal_score", "instruments", "moods",
-]
 
 # A record signs only when its linked source is signable-classed AND
 # first-hand (imported sources arrived over sync — signing analysis this node
@@ -73,23 +65,9 @@ def _pubkey_hex(key) -> str:
         format=serialization.PublicFormat.Raw).hex()
 
 
-def _parse_vector(text: str) -> np.ndarray:
-    return np.array([float(x) for x in text.strip("[]").split(",")],
-                    dtype=np.float32)
-
-
-def _fmt(v) -> str:
-    if v is None:
-        return ""
-    if isinstance(v, float):
-        return repr(v)
-    if isinstance(v, (dict, list)):
-        return json.dumps(v, sort_keys=True, separators=(",", ":"))
-    return str(v)
-
-
-def canonical_features_blob(row: dict) -> bytes:
-    return "|".join(_fmt(row[c]) for c in FEATURE_ORDER).encode("utf-8")
+def _vector_bytes(text: str) -> bytes:
+    """pgvector text → the canonical float32-LE bytes vector_hash covers."""
+    return rs.vector_to_bytes([float(x) for x in text.strip("[]").split(",")])
 
 
 def _timestamp_root(root: str) -> dict:
@@ -148,7 +126,7 @@ def run(limit=None, dry_run=False):
               AND {_SIGNABLE_SRC}
             ORDER BY s.segment_index""", params)
         for seg in cur.fetchall():
-            vh = rs.vector_hash(_parse_vector(seg["vec"]).tobytes())
+            vh = rs.vector_hash(_vector_bytes(seg["vec"]))
             payload = rs.segment_payload(
                 author, tid, seg["pcm_hash"], seg["chromaprint"],
                 seg["duration_seconds"],
@@ -263,7 +241,7 @@ def verify_all() -> bool:
             if len(bad_samples) < 5:
                 bad_samples.append(f"segment {r['tid'][:8]}#{r['idx']} UNLINKED")
             continue
-        vh = rs.vector_hash(_parse_vector(r["vec"]).tobytes())
+        vh = rs.vector_hash(_vector_bytes(r["vec"]))
         payload = rs.segment_payload(r["author_pubkey"], r["tid"], r["pcm_hash"],
                                      r["chromaprint"], r["duration_seconds"],
                                      r["model"], r["idx"], vh,

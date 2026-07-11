@@ -1,5 +1,9 @@
 """Signed audio-analysis records — the attribution + content-address layer.
 
+MIRROR of backend/record_sig.py (the launcher build cannot import backend
+modules). Keep both copies in step, byte for byte below this header — the
+payload formats here ARE the wire contract sync verify-on-import checks.
+
 Phase 1 of enrichment signing (see docs/design/P2P-SYNC-INTEGRITY.md). A
 signature proves *who* produced the data and *from what material*; it is
 weight, never proof of truth — truth is established by a verifier who owns
@@ -27,10 +31,6 @@ subsets, so each segment is signed independently and travels self-contained.
 Only hashes and IDs enter the signed string — never raw floats — so the
 payload is byte-stable across signer and verifier. Float determinism lives
 only in vector_hash / features_hash, taken over fixed-layout bytes.
-
-Producer (signing) AND verifier (import) contract in one file. MIRRORED at
-desktop/p2p/record_sig.py — the launcher build cannot import backend modules;
-keep both copies in step, byte for byte below the header.
 """
 
 import hashlib

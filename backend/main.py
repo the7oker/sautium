@@ -547,9 +547,12 @@ async def health_check() -> Dict[str, Any]:
     # MB dump capability — dump-less peers pick slice sources by this field
     # (same contract as the launcher sync server's /health). node_id = the
     # backend's Ed25519 pubkey, matching the launcher convention.
-    from routers.sync import mb_dump_version, node_pubkey_hex
+    from routers.sync import SYNC_CAPABILITIES, mb_dump_version, node_pubkey_hex
     health_status["mb_dump"] = mb_dump_version()
     health_status["node_id"] = node_pubkey_hex()
+    # Sync-protocol capabilities — peers pick pull categories by this list
+    # (e.g. `segments` bundles vs the legacy mean-vector pull).
+    health_status["capabilities"] = SYNC_CAPABILITIES
 
     return health_status
 

@@ -129,6 +129,7 @@ class SyncServer:
             "node_id": self.node_id,
             "type": "sautium-peer",
             "mb_dump": self.mb_dump_version,
+            "capabilities": sync_queries.CAPABILITIES,
         })
 
     async def handle_inventory(self, request: web.Request) -> web.Response:
@@ -187,9 +188,11 @@ class SyncServer:
                 request, {"error": "invalid JSON"}, status=400
             )
 
-        if not isinstance(uuids, list) or len(uuids) > MAX_UUIDS_PER_REQUEST:
+        limit = (sync_queries.SEGMENTS_MAX_UUIDS if category == "segments"
+                 else MAX_UUIDS_PER_REQUEST)
+        if not isinstance(uuids, list) or len(uuids) > limit:
             return self._json_response(
-                request, {"error": f"uuids must be a list of at most {MAX_UUIDS_PER_REQUEST} items"},
+                request, {"error": f"uuids must be a list of at most {limit} items"},
                 status=400,
             )
 

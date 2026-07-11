@@ -8,24 +8,41 @@ Protocol:
   1. POST /api/sync/inventory  — what enrichment data is available for given tracks?
   2. POST /api/sync/pull/{category} — retrieve enrichment data by UUIDs (batched)
   3. POST /api/mb/slice — raw mb_* rows for artist names (dump holders only)
+
+Lyrics are deliberately NOT part of the protocol (2026-07-11): the one
+category that is verbatim copyrighted text — every node fetches its own from
+the public sources. Audio analysis travels as SEGMENTS with their seals
+(pull category `segments`); the track-level mean is derived locally by the
+importer and the legacy `embeddings` mean pull remains only for peers
+without the `segments` capability.
 """
 
+import base64
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+import record_sig
 from config import settings
 from db_pool import db_query as _db_query, db_query_one as _db_query_one, get_conn
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
+
+# Sync-protocol capabilities advertised on /health. Mirrors the launcher
+# server's list (desktop/p2p/sync_queries.py CAPABILITIES) — keep in step.
+SYNC_CAPABILITIES = ["segments"]
+
+# A track bundle is K=12..24 vectors, each ~2.7KB base64 + ~1.3KB proof —
+# segments pulls get a tighter per-request cap than plain-row categories.
+SEGMENTS_MAX_UUIDS = 500
 
 # Single source: desktop/p2p/mb_slice_queries.py. In Docker the desktop/p2p
 # dir is bind-mounted at /app/desktop_p2p; a native repo run finds it at
@@ -144,7 +161,9 @@ def mb_slice(req: MBSliceRequest) -> dict:
 # ---------------------------------------------------------------------------
 
 class InventoryRequest(BaseModel):
-    track_uuids: list[str] = Field(default_factory=list, max_length=50000)
+    # Same ceiling as the launcher sync server (MAX_UUIDS_PER_REQUEST) — the
+    # client chunks its library into ≤10k slices and merges the responses.
+    track_uuids: list[str] = Field(default_factory=list, max_length=10000)
 
 
 class PullRequest(BaseModel):
@@ -156,7 +175,7 @@ class PullRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 _EMPTY_INVENTORY = {
-    "tracks": [], "lyrics": [], "embeddings": [],
+    "tracks": [], "embeddings": [],
     "audio_features": [], "track_stats": [],
     "artists": [], "artist_bios": [],
     "artist_tags": [], "similar_artists": [],
@@ -188,15 +207,16 @@ async def get_inventory(req: InventoryRequest) -> dict:
             SELECT
                 ARRAY(SELECT t.id::text FROM tracks t
                       WHERE t.id IN (SELECT id FROM uuids)) AS tracks,
-                (SELECT COALESCE(json_agg(json_build_array(x.tid, x.v)), '[]'::json)
-                 FROM (SELECT e.track_id::text AS tid, MAX(e.analysis_version) AS v
-                       FROM embeddings e WHERE e.track_id IN (SELECT id FROM uuids)
+                (SELECT COALESCE(json_agg(json_build_array(x.tid, x.v, x.segs)), '[]'::json)
+                 FROM (SELECT e.track_id::text AS tid, MAX(e.analysis_version) AS v,
+                              COUNT(es.id) AS segs
+                       FROM embeddings e
+                       LEFT JOIN embedding_segments es ON es.embedding_id = e.id
+                       WHERE e.track_id IN (SELECT id FROM uuids)
                        GROUP BY e.track_id) x) AS embeddings,
                 (SELECT COALESCE(json_agg(json_build_array(af.track_id::text, af.analysis_version)), '[]'::json)
                  FROM audio_features af
                  WHERE af.track_id IN (SELECT id FROM uuids)) AS audio_features,
-                ARRAY(SELECT DISTINCT tl.track_id::text FROM track_lyrics tl
-                      WHERE tl.track_id IN (SELECT id FROM uuids)) AS lyrics,
                 ARRAY(SELECT DISTINCT ts.track_id::text FROM track_stats ts
                       WHERE ts.track_id IN (SELECT id FROM uuids)) AS track_stats,
                 ARRAY(SELECT DISTINCT ag.genre_id::text FROM album_genres ag
@@ -229,7 +249,6 @@ async def get_inventory(req: InventoryRequest) -> dict:
 
         return {
             "tracks": track_row["tracks"],
-            "lyrics": track_row["lyrics"],
             "embeddings": track_row["embeddings"],
             "audio_features": track_row["audio_features"],
             "track_stats": track_row["track_stats"],
@@ -338,19 +357,6 @@ async def pull_tracks(req: PullRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/pull/lyrics")
-async def pull_lyrics(req: PullRequest) -> dict:
-    """Pull track lyrics."""
-    return _pull_handler(
-        "lyrics",
-        """SELECT track_id::text AS track_uuid, source,
-                  plain_lyrics, synced_lyrics, instrumental
-           FROM track_lyrics
-           WHERE track_id = ANY(%s::uuid[])""",
-        req.uuids,
-    )
-
-
 def _provenance_item(r: dict) -> Optional[dict]:
     """Nested provenance payload from p_-prefixed LEFT JOIN columns; None for
     rows not linked to an analysis_sources row (legacy / failed fingerprints)."""
@@ -376,9 +382,101 @@ _PROVENANCE_COLS = """s.origin::text AS p_origin, s.pcm_hash AS p_pcm_hash,
                       s.is_lossless AS p_is_lossless"""
 
 
+def _batches_map(roots: set) -> dict:
+    """signing_batches rows for the referenced Merkle roots, serialized so the
+    importer can verify the Worker timestamp: worker_date is re-rendered as the
+    exact seconds-precision UTC string the Worker signed."""
+    if not roots:
+        return {}
+    rows = _db_query(
+        """SELECT batch_root, author_pubkey, worker_date, ip_hash::text AS ip_hash,
+                  worker_sig, authority
+           FROM signing_batches WHERE batch_root = ANY(%s)""",
+        [list(roots)],
+    )
+    return {
+        r["batch_root"]: {
+            "author_pubkey": r["author_pubkey"],
+            "worker_date": r["worker_date"].astimezone(timezone.utc)
+                                           .strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "ip_hash": r["ip_hash"],
+            "worker_sig": r["worker_sig"],
+            "authority": r["authority"],
+        }
+        for r in rows
+    }
+
+
+@router.post("/pull/segments")
+async def pull_segments(req: PullRequest) -> dict:
+    """Per-track CLAP segment bundles with their seals — the signed, synced
+    unit (the importer derives the mean locally; see record_sig.py). Vectors
+    travel as base64 of the canonical float32-LE bytes so vector_hash verifies
+    over the received bytes; the `batches` map carries the Worker timestamps.
+    Mirrors desktop/p2p/sync_queries.pull_segments."""
+    if not req.uuids:
+        return {"category": "segments", "items": [], "batches": {}}
+    if len(req.uuids) > SEGMENTS_MAX_UUIDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"segments pull is capped at {SEGMENTS_MAX_UUIDS} tracks per request")
+
+    try:
+        rows = _db_query(
+            f"""SELECT e.track_id::text AS track_uuid,
+                       em.id::text AS model_uuid, em.name AS model_name,
+                       e.analysis_version,
+                       es.segment_index, es.vector::text AS vec,
+                       es.author_pubkey, es.signature, es.batch_root, es.merkle_proof,
+                       {_PROVENANCE_COLS}
+                FROM embeddings e
+                INNER JOIN embedding_models em ON em.id = e.model_id
+                INNER JOIN embedding_segments es ON es.embedding_id = e.id
+                LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
+                WHERE e.track_id = ANY(%s::uuid[])
+                ORDER BY e.track_id, es.segment_index""",
+            [req.uuids],
+        )
+
+        items_by_track: dict[str, dict] = {}
+        roots: set = set()
+        for r in rows:
+            bundle = items_by_track.get(r["track_uuid"])
+            if bundle is None:
+                bundle = items_by_track[r["track_uuid"]] = {
+                    "track_uuid": r["track_uuid"],
+                    "model_uuid": r["model_uuid"],
+                    "model_name": r["model_name"],
+                    "analysis_version": r["analysis_version"],
+                    "provenance": _provenance_item(r),
+                    "segments": [],
+                }
+            seg = {
+                "i": r["segment_index"],
+                "v": base64.b64encode(
+                    record_sig.vector_to_bytes(_parse_vector(r["vec"]))
+                ).decode("ascii"),
+            }
+            if r["signature"]:
+                seg["author_pubkey"] = r["author_pubkey"]
+                seg["signature"] = r["signature"]
+                seg["batch_root"] = r["batch_root"]
+                seg["proof"] = r["merkle_proof"]
+                roots.add(r["batch_root"])
+            bundle["segments"].append(seg)
+
+        return {"category": "segments", "items": list(items_by_track.values()),
+                "batches": _batches_map(roots)}
+
+    except Exception as e:
+        logger.error(f"Pull segments failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/pull/embeddings")
 async def pull_embeddings(req: PullRequest) -> dict:
-    """Pull audio embeddings (CLAP 512d vectors) with their provenance."""
+    """Legacy mean-vector pull — kept for peers without the `segments`
+    capability. Capable peers pull `segments` and derive the mean locally."""
     if not req.uuids:
         return {"category": "embeddings", "items": []}
 
@@ -415,9 +513,11 @@ async def pull_embeddings(req: PullRequest) -> dict:
 
 @router.post("/pull/audio-features")
 async def pull_audio_features(req: PullRequest) -> dict:
-    """Pull audio analysis features with their provenance."""
+    """Pull audio analysis features with their provenance. Rows travel WITH
+    their seals + a `batches` map (Worker timestamps) — imported rows stay
+    verifiable and re-servable with authorship intact."""
     if not req.uuids:
-        return {"category": "audio_features", "items": []}
+        return {"category": "audio_features", "items": [], "batches": {}}
 
     try:
         rows = _db_query(
@@ -427,18 +527,25 @@ async def pull_audio_features(req: PullRequest) -> dict:
                        a.zero_crossing_rate, a.instruments, a.moods,
                        a.vocal_instrumental, a.vocal_score, a.danceability,
                        a.analysis_version,
+                       a.author_pubkey, a.signature, a.batch_root, a.merkle_proof,
                        {_PROVENANCE_COLS}
                 FROM audio_features a
                 LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
                 WHERE a.track_id = ANY(%s::uuid[])""",
             [req.uuids],
         )
-        items = []
+        items, roots = [], set()
         for r in rows:
             item = {k: v for k, v in r.items() if not k.startswith("p_")}
             item["provenance"] = _provenance_item(r)
+            if item.get("signature"):
+                roots.add(item["batch_root"])
+            else:
+                for c in ("author_pubkey", "signature", "batch_root", "merkle_proof"):
+                    item.pop(c, None)
             items.append(item)
-        return {"category": "audio_features", "items": items}
+        return {"category": "audio_features", "items": items,
+                "batches": _batches_map(roots)}
 
     except Exception as e:
         logger.error(f"Pull audio features failed: {e}")

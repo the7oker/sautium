@@ -5,13 +5,27 @@ Framework-agnostic module: takes a psycopg2 connection, returns dicts.
 Used by both the aiohttp P2P sync server and the FastAPI backend.
 """
 
+import base64
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import psycopg2.extras
 
+from desktop.p2p import record_sig
+
 logger = logging.getLogger(__name__)
+
+# Sync-protocol capabilities advertised on /health. Peers pick pull categories
+# by this list: "segments" = this node serves per-track segment bundles
+# (pull category `segments`, seals on the wire) and the legacy mean-vector
+# `embeddings` pull is deprecated for it. Mirrored by the FastAPI backend
+# (backend/routers/sync.py SYNC_CAPABILITIES) — keep in step.
+CAPABILITIES = ["segments"]
+
+# A track bundle is K=12..24 vectors, each ~2.7KB base64 + ~1.3KB proof —
+# segments pulls get a tighter per-request cap than plain-row categories.
+SEGMENTS_MAX_UUIDS = 500
 
 # ---------------------------------------------------------------------------
 # DB helpers
@@ -54,7 +68,7 @@ def _parse_vector(vec_text: str) -> list[float]:
 # ---------------------------------------------------------------------------
 
 EMPTY_INVENTORY = {
-    "tracks": [], "lyrics": [], "embeddings": [],
+    "tracks": [], "embeddings": [],
     "audio_features": [], "track_stats": [],
     "artists": [], "artist_bios": [],
     "artist_tags": [], "similar_artists": [],
@@ -67,10 +81,16 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
     """
     Check what enrichment data is available for the given track UUIDs.
 
-    Returns category -> uuid_list dict. The versioned categories
-    (embeddings, audio_features) return [uuid, analysis_version] pairs
-    instead, so peers can re-pull rows produced by an older analysis
-    methodology — existence alone never delivers upgrades.
+    Returns category -> uuid_list dict. The versioned categories return
+    [uuid, analysis_version, segment_count] triples (embeddings) and
+    [uuid, analysis_version] pairs (audio_features) instead, so peers can
+    re-pull rows produced by an older analysis methodology — existence
+    alone never delivers upgrades. segment_count lets a peer see how dense
+    this node's grid is (densification / "deepen analysis" planning).
+
+    Lyrics are deliberately NOT part of the protocol (2026-07-11): the one
+    category that is verbatim copyrighted text — every node fetches its own
+    from the public sources.
     """
     if not track_uuids:
         return dict(EMPTY_INVENTORY)
@@ -83,20 +103,19 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
         q("SELECT id FROM tracks WHERE id = ANY(%s::uuid[])"), "id"
     )
     embeddings = [
-        [r["track_id"], r["v"]] for r in
-        q("""SELECT track_id::text AS track_id, MAX(analysis_version) AS v
-             FROM embeddings WHERE track_id = ANY(%s::uuid[])
-             GROUP BY track_id""")
+        [r["track_id"], r["v"], r["segs"]] for r in
+        q("""SELECT e.track_id::text AS track_id,
+                    MAX(e.analysis_version) AS v, COUNT(es.id) AS segs
+             FROM embeddings e
+             LEFT JOIN embedding_segments es ON es.embedding_id = e.id
+             WHERE e.track_id = ANY(%s::uuid[])
+             GROUP BY e.track_id""")
     ]
     audio_features = [
         [r["track_id"], r["analysis_version"]] for r in
         q("""SELECT track_id::text AS track_id, analysis_version
              FROM audio_features WHERE track_id = ANY(%s::uuid[])""")
     ]
-    lyrics = _uuid_list(
-        q("SELECT DISTINCT track_id FROM track_lyrics WHERE track_id = ANY(%s::uuid[])"),
-        "track_id",
-    )
     track_stats = _uuid_list(
         q("SELECT DISTINCT track_id FROM track_stats WHERE track_id = ANY(%s::uuid[])"),
         "track_id",
@@ -154,7 +173,6 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
 
     return {
         "tracks": tracks,
-        "lyrics": lyrics,
         "embeddings": embeddings,
         "audio_features": audio_features,
         "track_stats": track_stats,
@@ -225,16 +243,6 @@ def pull_tracks(conn, uuids: list[str]) -> dict:
     return {"category": "tracks", "items": items}
 
 
-def pull_lyrics(conn, uuids: list[str]) -> dict:
-    return _pull_simple(
-        conn, "lyrics",
-        """SELECT track_id::text AS track_uuid, source,
-                  plain_lyrics, synced_lyrics, instrumental
-           FROM track_lyrics WHERE track_id = ANY(%s::uuid[])""",
-        uuids,
-    )
-
-
 def _provenance_item(r: dict):
     """Nested provenance payload from p_-prefixed LEFT JOIN columns; None for
     rows not linked to an analysis_sources row (legacy / failed fingerprints)."""
@@ -260,7 +268,96 @@ _PROVENANCE_COLS = """s.origin::text AS p_origin, s.pcm_hash AS p_pcm_hash,
                       s.is_lossless AS p_is_lossless"""
 
 
+def _batches_map(conn, roots: set) -> dict:
+    """signing_batches rows for the referenced Merkle roots, serialized so the
+    importer can verify the Worker timestamp: worker_date is re-rendered as the
+    exact seconds-precision UTC string the Worker signed."""
+    if not roots:
+        return {}
+    rows = db_query(
+        conn,
+        """SELECT batch_root, author_pubkey, worker_date, ip_hash::text AS ip_hash,
+                  worker_sig, authority
+           FROM signing_batches WHERE batch_root = ANY(%s)""",
+        [list(roots)],
+    )
+    return {
+        r["batch_root"]: {
+            "author_pubkey": r["author_pubkey"],
+            "worker_date": r["worker_date"].astimezone(timezone.utc)
+                                           .strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "ip_hash": r["ip_hash"],
+            "worker_sig": r["worker_sig"],
+            "authority": r["authority"],
+        }
+        for r in rows
+    }
+
+
+def pull_segments(conn, uuids: list[str]) -> dict:
+    """Per-track CLAP segment bundles with their seals — the signed, synced
+    unit (the importer derives the mean locally; see record_sig.py). Vectors
+    travel as base64 of the canonical float32-LE bytes so vector_hash verifies
+    over the received bytes with no float re-derivation. The response-level
+    `batches` map carries each seal's Worker timestamp so the full chain
+    travels with the records and survives relay."""
+    if not uuids:
+        return {"category": "segments", "items": [], "batches": {}}
+    if len(uuids) > SEGMENTS_MAX_UUIDS:
+        raise ValueError(
+            f"segments pull is capped at {SEGMENTS_MAX_UUIDS} tracks per request")
+
+    rows = db_query(
+        conn,
+        f"""SELECT e.track_id::text AS track_uuid,
+                   em.id::text AS model_uuid, em.name AS model_name,
+                   e.analysis_version,
+                   es.segment_index, es.vector::text AS vec,
+                   es.author_pubkey, es.signature, es.batch_root, es.merkle_proof,
+                   {_PROVENANCE_COLS}
+            FROM embeddings e
+            INNER JOIN embedding_models em ON em.id = e.model_id
+            INNER JOIN embedding_segments es ON es.embedding_id = e.id
+            LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
+            WHERE e.track_id = ANY(%s::uuid[])
+            ORDER BY e.track_id, es.segment_index""",
+        [uuids],
+    )
+
+    items_by_track: dict[str, dict] = {}
+    roots: set = set()
+    for r in rows:
+        bundle = items_by_track.get(r["track_uuid"])
+        if bundle is None:
+            bundle = items_by_track[r["track_uuid"]] = {
+                "track_uuid": r["track_uuid"],
+                "model_uuid": r["model_uuid"],
+                "model_name": r["model_name"],
+                "analysis_version": r["analysis_version"],
+                "provenance": _provenance_item(r),
+                "segments": [],
+            }
+        seg = {
+            "i": r["segment_index"],
+            "v": base64.b64encode(
+                record_sig.vector_to_bytes(_parse_vector(r["vec"]))
+            ).decode("ascii"),
+        }
+        if r["signature"]:
+            seg["author_pubkey"] = r["author_pubkey"]
+            seg["signature"] = r["signature"]
+            seg["batch_root"] = r["batch_root"]
+            seg["proof"] = r["merkle_proof"]
+            roots.add(r["batch_root"])
+        bundle["segments"].append(seg)
+
+    return {"category": "segments", "items": list(items_by_track.values()),
+            "batches": _batches_map(conn, roots)}
+
+
 def pull_embeddings(conn, uuids: list[str]) -> dict:
+    """Legacy mean-vector pull — kept for peers without the `segments`
+    capability. Capable peers pull `segments` and derive the mean locally."""
     if not uuids:
         return {"category": "embeddings", "items": []}
 
@@ -292,8 +389,11 @@ def pull_embeddings(conn, uuids: list[str]) -> dict:
 
 
 def pull_audio_features(conn, uuids: list[str]) -> dict:
+    """Feature rows travel WITH their seals (author sig + Merkle proof) and a
+    `batches` map for the Worker timestamps — imported rows stay verifiable
+    and re-servable with authorship intact."""
     if not uuids:
-        return {"category": "audio_features", "items": []}
+        return {"category": "audio_features", "items": [], "batches": {}}
 
     rows = db_query(
         conn,
@@ -303,18 +403,25 @@ def pull_audio_features(conn, uuids: list[str]) -> dict:
                    a.zero_crossing_rate, a.instruments, a.moods,
                    a.vocal_instrumental, a.vocal_score, a.danceability,
                    a.analysis_version,
+                   a.author_pubkey, a.signature, a.batch_root, a.merkle_proof,
                    {_PROVENANCE_COLS}
             FROM audio_features a
             LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
             WHERE a.track_id = ANY(%s::uuid[])""",
         [uuids],
     )
-    items = []
+    items, roots = [], set()
     for r in rows:
         item = {k: v for k, v in r.items() if not k.startswith("p_")}
         item["provenance"] = _provenance_item(r)
+        if item.get("signature"):
+            roots.add(item["batch_root"])
+        else:
+            for c in ("author_pubkey", "signature", "batch_root", "merkle_proof"):
+                item.pop(c, None)
         items.append(item)
-    return {"category": "audio_features", "items": items}
+    return {"category": "audio_features", "items": items,
+            "batches": _batches_map(conn, roots)}
 
 
 def pull_track_stats(conn, uuids: list[str]) -> dict:
@@ -398,7 +505,7 @@ def pull_genre_descriptions(conn, uuids: list[str]) -> dict:
 # Map category name -> pull function
 PULL_HANDLERS = {
     "tracks": pull_tracks,
-    "lyrics": pull_lyrics,
+    "segments": pull_segments,
     "embeddings": pull_embeddings,
     "audio-features": pull_audio_features,
     "audio_features": pull_audio_features,
@@ -475,7 +582,7 @@ def get_incomplete_artist_uuids(conn) -> list[str]:
     category — used as the trigger set for manual/LAN peer sync.
 
     Track-level (any track missing → trigger): embeddings, audio_features,
-    track_lyrics, track_stats.
+    track_stats. (Lyrics are out of the sync protocol — never a trigger.)
     Artist-level (artist itself missing → trigger): artist_bios,
     artist_tags, similar_artists.
 
@@ -497,7 +604,6 @@ def get_incomplete_artist_uuids(conn) -> list[str]:
            FROM track_artists ta
            WHERE NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = ta.track_id)
               OR NOT EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id)
-              OR NOT EXISTS (SELECT 1 FROM track_lyrics tl WHERE tl.track_id = ta.track_id)
               OR NOT EXISTS (SELECT 1 FROM track_stats ts WHERE ts.track_id = ta.track_id)
               OR NOT EXISTS (SELECT 1 FROM artist_bios ab WHERE ab.artist_id = ta.artist_id)
               OR NOT EXISTS (SELECT 1 FROM artist_tags atg WHERE atg.artist_id = ta.artist_id)
