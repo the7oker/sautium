@@ -150,7 +150,10 @@ def get_outputs(rescan: bool = False):
         dlna_available = False
     persisted_renderer = _read("output.dlna_renderer")
     renderers = {**_dlna_discovered, **_dlna_pinned}
-    if persisted_renderer:
+    # The renderer of the ACTIVE dlna output is configuration — it stays
+    # listed even when unreachable (like the HQPlayer row when HQP is off).
+    # Once another output is selected it must earn its place via scan/pin.
+    if persisted_renderer and _read("output.type") == "dlna":
         renderers.setdefault(persisted_renderer.get("udn"), persisted_renderer)
     outputs.append({
         "type": "dlna",
