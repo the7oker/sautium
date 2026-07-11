@@ -282,6 +282,19 @@ class DlnaBackend(PlayerBackend):
             return f"http://{host}:{proxy.port}/preview/{src['token']}"
         return None   # foreign URIs (file:// passthrough) aren't renderer-reachable
 
+    @staticmethod
+    def _didl_meta(item: QueueItem) -> dict:
+        """Structured DIDL-Lite fields — renderers show artist/album in their
+        own UI (a bare title left them as "unknown artist/album")."""
+        meta = {}
+        if item.artist:
+            meta["artist"] = item.artist
+        if item.album:
+            meta["album"] = item.album
+        if item.track_number:
+            meta["original_track_number"] = item.track_number
+        return meta
+
     async def _load_and_play(self, index: int, *, play: bool = True) -> bool:
         item = self._queue.item_at(index)
         if item is None:
@@ -292,8 +305,8 @@ class DlnaBackend(PlayerBackend):
             logger.warning("DLNA: skipping unreachable item %s — %s",
                            item.artist, item.title)
             return await self._load_and_play(index + 1, play=play)
-        title = f"{item.artist} — {item.title}" if item.artist else item.title
-        await self._dmr.async_set_transport_uri(url, title or "Sautium")
+        await self._dmr.async_set_transport_uri(
+            url, item.title or "Sautium", meta_data=self._didl_meta(item))
         self._index = index
         self._current_url = url
         self._position = 0.0
@@ -316,8 +329,8 @@ class DlnaBackend(PlayerBackend):
         if url is None:
             return
         try:
-            title = f"{nxt.artist} — {nxt.title}" if nxt.artist else nxt.title
-            await self._dmr.async_set_next_transport_uri(url, title or "Sautium")
+            await self._dmr.async_set_next_transport_uri(
+                url, nxt.title or "Sautium", meta_data=self._didl_meta(nxt))
             self._next_url = url
         except Exception as e:
             logger.debug("SetNextAVTransportURI unsupported/failed: %s", e)
