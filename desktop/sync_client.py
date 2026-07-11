@@ -948,6 +948,18 @@ class SyncClient:
         return len(items)
 
     def _import_similar_artists(self, conn, items: list[dict]) -> int:
+        # Boundary filter: a self-edge is always garbage (namesake-collapse
+        # era rows on peers that predate chk_not_self_similar) and would kill
+        # the whole batch against the constraint here.
+        self_edges = [i for i in items
+                      if i["artist_uuid"] == i["similar_artist_uuid"]]
+        if self_edges:
+            logger.warning("sync import: dropping %d self-similar edge(s)",
+                           len(self_edges))
+            items = [i for i in items
+                     if i["artist_uuid"] != i["similar_artist_uuid"]]
+            if not items:
+                return 0
         with conn.cursor() as cur:
             # Batch upsert similar artists
             artist_values = list({
