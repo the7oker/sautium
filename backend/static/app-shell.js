@@ -8954,7 +8954,7 @@
         </div>
         <div class="row-stack-value" style="display:flex;align-items:center;gap:calc(8*var(--px));flex-wrap:wrap;">
           <span data-hqp-dot style="color:var(--color-text-muted);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;">checking…</span>
-          <span data-action="open-hqplayer" style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(11.5*var(--px));letter-spacing:0.02em;cursor:pointer;">${escapeProfileHtml(String(hqp.host || '—'))}:${escapeProfileHtml(String(hqp.port || '—'))}</span>
+          <span style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(11.5*var(--px));letter-spacing:0.02em;">${escapeProfileHtml(String(hqp.host || '—'))}:${escapeProfileHtml(String(hqp.port || '—'))}</span>
         </div>
       </div>`;
 
@@ -9125,11 +9125,6 @@
         if (window.browserRenderer) window.browserRenderer.attach();
       });
     }
-    root.querySelectorAll('[data-action="open-hqplayer"]').forEach(el =>
-      el.addEventListener('click', (e) => {
-        e.stopPropagation();
-        navigate('more/hqplayer');
-      }));
   }
 
   /* Manual renderer registration (the Docker path — no LAN multicast for
