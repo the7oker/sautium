@@ -298,6 +298,16 @@ class DlnaBackend(PlayerBackend):
             meta["original_track_number"] = item.track_number
         return meta
 
+    async def _transport_meta(self, url: str, item: QueueItem) -> str:
+        """DIDL with the class FORCED to musicTrack: the library derives the
+        class from the mime type and lands on plain audioItem, whose didl
+        type silently drops artist/album/track-number on serialization
+        (verified by reading CurrentURIMetaData back off the renderer)."""
+        return await self._dmr.construct_play_media_metadata(
+            url, item.title or "Sautium",
+            override_upnp_class="object.item.audioItem.musicTrack",
+            meta_data=self._didl_meta(item))
+
     async def _load_and_play(self, index: int, *, play: bool = True) -> bool:
         item = self._queue.item_at(index)
         if item is None:
@@ -309,7 +319,8 @@ class DlnaBackend(PlayerBackend):
                            item.artist, item.title)
             return await self._load_and_play(index + 1, play=play)
         await self._dmr.async_set_transport_uri(
-            url, item.title or "Sautium", meta_data=self._didl_meta(item))
+            url, item.title or "Sautium",
+            meta_data=await self._transport_meta(url, item))
         self._index = index
         self._current_url = url
         self._position = 0.0
@@ -333,7 +344,8 @@ class DlnaBackend(PlayerBackend):
             return
         try:
             await self._dmr.async_set_next_transport_uri(
-                url, nxt.title or "Sautium", meta_data=self._didl_meta(nxt))
+                url, nxt.title or "Sautium",
+                meta_data=await self._transport_meta(url, nxt))
             self._next_url = url
         except Exception as e:
             logger.debug("SetNextAVTransportURI unsupported/failed: %s", e)
