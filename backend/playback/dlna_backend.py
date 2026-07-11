@@ -298,15 +298,64 @@ class DlnaBackend(PlayerBackend):
             meta["original_track_number"] = item.track_number
         return meta
 
+    @staticmethod
+    def _load_cover_jpeg(cover_id: str) -> Optional[bytes]:
+        """Cover bytes from the covers table, converted webp→JPEG — hi-fi
+        renderers rarely decode webp. Runs in a worker thread (blocking DB +
+        PIL)."""
+        from db_pool import db_query_one
+        row = db_query_one("SELECT data FROM covers WHERE id = %(id)s::uuid",
+                           {"id": cover_id})
+        if not row or not row["data"]:
+            return None
+        try:
+            import io
+            from PIL import Image
+            img = Image.open(io.BytesIO(bytes(row["data"]))).convert("RGB")
+            out = io.BytesIO()
+            img.save(out, format="JPEG", quality=85)
+            return out.getvalue()
+        except Exception as e:
+            logger.debug("cover convert failed for %s: %s", cover_id, e)
+            return None
+
+    async def _art_url(self, item: QueueItem) -> Optional[str]:
+        """Renderer-fetchable cover URL: owned art is re-served as JPEG on
+        the plain-http proxy (/art/{token}); phantom art passes through its
+        external provider/CAA URL."""
+        if item.cover_id:
+            from streaming import service as streaming_service
+            proxy = streaming_service.ensure_proxy()
+            tok = proxy.blob_token_for(item.cover_id)
+            if tok is None:
+                data = await asyncio.to_thread(self._load_cover_jpeg, item.cover_id)
+                if data is None:
+                    return None
+                tok = proxy.register_blob(item.cover_id, data, "image/jpeg")
+            return f"http://{media_host()}:{proxy.port}/art/{tok}"
+        if item.preview:
+            from playback.queue import resolved_artwork
+            return resolved_artwork.get(item.track_id) or item.cover_url
+        return None
+
     async def _transport_meta(self, url: str, item: QueueItem) -> str:
         """DIDL with the class FORCED to musicTrack: the library derives the
         class from the mime type and lands on plain audioItem, whose didl
         type silently drops artist/album/track-number on serialization
-        (verified by reading CurrentURIMetaData back off the renderer)."""
-        return await self._dmr.construct_play_media_metadata(
+        (verified by reading CurrentURIMetaData back off the renderer).
+        albumArtURI is injected manually — this didl_lite version has no such
+        property on MusicTrack at all."""
+        xml = await self._dmr.construct_play_media_metadata(
             url, item.title or "Sautium",
             override_upnp_class="object.item.audioItem.musicTrack",
             meta_data=self._didl_meta(item))
+        art = await self._art_url(item)
+        if art:
+            from xml.sax.saxutils import escape
+            xml = xml.replace(
+                "</item>",
+                f"<upnp:albumArtURI>{escape(art)}</upnp:albumArtURI></item>", 1)
+        return xml
 
     async def _load_and_play(self, index: int, *, play: bool = True) -> bool:
         item = self._queue.item_at(index)

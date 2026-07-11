@@ -81,6 +81,8 @@ class MediaProxy:
         self._session: list[str] = []   # ordered tokens of the current preview
         self._files: dict[str, _FileEntry] = {}          # /file/{token} registry
         self._file_tokens_by_path: dict[str, str] = {}   # idempotent re-registration
+        self._blobs: dict[str, tuple[bytes, str]] = {}   # /art/{token} → (data, mime)
+        self._blob_tokens_by_key: dict[str, str] = {}    # cover key → token
         self._httpd: Optional[ThreadingHTTPServer] = None
         # Fired (with the _Entry) once a track is fetched, audio present — the
         # preview-enrichment tee. Kept generic so the proxy stays CLAP-agnostic.
@@ -124,6 +126,30 @@ class MediaProxy:
     def file_entry(self, token: str) -> Optional[_FileEntry]:
         with self._lock:
             return self._files.get(token)
+
+    def register_blob(self, key: str, data: bytes, mime: str) -> str:
+        """Expose small bytes (cover art for DLNA renderers) at /art/{token}.
+        Idempotent per key (cover_id); a small FIFO cap bounds memory to
+        roughly one queue's worth of covers."""
+        with self._lock:
+            tok = self._blob_tokens_by_key.get(key)
+            if tok:
+                return tok
+            tok = secrets.token_urlsafe(12)
+            self._blobs[tok] = (data, mime)
+            self._blob_tokens_by_key[key] = tok
+            while len(self._blob_tokens_by_key) > 48:
+                old_key = next(iter(self._blob_tokens_by_key))
+                self._blobs.pop(self._blob_tokens_by_key.pop(old_key), None)
+            return tok
+
+    def blob_token_for(self, key: str) -> Optional[str]:
+        with self._lock:
+            return self._blob_tokens_by_key.get(key)
+
+    def blob(self, token: str) -> Optional[tuple[bytes, str]]:
+        with self._lock:
+            return self._blobs.get(token)
 
     # ---- session API (called by the player endpoint) --------------------
     def start_session(self, items: list) -> list[str]:
@@ -413,7 +439,30 @@ def _make_handler(proxy: MediaProxy):
             except OSError as e:
                 logger.error("file serve failed %s: %s", fe.path, e)
 
+        def _art_token(self) -> Optional[str]:
+            if not self.path.startswith("/art/"):
+                return None
+            return self.path[len("/art/"):].split("?", 1)[0]
+
+        def _serve_art(self, token: str, *, body: bool):
+            blob = proxy.blob(token)
+            if blob is None:
+                self.send_error(404, "unknown token")
+                return
+            data, mime = blob
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "public, max-age=86400, immutable")
+            self.end_headers()
+            if body:
+                self._write(data)
+
         def do_HEAD(self):
+            atok = self._art_token()
+            if atok is not None:
+                self._serve_art(atok, body=False)
+                return
             ftok = self._file_token()
             if ftok is not None:
                 fe = proxy.file_entry(ftok)
@@ -448,6 +497,10 @@ def _make_handler(proxy: MediaProxy):
             self.end_headers()
 
         def do_GET(self):
+            atok = self._art_token()
+            if atok is not None:
+                self._serve_art(atok, body=True)
+                return
             ftok = self._file_token()
             if ftok is not None:
                 fe = proxy.file_entry(ftok)
