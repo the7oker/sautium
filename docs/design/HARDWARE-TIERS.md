@@ -40,7 +40,7 @@ plus user-facing minimum/recommended configurations.
 |---|---|---|
 | Backend idle RSS | 709 MB | models live on GPU; on CPU-only they'd sit in RAM instead |
 | Postgres RSS | 1.32 GB | stock config (`shared_buffers=128MB` — untuned everywhere) |
-| VRAM resident after prewarm | ~4.3 GB (est.) | CLAP bf16 0.31 (logged) + **BGE-M3 fp32 2.27** + NLLB bf16 ~1.2 + CUDA ctx |
+| VRAM resident after prewarm | ~~4.3 GB~~ → **2.68 GB measured** (2026-07-11, self-reported "backend VRAM" log line) | CLAP bf16 0.31 + BGE-M3 **bf16 1.14** + NLLB bf16 1.2; allocated == reserved (zero parked cache). Pre-fix state for history: BGE-M3 ran fp32 (2.27 GB) |
 | VRAM during analysis | +0.5–2 GB + batch audio | AST+PaSST lazy-load; adaptive budget `device.py:123-150` |
 | Whole stack envelope | fits in **15.5 GB** WSL2 VM | i.e. real floor is ~16 GB host for the full profile, not 32 |
 | Model cold-load from NTFS | BGE-M3 **2m15s–5m10s** (logged) | startup latency driver; worse on HDD |
@@ -291,7 +291,15 @@ large library is an overnight-scale job; instruments optional.
 + DB ~13 GB per 40k tracks + optional 19 GB MB dump). Analysis of a 30k library
 in hours–a day; serves MB slices and analysis to peers.
 
-Unsupported: <8 GB RAM, HDD, 32-bit, 4 GB Ampere cards until the bf16 fix lands.
+Unsupported: <8 GB RAM, HDD, 32-bit.
+
+Post-bf16 note (2026-07-11): 4 GB NVIDIA cards are now a fully functional
+**lite** (the whole resident model set is 2.68 GB, so warm semantic search
+and trickle stream-enrichment fit) — they are no longer "unsupported", but
+they do NOT get bulk analysis: the audio-batch memory model
+(`device.py` `fixed=4.0`, marked provisional) is uncalibrated on small
+cards, so the standard-tier VRAM floor deliberately stays at ≥5.5 GB until
+`sautium bench` data on such hardware says otherwise.
 
 ## 6. Prioritized backlog
 
