@@ -416,10 +416,14 @@ class Engine:
                 np.multiply(out, vol / 100.0, out=out, casting="unsafe")
 
         try:
+            # latency="high": a music player wants scheduling slack, not
+            # monitoring latency. Default (driver-preferred) ASIO buffers are
+            # 5-10 ms — GIL contention from background enrichment/prewarm
+            # blows those deadlines and stutters the first minute after boot.
             stream = sd.RawOutputStream(
                 samplerate=rate, channels=channels, dtype="int32",
                 device=device_index, callback=callback,
-                extra_settings=extra)
+                latency="high", extra_settings=extra)
         except Exception as e:
             logger.error("stream open failed (%s ch=%d rate=%d exclusive=%s): %s",
                          hostapi, channels, rate, self._exclusive, e)
