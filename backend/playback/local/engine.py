@@ -211,12 +211,13 @@ class Engine:
 
     def _loop(self) -> None:
         if sys.platform == "win32":
-            # WASAPI is COM-based and PortAudio opens the device on the
-            # CALLING thread — without COM initialized here, stream start
-            # fails with CO_E_NOTINITIALIZED. MTA (0) matches PortAudio's
-            # own internal COM usage.
+            # WASAPI and ASIO are COM-based and PortAudio opens the device on
+            # the CALLING thread — without COM initialized here, WASAPI fails
+            # with CO_E_NOTINITIALIZED. Apartment-threaded (0x2) specifically:
+            # ASIO drivers are legacy STA COM objects and refuse to load under
+            # MTA ("Failed to load ASIO driver"); WASAPI works in either.
             import ctypes
-            ctypes.windll.ole32.CoInitializeEx(None, 0)
+            ctypes.windll.ole32.CoInitializeEx(None, 0x2)
         last_emit = 0.0
         self._emit_status()   # announce the idle backend as soon as it attaches
         while self._running:
