@@ -908,43 +908,59 @@ class SyncClient:
             )
         return len(items)
 
-    def _import_artist_tags(self, conn, items: list[dict]) -> int:
-        with conn.cursor() as cur:
-            # Batch upsert tags (deduplicated)
-            tags_seen = {}
-            for item in items:
-                tid = item["tag_uuid"]
-                if tid not in tags_seen:
-                    tags_seen[tid] = (tid, item["tag_name"])
-            if tags_seen:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """INSERT INTO tags (id, name)
-                       VALUES %s ON CONFLICT (id) DO NOTHING""",
-                    list(tags_seen.values()),
-                    template="(%s, %s)",
-                )
+    def _reconcile_named(self, cur, table: str, pairs: list[tuple]) -> dict:
+        """Get-or-create content-addressed (id, name) rows; return name -> local id.
 
-            # Batch upsert artist_tags
-            values = [
-                (
-                    item["artist_uuid"], item["tag_uuid"],
-                    item["weight"], item.get("source", "sync"),
-                )
-                for item in items
-            ]
+        tags/genres are content-addressed by name (UNIQUE name), so a peer may
+        hold the same name under a different id — legacy pre-v5 rows, or a
+        divergent enrichment history. Trusting the wire id with ON CONFLICT (id)
+        crashes the whole batch on the name index, and even skipping that insert
+        would leave the child row (artist_tags / genre_descriptions) pointing at
+        an id this node lacks. Resolve each name to the LOCAL row's id instead:
+        reuse the existing row when the name is present, else insert the wire id.
+        `table` is a trusted literal from the caller, never user input.
+        """
+        by_name = {name: wid for wid, name in pairs if name}   # dedup, last wins
+        if not by_name:
+            return {}
+        names = list(by_name)
+        cur.execute(f"SELECT name, id::text FROM {table} WHERE name = ANY(%s)", (names,))
+        local = dict(cur.fetchall())
+        missing = [(by_name[n], n) for n in names if n not in local]
+        if missing:
             psycopg2.extras.execute_values(
                 cur,
-                """INSERT INTO artist_tags
-                   (artist_id, tag_id, weight, source)
-                   VALUES %s
-                   ON CONFLICT (artist_id, tag_id, source) DO UPDATE SET
-                       weight = EXCLUDED.weight,
-                       updated_at = CURRENT_TIMESTAMP""",
-                values,
-                template="(%s, %s, %s, %s)",
-                page_size=500,
+                f"INSERT INTO {table} (id, name) VALUES %s ON CONFLICT (name) DO NOTHING",
+                missing, template="(%s, %s)",
             )
+            cur.execute(f"SELECT name, id::text FROM {table} WHERE name = ANY(%s)",
+                        ([n for _, n in missing],))
+            local.update(dict(cur.fetchall()))
+        return local
+
+    def _import_artist_tags(self, conn, items: list[dict]) -> int:
+        with conn.cursor() as cur:
+            local = self._reconcile_named(
+                cur, "tags",
+                [(item["tag_uuid"], item["tag_name"]) for item in items])
+            values = [
+                (item["artist_uuid"], local[item["tag_name"]],
+                 item["weight"], item.get("source", "sync"))
+                for item in items if item["tag_name"] in local
+            ]
+            if values:
+                psycopg2.extras.execute_values(
+                    cur,
+                    """INSERT INTO artist_tags
+                       (artist_id, tag_id, weight, source)
+                       VALUES %s
+                       ON CONFLICT (artist_id, tag_id, source) DO UPDATE SET
+                           weight = EXCLUDED.weight,
+                           updated_at = CURRENT_TIMESTAMP""",
+                    values,
+                    template="(%s, %s, %s, %s)",
+                    page_size=500,
+                )
         return len(items)
 
     def _import_similar_artists(self, conn, items: list[dict]) -> int:
@@ -1062,43 +1078,34 @@ class SyncClient:
 
     def _import_genre_descriptions(self, conn, items: list[dict]) -> int:
         with conn.cursor() as cur:
-            # Batch upsert genres
-            genre_values = list({
-                item["genre_uuid"]: (item["genre_uuid"], item["genre_name"])
-                for item in items if item.get("genre_name")
-            }.values())
-            if genre_values:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """INSERT INTO genres (id, name)
-                       VALUES %s ON CONFLICT (id) DO NOTHING""",
-                    genre_values,
-                    template="(%s, %s)",
-                )
+            local = self._reconcile_named(
+                cur, "genres",
+                [(item["genre_uuid"], item.get("genre_name")) for item in items])
 
-            # Batch upsert genre_descriptions
+            # Batch upsert genre_descriptions (genre_id resolved to the local row)
             values = [
                 (
-                    item["genre_uuid"], item.get("source", "sync"),
+                    local[item["genre_name"]], item.get("source", "sync"),
                     item.get("summary"), item.get("content"),
                     item.get("url"),
                 )
-                for item in items
+                for item in items if item.get("genre_name") in local
             ]
-            psycopg2.extras.execute_values(
-                cur,
-                """INSERT INTO genre_descriptions
-                   (genre_id, source, summary, content, url)
-                   VALUES %s
-                   ON CONFLICT (genre_id, source) DO UPDATE SET
-                       summary = EXCLUDED.summary,
-                       content = EXCLUDED.content,
-                       url = EXCLUDED.url,
-                       updated_at = CURRENT_TIMESTAMP""",
-                values,
-                template="(%s, %s, %s, %s, %s)",
-                page_size=500,
-            )
+            if values:
+                psycopg2.extras.execute_values(
+                    cur,
+                    """INSERT INTO genre_descriptions
+                       (genre_id, source, summary, content, url)
+                       VALUES %s
+                       ON CONFLICT (genre_id, source) DO UPDATE SET
+                           summary = EXCLUDED.summary,
+                           content = EXCLUDED.content,
+                           url = EXCLUDED.url,
+                           updated_at = CURRENT_TIMESTAMP""",
+                    values,
+                    template="(%s, %s, %s, %s, %s)",
+                    page_size=500,
+                )
         return len(items)
 
     # -- Post-import enrichment -----------------------------------------------
