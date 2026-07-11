@@ -237,6 +237,24 @@ async def lifespan(app: FastAPI):
             )
             await _dht_service.start()
 
+            # Yield-to-foreground probe: the announcer holds while playback
+            # is active on ANY output (HQP / local / DLNA / browser — the
+            # audio and control traffic ride the same container->host path
+            # the announce storm chokes) or while an authenticated UI
+            # request happened within the activity window.
+            def _node_busy() -> bool:
+                try:
+                    from playback.manager import manager as _pm
+                    if _pm.latest_status.get("state") in ("playing", "paused"):
+                        return True
+                except Exception:
+                    pass
+                from auth_hmac import seconds_since_ui_activity
+                from dht_service import ACTIVITY_WINDOW
+                return seconds_since_ui_activity() < ACTIVITY_WINDOW
+
+            _dht_service.set_activity_probe(_node_busy)
+
             # Announce user identity in DHT
             if _p2p_identity:
                 await _dht_service.announce_user(

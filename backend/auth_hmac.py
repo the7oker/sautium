@@ -144,6 +144,26 @@ def sign(secret: bytes, method: str, path_and_query: str, ts: str, body: bytes) 
     return hmac.new(secret, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+# Monotonic timestamp of the last HMAC-VERIFIED request — a "someone is
+# actively using the Web UI" signal for background schedulers (the DHT
+# announcer yields to foreground traffic). Whitelisted paths (health probes,
+# static, media) deliberately don't count: the launcher polls /health every
+# 30s and would otherwise keep the node permanently "busy".
+_last_ui_activity: float = 0.0
+
+
+def _mark_ui_activity() -> None:
+    global _last_ui_activity
+    _last_ui_activity = time.monotonic()
+
+
+def seconds_since_ui_activity() -> float:
+    """Seconds since the last authenticated UI request (inf if never)."""
+    if not _last_ui_activity:
+        return float("inf")
+    return time.monotonic() - _last_ui_activity
+
+
 class HMACAuthMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, secret_path: Path):
         super().__init__(app)
@@ -194,4 +214,5 @@ class HMACAuthMiddleware(BaseHTTPMiddleware):
         if not hmac.compare_digest(sig, expected):
             return JSONResponse({"detail": "bad signature"}, status_code=401)
 
+        _mark_ui_activity()
         return await call_next(request)

@@ -52,6 +52,20 @@ ANNOUNCE_CHUNK_PAUSE = 1.0
 # DHT re-announce interval (seconds)
 REANNOUNCE_INTERVAL = 15 * 60  # 15 minutes
 
+# Yield-to-foreground announce scheduling (HARDWARE-TIERS / announce-storm
+# history): even the paced sweep degrades the container->host path for its
+# whole ~10-min window — HQPlayer connects time out and the Web UI starves.
+# Discoverability is a *background* value; local playback/UI always wins.
+# The announcer therefore HOLDS between chunks while the node is busy
+# (playback active on any output, or an authenticated UI request within
+# ACTIVITY_WINDOW). To keep an always-listening node from vanishing off the
+# DHT (entries live 15-30 min), a hold longer than MAX_DEFER grants a
+# FORCED_TRICKLE allowance of announces even under activity.
+BUSY_CHECK_INTERVAL = 15.0
+ACTIVITY_WINDOW = 5 * 60
+MAX_DEFER_SECONDS = 30 * 60
+FORCED_TRICKLE = 50
+
 # How long to wait for DHT bootstrap (seconds)
 DHT_BOOTSTRAP_TIMEOUT = 30
 
@@ -104,6 +118,54 @@ class DHTService:
         self._alert_task: Optional[asyncio.Task] = None
         # Pending lookups: infohash_hex -> list of futures
         self._pending_lookups: dict[str, list[asyncio.Future]] = {}
+        # Yield-to-foreground state (see module constants). The probe is
+        # injected by main.py after startup — returns True while the node
+        # has foreground activity; None = never busy (announce freely).
+        self._activity_probe: Optional[callable] = None
+        self._deferred_s = 0.0
+        self._trickle_allowance = 0
+        # Serialize sweeps: the startup announce and the 15-min cycle must
+        # not interleave (double traffic on the same choked path).
+        self._announce_lock = asyncio.Lock()
+
+    def set_activity_probe(self, probe: callable) -> None:
+        self._activity_probe = probe
+
+    def _is_busy(self) -> bool:
+        if self._activity_probe is None:
+            return False
+        try:
+            return bool(self._activity_probe())
+        except Exception:
+            return False
+
+    async def _hold_while_busy(self) -> None:
+        """Block between announce chunks while foreground activity is on.
+        Coarse checks of an in-process flag (BUSY_CHECK_INTERVAL) — this is
+        backpressure scheduling, not state polling of another component.
+        After MAX_DEFER_SECONDS of continuous busy, grants FORCED_TRICKLE
+        announces so DHT presence survives an all-day listening session."""
+        if not self._is_busy():
+            self._deferred_s = 0.0
+            return
+        if self._trickle_allowance > 0:
+            self._trickle_allowance -= 1
+            return
+        held = False
+        while self._running and self._is_busy():
+            held = True
+            await asyncio.sleep(BUSY_CHECK_INTERVAL)
+            self._deferred_s += BUSY_CHECK_INTERVAL
+            if self._deferred_s >= MAX_DEFER_SECONDS:
+                self._deferred_s = 0.0
+                self._trickle_allowance = FORCED_TRICKLE - 1
+                logger.info(
+                    "DHT: announce deferred %d min under activity — pushing "
+                    "a %d-announce trickle", MAX_DEFER_SECONDS // 60,
+                    FORCED_TRICKLE)
+                return
+        if held:
+            logger.info("DHT: node idle — announcing resumes")
 
     @property
     def is_available(self) -> bool:
@@ -230,15 +292,19 @@ class DHTService:
                 f"Announcing {len(new_uuids)} artists in DHT "
                 f"(HTTP port {self.http_port})"
             )
-        for i, uuid in enumerate(new_uuids):
-            ih = artist_infohash(uuid)
-            sha1 = lt.sha1_hash(ih)
-            self._session.dht_announce(sha1, self.http_port, 0)
-            self._announced.add(uuid)
-            if (i + 1) % ANNOUNCE_CHUNK == 0:
-                await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE)
+        async with self._announce_lock:
+            for i, uuid in enumerate(new_uuids):
+                await self._hold_while_busy()
                 if not self._running or not self._session:
                     return
+                ih = artist_infohash(uuid)
+                sha1 = lt.sha1_hash(ih)
+                self._session.dht_announce(sha1, self.http_port, 0)
+                self._announced.add(uuid)
+                if (i + 1) % ANNOUNCE_CHUNK == 0:
+                    await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE)
+                    if not self._running or not self._session:
+                        return
 
         logger.info(
             f"DHT: {len(self._announced)} artists announced total"
@@ -362,15 +428,19 @@ class DHTService:
                 logger.info(
                     f"Re-announcing {len(uuids)} artists + user in DHT"
                 )
-            for i, uuid in enumerate(uuids):
-                ih = artist_infohash(uuid)
-                sha1 = lt.sha1_hash(ih)
-                self._session.dht_announce(sha1, self.http_port, 0)
-                self._announced.add(uuid)
-                if (i + 1) % ANNOUNCE_CHUNK == 0:
-                    await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE)
+            async with self._announce_lock:
+                for i, uuid in enumerate(uuids):
+                    await self._hold_while_busy()
                     if not self._running or not self._session:
                         return
+                    ih = artist_infohash(uuid)
+                    sha1 = lt.sha1_hash(ih)
+                    self._session.dht_announce(sha1, self.http_port, 0)
+                    self._announced.add(uuid)
+                    if (i + 1) % ANNOUNCE_CHUNK == 0:
+                        await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE)
+                        if not self._running or not self._session:
+                            return
             logger.info("DHT re-announce complete")
 
     async def _poll_alerts(self):
