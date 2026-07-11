@@ -252,9 +252,19 @@ async def dlna_scan():
         if loc:
             found[usn] = str(loc)
 
-    await async_search(
-        _on_response, timeout=3,
-        search_target="urn:schemas-upnp-org:device:MediaRenderer:1")
+    # Search from EVERY private interface: on a multi-homed host (Wi-Fi +
+    # WSL/Hyper-V virtual adapters) the default-route multicast often egresses
+    # a virtual NIC and never reaches the LAN — the KANN was invisible to a
+    # single default search while answering an interface-bound one.
+    from tls_gen import detect_private_host_ips
+    sources = [None] + [(ip, 0) for ip in detect_private_host_ips()]
+    for source in sources:
+        try:
+            await async_search(
+                _on_response, timeout=2, source=source,
+                search_target="urn:schemas-upnp-org:device:MediaRenderer:1")
+        except Exception as e:
+            logger.debug("SSDP search on %s failed: %s", source, e)
 
     renderers = []
     for loc in sorted(set(found.values())):
