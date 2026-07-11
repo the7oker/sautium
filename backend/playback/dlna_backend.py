@@ -342,6 +342,17 @@ class DlnaBackend(PlayerBackend):
 
     # -- transport (uvicorn threads → dlna-loop) ----------------------------------
 
+    async def _avt(self, name: str, **kwargs):
+        """Invoke an AVTransport action DIRECTLY. DmrDevice's transport
+        helpers gate on the renderer's CurrentTransportActions report and
+        silently no-op when an action is missing from it — the AK Connect
+        renderer omits "Pause" there while executing the action perfectly,
+        so the report can't be trusted."""
+        action = self._dmr._action("AVT", name)
+        if action is None:
+            raise RuntimeError(f"renderer lacks AVTransport/{name}")
+        return await action.async_call(InstanceID=0, **kwargs)
+
     def _call(self, coro) -> bool:
         if self._loop is None:
             return False
@@ -358,21 +369,21 @@ class DlnaBackend(PlayerBackend):
             if self._current_url is None:
                 await self._load_and_play(self._index if self._index >= 1 else 1)
             else:
-                await self._dmr.async_play()
+                await self._avt("Play", Speed="1")
                 self._ensure_poll()
                 self._emit_now("playing")
         return self._call(_p())
 
     def pause(self) -> bool:
         async def _p():
-            await self._dmr.async_pause()
+            await self._avt("Pause")
             self._emit_now("paused")
         return self._call(_p())
 
     def stop(self) -> bool:
         async def _s():
             self._stop_poll()
-            await self._dmr.async_stop()
+            await self._avt("Stop")
             self._emit_now("stopped")
         return self._call(_s())
 
@@ -389,8 +400,10 @@ class DlnaBackend(PlayerBackend):
 
     def seek(self, seconds: int) -> bool:
         async def _s():
-            await self._dmr.async_seek_rel_time(timedelta(seconds=int(seconds)))
-            self._position = float(seconds)
+            total = int(seconds)
+            target = f"{total // 3600}:{total % 3600 // 60:02d}:{total % 60:02d}"
+            await self._avt("Seek", Unit="REL_TIME", Target=target)
+            self._position = float(total)
             self._emit_now()
         return self._call(_s())
 
