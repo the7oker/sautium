@@ -9025,6 +9025,19 @@
         </div>`;
     }
 
+    const browserSel = active.type === 'browser';
+    const isRendererTab = browserSel && window.browserRenderer && window.browserRenderer.active;
+    const browserRow = `
+      <div class="form-row stacked" data-action="select-browser" style="cursor:pointer;">
+        <div class="row-stack">
+          <span class="row-stack-label">This device</span>
+          ${mark(browserSel)}
+        </div>
+        <div class="row-stack-value">
+          <span style="font-family:var(--font-mono);font-size:calc(11.5*var(--px));color:var(--color-text-dim);letter-spacing:0.04em;">Browser playback${isRendererTab ? ' · this tab' : ''}</span>
+        </div>
+      </div>`;
+
     const exclusiveGroup = (local && local.devices.length) ? `
       <div class="form-group">
         <div class="form-row">
@@ -9041,6 +9054,7 @@
         ${hqpRow}
         ${deviceRows}
         ${dlnaRows}
+        ${browserRow}
       </div>
       ${exclusiveGroup}
       <div class="btn-row single">
@@ -9100,6 +9114,16 @@
         openDlnaAddSheet(async (info) => {
           await putOutput({ type: 'dlna', renderer: info });
         }));
+    }
+    const browserRow = root.querySelector('[data-action="select-browser"]');
+    if (browserRow) {
+      browserRow.addEventListener('click', async () => {
+        // THIS tap makes THIS tab the renderer. Activate the backend first
+        // (the channel endpoint 409s until then), then open the channel;
+        // the autoplay unlock happens on the user's play tap (resumeLocal).
+        await putOutput({ type: 'browser' });
+        if (window.browserRenderer) window.browserRenderer.attach();
+      });
     }
     root.querySelectorAll('[data-action="open-hqplayer"]').forEach(el =>
       el.addEventListener('click', (e) => {

@@ -1251,9 +1251,11 @@ async def lastfm_auth_complete() -> Dict[str, Any]:
 
 from routers.player import router as player_router
 from routers.chat import router as chat_router
+from routers.media import router as media_router
 
 app.include_router(player_router)
 app.include_router(chat_router)
+app.include_router(media_router)
 
 from routers.eq import router as eq_router
 app.include_router(eq_router)

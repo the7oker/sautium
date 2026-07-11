@@ -66,6 +66,9 @@ WHITELIST_PREFIX = (
     "/api/sync/",
     "/api/mb/",
     "/sync/",
+    # <audio> elements can't set HMAC headers — these routes verify their
+    # own short-lived query-param signatures instead (media_urls.verify).
+    "/api/player/media/",
 )
 
 

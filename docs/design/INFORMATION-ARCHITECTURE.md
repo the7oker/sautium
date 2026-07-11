@@ -107,11 +107,16 @@ A **bottom-up sheet** with a vertical list of entries:
 
 - HQPlayer (status, host, port, quick-access to DSP)
 - Audio output (`#more/output`) — the Output picker (HARDWARE-TIERS
-  §2.6): HQPlayer vs local devices via the built-in engine
+  §2.6): HQPlayer, local devices via the built-in engine
   (WASAPI / ASIO / CoreAudio; listed only where the backend runs
-  natively), exclusive-mode toggle, device rescan; DLNA renderers and
-  browser playback join this screen in later phases. The drawer row's
-  hint shows the active output's label from the SSE `output` field.
+  natively) with an exclusive-mode toggle, DLNA renderers (auto-scan on
+  open + add-by-IP), and "This device" (browser playback). The drawer
+  row's hint shows the active output's label from the SSE `output` field.
+  Browser-renderer semantics: the tab that taps "This device" becomes
+  the renderer (its tap doubles as the autoplay-unlock gesture); a
+  newer tab taking over displaces the old one via a `released`
+  directive; a closed renderer tab reports the output stopped after a
+  short grace, and the queue survives for any output to pick up.
 - DSP / Signal Chain (filter, matrix, dither, digital attenuation)
 - Profile (identity, account, Last.fm, audio chain)
 - About / version

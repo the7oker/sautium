@@ -97,6 +97,17 @@
     // unknown). Carried straight through on the status object so any screen
     // can read it off window.currentStatus or the np-update detail.
     window.currentStatus = data;
+    // Browser-output renderer lifecycle: THIS tab renders audio only while
+    // it holds the sessionStorage claim AND the backend output is browser.
+    // Reloads re-attach (same tab claim); switching outputs detaches.
+    const outType = data.output && data.output.type;
+    if (sessionStorage.getItem('sautiumBrowserRenderer') === '1') {
+      if (outType === 'browser' && !browserRenderer.active) {
+        browserRenderer.attach();
+      } else if (outType && outType !== 'browser' && browserRenderer.active) {
+        browserRenderer.detach();
+      }
+    }
     if (data.playlist_version !== undefined &&
         data.playlist_version !== lastPlaylistVersion) {
       // Update marker first so a duplicate event doesn't trigger a
@@ -128,8 +139,167 @@
   }
 
   function togglePlayPause() {
+    // The renderer tab retries a blocked <audio>.play() inside THIS user
+    // gesture first — autoplay policies accept it here where a directive
+    // arriving over SSE (no gesture context) can be rejected.
+    if (browserRenderer.active && currentState !== 'playing') {
+      browserRenderer.resumeLocal();
+    }
     return playerCmd(currentState === 'playing' ? 'pause' : 'play');
   }
+
+  // ---- Browser output renderer ("this device") ---------------------------
+  // The tab that selects the browser output becomes the audio renderer: a
+  // hidden <audio> plays short-lived signed same-origin media URLs;
+  // transport directives arrive on a per-tab SSE command channel; element
+  // events are POSTed back and become the backend's status feed.
+  // MediaSession mirrors metadata to the lock screen. Backend counterpart:
+  // playback/browser_backend.py.
+  const browserRenderer = {
+    tab: null,
+    ctrl: null,
+    audio: null,
+    pendingPlay: false,
+
+    get active() { return !!this.ctrl; },
+
+    attach() {
+      if (this.ctrl) return;
+      this.tab = sessionStorage.getItem('sautiumBrowserTabId');
+      if (!this.tab) {
+        this.tab = (crypto.randomUUID && crypto.randomUUID())
+          || (Date.now().toString(36) + Math.random().toString(36).slice(2));
+        sessionStorage.setItem('sautiumBrowserTabId', this.tab);
+      }
+      sessionStorage.setItem('sautiumBrowserRenderer', '1');
+      if (!this.audio) {
+        this.audio = new Audio();
+        this.audio.preload = 'auto';
+        this._wireAudio();
+      }
+      this.ctrl = window.sseStream(
+        '/api/player/browser/channel?tab=' + encodeURIComponent(this.tab),
+        (msg) => {
+          try { this._onDirective(JSON.parse(msg.data)); }
+          catch (e) { console.warn('browser renderer directive error:', e); }
+        },
+        () => {});
+    },
+
+    detach() {
+      sessionStorage.removeItem('sautiumBrowserRenderer');
+      if (this.ctrl) { this.ctrl.abort(); this.ctrl = null; }
+      if (this.audio) {
+        this.audio.pause();
+        this.audio.removeAttribute('src');
+        this.audio.load();
+      }
+      this.pendingPlay = false;
+    },
+
+    resumeLocal() {
+      // Called inside a real user gesture (play tap) — unlocks autoplay.
+      if (this.audio && this.audio.src && (this.pendingPlay || this.audio.paused)) {
+        this._tryPlay();
+        return true;
+      }
+      return false;
+    },
+
+    _post(event) {
+      if (!this.tab) return;
+      fetch('/api/player/browser/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tab: this.tab,
+          event,
+          position: this.audio ? this.audio.currentTime : null,
+          duration: (this.audio && isFinite(this.audio.duration))
+            ? this.audio.duration : null,
+        }),
+      }).catch(() => {});
+    },
+
+    _wireAudio() {
+      const a = this.audio;
+      a.addEventListener('playing', () => { this.pendingPlay = false; this._post('playing'); });
+      a.addEventListener('pause', () => { if (!a.ended) this._post('paused'); });
+      a.addEventListener('ended', () => this._post('ended'));
+      a.addEventListener('error', () => { if (a.src) this._post('error'); });
+      let lastTimeupdate = 0;
+      a.addEventListener('timeupdate', () => {
+        const now = Date.now();
+        if (!a.paused && now - lastTimeupdate >= 1000) {
+          lastTimeupdate = now;
+          this._post('timeupdate');
+        }
+      });
+    },
+
+    _onDirective(d) {
+      const a = this.audio;
+      switch (d.cmd) {
+        case 'load':
+          a.src = d.url;
+          this._mediaSession(d.meta || {});
+          if (d.play) this._tryPlay();
+          break;
+        case 'play':   this._tryPlay(); break;
+        case 'pause':  a.pause(); break;
+        case 'seek':   a.currentTime = d.position || 0; break;
+        case 'volume': a.volume = Math.max(0, Math.min(1, (d.level || 0) / 100)); break;
+        case 'stop':
+          a.pause();
+          a.removeAttribute('src');
+          a.load();
+          break;
+        case 'released':
+          // Another tab took over as the renderer.
+          this.detach();
+          break;
+      }
+    },
+
+    _tryPlay() {
+      const p = this.audio.play();
+      if (p && p.catch) {
+        p.catch(() => {
+          // Autoplay policy rejected a directive outside a user gesture —
+          // the next play tap goes through resumeLocal (gesture context).
+          this.pendingPlay = true;
+          this._post('paused');
+        });
+      }
+    },
+
+    _mediaSession(meta) {
+      if (!('mediaSession' in navigator)) return;
+      const artwork = [];
+      if (meta.cover_id) {
+        artwork.push({ src: '/api/covers/' + meta.cover_id,
+                       sizes: '500x500', type: 'image/webp' });
+      } else if (meta.cover_url) {
+        artwork.push({ src: meta.cover_url });
+      }
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: meta.title || '',
+        artist: meta.artist || '',
+        album: meta.album || '',
+        artwork,
+      });
+      navigator.mediaSession.setActionHandler('play', () => {
+        this._tryPlay();
+        playerCmd('play');
+      });
+      navigator.mediaSession.setActionHandler('pause', () => {
+        this.audio.pause();
+        playerCmd('pause');
+      });
+      navigator.mediaSession.setActionHandler('previoustrack', () => playerCmd('previous'));
+      navigator.mediaSession.setActionHandler('nexttrack', () => playerCmd('next'));
+    },
+  };
 
   async function playTrack(mediaFileId) {
     try {
@@ -150,6 +320,7 @@
   window.playerCmd = playerCmd;
   window.playTrack = playTrack;
   window.togglePlayPause = togglePlayPause;
+  window.browserRenderer = browserRenderer;
   window.fetchPlaylist = fetchPlaylist;
 
   // --- Boot ------------------------------------------------------------

@@ -160,6 +160,7 @@ def get_outputs(rescan: bool = False):
         "available": dlna_available,
         "renderers": list(renderers.values()),
     })
+    outputs.append({"type": "browser", "available": True})
 
     backend = manager.active
     return {
@@ -310,6 +311,68 @@ async def dlna_add(req: DlnaAddRequest):
         raise HTTPException(status_code=502, detail=f"renderer not reachable: {e}")
     _dlna_pinned[info["udn"]] = info
     return info
+
+
+# -- Browser output (per-tab renderer channel) -------------------------------------
+
+class BrowserEventRequest(BaseModel):
+    tab: str
+    event: str                        # playing|paused|ended|timeupdate|error
+    position: Optional[float] = None
+    duration: Optional[float] = None
+
+
+def _browser_backend():
+    backend = manager.active
+    if backend is None or backend.id != "browser":
+        raise HTTPException(status_code=409, detail="browser output is not active")
+    return backend
+
+
+@router.get("/browser/channel")
+async def browser_channel(tab: str):
+    """SSE command channel for the renderer tab. Directives (load/play/
+    pause/seek/volume/stop/released) flow down; the newest subscriber
+    displaces the previous one (takeover)."""
+    backend = _browser_backend()
+    loop = asyncio.get_event_loop()
+    channel: asyncio.Queue = asyncio.Queue()
+    backend.attach_tab(tab, channel, loop)
+
+    async def event_generator():
+        try:
+            while True:
+                try:
+                    directive = await asyncio.wait_for(channel.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                yield f"data: {json.dumps(directive)}\n\n"
+                if directive.get("cmd") == "released":
+                    return
+        except asyncio.CancelledError:
+            pass
+        finally:
+            backend.detach_tab(tab)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/browser/event")
+def browser_event(req: BrowserEventRequest):
+    """<audio> element events from the renderer tab (element callbacks —
+    timeupdate throttled to ~1/s client-side, not polling)."""
+    backend = _browser_backend()
+    backend.on_client_event(req.tab, req.event, req.position, req.duration)
+    return {"ok": True}
 
 
 # -- Search -------------------------------------------------------------------

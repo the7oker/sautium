@@ -97,6 +97,9 @@ class PlaybackManager:
                 from playback.dlna_backend import DlnaBackend
                 backend = DlnaBackend(emit=self._on_backend_status, queue=self.queue,
                                       renderer=cfg["renderer"])
+            elif output_type == "browser":
+                from playback.browser_backend import BrowserBackend
+                backend = BrowserBackend(emit=self._on_backend_status, queue=self.queue)
             else:
                 raise ValueError(f"unknown output type: {output_type}")
             self._active = backend
@@ -129,6 +132,9 @@ class PlaybackManager:
                     logger.error("DLNA output activation failed: %s", e)
             else:
                 logger.info("output=dlna but no renderer persisted — idle")
+        elif otype == "browser":
+            self._restore_persisted_queue()
+            self.activate("browser")
         elif otype == "hqplayer":
             if _hqp_configured():
                 self.activate("hqplayer")

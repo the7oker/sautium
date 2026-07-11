@@ -1185,7 +1185,7 @@ def put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
     not auto-resume — the user presses play on the new output."""
     from playback.manager import manager
 
-    if req.type is not None and req.type not in ("hqplayer", "local", "dlna"):
+    if req.type is not None and req.type not in ("hqplayer", "local", "dlna", "browser"):
         raise HTTPException(status_code=400, detail=f"unknown output type: {req.type}")
     if req.type == "local":
         from playback.local import devices as local_devices
@@ -1207,7 +1207,10 @@ def put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
 
     otype = _read("output.type")
     try:
-        if otype == "dlna":
+        if otype == "browser":
+            manager.activate(None)
+            manager.activate("browser")
+        elif otype == "dlna":
             manager.activate(None)
             manager.activate("dlna", renderer=_read("output.dlna_renderer"))
         elif otype == "local":

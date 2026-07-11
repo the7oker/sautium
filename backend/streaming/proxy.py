@@ -151,6 +151,16 @@ class MediaProxy:
         with self._lock:
             return self._blobs.get(token)
 
+    def entry_bytes(self, token: str) -> Optional[tuple[bytes, str]]:
+        """(data, mime) of a READY preview entry — the browser output serves
+        phantom bytes through the HTTPS origin (an https page can't fetch the
+        plain-http proxy: mixed content), reading the same in-memory buffer."""
+        with self._lock:
+            e = self._entries.get(token)
+        if e is None or e.audio is None:
+            return None
+        return e.audio.data, e.audio.mime
+
     # ---- session API (called by the player endpoint) --------------------
     def start_session(self, items: list) -> list[str]:
         """Replace the current preview with an ordered track list. Each item is a

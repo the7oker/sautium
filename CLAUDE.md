@@ -264,12 +264,19 @@ distribution model.
    you must add app-level auth to the backend first.
 3. **Plain-HTTP media surfaces (8830, 8831) are LAN-only by design.**
    The media proxy (8830) serves phantom-preview buffers AND — since the
-   DLNA output — owned-file bytes at `/file/{token}`; both are gated by
-   unguessable per-queue tokens (never the library at large) and exist
-   because HQPlayer and DLNA renderers can neither sign HMAC nor trust
-   the self-signed TLS. 8831 is the DLNA GENA event listener (renderer
-   → backend callbacks). Neither port may ever be UPnP-forwarded or
-   otherwise exposed beyond the LAN.
+   DLNA output — owned-file bytes at `/file/{token}` plus cover art at
+   `/art/{token}`; all gated by unguessable per-queue tokens (never the
+   library at large) and exist because HQPlayer and DLNA renderers can
+   neither sign HMAC nor trust the self-signed TLS. 8831 is the DLNA
+   GENA event listener (renderer → backend callbacks). Neither port may
+   ever be UPnP-forwarded or otherwise exposed beyond the LAN.
+   The browser output adds NO new port: `<audio>` media rides the
+   existing HTTPS origin at `/api/player/media/{kind}/{id}` behind
+   short-lived signed query params (`backend/media_urls.py`, 4 h TTL,
+   HMAC from the same shared secret) because audio elements can't set
+   the signing headers — that prefix is whitelisted in `auth_hmac.py`
+   and does its own verification. A leaked media URL exposes one track
+   for hours, never the API.
 4. **The P2P sync server is the only network surface that *is*
    safe to expose to the public internet** (random port
    20000–29999, UPnP-mapped). It uses self-signed TLS + Ed25519
