@@ -8903,10 +8903,12 @@
      repaints from the fresh state. Visual vocabulary follows the
      reference Settings.html "Audio output" group. */
 
+  // rescan: true = full (PortAudio reinit + fresh DLNA cache, the button);
+  // 'soft' = re-render only (post-auto-scan refresh); falsy = initial mount.
   async function renderOutputSettings(root, rescan) {
     let data = null;
     try {
-      const r = await fetch('/api/player/outputs' + (rescan ? '?rescan=1' : ''));
+      const r = await fetch('/api/player/outputs' + (rescan === true ? '?rescan=1' : ''));
       if (r.ok) data = await r.json();
     } catch (_) {}
     if (!data) {
@@ -8922,6 +8924,18 @@
     _wireBack(root);
     _wireOutputActions(root);
     _refreshOutputHqpDot(root);
+    // Opening the picker IS the discovery intent: kick an SSDP scan in the
+    // background (multi-interface, ~10 s) and refresh the list once it lands
+    // — but only if the user is still on this screen.
+    if (!rescan) {
+      fetch('/api/player/outputs/dlna/scan', { method: 'POST' })
+        .then(() => {
+          if (root.querySelector('[data-output-content]')) {
+            renderOutputSettings(root, 'soft');
+          }
+        })
+        .catch(() => {});
+    }
   }
 
   function _renderOutputs(data) {
