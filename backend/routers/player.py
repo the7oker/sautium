@@ -149,7 +149,7 @@ def get_outputs(rescan: bool = False):
     except ImportError:
         dlna_available = False
     persisted_renderer = _read("output.dlna_renderer")
-    renderers = dict(_dlna_renderers)
+    renderers = {**_dlna_discovered, **_dlna_pinned}
     if persisted_renderer:
         renderers.setdefault(persisted_renderer.get("udn"), persisted_renderer)
     outputs.append({
@@ -173,10 +173,13 @@ def get_outputs(rescan: bool = False):
 
 # -- DLNA discovery --------------------------------------------------------------
 
-# Last scan results, served by /outputs so the picker shows renderers without
-# re-scanning on every render. Refreshed by /outputs/dlna/scan (screen open /
-# refresh button) — event-driven, never a background loop.
-_dlna_renderers: dict[str, dict] = {}
+# Two renderer tiers served by /outputs. Discovered = the LAST scan's
+# snapshot, replaced wholesale each Rescan so powered-off devices drop out.
+# Pinned = manual adds (deliberate config — on Docker nodes the scan is
+# blind, so these must survive rescans); the persisted selection is always
+# merged in as well.
+_dlna_discovered: dict[str, dict] = {}
+_dlna_pinned: dict[str, dict] = {}
 
 
 class DlnaAddRequest(BaseModel):
@@ -267,14 +270,17 @@ async def dlna_scan():
             logger.debug("SSDP search on %s failed: %s", source, e)
 
     renderers = []
+    fresh: dict[str, dict] = {}
     for loc in sorted(set(found.values())):
         try:
             info = await _dlna_describe(loc)
         except Exception as e:
             logger.debug("DLNA describe failed for %s: %s", loc, e)
             continue
-        _dlna_renderers[info["udn"]] = info
+        fresh[info["udn"]] = info
         renderers.append(info)
+    _dlna_discovered.clear()
+    _dlna_discovered.update(fresh)
     return {"renderers": renderers}
 
 
@@ -299,7 +305,7 @@ async def dlna_add(req: DlnaAddRequest):
         raise HTTPException(status_code=501, detail="async-upnp-client not installed")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"renderer not reachable: {e}")
-    _dlna_renderers[info["udn"]] = info
+    _dlna_pinned[info["udn"]] = info
     return info
 
 
