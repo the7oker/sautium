@@ -258,9 +258,10 @@ _DEFAULTS: Dict[str, Any] = {
     "ai.canonization_enabled":   None,
     # Playback output selection (Output picker). null type = legacy resolution:
     # HQPlayer when an endpoint is configured, otherwise no active output.
-    "output.type":               None,   # 'hqplayer' | 'local'
+    "output.type":               None,   # 'hqplayer' | 'local' | 'dlna'
     "output.local_device":       None,   # "{hostapi}::{device name}"
     "output.local_exclusive":    False,  # WASAPI exclusive / bit-perfect claim
+    "output.dlna_renderer":      None,   # {udn, location, name} of the picked renderer
 }
 
 
@@ -1161,9 +1162,10 @@ def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
 
 
 class OutputPrefs(BaseModel):
-    type: Optional[str] = None          # 'hqplayer' | 'local'
+    type: Optional[str] = None          # 'hqplayer' | 'local' | 'dlna'
     device_id: Optional[str] = None     # local: "{hostapi}::{name}"
     exclusive: Optional[bool] = None    # local: WASAPI exclusive mode
+    renderer: Optional[Dict[str, Any]] = None   # dlna: {udn, location, name}
 
 
 @router.get("/output")
@@ -1172,6 +1174,7 @@ def get_output_prefs() -> Dict[str, Any]:
         "type": _read("output.type"),
         "device_id": _read("output.local_device"),
         "exclusive": bool(_read("output.local_exclusive")),
+        "renderer": _read("output.dlna_renderer"),
     }
 
 
@@ -1182,7 +1185,7 @@ def put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
     not auto-resume — the user presses play on the new output."""
     from playback.manager import manager
 
-    if req.type is not None and req.type not in ("hqplayer", "local"):
+    if req.type is not None and req.type not in ("hqplayer", "local", "dlna"):
         raise HTTPException(status_code=400, detail=f"unknown output type: {req.type}")
     if req.type == "local":
         from playback.local import devices as local_devices
@@ -1191,16 +1194,23 @@ def put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
                 status_code=409,
                 detail="No local audio devices — the backend must run natively "
                        "(launcher mode) for WASAPI/ASIO/CoreAudio output")
+    if req.type == "dlna" and not (req.renderer or _read("output.dlna_renderer")):
+        raise HTTPException(status_code=409, detail="No DLNA renderer selected")
     if req.type is not None:
         _write("output.type", req.type)
     if req.device_id is not None:
         _write("output.local_device", req.device_id or None)
     if req.exclusive is not None:
         _write("output.local_exclusive", bool(req.exclusive))
+    if req.renderer is not None:
+        _write("output.dlna_renderer", req.renderer or None)
 
     otype = _read("output.type")
     try:
-        if otype == "local":
+        if otype == "dlna":
+            manager.activate(None)
+            manager.activate("dlna", renderer=_read("output.dlna_renderer"))
+        elif otype == "local":
             # Deactivate first — re-selecting "local" with a different device
             # must reconstruct the engine, and activate() is idempotent per type.
             manager.activate(None)

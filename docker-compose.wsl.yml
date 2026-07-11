@@ -135,6 +135,8 @@ services:
     ports:
       - "8800:8000"
       - "${MEDIA_PROXY_PORT:-8830}:${MEDIA_PROXY_PORT:-8830}"   # phantom-preview media proxy (plain http, HQPlayer pulls)
+      # DLNA GENA event callbacks from LAN renderers (plain http listener).
+      - "8831:8831"
       - "${P2P_DHT_PORT:-19001}:${P2P_DHT_PORT:-19001}/udp"
     networks:
       - sautium-network

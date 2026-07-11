@@ -8975,6 +8975,42 @@
         </div>`;
     }
 
+    const dlna = (data.outputs || []).find(o => o.type === 'dlna');
+    let dlnaRows = '';
+    if (dlna && dlna.available) {
+      const rows = (dlna.renderers || []).map(r => {
+        const sel = active.type === 'dlna' && active.renderer_udn === r.udn;
+        return `
+        <div class="form-row stacked" data-action="select-renderer" data-udn="${escapeProfileHtml(r.udn)}" style="cursor:pointer;">
+          <div class="row-stack">
+            <span class="row-stack-label">${escapeProfileHtml(r.name || 'Renderer')}</span>
+            ${mark(sel)}
+          </div>
+          <div class="row-stack-value">
+            <span style="font-family:var(--font-mono);font-size:calc(11.5*var(--px));color:var(--color-text-dim);letter-spacing:0.04em;">DLNA · ${escapeProfileHtml(r.model || '')}</span>
+          </div>
+        </div>`;
+      }).join('');
+      const empty = (dlna.renderers || []).length ? '' : `
+        <div class="form-row stacked">
+          <div class="row-stack-sub">No renderers found yet — enable the device's network mode (e.g. AK Connect) and Rescan.</div>
+        </div>`;
+      dlnaRows = rows + empty + `
+        <div class="form-row stacked" data-action="add-renderer" style="cursor:pointer;">
+          <div class="row-stack">
+            <span class="row-stack-label">Add renderer by address</span>
+            <span style="color:var(--color-text-dim);display:inline-flex;">${SETTINGS_ICONS.rightCh}</span>
+          </div>
+          <div class="row-stack-sub">For Docker backends (no LAN multicast): the renderer's description URL, e.g. http://192.168.1.60:49152/description.xml</div>
+        </div>`;
+    } else if (dlna) {
+      dlnaRows = `
+        <div class="form-row disabled stacked">
+          <div class="row-stack"><span class="row-stack-label">DLNA</span><span></span></div>
+          <div class="row-stack-sub">async-upnp-client is not installed on this backend yet — restart it to pick up new dependencies.</div>
+        </div>`;
+    }
+
     const exclusiveGroup = (local && local.devices.length) ? `
       <div class="form-group">
         <div class="form-row">
@@ -8990,6 +9026,7 @@
       <div class="form-group">
         ${hqpRow}
         ${deviceRows}
+        ${dlnaRows}
       </div>
       ${exclusiveGroup}
       <div class="btn-row single">
@@ -9027,12 +9064,94 @@
         putOutput({ exclusive: !excl.classList.contains('on') }));
     }
     const refresh = root.querySelector('[data-action="refresh-outputs"]');
-    if (refresh) refresh.addEventListener('click', () => renderOutputSettings(root, true));
+    if (refresh) {
+      refresh.addEventListener('click', async () => {
+        refresh.disabled = true;
+        refresh.textContent = 'Scanning…';
+        try { await fetch('/api/player/outputs/dlna/scan', { method: 'POST' }); }
+        catch (_) {}
+        renderOutputSettings(root, true);
+      });
+    }
+    root.querySelectorAll('[data-action="select-renderer"]').forEach(el =>
+      el.addEventListener('click', async () => {
+        const outs = await fetch('/api/player/outputs').then(r => r.json()).catch(() => null);
+        const dlna = outs && (outs.outputs || []).find(o => o.type === 'dlna');
+        const r = dlna && (dlna.renderers || []).find(x => x.udn === el.dataset.udn);
+        if (r) putOutput({ type: 'dlna', renderer: r });
+      }));
+    const addRenderer = root.querySelector('[data-action="add-renderer"]');
+    if (addRenderer) {
+      addRenderer.addEventListener('click', () =>
+        openDlnaAddSheet(async (info) => {
+          await putOutput({ type: 'dlna', renderer: info });
+        }));
+    }
     root.querySelectorAll('[data-action="open-hqplayer"]').forEach(el =>
       el.addEventListener('click', (e) => {
         e.stopPropagation();
         navigate('more/hqplayer');
       }));
+  }
+
+  /* Manual renderer registration (the Docker path — no LAN multicast for
+     SSDP). Bottom-sheet with one URL input, same shell as the HQPlayer
+     connection editor. */
+  function openDlnaAddSheet(onAdded) {
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Add DLNA renderer</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <label>Description URL
+            <input class="add-gear-input" type="url" inputmode="url" autocomplete="off" spellcheck="false"
+                   placeholder="http://192.168.1.60:49152/description.xml" data-dlna-url>
+          </label>
+        </div>
+        <button class="profile-btn primary" data-save>Add</button>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    const input = overlay.querySelector('[data-dlna-url]');
+    input.focus();
+    overlay.querySelector('[data-save]').addEventListener('click', async () => {
+      const url = (input.value || '').trim();
+      if (!url) return;
+      const btn = overlay.querySelector('[data-save]');
+      btn.disabled = true;
+      btn.textContent = 'Checking…';
+      try {
+        const r = await fetch('/api/player/outputs/dlna/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url }),
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          await window.notifyDialog({
+            title: 'DLNA renderer',
+            message: escapeProfileHtml(err.detail || 'Renderer not reachable'),
+            kind: 'error',
+          });
+          btn.disabled = false;
+          btn.textContent = 'Add';
+          return;
+        }
+        const info = await r.json();
+        close();
+        if (onAdded) await onAdded(info);
+      } catch (_) {
+        btn.disabled = false;
+        btn.textContent = 'Add';
+      }
+    });
   }
 
   async function _refreshOutputHqpDot(root) {

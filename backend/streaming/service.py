@@ -85,8 +85,28 @@ def init(settings) -> bool:
     return True
 
 
+def ensure_proxy() -> Optional[MediaProxy]:
+    """Start the media proxy WITHOUT the provider registry when it isn't
+    running yet — DLNA output needs the plain-http file server even on nodes
+    where streaming preview is disabled (launcher installs without yt-dlp).
+    Phantom streaming stays gated on streaming_preview_enabled."""
+    global _proxy
+    if _proxy is None:
+        from config import settings
+        _proxy = MediaProxy(
+            port=settings.media_proxy_port,
+            advertised_host=settings.media_proxy_advertised_host,
+            bind_host=settings.media_proxy_host,
+        )
+        _proxy.start()
+        logger.info("media proxy started for local file serving (no providers)")
+    return _proxy
+
+
 def is_enabled() -> bool:
-    return _proxy is not None
+    """Streaming PREVIEW (providers) is up — distinct from the proxy alone,
+    which ensure_proxy() may start provider-less for DLNA file serving."""
+    return _proxy is not None and _registry is not None
 
 
 def get_proxy() -> Optional[MediaProxy]:

@@ -93,6 +93,10 @@ class PlaybackManager:
                 backend = LocalBackend(emit=self._on_backend_status, queue=self.queue,
                                        device_id=cfg.get("device_id"),
                                        exclusive=bool(cfg.get("exclusive")))
+            elif output_type == "dlna":
+                from playback.dlna_backend import DlnaBackend
+                backend = DlnaBackend(emit=self._on_backend_status, queue=self.queue,
+                                      renderer=cfg["renderer"])
             else:
                 raise ValueError(f"unknown output type: {output_type}")
             self._active = backend
@@ -115,6 +119,16 @@ class PlaybackManager:
                               exclusive=bool(_read("output.local_exclusive")))
             except Exception as e:
                 logger.error("local output activation failed: %s", e)
+        elif otype == "dlna":
+            self._restore_persisted_queue()
+            renderer = _read("output.dlna_renderer")
+            if renderer:
+                try:
+                    self.activate("dlna", renderer=renderer)
+                except Exception as e:
+                    logger.error("DLNA output activation failed: %s", e)
+            else:
+                logger.info("output=dlna but no renderer persisted — idle")
         elif otype == "hqplayer":
             if _hqp_configured():
                 self.activate("hqplayer")

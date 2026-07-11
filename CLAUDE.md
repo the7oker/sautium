@@ -262,31 +262,39 @@ distribution model.
    `desktop/config_manager.py:58` is for *localhost-only LAN
    discovery probes*, never for UPnP. If you ever combine them,
    you must add app-level auth to the backend first.
-3. **The P2P sync server is the only network surface that *is*
+3. **Plain-HTTP media surfaces (8830, 8831) are LAN-only by design.**
+   The media proxy (8830) serves phantom-preview buffers AND — since the
+   DLNA output — owned-file bytes at `/file/{token}`; both are gated by
+   unguessable per-queue tokens (never the library at large) and exist
+   because HQPlayer and DLNA renderers can neither sign HMAC nor trust
+   the self-signed TLS. 8831 is the DLNA GENA event listener (renderer
+   → backend callbacks). Neither port may ever be UPnP-forwarded or
+   otherwise exposed beyond the LAN.
+4. **The P2P sync server is the only network surface that *is*
    safe to expose to the public internet** (random port
    20000–29999, UPnP-mapped). It uses self-signed TLS + Ed25519
    request signatures (see `desktop/p2p/sync_server.py:372,464`).
    Do not move backend endpoints into the sync server, or vice
    versa, without redoing the auth story.
-4. **No `Bearer` / cookie / `request.client.host` auth in Docker
+5. **No `Bearer` / cookie / `request.client.host` auth in Docker
    without thinking about NAT.** Containerised backend sees every
    request as coming from the docker bridge gateway
    (`172.x.0.1`), not the real client — `request.client.host`
    loopback checks silently allow everything. If app-level auth
    ever lands, do it with a shared secret (HMAC or signed token),
    not source-IP filtering.
-5. **Web UI lives at the same origin as the API.** CSRF is blocked
+6. **Web UI lives at the same origin as the API.** CSRF is blocked
    today by HMAC: a foreign origin cannot read `window.__SAUTIUM_SECRET`
    (cross-origin HTML reads are forbidden by the browser), so it
    cannot forge `X-Sautium-Sig`. Don't replace HMAC with cookies
    without thinking through `SameSite=Strict` and the inline-secret
    distribution model.
-6. **Don't add Windows Firewall rules for 8800.** Windows mis-
+7. **Don't add Windows Firewall rules for 8800.** Windows mis-
    classifies networks as Public surprisingly often (Wi-Fi hand-off
    bugs, user clicks "Public" by mistake) — a profile-locked rule
    would silently break phone access at the worst moment. The
    bind-address layer is enough.
-7. **TLS cert SAN — only private IPs.** `backend/tls_gen.py`
+8. **TLS cert SAN — only private IPs.** `backend/tls_gen.py`
    filters auto-detected and explicit (`SAUTIUM_HOST_IPS` env)
    addresses through `ipaddress.ip_address().is_private`. Never
    add a public IP or DNS name to the SAN — a valid cert for a

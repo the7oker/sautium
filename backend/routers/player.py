@@ -143,6 +143,21 @@ def get_outputs(rescan: bool = False):
     if devices:
         outputs.append({"type": "local", "available": True, "devices": devices})
 
+    try:
+        import async_upnp_client  # noqa: F401 — presence check only
+        dlna_available = True
+    except ImportError:
+        dlna_available = False
+    persisted_renderer = _read("output.dlna_renderer")
+    renderers = dict(_dlna_renderers)
+    if persisted_renderer:
+        renderers.setdefault(persisted_renderer.get("udn"), persisted_renderer)
+    outputs.append({
+        "type": "dlna",
+        "available": dlna_available,
+        "renderers": list(renderers.values()),
+    })
+
     backend = manager.active
     return {
         "active": {
@@ -150,9 +165,84 @@ def get_outputs(rescan: bool = False):
             "label": backend.label if backend else None,
             "device_id": _read("output.local_device"),
             "exclusive": bool(_read("output.local_exclusive")),
+            "renderer_udn": (persisted_renderer or {}).get("udn"),
         },
         "outputs": outputs,
     }
+
+
+# -- DLNA discovery --------------------------------------------------------------
+
+# Last scan results, served by /outputs so the picker shows renderers without
+# re-scanning on every render. Refreshed by /outputs/dlna/scan (screen open /
+# refresh button) — event-driven, never a background loop.
+_dlna_renderers: dict[str, dict] = {}
+
+
+class DlnaAddRequest(BaseModel):
+    url: str   # device-description URL, e.g. http://192.168.1.60:49152/desc.xml
+
+
+async def _dlna_describe(location: str) -> dict:
+    """Fetch a renderer's device description → {udn, location, name, model}."""
+    from async_upnp_client.aiohttp import AiohttpRequester
+    from async_upnp_client.client_factory import UpnpFactory
+    factory = UpnpFactory(AiohttpRequester(), non_strict=True)
+    device = await factory.async_create_device(location)
+    return {
+        "udn": device.udn,
+        "location": location,
+        "name": device.friendly_name,
+        "model": device.model_name,
+    }
+
+
+@router.post("/outputs/dlna/scan")
+async def dlna_scan():
+    """SSDP-search the LAN for MediaRenderer devices (~3 s). Works from
+    native deployments; the Docker bridge has no LAN multicast — use
+    /outputs/dlna/add with the renderer's description URL there."""
+    try:
+        from async_upnp_client.search import async_search
+    except ImportError:
+        raise HTTPException(status_code=501, detail="async-upnp-client not installed")
+
+    found: dict[str, str] = {}
+
+    async def _on_response(headers) -> None:
+        loc = headers.get("location") or headers.get("LOCATION")
+        usn = headers.get("usn") or headers.get("USN") or loc
+        if loc:
+            found[usn] = str(loc)
+
+    await async_search(
+        _on_response, timeout=3,
+        search_target="urn:schemas-upnp-org:device:MediaRenderer:1")
+
+    renderers = []
+    for loc in sorted(set(found.values())):
+        try:
+            info = await _dlna_describe(loc)
+        except Exception as e:
+            logger.debug("DLNA describe failed for %s: %s", loc, e)
+            continue
+        _dlna_renderers[info["udn"]] = info
+        renderers.append(info)
+    return {"renderers": renderers}
+
+
+@router.post("/outputs/dlna/add")
+async def dlna_add(req: DlnaAddRequest):
+    """Register a renderer by its device-description URL (unicast — the
+    Docker path, where SSDP multicast can't reach the LAN)."""
+    try:
+        info = await _dlna_describe(req.url.strip())
+    except ImportError:
+        raise HTTPException(status_code=501, detail="async-upnp-client not installed")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"renderer not reachable: {e}")
+    _dlna_renderers[info["udn"]] = info
+    return info
 
 
 # -- Search -------------------------------------------------------------------

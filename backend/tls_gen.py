@@ -51,6 +51,12 @@ def _is_private_ipv4(ip: str) -> bool:
     )
 
 
+def detect_private_host_ips() -> list[str]:
+    """Public alias — LAN-reachable address detection is also needed by the
+    DLNA output (renderers must pull media from a LAN IP, not 127.0.0.1)."""
+    return _detect_private_host_ips()
+
+
 def _detect_private_host_ips() -> list[str]:
     """Auto-detect private IPv4 addresses bound to local interfaces.
 

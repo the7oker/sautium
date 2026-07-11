@@ -18,6 +18,9 @@ audioread>=3.0.1
 # bundles PortAudio on Windows/macOS; on Linux (Docker) the import guard in
 # playback/local/devices.py degrades to zero devices.
 sounddevice>=0.5.1
+# DLNA output: SSDP discovery + AVTransport/RenderingControl + GENA eventing
+# (Home Assistant's UPnP stack, rides the aiohttp already in the deps).
+async-upnp-client>=0.36.0
 
 # Image Processing (cover art)
 Pillow>=10.2.0

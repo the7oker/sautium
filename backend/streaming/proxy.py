@@ -30,6 +30,17 @@ from .events import preview_events
 logger = logging.getLogger(__name__)
 
 @dataclass
+class _FileEntry:
+    """Disk-backed serving (owned tracks for DLNA renderers): the proxy
+    streams straight from the file handle — never slurped into RAM, unlike
+    preview buffers."""
+    token: str
+    path: str
+    mime: str
+    size: int
+
+
+@dataclass
 class _Entry:
     token: str
     query: TrackQuery
@@ -68,6 +79,8 @@ class MediaProxy:
         self._fetch_worker = False
         self._entries: dict[str, _Entry] = {}
         self._session: list[str] = []   # ordered tokens of the current preview
+        self._files: dict[str, _FileEntry] = {}          # /file/{token} registry
+        self._file_tokens_by_path: dict[str, str] = {}   # idempotent re-registration
         self._httpd: Optional[ThreadingHTTPServer] = None
         # Fired (with the _Entry) once a track is fetched, audio present — the
         # preview-enrichment tee. Kept generic so the proxy stays CLAP-agnostic.
@@ -81,6 +94,36 @@ class MediaProxy:
                          name="media-proxy").start()
         logger.info("media proxy on %s:%d (advertised host %s)",
                     self._bind_host, self.port, self._advertised_host)
+
+    # ---- owned-file serving (DLNA renderers pull these) -------------------
+
+    def register_file(self, path: str, mime: str) -> str:
+        """Expose one owned file at /file/{token}. Idempotent per path —
+        re-registering returns the existing token (a renderer may still be
+        mid-stream on it). Tokens are unguessable; only registered files are
+        reachable, never the library at large."""
+        import os
+        with self._lock:
+            tok = self._file_tokens_by_path.get(path)
+            if tok:
+                return tok
+            tok = secrets.token_urlsafe(12)
+            self._files[tok] = _FileEntry(tok, path, mime, os.path.getsize(path))
+            self._file_tokens_by_path[path] = tok
+            return tok
+
+    def clear_files(self, keep_paths: Optional[set] = None) -> None:
+        """Drop file registrations (queue replaced) except `keep_paths`."""
+        with self._lock:
+            keep = keep_paths or set()
+            for path, tok in list(self._file_tokens_by_path.items()):
+                if path not in keep:
+                    del self._file_tokens_by_path[path]
+                    self._files.pop(tok, None)
+
+    def file_entry(self, token: str) -> Optional[_FileEntry]:
+        with self._lock:
+            return self._files.get(token)
 
     # ---- session API (called by the player endpoint) --------------------
     def start_session(self, items: list) -> list[str]:
@@ -309,7 +352,76 @@ def _make_handler(proxy: MediaProxy):
                 return None
             return self.path[len("/preview/"):].split("?", 1)[0]
 
+        def _file_token(self) -> Optional[str]:
+            if not self.path.startswith("/file/"):
+                return None
+            return self.path[len("/file/"):].split("?", 1)[0]
+
+        # DLNA renderers gate playability on these headers (OP=01: Range
+        # seek supported). Harmless for HQPlayer, so both routes send them.
+        def _dlna_headers(self):
+            self.send_header("contentFeatures.dlna.org",
+                             "DLNA.ORG_OP=01;DLNA.ORG_FLAGS="
+                             "01700000000000000000000000000000")
+            self.send_header("transferMode.dlna.org", "Streaming")
+
+        def _parse_range(self, total: int):
+            rng = self.headers.get("Range")
+            if not (rng and rng.startswith("bytes=")):
+                return None
+            try:
+                s, _, en = rng[len("bytes="):].partition("-")
+                start = int(s) if s else 0
+                end = int(en) if en else total - 1
+                end = min(end, total - 1)
+                if 0 <= start <= end:
+                    return start, end
+            except ValueError:
+                pass
+            return None
+
+        def _serve_file(self, fe, *, body: bool):
+            span = self._parse_range(fe.size)
+            if span:
+                start, end = span
+                self.send_response(206)
+            else:
+                start, end = 0, fe.size - 1
+                self.send_response(200)
+            self.send_header("Content-Type", fe.mime)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(end - start + 1))
+            if span:
+                self.send_header("Content-Range",
+                                 f"bytes {start}-{end}/{fe.size}")
+            self._dlna_headers()
+            self.end_headers()
+            if not body:
+                return
+            try:
+                with open(fe.path, "rb") as f:
+                    f.seek(start)
+                    remaining = end - start + 1
+                    while remaining > 0:
+                        chunk = f.read(min(262144, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass   # renderers probe-then-reset, like HQPlayer
+            except OSError as e:
+                logger.error("file serve failed %s: %s", fe.path, e)
+
         def do_HEAD(self):
+            ftok = self._file_token()
+            if ftok is not None:
+                fe = proxy.file_entry(ftok)
+                if fe is None:
+                    self.send_error(404, "unknown token")
+                    return
+                self._serve_file(fe, body=False)
+                return
             # HQPlayer HEAD-probes each URI synchronously when it is ADDED and
             # needs Content-Length to accept it (the FLAC size is only known
             # after the fetch). The session prefetches the whole album and the
@@ -332,9 +444,18 @@ def _make_handler(proxy: MediaProxy):
             self.send_header("Content-Type", e.audio.mime)
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Length", str(len(e.audio.data)))
+            self._dlna_headers()
             self.end_headers()
 
         def do_GET(self):
+            ftok = self._file_token()
+            if ftok is not None:
+                fe = proxy.file_entry(ftok)
+                if fe is None:
+                    self.send_error(404, "unknown token")
+                    return
+                self._serve_file(fe, body=True)
+                return
             tok = self._token()
             if tok is None:
                 return
@@ -379,6 +500,7 @@ def _make_handler(proxy: MediaProxy):
             self.send_header("Content-Length", str(length))
             if not full:
                 self.send_header("Content-Range", f"bytes {start}-{end}/{total}")
+            self._dlna_headers()
             self.end_headers()
 
         def _write(self, chunk: bytes):
