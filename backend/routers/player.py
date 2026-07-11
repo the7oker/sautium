@@ -180,7 +180,44 @@ _dlna_renderers: dict[str, dict] = {}
 
 
 class DlnaAddRequest(BaseModel):
-    url: str   # device-description URL, e.g. http://192.168.1.60:49152/desc.xml
+    url: str   # renderer IP — or a full device-description URL
+
+
+def _msearch_location(ip: str, timeout: float = 3.0) -> Optional[str]:
+    """Unicast SSDP M-SEARCH straight at `ip`. Description URLs are
+    device-invented (random port + path), but UDP 1900 IS the standard —
+    so users enter a bare IP and we resolve the LOCATION ourselves.
+    Prefers a MediaRenderer answer, falls back to any root device."""
+    import socket as sock
+    msg = ("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n"
+           'MAN: "ssdp:discover"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n').encode()
+    s = sock.socket(sock.AF_INET, sock.SOCK_DGRAM)
+    s.settimeout(timeout)
+    fallback = None
+    try:
+        s.sendto(msg, (ip, 1900))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                data, addr = s.recvfrom(4096)
+            except OSError:
+                break
+            if addr[0] != ip:
+                continue
+            loc = st = ""
+            for line in data.decode(errors="replace").splitlines():
+                low = line.lower()
+                if low.startswith("location:"):
+                    loc = line.split(":", 1)[1].strip()
+                elif low.startswith("st:"):
+                    st = line.split(":", 1)[1].strip()
+            if loc and "MediaRenderer" in st:
+                return loc
+            if loc and fallback is None:
+                fallback = loc
+    finally:
+        s.close()
+    return fallback
 
 
 async def _dlna_describe(location: str) -> dict:
@@ -233,10 +270,21 @@ async def dlna_scan():
 
 @router.post("/outputs/dlna/add")
 async def dlna_add(req: DlnaAddRequest):
-    """Register a renderer by its device-description URL (unicast — the
-    Docker path, where SSDP multicast can't reach the LAN)."""
+    """Register a renderer by IP (unicast M-SEARCH resolves its description
+    URL — the path multicast-less deployments use) or by a full
+    device-description URL."""
+    raw = req.url.strip()
+    if not raw.lower().startswith(("http://", "https://")):
+        ip = raw.split("/")[0].split(":")[0]
+        location = await asyncio.to_thread(_msearch_location, ip)
+        if not location:
+            raise HTTPException(
+                status_code=502,
+                detail=f"no UPnP device answered at {ip}:1900 — is the "
+                       "renderer's network mode (e.g. AK Connect) enabled?")
+        raw = location
     try:
-        info = await _dlna_describe(req.url.strip())
+        info = await _dlna_describe(raw)
     except ImportError:
         raise HTTPException(status_code=501, detail="async-upnp-client not installed")
     except Exception as e:

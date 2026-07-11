@@ -9001,7 +9001,7 @@
             <span class="row-stack-label">Add renderer by address</span>
             <span style="color:var(--color-text-dim);display:inline-flex;">${SETTINGS_ICONS.rightCh}</span>
           </div>
-          <div class="row-stack-sub">For Docker backends (no LAN multicast): the renderer's description URL, e.g. http://192.168.1.60:49152/description.xml</div>
+          <div class="row-stack-sub">When scanning can't see the device (Docker backends have no LAN multicast): enter its IP — the description URL is resolved automatically.</div>
         </div>`;
     } else if (dlna) {
       dlnaRows = `
@@ -9108,9 +9108,9 @@
           <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
         </div>
         <div class="add-gear-row">
-          <label>Description URL
-            <input class="add-gear-input" type="url" inputmode="url" autocomplete="off" spellcheck="false"
-                   placeholder="http://192.168.1.60:49152/description.xml" data-dlna-url>
+          <label>Renderer IP
+            <input class="add-gear-input" type="text" inputmode="url" autocomplete="off" spellcheck="false"
+                   placeholder="192.168.1.60" data-dlna-url>
           </label>
         </div>
         <button class="profile-btn primary" data-save>Add</button>
