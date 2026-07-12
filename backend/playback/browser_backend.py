@@ -53,6 +53,10 @@ class BrowserBackend(PlayerBackend):
         self._position = 0.0
         self._length = 0.0
         self._volume = 100.0
+        # Bumped on every server-initiated track start; events stamped with
+        # an older epoch are stale (they raced a newer load directive) and
+        # must not resync the index or position.
+        self._epoch = 0
         # A play intent that arrived while NO renderer tab was attached
         # (e.g. the previous renderer closed): honored the moment a tab
         # claims the output, instead of silently playing into the void.
@@ -85,7 +89,10 @@ class BrowserBackend(PlayerBackend):
     def attach_tab(self, tab: str, channel: asyncio.Queue,
                    loop: asyncio.AbstractEventLoop) -> None:
         """A tab opened the command channel. Takeover rule: the newest tab
-        wins; the previous one is told to release its <audio>."""
+        wins; the previous one is told to release its <audio>. Priming is
+        unconditional — the RENDERER is idempotent by queue_index, so a live
+        reconnect (screen woke, network blip) updates bookkeeping without
+        reloading the src it is already playing."""
         with self._lock:
             if self._channel is not None and self._tab != tab:
                 self._push_locked({"cmd": "released"})
@@ -101,7 +108,7 @@ class BrowserBackend(PlayerBackend):
             self._pending_play_index = None
             self._start_at(index, play=True)
             return
-        # (Re)prime the new tab with the current slot, paused — the user
+        # (Re)prime the tab with the current slot, paused — the user
         # presses play (that tap is also the autoplay-unlock gesture).
         item = self._queue.item_at(self._index)
         if item is not None:
@@ -147,13 +154,32 @@ class BrowserBackend(PlayerBackend):
     # -- events from the tab (called from the POST endpoint) --------------------
 
     def on_client_event(self, tab: str, event: str, position: Optional[float],
-                        duration: Optional[float]) -> None:
+                        duration: Optional[float],
+                        queue_index: Optional[int] = None,
+                        epoch: Optional[int] = None) -> None:
         if tab != self._tab:
             return   # a displaced tab still flushing events
+        if epoch is not None and epoch != self._epoch:
+            return   # stale event raced a newer load directive
+        if queue_index is not None and int(queue_index) != self._index:
+            # The renderer advanced locally (mobile background path — see
+            # _queue_tail). Within an epoch its slot is the truth; every
+            # event carries it, so a lost `advanced` POST self-heals here.
+            self._index = int(queue_index)
+            item = self._queue.item_at(self._index)
+            self._length = (item.duration_seconds or 0.0) if item else 0.0
+            self._position = 0.0
         if position is not None:
             self._position = float(position)
         if duration:
             self._length = float(duration)
+        if event == "advanced":
+            self._state = "playing"
+            # Refresh the tail (fresh signed URLs) — best-effort: a frozen
+            # tab keeps walking the list it already holds.
+            self._push({"cmd": "queue", "queue": self._queue_tail(self._index)})
+            self._emit_now()
+            return
         if event == "playing":
             self._state = "playing"
         elif event == "paused":
@@ -179,6 +205,7 @@ class BrowserBackend(PlayerBackend):
         self._index = nxt_index
         self._position = 0.0
         self._length = item.duration_seconds or 0.0
+        self._epoch += 1
         self._push(self._load_directive(nxt_index, item, play=True))
         self._state = "playing"
         self._emit_now()
@@ -194,18 +221,48 @@ class BrowserBackend(PlayerBackend):
             return media_urls.signed_media_url("preview", src["token"])
         return None
 
+    @staticmethod
+    def _item_meta(item: QueueItem) -> dict:
+        return {
+            "title": item.title,
+            "artist": item.artist,
+            "album": item.album,
+            "cover_id": item.cover_id,
+            "cover_url": item.cover_url,
+        }
+
+    # Mobile browsers freeze background tabs: the SSE channel is dead while
+    # the screen is off, so track advancement must NOT round-trip through
+    # the server. Every load ships the queue tail (signed URLs + metadata);
+    # the tab advances locally inside its `ended` handler and notifies via
+    # POST — the backend only resynchronizes. The limit keeps the deepest
+    # tail entry comfortably inside the signed-URL TTL (40 tracks ≈ 3 h
+    # vs 4 h), and every `advanced` refreshes the tail anyway.
+    _QUEUE_TAIL_LIMIT = 40
+
+    def _queue_tail(self, from_index: int) -> list:
+        tail = []
+        for offset in range(self._QUEUE_TAIL_LIMIT):
+            index = from_index + offset
+            item = self._queue.item_at(index)
+            if item is None:
+                break
+            url = self._media_url(item)
+            if url is None:
+                continue
+            tail.append({"queue_index": index, "url": url,
+                         "meta": self._item_meta(item)})
+        return tail
+
     def _load_directive(self, index: int, item: QueueItem, *, play: bool) -> dict:
         return {
             "cmd": "load",
             "url": self._media_url(item),
             "play": play,
-            "meta": {
-                "title": item.title,
-                "artist": item.artist,
-                "album": item.album,
-                "cover_id": item.cover_id,
-                "cover_url": item.cover_url,
-            },
+            "queue_index": index,
+            "epoch": self._epoch,
+            "meta": self._item_meta(item),
+            "queue": self._queue_tail(index),
         }
 
     def _start_at(self, index: int, *, play: bool) -> bool:
@@ -228,6 +285,7 @@ class BrowserBackend(PlayerBackend):
             self._state = "stopped"
             self._emit_now()
             return True
+        self._epoch += 1
         self._push(self._load_directive(index, item, play=play))
         if play:
             self._state = "playing"
@@ -237,7 +295,10 @@ class BrowserBackend(PlayerBackend):
     # -- transport ---------------------------------------------------------------------
 
     def play(self) -> bool:
-        if self._state == "paused" and self._channel is not None:
+        if self._state in ("playing", "paused") and self._channel is not None:
+            # Resume / ensure-playing — never reload the current slot. A jump
+            # is select()+play(): reloading here would restart the track and
+            # bump the epoch a second time, orphaning in-flight tab events.
             self._push({"cmd": "play"})
             return True
         # Without a renderer this parks the intent (see _start_at) instead
@@ -300,6 +361,10 @@ class BrowserBackend(PlayerBackend):
                 self._start_at(min(self._index, snapshot_len), play=self._state == "playing")
             else:
                 self.stop()
+            return
+        # Keep the renderer's local tail in step with mutations (append,
+        # remove, reorder) so background advancement walks the real queue.
+        self._push({"cmd": "queue", "queue": self._queue_tail(self._index)})
 
     # -- status --------------------------------------------------------------------------
 

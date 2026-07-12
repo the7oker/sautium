@@ -174,6 +174,13 @@
     ctrl: null,
     audio: null,
     pendingPlay: false,
+    // Local queue tail (signed URLs + metadata) shipped with every load
+    // directive. Mobile browsers freeze background tabs — SSE is dead while
+    // the screen is off — so the NEXT track must start locally inside the
+    // `ended` handler, from this list, and the backend is only notified.
+    playlist: [],
+    queueIndex: null,
+    epoch: null,
 
     get active() { return !!this.ctrl; },
 
@@ -209,6 +216,9 @@
         this.audio.load();
       }
       this.pendingPlay = false;
+      this.playlist = [];
+      this.queueIndex = null;
+      this.epoch = null;
     },
 
     resumeLocal() {
@@ -231,6 +241,11 @@
           position: this.audio ? this.audio.currentTime : null,
           duration: (this.audio && isFinite(this.audio.duration))
             ? this.audio.duration : null,
+          // Every event carries the rendered slot + directive epoch: the
+          // backend resyncs its index from these (a lost `advanced` POST
+          // self-heals) and drops events that raced a newer load.
+          queue_index: this.queueIndex,
+          epoch: this.epoch,
         }),
       }).catch(() => {});
     },
@@ -239,7 +254,9 @@
       const a = this.audio;
       a.addEventListener('playing', () => { this.pendingPlay = false; this._post('playing'); });
       a.addEventListener('pause', () => { if (!a.ended) this._post('paused'); });
-      a.addEventListener('ended', () => this._post('ended'));
+      a.addEventListener('ended', () => {
+        if (!this._advanceLocal()) this._post('ended');
+      });
       a.addEventListener('error', () => { if (a.src) this._post('error'); });
       let lastTimeupdate = 0;
       a.addEventListener('timeupdate', () => {
@@ -255,9 +272,22 @@
       const a = this.audio;
       switch (d.cmd) {
         case 'load':
+          if (d.epoch !== undefined) this.epoch = d.epoch;
+          this.playlist = d.queue || [];
+          if (!d.play && d.queue_index !== undefined
+              && d.queue_index === this.queueIndex && a.src) {
+            // Channel reconnect re-prime of the slot we already hold —
+            // reloading the src would cut playback / lose the position.
+            this._mediaSession(d.meta || {});
+            break;
+          }
+          this.queueIndex = (d.queue_index !== undefined) ? d.queue_index : null;
           a.src = d.url;
           this._mediaSession(d.meta || {});
           if (d.play) this._tryPlay();
+          break;
+        case 'queue':
+          this.playlist = d.queue || [];
           break;
         case 'play':   this._tryPlay(); break;
         case 'pause':  a.pause(); break;
@@ -267,12 +297,31 @@
           a.pause();
           a.removeAttribute('src');
           a.load();
+          this.queueIndex = null;
           break;
         case 'released':
           // Another tab took over as the renderer.
           this.detach();
           break;
       }
+    },
+
+    _advanceLocal() {
+      // Background-safe track advance: swap to the next tail entry right
+      // inside the `ended` handler (media playback may continue in a
+      // frozen tab; an SSE round-trip may not). Returns false at the true
+      // end of the local tail — the plain `ended` POST lets the backend
+      // decide (it may know more of the queue than the shipped tail).
+      if (this.queueIndex === null || !this.playlist.length) return false;
+      const i = this.playlist.findIndex((e) => e.queue_index === this.queueIndex);
+      const next = i >= 0 ? this.playlist[i + 1] : null;
+      if (!next) return false;
+      this.queueIndex = next.queue_index;
+      this.audio.src = next.url;
+      this._mediaSession(next.meta || {});
+      this._tryPlay();
+      this._post('advanced');
+      return true;
     },
 
     _tryPlay() {

@@ -318,9 +318,11 @@ async def dlna_add(req: DlnaAddRequest):
 
 class BrowserEventRequest(BaseModel):
     tab: str
-    event: str                        # playing|paused|ended|timeupdate|error
+    event: str                        # playing|paused|ended|advanced|timeupdate|error
     position: Optional[float] = None
     duration: Optional[float] = None
+    queue_index: Optional[int] = None  # the slot the tab currently renders
+    epoch: Optional[int] = None       # load-directive epoch the event belongs to
 
 
 def _browser_backend():
@@ -333,7 +335,7 @@ def _browser_backend():
 @router.get("/browser/channel")
 async def browser_channel(tab: str):
     """SSE command channel for the renderer tab. Directives (load/play/
-    pause/seek/volume/stop/released) flow down; the newest subscriber
+    pause/seek/volume/stop/queue/released) flow down; the newest subscriber
     displaces the previous one (takeover)."""
     backend = _browser_backend()
     loop = asyncio.get_event_loop()
@@ -372,7 +374,8 @@ def browser_event(req: BrowserEventRequest):
     """<audio> element events from the renderer tab (element callbacks —
     timeupdate throttled to ~1/s client-side, not polling)."""
     backend = _browser_backend()
-    backend.on_client_event(req.tab, req.event, req.position, req.duration)
+    backend.on_client_event(req.tab, req.event, req.position, req.duration,
+                            req.queue_index, req.epoch)
     return {"ok": True}
 
 
