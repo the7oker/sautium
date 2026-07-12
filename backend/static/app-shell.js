@@ -9027,6 +9027,16 @@
 
     const browserSel = active.type === 'browser';
     const isRendererTab = browserSel && window.browserRenderer && window.browserRenderer.active;
+    let browserCaption = 'Browser playback';
+    if (browserSel) {
+      if (isRendererTab) {
+        browserCaption += ' · this tab';
+      } else if (active.renderer_attached) {
+        browserCaption += ' · playing on another device — tap to move here';
+      } else {
+        browserCaption += ' · no active device — tap to play here';
+      }
+    }
     const browserRow = `
       <div class="form-row stacked" data-action="select-browser" style="cursor:pointer;">
         <div class="row-stack">
@@ -9034,7 +9044,7 @@
           ${mark(browserSel)}
         </div>
         <div class="row-stack-value">
-          <span style="font-family:var(--font-mono);font-size:calc(11.5*var(--px));color:var(--color-text-dim);letter-spacing:0.04em;">Browser playback${isRendererTab ? ' · this tab' : ''}</span>
+          <span style="font-family:var(--font-mono);font-size:calc(11.5*var(--px));color:var(--color-text-dim);letter-spacing:0.04em;">${browserCaption}</span>
         </div>
       </div>`;
 

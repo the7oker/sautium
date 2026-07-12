@@ -170,6 +170,7 @@ def get_outputs(rescan: bool = False):
             "device_id": _read("output.local_device"),
             "exclusive": bool(_read("output.local_exclusive")),
             "renderer_udn": (persisted_renderer or {}).get("udn"),
+            "renderer_attached": getattr(backend, "renderer_attached", None),
         },
         "outputs": outputs,
     }

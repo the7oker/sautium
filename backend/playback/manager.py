@@ -167,6 +167,17 @@ class PlaybackManager:
             for evt, loop in self._sse_clients:
                 loop.call_soon_threadsafe(evt.set)
 
+    @staticmethod
+    def _output_info(backend: Optional[PlayerBackend]) -> dict:
+        info = {"type": backend.id if backend else None,
+                "label": backend.label if backend else None}
+        attached = getattr(backend, "renderer_attached", None)
+        if attached is not None:
+            # Browser output only: distinguishes "another device is playing"
+            # (remote-control mode) from "nobody renders" in the UI.
+            info["renderer_attached"] = attached
+        return info
+
     def subscribe_status(self, fn: Callable) -> None:
         """Register `fn(status_dict, item)` — called on every successful
         status tick before the SSE fan-out (radio refill rides on this)."""
@@ -244,8 +255,7 @@ class PlaybackManager:
             "preview": preview,
             "provider": item.provider if preview else None,
             "preview_track_id": item.track_id if preview else None,
-            "output": {"type": backend.id if backend else None,
-                       "label": backend.label if backend else None},
+            "output": self._output_info(backend),
         }
         # Engine failure surface (device open/start failed, unplayable
         # tracks) — additive; absent when everything is healthy.

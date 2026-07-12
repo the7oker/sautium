@@ -53,6 +53,17 @@ class BrowserBackend(PlayerBackend):
         self._position = 0.0
         self._length = 0.0
         self._volume = 100.0
+        # A play intent that arrived while NO renderer tab was attached
+        # (e.g. the previous renderer closed): honored the moment a tab
+        # claims the output, instead of silently playing into the void.
+        self._pending_play_index: Optional[int] = None
+
+    @property
+    def renderer_attached(self) -> bool:
+        """A renderer tab currently holds the command channel — surfaced in
+        the status payload so control surfaces can tell 'remote control'
+        from 'nobody is playing'."""
+        return self._channel is not None
 
     # -- lifecycle -------------------------------------------------------
 
@@ -83,6 +94,13 @@ class BrowserBackend(PlayerBackend):
             self._channel = channel
             self._loop = loop
         self._cancel_grace()
+        if self._pending_play_index is not None:
+            # A play intent queued up while no renderer existed — honor it
+            # now on the tab that just claimed the output.
+            index = self._pending_play_index
+            self._pending_play_index = None
+            self._start_at(index, play=True)
+            return
         # (Re)prime the new tab with the current slot, paused — the user
         # presses play (that tap is also the autoplay-unlock gesture).
         item = self._queue.item_at(self._index)
@@ -202,6 +220,14 @@ class BrowserBackend(PlayerBackend):
         self._index = index
         self._position = 0.0
         self._length = item.duration_seconds or 0.0
+        if self._channel is None:
+            # No renderer tab: don't pretend to play — park the intent (the
+            # next tab to claim the output starts here) and report honestly.
+            if play:
+                self._pending_play_index = index
+            self._state = "stopped"
+            self._emit_now()
+            return True
         self._push(self._load_directive(index, item, play=play))
         if play:
             self._state = "playing"
@@ -211,11 +237,11 @@ class BrowserBackend(PlayerBackend):
     # -- transport ---------------------------------------------------------------------
 
     def play(self) -> bool:
-        if self._channel is None:
-            return False   # no renderer tab attached
-        if self._state == "paused":
+        if self._state == "paused" and self._channel is not None:
             self._push({"cmd": "play"})
             return True
+        # Without a renderer this parks the intent (see _start_at) instead
+        # of failing — the claiming tab will start right here.
         return self._start_at(self._index if self._index >= 1 else 1, play=True)
 
     def pause(self) -> bool:
@@ -279,8 +305,10 @@ class BrowserBackend(PlayerBackend):
 
     def _emit_now(self) -> None:
         extra = {}
-        if self._channel is None and self._state != "stopped":
-            extra["error"] = "renderer tab disconnected"
+        if self._channel is None and (self._state != "stopped"
+                                      or self._pending_play_index is not None):
+            extra["error"] = ("no playback device — open Sautium on the "
+                              "device that should play and press play")
         self._emit(PlaybackStatus(
             state=self._state,
             position=self._position,

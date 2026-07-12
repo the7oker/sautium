@@ -133,7 +133,21 @@
   }
 
   // --- Transport -------------------------------------------------------
+  // Orphaned browser output: the output is "this device" but NO tab renders
+  // it (the previous renderer closed). A play gesture from ANY tab claims
+  // the renderer role — the tap doubles as the autoplay unlock — instead of
+  // playing into the void. When a renderer IS attached elsewhere, commands
+  // act as a remote control (Connect semantics) and nothing is claimed.
+  function maybeClaimRenderer() {
+    const out = window.currentStatus && window.currentStatus.output;
+    if (out && out.type === 'browser' && out.renderer_attached === false
+        && !browserRenderer.active) {
+      browserRenderer.attach();
+    }
+  }
+
   async function playerCmd(cmd) {
+    if (cmd === 'play') maybeClaimRenderer();
     try { await fetch('/api/player/' + cmd, { method: 'POST' }); }
     catch (e) { console.error('Player command failed:', e); }
   }
@@ -302,6 +316,7 @@
   };
 
   async function playTrack(mediaFileId) {
+    maybeClaimRenderer();
     try {
       await fetch('/api/player/play-track', {
         method: 'POST',
