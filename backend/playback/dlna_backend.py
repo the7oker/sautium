@@ -103,7 +103,15 @@ class DlnaBackend(PlayerBackend):
 
     def shutdown(self) -> None:
         if self._loop is not None:
-            asyncio.run_coroutine_threadsafe(self._async_shutdown(), self._loop)
+            # The cleanup MUST complete before the loop stops — otherwise the
+            # GENA notify server never releases :8831 and every later DLNA
+            # attach in this process dies with "address already in use".
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._async_shutdown(), self._loop)
+                fut.result(timeout=8)
+            except Exception as e:
+                logger.warning("DLNA shutdown cleanup incomplete: %s", e)
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread:
             self._thread.join(timeout=10)
@@ -160,7 +168,10 @@ class DlnaBackend(PlayerBackend):
             self._poll_task.cancel()
         try:
             if self._dmr:
-                await self._dmr.async_unsubscribe_services()
+                # Unsubscribe is HTTP to the renderer — a powered-off or
+                # dozing device would hang it far past the shutdown budget,
+                # and releasing the local notify port matters more.
+                await asyncio.wait_for(self._dmr.async_unsubscribe_services(), 3)
         except Exception as e:
             logger.debug("GENA unsubscribe: %s", e)
         try:
