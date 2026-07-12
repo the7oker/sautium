@@ -155,9 +155,13 @@
   function togglePlayPause() {
     // The renderer tab retries a blocked <audio>.play() inside THIS user
     // gesture first — autoplay policies accept it here where a directive
-    // arriving over SSE (no gesture context) can be rejected.
+    // arriving over SSE (no gesture context) can be rejected. When the
+    // local resume handles it, DON'T also send /play: the backend may
+    // still think it's stopped (post-error) and would answer with a load
+    // directive that reloads the track from zero, discarding the position
+    // the recovery just preserved. The `playing` event syncs the state.
     if (browserRenderer.active && currentState !== 'playing') {
-      browserRenderer.resumeLocal();
+      if (browserRenderer.resumeLocal()) return Promise.resolve();
     }
     return playerCmd(currentState === 'playing' ? 'pause' : 'play');
   }
@@ -174,6 +178,7 @@
     ctrl: null,
     audio: null,
     pendingPlay: false,
+    playingNow: false,
     // Local queue tail (signed URLs + metadata) shipped with every load
     // directive. Mobile browsers freeze background tabs — SSE is dead while
     // the screen is off — so the NEXT track must start locally inside the
@@ -181,6 +186,14 @@
     playlist: [],
     queueIndex: null,
     epoch: null,
+    // Blob double-buffer (queue_index → object URL, at most current + next).
+    // A dozing phone parks the tab's network mid-download: a streaming src
+    // starves once the element's modest readahead drains. Tracks therefore
+    // get fully fetched while the network is provably alive (during
+    // playback), so mid-track playback and the advance to the next track
+    // need no network at all.
+    blobs: new Map(),
+    fetching: new Map(),   // queue_index → AbortController
 
     get active() { return !!this.ctrl; },
 
@@ -216,14 +229,24 @@
         this.audio.load();
       }
       this.pendingPlay = false;
+      this.playingNow = false;
       this.playlist = [];
       this.queueIndex = null;
       this.epoch = null;
+      this._clearBlobs();
     },
 
     resumeLocal() {
       // Called inside a real user gesture (play tap) — unlocks autoplay.
-      if (this.audio && this.audio.src && (this.pendingPlay || this.audio.paused)) {
+      // Returns true only when playback was genuinely handled locally;
+      // false falls through to the server path.
+      if (!this.audio || !this.audio.src) return false;
+      if (this.audio.error) {
+        // Dead pipeline (network died mid-stream): a held blob revives it
+        // at the same position; without one the server reload is the floor.
+        return this._swapToBlob({ resume: true });
+      }
+      if (this.pendingPlay || this.audio.paused) {
         this._tryPlay();
         return true;
       }
@@ -263,12 +286,34 @@
 
     _wireAudio() {
       const a = this.audio;
-      a.addEventListener('playing', () => { this.pendingPlay = false; this._post('playing'); });
-      a.addEventListener('pause', () => { if (!a.ended) this._post('paused'); });
+      a.addEventListener('playing', () => {
+        this.pendingPlay = false;
+        this.playingNow = true;
+        this._post('playing');
+        this._prefetchNext();
+      });
+      a.addEventListener('pause', () => {
+        this.playingNow = false;
+        if (!a.ended) this._post('paused');
+      });
       a.addEventListener('ended', () => {
+        this.playingNow = false;
         if (!this._advanceLocal()) this._post('ended');
       });
-      a.addEventListener('error', () => { if (a.src) this._post('error'); });
+      a.addEventListener('error', () => {
+        if (!a.src) return;
+        // A parked network killed the streaming src mid-track — the fully
+        // fetched blob takes over at the same position instead of dying.
+        if (this._swapToBlob({ resume: this.playingNow || this.pendingPlay })) return;
+        this._post('error');
+      });
+      const starving = () => {
+        if (!a.paused && a.readyState < 3) {
+          this._swapToBlob({ resume: true });
+        }
+      };
+      a.addEventListener('waiting', starving);
+      a.addEventListener('stalled', starving);
       let lastTimeupdate = 0;
       a.addEventListener('timeupdate', () => {
         const now = Date.now();
@@ -277,6 +322,93 @@
           this._post('timeupdate');
         }
       });
+    },
+
+    // -- blob double-buffer ------------------------------------------------
+
+    _startCurrent(url, play) {
+      const a = this.audio;
+      const blobUrl = this.blobs.get(this.queueIndex);
+      a.src = blobUrl || url;
+      if (!blobUrl) this._fetchBlob(this.queueIndex, url);   // insurance
+      this._evictBlobs();
+      if (play) this._tryPlay();
+    },
+
+    _fetchBlob(index, url) {
+      if (index === null || !url
+          || this.blobs.has(index) || this.fetching.has(index)) return;
+      const ctrl = new AbortController();
+      this.fetching.set(index, ctrl);
+      fetch(url, { signal: ctrl.signal })
+        .then((r) => (r.ok ? r.blob() : null))
+        .then((blob) => {
+          this.fetching.delete(index);
+          if (!blob) return;
+          this.blobs.set(index, URL.createObjectURL(blob));
+          this._evictBlobs();
+          // The current track may already be starving on its cut-off
+          // streaming src — take over the moment the bytes are local.
+          if (index === this.queueIndex) {
+            const a = this.audio;
+            if (a && (a.error || (!a.paused && a.readyState < 3 && !a.ended))) {
+              this._swapToBlob({ resume: this.playingNow || this.pendingPlay });
+            }
+          }
+        })
+        .catch(() => { this.fetching.delete(index); });
+    },
+
+    _swapToBlob(opts) {
+      const a = this.audio;
+      const blobUrl = this.blobs.get(this.queueIndex);
+      if (!a || !blobUrl || a.src === blobUrl) return false;
+      const pos = a.currentTime || 0;
+      a.src = blobUrl;
+      if (pos > 0) {
+        a.addEventListener('loadedmetadata', () => {
+          if (a.src === blobUrl) a.currentTime = pos;
+        }, { once: true });
+      }
+      if (opts && opts.resume) this._tryPlay();
+      return true;
+    },
+
+    _nextEntry() {
+      if (this.queueIndex === null || !this.playlist.length) return null;
+      const i = this.playlist.findIndex((e) => e.queue_index === this.queueIndex);
+      return (i >= 0 && this.playlist[i + 1]) || null;
+    },
+
+    _prefetchNext() {
+      const nxt = this._nextEntry();
+      if (nxt) this._fetchBlob(nxt.queue_index, nxt.url);
+      this._evictBlobs();
+    },
+
+    _evictBlobs() {
+      const keep = new Set([this.queueIndex]);
+      const nxt = this._nextEntry();
+      if (nxt) keep.add(nxt.queue_index);
+      for (const [i, u] of [...this.blobs]) {
+        if (!keep.has(i) && (!this.audio || this.audio.src !== u)) {
+          URL.revokeObjectURL(u);
+          this.blobs.delete(i);
+        }
+      }
+      for (const [i, c] of [...this.fetching]) {
+        if (!keep.has(i)) {
+          c.abort();
+          this.fetching.delete(i);
+        }
+      }
+    },
+
+    _clearBlobs() {
+      for (const c of this.fetching.values()) c.abort();
+      this.fetching.clear();
+      for (const u of this.blobs.values()) URL.revokeObjectURL(u);
+      this.blobs.clear();
     },
 
     _onDirective(d) {
@@ -290,15 +422,16 @@
             // Channel reconnect re-prime of the slot we already hold —
             // reloading the src would cut playback / lose the position.
             this._mediaSession(d.meta || {});
+            this._prefetchNext();
             break;
           }
           this.queueIndex = (d.queue_index !== undefined) ? d.queue_index : null;
-          a.src = d.url;
+          this._startCurrent(d.url, !!d.play);
           this._mediaSession(d.meta || {});
-          if (d.play) this._tryPlay();
           break;
         case 'queue':
           this.playlist = d.queue || [];
+          this._prefetchNext();
           break;
         case 'play':   this._tryPlay(); break;
         case 'pause':  a.pause(); break;
@@ -309,6 +442,8 @@
           a.removeAttribute('src');
           a.load();
           this.queueIndex = null;
+          this.playingNow = false;
+          this._clearBlobs();
           break;
         case 'released':
           // Another tab took over as the renderer.
@@ -320,17 +455,16 @@
     _advanceLocal() {
       // Background-safe track advance: swap to the next tail entry right
       // inside the `ended` handler (media playback may continue in a
-      // frozen tab; an SSE round-trip may not). Returns false at the true
-      // end of the local tail — the plain `ended` POST lets the backend
-      // decide (it may know more of the queue than the shipped tail).
-      if (this.queueIndex === null || !this.playlist.length) return false;
-      const i = this.playlist.findIndex((e) => e.queue_index === this.queueIndex);
-      const next = i >= 0 ? this.playlist[i + 1] : null;
+      // frozen tab; an SSE round-trip may not). The next track normally
+      // plays from its prefetched blob — no network at the boundary.
+      // Returns false at the true end of the local tail — the plain
+      // `ended` POST lets the backend decide (it may know more of the
+      // queue than the shipped tail).
+      const next = this._nextEntry();
       if (!next) return false;
       this.queueIndex = next.queue_index;
-      this.audio.src = next.url;
+      this._startCurrent(next.url, true);
       this._mediaSession(next.meta || {});
-      this._tryPlay();
       this._post('advanced');
       return true;
     },
@@ -363,8 +497,10 @@
         artwork,
       });
       navigator.mediaSession.setActionHandler('play', () => {
-        this._tryPlay();
-        playerCmd('play');
+        // Same rule as togglePlayPause: a successful local resume must not
+        // be followed by /play — a stopped backend answers that with a
+        // from-zero reload.
+        if (!this.resumeLocal()) playerCmd('play');
       });
       navigator.mediaSession.setActionHandler('pause', () => {
         this.audio.pause();
