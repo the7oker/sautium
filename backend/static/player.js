@@ -376,13 +376,15 @@
       const a = this.audio;
       clearTimeout(this._watchdog);
       const held = this._heldBlob(this.queueIndex, this.currentMediaId);
-      // Stream-first even when a blob is held: only an actively streaming
-      // media element keeps the dozing phone's network awake (measured:
-      // JS requests flow ~1/s during streaming and park within seconds of
-      // blob-only playback). Exception: once the latch has demonstrably
-      // closed and we're hidden, a stream attempt would just hang — go
-      // blob-first, the held runway is all there is until a wake-up.
-      if (held && this.networkParked && document.visibilityState === 'hidden') {
+      // Foreground: stream-first (instant start, and the download itself
+      // nudges the doze away). Hidden: ALWAYS blob-first when held — the
+      // doze latch closes silently (on a LAN the whole file lands before
+      // any starvation signal, so no flag ever flips), boundary stream
+      // fetches park, frozen timers never fire, and the >2s waiting
+      // threshold blocks the start-of-track swap: the runway would sit
+      // unused. Deterministic local playback is the only background mode
+      // that survives without a single working network primitive.
+      if (held && (this.networkParked || document.visibilityState === 'hidden')) {
         a.src = held;
       } else {
         a.src = url;

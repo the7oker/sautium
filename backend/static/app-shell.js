@@ -9027,20 +9027,23 @@
 
     const browserSel = active.type === 'browser';
     const isRendererTab = browserSel && window.browserRenderer && window.browserRenderer.active;
-    let browserCaption = 'Browser playback';
+    // Experimental: mobile OSes doze background tabs — playback survives on
+    // a prefetched local runway (~8 tracks), but an unwoken phone stops
+    // after it. A capability web pages can't fully own; PWA/native later.
+    let browserCaption = 'Browser playback · experimental';
     if (browserSel) {
       if (isRendererTab) {
-        browserCaption += ' · this tab';
+        browserCaption = 'Browser playback · this tab';
       } else if (active.renderer_attached) {
-        browserCaption += ' · playing on another device — tap to move here';
+        browserCaption = 'Browser playback · playing on another device — tap to move here';
       } else {
-        browserCaption += ' · no active device — tap to play here';
+        browserCaption = 'Browser playback · no active device — tap to play here';
       }
     }
     const browserRow = `
       <div class="form-row stacked" data-action="select-browser" style="cursor:pointer;">
         <div class="row-stack">
-          <span class="row-stack-label">This device</span>
+          <span class="row-stack-label">This device <span style="color:var(--color-text-dim);font-size:calc(11*var(--px));">(experimental)</span></span>
           ${mark(browserSel)}
         </div>
         <div class="row-stack-value">
