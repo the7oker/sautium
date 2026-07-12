@@ -43,7 +43,7 @@ analytics between collectors.
 
 ```
 Sautium node
-├── Docker backend         FastAPI + PostgreSQL 16/pgvector + GPU (CLAP, BGE-M3)
+├── Docker backend         FastAPI + PostgreSQL 18/pgvector + GPU (CLAP, BGE-M3)
 │   ├── routers/           home, discovery, artists, albums, genres, player,
 │   │                      hqplayer, eq, covers, chat, p2p, sync, profile, settings
 │   ├── static/            Web UI (index.html + app-shell.js + player.js + tokens.css)
@@ -61,7 +61,7 @@ bind to loopback. The P2P DHT listens on `19001/udp`.
 ## Tech Stack
 
 - **Python 3.11+**, **FastAPI** (async)
-- **PostgreSQL 16 + pgvector** — vector similarity + relational data
+- **PostgreSQL 18 + pgvector** — vector similarity + relational data
 - **SQLAlchemy** ORM + `psycopg2` for raw SQL / batch operations
 - **Docker + Docker Compose** (WSL2 on Windows, native on macOS)
 - **NVIDIA RTX 4090** for GPU work (CLAP embeddings, BGE-M3 text encoding)

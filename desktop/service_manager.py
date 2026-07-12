@@ -51,14 +51,15 @@ class ServiceManager:
         port = self.ports.get("postgres", 5432)
         password = self.config.get("postgres_password", "changeme")
 
-        # Auto-download/install PostgreSQL if not found
-        try:
-            get_pg_bin_dir()
-        except FileNotFoundError:
-            if sys.platform in ("win32", "darwin"):
-                if not download_portable_postgres(progress_cb):
-                    return False
-            else:
+        # Ensure the correct PostgreSQL major (idempotent; upgrades a stale major
+        # in place). Bare-metal Linux is expected to provide PostgreSQL itself.
+        if sys.platform in ("win32", "darwin"):
+            if not download_portable_postgres(progress_cb):
+                return False
+        else:
+            try:
+                get_pg_bin_dir()
+            except FileNotFoundError:
                 logger.error("PostgreSQL not found. Install it manually.")
                 return False
 

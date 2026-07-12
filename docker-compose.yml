@@ -1,8 +1,8 @@
 services:
   postgres:
     # Official pgvector image (ankane/pgvector is abandoned at 0.5.1); MUST stay
-    # on the pg15 series — the data volume is a PostgreSQL 15 datadir.
-    image: pgvector/pgvector:pg15
+    # on the pg18 series — the data volume is a PostgreSQL 18 datadir.
+    image: pgvector/pgvector:pg18
     container_name: sautium-postgres
     # Docker's default /dev/shm is 64MB — parallel hash joins / pgvector ops
     # allocate dynamic shared memory there and die with "could not resize
@@ -24,7 +24,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-musicai}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      # PG18 images store data in a major-versioned subdir and require the mount
+      # at /var/lib/postgresql (NOT /data) — mounting the old /data path makes the
+      # entrypoint refuse to start. See docker-library/postgres#1259.
+      - postgres-data:/var/lib/postgresql
       - ./desktop/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql
     ports:
       - "127.0.0.1:5432:5432"

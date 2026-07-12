@@ -312,7 +312,7 @@ cards, so the standard-tier VRAM floor deliberately stays at ≥5.5 GB until
 2. ✅ `ensure_media_tools()` now runs on every backend start (idempotent-fast
    when present) — the wizard is no longer the only install path.
 3. ✅ `docker-compose.wsl.yml`/`.mac.yml`: `shm_size: 1gb` +
-   `pgvector/pgvector:pg15`.
+   `pgvector/pgvector:pg18`.
 
 **P1 — big wins (SHIPPED 2026-07-10):**
 4. ✅ BGE-M3 + PaSST-net → bf16 on half tiers (`text_embedder.py`,

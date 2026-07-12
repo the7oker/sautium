@@ -30,19 +30,42 @@ logger = logging.getLogger(__name__)
 # Migration tracking table
 MIGRATIONS_TABLE = "_schema_migrations"
 
+# Portable PostgreSQL (Windows), Homebrew formula (macOS) and the Docker image
+# tag (docker-compose*.yml) all track the SAME major — bump them together.
+# A datadir is bound to its major: new binaries refuse a mismatched cluster.
+EXPECTED_PG_MAJOR = 18
+
 # Windows portable PostgreSQL
 PG_DOWNLOAD_URL = (
     "https://get.enterprisedb.com/postgresql/"
-    "postgresql-16.8-1-windows-x64-binaries.zip"
+    "postgresql-18.4-1-windows-x64-binaries.zip"
 )
 
 PGVECTOR_DOWNLOAD_URL = (
     "https://github.com/andreiramani/pgvector_pgsql_windows/"
-    "releases/download/0.8.1_16/vector.v0.8.1-pg16.zip"
+    "releases/download/0.8.3_18.4/vector.v0.8.3-pg18.zip"
 )
 
 IS_MACOS = sys.platform == "darwin"
 IS_WINDOWS = sys.platform == "win32"
+
+
+def _binary_pg_major(pg_bin: Path) -> Optional[int]:
+    """PG major of an installed binary set, via `pg_ctl --version`
+    ('pg_ctl (PostgreSQL) 18.4' → 18). None if it can't be determined."""
+    import re
+    pg_ctl = pg_bin / ("pg_ctl.exe" if IS_WINDOWS else "pg_ctl")
+    if not pg_ctl.exists():
+        return None
+    kwargs = {"capture_output": True, "text": True, "timeout": 10}
+    if IS_WINDOWS:
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        out = subprocess.run([str(pg_ctl), "--version"], **kwargs).stdout or ""
+    except Exception:
+        return None
+    m = re.search(r"\)\s+(\d+)", out)
+    return int(m.group(1)) if m else None
 
 
 def get_pg_bin_dir() -> Path:
@@ -80,8 +103,21 @@ def download_portable_postgres(progress_cb: Optional[Callable] = None) -> bool:
     pg_bin = project_root / "pgsql" / "bin"
 
     if (pg_bin / "pg_ctl.exe").exists():
-        logger.info("PostgreSQL already present")
-        return True
+        major = _binary_pg_major(pg_bin)
+        if major == EXPECTED_PG_MAJOR or major is None:
+            logger.info("PostgreSQL already present (PG%s)", major)
+            return True
+        # Stale major from an earlier release — swap the binaries. The datadir is
+        # wiped separately by initialize_cluster (embedded PG is disposable).
+        logger.warning("Portable PostgreSQL is PG%s, need PG%s — replacing binaries",
+                       major, EXPECTED_PG_MAJOR)
+        if progress_cb:
+            progress_cb(f"Upgrading PostgreSQL {major} → {EXPECTED_PG_MAJOR}...")
+        try:
+            stop_postgres()
+        except Exception:
+            pass
+        shutil.rmtree(project_root / "pgsql", ignore_errors=True)
 
     zip_path = project_root / "_postgresql_download.zip"
 
@@ -219,7 +255,7 @@ def _get_homebrew_pg_bin() -> Optional[Path]:
         return None
 
     # Try versioned formulae first, then unversioned
-    for formula in ["postgresql@17", "postgresql@16", "postgresql@15", "postgresql"]:
+    for formula in ["postgresql@18", "postgresql@17", "postgresql@16", "postgresql@15", "postgresql"]:
         try:
             result = subprocess.run(
                 [brew, "--prefix", formula],
@@ -248,11 +284,12 @@ def _find_brew() -> Optional[str]:
 
 def _install_postgres_macos(progress_cb: Optional[Callable] = None) -> bool:
     """Install PostgreSQL + pgvector via Homebrew on macOS."""
-    # Check if already installed
+    # Skip install only if the EXPECTED major is already present. An older major
+    # left over (e.g. @17) must NOT short-circuit — otherwise the bump never
+    # installs @18 and initialize_cluster's wipe would just recreate the old one.
     brew_pg = _get_homebrew_pg_bin()
-    if brew_pg:
-        logger.info("PostgreSQL already installed via Homebrew")
-        # Ensure pgvector is also installed
+    if brew_pg and _binary_pg_major(brew_pg) == EXPECTED_PG_MAJOR:
+        logger.info("PostgreSQL %s already installed via Homebrew", EXPECTED_PG_MAJOR)
         _ensure_pgvector_homebrew(progress_cb)
         return True
 
@@ -273,13 +310,13 @@ def _install_postgres_macos(progress_cb: Optional[Callable] = None) -> bool:
         if progress_cb:
             progress_cb("Installing PostgreSQL via Homebrew (may take a few minutes)...")
 
-        logger.info("Installing postgresql@17 via Homebrew...")
+        logger.info("Installing postgresql@18 via Homebrew...")
         result = subprocess.run(
-            [brew, "install", "postgresql@17"],
+            [brew, "install", "postgresql@18"],
             capture_output=True, text=True, timeout=600,
         )
         if result.returncode != 0:
-            logger.error(f"brew install postgresql@17 failed: {result.stderr}")
+            logger.error(f"brew install postgresql@18 failed: {result.stderr}")
             if progress_cb:
                 progress_cb(f"PostgreSQL install failed: {result.stderr[:200]}")
             return False
@@ -580,6 +617,20 @@ def _run_pg_cmd(cmd: list, env: Optional[dict] = None, timeout: int = 60) -> sub
     return result
 
 
+def _datadir_pg_major(data_dir: Path) -> Optional[int]:
+    """Major version of an existing pgdata, or None if absent/unreadable.
+    A datadir is bound to its major — the new binaries refuse to start on a
+    mismatched one, so a version bump must wipe & reinit. Embedded PG holds no
+    irreplaceable data (it re-derives from a fresh scan + P2P sync)."""
+    pv = data_dir / "PG_VERSION"
+    if not pv.exists():
+        return None
+    try:
+        return int(pv.read_text().strip().split(".")[0])
+    except ValueError:
+        return None
+
+
 def initialize_cluster(password: str, progress_cb: Optional[Callable] = None) -> bool:
     """
     Initialize a new PostgreSQL data cluster.
@@ -589,6 +640,23 @@ def initialize_cluster(password: str, progress_cb: Optional[Callable] = None) ->
     pg_bin = get_pg_bin_dir()
     data_dir = get_pg_data_dir()
     initdb = str(pg_bin / "initdb")
+
+    # A pgdata from an older PG major won't start on the new binaries. Embedded
+    # PG is a disposable test/replica store, so wipe & reinit rather than a
+    # dump/restore upgrade (which would need the old binaries shipped alongside).
+    existing_major = _datadir_pg_major(data_dir)
+    if existing_major is not None and existing_major != EXPECTED_PG_MAJOR:
+        logger.warning(
+            "pgdata is PG%s but binaries are PG%s — wiping & reinitializing",
+            existing_major, EXPECTED_PG_MAJOR,
+        )
+        if progress_cb:
+            progress_cb(f"Upgrading PostgreSQL {existing_major} → {EXPECTED_PG_MAJOR} (reinitializing)...")
+        try:
+            stop_postgres()
+        except Exception:
+            pass
+        shutil.rmtree(data_dir)
 
     # Check if already initialized
     if data_dir.exists() and (data_dir / "PG_VERSION").exists():
@@ -1004,17 +1072,15 @@ def full_init(
     3. Create database/role/pgvector (if needed)
     4. Run migrations
     """
-    # Auto-download/install PostgreSQL if missing
+    # Ensure the correct PostgreSQL major is installed. Idempotent-fast when
+    # already correct; upgrades a stale major in place (download_portable_postgres
+    # version-gates the binaries, initialize_cluster the datadir).
     if IS_WINDOWS or IS_MACOS:
-        try:
-            get_pg_bin_dir()
-        except FileNotFoundError:
-            logger.info("PostgreSQL not found, installing...")
-            if not download_portable_postgres(progress_cb):
-                raise RuntimeError(
-                    "Failed to install PostgreSQL. "
-                    "Check your internet connection and try again."
-                )
+        if not download_portable_postgres(progress_cb):
+            raise RuntimeError(
+                "Failed to install PostgreSQL. "
+                "Check your internet connection and try again."
+            )
 
     initialize_cluster(password, progress_cb=progress_cb)
     start_postgres(port=port)

@@ -21,7 +21,7 @@ See:
 
 - **Python 3.11+** (best ML library support)
 - **FastAPI** backend (async)
-- **PostgreSQL 15 + pgvector 0.8** (vector similarity + relational data; image `pgvector/pgvector:pg15` — the data volume is a PG15 datadir, keep the major)
+- **PostgreSQL 18 + pgvector 0.8** (vector similarity + relational data; image `pgvector/pgvector:pg18` — the data volume is a PG18 datadir, keep the major)
 - **SQLAlchemy** ORM + `psycopg2` for raw SQL and batch operations
 - **Docker + Docker Compose** (WSL2 on Windows, native on macOS)
 - **NVIDIA RTX 4090** for GPU work (CLAP embeddings, BGE-M3 text encoding)
@@ -201,7 +201,7 @@ See:
 
 ## Docker & Runtime Layout
 
-- `sautium-postgres` — PostgreSQL 16 + pgvector. Credentials `musicai/supervisor`, DB `music_ai`. Persistent volume `./data/postgres/`.
+- `sautium-postgres` — PostgreSQL 18 + pgvector. Credentials `musicai/supervisor`, DB `music_ai`. Persistent volume `./data/postgres/`.
 - `sautium-backend` — FastAPI on `0.0.0.0:8000`, exposed to host at `localhost:8800`. GPU access via NVIDIA runtime. Also owns **play tracking** (`listening_history` + `local_play_stats` + Last.fm scrobbling) inside its status poller — keyed source-agnostically on `track_id`, so streamed phantom plays track like owned files. There is **no separate tracker daemon** (consolidated 2026-06-30; the old `sautium-playback-tracker` was retired).
 - Music library mounted read-only: `E:\Music` → `/music:ro` inside backend.
 - Model cache external: `./data/cache` → `/root/.cache`.
