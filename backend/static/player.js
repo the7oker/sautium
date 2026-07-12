@@ -201,14 +201,21 @@
     playlist: [],
     queueIndex: null,
     epoch: null,
-    // Blob double-buffer (queue_index → object URL, at most current + next).
-    // A dozing phone parks the tab's network mid-download: a streaming src
-    // starves once the element's modest readahead drains. Tracks therefore
-    // get fully fetched while the network is provably alive (during
-    // playback), so mid-track playback and the advance to the next track
-    // need no network at all.
+    // Blob insurance (queue_index → object URL; current + 2 ahead).
+    // A dozing phone parks the tab's network the moment no media is
+    // actively streaming (measured live: event POSTs flow ~1/s during
+    // streaming playback and park within seconds of blob-only playback).
+    // So playback always STREAMS — the network-active media session is
+    // what keeps the doze latch away — while fully fetched blobs stand by
+    // for an instant same-position swap whenever the stream starves.
     blobs: new Map(),
     fetching: new Map(),   // queue_index → AbortController
+    // True once the stream demonstrably starved (doze latch closed). While
+    // parked AND hidden, boundaries go blob-first — deterministic audio
+    // with no reliance on timers a frozen tab may never fire. Any
+    // completed response (fetch, event POST, visibility return) unparks.
+    networkParked: false,
+    _watchdog: null,
 
     get active() { return !!this.ctrl; },
 
@@ -248,6 +255,7 @@
       this.playlist = [];
       this.queueIndex = null;
       this.epoch = null;
+      clearTimeout(this._watchdog);
       this._clearBlobs();
     },
 
@@ -289,6 +297,7 @@
         .then((r) => (r.ok ? r.json() : null))
         .then((resp) => {
           if (!resp) return;
+          this.networkParked = false;   // a completed response = alive
           // The response is the background-safe downlink (SSE may be dead
           // in a frozen tab): `advanced` returns the refreshed tail —
           // including radio refills — and `ended` past the local tail
@@ -319,16 +328,28 @@
         if (!a.src) return;
         // A parked network killed the streaming src mid-track — the fully
         // fetched blob takes over at the same position instead of dying.
-        if (this._swapToBlob({ resume: this.playingNow || this.pendingPlay })) return;
+        if (this._swapToBlob({ resume: this.playingNow || this.pendingPlay })) {
+          this.networkParked = true;
+          return;
+        }
         this._post('error');
       });
       const starving = () => {
-        if (!a.paused && a.readyState < 3) {
-          this._swapToBlob({ resume: true });
+        // currentTime > 2 filters the routine waiting at every track start
+        // (no data for the first ~100ms) from a drained mid-track readahead
+        // — track starts are guarded by the boundary watchdog instead.
+        if (!a.paused && a.readyState < 3 && a.currentTime > 2) {
+          if (this._swapToBlob({ resume: true })) this.networkParked = true;
         }
       };
       a.addEventListener('waiting', starving);
       a.addEventListener('stalled', starving);
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+          this.networkParked = false;
+          this._prefetchNext();   // top the runway back up
+        }
+      });
       let lastTimeupdate = 0;
       a.addEventListener('timeupdate', () => {
         const now = Date.now();
@@ -343,9 +364,31 @@
 
     _startCurrent(url, play) {
       const a = this.audio;
-      const blobUrl = this.blobs.get(this.queueIndex);
-      a.src = blobUrl || url;
-      if (!blobUrl) this._fetchBlob(this.queueIndex, url);   // insurance
+      clearTimeout(this._watchdog);
+      const held = this.blobs.get(this.queueIndex);
+      // Stream-first even when a blob is held: only an actively streaming
+      // media element keeps the dozing phone's network awake (measured:
+      // JS requests flow ~1/s during streaming and park within seconds of
+      // blob-only playback). Exception: once the latch has demonstrably
+      // closed and we're hidden, a stream attempt would just hang — go
+      // blob-first, the held runway is all there is until a wake-up.
+      if (held && this.networkParked && document.visibilityState === 'hidden') {
+        a.src = held;
+      } else {
+        a.src = url;
+        if (!this.blobs.has(this.queueIndex)) {
+          this._fetchBlob(this.queueIndex, url);   // insurance
+        }
+        if (play) {
+          // Boundary watchdog: if the stream produced no data within the
+          // pre-latch window (timers still fire there), fall to the blob.
+          this._watchdog = setTimeout(() => {
+            if (a.readyState < 3 && !a.paused && this._swapToBlob({ resume: true })) {
+              this.networkParked = true;
+            }
+          }, 2000);
+        }
+      }
       this._evictBlobs();
       if (play) this._tryPlay();
     },
@@ -360,6 +403,7 @@
         .then((blob) => {
           this.fetching.delete(index);
           if (!blob) return;
+          this.networkParked = false;   // a completed response = alive
           this.blobs.set(index, URL.createObjectURL(blob));
           this._evictBlobs();
           // The current track may already be starving on its cut-off
@@ -389,22 +433,39 @@
       return true;
     },
 
-    _nextEntry() {
-      if (this.queueIndex === null || !this.playlist.length) return null;
-      const i = this.playlist.findIndex((e) => e.queue_index === this.queueIndex);
+    _entryAfter(index) {
+      if (index === null || !this.playlist.length) return null;
+      const i = this.playlist.findIndex((e) => e.queue_index === index);
       return (i >= 0 && this.playlist[i + 1]) || null;
     },
 
+    _nextEntry() { return this._entryAfter(this.queueIndex); },
+
+    // How deep the blob insurance reaches past the current track. Once the
+    // doze latch closes (blob-only playback, screen off), no further fetch
+    // leaves the tab — held blobs are the whole remaining runway.
+    _PREFETCH_AHEAD: 2,
+
+    _lookahead() {
+      const ahead = [];
+      let idx = this.queueIndex;
+      for (let k = 0; k < this._PREFETCH_AHEAD; k++) {
+        const nxt = this._entryAfter(idx);
+        if (!nxt) break;
+        ahead.push(nxt);
+        idx = nxt.queue_index;
+      }
+      return ahead;
+    },
+
     _prefetchNext() {
-      const nxt = this._nextEntry();
-      if (nxt) this._fetchBlob(nxt.queue_index, nxt.url);
+      for (const e of this._lookahead()) this._fetchBlob(e.queue_index, e.url);
       this._evictBlobs();
     },
 
     _evictBlobs() {
       const keep = new Set([this.queueIndex]);
-      const nxt = this._nextEntry();
-      if (nxt) keep.add(nxt.queue_index);
+      for (const e of this._lookahead()) keep.add(e.queue_index);
       for (const [i, u] of [...this.blobs]) {
         if (!keep.has(i) && (!this.audio || this.audio.src !== u)) {
           URL.revokeObjectURL(u);
@@ -458,6 +519,7 @@
           a.load();
           this.queueIndex = null;
           this.playingNow = false;
+          clearTimeout(this._watchdog);
           this._clearBlobs();
           break;
         case 'released':
