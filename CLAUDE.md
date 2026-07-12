@@ -263,6 +263,13 @@ distribution model.
    discovery probes*, never for UPnP. If you ever combine them,
    you must add app-level auth to the backend first.
 3. **Plain-HTTP media surfaces (8830, 8831) are LAN-only by design.**
+   On this host, Docker Desktop's published ports listen IPv6-only on
+   the Windows side: LAN IPv4 reachability rides `netsh portproxy`
+   rules (0.0.0.0:PORT → WSL-VM IP) plus inbound firewall allows —
+   "Music AI DJ" covers 8800; "Sautium Media (DLNA)" covers 8830-8831
+   (profile=any, added 2026-07-12 — without it DLNA renderers accepted
+   commands but could never fetch the audio bytes). If the WSL VM IP
+   changes (reboot), the portproxy `connectaddress` must be updated.
    The media proxy (8830) serves phantom-preview buffers AND — since the
    DLNA output — owned-file bytes at `/file/{token}` plus cover art at
    `/art/{token}`; all gated by unguessable per-queue tokens (never the
