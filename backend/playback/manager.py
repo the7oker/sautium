@@ -21,6 +21,7 @@ import threading
 from dataclasses import asdict
 from typing import Callable, Optional
 
+from config import ui_build
 from hqplayer_client import format_time
 
 from playback import sessions, tracker
@@ -256,6 +257,9 @@ class PlaybackManager:
             "provider": item.provider if preview else None,
             "preview_track_id": item.track_id if preview else None,
             "output": self._output_info(backend),
+            # Stale-tab detection: tabs compare this against the build they
+            # loaded with and reload themselves on mismatch (player.js).
+            "ui_build": ui_build(),
         }
         # Engine failure surface (device open/start failed, unplayable
         # tracks) — additive; absent when everything is healthy.

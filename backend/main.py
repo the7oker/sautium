@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path as _Path
 
 from auth_hmac import HMACAuthMiddleware, ensure_secret
-from config import settings, get_settings, LOGGING_CONFIG
+from config import settings, get_settings, ui_build, LOGGING_CONFIG
 from dht_service import DHTService, HAS_LIBTORRENT
 
 _API_SECRET_PATH = _Path(__file__).parent / "data" / ".api_secret"
@@ -486,7 +486,8 @@ async def root() -> HTMLResponse:
     """
     secret = _get_api_secret().decode("ascii")
     html = _get_index_html()
-    inject = f'<script>window.__SAUTIUM_SECRET="{secret}";</script>'
+    inject = (f'<script>window.__SAUTIUM_SECRET="{secret}";'
+              f'window.__SAUTIUM_BUILD={ui_build()};</script>')
     if "</head>" in html:
         html = html.replace("</head>", f"  {inject}\n</head>", 1)
     else:

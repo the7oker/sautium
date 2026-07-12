@@ -91,8 +91,23 @@
       .catch((e) => console.error('SSE handler error:', e));
   }
 
+  // Stale-tab reload: the SSE status carries the frontend build stamp; when
+  // the server's frontend is newer than the one this page loaded with, the
+  // tab reloads itself — long-lived SPA tabs otherwise keep running pre-fix
+  // code forever. Deferred while this tab is actively rendering audio (a
+  // reload would kill the <audio>); the check re-fires on every event, so
+  // it lands at the next pause/stop.
+  function maybeReloadForUpdate(build) {
+    if (window.__SAUTIUM_BUILD === build) return;
+    if (browserRenderer.active && browserRenderer.playingNow) return;
+    if (sessionStorage.getItem('sautiumReloadedFor') === String(build)) return;
+    sessionStorage.setItem('sautiumReloadedFor', String(build));
+    location.reload();
+  }
+
   async function processStatusEvent(data) {
     currentState = data.state;
+    if (data.ui_build) maybeReloadForUpdate(data.ui_build);
     // process_speed is HQPlayer's realtime DSP processing factor (0.0 when
     // unknown). Carried straight through on the status object so any screen
     // can read it off window.currentStatus or the np-update detail.
@@ -466,6 +481,11 @@
       this._startCurrent(next.url, true);
       this._mediaSession(next.meta || {});
       this._post('advanced');
+      // Bias the prefetch of the track after next into THIS instant: a
+      // dozing phone slams the network shut moments after audio goes
+      // silent, but requests fired right at the boundary demonstrably
+      // slip through. Re-attempted on `playing` anyway (idempotent).
+      this._prefetchNext();
       return true;
     },
 

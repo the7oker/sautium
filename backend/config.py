@@ -215,6 +215,23 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
+_UI_BUILD_CACHE: Optional[int] = None
+
+
+def ui_build() -> int:
+    """Frontend build stamp (newest static-file mtime). Injected into the
+    index HTML and carried in every SSE status event: a long-lived tab
+    compares the two and reloads itself when the frontend on disk is newer —
+    otherwise stale open tabs keep running pre-fix code forever."""
+    global _UI_BUILD_CACHE
+    if _UI_BUILD_CACHE is None:
+        static = Path(__file__).parent / "static"
+        _UI_BUILD_CACHE = int(max(
+            p.stat().st_mtime for p in static.iterdir()
+            if p.suffix in (".js", ".css", ".html")))
+    return _UI_BUILD_CACHE
+
+
 def get_settings() -> Settings:
     """Get application settings instance."""
     return settings
