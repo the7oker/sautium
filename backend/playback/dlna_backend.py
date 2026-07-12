@@ -127,8 +127,10 @@ class DlnaBackend(PlayerBackend):
         try:
             self._loop.run_until_complete(self._async_start())
         except Exception as e:
-            self._error = f"DLNA attach failed: {e}"
-            logger.error(self._error)
+            reason = str(e).strip() or type(e).__name__
+            self._error = (f"'{self.label}' did not respond ({reason}) — "
+                           "wake the device (phone renderers doze) and try again")
+            logger.error("DLNA attach failed: %s", self._error)
             self._ready.set()
             return
         self._ready.set()
@@ -142,7 +144,9 @@ class DlnaBackend(PlayerBackend):
         self._loop.close()
 
     async def _async_start(self) -> None:
-        requester = AiohttpRequester()
+        # 10s over the default 5s: phone renderers in Wi-Fi power-save can
+        # stall the first request for seconds while the radio wakes up.
+        requester = AiohttpRequester(timeout=10)
         factory = UpnpFactory(requester, non_strict=True)
         device = await factory.async_create_device(self._renderer["location"])
 
