@@ -200,8 +200,12 @@
     // `ended` handler, from this list, and the backend is only notified.
     playlist: [],
     queueIndex: null,
+    currentMediaId: null,
     epoch: null,
-    // Blob insurance (queue_index → object URL; current + 2 ahead).
+    // Blob insurance (queue_index → {u: objectURL, id: media identity};
+    // current + lookahead). Entries are validated by media id — queue
+    // indexes shift on replace/reorder, and a stale blob must never
+    // impersonate a different track.
     // A dozing phone parks the tab's network the moment no media is
     // actively streaming (measured live: event POSTs flow ~1/s during
     // streaming playback and park within seconds of blob-only playback).
@@ -254,6 +258,7 @@
       this.playingNow = false;
       this.playlist = [];
       this.queueIndex = null;
+      this.currentMediaId = null;
       this.epoch = null;
       clearTimeout(this._watchdog);
       this._clearBlobs();
@@ -362,10 +367,15 @@
 
     // -- blob double-buffer ------------------------------------------------
 
+    _heldBlob(index, mediaId) {
+      const e = this.blobs.get(index);
+      return (e && e.id === mediaId) ? e.u : null;
+    },
+
     _startCurrent(url, play) {
       const a = this.audio;
       clearTimeout(this._watchdog);
-      const held = this.blobs.get(this.queueIndex);
+      const held = this._heldBlob(this.queueIndex, this.currentMediaId);
       // Stream-first even when a blob is held: only an actively streaming
       // media element keeps the dozing phone's network awake (measured:
       // JS requests flow ~1/s during streaming and park within seconds of
@@ -376,8 +386,8 @@
         a.src = held;
       } else {
         a.src = url;
-        if (!this.blobs.has(this.queueIndex)) {
-          this._fetchBlob(this.queueIndex, url);   // insurance
+        if (!held) {
+          this._fetchBlob(this.queueIndex, url, this.currentMediaId);
         }
         if (play) {
           // Boundary watchdog: if the stream produced no data within the
@@ -393,18 +403,23 @@
       if (play) this._tryPlay();
     },
 
-    _fetchBlob(index, url) {
+    _fetchBlob(index, url, mediaId, onDone) {
       if (index === null || !url
-          || this.blobs.has(index) || this.fetching.has(index)) return;
+          || this._heldBlob(index, mediaId) || this.fetching.has(index)) {
+        if (onDone) onDone();
+        return;
+      }
       const ctrl = new AbortController();
       this.fetching.set(index, ctrl);
       fetch(url, { signal: ctrl.signal })
         .then((r) => (r.ok ? r.blob() : null))
         .then((blob) => {
           this.fetching.delete(index);
-          if (!blob) return;
+          if (!blob) { if (onDone) onDone(); return; }
           this.networkParked = false;   // a completed response = alive
-          this.blobs.set(index, URL.createObjectURL(blob));
+          const old = this.blobs.get(index);
+          if (old) URL.revokeObjectURL(old.u);
+          this.blobs.set(index, { u: URL.createObjectURL(blob), id: mediaId });
           this._evictBlobs();
           // The current track may already be starving on its cut-off
           // streaming src — take over the moment the bytes are local.
@@ -414,13 +429,17 @@
               this._swapToBlob({ resume: this.playingNow || this.pendingPlay });
             }
           }
+          if (onDone) onDone();
         })
-        .catch(() => { this.fetching.delete(index); });
+        .catch(() => {
+          this.fetching.delete(index);
+          if (onDone) onDone();
+        });
     },
 
     _swapToBlob(opts) {
       const a = this.audio;
-      const blobUrl = this.blobs.get(this.queueIndex);
+      const blobUrl = this._heldBlob(this.queueIndex, this.currentMediaId);
       if (!a || !blobUrl || a.src === blobUrl) return false;
       const pos = a.currentTime || 0;
       a.src = blobUrl;
@@ -442,9 +461,12 @@
     _nextEntry() { return this._entryAfter(this.queueIndex); },
 
     // How deep the blob insurance reaches past the current track. Once the
-    // doze latch closes (blob-only playback, screen off), no further fetch
-    // leaves the tab — held blobs are the whole remaining runway.
-    _PREFETCH_AHEAD: 2,
+    // doze latch closes, no further fetch leaves the tab — held blobs are
+    // the whole remaining runway (measured on a LAN: the streaming src
+    // downloads whole in seconds, so "actively streaming" keeps the doze
+    // away only briefly; depth 8 ≈ 35-45 min of pocket radio). Blobs are
+    // disk-backed in the browser's blob storage, not resident RAM.
+    _PREFETCH_AHEAD: 8,
 
     _lookahead() {
       const ahead = [];
@@ -459,16 +481,25 @@
     },
 
     _prefetchNext() {
-      for (const e of this._lookahead()) this._fetchBlob(e.queue_index, e.url);
+      // Sequential chain, nearest first — parallel fetches of 8 FLACs
+      // would congest the very Wi-Fi link the audible stream rides on.
+      const targets = this._lookahead().filter(
+        (e) => !this._heldBlob(e.queue_index, e.media)
+               && !this.fetching.has(e.queue_index));
+      const runNext = () => {
+        const e = targets.shift();
+        if (e) this._fetchBlob(e.queue_index, e.url, e.media, runNext);
+      };
+      runNext();
       this._evictBlobs();
     },
 
     _evictBlobs() {
       const keep = new Set([this.queueIndex]);
       for (const e of this._lookahead()) keep.add(e.queue_index);
-      for (const [i, u] of [...this.blobs]) {
-        if (!keep.has(i) && (!this.audio || this.audio.src !== u)) {
-          URL.revokeObjectURL(u);
+      for (const [i, e] of [...this.blobs]) {
+        if (!keep.has(i) && (!this.audio || this.audio.src !== e.u)) {
+          URL.revokeObjectURL(e.u);
           this.blobs.delete(i);
         }
       }
@@ -483,7 +514,7 @@
     _clearBlobs() {
       for (const c of this.fetching.values()) c.abort();
       this.fetching.clear();
-      for (const u of this.blobs.values()) URL.revokeObjectURL(u);
+      for (const e of this.blobs.values()) URL.revokeObjectURL(e.u);
       this.blobs.clear();
     },
 
@@ -494,14 +525,18 @@
           if (d.epoch !== undefined) this.epoch = d.epoch;
           this.playlist = d.queue || [];
           if (!d.play && d.queue_index !== undefined
-              && d.queue_index === this.queueIndex && a.src) {
-            // Channel reconnect re-prime of the slot we already hold —
-            // reloading the src would cut playback / lose the position.
+              && d.queue_index === this.queueIndex
+              && d.media === this.currentMediaId && a.src) {
+            // Channel reconnect re-prime of the SAME track we already hold
+            // (index + media identity — an index alone can point at a
+            // different track after a replace) — reloading the src would
+            // cut playback / lose the position.
             this._mediaSession(d.meta || {});
             this._prefetchNext();
             break;
           }
           this.queueIndex = (d.queue_index !== undefined) ? d.queue_index : null;
+          this.currentMediaId = (d.media !== undefined) ? d.media : null;
           this._startCurrent(d.url, !!d.play);
           this._mediaSession(d.meta || {});
           break;
@@ -518,6 +553,7 @@
           a.removeAttribute('src');
           a.load();
           this.queueIndex = null;
+          this.currentMediaId = null;
           this.playingNow = false;
           clearTimeout(this._watchdog);
           this._clearBlobs();
@@ -540,6 +576,7 @@
       const next = this._nextEntry();
       if (!next) return false;
       this.queueIndex = next.queue_index;
+      this.currentMediaId = (next.media !== undefined) ? next.media : null;
       this._startCurrent(next.url, true);
       this._mediaSession(next.meta || {});
       this._post('advanced');

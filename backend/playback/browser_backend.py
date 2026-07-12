@@ -238,6 +238,18 @@ class BrowserBackend(PlayerBackend):
             "cover_url": item.cover_url,
         }
 
+    @staticmethod
+    def _item_ident(item: QueueItem) -> Optional[str]:
+        """Stable media identity for the renderer's blob cache — queue
+        indexes shift on replace/reorder, so slot numbers alone would let a
+        stale blob impersonate a different track."""
+        if item.media_file_id:
+            return f"f{item.media_file_id}"
+        src = item.source
+        if src.get("kind") == "proxy":
+            return f"p{src.get('token')}"
+        return None
+
     # Mobile browsers freeze background tabs: the SSE channel is dead while
     # the screen is off, so track advancement must NOT round-trip through
     # the server. Every load ships the queue tail (signed URLs + metadata);
@@ -258,6 +270,7 @@ class BrowserBackend(PlayerBackend):
             if url is None:
                 continue
             tail.append({"queue_index": index, "url": url,
+                         "media": self._item_ident(item),
                          "meta": self._item_meta(item)})
         return tail
 
@@ -267,6 +280,7 @@ class BrowserBackend(PlayerBackend):
             "url": self._media_url(item),
             "play": play,
             "queue_index": index,
+            "media": self._item_ident(item),
             "epoch": self._epoch,
             "meta": self._item_meta(item),
             "queue": self._queue_tail(index),
