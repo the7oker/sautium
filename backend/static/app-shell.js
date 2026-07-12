@@ -8994,14 +8994,18 @@
     if (dlna && dlna.available) {
       const rows = (dlna.renderers || []).map(r => {
         const sel = active.type === 'dlna' && active.renderer_udn === r.udn;
+        const unpin = r.pinned ? `
+            <button data-action="remove-renderer" data-udn="${escapeProfileHtml(r.udn)}"
+              style="background:none;border:none;color:var(--color-text-dim);font-size:calc(15*var(--px));padding:0 calc(4*var(--px));cursor:pointer;line-height:1;"
+              title="Remove pinned renderer">&times;</button>` : '';
         return `
         <div class="form-row stacked" data-action="select-renderer" data-udn="${escapeProfileHtml(r.udn)}" style="cursor:pointer;">
           <div class="row-stack">
             <span class="row-stack-label">${escapeProfileHtml(r.name || 'Renderer')}</span>
-            ${mark(sel)}
+            <span style="display:inline-flex;align-items:center;gap:calc(6*var(--px));">${unpin}${mark(sel)}</span>
           </div>
           <div class="row-stack-value">
-            <span style="font-family:var(--font-mono);font-size:calc(11.5*var(--px));color:var(--color-text-dim);letter-spacing:0.04em;">DLNA · ${escapeProfileHtml(r.model || '')}</span>
+            <span style="font-family:var(--font-mono);font-size:calc(11.5*var(--px));color:var(--color-text-dim);letter-spacing:0.04em;">DLNA · ${escapeProfileHtml(r.model || '')}${r.pinned ? ' · pinned' : ''}</span>
           </div>
         </div>`;
       }).join('');
@@ -9120,6 +9124,16 @@
         const dlna = outs && (outs.outputs || []).find(o => o.type === 'dlna');
         const r = dlna && (dlna.renderers || []).find(x => x.udn === el.dataset.udn);
         if (r) putOutput({ type: 'dlna', renderer: r });
+      }));
+    root.querySelectorAll('[data-action="remove-renderer"]').forEach(el =>
+      el.addEventListener('click', async (e) => {
+        e.stopPropagation();   // the × sits inside the select-renderer row
+        await fetch('/api/player/outputs/dlna/remove', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ udn: el.dataset.udn }),
+        }).catch(() => {});
+        renderOutputSettings(root);
       }));
     const addRenderer = root.querySelector('[data-action="add-renderer"]');
     if (addRenderer) {

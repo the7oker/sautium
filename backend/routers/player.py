@@ -149,7 +149,8 @@ def get_outputs(rescan: bool = False):
     except ImportError:
         dlna_available = False
     persisted_renderer = _read("output.dlna_renderer")
-    renderers = {**_dlna_discovered, **_dlna_pinned}
+    renderers = {**_dlna_discovered,
+                 **{u: {**r, "pinned": True} for u, r in _dlna_pins().items()}}
     # The renderer of the ACTIVE dlna output is configuration — it stays
     # listed even when unreachable (like the HQPlayer row when HQP is off).
     # Once another output is selected it must earn its place via scan/pin.
@@ -179,12 +180,22 @@ def get_outputs(rescan: bool = False):
 # -- DLNA discovery --------------------------------------------------------------
 
 # Two renderer tiers served by /outputs. Discovered = the LAST scan's
-# snapshot, replaced wholesale each Rescan so powered-off devices drop out.
-# Pinned = manual adds (deliberate config — on Docker nodes the scan is
-# blind, so these must survive rescans); the persisted selection is always
-# merged in as well.
+# snapshot, replaced wholesale each Rescan so powered-off devices drop out
+# (in-memory by design). Pinned = manual adds — deliberate config: on
+# Docker nodes the scan is blind (multicast dies at the bridge, and the
+# NAT drops unicast M-SEARCH replies), so pins are the ONLY population
+# mechanism and live in user_settings to survive restarts.
 _dlna_discovered: dict[str, dict] = {}
-_dlna_pinned: dict[str, dict] = {}
+
+
+def _dlna_pins() -> dict[str, dict]:
+    from routers.settings import _read
+    return {r["udn"]: r for r in (_read("output.dlna_pinned") or [])}
+
+
+def _dlna_save_pins(pins: dict[str, dict]) -> None:
+    from routers.settings import _write
+    _write("output.dlna_pinned", list(pins.values()))
 
 
 class DlnaAddRequest(BaseModel):
@@ -229,16 +240,28 @@ def _msearch_location(ip: str, timeout: float = 3.0) -> Optional[str]:
 
 
 async def _dlna_describe(location: str) -> dict:
-    """Fetch a renderer's device description → {udn, location, name, model}."""
+    """Fetch a device description and resolve the MediaRenderer in it →
+    {udn, location, name, model}. Rejects descriptions without a renderer:
+    multi-device hosts exist (the KANN serves its AK Connect media SERVER
+    on the same port) and a pinned server can never play."""
     from async_upnp_client.aiohttp import AiohttpRequester
     from async_upnp_client.client_factory import UpnpFactory
     factory = UpnpFactory(AiohttpRequester(), non_strict=True)
     device = await factory.async_create_device(location)
+    candidates = [device, *device.embedded_devices.values()]
+    renderer = next((d for d in candidates
+                     if ":MediaRenderer:" in (d.device_type or "")), None)
+    if renderer is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"'{device.friendly_name}' is {device.device_type or 'not a renderer'}"
+                   " — no MediaRenderer at this address (a media-server "
+                   "description of the same device is a common decoy)")
     return {
-        "udn": device.udn,
+        "udn": renderer.udn,
         "location": location,
-        "name": device.friendly_name,
-        "model": device.model_name,
+        "name": renderer.friendly_name,
+        "model": renderer.model_name,
     }
 
 
@@ -308,10 +331,29 @@ async def dlna_add(req: DlnaAddRequest):
         info = await _dlna_describe(raw)
     except ImportError:
         raise HTTPException(status_code=501, detail="async-upnp-client not installed")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"renderer not reachable: {e}")
-    _dlna_pinned[info["udn"]] = info
+    pins = _dlna_pins()
+    pins[info["udn"]] = info
+    _dlna_save_pins(pins)
     return info
+
+
+class DlnaRemoveRequest(BaseModel):
+    udn: str
+
+
+@router.post("/outputs/dlna/remove")
+async def dlna_remove(req: DlnaRemoveRequest):
+    """Unpin a manually added renderer (and drop it from the last scan
+    snapshot so it disappears immediately)."""
+    pins = _dlna_pins()
+    removed = pins.pop(req.udn, None) is not None
+    _dlna_save_pins(pins)
+    _dlna_discovered.pop(req.udn, None)
+    return {"ok": True, "removed": removed}
 
 
 # -- Browser output (per-tab renderer channel) -------------------------------------
