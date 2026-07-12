@@ -101,6 +101,9 @@ def call_claude_code(
     session_id: Optional[str] = None,
     resume: bool = False,
     model: Optional[str] = None,
+    timeout_seconds: Optional[int] = None,
+    mcp: bool = True,
+    max_turns: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Call Claude Code CLI in headless mode.
@@ -111,11 +114,18 @@ def call_claude_code(
         session_id: Previous Claude Code session ID for continuity
         resume: Whether to resume a previous session
         model: Model to use (sonnet or haiku). Defaults to DEFAULT_MODEL.
+        timeout_seconds: Wallclock cap override. The 150s default exists
+            for the chat SSE path; long-running non-interactive callers
+            (gear research worker) pass their own budget.
+        mcp: Attach the library MCP config (PostgreSQL + HQPlayer tools).
+            Research-style callers that only need the built-in
+            WebSearch/WebFetch turn this off.
 
     Returns:
         dict with keys: answer, tracks, claude_session_id, model
     """
     use_model = model if model in ALLOWED_MODELS else DEFAULT_MODEL
+    wallclock = timeout_seconds or TIMEOUT_SECONDS
 
     claude_exe = _resolve_claude_executable()
     if claude_exe is None:
@@ -130,11 +140,14 @@ def call_claude_code(
         claude_exe,
         "-p", message,
         "--output-format", "json",
-        "--mcp-config", MCP_CONFIG_PATH,
         "--model", use_model,
         "--system-prompt", system_prompt,
         "--dangerously-skip-permissions",
     ]
+    if mcp:
+        cmd[3:3] = ["--mcp-config", MCP_CONFIG_PATH]
+    if max_turns:
+        cmd.extend(["--max-turns", str(max_turns)])
 
     if resume and session_id:
         cmd.extend(["--resume", session_id])
@@ -151,7 +164,7 @@ def call_claude_code(
             "text": True,
             "encoding": "utf-8",
             "errors": "replace",
-            "timeout": TIMEOUT_SECONDS,
+            "timeout": wallclock,
             "env": env,
         }
 
@@ -212,7 +225,7 @@ def call_claude_code(
         }
 
     except subprocess.TimeoutExpired:
-        logger.error(f"Claude Code timed out after {TIMEOUT_SECONDS}s")
+        logger.error(f"Claude Code timed out after {wallclock}s")
         return {
             "answer": "Request timed out. Please try a simpler query.",
             "claude_session_id": None,
