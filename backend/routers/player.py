@@ -374,9 +374,9 @@ def browser_event(req: BrowserEventRequest):
     """<audio> element events from the renderer tab (element callbacks —
     timeupdate throttled to ~1/s client-side, not polling)."""
     backend = _browser_backend()
-    backend.on_client_event(req.tab, req.event, req.position, req.duration,
-                            req.queue_index, req.epoch)
-    return {"ok": True}
+    payload = backend.on_client_event(req.tab, req.event, req.position,
+                                      req.duration, req.queue_index, req.epoch)
+    return {"ok": True, **(payload or {})}
 
 
 # -- Search -------------------------------------------------------------------

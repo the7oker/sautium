@@ -156,11 +156,14 @@ class BrowserBackend(PlayerBackend):
     def on_client_event(self, tab: str, event: str, position: Optional[float],
                         duration: Optional[float],
                         queue_index: Optional[int] = None,
-                        epoch: Optional[int] = None) -> None:
+                        epoch: Optional[int] = None) -> Optional[dict]:
+        """Returns an optional payload for the POST response — the only
+        downlink that provably works from a frozen background tab (its SSE
+        channel is dead exactly when radio refills matter)."""
         if tab != self._tab:
-            return   # a displaced tab still flushing events
+            return None   # a displaced tab still flushing events
         if epoch is not None and epoch != self._epoch:
-            return   # stale event raced a newer load directive
+            return None   # stale event raced a newer load directive
         if queue_index is not None and int(queue_index) != self._index:
             # The renderer advanced locally (mobile background path — see
             # _queue_tail). Within an epoch its slot is the truth; every
@@ -175,11 +178,10 @@ class BrowserBackend(PlayerBackend):
             self._length = float(duration)
         if event == "advanced":
             self._state = "playing"
-            # Refresh the tail (fresh signed URLs) — best-effort: a frozen
-            # tab keeps walking the list it already holds.
-            self._push({"cmd": "queue", "queue": self._queue_tail(self._index)})
             self._emit_now()
-            return
+            # Fresh tail (new signed URLs + anything appended since the last
+            # load — radio refills land here one advance after they trigger).
+            return {"queue": self._queue_tail(self._index)}
         if event == "playing":
             self._state = "playing"
         elif event == "paused":
@@ -191,24 +193,29 @@ class BrowserBackend(PlayerBackend):
                            item.title if item else "?")
             self._state = "stopped"
         elif event == "ended":
-            self._advance()
-            return
+            return self._advance()
         self._emit_now()
+        return None
 
-    def _advance(self) -> None:
+    def _advance(self) -> Optional[dict]:
+        """Tab-driven advance past its local tail. The load directive rides
+        the POST response, not the SSE push — `ended` means the tab's list
+        ran dry, and if it is frozen in the background the response is the
+        only way to hand it the next track."""
         nxt_index = self._index + 1
         item = self._queue.item_at(nxt_index)
         if item is None:
             self._state = "stopped"
             self._emit_now()
-            return
+            return None
         self._index = nxt_index
         self._position = 0.0
         self._length = item.duration_seconds or 0.0
         self._epoch += 1
-        self._push(self._load_directive(nxt_index, item, play=True))
+        directive = self._load_directive(nxt_index, item, play=True)
         self._state = "playing"
         self._emit_now()
+        return {"directive": directive}
 
     # -- directives ------------------------------------------------------------------
 

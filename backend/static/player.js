@@ -247,7 +247,18 @@
           queue_index: this.queueIndex,
           epoch: this.epoch,
         }),
-      }).catch(() => {});
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((resp) => {
+          if (!resp) return;
+          // The response is the background-safe downlink (SSE may be dead
+          // in a frozen tab): `advanced` returns the refreshed tail —
+          // including radio refills — and `ended` past the local tail
+          // returns the next load directive.
+          if (resp.queue) this.playlist = resp.queue;
+          if (resp.directive) this._onDirective(resp.directive);
+        })
+        .catch(() => {});
     },
 
     _wireAudio() {
