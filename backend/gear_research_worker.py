@@ -401,6 +401,7 @@ def research_one(model_id: str) -> bool:
             "UPDATE gear_models SET research_state = 'failed' WHERE id = %(m)s::uuid",
             {"m": model_id},
         )
+        _notify_state(model_id, "failed")
         logger.error(f"gear research: FAILED {brand} {model} (no parseable payload)")
         return False
 
@@ -418,6 +419,7 @@ def research_one(model_id: str) -> bool:
         """,
         {"m": model_id, "summary": (payload.get("research_summary") or "").strip() or None},
     )
+    _notify_state(model_id, "cached")
     logger.info(
         f"gear research: done {brand} {model} — {n_specs} specs, {n_techs} technologies, "
         f"{n_caveats} caveats, {time.time() - started:.0f}s"
@@ -426,6 +428,12 @@ def research_one(model_id: str) -> bool:
 
 
 # ─── queue ──────────────────────────────────────────────────────────────────
+
+def _notify_state(model_id: str, state: str) -> None:
+    """Wake UI chips over the gear-state SSE bridge."""
+    db_execute("SELECT pg_notify('sautium_gear_state', %(p)s)",
+               {"p": f"{model_id}:{state}"})
+
 
 def _claim_next() -> Optional[str]:
     row = db_execute(
@@ -442,6 +450,8 @@ def _claim_next() -> Optional[str]:
         RETURNING id::text AS id
         """
     )
+    if row:
+        _notify_state(row["id"], "researching")
     return row["id"] if row else None
 
 

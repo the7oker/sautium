@@ -5059,6 +5059,23 @@ select.add-gear-input {
 }
 .research-state-label.is-awaiting { color: var(--color-text-dim); }
 .research-state-label.is-researching { color: var(--color-amber); }
+.research-state-label.is-failed { color: var(--color-negative); }
+
+/* ---- Measured findings (gear sheet) ---- */
+.measured-row {
+  padding: calc(8 * var(--px)) 0;
+  border-top: 1px solid var(--color-divider);
+}
+.measured-row.is-warn { border-left: 3px solid var(--color-amber); padding-left: calc(9 * var(--px)); }
+.measured-row.is-info { border-left: 3px solid var(--color-blue);  padding-left: calc(9 * var(--px)); }
+.measured-text {
+  margin: 0; font-size: calc(12.5 * var(--px));
+  color: var(--color-text); line-height: 1.5;
+}
+.measured-src {
+  font-family: var(--font-mono); font-size: calc(10 * var(--px));
+  color: var(--color-blue-hover);
+}
 .research-prose {
   font-size: calc(13.5 * var(--px));
   line-height: 1.55;

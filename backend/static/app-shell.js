@@ -7913,6 +7913,11 @@
       this.isOpen = false;
       this.current = null;
     },
+    refresh() {
+      // open() refetches canonical detail, so this is a full repaint
+      // from fresh data — used by the research-state SSE bridge.
+      if (this.isOpen && this.current) this.open(this.current);
+    },
     render() {
       const g = this.current;
       if (!g) return;
@@ -7951,6 +7956,18 @@
             </div>
             <p class="research-prose empty">Gathering specs and community sentiment from audiophile sources. This usually completes in a few minutes.</p>
             <p class="helper-prose">Sources scanned: Head-Fi, ASR, manufacturer docs. The card refreshes automatically when the summary is ready.</p>
+          </div>`;
+      } else if (g.research_state === 'failed') {
+        researchHTML = `
+          <div class="research-card">
+            <div class="research-state-row">
+              <span class="research-state-label is-failed">Research failed</span>
+            </div>
+            <p class="research-prose empty">The research agent couldn't produce a verifiable result — usually a transient timeout or an AI usage-limit window. For bespoke gear with no published sources this can be permanent.</p>
+            <div class="research-meta">
+              <span></span>
+              <button class="refresh" data-retry-research>Retry research</button>
+            </div>
           </div>`;
       } else {
         researchHTML = `
@@ -8004,6 +8021,21 @@
           <div class="specs-grid" style="margin-top:calc(12*var(--px));">
             <div class="specs-title">Technologies</div>
             <div>${items}</div>
+          </div>`;
+      }
+
+      let measuredHTML = '';
+      if (isCached && Array.isArray(g.measured_caveats) && g.measured_caveats.length > 0) {
+        const rows = g.measured_caveats.map(cv => `
+          <div class="measured-row is-${cv.severity}">
+            <p class="measured-text">${escapeProfileHtml(cv.text)}</p>
+            ${cv.source_url ? `<a class="measured-src" href="${escapeProfileHtml(cv.source_url)}" target="_blank" rel="noopener">source ↗</a>` : ''}
+          </div>`).join('');
+        measuredHTML = `
+          <div class="specs-grid" style="margin-top:calc(12*var(--px));">
+            <div class="specs-title">Measured findings</div>
+            <div>${rows}</div>
+            <p class="helper-prose" style="margin:calc(6*var(--px)) 0 0;">Instrumented behavior the spec sheet omits. The pair engine applies these only to pairings where the physics actually engages.</p>
           </div>`;
       }
 
@@ -8062,6 +8094,7 @@
           ${researchHTML}
           ${specsHTML}
           ${technologiesHTML}
+          ${measuredHTML}
           ${sentimentHTML}
           ${aiTakeHTML}
           <div class="notes-card">
@@ -8090,6 +8123,15 @@
       if (aiBtn) aiBtn.addEventListener('click', () => {
         this.close();
         if (typeof ai !== 'undefined' && ai.open) ai.open();
+      });
+      const retryBtn = this.el.querySelector('[data-retry-research]');
+      if (retryBtn) retryBtn.addEventListener('click', async () => {
+        retryBtn.disabled = true;
+        retryBtn.textContent = 'Queued…';
+        try {
+          await fetch('/api/gear-models/' + g.gear_model_id + '/retry-research', { method: 'POST' });
+        } catch (_) { /* the SSE refresh below repaints the true state */ }
+        this.refresh();
       });
     },
     openRenameForm() {
@@ -10045,6 +10087,16 @@
     // no longer needs a re-poke because media_file_id is in np-update.
     document.addEventListener('playlist-loaded', updatePlayingHighlight);
     window.addEventListener('hashchange', render);
+
+    // Research-state SSE: worker transitions (queued → researching →
+    // cached/failed) repaint gear surfaces live — no manual reload.
+    if (typeof window.sseStream === 'function') {
+      window.sseStream('/api/gear-models/research/stream', () => {
+        const h = parseHash();
+        if (h.startsWith('more/profile') || h.startsWith('more/gear-system')) render();
+        if (gearSheet.isOpen) gearSheet.refresh();
+      }, () => { /* sseStream auto-reconnects */ });
+    }
 
     if (!location.hash) {
       // Setting hash to #home won't fire hashchange when current is empty,

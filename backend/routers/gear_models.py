@@ -14,12 +14,20 @@ sentiment. Until then every newly-seen model stays in `queued` and
 the gear sheet renders the "Awaiting research" panel.
 """
 
-from typing import Any, Dict, List
+import asyncio
+import logging
+import select
+import threading
+from typing import Any, Dict, List, Optional
 
+import psycopg2
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 
-from db_pool import db_query, db_query_one
+from config import settings
+from db_pool import db_execute, db_query, db_query_one
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/gear-models", tags=["gear_models"])
 
@@ -135,6 +143,17 @@ def get_gear_model(model_id: str) -> Dict[str, Any]:
     )
     head["technologies"] = technologies
 
+    head["measured_caveats"] = db_query(
+        """
+        SELECT role, severity::text AS severity, load_z_below, only_above_vrms,
+               text, source_url
+        FROM gear_measured_caveats
+        WHERE gear_model_id = %(id)s::uuid
+        ORDER BY severity DESC, text
+        """,
+        {"id": model_id},
+    )
+
     sentiment_rows = db_query(
         """
         SELECT polarity, term, weight
@@ -155,3 +174,110 @@ def get_gear_model(model_id: str) -> Dict[str, Any]:
     }
 
     return head
+
+
+@router.post("/{model_id}/retry-research")
+def retry_research(model_id: str) -> Dict[str, Any]:
+    """Deliberate user action — research burns real tokens, so failed
+    rows never retry automatically."""
+    row = db_execute(
+        """
+        UPDATE gear_models SET research_state = 'queued'
+        WHERE id = %(id)s::uuid AND research_state = 'failed'
+        RETURNING id::text AS id
+        """,
+        {"id": model_id},
+    )
+    if row is None:
+        raise HTTPException(status_code=409, detail="model is not in failed state")
+    db_execute("SELECT pg_notify('gear_research', %(id)s)", {"id": model_id})
+    return {"ok": True}
+
+
+# ── research-state SSE (worker NOTIFY → UI chips) ──────────────────────
+
+_state_sse_clients: list = []  # (asyncio.Event, loop)
+_state_sse_lock = threading.Lock()
+_state_listener_thread: Optional[threading.Thread] = None
+_state_listener_running = False
+
+
+def _wake_state_clients():
+    with _state_sse_lock:
+        for evt, loop in _state_sse_clients:
+            loop.call_soon_threadsafe(evt.set)
+
+
+def _state_db_listener():
+    while _state_listener_running:
+        conn = None
+        try:
+            conn = psycopg2.connect(settings.database_url)
+            conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+            with conn.cursor() as cur:
+                cur.execute("LISTEN sautium_gear_state")
+            while _state_listener_running:
+                ready = select.select([conn], [], [], 1)
+                if ready[0]:
+                    conn.poll()
+                    if conn.notifies:
+                        conn.notifies.clear()
+                        _wake_state_clients()
+        except Exception as e:
+            logger.debug(f"gear state listener error: {e}")
+            if _state_listener_running:
+                import time
+                time.sleep(1)
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+
+def start_gear_state_listener():
+    global _state_listener_thread, _state_listener_running
+    if _state_listener_thread and _state_listener_thread.is_alive():
+        return
+    _state_listener_running = True
+    _state_listener_thread = threading.Thread(
+        target=_state_db_listener, daemon=True, name="gear-state-sse"
+    )
+    _state_listener_thread.start()
+
+
+def stop_gear_state_listener():
+    global _state_listener_running
+    _state_listener_running = False
+    if _state_listener_thread:
+        _state_listener_thread.join(timeout=3)
+
+
+@router.get("/research/stream")
+async def research_state_stream():
+    """One event per research-state transition; payload-free — the
+    client refetches whatever screen it is on."""
+    evt = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    with _state_sse_lock:
+        _state_sse_clients.append((evt, loop))
+
+    async def gen():
+        try:
+            while True:
+                try:
+                    await asyncio.wait_for(evt.wait(), timeout=15)
+                    evt.clear()
+                    yield "event: changed\ndata: {}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        finally:
+            with _state_sse_lock:
+                try:
+                    _state_sse_clients.remove((evt, loop))
+                except ValueError:
+                    pass
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache"})

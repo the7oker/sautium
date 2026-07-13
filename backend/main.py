@@ -197,6 +197,10 @@ async def lifespan(app: FastAPI):
     from gear_research_worker import start_gear_research_worker, stop_gear_research_worker
     start_gear_research_worker()
 
+    # Bridge worker state NOTIFYs to the research-state SSE for UI chips
+    from routers.gear_models import start_gear_state_listener, stop_gear_state_listener
+    start_gear_state_listener()
+
     # Derive P2P identity
     _p2p_identity = None
     if settings.p2p_enabled:
@@ -415,6 +419,7 @@ async def lifespan(app: FastAPI):
     stop_chat_listener()
     stop_sync_listener()
     stop_gear_research_worker()
+    stop_gear_state_listener()
 
     try:
         import background_enrichment
