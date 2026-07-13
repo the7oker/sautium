@@ -372,7 +372,7 @@
       return (e && e.id === mediaId) ? e.u : null;
     },
 
-    _startCurrent(url, play) {
+    _startCurrent(url, play, startPos) {
       const a = this.audio;
       clearTimeout(this._watchdog);
       const held = this._heldBlob(this.queueIndex, this.currentMediaId);
@@ -400,6 +400,14 @@
             }
           }, 2000);
         }
+      }
+      if (startPos > 0) {
+        // Resume point from a re-prime (page reload mid-track): seek once
+        // the fresh element knows its duration.
+        const src = a.src;
+        a.addEventListener('loadedmetadata', () => {
+          if (a.src === src) a.currentTime = startPos;
+        }, { once: true });
       }
       this._evictBlobs();
       if (play) this._tryPlay();
@@ -539,7 +547,7 @@
           }
           this.queueIndex = (d.queue_index !== undefined) ? d.queue_index : null;
           this.currentMediaId = (d.media !== undefined) ? d.media : null;
-          this._startCurrent(d.url, !!d.play);
+          this._startCurrent(d.url, !!d.play, d.position || 0);
           this._mediaSession(d.meta || {});
           break;
         case 'queue':
@@ -579,7 +587,7 @@
       if (!next) return false;
       this.queueIndex = next.queue_index;
       this.currentMediaId = (next.media !== undefined) ? next.media : null;
-      this._startCurrent(next.url, true);
+      this._startCurrent(next.url, true, 0);
       this._mediaSession(next.meta || {});
       this._post('advanced');
       // Bias the prefetch of the track after next into THIS instant: a

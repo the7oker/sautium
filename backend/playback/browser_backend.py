@@ -110,9 +110,22 @@ class BrowserBackend(PlayerBackend):
             return
         # (Re)prime the tab with the current slot, paused — the user
         # presses play (that tap is also the autoplay-unlock gesture).
+        # The directive carries the last known position so a reloaded page
+        # resumes where the music was, not from zero.
         item = self._queue.item_at(self._index)
         if item is not None:
-            self._push(self._load_directive(self._index, item, play=False))
+            self._push(self._load_directive(self._index, item, play=False,
+                                            position=self._position))
+            if self._state == "playing":
+                # A freshly primed element is paused by definition (a
+                # reloaded page cannot resume without a user gesture).
+                # Claiming "playing" here deadlocks the UI: the pause the
+                # play/pause button then sends is a no-op on an already
+                # paused element and no event ever corrects the state. If
+                # this was a live SSE blip instead (audio still running),
+                # the tab's next timeupdate flips the state right back.
+                self._state = "paused"
+                self._emit_now()
 
     def detach_tab(self, tab: str) -> None:
         """The tab's SSE stream ended (closed tab / navigation). After a
@@ -183,6 +196,11 @@ class BrowserBackend(PlayerBackend):
             # load — radio refills land here one advance after they trigger).
             return {"queue": self._queue_tail(self._index)}
         if event == "playing":
+            self._state = "playing"
+        elif event == "timeupdate":
+            # The tab only posts timeupdate while its element is actually
+            # playing — the authoritative signal that un-flips the paused
+            # state a channel-reconnect prime assumed.
             self._state = "playing"
         elif event == "paused":
             self._state = "paused"
@@ -274,11 +292,13 @@ class BrowserBackend(PlayerBackend):
                          "meta": self._item_meta(item)})
         return tail
 
-    def _load_directive(self, index: int, item: QueueItem, *, play: bool) -> dict:
+    def _load_directive(self, index: int, item: QueueItem, *, play: bool,
+                        position: float = 0.0) -> dict:
         return {
             "cmd": "load",
             "url": self._media_url(item),
             "play": play,
+            "position": position,
             "queue_index": index,
             "media": self._item_ident(item),
             "epoch": self._epoch,
@@ -328,6 +348,12 @@ class BrowserBackend(PlayerBackend):
 
     def pause(self) -> bool:
         self._push({"cmd": "pause"})
+        if self._state == "playing":
+            # Optimistic: pausing an already-paused element fires no event,
+            # so waiting for one can leave a stale "playing" forever. The
+            # tab's own events correct us if reality disagrees.
+            self._state = "paused"
+            self._emit_now()
         return True
 
     def stop(self) -> bool:
