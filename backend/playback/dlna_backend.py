@@ -245,6 +245,7 @@ class DlnaBackend(PlayerBackend):
         """1 Hz GetPositionInfo while playing — RelTime is not evented
         (documented boundary exception, §2.6). Also our track-end detector:
         some renderers under-report the final GENA STOPPED."""
+        misses = 0
         try:
             while True:
                 await asyncio.sleep(1.0)
@@ -252,8 +253,23 @@ class DlnaBackend(PlayerBackend):
                     return
                 try:
                     await self._dmr.async_update()
+                    misses = 0
                 except Exception as e:
                     logger.debug("position poll update failed: %s", e)
+                    misses += 1
+                    if misses >= 3:
+                        # The renderer left the network (battery DAPs drop
+                        # Wi-Fi in deep sleep while playing from buffer) —
+                        # a frozen "playing" status would just gaslight the
+                        # user. Report the loss and stop pretending.
+                        self._error = (f"'{self.label}' stopped responding — "
+                                       "it may have left the network "
+                                       "(deep sleep / Wi-Fi off)")
+                        logger.warning("DLNA renderer unreachable after "
+                                       "%d poll misses — reporting stopped",
+                                       misses)
+                        self._emit_now("stopped")
+                        return
                     continue
                 pos = self._dmr.media_position
                 if pos is not None:
