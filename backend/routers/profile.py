@@ -299,6 +299,14 @@ def list_gear() -> List[Dict[str, Any]]:
     return _load_gear_rows()
 
 
+@router.get("/gear/system")
+def gear_system_analysis() -> Dict[str, Any]:
+    """Deterministic pair matrix over the user's park (Gear Advisor
+    Phase 3). Pure spec math — cheap enough to compute on read."""
+    from gear_pairs import system_analysis
+    return system_analysis()
+
+
 @router.post("/gear")
 def add_gear(req: GearAddRequest) -> Dict[str, Any]:
     if req.status not in VALID_STATUSES:
