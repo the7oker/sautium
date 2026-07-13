@@ -307,6 +307,14 @@ def gear_system_analysis() -> Dict[str, Any]:
     return system_analysis()
 
 
+@router.get("/gear/advisor")
+def gear_advisor() -> Dict[str, Any]:
+    """Upgrade advisor: plateau diagnosis + library axes + candidate
+    cards on the price axis (Gear Advisor Phases 4/5)."""
+    from gear_advisor import advisor
+    return advisor()
+
+
 @router.post("/gear")
 def add_gear(req: GearAddRequest) -> Dict[str, Any]:
     if req.status not in VALID_STATUSES:

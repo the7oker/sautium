@@ -5991,6 +5991,7 @@
     if (sub === 'output')  return renderOutputSettings(root);
     if (sub === 'profile') return renderProfile(root);
     if (sub === 'gear-system') return renderGearSystem(root);
+    if (sub === 'gear-advisor') return renderGearAdvisor(root);
     if (sub === 'library') return renderLibrary(root);
     if (sub === 'ai')      return renderAI(root);
     if (sub === 'sync')    return renderSync(root);
@@ -7013,6 +7014,96 @@
     if (back) back.addEventListener('click', () => navigate('more/profile'));
   }
 
+  /* ------------------------------------------------------------------
+   * Upgrade advisor — plateau + candidates (#more/gear-advisor)
+   * ------------------------------------------------------------------ */
+
+  const GADV_VERDICT = {
+    plateau:      { mark: '✓', label: 'Plateau — money is dead here', cls: 'is-ok' },
+    open:         { mark: '⚠', label: 'Open question',                cls: 'is-warn' },
+    out_of_scope: { mark: '⌀', label: 'Outside measured evidence',    cls: 'is-nodata' },
+  };
+
+  async function renderGearAdvisor(root) {
+    let data = null;
+    try {
+      const r = await fetch('/api/profile/gear/advisor');
+      if (r.ok) data = await r.json();
+    } catch (_) { /* fall through */ }
+    if (!data) {
+      root.innerHTML = '<section class="screen"><div class="screen-head"><h2 class="screen-title">Upgrade advisor</h2></div><div class="placeholder">Не вдалося завантажити.</div></section>';
+      return;
+    }
+
+    const lib = data.library || {};
+    const axesHTML = (lib.axes || []).map(a => `
+      <div class="tilebox">
+        <div class="tilebox-v">${a.share_pct != null ? a.share_pct + '%' : '—'}</div>
+        <div class="tilebox-k">${escapeProfileHtml(a.label)}</div>
+      </div>`).join('');
+
+    const plateauHTML = (data.plateau || []).map(p => {
+      const v = GADV_VERDICT[p.verdict] || GADV_VERDICT.out_of_scope;
+      return `
+        <div class="gsys-pair ${v.cls}">
+          <div class="gsys-pair-head">
+            <span class="gsys-mark">${v.mark}</span>
+            <span class="gsys-target">${escapeProfileHtml(p.name)}</span>
+            <span class="gadv-verdict">${v.label}</span>
+          </div>
+          <div class="gsys-check">
+            <span class="gsys-check-num">${escapeProfileHtml(p.numbers)}</span>
+            <span class="gsys-tier gsys-tier-${p.tier}">${p.tier === 'm' ? 'M' : 'D'}</span>
+            <span class="gsys-note" style="padding-left:0;">${escapeProfileHtml(p.reason)}</span>
+          </div>
+        </div>`;
+    }).join('');
+
+    const candHTML = (data.candidates || []).map(c => {
+      const axes = Object.entries(c.axis_hits || {}).map(([axis, terms]) => `
+        <span class="gadv-axis" title="${escapeProfileHtml(terms.join(', '))}">
+          ${escapeProfileHtml((lib.axes || []).find(a => a.axis === axis)?.label || axis)} ×${terms.length}
+        </span>`).join('');
+      return `
+        <div class="gadv-cand">
+          <div class="gadv-cand-head">
+            <span class="gadv-price">${c.price_usd != null ? '$' + Math.round(c.price_usd) : '$ —'}</span>
+            <span class="gsys-target">${escapeProfileHtml(c.name)}</span>
+            ${c.want ? '<span class="badge badge-want">Want</span>' : ''}
+          </div>
+          <div class="gadv-cand-meta">
+            <span class="gadv-compat is-${c.park_compatibility}">park: ${c.park_compatibility}</span>
+            ${c.driver_type ? `<span>${escapeProfileHtml(humanizeSpecValue(c.driver_type))}</span>` : ''}
+            ${c.sentiment_score != null ? `<span class="gadv-sent">${c.sentiment_score}<small>/10 · n≈${c.sentiment_sample || '?'}</small></span>` : ''}
+          </div>
+          ${axes ? `<div class="gadv-axes">${axes}</div>` : ''}
+        </div>`;
+    }).join('');
+
+    root.innerHTML = `
+      <section class="screen gsys-screen">
+        <div class="screen-head">
+          <button class="back-btn" data-gadv-back aria-label="Back">‹</button>
+          <h2 class="screen-title">Upgrade advisor</h2>
+        </div>
+        <p class="gsys-context">Your listening axes (share of genre weight) — candidate traits are
+          matched against these, and against your library's dynamics
+          (DR p50 ${lib.dr_p50 ?? '—'} / p90 ${lib.dr_p90 ?? '—'} dB).</p>
+        <div class="tiles-row">${axesHTML}</div>
+
+        <div class="profile-group-label">Where the money is dead — and why that's good news</div>
+        <div class="gsys-group">${plateauHTML || '<div class="placeholder">No owned electronics analyzed yet.</div>'}</div>
+
+        <div class="profile-group-label">Candidates · price axis</div>
+        <div class="gsys-group">${candHTML || '<div class="placeholder">No researched candidates yet — add models with status Want.</div>'}</div>
+        <p class="gsys-legend">${escapeProfileHtml(data.pool_note || '')}</p>
+        <p class="gsys-legend">Trait matches come from attributed community praise (forum voice),
+          compatibility from the deterministic pair engine — see System. No merged scores by design.</p>
+      </section>`;
+    const back = root.querySelector('[data-gadv-back]');
+    if (back) back.addEventListener('click', () => navigate('more/profile'));
+  }
+
   async function renderProfile(root) {
     let profile = null, account = null, config = null, scrobbling = null;
     // emailStatus stays null at first paint — fetched in background
@@ -7173,6 +7264,13 @@
             <span class="form-value action">Pair matrix</span>
             <span class="link-chev">${PROFILE_ICONS.chev}</span>
           </span>
+        </button>
+        <button class="form-row is-clickable gsys-entry" data-go-advisor>
+          <span class="form-label">Upgrade advisor</span>
+          <span class="form-actions">
+            <span class="form-value action">Plateau &amp; candidates</span>
+            <span class="link-chev">${PROFILE_ICONS.chev}</span>
+          </span>
         </button>` : ''}
 
         <div class="profile-group-label">Sociability</div>
@@ -7207,6 +7305,8 @@
     root.querySelector('[data-add-gear]').addEventListener('click', () => addGearSheet.open());
     const sysEntry = root.querySelector('[data-go-system]');
     if (sysEntry) sysEntry.addEventListener('click', () => navigate('more/gear-system'));
+    const advEntry = root.querySelector('[data-go-advisor]');
+    if (advEntry) advEntry.addEventListener('click', () => navigate('more/gear-advisor'));
     root.querySelector('[data-edit-toggle]').addEventListener('click', () => openInlineProfileEditor(profile));
 
     // No verify-email handler attached here — the email row starts in

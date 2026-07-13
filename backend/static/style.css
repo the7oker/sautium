@@ -4612,6 +4612,49 @@ body.has-miniplayer .more-overlay .drawer {
   border-radius: var(--radius-md); margin-top: calc(8 * var(--px));
 }
 
+/* ---- Upgrade advisor ---- */
+.tiles-row {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  gap: calc(8 * var(--px)); margin-bottom: calc(16 * var(--px));
+}
+.tilebox { background: var(--color-surface-lo); border-radius: var(--radius-md); padding: calc(10 * var(--px)) calc(12 * var(--px)); }
+.tilebox-v {
+  font: 500 calc(19 * var(--px)) / 1.15 var(--font-mono);
+  color: var(--color-blue-hover); font-variant-numeric: tabular-nums;
+}
+.tilebox-k {
+  font-size: calc(10 * var(--px)); letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--color-text-muted);
+  margin-top: calc(4 * var(--px));
+}
+.gadv-verdict { font-size: calc(11 * var(--px)); color: var(--color-text-muted); margin-left: auto; }
+.gadv-cand {
+  background: var(--color-surface-lo); border-radius: var(--radius-md);
+  padding: calc(10 * var(--px)) calc(12 * var(--px));
+}
+.gadv-cand-head { display: flex; align-items: baseline; gap: calc(8 * var(--px)); }
+.gadv-price {
+  font: 500 calc(15 * var(--px)) / 1 var(--font-mono);
+  color: var(--color-blue-hover); font-variant-numeric: tabular-nums;
+  min-width: calc(52 * var(--px));
+}
+.gadv-cand-meta {
+  display: flex; flex-wrap: wrap; gap: calc(10 * var(--px));
+  margin-top: calc(5 * var(--px)); font-size: calc(11.5 * var(--px));
+  color: var(--color-text-muted);
+}
+.gadv-compat.is-ok { color: var(--color-positive); }
+.gadv-compat.is-warn { color: var(--color-amber); }
+.gadv-compat.is-fail { color: var(--color-negative); }
+.gadv-sent { font-family: var(--font-mono); color: var(--color-blue-hover); }
+.gadv-sent small { color: var(--color-text-dim); }
+.gadv-axes { display: flex; flex-wrap: wrap; gap: calc(6 * var(--px)); margin-top: calc(7 * var(--px)); }
+.gadv-axis {
+  font: 600 calc(9.5 * var(--px)) / 1 var(--font-mono); letter-spacing: 0.04em;
+  color: var(--color-amber); background: var(--color-amber-weak);
+  padding: calc(3 * var(--px)) calc(6 * var(--px)); border-radius: var(--radius-sm);
+}
+
 .research-chip .chip-sig {
   min-width: 0;
   overflow: hidden;
