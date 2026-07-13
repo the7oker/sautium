@@ -1618,6 +1618,9 @@ CREATE TABLE IF NOT EXISTS gear_measured_caveats (
     -- optional machine-readable condition: caveat applies only when
     -- the partner load impedance is below this (ohms)
     load_z_below   REAL,
+    -- optional condition: applies only when the pairing needs more
+    -- than this many Vrms (i.e. high-gain territory)
+    only_above_vrms REAL,
     text           TEXT NOT NULL,
     source_url     TEXT,
     created_at     TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,

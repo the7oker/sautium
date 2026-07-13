@@ -313,20 +313,26 @@ def _persist_caveats(model_id: str, payload: Dict[str, Any]) -> int:
         if role not in _VALID_CAVEAT_ROLES:
             role = None
         severity = cv.get("severity") if cv.get("severity") in ("info", "warn") else "warn"
-        try:
-            load_z = float(cv["load_z_below"]) if cv.get("load_z_below") is not None else None
-        except (TypeError, ValueError):
-            load_z = None
+        def _f(key):
+            try:
+                return float(cv[key]) if cv.get(key) is not None else None
+            except (TypeError, ValueError):
+                return None
         db_execute(
             """
-            INSERT INTO gear_measured_caveats (id, gear_model_id, role, severity, load_z_below, text, source_url)
-            VALUES (%(id)s::uuid, %(m)s::uuid, %(role)s, %(sev)s::gear_caveat_severity, %(lz)s, %(t)s, %(src)s)
+            INSERT INTO gear_measured_caveats
+                (id, gear_model_id, role, severity, load_z_below, only_above_vrms, text, source_url)
+            VALUES (%(id)s::uuid, %(m)s::uuid, %(role)s, %(sev)s::gear_caveat_severity,
+                    %(lz)s, %(oav)s, %(t)s, %(src)s)
             ON CONFLICT (gear_model_id, text) DO UPDATE
             SET role = EXCLUDED.role, severity = EXCLUDED.severity,
-                load_z_below = EXCLUDED.load_z_below, source_url = EXCLUDED.source_url
+                load_z_below = EXCLUDED.load_z_below,
+                only_above_vrms = EXCLUDED.only_above_vrms,
+                source_url = EXCLUDED.source_url
             """,
             {"id": str(gear_caveat_uuid(model_id, text)), "m": model_id,
-             "role": role, "sev": severity, "lz": load_z, "t": text, "src": source_url},
+             "role": role, "sev": severity, "lz": _f("load_z_below"),
+             "oav": _f("only_above_vrms"), "t": text, "src": source_url},
         )
         written += 1
     return written

@@ -82,7 +82,7 @@ def _load_park() -> List[Dict[str, Any]]:
     caveat_rows = db_query(
         """
         SELECT gear_model_id::text AS model_id, role, severity::text AS severity,
-               load_z_below, text, source_url
+               load_z_below, only_above_vrms, text, source_url
         FROM gear_measured_caveats
         WHERE gear_model_id = ANY(%(ids)s::uuid[])
         """,
@@ -293,6 +293,16 @@ def _pair_transport(src, s_role, dst, d_role) -> Dict[str, Any]:
     return _verdict(src, "transport", dst, "digital_in", checks)
 
 
+def _need_vrms(item) -> Optional[float]:
+    """Voltage a transducer needs for PEAK_TARGET_DB, or None."""
+    specs = item.get("specs", {})
+    z, sens_mw = _num(specs, "impedance_ohm"), _num(specs, "sensitivity_db_mw")
+    if z is None or sens_mw is None or z <= 0:
+        return None
+    sens_v = sens_mw + 10 * math.log10(1000 / z)
+    return 10 ** ((PEAK_TARGET_DB - sens_v) / 20)
+
+
 def _apply_caveats(src, s_role_name, dst, d_role_name, checks) -> None:
     """Measurement-sourced behavior gates spec math: a caveat attached
     to either side's active role (or model-wide) joins the checks —
@@ -306,6 +316,13 @@ def _apply_caveats(src, s_role_name, dst, d_role_name, checks) -> None:
                 # Unknown partner impedance stays conservative (applies).
                 partner_z = _num(partner.get("specs", {}), "impedance_ohm")
                 if partner_z is not None and partner_z >= cv["load_z_below"]:
+                    continue
+            if cv.get("only_above_vrms") is not None:
+                # High-gain-only findings don't bite pairings that live
+                # comfortably on low gain: skip when the partner's peak-
+                # target voltage need fits under the threshold.
+                need_v = _need_vrms(partner)
+                if need_v is not None and need_v <= cv["only_above_vrms"]:
                     continue
             checks.append(_check(
                 "measured", "warn" if cv["severity"] == "warn" else "ok",

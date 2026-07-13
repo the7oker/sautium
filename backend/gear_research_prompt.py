@@ -87,6 +87,9 @@ MEASURED CAVEATS
 - load_z_below (optional number, ohms): when the finding only applies
   below a load-impedance threshold ("clips into low-Z loads"), state
   the threshold so the engine skips unaffected pairings.
+- only_above_vrms (optional number): when the finding only applies in
+  high-gain territory, state the low-gain output voltage — pairings
+  that fit under it are unaffected and get no flag.
 """
 
 _OUTPUT_SCHEMA = """
