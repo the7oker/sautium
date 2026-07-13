@@ -135,7 +135,10 @@ def _roles(item: Dict[str, Any]) -> List[Dict[str, Any]]:
     if cat == "amp":
         roles.append({
             "role": "line_in",
-            "in_z": _num(specs, "line_input_impedance_ohm"),
+            "in_z_se": _num(specs, "line_input_impedance_ohm"),
+            "in_z_bal": _num(specs, "line_input_impedance_bal_ohm"),
+            "max_in_se": _num(specs, "max_input_vrms_se"),
+            "max_in_bal": _num(specs, "max_input_vrms_bal"),
             "gain_max": _num(specs, "max_gain_db"),
         })
 
@@ -215,13 +218,19 @@ def _pair_hp_transducer(src, s_role, dst, d_role) -> Dict[str, Any]:
 
 def _pair_line(src, s_role, dst, d_role) -> Dict[str, Any]:
     checks = []
-    v = s_role["v_bal"] if s_role["v_bal"] is not None else s_role["v_se"]
-    conn = "balanced" if s_role["v_bal"] is not None else "single-ended"
-    out_z = s_role["out_z_bal"] if conn == "balanced" else s_role["out_z_se"]
-    in_z = d_role["in_z"]
+    balanced = s_role["v_bal"] is not None
+    conn = "balanced" if balanced else "single-ended"
+    v = s_role["v_bal"] if balanced else s_role["v_se"]
+    out_z = s_role["out_z_bal"] if balanced else s_role["out_z_se"]
+    in_z = d_role["in_z_bal"] if balanced else d_role["in_z_se"]
 
     if out_z is None or in_z is None:
-        checks.append(_check("bridging", "nodata", "line out-Z or in-Z unknown", "d"))
+        missing = [side for side, val in
+                   ((f"source {conn} line out-Z (unpublished)", out_z),
+                    (f"amp {conn} in-Z", in_z)) if val is None]
+        checks.append(_check("bridging", "nodata", "missing: " + "; ".join(missing), "d",
+                             "line out-Z of portable sources is typically ≤200 Ω — "
+                             "bridging into a 10 kΩ-class input is rarely a real risk"))
     else:
         status = "ok" if out_z * THRESHOLDS["bridging_ratio"] <= in_z else "warn"
         checks.append(_check(
@@ -229,18 +238,27 @@ def _pair_line(src, s_role, dst, d_role) -> Dict[str, Any]:
             f"{conn}: out-Z {out_z:g} Ω → in-Z {in_z:g} Ω (1:{in_z / out_z:.0f}, rule ≥1:{THRESHOLDS['bridging_ratio']})",
             "m" if out_z == 40 else "ds",
         ))
-    if v is not None:
-        note = None
-        if d_role["gain_max"] is None:
-            note = "amp max input level not captured — clipping check partial"
-        checks.append(_check(
-            "level", "ok",
-            f"{conn} line level {v:g} Vrms into amp input"
-            + (f"; amp gain up to {d_role['gain_max']:+g} dB" if d_role["gain_max"] is not None else ""),
-            "ds", note,
-        ))
-    else:
+
+    if v is None:
         checks.append(_check("level", "nodata", "source line-out voltage unknown", "d"))
+    else:
+        max_in = d_role["max_in_bal"] if balanced else d_role["max_in_se"]
+        if max_in is not None:
+            margin = 20 * math.log10(max_in / v)
+            status = "ok" if margin >= 0 else "fail"
+            checks.append(_check(
+                "level", status,
+                f"{conn} {v:g} Vrms vs amp max input {max_in:g} Vrms → {margin:+.1f} dB input headroom"
+                + (f"; gain {d_role['gain_max']:+g} dB max" if d_role["gain_max"] is not None else ""),
+                "ds",
+            ))
+        else:
+            checks.append(_check(
+                "level", "ok",
+                f"{conn} line level {v:g} Vrms into amp input"
+                + (f"; amp gain up to {d_role['gain_max']:+g} dB" if d_role["gain_max"] is not None else ""),
+                "ds", "amp max input level not captured — clipping check partial",
+            ))
 
     return _verdict(src, "line_out", dst, "line_in", checks)
 
