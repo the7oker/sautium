@@ -666,6 +666,7 @@
             });
             if (!ok) return;
           }
+          window.maybeClaimRenderer();
           try {
             const resp = await fetch('/api/player/radio/start', {
               method: 'POST',
@@ -732,6 +733,7 @@
             const tid = row.getAttribute('data-phantom-tid');
             if (!tid) return;
             onceInFlight(row, async () => {     // phantom match → stream it
+              window.maybeClaimRenderer();
               const buf = row.querySelector('.track-buffering');
               if (buf) buf.hidden = false;      // resolve+download is slow — show it
               const resp = await fetch('/api/player/play-phantom-track', {
@@ -1434,10 +1436,11 @@
     },
 
     async togglePlayPause() {
-      const url = this._npState === 'playing'
-        ? '/api/player/pause' : '/api/player/play';
+      // Delegate to the shared transport toggle — it owns the browser-
+      // renderer subtleties (local resume inside the gesture, orphaned-
+      // output claim). A parallel fetch here bypassed both.
       try {
-        await fetch(url, { method: 'POST' });
+        await window.togglePlayPause();
       } catch (err) { console.warn('toggle play/pause failed', err); }
     },
 
@@ -1479,6 +1482,7 @@
     },
 
     async jumpTo(index) {
+      window.maybeClaimRenderer();
       try {
         await fetch('/api/player/jump', {
           method: 'POST',
@@ -4902,6 +4906,7 @@
           if (ctx.originAlbumId) body.origin_album_id = ctx.originAlbumId;
         }
         btn.disabled = true;            // block double-fire; faded while in flight
+        window.maybeClaimRenderer();
         try {
           const resp = await fetch('/api/player/play-tracks', {
             method: 'POST',
@@ -4922,6 +4927,7 @@
         // per-track "Buffering…" lines (driven by the preview-events re-fetch)
         // carry the progress now, not the button.
         btn.disabled = true;
+        window.maybeClaimRenderer();
         const resp = await fetch('/api/player/play-phantom-album', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -4963,6 +4969,7 @@
         const tid = row.getAttribute('data-track-id');
         if (!tid) return;
         onceInFlight(row, async () => {               // ignore re-click while loading
+          window.maybeClaimRenderer();
           setTrackBuffering(screen, tid, true);
           const resp = await fetch('/api/player/play-phantom-track', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },

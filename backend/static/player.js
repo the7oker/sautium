@@ -660,6 +660,10 @@
   window.playerCmd = playerCmd;
   window.playTrack = playTrack;
   window.togglePlayPause = togglePlayPause;
+  // Every play-intent gesture in the UI must claim the orphaned browser
+  // output (the tap doubles as the autoplay unlock) — screens call this
+  // before their play-ish fetches (sessions, albums, radio, jump).
+  window.maybeClaimRenderer = maybeClaimRenderer;
   window.browserRenderer = browserRenderer;
   window.fetchPlaylist = fetchPlaylist;
 
