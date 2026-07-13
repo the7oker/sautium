@@ -56,6 +56,12 @@ REUSE THE CATALOG
   description, brand (must match the canonical brands or be a new
   one to propose), patent_or_source (URL or patent number, optional),
   introduced_year, applies_to.
+- Attach a brand technology to THIS model only when a source ties it
+  to this exact model or its series. Brands introduce technologies in
+  newer lines and market them site-wide — do NOT generalize across
+  the whole range (observed failure: a non-crossover topology from a
+  brand's newest series was wrongly attached to its older
+  crossover-based models).
 
 CITATIONS
 - Every spec value must come from a verifiable source. The
