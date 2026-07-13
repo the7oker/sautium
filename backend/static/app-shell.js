@@ -6789,6 +6789,14 @@
               .replace(/\bUsd\b/i, '($)');
   }
 
+  function humanizeSpecValue(value) {
+    // Canonical enum tokens ("planar_magnetic", "oxygen_free_copper")
+    // are P2P-mergeable data, not display text — prettify only clean
+    // lowercase tokens; numbers, sizes and free text pass through.
+    if (!/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(value)) return value;
+    return value.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  }
+
   function researchChipHTML(gear) {
     if (gear.research_state === 'researching') {
       return '<span class="research-pending is-researching"><span class="pulse"></span>Researching…</span>';
@@ -6805,7 +6813,7 @@
       // Price must never truncate — the signature spec ellipsizes
       // instead. Needs nested spans: text-overflow is inert directly
       // on a flex container ($900 was silently clipping to $90).
-      const sigHtml = sig ? `<span class="chip-sig">${escapeProfileHtml(sig)}</span>` : '';
+      const sigHtml = sig ? `<span class="chip-sig">${escapeProfileHtml(humanizeSpecValue(sig))}</span>` : '';
       const priceHtml = price ? `<span class="chip-price">${escapeProfileHtml(price)}</span>` : '';
       return `<span class="research-chip">${sigHtml}${priceHtml}</span>`;
     }
@@ -7836,7 +7844,7 @@
           .map(s => `
             <div>
               <div class="spec-key">${escapeProfileHtml(s.label || humanizeSpecKey(s.key))}</div>
-              <div class="spec-val">${escapeProfileHtml(String(s.value))}${s.unit ? ' <span style="color:var(--color-text-dim);">' + escapeProfileHtml(s.unit) + '</span>' : ''}</div>
+              <div class="spec-val">${escapeProfileHtml(humanizeSpecValue(String(s.value)))}${s.unit ? ' <span style="color:var(--color-text-dim);">' + escapeProfileHtml(s.unit) + '</span>' : ''}</div>
             </div>
           `).join('');
         if (rows) {
