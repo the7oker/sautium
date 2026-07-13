@@ -313,32 +313,26 @@ def _apply_caveats(src, s_role_name, dst, d_role_name, checks) -> None:
                 continue
             # Conditional caveats: a condition can pass (caveat bites),
             # refute (skip), or be UNVERIFIABLE when the partner's data
-            # is missing. Unverifiable is reported as nodata — "not
-            # checked" must never wear the face of "checked and bad".
-            unverifiable = False
+            # is missing. Unverifiable also skips — the pair's own
+            # nodata checks already say the partner is unmeasured, and
+            # advice-shaped text reads as a live warning no matter what
+            # status it wears. The finding itself belongs to the model
+            # sheet, not to a pair we can't evaluate.
+            applies = True
             if cv.get("load_z_below") is not None:
                 partner_z = _num(partner.get("specs", {}), "impedance_ohm")
-                if partner_z is None:
-                    unverifiable = True
-                elif partner_z >= cv["load_z_below"]:
-                    continue
-            if cv.get("only_above_vrms") is not None:
+                if partner_z is None or partner_z >= cv["load_z_below"]:
+                    applies = False
+            if applies and cv.get("only_above_vrms") is not None:
                 need_v = _need_vrms(partner)
-                if need_v is None:
-                    unverifiable = True
-                elif need_v <= cv["only_above_vrms"]:
-                    continue
-            if unverifiable:
-                checks.append(_check(
-                    "measured", "nodata",
-                    f'{item["name"]}: {cv["text"]}', "m",
-                    "conditional finding — partner data missing, applicability unknown",
-                ))
-            else:
-                checks.append(_check(
-                    "measured", "warn" if cv["severity"] == "warn" else "ok",
-                    f'{item["name"]}: {cv["text"]}', "m",
-                ))
+                if need_v is None or need_v <= cv["only_above_vrms"]:
+                    applies = False
+            if not applies:
+                continue
+            checks.append(_check(
+                "measured", "warn" if cv["severity"] == "warn" else "ok",
+                f'{item["name"]}: {cv["text"]}', "m",
+            ))
 
 
 def _verdict(src, s_role, dst, d_role, checks) -> Dict[str, Any]:
