@@ -7059,11 +7059,38 @@
         </div>`;
     }).join('');
 
+    const DELTA_STYLE = {
+      improves: { mark: '▲', hint: 'addresses a criticized spot in your gear' },
+      adds:     { mark: '+', hint: 'adds what your gear is not praised for' },
+      parity:   { mark: '≈', hint: 'matches what your gear already does well' },
+      regress:  { mark: '▼', hint: 'trade-off vs what your gear is praised for' },
+    };
+    const coverageHTML = (data.coverage || []).map(ax => `
+      <div class="gadv-cov">
+        <div class="gadv-cov-head">
+          <span class="gsys-target">${escapeProfileHtml(ax.label)}</span>
+          <span class="gadv-cov-share">${ax.share_pct != null ? ax.share_pct + '% of your listening weight' : ''}</span>
+        </div>
+        ${ax.strengths.map(s => `<div class="gadv-cov-row is-plus">+ ${escapeProfileHtml(s.name)}: ${escapeProfileHtml(s.term)}</div>`).join('')}
+        ${ax.weaknesses.map(w => `<div class="gadv-cov-row is-minus">− ${escapeProfileHtml(w.name)}: ${escapeProfileHtml(w.term)}</div>`).join('')}
+        ${(!ax.strengths.length && !ax.weaknesses.length) ? '<div class="gadv-cov-row">no attributed terms yet</div>' : ''}
+      </div>`).join('');
+
     const candHTML = (data.candidates || []).map(c => {
-      const axes = Object.entries(c.axis_hits || {}).map(([axis, terms]) => `
-        <span class="gadv-axis" title="${escapeProfileHtml(terms.join(', '))}">
-          ${escapeProfileHtml((lib.axes || []).find(a => a.axis === axis)?.label || axis)} ×${terms.length}
-        </span>`).join('');
+      const deltas = (c.delta || []).map(d => {
+        const st = DELTA_STYLE[d.cls] || DELTA_STYLE.parity;
+        const owned = (d.owned || []).length
+          ? ` <span class="gadv-delta-owned">vs yours: “${escapeProfileHtml(d.owned[0])}”</span>` : '';
+        return `
+          <div class="gadv-delta is-${d.cls}" title="${st.hint}">
+            <span class="gadv-delta-mark">${st.mark}</span>
+            <span class="gadv-delta-axis">${escapeProfileHtml(d.label)}</span>
+            <span class="gadv-delta-terms">${escapeProfileHtml((d.cand || []).join(', '))}${owned}</span>
+          </div>`;
+      }).join('');
+      const ergo = (c.ergo_tradeoffs || []).length
+        ? `<div class="gadv-delta is-regress"><span class="gadv-delta-mark">▼</span><span class="gadv-delta-axis">ergonomics</span><span class="gadv-delta-terms">${escapeProfileHtml(c.ergo_tradeoffs.join(', '))}</span></div>`
+        : '';
       return `
         <div class="gadv-cand">
           <div class="gadv-cand-head">
@@ -7076,7 +7103,7 @@
             ${c.driver_type ? `<span>${escapeProfileHtml(humanizeSpecValue(c.driver_type))}</span>` : ''}
             ${c.sentiment_score != null ? `<span class="gadv-sent">${c.sentiment_score}<small>/10 · n≈${c.sentiment_sample || '?'}</small></span>` : ''}
           </div>
-          ${axes ? `<div class="gadv-axes">${axes}</div>` : ''}
+          ${(deltas || ergo) ? `<div class="gadv-deltas">${deltas}${ergo}</div>` : ''}
         </div>`;
     }).join('');
 
@@ -7091,14 +7118,18 @@
           (DR p50 ${lib.dr_p50 ?? '—'} / p90 ${lib.dr_p90 ?? '—'} dB).</p>
         <div class="tiles-row">${axesHTML}</div>
 
+        <div class="profile-group-label">How your gear covers these axes today</div>
+        <div class="gsys-group">${coverageHTML || '<div class="placeholder">No owned transducers researched yet.</div>'}</div>
+
         <div class="profile-group-label">Where the money is dead — and why that's good news</div>
         <div class="gsys-group">${plateauHTML || '<div class="placeholder">No owned electronics analyzed yet.</div>'}</div>
 
-        <div class="profile-group-label">Candidates · price axis</div>
+        <div class="profile-group-label">Candidates · what changes vs what you own</div>
         <div class="gsys-group">${candHTML || '<div class="placeholder">No researched candidates yet — add models with status Want.</div>'}</div>
+        <p class="gsys-legend">▲ addresses a criticized spot in your gear · + adds something yours isn't praised for ·
+          ≈ parity · ▼ trade-off. Terms are attributed community voice (forum tier), never converted to scores;
+          compatibility comes from the deterministic pair engine — see System.</p>
         <p class="gsys-legend">${escapeProfileHtml(data.pool_note || '')}</p>
-        <p class="gsys-legend">Trait matches come from attributed community praise (forum voice),
-          compatibility from the deterministic pair engine — see System. No merged scores by design.</p>
       </section>`;
     const back = root.querySelector('[data-gadv-back]');
     if (back) back.addEventListener('click', () => navigate('more/profile'));

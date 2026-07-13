@@ -40,14 +40,18 @@ _TIMBRE_GENRES = (
     "Soul", "Blues", "Vocal",
 )
 
-# praise-term keyword → listening axis. Sentiment terms are community
+# sentiment-term keyword → listening axis. Sentiment terms are community
 # voice (tier F): shown as attributed matches, never converted to a score.
+# The same map runs over praise (strengths) AND criticism (weaknesses) —
+# the delta between a candidate and the owned baseline is the product.
 _AXIS_TERMS = {
     "sub_bass": ("bass", "slam", "sub", "impact", "punch", "dynamics"),
-    "texture_stage": ("stage", "texture", "detail", "resolution",
+    "texture_stage": ("stage", "texture", "detail", "resolution", "resolving",
                       "imaging", "separation", "air", "spacious", "wide"),
     "timbre_vocal": ("timbre", "natural", "organic", "vocal", "midrange", "tonal"),
 }
+# Non-sonic trade-offs worth surfacing on a candidate card.
+_ERGO_TERMS = ("comfort", "clamp", "weight", "heavy", "hot", "fit", "bulky")
 
 _AXIS_LABELS = {
     "sub_bass": "sub-bass / slam",
@@ -189,10 +193,66 @@ def _load_specs(model_ids: List[str]) -> Dict[str, Dict[str, str]]:
     return out
 
 
-def _candidates(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Researched transducers not currently owned: the want-list plus
-    the rest of the catalog. Small pool is stated, never hidden."""
-    own_ids = {c["model_id"] for c in analysis["components"] if c["status"] == "own"}
+def _axis_hits(terms: List[str]) -> Dict[str, List[str]]:
+    out: Dict[str, List[str]] = {}
+    for axis, keywords in _AXIS_TERMS.items():
+        hits = [t for t in terms if any(k in t.lower() for k in keywords)]
+        if hits:
+            out[axis] = hits
+    return out
+
+
+def _load_terms(model_ids: List[str]) -> Dict[str, Dict[str, List[str]]]:
+    """{model_id: {'praise': [...], 'criticism': [...]}}"""
+    if not model_ids:
+        return {}
+    rows = db_query(
+        """
+        SELECT gear_model_id::text AS model_id, polarity::text AS polarity, term
+        FROM gear_sentiment_terms
+        WHERE gear_model_id = ANY(%(ids)s::uuid[])
+        """,
+        {"ids": model_ids},
+    )
+    out: Dict[str, Dict[str, List[str]]] = {}
+    for r in rows:
+        out.setdefault(r["model_id"], {"praise": [], "criticism": []})[r["polarity"]].append(r["term"])
+    return out
+
+
+def _coverage(analysis: Dict[str, Any], lib_axes: List[Dict[str, Any]],
+              terms: Dict[str, Dict[str, List[str]]]) -> List[Dict[str, Any]]:
+    """Per listening axis: what the OWNED transducers are praised for
+    and criticized for — 'your Elite covers this genre, struggles
+    with that one', straight from attributed community terms."""
+    owned = [c for c in analysis["components"]
+             if c["status"] == "own" and c["category"] in ("headphones", "iems")]
+    out = []
+    for ax in lib_axes:
+        axis = ax["axis"]
+        strengths, weaknesses = [], []
+        for c in owned:
+            t = terms.get(c["model_id"], {"praise": [], "criticism": []})
+            for term in _axis_hits(t["praise"]).get(axis, []):
+                strengths.append({"name": c["name"], "term": term})
+            for term in _axis_hits(t["criticism"]).get(axis, []):
+                weaknesses.append({"name": c["name"], "term": term})
+        out.append({**ax, "strengths": strengths, "weaknesses": weaknesses})
+    return out
+
+
+def _candidates(analysis: Dict[str, Any],
+                terms: Dict[str, Dict[str, List[str]]]) -> List[Dict[str, Any]]:
+    """Researched transducers not currently owned, each carrying a
+    DELTA against the owned baseline of the same category: improves /
+    adds / parity / trade-off rows with the exact community terms on
+    both sides. Direction with evidence — never a percentage."""
+    own_by_cat: Dict[str, List[str]] = {}
+    for c in analysis["components"]:
+        if c["status"] == "own" and c["category"] in ("headphones", "iems"):
+            own_by_cat.setdefault(c["category"], []).append(c["model_id"])
+    own_ids = {m for ids in own_by_cat.values() for m in ids}
+
     rows = db_query(
         """
         SELECT gm.id::text AS model_id, b.name AS brand, gm.model,
@@ -208,17 +268,6 @@ def _candidates(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows = [r for r in rows if r["model_id"] not in own_ids
             and r["user_status"] != "previously_owned"]
     specs_by_model = _load_specs([r["model_id"] for r in rows])
-    terms_rows = db_query(
-        """
-        SELECT gear_model_id::text AS model_id, term
-        FROM gear_sentiment_terms
-        WHERE polarity = 'praise' AND gear_model_id = ANY(%(ids)s::uuid[])
-        """,
-        {"ids": [r["model_id"] for r in rows]},
-    ) if rows else []
-    praise_by_model: Dict[str, List[str]] = {}
-    for t in terms_rows:
-        praise_by_model.setdefault(t["model_id"], []).append(t["term"])
 
     pair_status: Dict[str, str] = {}
     order = {"fail": 0, "warn": 1, "nodata": 2, "ok": 3}
@@ -231,12 +280,39 @@ def _candidates(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
     out = []
     for r in rows:
         specs = specs_by_model.get(r["model_id"], {})
-        praise = praise_by_model.get(r["model_id"], [])
-        axis_hits = {}
-        for axis, keywords in _AXIS_TERMS.items():
-            hits = [t for t in praise if any(k in t.lower() for k in keywords)]
-            if hits:
-                axis_hits[axis] = hits
+        cand_t = terms.get(r["model_id"], {"praise": [], "criticism": []})
+        cand_p, cand_c = _axis_hits(cand_t["praise"]), _axis_hits(cand_t["criticism"])
+
+        # Owned baseline = union of same-category owned transducers.
+        base_ids = own_by_cat.get(r["category"], [])
+        base_praise: Dict[str, List[str]] = {}
+        base_crit: Dict[str, List[str]] = {}
+        for mid in base_ids:
+            bt = terms.get(mid, {"praise": [], "criticism": []})
+            for ax, hits in _axis_hits(bt["praise"]).items():
+                base_praise.setdefault(ax, []).extend(hits)
+            for ax, hits in _axis_hits(bt["criticism"]).items():
+                base_crit.setdefault(ax, []).extend(hits)
+
+        delta = []
+        for axis in _AXIS_TERMS:
+            label = _AXIS_LABELS[axis]
+            if axis in cand_p and axis in base_crit:
+                delta.append({"axis": axis, "label": label, "cls": "improves",
+                              "cand": cand_p[axis][:2], "owned": base_crit[axis][:2]})
+            elif axis in cand_p and axis not in base_praise:
+                delta.append({"axis": axis, "label": label, "cls": "adds",
+                              "cand": cand_p[axis][:2], "owned": []})
+            elif axis in cand_p and axis in base_praise:
+                delta.append({"axis": axis, "label": label, "cls": "parity",
+                              "cand": cand_p[axis][:2], "owned": base_praise[axis][:2]})
+            if axis in cand_c and axis in base_praise:
+                delta.append({"axis": axis, "label": label, "cls": "regress",
+                              "cand": cand_c[axis][:2], "owned": base_praise[axis][:2]})
+
+        ergo = [t for t in cand_t["criticism"]
+                if any(k in t.lower() for k in _ERGO_TERMS)]
+
         out.append({
             "model_id": r["model_id"],
             "name": f'{r["brand"]} {r["model"]}',
@@ -247,7 +323,8 @@ def _candidates(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
             "park_compatibility": pair_status.get(r["model_id"], "nodata"),
             "sentiment_score": float(r["sentiment_score"]) if r["sentiment_score"] is not None else None,
             "sentiment_sample": r["sentiment_sample_size"],
-            "axis_hits": axis_hits,
+            "delta": delta,
+            "ergo_tradeoffs": ergo,
         })
     out.sort(key=lambda c: (c["price_usd"] is None, c["price_usd"] or 0))
     return out
@@ -255,9 +332,17 @@ def _candidates(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def advisor() -> Dict[str, Any]:
     analysis = system_analysis()
-    candidates = _candidates(analysis)
+    library = _library_axes()
+    transducer_ids = [c["model_id"] for c in analysis["components"]
+                      if c["category"] in ("headphones", "iems")]
+    catalog_ids = [r["model_id"] for r in db_query(
+        "SELECT id::text AS model_id FROM gear_models WHERE category IN ('headphones','iems')"
+    )]
+    terms = _load_terms(list(set(transducer_ids + catalog_ids)))
+    candidates = _candidates(analysis, terms)
     return {
-        "library": _library_axes(),
+        "library": library,
+        "coverage": _coverage(analysis, library["axes"], terms),
         "plateau": _plateau_diagnosis(analysis),
         "candidates": candidates,
         "pool_note": (

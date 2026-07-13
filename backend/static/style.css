@@ -4648,12 +4648,30 @@ body.has-miniplayer .more-overlay .drawer {
 .gadv-compat.is-fail { color: var(--color-negative); }
 .gadv-sent { font-family: var(--font-mono); color: var(--color-blue-hover); }
 .gadv-sent small { color: var(--color-text-dim); }
-.gadv-axes { display: flex; flex-wrap: wrap; gap: calc(6 * var(--px)); margin-top: calc(7 * var(--px)); }
-.gadv-axis {
-  font: 600 calc(9.5 * var(--px)) / 1 var(--font-mono); letter-spacing: 0.04em;
-  color: var(--color-amber); background: var(--color-amber-weak);
-  padding: calc(3 * var(--px)) calc(6 * var(--px)); border-radius: var(--radius-sm);
+/* coverage rows */
+.gadv-cov { background: var(--color-surface-lo); border-radius: var(--radius-md); padding: calc(10 * var(--px)) calc(12 * var(--px)); }
+.gadv-cov-head { display: flex; align-items: baseline; gap: calc(8 * var(--px)); margin-bottom: calc(4 * var(--px)); }
+.gadv-cov-share { font-family: var(--font-mono); font-size: calc(10.5 * var(--px)); color: var(--color-blue-hover); margin-left: auto; }
+.gadv-cov-row { font-size: calc(12 * var(--px)); color: var(--color-text-dim); padding: calc(2 * var(--px)) 0; }
+.gadv-cov-row.is-plus  { color: var(--color-positive); }
+.gadv-cov-row.is-minus { color: var(--color-negative); }
+
+/* candidate delta rows */
+.gadv-deltas { display: flex; flex-direction: column; gap: calc(3 * var(--px)); margin-top: calc(8 * var(--px)); }
+.gadv-delta { display: flex; align-items: baseline; gap: calc(7 * var(--px)); font-size: calc(12 * var(--px)); line-height: 1.45; }
+.gadv-delta-mark { flex: none; width: calc(12 * var(--px)); text-align: center; font-family: var(--font-mono); }
+.gadv-delta.is-improves .gadv-delta-mark { color: var(--color-positive); }
+.gadv-delta.is-adds     .gadv-delta-mark { color: var(--color-positive); }
+.gadv-delta.is-parity   .gadv-delta-mark { color: var(--color-text-dim); }
+.gadv-delta.is-regress  .gadv-delta-mark { color: var(--color-amber); }
+.gadv-delta-axis {
+  flex: none; font-size: calc(10 * var(--px)); letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--color-text-muted);
+  min-width: calc(88 * var(--px));
 }
+.gadv-delta-terms { color: var(--color-text); }
+.gadv-delta.is-parity .gadv-delta-terms { color: var(--color-text-muted); }
+.gadv-delta-owned { color: var(--color-text-dim); }
 
 .research-chip .chip-sig {
   min-width: 0;
