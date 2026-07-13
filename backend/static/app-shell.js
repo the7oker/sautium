@@ -5983,6 +5983,7 @@
     if (sub === 'hqplayer') return renderHqplayerSettings(root);
     if (sub === 'output')  return renderOutputSettings(root);
     if (sub === 'profile') return renderProfile(root);
+    if (sub === 'gear-system') return renderGearSystem(root);
     if (sub === 'library') return renderLibrary(root);
     if (sub === 'ai')      return renderAI(root);
     if (sub === 'sync')    return renderSync(root);
@@ -6886,6 +6887,124 @@
     if (setRow) setRow.addEventListener('click', () => openSetEmailFlow());
   }
 
+  /* ------------------------------------------------------------------
+   * System — deterministic pair matrix over the park (#more/gear-system)
+   * ------------------------------------------------------------------ */
+
+  const GSYS_CHECK_LABELS = {
+    spl_headroom:   'SPL headroom',
+    driver_ceiling: 'Driver ceiling',
+    damping:        'Damping · ⅛ rule',
+    bridging:       'Impedance bridging',
+    level:          'Gain staging',
+    formats:        'Formats',
+  };
+  const GSYS_STATUS = {
+    ok:     { mark: '✓', label: 'OK' },
+    warn:   { mark: '⚠', label: 'Caveat' },
+    fail:   { mark: '✗', label: 'Conflict' },
+    nodata: { mark: '⌀', label: 'No data' },
+  };
+
+  function gsysPairHTML(pair, wantIds) {
+    const st = GSYS_STATUS[pair.status] || GSYS_STATUS.nodata;
+    const wantBadge = wantIds.has(pair.target.model_id)
+      ? '<span class="badge badge-want">Want</span>' : '';
+    const checks = pair.checks.map(c => `
+      <div class="gsys-check is-${c.status}">
+        <span class="gsys-check-name">${GSYS_CHECK_LABELS[c.name] || c.name}</span>
+        <span class="gsys-check-num">${escapeProfileHtml(c.numbers)}</span>
+        <span class="gsys-tier gsys-tier-${c.tier}">${c.tier === 'm' ? 'M' : c.tier === 'd' ? 'D' : 'DS'}</span>
+        ${c.note ? `<span class="gsys-note">${escapeProfileHtml(c.note)}</span>` : ''}
+      </div>`).join('');
+    return `
+      <div class="gsys-pair is-${pair.status}">
+        <div class="gsys-pair-head">
+          <span class="gsys-mark">${st.mark}</span>
+          <span class="gsys-target">${escapeProfileHtml(pair.target.name)}</span>
+          ${wantBadge}
+        </div>
+        ${checks}
+      </div>`;
+  }
+
+  async function renderGearSystem(root) {
+    let data = null;
+    try {
+      const r = await fetch('/api/profile/gear/system');
+      if (r.ok) data = await r.json();
+    } catch (_) { /* fall through */ }
+    if (!data) {
+      root.innerHTML = '<section class="screen"><div class="screen-head"><h2 class="screen-title">System</h2></div><div class="placeholder">Не вдалося завантажити аналіз системи.</div></section>';
+      return;
+    }
+
+    const wantIds = new Set(data.components.filter(c => c.status === 'want').map(c => c.model_id));
+    const order = { fail: 0, warn: 1, ok: 2, nodata: 3 };
+    const sortPairs = arr => arr.sort((a, b) =>
+      (order[a.status] - order[b.status]) || a.target.name.localeCompare(b.target.name));
+
+    const linePairs = sortPairs(data.pairs.filter(p => p.source.role === 'line_out'));
+    const transportPairs = sortPairs(data.pairs.filter(p => p.source.role === 'transport'));
+    const hpBySource = {};
+    for (const p of data.pairs.filter(p => p.source.role === 'hp_out')) {
+      (hpBySource[p.source.name] || (hpBySource[p.source.name] = [])).push(p);
+    }
+
+    let groups = '';
+    if (linePairs.length) {
+      groups += `<div class="profile-group-label">Source → Amplifier</div>
+        <div class="gsys-group">${linePairs.map(p => `
+          <div class="gsys-pair is-${p.status}">
+            <div class="gsys-pair-head">
+              <span class="gsys-mark">${(GSYS_STATUS[p.status] || GSYS_STATUS.nodata).mark}</span>
+              <span class="gsys-target">${escapeProfileHtml(p.source.name)} → ${escapeProfileHtml(p.target.name)}</span>
+            </div>
+            ${p.checks.map(c => `
+              <div class="gsys-check is-${c.status}">
+                <span class="gsys-check-name">${GSYS_CHECK_LABELS[c.name] || c.name}</span>
+                <span class="gsys-check-num">${escapeProfileHtml(c.numbers)}</span>
+                <span class="gsys-tier gsys-tier-${c.tier}">${c.tier === 'm' ? 'M' : c.tier === 'd' ? 'D' : 'DS'}</span>
+                ${c.note ? `<span class="gsys-note">${escapeProfileHtml(c.note)}</span>` : ''}
+              </div>`).join('')}
+          </div>`).join('')}</div>`;
+    }
+    for (const src of Object.keys(hpBySource).sort()) {
+      groups += `<div class="profile-group-label">${escapeProfileHtml(src)} → headphones</div>
+        <div class="gsys-group">${sortPairs(hpBySource[src]).map(p => gsysPairHTML(p, wantIds)).join('')}</div>`;
+    }
+    if (transportPairs.length) {
+      groups += `<div class="profile-group-label">Digital transport</div>
+        <div class="gsys-group">${transportPairs.map(p => gsysPairHTML(p, wantIds)).join('')}</div>`;
+    }
+    if (!groups) {
+      groups = '<div class="placeholder">No analyzable pairs yet — add gear and let research finish.</div>';
+    }
+
+    const lib = data.library || {};
+    const libLine = (lib.dr_p50 != null)
+      ? `Peak target ${data.peak_target_db} dB SPL · your library DR p50 ${lib.dr_p50} / p90 ${lib.dr_p90} dB`
+      : `Peak target ${data.peak_target_db} dB SPL`;
+
+    root.innerHTML = `
+      <section class="screen gsys-screen">
+        <div class="screen-head">
+          <button class="back-btn" data-gsys-back aria-label="Back">‹</button>
+          <h2 class="screen-title">System</h2>
+        </div>
+        <p class="gsys-context">${libLine}. Deterministic layer only — spec math with
+          audibility thresholds; community sentiment lives on each model's sheet.</p>
+        ${groups}
+        <p class="gsys-legend">
+          <span class="gsys-tier gsys-tier-ds">DS</span> datasheet ·
+          <span class="gsys-tier gsys-tier-m">M</span> measured ·
+          <span class="gsys-tier gsys-tier-d">D</span> derived by the engine
+        </p>
+      </section>`;
+    const back = root.querySelector('[data-gsys-back]');
+    if (back) back.addEventListener('click', () => navigate('more/profile'));
+  }
+
   async function renderProfile(root) {
     let profile = null, account = null, config = null, scrobbling = null;
     // emailStatus stays null at first paint — fetched in background
@@ -7039,6 +7158,14 @@
           <button class="add-btn" data-add-gear><span class="plus">+</span>Add gear</button>
         </div>
         ${gearSection}
+        ${gear.length ? `
+        <button class="form-row is-clickable gsys-entry" data-go-system>
+          <span class="form-label">System analysis</span>
+          <span class="form-actions">
+            <span class="form-value action">Pair matrix</span>
+            <span class="link-chev">${PROFILE_ICONS.chev}</span>
+          </span>
+        </button>` : ''}
 
         <div class="profile-group-label">Sociability</div>
         <div class="sociability">
@@ -7070,6 +7197,8 @@
       });
     });
     root.querySelector('[data-add-gear]').addEventListener('click', () => addGearSheet.open());
+    const sysEntry = root.querySelector('[data-go-system]');
+    if (sysEntry) sysEntry.addEventListener('click', () => navigate('more/gear-system'));
     root.querySelector('[data-edit-toggle]').addEventListener('click', () => openInlineProfileEditor(profile));
 
     // No verify-email handler attached here — the email row starts in
