@@ -311,23 +311,34 @@ def _apply_caveats(src, s_role_name, dst, d_role_name, checks) -> None:
         for cv in item.get("caveats", []):
             if cv["role"] is not None and cv["role"] != active_role:
                 continue
+            # Conditional caveats: a condition can pass (caveat bites),
+            # refute (skip), or be UNVERIFIABLE when the partner's data
+            # is missing. Unverifiable is reported as nodata — "not
+            # checked" must never wear the face of "checked and bad".
+            unverifiable = False
             if cv.get("load_z_below") is not None:
-                # Conditional caveat: only bites below the load threshold.
-                # Unknown partner impedance stays conservative (applies).
                 partner_z = _num(partner.get("specs", {}), "impedance_ohm")
-                if partner_z is not None and partner_z >= cv["load_z_below"]:
+                if partner_z is None:
+                    unverifiable = True
+                elif partner_z >= cv["load_z_below"]:
                     continue
             if cv.get("only_above_vrms") is not None:
-                # High-gain-only findings don't bite pairings that live
-                # comfortably on low gain: skip when the partner's peak-
-                # target voltage need fits under the threshold.
                 need_v = _need_vrms(partner)
-                if need_v is not None and need_v <= cv["only_above_vrms"]:
+                if need_v is None:
+                    unverifiable = True
+                elif need_v <= cv["only_above_vrms"]:
                     continue
-            checks.append(_check(
-                "measured", "warn" if cv["severity"] == "warn" else "ok",
-                f'{item["name"]}: {cv["text"]}', "m",
-            ))
+            if unverifiable:
+                checks.append(_check(
+                    "measured", "nodata",
+                    f'{item["name"]}: {cv["text"]}', "m",
+                    "conditional finding — partner data missing, applicability unknown",
+                ))
+            else:
+                checks.append(_check(
+                    "measured", "warn" if cv["severity"] == "warn" else "ok",
+                    f'{item["name"]}: {cv["text"]}', "m",
+                ))
 
 
 def _verdict(src, s_role, dst, d_role, checks) -> Dict[str, Any]:
