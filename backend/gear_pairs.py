@@ -189,11 +189,17 @@ def _pair_hp_transducer(src, s_role, dst, d_role) -> Dict[str, Any]:
             s_role["rail_tier"],
         ))
         if d_role["max_spl"] is not None:
+            ceiling_ok = d_role["max_spl"] >= PEAK_TARGET_DB
             checks.append(_check(
-                "driver_ceiling", "ok" if d_role["max_spl"] >= PEAK_TARGET_DB else "warn",
+                "driver_ceiling", "ok" if ceiling_ok else "warn",
                 f"driver max SPL {d_role['max_spl']:.0f} dB vs {PEAK_TARGET_DB} dB target",
                 "ds",
-                "the driver, not the amp, is the ultimate ceiling",
+                ("good news: the driver stays clean well past the target, so the amp "
+                 "headroom above is genuinely usable margin — just not an invitation "
+                 "to chase the amp's electrical maximum")
+                if ceiling_ok else
+                ("the driver distorts before the target is reached — the driver, not "
+                 "the amp, sets this pair's real ceiling; extra amp power adds nothing"),
             ))
 
     out_z = s_role["out_z"]
