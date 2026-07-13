@@ -26,6 +26,8 @@ live score distributions 2026-07-02.
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+import track_similarity
+
 
 # ── Entities ────────────────────────────────────────────────────────────────
 
@@ -122,6 +124,9 @@ class Source:
                                # `ORDER BY vector <=> q LIMIT n` uses the index, the wrapped
                                # `1-(...)` score form never does. pgvector 0.5 returns at most
                                # hnsw.ef_search rows, so executors SET LOCAL hnsw.ef_search=1000.
+    knn_limit: int = 1000      # inner-KNN overscan; must stay <= the executor's ef_search.
+                               # Sources with an expensive per-row score (seed's chamfer
+                               # subquery) trim it to bound the rerank cost.
     expand: Optional[Callable[[Any], Any]] = None
 
 
@@ -132,6 +137,60 @@ class Tool:
     broad: bool = False        # non-selective gate (mode ~51%): browse roll-ups above the
                                # atom are skipped when every active tool is broad — ranking
                                # by count then degenerates to catalog size (corr 0.94)
+
+
+# Seed (audio↔audio) two-tier score over an `embeddings e` row — the same
+# formula as track_similarity.similar_tracks (weights imported so calibration
+# stays single-source): segment chamfer + octave-folded BPM + energy delta −
+# shared album-genre bonus, expressed as correlated subqueries so it fits the
+# engine's per-row score grammar. Mean↔mean was dropped 2026-07-13: the
+# post-mean-flip space is concentrated (a whole KNN batch within dist
+# 0.042–0.070 against ~0.19 intra-track segment spread) and its ordering is
+# near-noise — see track_similarity.py. Mean-KNN survives only as the
+# retrieve branch (knn=), bounded by knn_limit to keep the per-row chamfer
+# rerank affordable (~1ms/row).
+_SEED_SCORE = f"""1 - (
+    (SELECT avg(w.best) FROM (
+        SELECT min(ss.vector <=> cs.vector) AS best
+        FROM embedding_segments ss
+        JOIN embeddings se ON se.id = ss.embedding_id
+        CROSS JOIN embedding_segments cs
+        WHERE se.track_id = CAST(:seed_tid AS uuid)
+          AND cs.embedding_id = e.id
+        GROUP BY ss.segment_index) w)
+    + {track_similarity.W_BPM} * COALESCE((
+        SELECT LEAST(abs(q.r), abs(q.r + 1), abs(q.r - 1)) FROM (
+            SELECT ln(NULLIF(c.bpm, 0) / NULLIF(s.bpm, 0)) / ln(2) AS r
+            FROM audio_features c, audio_features s
+            WHERE c.track_id = e.track_id
+              AND s.track_id = CAST(:seed_tid AS uuid)) q
+      ), {track_similarity.BPM_NEUTRAL})
+    + {track_similarity.W_ENERGY} * COALESCE((
+        SELECT abs(c.energy - s.energy)
+        FROM audio_features c, audio_features s
+        WHERE c.track_id = e.track_id
+          AND s.track_id = CAST(:seed_tid AS uuid)
+      ), {track_similarity.ENERGY_NEUTRAL})
+    - {track_similarity.W_GENRE} * LEAST((
+        SELECT count(DISTINCT sag.genre_id) FROM album_genres sag
+        WHERE sag.genre_id IN (
+                SELECT sag2.genre_id FROM album_genres sag2
+                WHERE sag2.album_id IN (
+                    SELECT sav.album_id FROM media_files smf
+                    JOIN album_variants sav ON sav.id = smf.album_variant_id
+                    WHERE smf.track_id = CAST(:seed_tid AS uuid)
+                    UNION
+                    SELECT satr.album_id FROM album_tracks satr
+                    WHERE satr.track_id = CAST(:seed_tid AS uuid)))
+          AND sag.album_id IN (
+                SELECT cav.album_id FROM media_files cmf
+                JOIN album_variants cav ON cav.id = cmf.album_variant_id
+                WHERE cmf.track_id = e.track_id
+                UNION
+                SELECT catr.album_id FROM album_tracks catr
+                WHERE catr.track_id = e.track_id)
+      ), {track_similarity.GENRE_CAP})
+)"""
 
 
 TOOLS: dict[str, Tool] = {
@@ -235,20 +294,24 @@ TOOLS: dict[str, Tool] = {
     "year": Tool("year", sources=(
         Source("year", "albums", "al.release_year BETWEEN :year_from AND :year_to",
                is_gate=True),)),
-    # Current-track context: the seed track's own CLAP vector as a relevance
-    # source (audio↔audio — no model needed, the vector is read from the DB).
-    # Characteristic ⇒ rolls up: similar tracks / albums / artists / genres from
-    # one checkbox, AND-composable with every gate ("similar + Trip-Hop only").
-    # Track-MEAN↔mean space stays healthy for seed (unlike text↔mean): the
-    # 2026-07-05 post-mean-flip probe reads p90≈.76. Ceil .97 = above the
-    # tie-mass — a real seed had 404 tracks ≥.93 and 0 ≥.97; a top-10 ceil
-    # would clamp them all into 1.00 and the list would go alphabetical. The
-    # self-exclusion gate keeps the seed out of the matched set, so its own
-    # album/artist rank only via their OTHER similar content.
+    # Current-track context ("Similar to now playing"): the two-tier audio↔audio
+    # score (_SEED_SCORE — same formula/weights as radio and the Now Playing
+    # shelf, see track_similarity.py). Characteristic ⇒ rolls up: similar
+    # tracks / albums / artists / genres from one checkbox, AND-composable with
+    # every gate ("similar + Trip-Hop only"). Retrieve = mean-KNN (knn=, recall
+    # only — mean ordering is near-noise), rerank = chamfer + continuity on the
+    # knn_limit pool. Floor/ceil from the 2026-07-13 three-seed probe (pool
+    # p90 .80–.88, top-1 .87–.93): floor .78 keeps sparse corners alive (a
+    # Berlin-school seed's pool p90 was .796), ceil .95 sits ABOVE the probe's
+    # max top-1 so near-ties never clamp into 1.00. The self-exclusion gate
+    # keeps the seed out of the matched set, so its own album/artist rank only
+    # via their OTHER similar content.
     "seed": Tool("seed", sources=(
-        Source("seed", "embeddings", "1-(e.vector <=> CAST(:qseed AS vector))",
+        Source("seed", "embeddings", _SEED_SCORE,
                targets=("track", "album", "artist", "genre"),
-               floor=0.76, ceil=0.97, weight=1.0),
+               floor=0.78, ceil=0.95, weight=1.0,
+               knn="e.vector <=> CAST(:qseed AS vector)",
+               knn_limit=track_similarity.POOL),
         Source("seed_not_self", "tracks", "t.id <> CAST(:seed_tid AS uuid)",
                is_gate=True),
     )),
@@ -499,7 +562,7 @@ def _retrieve_branch(src: Source, entity: EntityDef, corpus: str, gates: list, K
         # reach tracks via their embeddings row).
         path = _route(src.table, entity, corpus)
         alias = _ALIAS[src.table]
-        frm = f"(SELECT * FROM {src.table} {alias} ORDER BY {src.knn} LIMIT 1000) {alias}"
+        frm = f"(SELECT * FROM {src.table} {alias} ORDER BY {src.knn} LIMIT {src.knn_limit}) {alias}"
         for i in range(len(path) - 1, 0, -1):
             tbl = path[i - 1][0]
             frm += f" JOIN {tbl} {_ALIAS[tbl]} ON {path[i][1]}"

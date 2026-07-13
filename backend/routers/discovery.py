@@ -339,5 +339,9 @@ def discovery_search(
         # ORDER BY in the branch re-sorts relaxed_order's stream anyway.
         db.execute(text("SET LOCAL hnsw.ef_search = 1000"))
         db.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
+        # Engine queries are index probes + small-set reranks; PG's JIT compiles
+        # the big per-row score expressions (seed's chamfer subquery) for >1s of
+        # pure overhead and never pays for itself here (measured 1.87s → 0.80s).
+        db.execute(text("SET LOCAL jit = off"))
         rows = db.execute(text(sql), params).fetchall()
     return {"status": "ok", "results": _SHAPERS[target](rows), "warming": warming}
