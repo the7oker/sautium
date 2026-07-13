@@ -6795,16 +6795,19 @@
     }
     if (gear.research_state === 'cached') {
       const specs = gear.specs || {};
-      let parts = [];
       // Pick a single "signature spec" per category — what audiophiles
       // would actually want at a glance. price always trails.
-      if (specs.architecture) parts.push(specs.architecture);
-      else if (specs.topology) parts.push(specs.topology);
-      else if (specs.driver_type) parts.push(specs.driver_type);
-      else if (specs.type) parts.push(specs.type);
-      if (specs.price_usd) parts.push('$' + specs.price_usd);
-      if (parts.length === 0) parts = [categoryLabel(gear.category)];
-      return `<span class="research-chip">${escapeProfileHtml(parts.join(' · '))}</span>`;
+      const sig = specs.architecture || specs.topology || specs.driver_type || specs.type || '';
+      const price = specs.price_usd ? '$' + specs.price_usd : '';
+      if (!sig && !price) {
+        return `<span class="research-chip">${escapeProfileHtml(categoryLabel(gear.category))}</span>`;
+      }
+      // Price must never truncate — the signature spec ellipsizes
+      // instead. Needs nested spans: text-overflow is inert directly
+      // on a flex container ($900 was silently clipping to $90).
+      const sigHtml = sig ? `<span class="chip-sig">${escapeProfileHtml(sig)}</span>` : '';
+      const priceHtml = price ? `<span class="chip-price">${escapeProfileHtml(price)}</span>` : '';
+      return `<span class="research-chip">${sigHtml}${priceHtml}</span>`;
     }
     return '<span class="research-pending">Awaiting research</span>';
   }

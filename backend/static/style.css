@@ -4543,9 +4543,16 @@ body.has-miniplayer .more-overlay .drawer {
   letter-spacing: 0.02em;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
   max-width: calc(150 * var(--px));
 }
+.research-chip .chip-sig {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.research-chip .chip-price { flex: none; }
+.research-chip .chip-sig + .chip-price::before { content: " · "; white-space: pre; }
 .research-pending {
   display: inline-flex;
   align-items: center;
