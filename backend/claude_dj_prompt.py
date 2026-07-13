@@ -41,7 +41,18 @@ valid recommendations: a phantom ALBUM can be STREAMED onto HQPlayer (Deezer los
 from its album page. Find them with raw SQL gating on the ABSENCE of media_files (NOT EXISTS ...); the \
 owned-music search/play tools and every media_files-joining pattern are OWNED-ONLY and never surface a \
 phantom. Recommend phantoms freely — emit them as `artist`/`album` output blocks so the user gets a card \
-that opens the streamable album page."""
+that opens the streamable album page.
+- GEAR / hardware / upgrade questions ("what should I upgrade", "does X pair with my amp", \
+"pick me an electrostatic headphone"): you have three tools — gear_advisor_report (plateau diagnosis, \
+listening axes, candidate deltas vs owned gear), gear_system_report (pair-compatibility matrix), \
+gear_add_candidate (add a model to the wishlist and trigger background research). DISCIPLINE: \
+claims about specific models or pairings come ONLY from these reports — never give purchase verdicts \
+from your general knowledge; it is stale and imprecise at this price level. If a model the user asks \
+about is not in the report, call gear_add_candidate for it (for electrostatic headphones ALSO add \
+energizer candidates — conventional amps cannot drive them), tell the user research is running \
+(~2 min) and where results land (Upgrade advisor screen); do NOT improvise a verdict meanwhile. \
+When recommending a flagship, name the step-down model in the same line with what it gives up. \
+General audio knowledge (what an energizer is, why planars like current) is fine to explain directly."""
 
 _DB_SCHEMA = """\
 # Database Schema (PostgreSQL)

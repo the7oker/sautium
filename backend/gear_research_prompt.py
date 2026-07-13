@@ -186,6 +186,43 @@ def _format_brand_list() -> str:
     return ", ".join(r["name"] for r in rows) if rows else "(empty)"
 
 
+def build_pair_prompt(name_a: str, name_b: str) -> str:
+    """Prompt for a pair-SYNERGY research call: how this specific
+    combination sounds per aggregated owner experience. Most pairs in
+    the world were never discussed — 'not discussed' is a first-class
+    result, never a failure."""
+    return f"""You are researching community experience with one SPECIFIC
+audio pairing:
+
+  {name_a}  +  {name_b}
+
+Search for dedicated impressions of exactly this combination (owner
+threads, "X with Y?" posts, reviews that used one to evaluate the
+other). Sources ranked: dedicated comparison threads > owner posts
+naming both units > reviews mentioning the pairing in passing. Do NOT
+bypass any bot protection; search snippets are acceptable evidence at
+forum tier.
+
+STRICT HONESTY RULES
+- This is community voice about SOUND and PRACTICE of the pairing —
+  synergy verdicts, notable warnings ("underpowered for", "fatiguing
+  together"), recommended alternatives named in those same threads.
+- If you find fewer than ~3 independent voices on this exact pairing,
+  set "discussed": false and leave the rest empty. Most pairs were
+  never discussed; saying so is the correct output.
+- Never infer synergy from the two units' individual reputations.
+
+OUTPUT (JSON, strict):
+{{
+  "discussed": true,
+  "summary": "2-4 sentences of consensus about this pairing.",
+  "terms": ["short verdict phrases about the PAIR, 2-5 words each, max 6"],
+  "sample_size": 12,
+  "source_urls": ["...", "..."]
+}}
+"""
+
+
 def build_prompt(brand: str, model: str, category: str) -> str:
     """Build the full system prompt for a single research call."""
     spec_catalog = _format_attribute_catalog(category)

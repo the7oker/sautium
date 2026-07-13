@@ -361,6 +361,22 @@ def add_gear(req: GearAddRequest) -> Dict[str, Any]:
         """,
         {"gm_id": gm_id, "status": req.status, "notes": notes},
     )
+
+    # A want-candidate transducer immediately queues pair-synergy
+    # research against the owned sources it would hang off — by the
+    # time the user opens the advisor, the community voice on those
+    # exact pairings is already cached.
+    if req.status == "want" and req.category in ("headphones", "iems"):
+        from gear_research_worker import enqueue_pair
+        own_sources = db_query(
+            """
+            SELECT ug.gear_model_id::text AS id
+            FROM user_gear ug JOIN gear_models gm ON gm.id = ug.gear_model_id
+            WHERE ug.status = 'own' AND gm.category IN ('amp', 'player')
+            """
+        )
+        for src in own_sources:
+            enqueue_pair(gm_id, src["id"])
     if inserted is None:
         inserted = db_query_one(
             "SELECT id::text AS id FROM user_gear WHERE gear_model_id = %(id)s::uuid",

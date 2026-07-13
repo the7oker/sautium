@@ -110,10 +110,15 @@ def _roles(item: Dict[str, Any]) -> List[Dict[str, Any]]:
         sens_v = None
         if sens_mw is not None and z:
             sens_v = sens_mw + 10 * math.log10(1000 / z)  # derived dB/V
+        driver = specs.get("driver_type") or ""
         roles.append({
             "role": "transducer", "z": z, "sens_mw": sens_mw, "sens_v": sens_v,
             "max_spl": _num(specs, "max_spl_db"),
-            "driver_type": specs.get("driver_type"),
+            "driver_type": driver,
+            # Electrostats live in a different voltage domain entirely:
+            # sensitivity per 100 Vrms + a DC bias supply requirement.
+            "electrostatic": "electrostat" in driver.lower(),
+            "sens_100v": _num(specs, "sensitivity_db_100v"),
         })
 
     if cat in ("amp", "player"):
@@ -133,6 +138,7 @@ def _roles(item: Dict[str, Any]) -> List[Dict[str, Any]]:
             "role": "hp_out", "rail_v": rail, "rail_tier": rail_tier,
             "power_points": points,
             "out_z": _num(specs, "output_impedance_ohm"),
+            "bias_v": _num(specs, "electrostatic_bias_v"),
         })
 
     line_se = _num(specs, "line_out_vrms_se") or _num(specs, "output_voltage_rca_vrms")
@@ -182,6 +188,45 @@ def _check(name, status, numbers, tier, note=None):
 
 def _pair_hp_transducer(src, s_role, dst, d_role) -> Dict[str, Any]:
     checks = []
+
+    # Electrostatic domain gate: bias supply + 100V-swing territory.
+    # A conventional headphone output is a hard incompatibility, not a
+    # headroom question — different connector, different physics.
+    if d_role.get("electrostatic"):
+        if s_role.get("bias_v") is None:
+            checks.append(_check(
+                "domain", "fail",
+                "electrostatic load — needs an energizer (DC bias + 100V-domain swing); "
+                "conventional headphone outputs cannot drive it",
+                "ds",
+            ))
+            return _verdict(src, "hp_out", dst, "transducer", checks)
+        sens100, rail = d_role.get("sens_100v"), s_role["rail_v"]
+        if sens100 is not None and rail:
+            need_v = 100 * 10 ** ((PEAK_TARGET_DB - sens100) / 20)
+            margin = 20 * math.log10(rail / need_v)
+            status = ("ok" if margin >= THRESHOLDS["headroom_ok_db"]
+                      else "warn" if margin >= 0 else "fail")
+            checks.append(_check(
+                "spl_headroom", status,
+                f"{PEAK_TARGET_DB} dB peaks need {need_v:.0f} Vrms; energizer swings ~{rail:.0f} Vrms → {margin:+.0f} dB",
+                s_role["rail_tier"],
+            ))
+        else:
+            checks.append(_check(
+                "spl_headroom", "nodata",
+                "missing: sensitivity per 100 Vrms or energizer voltage swing", "d",
+            ))
+        return _verdict(src, "hp_out", dst, "transducer", checks)
+
+    if s_role.get("bias_v") is not None:
+        checks.append(_check(
+            "domain", "fail",
+            "electrostatic energizer output — cannot drive conventional low-impedance headphones",
+            "ds",
+        ))
+        return _verdict(src, "hp_out", dst, "transducer", checks)
+
     z, sens_v = d_role["z"], d_role["sens_v"]
     rail = s_role["rail_v"]
 
@@ -379,6 +424,28 @@ def system_analysis() -> Dict[str, Any]:
                 pairs.append(_pair_line(src, sr, dst, dr))
             elif sr["role"] == "transport" and dr["role"] == "digital_in":
                 pairs.append(_pair_transport(src, sr, dst, dr))
+
+    # Community pair-synergy voice (the fourth voice, tier F): attached
+    # to any pair whose model combination carries a cached, discussed
+    # note. Never gates the status — physics gates, consensus informs.
+    note_rows = db_query(
+        """
+        SELECT model_a::text AS a, model_b::text AS b, summary, terms, sample_size
+        FROM gear_pair_notes
+        WHERE research_state = 'cached' AND summary IS NOT NULL
+        """
+    )
+    notes = {(r["a"], r["b"]): r for r in note_rows}
+    for p in pairs:
+        key = tuple(sorted((p["source"]["model_id"], p["target"]["model_id"])))
+        n = notes.get(key)
+        if n:
+            terms = " · ".join(n["terms"] or []) or (n["summary"] or "")[:120]
+            p["checks"].append(_check(
+                "synergy", "ok",
+                f'{terms} (~{n["sample_size"] or "?"} voices)',
+                "f", n["summary"],
+            ))
 
     library = db_query(
         """

@@ -313,7 +313,22 @@ def _candidates(analysis: Dict[str, Any],
         ergo = [t for t in cand_t["criticism"]
                 if any(k in t.lower() for k in _ERGO_TERMS)]
 
+        synergy = db_query(
+            """
+            SELECT bo.name || ' ' || go2.model AS with_name, pn.terms, pn.sample_size
+            FROM gear_pair_notes pn
+            JOIN gear_models go2 ON go2.id = CASE WHEN pn.model_a = %(c)s::uuid
+                                                  THEN pn.model_b ELSE pn.model_a END
+            JOIN gear_brands bo ON bo.id = go2.brand_id
+            WHERE (pn.model_a = %(c)s::uuid OR pn.model_b = %(c)s::uuid)
+              AND pn.research_state = 'cached' AND pn.summary IS NOT NULL
+            """,
+            {"c": r["model_id"]},
+        )
+
         out.append({
+            "synergy": [{"with": s["with_name"], "terms": s["terms"] or [],
+                         "sample": s["sample_size"]} for s in synergy],
             "model_id": r["model_id"],
             "name": f'{r["brand"]} {r["model"]}',
             "category": r["category"],

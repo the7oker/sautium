@@ -1488,6 +1488,7 @@ INSERT INTO gear_spec_attributes (id, key, label, description, unit, value_type,
     ('b8e18aa6-6564-5211-a73d-0a6741681512', 'driver_type', 'Driver Type', 'The fundamental transducer technology used to generate sound, such as dynamic, planar magnetic, electrostatic, or balanced armature. Fundamentally shapes distortion behavior, transient speed, and typical frequency response shape.', NULL, 'enum'::spec_value_type, ARRAY['dynamic','planar_magnetic','electrostatic','balanced_armature','hybrid','ribbon'], ARRAY['headphones','iems'], TRUE),
     ('81b111b1-5987-5e9f-afb3-1d19b3a79973', 'dsd_max_rate', 'Max Native DSD Rate', 'The highest native (non-DoP) DSD sample rate the DAC can accept and convert, expressed as a DSD multiple (e.g. DSD256, DSD1024). Affects compatibility with high-rate DSD source files.', NULL, 'string'::spec_value_type, NULL, ARRAY['dac'], TRUE),
     ('7662776c-518b-5223-a976-1aa8d60f9f13', 'dynamic_range_db', 'Dynamic Range', 'The ratio between the loudest undistorted signal and the noise floor, expressed in dB. Higher values allow finer resolution of quiet passages and lower audible hiss.', 'dB', 'number'::spec_value_type, NULL, ARRAY['dac'], TRUE),
+    ('50c9ae9e-a33b-56ee-8193-d5531573ad1f', 'electrostatic_bias_v', 'Electrostatic Bias Voltage', 'DC bias an energizer supplies to an electrostatic diaphragm (e.g. 580V STAX PRO). Presence marks the amp as an energizer: it drives electrostats and nothing else.', 'V', 'number'::spec_value_type, NULL, ARRAY['amp'], TRUE),
     ('e67dc87c-500b-5636-80c9-4dcfe97bbfc8', 'enclosure_material', 'Enclosure Material', 'The material of the outer chassis housing the mains block internals. Metal enclosures like aluminum can provide shielding against ambient RFI/EMI compared to plastic housings.', NULL, 'enum'::spec_value_type, ARRAY['aluminum','steel','plastic','wood'], ARRAY['power'], TRUE),
     ('803e8d2a-58cd-5951-a4dc-360c7681cffd', 'external_storage_gb_max', 'Maximum External Storage', 'Total additional storage supported via removable memory cards (e.g. microSD slots), extending the library size beyond internal storage.', 'GB', 'number'::spec_value_type, NULL, ARRAY['player'], TRUE),
     ('050f7908-593e-5404-b3ec-b2409c541aab', 'feedback_topology', 'Feedback Topology', 'Whether the amplifier''s gain stages use global negative feedback, local/nested feedback only, or none at all. Zero-feedback designs are prized by some listeners for a more ''natural'' transient character at the cost of raw measured linearity.', NULL, 'enum'::spec_value_type, ARRAY['zero_feedback','local_feedback','global_feedback','nested_feedback'], ARRAY['amp'], TRUE),
@@ -1533,6 +1534,7 @@ INSERT INTO gear_spec_attributes (id, key, label, description, unit, value_type,
     ('d0365d2e-5c81-5e20-8310-9f4424c2a174', 'power_output_w', 'Power Output', 'Maximum RMS power the amplifier can deliver into a specified load impedance. Determines whether the amp can adequately drive low-sensitivity planar magnetic or electrostatic-class headphones without clipping.', 'W', 'number'::spec_value_type, NULL, ARRAY['amp'], TRUE),
     ('b6866a97-cf3c-5ae1-89b7-0a42d7ed01c1', 'price_usd', 'Price (USD)', 'Manufacturer or authorized-dealer retail price in US dollars. Reflects positioning within the market and value relative to measured performance.', 'USD', 'number'::spec_value_type, NULL, ARRAY['amp','dac','headphones','iems'], TRUE),
     ('5d660801-7c23-5995-946c-eef72b8eafc1', 'rfi_damping_db', 'RFI Damping', 'The maximum attenuation, in decibels, the internal filter applies to radio-frequency interference riding on the mains line. Higher values indicate stronger suppression of noise that can otherwise couple into sensitive analog and digital audio circuits.', 'dB', 'number'::spec_value_type, NULL, ARRAY['power'], TRUE),
+    ('41b1778e-891d-5e1a-95e8-71a1a82447e1', 'sensitivity_db_100v', 'Sensitivity (dB/100Vrms)', 'Electrostatic sensitivity: SPL produced at 100 Vrms input. Electrostats live in a hundreds-of-volts domain — never comparable with dB/mW figures of dynamic/planar headphones.', 'dB SPL', 'number'::spec_value_type, NULL, ARRAY['headphones'], TRUE),
     ('7149a115-569b-52c4-a91d-9d217a2e6dc0', 'sensitivity_db_mw', 'Sensitivity (dB SPL/mW)', 'Sound pressure level produced per milliwatt of input power at 1 kHz. Higher values mean the headphone reaches a given loudness with less amplifier power, affecting how easy it is to drive from portable sources.', 'dB SPL/mW', 'number'::spec_value_type, NULL, ARRAY['headphones'], TRUE),
     ('b1b74abb-3512-5f64-810a-9b3ad5dcd1a0', 'shielding_type', 'Shielding Type', 'The construction used to block electromagnetic and radio-frequency interference from reaching the signal conductors. Foil shielding gives full coverage against high-frequency noise, while braid adds mechanical durability and low-frequency rejection.', NULL, 'enum'::spec_value_type, ARRAY['foil','braid','foil_and_braid','none'], ARRAY['cable'], TRUE),
     ('9ec8a827-701c-5686-8b11-2d0dbb1f4958', 'signal_to_noise_db', 'Signal-to-Noise Ratio', 'Ratio between the maximum output signal level and the amplifier''s residual noise floor. Higher values indicate a blacker background, which is critical for resolving low-level detail with sensitive IEMs.', 'dB', 'number'::spec_value_type, NULL, ARRAY['amp','dac'], TRUE),
@@ -1628,6 +1630,28 @@ CREATE TABLE IF NOT EXISTS gear_measured_caveats (
     UNIQUE (gear_model_id, text)
 );
 CREATE INDEX IF NOT EXISTS idx_gear_caveats_model ON gear_measured_caveats(gear_model_id);
+
+-- Community pair-synergy notes: how a specific combination SOUNDS
+-- per aggregated owner experience. Third knowledge type after model
+-- facts and pair physics; researched strictly on demand (combinatorics
+-- forbid "research everything"), cached forever, P2P-mergeable via
+-- deterministic id. model_a/model_b are canonically ordered (a < b).
+CREATE TABLE IF NOT EXISTS gear_pair_notes (
+    id              UUID PRIMARY KEY,
+    model_a         UUID NOT NULL REFERENCES gear_models(id) ON DELETE CASCADE,
+    model_b         UUID NOT NULL REFERENCES gear_models(id) ON DELETE CASCADE,
+    research_state  gear_research_state NOT NULL DEFAULT 'queued',
+    summary         TEXT,
+    terms           TEXT[],
+    sample_size     INTEGER,
+    source_urls     TEXT[],
+    researched_at   TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (model_a, model_b),
+    CHECK (model_a < model_b)
+);
+CREATE INDEX IF NOT EXISTS idx_gear_pair_notes_state
+    ON gear_pair_notes(research_state) WHERE research_state IN ('queued','researching');
 
 -- ============================================================
 -- MusicBrainz data-dump subset (Etap 1: artist + album canon)

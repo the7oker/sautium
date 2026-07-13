@@ -4601,6 +4601,7 @@ body.has-miniplayer .more-overlay .drawer {
 .gsys-tier-ds { color: var(--color-positive); background: rgba(141, 167, 123, 0.13); }
 .gsys-tier-m  { color: var(--color-blue-hover); background: var(--color-blue-weak); }
 .gsys-tier-d  { color: var(--color-amber); background: var(--color-amber-weak); }
+.gsys-tier-f  { color: var(--color-text-muted); background: rgba(166, 155, 142, 0.13); }
 .gsys-note {
   flex: 1 1 100%; font-size: var(--text-caption);
   color: var(--color-text-dim); padding-left: calc(96 * var(--px) + 6 * var(--px));

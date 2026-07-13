@@ -83,6 +83,21 @@ def _backend_get(path: str, params: dict) -> dict:
         return resp.json()
 
 
+def _backend_post(path: str, body: dict) -> dict:
+    """Signed POST to the FastAPI backend (JSON body covered by the signature)."""
+    import json as _json
+    payload = _json.dumps(body).encode("utf-8")
+    ts = str(int(time.time()))
+    canonical = f"POST\n{path}\n{ts}\n{hashlib.sha256(payload).hexdigest()}"
+    sig = hmac.new(_api_secret(), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    with httpx.Client(base_url=BACKEND_URL, timeout=30.0, verify=False) as client:
+        resp = client.post(path, content=payload,
+                           headers={"x-sautium-ts": ts, "x-sautium-sig": sig,
+                                    "content-type": "application/json"})
+        resp.raise_for_status()
+        return resp.json()
+
+
 def _discovery(target: str, **params) -> list[dict]:
     """One composite discovery-engine query → one target's results. Same engine
     as the Web UI's Discovery search (routers/discovery.py /api/discovery/search)."""
@@ -1327,6 +1342,62 @@ def generate_eq_preset(name: str, filters_json: str, description: str = "") -> s
         return f"Error parsing filters_json: {e}"
     except Exception as e:
         return f"Error generating EQ preset: {e}"
+
+
+# =============================================================================
+# GEAR ADVISOR (3 tools)
+# =============================================================================
+
+@mcp.tool()
+def gear_advisor_report() -> str:
+    """The user's audio-gear upgrade advisor report: listening axes from
+    their library, plateau diagnosis of owned electronics (where money is
+    measurably dead), and researched candidate transducers with delta rows
+    vs owned gear. THIS is the source of truth for gear advice — never
+    advise purchases from general knowledge when this data exists."""
+    try:
+        import json as _json
+        return _json.dumps(_backend_get("/api/profile/gear/advisor", {}), ensure_ascii=False)
+    except Exception as e:
+        return f"Error fetching advisor report: {e}"
+
+
+@mcp.tool()
+def gear_system_report() -> str:
+    """Deterministic pair-compatibility matrix over the user's gear park:
+    SPL headroom, damping, gain staging, format chains, measured caveats
+    and community pair-synergy notes, each with provenance tiers."""
+    try:
+        import json as _json
+        return _json.dumps(_backend_get("/api/profile/gear/system", {}), ensure_ascii=False)
+    except Exception as e:
+        return f"Error fetching system report: {e}"
+
+
+@mcp.tool()
+def gear_add_candidate(brand: str, model: str, category: str) -> str:
+    """Add a gear model to the user's wishlist (status 'want') and kick off
+    background research: specs, community sentiment, measured caveats, and
+    pair-synergy notes against the user's owned sources. Research lands in
+    ~2 minutes; results appear in the Upgrade advisor and via
+    gear_advisor_report. Use when the user asks to consider/compare gear
+    that is not in the catalog yet. category is one of: headphones, iems,
+    dac, amp, player, streamer, power, cable. For electrostatic headphones
+    ALWAYS also add the energizer/amp candidates — conventional amps cannot
+    drive them, and the pair research will surface which energizers the
+    community actually rates for that model."""
+    try:
+        res = _backend_post("/api/profile/gear", {
+            "brand": brand, "model": model, "category": category, "status": "want",
+        })
+        return (f"Queued: {brand} {model} ({category}) added as 'want' "
+                f"(gear_model_id {res.get('gear_model_id')}). Background research "
+                "started — specs, sentiment and pair-synergy vs the user's sources "
+                "will be cached in ~2 minutes. Tell the user results will appear in "
+                "the Upgrade advisor, and re-check gear_advisor_report before giving "
+                "verdicts on this model.")
+    except Exception as e:
+        return f"Error adding candidate: {e}"
 
 
 # =============================================================================

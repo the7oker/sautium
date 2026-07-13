@@ -6907,6 +6907,8 @@
     level:          'Gain staging',
     formats:        'Formats',
     measured:       'Measured',
+    synergy:        'Community',
+    domain:         'Domain',
   };
   const GSYS_STATUS = {
     ok:     { mark: '✓', label: 'OK' },
@@ -7007,7 +7009,8 @@
         <p class="gsys-legend">
           <span class="gsys-tier gsys-tier-ds">DS</span> datasheet ·
           <span class="gsys-tier gsys-tier-m">M</span> measured ·
-          <span class="gsys-tier gsys-tier-d">D</span> derived by the engine
+          <span class="gsys-tier gsys-tier-d">D</span> derived by the engine ·
+          <span class="gsys-tier gsys-tier-f">F</span> community voice (informs, never gates)
         </p>
       </section>`;
     const back = root.querySelector('[data-gsys-back]');
@@ -7091,6 +7094,12 @@
       const ergo = (c.ergo_tradeoffs || []).length
         ? `<div class="gadv-delta is-regress"><span class="gadv-delta-mark">▼</span><span class="gadv-delta-axis">ergonomics</span><span class="gadv-delta-terms">${escapeProfileHtml(c.ergo_tradeoffs.join(', '))}</span></div>`
         : '';
+      const synergy = (c.synergy || []).map(s => `
+        <div class="gadv-delta is-parity">
+          <span class="gadv-delta-mark">☰</span>
+          <span class="gadv-delta-axis">with ${escapeProfileHtml(s.with.split(' ').slice(-2).join(' '))}</span>
+          <span class="gadv-delta-terms">${escapeProfileHtml((s.terms || []).join(' · '))}<span class="gadv-delta-owned"> (~${s.sample || '?'} voices)</span></span>
+        </div>`).join('');
       return `
         <div class="gadv-cand">
           <div class="gadv-cand-head">
@@ -7103,7 +7112,7 @@
             ${c.driver_type ? `<span>${escapeProfileHtml(humanizeSpecValue(c.driver_type))}</span>` : ''}
             ${c.sentiment_score != null ? `<span class="gadv-sent">${c.sentiment_score}<small>/10 · n≈${c.sentiment_sample || '?'}</small></span>` : ''}
           </div>
-          ${(deltas || ergo) ? `<div class="gadv-deltas">${deltas}${ergo}</div>` : ''}
+          ${(deltas || ergo || synergy) ? `<div class="gadv-deltas">${deltas}${ergo}${synergy}</div>` : ''}
         </div>`;
     }).join('');
 

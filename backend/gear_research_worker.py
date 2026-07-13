@@ -41,7 +41,8 @@ import psycopg2
 
 from config import settings
 from db_pool import db_execute, db_query, db_query_one
-from uuid_utils import gear_caveat_uuid, gear_spec_attribute_uuid, gear_technology_uuid
+from uuid_utils import (gear_caveat_uuid, gear_pair_uuid,
+                        gear_spec_attribute_uuid, gear_technology_uuid)
 
 logger = logging.getLogger(__name__)
 
@@ -427,6 +428,116 @@ def research_one(model_id: str) -> bool:
     return True
 
 
+# ─── pair-synergy research ──────────────────────────────────────────────────
+
+def enqueue_pair(model_a: str, model_b: str) -> None:
+    """Queue a pair-synergy research job (idempotent) and wake the worker."""
+    a, b = sorted((model_a, model_b))
+    db_execute(
+        """
+        INSERT INTO gear_pair_notes (id, model_a, model_b)
+        VALUES (%(id)s::uuid, %(a)s::uuid, %(b)s::uuid)
+        ON CONFLICT (model_a, model_b) DO NOTHING
+        """,
+        {"id": str(gear_pair_uuid(a, b)), "a": a, "b": b},
+    )
+    db_execute("SELECT pg_notify('gear_research', %(p)s)", {"p": f"pair:{a}:{b}"})
+
+
+def _pair_names(pair_id: str) -> Optional[Dict[str, str]]:
+    return db_query_one(
+        """
+        SELECT pn.id::text AS id,
+               ba.name || ' ' || ga.model AS name_a,
+               bb.name || ' ' || gb.model AS name_b
+        FROM gear_pair_notes pn
+        JOIN gear_models ga ON ga.id = pn.model_a
+        JOIN gear_brands ba ON ba.id = ga.brand_id
+        JOIN gear_models gb ON gb.id = pn.model_b
+        JOIN gear_brands bb ON bb.id = gb.brand_id
+        WHERE pn.id = %(id)s::uuid
+        """,
+        {"id": pair_id},
+    )
+
+
+def research_pair(pair_id: str) -> bool:
+    from gear_research_prompt import build_pair_prompt
+    head = _pair_names(pair_id)
+    if not head:
+        return False
+    logger.info(f"gear research: pair start {head['name_a']} + {head['name_b']}")
+    started = time.time()
+    system_prompt = build_pair_prompt(head["name_a"], head["name_b"])
+    user_msg = (
+        f"Research this pairing now: {head['name_a']} + {head['name_b']}. "
+        "RESEARCH BUDGET: at most ~6 web searches / ~8 page fetches; when spent, "
+        "emit the JSON with what you have (discussed:false is a valid answer). "
+        "Return ONLY the JSON object."
+    )
+    try:
+        payload = _call_claude_code_research(system_prompt, user_msg) \
+            or _call_anthropic_research(system_prompt, user_msg)
+    except ResearchInfraPause:
+        raise
+    except Exception as e:
+        logger.error(f"gear research: pair call failed: {e}")
+        payload = None
+
+    if payload is None:
+        db_execute(
+            "UPDATE gear_pair_notes SET research_state = 'failed' WHERE id = %(id)s::uuid",
+            {"id": pair_id},
+        )
+        logger.error(f"gear research: pair FAILED {head['name_a']} + {head['name_b']}")
+        return False
+
+    discussed = bool(payload.get("discussed"))
+    db_execute(
+        """
+        UPDATE gear_pair_notes
+        SET research_state = 'cached',
+            summary     = %(summary)s,
+            terms       = %(terms)s,
+            sample_size = %(n)s,
+            source_urls = %(srcs)s,
+            researched_at = now()
+        WHERE id = %(id)s::uuid
+        """,
+        {
+            "id": pair_id,
+            "summary": (payload.get("summary") or "").strip() or None if discussed else None,
+            "terms": [str(t)[:80] for t in (payload.get("terms") or [])][:6] if discussed else None,
+            "n": payload.get("sample_size") if discussed else None,
+            "srcs": (payload.get("source_urls") or [])[:6] if discussed else None,
+        },
+    )
+    db_execute("SELECT pg_notify('sautium_gear_state', %(p)s)", {"p": f"pair:{pair_id}:cached"})
+    logger.info(
+        f"gear research: pair done {head['name_a']} + {head['name_b']} — "
+        f"{'discussed' if discussed else 'not discussed'}, {time.time() - started:.0f}s"
+    )
+    return True
+
+
+def _claim_next_pair() -> Optional[str]:
+    row = db_execute(
+        """
+        UPDATE gear_pair_notes
+        SET research_state = 'researching'
+        WHERE id = (
+            SELECT id FROM gear_pair_notes
+            WHERE research_state = 'queued'
+            ORDER BY created_at
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id::text AS id
+        """
+    )
+    return row["id"] if row else None
+
+
 # ─── queue ──────────────────────────────────────────────────────────────────
 
 def _notify_state(model_id: str, state: str) -> None:
@@ -456,17 +567,30 @@ def _claim_next() -> Optional[str]:
 
 
 def _drain_queue() -> None:
+    # Models first (they feed specs/sentiment), then pair-synergy jobs.
     while _worker_running:
         model_id = _claim_next()
+        pair_id = None
         if not model_id:
-            return
+            pair_id = _claim_next_pair()
+            if not pair_id:
+                return
         try:
-            research_one(model_id)
+            if model_id:
+                research_one(model_id)
+            else:
+                research_pair(pair_id)
         except ResearchInfraPause as e:
-            db_execute(
-                "UPDATE gear_models SET research_state = 'queued' WHERE id = %(m)s::uuid",
-                {"m": model_id},
-            )
+            if model_id:
+                db_execute(
+                    "UPDATE gear_models SET research_state = 'queued' WHERE id = %(m)s::uuid",
+                    {"m": model_id},
+                )
+            else:
+                db_execute(
+                    "UPDATE gear_pair_notes SET research_state = 'queued' WHERE id = %(m)s::uuid",
+                    {"m": pair_id},
+                )
             logger.warning(
                 f"gear research: AI backend unavailable ({e}); pausing drain "
                 f"for {INFRA_PAUSE_SECONDS // 60} min"
@@ -489,8 +613,15 @@ def _requeue_orphans() -> None:
         RETURNING id
         """
     )
-    if n:
-        logger.info(f"gear research: re-queued {len(n)} orphaned row(s)")
+    n2 = db_query(
+        """
+        UPDATE gear_pair_notes SET research_state = 'queued'
+        WHERE research_state = 'researching'
+        RETURNING id
+        """
+    )
+    if n or n2:
+        logger.info(f"gear research: re-queued {len(n)} model + {len(n2)} pair orphan(s)")
 
 
 def _worker_loop() -> None:

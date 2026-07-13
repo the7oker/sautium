@@ -89,6 +89,13 @@ def gear_caveat_uuid(gear_model_id: str, text: str) -> uuid.UUID:
     return uuid.uuid5(NAMESPACE, f"gear_caveat:{gear_model_id}:{normalize(text)}")
 
 
+def gear_pair_uuid(model_a: str, model_b: str) -> uuid.UUID:
+    """Deterministic UUID for a pair-synergy note. Order-insensitive:
+    callers store the pair canonically (a < b), the id matches either way."""
+    a, b = sorted((str(model_a), str(model_b)))
+    return uuid.uuid5(NAMESPACE, f"gear_pair:{a}:{b}")
+
+
 # Lossless audio formats
 LOSSLESS_FORMATS = {'flac', 'ape', 'alac', 'wav', 'aiff', 'wv', 'tta', 'dsf', 'dff'}
 
