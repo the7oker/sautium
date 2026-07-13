@@ -70,6 +70,23 @@ SENTIMENT
   reviews you considered. Don't pretend precision.
 - praise/criticism are short noun phrases ("organic timbre",
   "runs hot"), 2-4 words. Limit to 6 per polarity.
+
+MEASURED CAVEATS
+- Behavioral findings from MEASUREMENT-TIER sources ONLY (bench
+  reviews with instruments: ASR, GoldenSound, L7Audiolab, Stereophile
+  measurements) that a spec sheet hides and that change how the
+  device should be paired or used: "clips into low-impedance loads
+  at high gain", "driver bottoms out at 114 dB", "elevated noise
+  floor on max gain". NOT community opinion, NOT tonal impressions.
+- 0-3 entries; omit the section's entries entirely if no instrumented
+  source documents such behavior. Each needs a source_url.
+- role: which port the caveat gates — "hp_out", "line_out",
+  "transducer", or null for model-wide (e.g. thermal).
+- severity: "warn" if it should flag an affected pairing, "info" if
+  purely contextual.
+- load_z_below (optional number, ohms): when the finding only applies
+  below a load-impedance threshold ("clips into low-Z loads"), state
+  the threshold so the engine skips unaffected pairings.
 """
 
 _OUTPUT_SCHEMA = """
@@ -92,6 +109,12 @@ OUTPUT (JSON, strict):
     ...
   ],
   "research_summary": "3-5 sentences of prose about this model.",
+  "measured_caveats": [
+    {"role": "hp_out", "severity": "warn", "load_z_below": 50,
+     "text": "clips into low-impedance loads at high/super gain",
+     "source_url": "..."},
+    ...
+  ],
   "sentiment": {
     "score": 8.7,
     "sample_size": 412,

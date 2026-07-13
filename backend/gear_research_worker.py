@@ -41,7 +41,7 @@ import psycopg2
 
 from config import settings
 from db_pool import db_execute, db_query, db_query_one
-from uuid_utils import gear_spec_attribute_uuid, gear_technology_uuid
+from uuid_utils import gear_caveat_uuid, gear_spec_attribute_uuid, gear_technology_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +295,43 @@ def _persist_technologies(model_id: str, payload: Dict[str, Any]) -> int:
     return written
 
 
+_VALID_CAVEAT_ROLES = {"hp_out", "line_out", "transducer"}
+
+
+def _persist_caveats(model_id: str, payload: Dict[str, Any]) -> int:
+    db_execute(
+        "DELETE FROM gear_measured_caveats WHERE gear_model_id = %(m)s::uuid",
+        {"m": model_id},
+    )
+    written = 0
+    for cv in payload.get("measured_caveats") or []:
+        text = (cv.get("text") or "").strip()
+        source_url = cv.get("source_url")
+        if not text or not source_url:
+            continue  # measurement-tier claims are citation-mandatory
+        role = cv.get("role")
+        if role not in _VALID_CAVEAT_ROLES:
+            role = None
+        severity = cv.get("severity") if cv.get("severity") in ("info", "warn") else "warn"
+        try:
+            load_z = float(cv["load_z_below"]) if cv.get("load_z_below") is not None else None
+        except (TypeError, ValueError):
+            load_z = None
+        db_execute(
+            """
+            INSERT INTO gear_measured_caveats (id, gear_model_id, role, severity, load_z_below, text, source_url)
+            VALUES (%(id)s::uuid, %(m)s::uuid, %(role)s, %(sev)s::gear_caveat_severity, %(lz)s, %(t)s, %(src)s)
+            ON CONFLICT (gear_model_id, text) DO UPDATE
+            SET role = EXCLUDED.role, severity = EXCLUDED.severity,
+                load_z_below = EXCLUDED.load_z_below, source_url = EXCLUDED.source_url
+            """,
+            {"id": str(gear_caveat_uuid(model_id, text)), "m": model_id,
+             "role": role, "sev": severity, "lz": load_z, "t": text, "src": source_url},
+        )
+        written += 1
+    return written
+
+
 def _persist_sentiment(model_id: str, payload: Dict[str, Any]) -> None:
     sentiment = payload.get("sentiment") or {}
     db_execute(
@@ -363,6 +400,7 @@ def research_one(model_id: str) -> bool:
 
     n_specs = _persist_specs(model_id, category, payload)
     n_techs = _persist_technologies(model_id, payload)
+    n_caveats = _persist_caveats(model_id, payload)
     _persist_sentiment(model_id, payload)
     db_execute(
         """
@@ -376,7 +414,7 @@ def research_one(model_id: str) -> bool:
     )
     logger.info(
         f"gear research: done {brand} {model} — {n_specs} specs, {n_techs} technologies, "
-        f"{time.time() - started:.0f}s"
+        f"{n_caveats} caveats, {time.time() - started:.0f}s"
     )
     return True
 

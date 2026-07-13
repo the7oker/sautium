@@ -1326,6 +1326,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_p2p_messages_uuid
 
 DO $$ BEGIN
     CREATE TYPE gear_research_state AS ENUM ('queued', 'researching', 'cached', 'failed');
+    CREATE TYPE gear_caveat_severity AS ENUM ('info', 'warn');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
@@ -1602,6 +1603,27 @@ CREATE TABLE IF NOT EXISTS gear_sentiment_terms (
 );
 
 CREATE INDEX IF NOT EXISTS idx_gear_sentiment_term_lookup ON gear_sentiment_terms(polarity, term);
+
+-- Measurement-sourced behavioral caveats the spec sheet hides:
+-- "clips into low-Z loads at high gain", "driver bottoms out at
+-- 114 dB". Distinct from sentiment terms (community opinion) --
+-- these come from measurement-tier sources only and gate pair
+-- verdicts in the deterministic engine. role: hp_out | line_out |
+-- transducer | NULL (model-wide).
+CREATE TABLE IF NOT EXISTS gear_measured_caveats (
+    id             UUID PRIMARY KEY,
+    gear_model_id  UUID NOT NULL REFERENCES gear_models(id) ON DELETE CASCADE,
+    role           VARCHAR(20),
+    severity       gear_caveat_severity NOT NULL DEFAULT 'warn',
+    -- optional machine-readable condition: caveat applies only when
+    -- the partner load impedance is below this (ohms)
+    load_z_below   REAL,
+    text           TEXT NOT NULL,
+    source_url     TEXT,
+    created_at     TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (gear_model_id, text)
+);
+CREATE INDEX IF NOT EXISTS idx_gear_caveats_model ON gear_measured_caveats(gear_model_id);
 
 -- ============================================================
 -- MusicBrainz data-dump subset (Etap 1: artist + album canon)

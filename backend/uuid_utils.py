@@ -83,6 +83,12 @@ def gear_technology_uuid(key: str) -> uuid.UUID:
     return uuid.uuid5(NAMESPACE, f"gear_technology:{normalize(key)}")
 
 
+def gear_caveat_uuid(gear_model_id: str, text: str) -> uuid.UUID:
+    """Deterministic UUID for a measured caveat — same finding on two
+    nodes collapses to one row on P2P merge."""
+    return uuid.uuid5(NAMESPACE, f"gear_caveat:{gear_model_id}:{normalize(text)}")
+
+
 # Lossless audio formats
 LOSSLESS_FORMATS = {'flac', 'ape', 'alac', 'wav', 'aiff', 'wv', 'tta', 'dsf', 'dff'}
 

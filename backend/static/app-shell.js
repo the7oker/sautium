@@ -6905,6 +6905,7 @@
     bridging:       'Impedance bridging',
     level:          'Gain staging',
     formats:        'Formats',
+    measured:       'Measured',
   };
   const GSYS_STATUS = {
     ok:     { mark: '✓', label: 'OK' },

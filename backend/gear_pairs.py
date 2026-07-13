@@ -79,8 +79,21 @@ def _load_park() -> List[Dict[str, Any]]:
     by_model: Dict[str, Dict[str, str]] = {}
     for s in spec_rows:
         by_model.setdefault(s["model_id"], {})[s["key"]] = s["value_text"]
+    caveat_rows = db_query(
+        """
+        SELECT gear_model_id::text AS model_id, role, severity::text AS severity,
+               load_z_below, text, source_url
+        FROM gear_measured_caveats
+        WHERE gear_model_id = ANY(%(ids)s::uuid[])
+        """,
+        {"ids": ids},
+    )
+    caveats_by_model: Dict[str, List[Dict[str, Any]]] = {}
+    for c in caveat_rows:
+        caveats_by_model.setdefault(c["model_id"], []).append(c)
     for r in rows:
         r["specs"] = by_model.get(r["model_id"], {})
+        r["caveats"] = caveats_by_model.get(r["model_id"], [])
         r["name"] = f'{r["brand"]} {r["model"]}'
     return rows
 
@@ -280,7 +293,28 @@ def _pair_transport(src, s_role, dst, d_role) -> Dict[str, Any]:
     return _verdict(src, "transport", dst, "digital_in", checks)
 
 
+def _apply_caveats(src, s_role_name, dst, d_role_name, checks) -> None:
+    """Measurement-sourced behavior gates spec math: a caveat attached
+    to either side's active role (or model-wide) joins the checks —
+    'warn' severity drags the pair status with it via the aggregate."""
+    for item, active_role, partner in ((src, s_role_name, dst), (dst, d_role_name, src)):
+        for cv in item.get("caveats", []):
+            if cv["role"] is not None and cv["role"] != active_role:
+                continue
+            if cv.get("load_z_below") is not None:
+                # Conditional caveat: only bites below the load threshold.
+                # Unknown partner impedance stays conservative (applies).
+                partner_z = _num(partner.get("specs", {}), "impedance_ohm")
+                if partner_z is not None and partner_z >= cv["load_z_below"]:
+                    continue
+            checks.append(_check(
+                "measured", "warn" if cv["severity"] == "warn" else "ok",
+                f'{item["name"]}: {cv["text"]}', "m",
+            ))
+
+
 def _verdict(src, s_role, dst, d_role, checks) -> Dict[str, Any]:
+    _apply_caveats(src, s_role, dst, d_role, checks)
     order = {"fail": 0, "warn": 1, "nodata": 2, "ok": 3}
     status = min((c["status"] for c in checks), key=lambda s: order[s], default="nodata")
     return {
