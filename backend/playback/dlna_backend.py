@@ -41,6 +41,42 @@ GENA_PORT = 8831            # LAN listener for renderer event callbacks
 _CMD_TIMEOUT = 10.0
 _TRACK_END_SLACK = 3.0      # STOPPED within this many seconds of the length = track finished
 
+# The dlna-loop and the GENA notify server are PROCESS singletons: the
+# notify port is a one-per-process resource, and rebinding it on every
+# renderer switch proved fragile — any shutdown that failed to release it
+# (a dozing phone holding half-open NOTIFY connections past the cleanup
+# budget) bricked every later DLNA attach until a backend restart.
+# Backends come and go; the loop and the server stay.
+_shared_lock = threading.Lock()
+_shared_loop: Optional[asyncio.AbstractEventLoop] = None
+_shared_notify = None
+
+
+def _ensure_loop() -> asyncio.AbstractEventLoop:
+    global _shared_loop
+    with _shared_lock:
+        if _shared_loop is None or _shared_loop.is_closed():
+            loop = asyncio.new_event_loop()
+
+            def _run():
+                asyncio.set_event_loop(loop)
+                loop.run_forever()
+
+            threading.Thread(target=_run, daemon=True, name="dlna-loop").start()
+            _shared_loop = loop
+        return _shared_loop
+
+
+async def _ensure_notify(requester):
+    global _shared_notify
+    if _shared_notify is None:
+        server = AiohttpNotifyServer(
+            requester, source=("0.0.0.0", GENA_PORT),
+            callback_url=f"http://{media_host()}:{GENA_PORT}/notify")
+        await server.async_start_server()
+        _shared_notify = server
+    return _shared_notify
+
 _MIME_BY_FORMAT = {
     "FLAC": "audio/flac", "MP3": "audio/mpeg", "WAV": "audio/wav",
     "OGG": "audio/ogg", "M4A": "audio/mp4", "AIFF": "audio/aiff",
@@ -75,12 +111,9 @@ class DlnaBackend(PlayerBackend):
         self._renderer = renderer                # {udn, location, name}
         self.label = renderer.get("name") or "DLNA renderer"
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._thread: Optional[threading.Thread] = None
-        self._ready = threading.Event()
 
         # dlna-loop-owned state
         self._dmr: Optional["DmrDevice"] = None
-        self._notify_server = None
         self._index = 0                          # 1-based canonical slot
         self._current_url: Optional[str] = None
         self._next_url: Optional[str] = None     # set via SetNextAVTransportURI
@@ -92,71 +125,44 @@ class DlnaBackend(PlayerBackend):
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
-        self._thread = threading.Thread(target=self._run_loop, daemon=True,
-                                        name="dlna-loop")
-        self._thread.start()
-        if not self._ready.wait(timeout=20):
-            raise RuntimeError("DLNA renderer connection timed out")
-        if self._error:
-            raise RuntimeError(self._error)
+        self._loop = _ensure_loop()
+        fut = asyncio.run_coroutine_threadsafe(self._async_start(), self._loop)
+        try:
+            fut.result(timeout=25)
+        except Exception as e:
+            reason = str(e).strip() or type(e).__name__
+            msg = (f"'{self.label}' did not respond ({reason}) — "
+                   "wake the device (phone renderers doze) and try again")
+            logger.error("DLNA attach failed: %s", msg)
+            raise RuntimeError(msg)
         logger.info("DLNA backend attached to %s", self.label)
 
     def shutdown(self) -> None:
         if self._loop is not None:
-            # The cleanup MUST complete before the loop stops — otherwise the
-            # GENA notify server never releases :8831 and every later DLNA
-            # attach in this process dies with "address already in use".
+            # Unsubscribe only — the shared loop and notify server outlive
+            # this backend by design (see the singleton note above).
             try:
                 fut = asyncio.run_coroutine_threadsafe(
                     self._async_shutdown(), self._loop)
                 fut.result(timeout=8)
             except Exception as e:
-                logger.warning("DLNA shutdown cleanup incomplete: %s", e)
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        if self._thread:
-            self._thread.join(timeout=10)
+                logger.warning("DLNA shutdown cleanup incomplete: %s",
+                               str(e).strip() or type(e).__name__)
         logger.info("DLNA backend detached from %s", self.label)
 
     def capabilities(self) -> Capabilities:
         return Capabilities(volume=True, volume_kind="percent", seek=True,
                             gapless=False)
 
-    def _run_loop(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        try:
-            self._loop.run_until_complete(self._async_start())
-        except Exception as e:
-            reason = str(e).strip() or type(e).__name__
-            self._error = (f"'{self.label}' did not respond ({reason}) — "
-                           "wake the device (phone renderers doze) and try again")
-            logger.error("DLNA attach failed: %s", self._error)
-            self._ready.set()
-            return
-        self._ready.set()
-        self._loop.run_forever()
-        # loop stopped → drain pending shutdown tasks
-        pending = asyncio.all_tasks(self._loop)
-        for t in pending:
-            t.cancel()
-        self._loop.run_until_complete(
-            asyncio.gather(*pending, return_exceptions=True))
-        self._loop.close()
-
     async def _async_start(self) -> None:
         # 10s over the default 5s: phone renderers in Wi-Fi power-save can
         # stall the first request for seconds while the radio wakes up.
         requester = AiohttpRequester(timeout=10)
+        notify_server = await _ensure_notify(requester)
         factory = UpnpFactory(requester, non_strict=True)
         device = await factory.async_create_device(self._renderer["location"])
 
-        host = media_host()
-        self._notify_server = AiohttpNotifyServer(
-            requester, source=("0.0.0.0", GENA_PORT),
-            callback_url=f"http://{host}:{GENA_PORT}/notify")
-        await self._notify_server.async_start_server()
-
-        self._dmr = DmrDevice(device, self._notify_server.event_handler)
+        self._dmr = DmrDevice(device, notify_server.event_handler)
         self._dmr.on_event = self._on_gena_event
         try:
             await self._dmr.async_subscribe_services(auto_resubscribe=True)
@@ -173,16 +179,10 @@ class DlnaBackend(PlayerBackend):
         try:
             if self._dmr:
                 # Unsubscribe is HTTP to the renderer — a powered-off or
-                # dozing device would hang it far past the shutdown budget,
-                # and releasing the local notify port matters more.
+                # dozing device would hang it far past the shutdown budget.
                 await asyncio.wait_for(self._dmr.async_unsubscribe_services(), 3)
         except Exception as e:
             logger.debug("GENA unsubscribe: %s", e)
-        try:
-            if self._notify_server:
-                await self._notify_server.async_stop_server()
-        except Exception as e:
-            logger.debug("notify server stop: %s", e)
 
     # -- status ---------------------------------------------------------------
 
@@ -382,15 +382,19 @@ class DlnaBackend(PlayerBackend):
             logger.warning("DLNA: skipping unreachable item %s — %s",
                            item.artist, item.title)
             return await self._load_and_play(index + 1, play=play)
-        await self._dmr.async_set_transport_uri(
-            url, item.title or "Sautium",
-            meta_data=await self._transport_meta(url, item))
+        # Direct AVT actions, never the DmrDevice helpers: they gate on the
+        # renderer's CurrentTransportActions report and silently NO-OP when
+        # an action is missing from it (the Phase-2 Pause lesson). A gated
+        # SetAVTransportURI/Play here meant next/prev committed the new
+        # index while the renderer kept playing the old track.
+        await self._avt("SetAVTransportURI", CurrentURI=url,
+                        CurrentURIMetaData=await self._transport_meta(url, item))
         self._index = index
         self._current_url = url
         self._position = 0.0
         self._length = item.duration_seconds or 0.0
         if play:
-            await self._dmr.async_play()
+            await self._avt("Play", Speed="1")
             self._ensure_poll()
         await self._preload_next()
         self._emit_now()
@@ -401,15 +405,14 @@ class DlnaBackend(PlayerBackend):
         gaplessly on its own; we detect the URI change and follow."""
         self._next_url = None
         nxt = self._queue.item_at(self._index + 1)
-        if nxt is None or not hasattr(self._dmr, "async_set_next_transport_uri"):
+        if nxt is None:
             return
         url = self._url_for(nxt)
         if url is None:
             return
         try:
-            await self._dmr.async_set_next_transport_uri(
-                url, nxt.title or "Sautium",
-                meta_data=await self._transport_meta(url, nxt))
+            await self._avt("SetNextAVTransportURI", NextURI=url,
+                            NextURIMetaData=await self._transport_meta(url, nxt))
             self._next_url = url
         except Exception as e:
             logger.debug("SetNextAVTransportURI unsupported/failed: %s", e)
@@ -451,9 +454,17 @@ class DlnaBackend(PlayerBackend):
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
             fut.result(timeout=_CMD_TIMEOUT)
+            if self._error:
+                self._error = None   # a command went through — device is back
             return True
         except Exception as e:
-            logger.warning("DLNA command failed: %s", e)
+            reason = str(e).strip() or type(e).__name__
+            # Surface it: a silently swallowed command is how "next" looked
+            # like it worked while the renderer kept playing the old track.
+            self._error = (f"'{self.label}' command failed ({reason}) — "
+                           "the renderer may be asleep")
+            logger.warning("DLNA command failed: %s", reason)
+            self._emit_now()
             return False
 
     def play(self) -> bool:
