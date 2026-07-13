@@ -16,11 +16,11 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+import track_similarity
 from config import settings
 from db_pool import (
     db_query as _db_query,
     db_query_one as _db_query_one,
-    db_query_with_ef_search as _db_query_with_ef_search,
 )
 from ensemble_instruments import present_instruments
 from hqplayer_client import PlaybackState, format_time
@@ -1920,13 +1920,11 @@ _RADIO_MAX_PHANTOM = 4          # cap streamed tracks per batch — owned ones b
                                 # so a slow stream can't starve the playhead
 _RADIO_PHANTOM_EVERY = 2        # place a phantom only after this many owned (spacing)
 _RADIO_REFILL_AT = 3            # refill when <= this many tracks remain ahead
-_RADIO_POOL = 100               # nearest-neighbour pool a batch draws from — the
-                                # drift radius; caps + jitter reshuffle inside it
 _RADIO_ARTIST_CAP = 2           # tracks per artist within one pool — raw KNN
                                 # clusters hard (a Tangerine Dream seed put Edgar
                                 # Froese in 10 of the top 30) and radio must not
                                 # collapse into a single-artist run
-_RADIO_JITTER = 0.2             # ORDER BY dist * (1 + JITTER*random()): reshuffles
+_RADIO_JITTER = 0.2             # ORDER BY score * (1 + JITTER*random()): reshuffles
                                 # near-ties so the same seed never yields the same
                                 # station twice, while distant pool members still
                                 # rank behind close ones in sparse library corners
@@ -1937,58 +1935,14 @@ _radio_last_artist: Optional[str] = None   # artist of the last queued track —
 
 
 def _radio_similar(seed_uuid: str, exclude: set, limit: int) -> list:
-    """Mixed (owned + phantom) CLAP-similar to the seed. Draws the _RADIO_POOL
-    nearest neighbours (HNSW with iterative scan — the default 40-candidate wave
-    dries up once the exclude list outgrows it and radio would silently die
-    mid-session), then caps each artist at _RADIO_ARTIST_CAP inside the pool and
-    jitters near-ties so the station varies between runs. Each row carries what
-    the batch builder needs: identity + file fields (owned) or the MB tracklist
-    fields (phantom). Excludes the seed and already-played UUIDs; empty when the
-    seed has no embedding (a NULL target would otherwise order arbitrarily)."""
-    return _db_query_with_ef_search("""
-        WITH target AS (SELECT vector FROM embeddings WHERE track_id = %(seed)s::uuid),
-        pool AS (
-            SELECT t.id::text AS track_id,
-                   mf_rep.id AS media_file_id, mf_rep.file_path, mf_rep.file_format,
-                   (mf_rep.id IS NOT NULL) AS is_owned,
-                   t.title, a.name AS artist, ta.artist_id,
-                   ph_rep.album AS phantom_album, ph_rep.length_ms,
-                   e.vector <=> (SELECT vector FROM target) AS dist
-            FROM tracks t
-            JOIN embeddings e ON e.track_id = t.id
-            JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
-            JOIN artists a ON a.id = ta.artist_id
-            LEFT JOIN LATERAL (
-                SELECT mf.id, mf.file_path, mf.file_format
-                FROM media_files mf
-                WHERE mf.track_id = t.id
-                ORDER BY mf.is_analysis_source DESC, mf.id LIMIT 1
-            ) mf_rep ON true
-            LEFT JOIN LATERAL (
-                SELECT atr.length_ms, al.title AS album
-                FROM album_tracks atr JOIN albums al ON al.id = atr.album_id
-                WHERE atr.track_id = t.id
-                ORDER BY (al.cover_url IS NOT NULL) DESC, al.id LIMIT 1
-            ) ph_rep ON true
-            WHERE t.id != %(seed)s::uuid
-              AND t.id <> ALL(%(exclude)s::uuid[])
-              AND (mf_rep.id IS NOT NULL OR ph_rep.album IS NOT NULL)
-              AND EXISTS (SELECT 1 FROM target)
-            ORDER BY e.vector <=> (SELECT vector FROM target)
-            LIMIT %(pool)s
-        )
-        SELECT track_id, media_file_id, file_path, file_format, is_owned,
-               title, artist, phantom_album, length_ms
-        FROM (SELECT pool.*, ROW_NUMBER() OVER (PARTITION BY artist_id
-                                                ORDER BY dist) AS artist_rank
-              FROM pool) ranked
-        WHERE artist_rank <= %(artist_cap)s
-        ORDER BY dist * (1 + %(jitter)s * random())
-        LIMIT %(limit)s
-    """, {"seed": seed_uuid, "exclude": list(exclude), "limit": limit,
-          "pool": _RADIO_POOL, "artist_cap": _RADIO_ARTIST_CAP,
-          "jitter": _RADIO_JITTER},
-        ef_search=500)
+    """Mixed (owned + phantom) audio-similar to the seed — the shared two-tier
+    scorer (track_similarity.similar_tracks: mean-KNN recall pool, segment
+    chamfer + BPM/energy/genre continuity rerank) with radio's artist cap and
+    jitter. Rows carry what the batch builder needs: identity + file fields
+    (owned) or the MB tracklist fields (phantom)."""
+    return track_similarity.similar_tracks(
+        seed_uuid, exclude=exclude, limit=limit,
+        artist_cap=_RADIO_ARTIST_CAP, jitter=_RADIO_JITTER)
 
 
 def _radio_interleave(owned: list, phantom: list, prev_artist: Optional[str]) -> list:
@@ -2127,6 +2081,19 @@ def _radio_refill_observer(new_data: dict, item) -> None:
 
 
 manager.subscribe_status(_radio_refill_observer)
+
+
+@router.get("/similar/{track_uuid}")
+def similar_tracks(track_uuid: str, limit: int = 7):
+    """Now Playing 'Similar' shelf — the same two-tier scorer radio drifts on
+    (track_similarity.similar_tracks), deterministic (no jitter). Mixed rows:
+    owned ones carry media_file_id (play by file), phantom ones track_id +
+    cover_url (stream). `similarity` is the chamfer cosine, not the old
+    concentrated mean↔mean score."""
+    rows = track_similarity.similar_tracks(track_uuid, limit=limit)
+    for r in rows:
+        del r["file_path"], r["file_format"], r["phantom_album"], r["length_ms"]
+    return {"results": rows}
 
 
 class RadioStartRequest(BaseModel):

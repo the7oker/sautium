@@ -883,21 +883,18 @@
       }
     },
 
-    // One similar path for owned AND preview tracks: the discovery engine's
-    // seed tool (track UUID → CLAP mean↔mean with calibrated norm + two-path
-    // owned/phantom bridges). Engine rows carry the playable id as `id` —
-    // renderSimilar's contract wants `media_file_id`.
+    // One similar path for owned AND preview tracks: the two-tier scorer
+    // shared with radio (segment chamfer + BPM/energy/genre continuity over a
+    // mean-KNN recall pool) — mean↔mean ranking alone is concentrated and
+    // near-noise. Rows come in renderSimilar's mixed contract already.
     async fetchSimilarSeed(tid) {
       if (!tid) return;
       try {
-        const params = new URLSearchParams({
-          target: 'track', seed_track_id: tid, limit: '7', corpus: 'all',
-        });
-        const resp = await fetch('/api/discovery/search?' + params);
+        const resp = await fetch('/api/player/similar/'
+          + encodeURIComponent(tid) + '?limit=7');
         if (!resp.ok) return;
         const data = await resp.json();
-        this.renderSimilar((data.results || []).map(r =>
-          Object.assign({}, r, { media_file_id: r.id })));
+        this.renderSimilar(data.results || []);
       } catch (err) {
         console.warn('similar fetch failed:', err);
       }
