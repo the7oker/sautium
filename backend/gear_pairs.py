@@ -62,6 +62,7 @@ def _load_park() -> List[Dict[str, Any]]:
         JOIN gear_models gm ON gm.id = ug.gear_model_id
         JOIN gear_brands b ON b.id = gm.brand_id
         WHERE ug.status <> 'previously_owned'
+          AND ug.removed_at IS NULL
         """
     )
     if not rows:

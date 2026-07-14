@@ -1426,6 +1426,12 @@ CREATE TABLE IF NOT EXISTS user_gear (
     notes           TEXT,
     added_at        TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    -- Soft-delete: NULL = in the chain, set = hidden. We never hard-delete
+    -- gear — the row carries the user's notes/status and re-adding restores
+    -- it, and a tombstone flag merges cleanly under P2P sync where a vanished
+    -- row would resurrect. The deterministic gear_model_id keeps the shared
+    -- research reachable regardless.
+    removed_at      TIMESTAMPTZ,
     UNIQUE (gear_model_id)
 );
 

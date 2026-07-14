@@ -126,7 +126,7 @@ def _plateau_diagnosis(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
                (snr is not None and snr >= PLATEAU_SNR_DB):
                 nums = f"SINAD {sinad:g} dB" if sinad is not None else f"SNR/DNR {snr:g} dB"
                 out.append({
-                    "name": comp["name"], "category": cat, "verdict": "plateau",
+                    "model_id": comp["model_id"], "name": comp["name"], "category": cat, "verdict": "plateau",
                     "numbers": nums, "tier": "m",
                     "reason": "transparency thresholds passed — a costlier DAC buys no "
                               "measurable gain in this chain; differences from here are "
@@ -134,7 +134,7 @@ def _plateau_diagnosis(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
                 })
             else:
                 out.append({
-                    "name": comp["name"], "category": cat, "verdict": "open",
+                    "model_id": comp["model_id"], "name": comp["name"], "category": cat, "verdict": "open",
                     "numbers": "transparency metrics missing or below threshold",
                     "tier": "d", "reason": "cannot confirm a plateau from captured specs",
                 })
@@ -147,7 +147,7 @@ def _plateau_diagnosis(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
             evaluated = [p for p in own_pairs if p["status"] in ("ok", "warn", "fail")]
             if evaluated and all(p["status"] == "ok" for p in evaluated):
                 out.append({
-                    "name": comp["name"], "category": cat, "verdict": "plateau",
+                    "model_id": comp["model_id"], "name": comp["name"], "category": cat, "verdict": "plateau",
                     "numbers": f"{len(evaluated)} owned pairing(s), all pass with margin",
                     "tier": "d",
                     "reason": "every owned transducer is driven past the peak target with "
@@ -157,7 +157,7 @@ def _plateau_diagnosis(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
             elif evaluated:
                 worst = min(evaluated, key=lambda p: {"fail": 0, "warn": 1, "ok": 2}[p["status"]])
                 out.append({
-                    "name": comp["name"], "category": cat, "verdict": "open",
+                    "model_id": comp["model_id"], "name": comp["name"], "category": cat, "verdict": "open",
                     "numbers": f'{worst["target"]["name"]}: {worst["status"]}',
                     "tier": "d",
                     "reason": "at least one owned pairing carries a caveat — see the "
@@ -166,7 +166,7 @@ def _plateau_diagnosis(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
 
         elif cat in ("power", "cable"):
             out.append({
-                "name": comp["name"], "category": cat, "verdict": "out_of_scope",
+                "model_id": comp["model_id"], "name": comp["name"], "category": cat, "verdict": "out_of_scope",
                 "numbers": "no third-party audio-band measurements exist",
                 "tier": "d",
                 "reason": "functional engineering (protection, shielding, CMRR) is real; "
@@ -257,7 +257,8 @@ def _candidates(analysis: Dict[str, Any],
         """
         SELECT gm.id::text AS model_id, b.name AS brand, gm.model,
                gm.category::text AS category, gm.sentiment_score,
-               gm.sentiment_sample_size, ug.status::text AS user_status
+               gm.sentiment_sample_size, ug.status::text AS user_status,
+               (ug.removed_at IS NOT NULL) AS user_removed
         FROM gear_models gm
         JOIN gear_brands b ON b.id = gm.brand_id
         LEFT JOIN user_gear ug ON ug.gear_model_id = gm.id
@@ -266,7 +267,8 @@ def _candidates(analysis: Dict[str, Any],
         """
     )
     rows = [r for r in rows if r["model_id"] not in own_ids
-            and r["user_status"] != "previously_owned"]
+            and r["user_status"] != "previously_owned"
+            and not r["user_removed"]]
     specs_by_model = _load_specs([r["model_id"] for r in rows])
 
     pair_status: Dict[str, str] = {}

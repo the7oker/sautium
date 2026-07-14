@@ -112,6 +112,7 @@ def _load_gear_rows() -> List[Dict[str, Any]]:
         FROM user_gear ug
         JOIN gear_models gm  ON gm.id = ug.gear_model_id
         JOIN gear_brands b   ON b.id  = gm.brand_id
+        WHERE ug.removed_at IS NULL
         ORDER BY ug.added_at DESC
     """)
     if not rows:
@@ -356,7 +357,11 @@ def add_gear(req: GearAddRequest) -> Dict[str, Any]:
         """
         INSERT INTO user_gear (gear_model_id, status, notes)
         VALUES (%(gm_id)s::uuid, %(status)s::user_gear_status, %(notes)s)
-        ON CONFLICT (gear_model_id) DO NOTHING
+        ON CONFLICT (gear_model_id) DO UPDATE SET
+            removed_at = NULL,
+            status = CASE WHEN user_gear.removed_at IS NOT NULL
+                          THEN EXCLUDED.status ELSE user_gear.status END,
+            notes = COALESCE(EXCLUDED.notes, user_gear.notes)
         RETURNING id::text AS id
         """,
         {"gm_id": gm_id, "status": req.status, "notes": notes},
@@ -373,15 +378,11 @@ def add_gear(req: GearAddRequest) -> Dict[str, Any]:
             SELECT ug.gear_model_id::text AS id
             FROM user_gear ug JOIN gear_models gm ON gm.id = ug.gear_model_id
             WHERE ug.status = 'own' AND gm.category IN ('amp', 'player')
+              AND ug.removed_at IS NULL
             """
         )
         for src in own_sources:
             enqueue_pair(gm_id, src["id"])
-    if inserted is None:
-        inserted = db_query_one(
-            "SELECT id::text AS id FROM user_gear WHERE gear_model_id = %(id)s::uuid",
-            {"id": gm_id},
-        )
     return {"id": inserted["id"], "gear_model_id": gm_id}
 
 
@@ -509,8 +510,13 @@ def reassign_gear_model(gear_id: str, req: GearReassignRequest) -> Dict[str, Any
 
 @router.delete("/gear/{gear_id}")
 def delete_gear(gear_id: str) -> Dict[str, Any]:
+    # Soft-delete: hide from the chain but keep the row (notes/status) so
+    # re-adding restores it, and so P2P sync sees a tombstone rather than a
+    # vanished row that would resurrect. The updated_at trigger bumps for LWW.
     row = db_execute(
-        "DELETE FROM user_gear WHERE id = %(id)s::uuid RETURNING id::text AS id",
+        """UPDATE user_gear SET removed_at = now()
+           WHERE id = %(id)s::uuid AND removed_at IS NULL
+           RETURNING id::text AS id""",
         {"id": gear_id},
     )
     if row is None:

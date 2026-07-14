@@ -5992,6 +5992,7 @@
     if (sub === 'profile') return renderProfile(root);
     if (sub === 'gear-system') return renderGearSystem(root);
     if (sub === 'gear-advisor') return renderGearAdvisor(root);
+    if (sub === 'gear') return renderGearDetail(root, segs[2]);
     if (sub === 'library') return renderLibrary(root);
     if (sub === 'ai')      return renderAI(root);
     if (sub === 'sync')    return renderSync(root);
@@ -6932,7 +6933,7 @@
       <div class="gsys-pair is-${pair.status}">
         <div class="gsys-pair-head">
           <span class="gsys-mark">${st.mark}</span>
-          <span class="gsys-target">${escapeProfileHtml(pair.target.name)}</span>
+          <span class="gsys-target" data-gear-nav="${pair.target.model_id}">${escapeProfileHtml(pair.target.name)}</span>
           ${wantBadge}
         </div>
         ${checks}
@@ -6969,7 +6970,7 @@
           <div class="gsys-pair is-${p.status}">
             <div class="gsys-pair-head">
               <span class="gsys-mark">${(GSYS_STATUS[p.status] || GSYS_STATUS.nodata).mark}</span>
-              <span class="gsys-target">${escapeProfileHtml(p.source.name)} → ${escapeProfileHtml(p.target.name)}</span>
+              <span class="gsys-target"><span data-gear-nav="${p.source.model_id}">${escapeProfileHtml(p.source.name)}</span> → <span data-gear-nav="${p.target.model_id}">${escapeProfileHtml(p.target.name)}</span></span>
             </div>
             ${p.checks.map(c => `
               <div class="gsys-check is-${c.status}">
@@ -6999,9 +7000,10 @@
 
     root.innerHTML = `
       <section class="screen gsys-screen">
-        <div class="screen-head">
-          <button class="back-btn" data-gsys-back aria-label="Back">‹</button>
-          <h2 class="screen-title">System</h2>
+        <div class="profile-header">
+          <button class="icon-btn" aria-label="back" data-gsys-back>${PROFILE_ICONS.back}</button>
+          <h1>System</h1>
+          <span></span>
         </div>
         <p class="gsys-context">${libLine}. Deterministic layer only — spec math with
           audibility thresholds; community sentiment lives on each model's sheet.</p>
@@ -7014,7 +7016,12 @@
         </p>
       </section>`;
     const back = root.querySelector('[data-gsys-back]');
-    if (back) back.addEventListener('click', () => navigate('more/profile'));
+    if (back) back.addEventListener('click', () => {
+      if (history.length > 1) history.back();
+      else navigate('more/profile');
+    });
+    root.querySelectorAll('[data-gear-nav]').forEach(el =>
+      el.addEventListener('click', () => navigate('more/gear/' + el.dataset.gearNav)));
   }
 
   /* ------------------------------------------------------------------
@@ -7051,7 +7058,7 @@
         <div class="gsys-pair ${v.cls}">
           <div class="gsys-pair-head">
             <span class="gsys-mark">${v.mark}</span>
-            <span class="gsys-target">${escapeProfileHtml(p.name)}</span>
+            <span class="gsys-target" data-gear-nav="${p.model_id}">${escapeProfileHtml(p.name)}</span>
             <span class="gadv-verdict">${v.label}</span>
           </div>
           <div class="gsys-check">
@@ -7104,7 +7111,7 @@
         <div class="gadv-cand">
           <div class="gadv-cand-head">
             <span class="gadv-price">${c.price_usd != null ? '$' + Math.round(c.price_usd) : '$ —'}</span>
-            <span class="gsys-target">${escapeProfileHtml(c.name)}</span>
+            <span class="gsys-target" data-gear-nav="${c.model_id}">${escapeProfileHtml(c.name)}</span>
             ${c.want ? '<span class="badge badge-want">Want</span>' : ''}
           </div>
           <div class="gadv-cand-meta">
@@ -7118,9 +7125,10 @@
 
     root.innerHTML = `
       <section class="screen gsys-screen">
-        <div class="screen-head">
-          <button class="back-btn" data-gadv-back aria-label="Back">‹</button>
-          <h2 class="screen-title">Upgrade advisor</h2>
+        <div class="profile-header">
+          <button class="icon-btn" aria-label="back" data-gadv-back>${PROFILE_ICONS.back}</button>
+          <h1>Upgrade advisor</h1>
+          <span></span>
         </div>
         <p class="gsys-context">Your listening axes (share of genre weight) — candidate traits are
           matched against these, and against your library's dynamics
@@ -7141,7 +7149,47 @@
         <p class="gsys-legend">${escapeProfileHtml(data.pool_note || '')}</p>
       </section>`;
     const back = root.querySelector('[data-gadv-back]');
-    if (back) back.addEventListener('click', () => navigate('more/profile'));
+    if (back) back.addEventListener('click', () => {
+      if (history.length > 1) history.back();
+      else navigate('more/profile');
+    });
+    root.querySelectorAll('[data-gear-nav]').forEach(el =>
+      el.addEventListener('click', () => navigate('more/gear/' + el.dataset.gearNav)));
+  }
+
+  /* Live research refresh. Never route through render() — it scrolls to
+     top and lets the async renderer rebuild the whole screen (reloading
+     the avatar image, dropping scroll). Profile patches only each gear
+     row's status+chip in place. The derived gear screens have no stable
+     DOM to patch (one spec landing reshuffles the whole matrix), so they
+     recompute wholesale but keep the scroll position. */
+  async function refreshProfileGearLive() {
+    let gear = null;
+    try {
+      const r = await fetch('/api/profile/gear');
+      if (r.ok) gear = await r.json();
+    } catch (_) { return; }
+    if (!gear) return;
+    const byId = new Map(gear.map(g => [String(g.id), g]));
+    // .gear-row only exists on the profile screen — if the user navigated
+    // away during the fetch this loop finds nothing and no-ops.
+    document.querySelectorAll('.gear-row[data-gear-id]').forEach(row => {
+      const g = byId.get(row.getAttribute('data-gear-id'));
+      if (!g) return;
+      const line2 = row.querySelector('.gear-line2');
+      if (line2) line2.innerHTML = statusBadgeHTML(g.status) + researchChipHTML(g);
+    });
+  }
+
+  async function refreshGearScreenLive(renderer, hashPrefix) {
+    const app = document.getElementById('app');
+    if (!app) return;
+    const y = window.scrollY;
+    await renderer(app);
+    // A navigation during the fetch would leave the renderer's stale
+    // output in #app — repaint the real current screen instead.
+    if (!parseHash().startsWith(hashPrefix)) { render(); return; }
+    window.scrollTo(0, y);
   }
 
   async function renderProfile(root) {
@@ -7339,7 +7387,7 @@
     root.querySelectorAll('[data-gear-id]').forEach(btn => {
       btn.addEventListener('click', () => {
         const item = gear.find(g => g.id === btn.dataset.gearId);
-        if (item) gearSheet.open(item);
+        if (item) navigate('more/gear/' + item.gear_model_id);
       });
     });
     root.querySelector('[data-add-gear]').addEventListener('click', () => addGearSheet.open());
@@ -8007,60 +8055,46 @@
     },
   };
 
-  const gearSheet = {
-    el: null,
-    isOpen: false,
-    current: null,
-    init() {
-      const overlay = document.createElement('div');
-      overlay.className = 'gear-overlay';
-      overlay.hidden = true;
-      document.body.appendChild(overlay);
-      this.el = overlay;
-      overlay.addEventListener('click', e => { if (e.target === overlay) this.close(); });
-    },
-    async open(gear) {
-      if (!this.el) this.init();
-      this.current = gear;
-      this.render();
-      this.el.hidden = false;
-      this.isOpen = true;
-      // Pull full detail (specs array, technologies, sentiment terms)
-      // from the canonical gear model — list payload only carries a
-      // compact spec map for the card chip.
-      if (gear.gear_model_id) {
-        try {
-          const r = await fetch('/api/gear-models/' + gear.gear_model_id);
-          if (r.ok) {
-            const detail = await r.json();
-            // Merge canonical detail first, then re-apply user_gear
-            // fields — detail.id is gear_models.id (canonical), but
-            // status / notes / DELETE path key off user_gear.id.
-            this.current = Object.assign({}, detail, {
-              id:             gear.id,
-              gear_model_id:  gear.gear_model_id,
-              status:         gear.status,
-              notes:          gear.notes,
-            });
-            this.render();
-          }
-        } catch (_) {}
+  // Gear detail is a full-screen route (#more/gear/<model_id>), reached from
+  // the profile chain and from the System/Advisor screens. Every reachable
+  // link points at gear that's in your chain, so the page resolves the
+  // user_gear row for status + notes + Remove; a model that isn't yours
+  // (only via a hand-typed URL) hits the placeholder fallback.
+  async function renderGearDetail(root, modelId) {
+    let detail = null, userRow = null;
+    try {
+      const [dr, gr] = await Promise.all([
+        fetch('/api/gear-models/' + modelId),
+        fetch('/api/profile/gear'),
+      ]);
+      if (dr.ok) detail = await dr.json();
+      if (gr.ok) {
+        const list = await gr.json();
+        userRow = list.find(x => x.gear_model_id === modelId) || null;
       }
-    },
-    close() {
-      if (!this.el) return;
-      this.el.hidden = true;
-      this.isOpen = false;
-      this.current = null;
-    },
-    refresh() {
-      // open() refetches canonical detail, so this is a full repaint
-      // from fresh data — used by the research-state SSE bridge.
-      if (this.isOpen && this.current) this.open(this.current);
-    },
-    render() {
-      const g = this.current;
-      if (!g) return;
+    } catch (_) { /* fall through to the error card */ }
+    // The page only supports gear that's actually in your chain — every
+    // reachable link (profile, System, Advisor) points at owned/want gear.
+    // A hand-typed URL for a model you don't own lands on the fallback.
+    if (!detail || !userRow) {
+      const msg = detail ? 'Цей пристрій не у вашому ланцюзі.' : 'Не вдалося завантажити пристрій.';
+      root.innerHTML = `<section class="screen screen-gear-detail"><div class="profile-header"><button class="icon-btn" aria-label="back" data-gear-back>${PROFILE_ICONS.back}</button><h1>Gear</h1><span></span></div><div class="placeholder">${msg}</div></section>`;
+      const b = root.querySelector('[data-gear-back]');
+      if (b) b.addEventListener('click', () => { if (history.length > 1) history.back(); else navigate('more/profile'); });
+      return;
+    }
+    // detail.id is gear_models.id (canonical); status / notes / DELETE key off
+    // the user_gear row.
+    const g = Object.assign({}, detail, {
+      gear_model_id: modelId,
+      id:     userRow.id,
+      status: userRow.status,
+      notes:  userRow.notes,
+    });
+    paintGearDetail(root, modelId, g);
+  }
+
+  function paintGearDetail(root, modelId, g) {
       const isCached = g.research_state === 'cached';
       const isResearching = g.research_state === 'researching';
       const specs = g.specs || {};
@@ -8213,22 +8247,19 @@
           <button class="ai-take-cta" data-ai-prompt>Ask AI ${PROFILE_ICONS.chev}</button>
         </div>` : '';
 
-      this.el.innerHTML = `
-        <div class="gear-sheet">
-          <div class="sheet-handle"></div>
-          <div class="gear-sheet-head">
-            <div class="gear-sheet-title-block">
-              <div class="gear-sheet-brand">${escapeProfileHtml(g.brand)}</div>
-              <h2 class="gear-sheet-model">
-                <span>${escapeProfileHtml(g.model)}</span>
-                <button class="gear-sheet-rename" data-rename type="button" aria-label="edit brand and model">${PROFILE_ICONS.edit}</button>
-              </h2>
-              <div class="gear-sheet-meta-row">
-                <span class="cat-tag">${categoryLabel(g.category)}</span>
-                ${statusBadgeHTML(g.status)}
-              </div>
-            </div>
-            <button class="icon-btn" data-close aria-label="close" style="margin-top:calc(4*var(--px));">${PROFILE_ICONS.close}</button>
+      root.innerHTML = `
+        <section class="screen screen-gear-detail">
+          <div class="profile-header">
+            <button class="icon-btn" aria-label="back" data-gear-back>${PROFILE_ICONS.back}</button>
+            <h1>${escapeProfileHtml(categoryLabel(g.category))}</h1>
+            <span></span>
+          </div>
+          <div class="gear-sheet-title-block">
+            <div class="gear-sheet-brand">${escapeProfileHtml(g.brand)}</div>
+            <h2 class="gear-sheet-model">
+              <span>${escapeProfileHtml(g.model)}</span>
+              <button class="gear-sheet-rename" data-rename type="button" aria-label="edit brand and model">${PROFILE_ICONS.edit}</button>
+            </h2>
           </div>
           <div class="status-segmented">${segments}</div>
           ${researchHTML}
@@ -8241,41 +8272,71 @@
             <div class="notes-title">My notes</div>
             <textarea class="notes-area${g.notes ? '' : ' placeholder'}" id="gearNotes" placeholder="Notes only you can see — pairings, dealer, serial, settings…">${escapeProfileHtml(g.notes || '')}</textarea>
           </div>
-          <div style="display:flex;gap:calc(10*var(--px));padding:0 calc(16*var(--px)) calc(20*var(--px));">
-            <button class="profile-btn secondary" data-delete>Remove from chain</button>
+          <div class="gear-detail-actions">
+            <button class="profile-btn secondary" data-remove>Remove from chain</button>
           </div>
-        </div>
+        </section>
       `;
 
-      this.el.querySelector('[data-close]').addEventListener('click', () => this.close());
-      this.el.querySelector('[data-rename]').addEventListener('click', () => this.openRenameForm());
-      this.el.querySelectorAll('[data-status]').forEach(btn => {
-        btn.addEventListener('click', () => this.setStatus(btn.dataset.status));
+      root.querySelector('[data-gear-back]').addEventListener('click', () => {
+        if (history.length > 1) history.back(); else navigate('more/profile');
       });
-      const notes = this.el.querySelector('#gearNotes');
-      let notesTimer = null;
-      notes.addEventListener('input', () => {
-        clearTimeout(notesTimer);
-        notesTimer = setTimeout(() => this.saveNotes(notes.value), 600);
+      const renameBtn = root.querySelector('[data-rename]');
+      if (renameBtn) renameBtn.addEventListener('click',
+        () => openGearRenameForm(g, () => renderGearDetail(root, modelId)));
+      root.querySelectorAll('[data-status]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          try {
+            await fetch('/api/profile/gear/' + g.id, {
+              method: 'PUT', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ status: btn.dataset.status }),
+            });
+            g.status = btn.dataset.status;
+            paintGearDetail(root, modelId, g);
+          } catch (_) {}
+        });
       });
-      this.el.querySelector('[data-delete]').addEventListener('click', () => this.remove());
-      const aiBtn = this.el.querySelector('[data-ai-prompt]');
-      if (aiBtn) aiBtn.addEventListener('click', () => {
-        this.close();
-        if (typeof ai !== 'undefined' && ai.open) ai.open();
+      const notes = root.querySelector('#gearNotes');
+      if (notes) {
+        let notesTimer = null;
+        notes.addEventListener('input', () => {
+          clearTimeout(notesTimer);
+          notesTimer = setTimeout(async () => {
+            try {
+              await fetch('/api/profile/gear/' + g.id, {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ notes: notes.value }),
+              });
+              g.notes = notes.value;
+            } catch (_) {}
+          }, 600);
+        });
+      }
+      const removeBtn = root.querySelector('[data-remove]');
+      if (removeBtn) removeBtn.addEventListener('click', async () => {
+        const ok = await confirmDestructive({
+          title: 'Remove from chain?',
+          message: `<b>${escapeProfileHtml(g.brand + ' ' + g.model)}</b> leaves your audio chain. Your notes and its research are kept — re-add it anytime to restore.`,
+          confirmText: 'Remove',
+        });
+        if (!ok) return;
+        try {
+          const r = await fetch('/api/profile/gear/' + g.id, { method: 'DELETE' });
+          if (!r.ok) { console.error('delete gear failed', r.status, await r.text()); return; }
+        } catch (err) { console.error('delete gear error', err); return; }
+        if (history.length > 1) history.back(); else navigate('more/profile');
       });
-      const retryBtn = this.el.querySelector('[data-retry-research]');
+      const aiBtn = root.querySelector('[data-ai-prompt]');
+      if (aiBtn) aiBtn.addEventListener('click', () => { if (typeof ai !== 'undefined' && ai.open) ai.open(); });
+      const retryBtn = root.querySelector('[data-retry-research]');
       if (retryBtn) retryBtn.addEventListener('click', async () => {
         retryBtn.disabled = true;
         retryBtn.textContent = 'Queued…';
-        try {
-          await fetch('/api/gear-models/' + g.gear_model_id + '/retry-research', { method: 'POST' });
-        } catch (_) { /* the SSE refresh below repaints the true state */ }
-        this.refresh();
+        try { await fetch('/api/gear-models/' + modelId + '/retry-research', { method: 'POST' }); } catch (_) {}
+        renderGearDetail(root, modelId);
       });
-    },
-    openRenameForm() {
-      const g = this.current;
+  }
+  function openGearRenameForm(g, onSaved) {
       const overlay = document.createElement('div');
       overlay.className = 'add-gear-overlay';
       overlay.innerHTML = `
@@ -8363,8 +8424,7 @@
             return;
           }
           close();
-          this.close();
-          if (parseHash().startsWith('more/profile')) render();
+          onSaved();
         } catch (err) {
           msg.style.color = 'var(--color-negative)';
           msg.textContent = String(err);
@@ -8372,51 +8432,7 @@
       };
       overlay.querySelector('[data-save]').addEventListener('click', submit);
       modelInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
-    },
-    async setStatus(status) {
-      try {
-        await fetch('/api/profile/gear/' + this.current.id, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status }),
-        });
-        this.current.status = status;
-        this.render();
-        if (parseHash().startsWith('more/profile')) render();
-      } catch (_) {}
-    },
-    async saveNotes(notes) {
-      try {
-        await fetch('/api/profile/gear/' + this.current.id, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ notes }),
-        });
-        this.current.notes = notes;
-      } catch (_) {}
-    },
-    async remove() {
-      const label = `${this.current.brand} ${this.current.model}`;
-      const ok = await confirmDestructive({
-        title: 'Remove from chain?',
-        message: `<b>${escapeProfileHtml(label)}</b> will be removed from your audio chain. The model stays in the shared catalog.`,
-        confirmText: 'Remove',
-      });
-      if (!ok) return;
-      try {
-        const r = await fetch('/api/profile/gear/' + this.current.id, { method: 'DELETE' });
-        if (!r.ok) {
-          console.error('delete gear failed', r.status, await r.text());
-          return;
-        }
-      } catch (err) {
-        console.error('delete gear error', err);
-        return;
-      }
-      this.close();
-      if (parseHash().startsWith('more/profile')) render();
-    },
-  };
+  }
 
   async function renderProfileOther(root, pubkeyPrefix) {
     let profile = null;
@@ -10233,8 +10249,10 @@
     if (typeof window.sseStream === 'function') {
       window.sseStream('/api/gear-models/research/stream', () => {
         const h = parseHash();
-        if (h.startsWith('more/profile') || h.startsWith('more/gear-system')) render();
-        if (gearSheet.isOpen) gearSheet.refresh();
+        if (h.startsWith('more/profile'))           refreshProfileGearLive();
+        else if (h.startsWith('more/gear-system'))  refreshGearScreenLive(renderGearSystem, 'more/gear-system');
+        else if (h.startsWith('more/gear-advisor')) refreshGearScreenLive(renderGearAdvisor, 'more/gear-advisor');
+        else if (h.startsWith('more/gear/'))        refreshGearScreenLive(app => renderGearDetail(app, h.split('/')[2]), 'more/gear/');
       }, () => { /* sseStream auto-reconnects */ });
     }
 

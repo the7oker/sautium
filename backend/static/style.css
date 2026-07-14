@@ -4410,7 +4410,6 @@ body.has-miniplayer .more-overlay .drawer {
 }
 .add-btn {
   display: inline-flex;
-  align-items: center;
   gap: calc(4 * var(--px));
   color: var(--color-amber);
   background: transparent;
@@ -4546,10 +4545,10 @@ body.has-miniplayer .more-overlay .drawer {
   max-width: calc(150 * var(--px));
 }
 /* ---- System screen (pair matrix) ---- */
-.gsys-screen .back-btn {
-  border: 0; background: none; color: var(--color-text-muted);
-  font-size: calc(24 * var(--px)); line-height: 1; padding: 0 calc(8 * var(--px)) 0 0;
-  cursor: pointer;
+/* Header reuses .profile-header; break out of the .screen padding so it sits
+   flush to the top and side edges like the other More sub-screens. */
+.gsys-screen .profile-header {
+  margin: calc(-1 * var(--space-5)) calc(-1 * var(--space-4)) 0;
 }
 .gsys-context {
   color: var(--color-text-muted); font-size: var(--text-label);
@@ -4577,6 +4576,12 @@ body.has-miniplayer .more-overlay .drawer {
 .gsys-pair.is-fail .gsys-mark { color: var(--color-negative); }
 .gsys-pair.is-nodata .gsys-mark { color: var(--color-text-dim); }
 .gsys-target { font-weight: 600; font-size: var(--text-body); }
+/* Gear names link to the gear detail page. The line-out pair wraps two
+   inner nav spans (source → target); the rest carry data-gear-nav directly. */
+.gsys-target[data-gear-nav],
+.gsys-target [data-gear-nav] { cursor: pointer; }
+.gsys-target[data-gear-nav]:active,
+.gsys-target [data-gear-nav]:active { color: var(--color-blue-hover); }
 .gsys-check {
   display: flex; flex-wrap: wrap; align-items: baseline;
   gap: calc(6 * var(--px)); padding: calc(3 * var(--px)) 0;
@@ -4608,10 +4613,11 @@ body.has-miniplayer .more-overlay .drawer {
 }
 .gsys-legend { color: var(--color-text-dim); font-size: var(--text-caption); }
 .gsys-entry {
-  width: 100%; font: inherit; color: inherit; text-align: left;
+  width: calc(100% - 32 * var(--px)); font: inherit; color: inherit; text-align: left;
   border: 0; background: var(--color-surface);
-  border-radius: var(--radius-md); margin-top: calc(8 * var(--px));
+  border-radius: var(--radius-md); margin: calc(8 * var(--px)) calc(16 * var(--px)) 0;
 }
+.gear-list + .gsys-entry { margin-top: calc(24 * var(--px)); }
 
 /* ---- Upgrade advisor ---- */
 .tiles-row {
@@ -4990,31 +4996,21 @@ select.add-gear-input {
 /* =====================================================================
  * Gear item detail sheet (research states + AI take + notes)
  * ===================================================================== */
-.gear-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
+/* Gear detail — full-screen route (#more/gear/<id>). Zero horizontal padding
+   like the other More sub-screens so the reused cards keep their own 16px
+   margins; the category rides the .profile-header, brand/model the title block
+   below. */
+.screen-gear-detail {
+  display: block;
+  padding: 0 0 calc(28 * var(--px));
+  gap: 0;
+}
+.gear-detail-actions {
   display: flex;
-  align-items: flex-end;
-  background: rgba(14, 10, 8, 0.55);
+  gap: calc(10 * var(--px));
+  padding: calc(10 * var(--px)) calc(16 * var(--px)) calc(20 * var(--px));
 }
-.gear-overlay[hidden] { display: none !important; }
-.gear-sheet {
-  width: 100%;
-  background: var(--color-surface-lo);
-  border-top-left-radius: var(--radius-lg);
-  border-top-right-radius: var(--radius-lg);
-  max-height: 92vh;
-  overflow-y: auto;
-  padding-bottom: calc(28 * var(--px) + env(safe-area-inset-bottom, 0));
-}
-.gear-sheet-head {
-  padding: calc(8 * var(--px)) calc(4 * var(--px)) calc(16 * var(--px));
-  display: grid;
-  grid-template-columns: 1fr calc(44 * var(--px));
-  align-items: start;
-  gap: calc(8 * var(--px));
-}
+.gear-detail-actions .profile-btn { flex: 1; }
 .gear-sheet-title-block { padding: calc(4 * var(--px)) 0 0 calc(20 * var(--px)); }
 .gear-sheet-brand {
   font-size: calc(12 * var(--px));
@@ -5047,30 +5043,10 @@ select.add-gear-input {
 }
 .gear-sheet-rename:hover { color: var(--color-amber); }
 .gear-sheet-rename svg { width: calc(14 * var(--px)); height: calc(14 * var(--px)); }
-.gear-sheet-meta-row {
-  margin-top: calc(10 * var(--px));
-  display: flex;
-  align-items: center;
-  gap: calc(8 * var(--px));
-  flex-wrap: wrap;
-}
-.cat-tag {
-  height: calc(22 * var(--px));
-  padding: 0 calc(9 * var(--px));
-  display: inline-flex;
-  align-items: center;
-  font-size: calc(11 * var(--px));
-  font-weight: 500;
-  color: var(--color-text-muted);
-  background: transparent;
-  border: 1px solid var(--color-divider);
-  border-radius: calc(11 * var(--px));
-  letter-spacing: 0.01em;
-}
 
-/* Status segmented control inside the sheet */
+/* Status segmented control on the gear detail page */
 .status-segmented {
-  margin: 0 calc(16 * var(--px));
+  margin: calc(14 * var(--px)) calc(16 * var(--px)) 0;
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   background: var(--color-surface-lo);
