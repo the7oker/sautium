@@ -8166,7 +8166,7 @@
               <span class="research-state-label is-awaiting">Awaiting research · queued</span>
             </div>
             <p class="research-prose empty">We don't have a community summary for this model yet. It's been added to the research queue.</p>
-            <p class="helper-prose">AI-on users trigger background research; results sync to everyone via P2P. You'll see specs, sentiment and a personalised take here once it lands.</p>
+            <p class="helper-prose">AI-on users trigger background research; results sync to everyone via P2P. You'll see specs and sentiment here once it lands.</p>
           </div>`;
       }
 
@@ -8253,16 +8253,6 @@
           </div>`;
       }
 
-      const aiTakeHTML = isCached ? `
-        <div class="ai-take">
-          <div class="ai-take-head">
-            <span class="ai-take-glyph">AI</span>
-            <span class="ai-take-label">Your personalised take</span>
-          </div>
-          <p class="ai-take-prose">Ask AI to weigh in on how this fits your chain and your listening style.</p>
-          <button class="ai-take-cta" data-ai-prompt>Ask AI ${PROFILE_ICONS.chev}</button>
-        </div>` : '';
-
       root.innerHTML = `
         <section class="screen screen-gear-detail">
           <div class="profile-header">
@@ -8283,7 +8273,6 @@
           ${technologiesHTML}
           ${measuredHTML}
           ${sentimentHTML}
-          ${aiTakeHTML}
           <div class="notes-card">
             <div class="notes-title">My notes</div>
             <textarea class="notes-area${g.notes ? '' : ' placeholder'}" id="gearNotes" placeholder="Notes only you can see — pairings, dealer, serial, settings…">${escapeProfileHtml(g.notes || '')}</textarea>
@@ -8342,8 +8331,6 @@
         } catch (err) { console.error('delete gear error', err); return; }
         if (history.length > 1) history.back(); else navigate('more/profile');
       });
-      const aiBtn = root.querySelector('[data-ai-prompt]');
-      if (aiBtn) aiBtn.addEventListener('click', () => { if (typeof ai !== 'undefined' && ai.open) ai.open(); });
       const retryBtn = root.querySelector('[data-retry-research]');
       if (retryBtn) retryBtn.addEventListener('click', async () => {
         retryBtn.disabled = true;

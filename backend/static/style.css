@@ -5274,62 +5274,6 @@ select.add-gear-input {
   text-transform: uppercase;
 }
 
-/* AI personalised take */
-.ai-take {
-  margin: calc(18 * var(--px)) calc(16 * var(--px)) 0;
-  background: var(--color-amber-stripe);
-  border: 1px solid var(--color-amber-weak);
-  border-radius: var(--radius-md);
-  padding: calc(14 * var(--px)) calc(16 * var(--px));
-}
-.ai-take-head {
-  display: flex;
-  align-items: center;
-  gap: calc(8 * var(--px));
-  margin-bottom: calc(8 * var(--px));
-}
-.ai-take-glyph {
-  width: calc(18 * var(--px));
-  height: calc(18 * var(--px));
-  border-radius: 50%;
-  background: var(--color-amber);
-  color: var(--color-foundation);
-  display: grid;
-  place-items: center;
-  font-family: var(--font-sans);
-  font-size: calc(10 * var(--px));
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-.ai-take-label {
-  font-family: var(--font-mono);
-  font-size: calc(10.5 * var(--px));
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--color-amber);
-  font-weight: 600;
-}
-.ai-take-prose {
-  font-size: calc(13.5 * var(--px));
-  color: var(--color-text);
-  line-height: 1.55;
-  text-wrap: pretty;
-}
-.ai-take-prose b { color: var(--color-amber); font-weight: 600; }
-.ai-take-cta {
-  margin-top: calc(10 * var(--px));
-  font-size: calc(12.5 * var(--px));
-  font-weight: 600;
-  color: var(--color-amber);
-  display: inline-flex;
-  align-items: center;
-  gap: calc(4 * var(--px));
-  background: none;
-  border: 0;
-  cursor: pointer;
-  padding: 0;
-}
-
 /* Notes card */
 .notes-card {
   margin: calc(18 * var(--px)) calc(16 * var(--px)) calc(24 * var(--px));
