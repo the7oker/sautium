@@ -162,16 +162,7 @@ def _roles(item: Dict[str, Any]) -> List[Dict[str, Any]]:
             "gain_max": _num(specs, "max_gain_db"),
         })
 
-    if cat == "dac":
-        roles.append({
-            "role": "digital_in",
-            "pcm_khz": _num(specs, "pcm_max_khz"),
-            "dsd": specs.get("dsd_max_rate"),
-        })
-
     if cat == "player":
-        if specs.get("digital_output_types"):
-            roles.append({"role": "transport", "outs": specs["digital_output_types"]})
         if (specs.get("usb_dac_mode") or "").lower() == "true":
             roles.append({"role": "usb_dac"})
 
@@ -187,6 +178,20 @@ def _check(name, status, numbers, tier, note=None):
     return c
 
 
+def _headroom_note(status: str) -> Optional[str]:
+    """Plain-language reading of an SPL-headroom verdict — the practical
+    'so what' behind the ±dB figure. Only warn/fail carry a note; a
+    positive 'ok' margin is self-evident from the figure and green tier."""
+    if status == "warn":
+        return ("usable but tight — the loudest transients on wide-dynamic "
+                "material can outrun the amp's headroom here; a stronger "
+                "source is the only thing that adds real margin")
+    if status == "fail":
+        return ("underpowered for reference peaks — the loudest passages "
+                "clip before target loudness; this pair needs a stronger source")
+    return None
+
+
 def _pair_hp_transducer(src, s_role, dst, d_role) -> Dict[str, Any]:
     checks = []
 
@@ -200,6 +205,9 @@ def _pair_hp_transducer(src, s_role, dst, d_role) -> Dict[str, Any]:
                 "electrostatic load — needs an energizer (DC bias + 100V-domain swing); "
                 "conventional headphone outputs cannot drive it",
                 "ds",
+                "an electrostat needs a dedicated energizer — DC bias plus a "
+                "hundreds-of-volts swing that a conventional headphone output can "
+                "neither supply nor connect to",
             ))
             return _verdict(src, "hp_out", dst, "transducer", checks)
         # Matched electrostatic domain — surface it as a positive check so
@@ -220,6 +228,7 @@ def _pair_hp_transducer(src, s_role, dst, d_role) -> Dict[str, Any]:
                 "spl_headroom", status,
                 f"{PEAK_TARGET_DB} dB peaks need {need_v:.0f} Vrms; energizer swings ~{rail:.0f} Vrms → {margin:+.0f} dB",
                 s_role["rail_tier"],
+                _headroom_note(status),
             ))
         else:
             checks.append(_check(
@@ -233,6 +242,9 @@ def _pair_hp_transducer(src, s_role, dst, d_role) -> Dict[str, Any]:
             "domain", "fail",
             "electrostatic energizer output — cannot drive conventional low-impedance headphones",
             "ds",
+            "an energizer drives only electrostats — a bias-referenced high-voltage "
+            "swing on a 5-pin socket that a dynamic or planar headphone can neither "
+            "accept nor plug into",
         ))
         return _verdict(src, "hp_out", dst, "transducer", checks)
 
@@ -254,6 +266,7 @@ def _pair_hp_transducer(src, s_role, dst, d_role) -> Dict[str, Any]:
             "spl_headroom", status,
             f"{PEAK_TARGET_DB} dB peaks need {need_v:.2f} Vrms; available ~{rail:.1f} Vrms → {margin:+.0f} dB",
             s_role["rail_tier"],
+            _headroom_note(status),
         ))
         if d_role["max_spl"] is not None:
             ceiling_ok = d_role["max_spl"] >= PEAK_TARGET_DB
@@ -334,17 +347,6 @@ def _pair_line(src, s_role, dst, d_role) -> Dict[str, Any]:
             ))
 
     return _verdict(src, "line_out", dst, "line_in", checks)
-
-
-def _pair_transport(src, s_role, dst, d_role) -> Dict[str, Any]:
-    checks = [_check(
-        "formats", "ok" if d_role["pcm_khz"] else "nodata",
-        f"transport outs: {s_role['outs']}; DAC ceiling: "
-        + (f"PCM {d_role['pcm_khz']:g} kHz / {d_role['dsd'] or '—'}" if d_role["pcm_khz"] else "unknown"),
-        "ds",
-        "transport-side format ceilings not captured yet — informational",
-    )]
-    return _verdict(src, "transport", dst, "digital_in", checks)
 
 
 def _need_vrms(item) -> Optional[float]:
@@ -433,8 +435,6 @@ def system_analysis() -> Dict[str, Any]:
                 pairs.append(_pair_hp_transducer(src, sr, dst, dr))
             elif sr["role"] == "line_out" and dr["role"] == "line_in":
                 pairs.append(_pair_line(src, sr, dst, dr))
-            elif sr["role"] == "transport" and dr["role"] == "digital_in":
-                pairs.append(_pair_transport(src, sr, dst, dr))
 
     # Community pair-synergy voice (the fourth voice, tier F): attached
     # to any pair whose model combination carries a cached, discussed

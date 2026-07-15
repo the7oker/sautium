@@ -101,7 +101,7 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
-    CREATE TYPE gear_category AS ENUM ('headphones', 'iems', 'dac', 'amp', 'player', 'streamer', 'power', 'cable');
+    CREATE TYPE gear_category AS ENUM ('headphones', 'iems', 'dac', 'amp', 'player');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN

@@ -6761,9 +6761,6 @@
     { id: 'dac',        label: 'DAC' },
     { id: 'amp',        label: 'Amp' },
     { id: 'player',     label: 'Player' },
-    { id: 'streamer',   label: 'Streamer' },
-    { id: 'power',      label: 'Power' },
-    { id: 'cable',      label: 'Cable' },
   ];
   function categoryLabel(id) {
     const c = GEAR_CATEGORIES.find(x => x.id === id);
@@ -6780,9 +6777,6 @@
     dac:        'dac_architecture',
     amp:        'amp_topology',
     player:     'form_factor',
-    streamer:   'form_factor',
-    power:      'power_type',
-    cable:      'cable_type',
   };
 
   function escapeProfileHtml(s) {
@@ -6934,7 +6928,6 @@
     damping:        'Damping · ⅛ rule',
     bridging:       'Impedance bridging',
     level:          'Gain staging',
-    formats:        'Formats',
     measured:       'Measured',
     synergy:        'Community',
     domain:         'Domain',
@@ -6985,7 +6978,6 @@
       (order[a.status] - order[b.status]) || a.target.name.localeCompare(b.target.name));
 
     const linePairs = sortPairs(data.pairs.filter(p => p.source.role === 'line_out'));
-    const transportPairs = sortPairs(data.pairs.filter(p => p.source.role === 'transport'));
     const hpBySource = {};
     for (const p of data.pairs.filter(p => p.source.role === 'hp_out')) {
       (hpBySource[p.source.name] || (hpBySource[p.source.name] = [])).push(p);
@@ -7012,10 +7004,6 @@
     for (const src of Object.keys(hpBySource).sort()) {
       groups += `<div class="profile-group-label">${escapeProfileHtml(src)} → headphones</div>
         <div class="gsys-group">${sortPairs(hpBySource[src]).map(p => gsysPairHTML(p, wantIds)).join('')}</div>`;
-    }
-    if (transportPairs.length) {
-      groups += `<div class="profile-group-label">Digital transport</div>
-        <div class="gsys-group">${transportPairs.map(p => gsysPairHTML(p, wantIds)).join('')}</div>`;
     }
     if (!groups) {
       groups = '<div class="placeholder">No analyzable pairs yet — add gear and let research finish.</div>';
