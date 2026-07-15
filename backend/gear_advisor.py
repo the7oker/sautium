@@ -271,12 +271,21 @@ def _candidates(analysis: Dict[str, Any],
             and not r["user_removed"]]
     specs_by_model = _load_specs([r["model_id"] for r in rows])
 
+    # How the planned system drives each candidate: the BEST pairing any
+    # source — owned OR wanted — achieves with it. Best (not worst) because
+    # one capable amp is enough to drive a transducer, and a source that
+    # can't (a conventional amp facing an electrostat, an energizer facing a
+    # dynamic) simply isn't its driver. So a candidate reads 'fail' only when
+    # nothing in the park or the wishlist can drive it: an electrostat with
+    # no energizer owned or wanted is a fail, but the moment the matching
+    # energizer sits in 'want' the pair becomes the deliberate set the user
+    # is planning.
     pair_status: Dict[str, str] = {}
     order = {"fail": 0, "warn": 1, "nodata": 2, "ok": 3}
     for p in analysis["pairs"]:
         tid = p["target"]["model_id"]
         cur = pair_status.get(tid)
-        if cur is None or order[p["status"]] < order[cur]:
+        if cur is None or order[p["status"]] > order[cur]:
             pair_status[tid] = p["status"]
 
     out = []
