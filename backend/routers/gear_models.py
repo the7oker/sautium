@@ -192,6 +192,8 @@ def retry_research(model_id: str) -> Dict[str, Any]:
     if row is None:
         raise HTTPException(status_code=409, detail="model is already queued or researching")
     db_execute("SELECT pg_notify('gear_research', %(id)s)", {"id": model_id})
+    from gear_research_worker import request_drain
+    request_drain()
     return {"ok": True}
 
 

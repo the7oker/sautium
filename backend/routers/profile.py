@@ -351,6 +351,8 @@ def add_gear(req: GearAddRequest) -> Dict[str, Any]:
             {"id": gm_id, "brand_id": brand_id, "model": model, "category": req.category},
         )
         db_execute("SELECT pg_notify('gear_research', %(id)s)", {"id": gm_id})
+        from gear_research_worker import request_drain
+        request_drain()
 
     notes = _none_if_blank(req.notes)
     inserted = db_execute(

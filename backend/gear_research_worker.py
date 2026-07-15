@@ -46,6 +46,34 @@ from uuid_utils import (gear_caveat_uuid, gear_pair_uuid,
 
 logger = logging.getLogger(__name__)
 
+# In-process drain trigger. Postgres NOTIFY fired from a pooled connection
+# does NOT reliably reach this process's own LISTEN socket in the Docker/WSL
+# deployment — external notifies arrive, in-process ones vanish, so a
+# freshly-added model sat in 'queued' forever. Local producers (add_gear,
+# retry/refresh, enqueue_pair) therefore kick the drain directly rather than
+# routing through Postgres or the LISTEN connection (which a mid-research
+# error can reconnect out from under a wake pipe). The lock keeps it
+# single-flight — a running drain already loops until the queue is empty, so
+# it absorbs any rows queued while it works. NOTIFY stays the cross-process
+# / P2P path.
+_drain_lock = threading.Lock()
+
+
+def _drain_once() -> None:
+    """Drain the queue unless a drain is already in progress."""
+    if not _drain_lock.acquire(blocking=False):
+        return
+    try:
+        _drain_queue()
+    finally:
+        _drain_lock.release()
+
+
+def request_drain() -> None:
+    """Kick a drain from any producer thread in this process (non-blocking)."""
+    threading.Thread(target=_drain_once, daemon=True, name="gear-drain-kick").start()
+
+
 RESEARCH_TIMEOUT_SECONDS = 600   # one model = many web fetches; chat's 150s is far too small.
                                  # 480 proved too tight for review-rich categories (Empyrean II
                                  # timed out on the first live drain) — headphones carry the
@@ -442,6 +470,7 @@ def enqueue_pair(model_a: str, model_b: str) -> None:
         {"id": str(gear_pair_uuid(a, b)), "a": a, "b": b},
     )
     db_execute("SELECT pg_notify('gear_research', %(p)s)", {"p": f"pair:{a}:{b}"})
+    request_drain()
 
 
 def _pair_names(pair_id: str) -> Optional[Dict[str, str]]:
@@ -626,21 +655,35 @@ def _requeue_orphans() -> None:
 
 def _worker_loop() -> None:
     _requeue_orphans()
-    _drain_queue()
     while _worker_running:
         conn = None
         try:
-            conn = psycopg2.connect(settings.database_url)
+            # Aggressive keepalives so a silently-dropped LISTEN socket (an
+            # idle TCP conn reaped by Docker/WSL NAT with no RST) surfaces
+            # as a poll error and forces a reconnect. Without them the
+            # worker keeps select()-ing a dead socket, no exception fires,
+            # and every later NOTIFY is lost — stranding freshly-queued
+            # gear in 'queued' forever.
+            conn = psycopg2.connect(
+                settings.database_url,
+                keepalives=1, keepalives_idle=30,
+                keepalives_interval=10, keepalives_count=3,
+            )
             conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
             with conn.cursor() as cur:
                 cur.execute("LISTEN gear_research")
+            # Sweep the queue on every (re)LISTEN. NOTIFY only reaches a
+            # live listener, so anything queued at startup or while the
+            # socket was down would otherwise never be picked up. Fired on
+            # the connect event, this is the reliability net, not a poll.
+            _drain_once()
             while _worker_running:
                 ready = select.select([conn], [], [], 5)
                 if ready[0]:
                     conn.poll()
                     if conn.notifies:
                         conn.notifies.clear()
-                        _drain_queue()
+                        _drain_once()
         except Exception as e:
             logger.warning(f"gear research listener error: {e}")
             if _worker_running:
