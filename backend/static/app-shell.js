@@ -8134,7 +8134,7 @@
             <p class="research-prose">${escapeProfileHtml(g.research_summary)}</p>
             <div class="research-meta">
               <span>Updated ${escapeProfileHtml(updatedAgo)}</span>
-              <button class="refresh cooldown" disabled>Refresh in ${g.refresh_cooldown_days || 7}d</button>
+              <button class="refresh" data-retry-research>Refresh</button>
             </div>
           </div>`;
       } else if (isResearching) {

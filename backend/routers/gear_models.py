@@ -178,18 +178,19 @@ def get_gear_model(model_id: str) -> Dict[str, Any]:
 
 @router.post("/{model_id}/retry-research")
 def retry_research(model_id: str) -> Dict[str, Any]:
-    """Deliberate user action — research burns real tokens, so failed
-    rows never retry automatically."""
+    """Deliberate user action — research burns real tokens, so gear never
+    re-researches on its own. Re-queues a failed retry or a cached refresh;
+    a row already queued or researching is left alone."""
     row = db_execute(
         """
         UPDATE gear_models SET research_state = 'queued'
-        WHERE id = %(id)s::uuid AND research_state = 'failed'
+        WHERE id = %(id)s::uuid AND research_state IN ('failed', 'cached')
         RETURNING id::text AS id
         """,
         {"id": model_id},
     )
     if row is None:
-        raise HTTPException(status_code=409, detail="model is not in failed state")
+        raise HTTPException(status_code=409, detail="model is already queued or researching")
     db_execute("SELECT pg_notify('gear_research', %(id)s)", {"id": model_id})
     return {"ok": True}
 
