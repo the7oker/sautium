@@ -202,6 +202,14 @@ def _pair_hp_transducer(src, s_role, dst, d_role) -> Dict[str, Any]:
                 "ds",
             ))
             return _verdict(src, "hp_out", dst, "transducer", checks)
+        # Matched electrostatic domain — surface it as a positive check so
+        # the correct partner reads as compatible, not merely "nodata" when
+        # the headroom maths below lacks the energizer's voltage swing.
+        checks.append(_check(
+            "domain", "ok",
+            f"energizer + electrostat — matched domain (DC bias {s_role['bias_v']:.0f} V)",
+            "ds",
+        ))
         sens100, rail = d_role.get("sens_100v"), s_role["rail_v"]
         if sens100 is not None and rail:
             need_v = 100 * 10 ** ((PEAK_TARGET_DB - sens100) / 20)
@@ -415,10 +423,12 @@ def system_analysis() -> Dict[str, Any]:
         for dst, dr in role_index:
             if src["model_id"] == dst["model_id"]:
                 continue
-            # own/want boundary: pairs among owned gear plus owned↔want
-            # (candidate evaluation); want↔want is noise.
-            if src["status"] != "own" and dst["status"] != "own":
-                continue
+            # No own/want gate. want↔want pairs are electrically real and
+            # sometimes the ONLY meaningful pairing: an energizer + an
+            # electrostat you are eyeing together drive nothing in your
+            # owned rack, so gating them out hides the one verdict that
+            # matters. The loop below only emits real (out-port, in-port)
+            # pairs, so there is no want↔want noise to suppress here.
             if sr["role"] == "hp_out" and dr["role"] == "transducer":
                 pairs.append(_pair_hp_transducer(src, sr, dst, dr))
             elif sr["role"] == "line_out" and dr["role"] == "line_in":
