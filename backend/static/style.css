@@ -4592,24 +4592,29 @@ body.has-miniplayer .more-overlay .drawer {
 .gsys-target [data-gear-nav] { cursor: pointer; }
 .gsys-target[data-gear-nav]:active,
 .gsys-target [data-gear-nav]:active { color: var(--color-blue-hover); }
+/* Each check is a labelled reading: a header row (name + provenance
+   tier pinned right) above the full-width mono value and its optional
+   note. Explicit grid placement locks the tier to its check's header —
+   the old flex-wrap let it drift mid-value or drop onto a line of its
+   own, so a badge read as belonging to the wrong row. */
 .gsys-check {
-  display: flex; flex-wrap: wrap; align-items: baseline;
-  gap: calc(6 * var(--px)); padding: calc(3 * var(--px)) 0;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  column-gap: calc(8 * var(--px));
+  row-gap: calc(3 * var(--px));
+  padding: calc(7 * var(--px)) 0;
 }
+.gsys-check + .gsys-check { border-top: 1px solid var(--color-divider); }
 .gsys-check-name {
-  flex: none; font-size: var(--text-caption); letter-spacing: var(--tracking-caption);
+  grid-column: 1; grid-row: 1;
+  font-size: var(--text-caption); letter-spacing: var(--tracking-caption);
   text-transform: uppercase; color: var(--color-text-muted);
-  min-width: calc(96 * var(--px));
 }
 .gsys-check.is-nodata .gsys-check-name { color: var(--color-text-dim); }
-.gsys-check-num {
-  font-family: var(--font-mono); font-size: calc(11.5 * var(--px));
-  line-height: var(--lh-mono); color: var(--color-blue-hover);
-  font-variant-numeric: tabular-nums; flex: 1 1 60%;
-}
-.gsys-check.is-nodata .gsys-check-num { color: var(--color-text-dim); }
 .gsys-tier {
-  flex: none; font: 600 calc(8.5 * var(--px)) / 1 var(--font-mono);
+  grid-column: 2; grid-row: 1; justify-self: end;
+  font: 600 calc(8.5 * var(--px)) / 1 var(--font-mono);
   letter-spacing: 0.06em; padding: calc(2 * var(--px)) calc(4 * var(--px));
   border-radius: var(--radius-sm);
 }
@@ -4617,9 +4622,16 @@ body.has-miniplayer .more-overlay .drawer {
 .gsys-tier-m  { color: var(--color-blue-hover); background: var(--color-blue-weak); }
 .gsys-tier-d  { color: var(--color-amber); background: var(--color-amber-weak); }
 .gsys-tier-f  { color: var(--color-text-muted); background: rgba(166, 155, 142, 0.13); }
+.gsys-check-num {
+  grid-column: 1 / -1; grid-row: 2; min-width: 0;
+  font-family: var(--font-mono); font-size: calc(11.5 * var(--px));
+  line-height: var(--lh-mono); color: var(--color-blue-hover);
+  font-variant-numeric: tabular-nums;
+}
+.gsys-check.is-nodata .gsys-check-num { color: var(--color-text-dim); }
 .gsys-note {
-  flex: 1 1 100%; font-size: var(--text-caption);
-  color: var(--color-text-dim); padding-left: calc(96 * var(--px) + 6 * var(--px));
+  grid-column: 1 / -1; grid-row: 3;
+  font-size: var(--text-caption); color: var(--color-text-dim);
 }
 .gsys-legend { color: var(--color-text-dim); font-size: var(--text-caption); margin-top: calc(16 * var(--px)); }
 .gsys-entry {
