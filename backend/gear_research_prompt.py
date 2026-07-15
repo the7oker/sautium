@@ -98,6 +98,24 @@ MEASURED CAVEATS
   that fit under it are unaffected and get no flag.
 """
 
+_SIGNATURE_RULE = """
+HEADLINE CLASSIFIER (do not skip)
+- Every category has ONE headline classifier the UI shows at a glance.
+  When the catalog above lists it for this category, resolving it is the
+  single highest-priority spec — never finish without it unless no source
+  could possibly determine it:
+    headphones / iems -> driver_type
+    dac               -> dac_architecture
+    amp               -> amp_topology
+    player / streamer -> form_factor
+    power             -> power_type
+    cable             -> cable_type
+- amp_topology is a single merged descriptor: solid_state_class_a for a
+  solid-state Class A design, class_d for Class D, tube / tube_hybrid / otl
+  for valve designs, energizer for an electrostatic-only amp. The finer
+  operating class still goes into amplifier_class when known.
+"""
+
 _OUTPUT_SCHEMA = """
 OUTPUT (JSON, strict):
 {
@@ -245,7 +263,7 @@ output MUST be canonical and stable for identical inputs.
 CANONICAL SPEC ATTRIBUTES (reuse these keys whenever applicable):
 
 {spec_catalog}
-
+{_SIGNATURE_RULE}
 CANONICAL TECHNOLOGIES (reuse these keys when applicable):
 
 {tech_catalog}

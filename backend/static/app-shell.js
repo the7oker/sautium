@@ -6770,6 +6770,21 @@
     return c ? c.label : id;
   }
 
+  // The single "headline" spec each category shows at a glance in the
+  // My-setup chip. driver_type covers transducers; the rest are the
+  // topology/role classifiers research fills. Keys must match
+  // gear_spec_attributes.key exactly.
+  const CATEGORY_SIGNATURE_SPEC = {
+    headphones: 'driver_type',
+    iems:       'driver_type',
+    dac:        'dac_architecture',
+    amp:        'amp_topology',
+    player:     'form_factor',
+    streamer:   'form_factor',
+    power:      'power_type',
+    cable:      'cable_type',
+  };
+
   function escapeProfileHtml(s) {
     if (s == null) return '';
     return String(s).replace(/[&<>"']/g, c => (
@@ -6799,10 +6814,19 @@
               .replace(/\bUsd\b/i, '($)');
   }
 
+  // Enum tokens the generic title-caser gets wrong — acronyms and special
+  // casing. Anything not listed falls through to underscore→space + caps.
+  const SPEC_VALUE_LABELS = {
+    r2r: 'R2R', fpga: 'FPGA', nos: 'NOS', otl: 'OTL', usb: 'USB',
+    delta_sigma: 'Delta-Sigma', solid_state: 'Solid-state',
+    solid_state_class_a: 'SS Class A', dc_blocker: 'DC Blocker',
+  };
+
   function humanizeSpecValue(value) {
     // Canonical enum tokens ("planar_magnetic", "oxygen_free_copper")
     // are P2P-mergeable data, not display text — prettify only clean
     // lowercase tokens; numbers, sizes and free text pass through.
+    if (SPEC_VALUE_LABELS[value]) return SPEC_VALUE_LABELS[value];
     if (!/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(value)) return value;
     return value.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   }
@@ -6813,12 +6837,16 @@
     }
     if (gear.research_state === 'cached') {
       const specs = gear.specs || {};
-      // Pick a single "signature spec" per category — what audiophiles
-      // would actually want at a glance. price always trails.
-      const sig = specs.architecture || specs.topology || specs.driver_type || specs.type || '';
+      // The category's headline classifier (driver_type / dac_architecture
+      // / amp_topology / form_factor / power_type) — what an audiophile
+      // wants at a glance. Price always trails.
+      const sigKey = CATEGORY_SIGNATURE_SPEC[gear.category];
+      const sig = (sigKey && specs[sigKey]) || '';
       const price = specs.price_usd ? '$' + specs.price_usd : '';
       if (!sig && !price) {
-        return `<span class="research-chip">${escapeProfileHtml(categoryLabel(gear.category))}</span>`;
+        // Researched but nothing to show yet — emit no chip. Never the
+        // category label: it only duplicates the group header above.
+        return '';
       }
       // Price must never truncate — the signature spec ellipsizes
       // instead. Needs nested spans: text-overflow is inert directly
