@@ -4550,13 +4550,23 @@ body.has-miniplayer .more-overlay .drawer {
 .gsys-screen .profile-header {
   margin: calc(-1 * var(--space-5)) calc(-1 * var(--space-4)) 0;
 }
+/* Space sections via each element's own margins + the .profile-group-label
+   padding, like the other sub-screens — not a blanket flex gap, which would
+   stack on top of that padding and over-space the group labels. */
+.gsys-screen { gap: 0; }
+/* .profile-group-label carries 20px horizontal padding sized for the
+   zero-padding profile/settings container; here the .screen container already
+   contributes var(--space-4), so trim the label to land on the same 20px inset. */
+.gsys-screen .profile-group-label {
+  padding-left: calc(20 * var(--px) - var(--space-4));
+  padding-right: calc(20 * var(--px) - var(--space-4));
+}
 .gsys-context {
   color: var(--color-text-muted); font-size: var(--text-label);
   margin: calc(4 * var(--px)) 0 calc(12 * var(--px)); max-width: 60ch;
 }
 .gsys-group {
   display: flex; flex-direction: column; gap: calc(6 * var(--px));
-  margin-bottom: calc(16 * var(--px));
 }
 .gsys-pair {
   background: var(--color-surface-lo); border-radius: var(--radius-md);
@@ -4611,7 +4621,7 @@ body.has-miniplayer .more-overlay .drawer {
   flex: 1 1 100%; font-size: var(--text-caption);
   color: var(--color-text-dim); padding-left: calc(96 * var(--px) + 6 * var(--px));
 }
-.gsys-legend { color: var(--color-text-dim); font-size: var(--text-caption); }
+.gsys-legend { color: var(--color-text-dim); font-size: var(--text-caption); margin-top: calc(16 * var(--px)); }
 .gsys-entry {
   width: calc(100% - 32 * var(--px)); font: inherit; color: inherit; text-align: left;
   border: 0; background: var(--color-surface);
@@ -4622,7 +4632,7 @@ body.has-miniplayer .more-overlay .drawer {
 /* ---- Upgrade advisor ---- */
 .tiles-row {
   display: grid; grid-template-columns: repeat(3, 1fr);
-  gap: calc(8 * var(--px)); margin-bottom: calc(16 * var(--px));
+  gap: calc(8 * var(--px));
 }
 .tilebox { background: var(--color-surface-lo); border-radius: var(--radius-md); padding: calc(10 * var(--px)) calc(12 * var(--px)); }
 .tilebox-v {

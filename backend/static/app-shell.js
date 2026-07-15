@@ -6947,7 +6947,7 @@
       if (r.ok) data = await r.json();
     } catch (_) { /* fall through */ }
     if (!data) {
-      root.innerHTML = '<section class="screen"><div class="screen-head"><h2 class="screen-title">System</h2></div><div class="placeholder">Не вдалося завантажити аналіз системи.</div></section>';
+      root.innerHTML = '<section class="screen"><div class="screen-head"><h2 class="screen-title">System analysis</h2></div><div class="placeholder">Не вдалося завантажити аналіз системи.</div></section>';
       return;
     }
 
@@ -7002,7 +7002,7 @@
       <section class="screen gsys-screen">
         <div class="profile-header">
           <button class="icon-btn" aria-label="back" data-gsys-back>${PROFILE_ICONS.back}</button>
-          <h1>System</h1>
+          <h1>System analysis</h1>
           <span></span>
         </div>
         <p class="gsys-context">${libLine}. Deterministic layer only — spec math with
