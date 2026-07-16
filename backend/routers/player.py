@@ -1113,7 +1113,7 @@ def play_track(req: PlayTrackRequest):
         if not added:
             raise HTTPException(
                 status_code=503,
-                detail="HQPlayer unavailable — track not queued. Try again.",
+                detail="The playback output did not accept the track — try again.",
             )
         return {
             "ok": True,
@@ -1543,7 +1543,7 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
         if not added:
             raise HTTPException(
                 status_code=503,
-                detail="HQPlayer unavailable — preview not queued. Try again.",
+                detail="The playback output did not accept the preview — try again.",
             )
         # Roll the remaining tracks in as they finish fetching (background).
         if next_index < len(tokens):
@@ -1611,7 +1611,7 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
         if not added:
             raise HTTPException(
                 status_code=503,
-                detail="HQPlayer unavailable — preview not queued. Try again.")
+                detail="The playback output did not accept the preview — try again.")
         return {"ok": True, "provider": e.provider.manifest.id, "track_count": 1,
                 "requested": 1, "missing": [], "artist": q.artist, "album": q.album}
     except HTTPException:
@@ -1650,7 +1650,7 @@ def queue_phantom_track(req: PlayPhantomTrackRequest):
         added = (manager.append([item], req.position) or 0) if item else 0
         if not added:
             raise HTTPException(status_code=503,
-                                detail="HQPlayer unavailable — not queued. Try again.")
+                                detail="The playback output did not accept the tracks — try again.")
         return {"ok": True, "provider": e.provider.manifest.id, "track_count": 1,
                 "requested": 1, "missing": []}
     except HTTPException:
@@ -1702,23 +1702,21 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
         added = manager.append(ready_items, "next") or 0
         if not added:
             raise HTTPException(status_code=503,
-                                detail="HQPlayer unavailable — preview not queued. Try again.")
+                                detail="The playback output did not accept the preview — try again.")
         return {"ok": True, "provider": _provider_label(items), "track_count": added,
                 "requested": len(queries), "missing": missing_payload}
     # 'end' → roll each available track into the back of the queue as it lands.
-    # The filler runs in the background, so probe HQPlayer now and fail loudly if
-    # it's unreachable — otherwise we'd return ok and silently drop everything.
-    with _hqp_lock:
-        try:
-            reachable = _get_hqp().get_status() is not None
-        except Exception:
-            reachable = False
-        if not reachable:
-            raise HTTPException(status_code=503,
-                                detail="HQPlayer unavailable — preview not queued. Try again.")
-        # A queue-append doesn't start a new session, so capture the CURRENT
-        # generation; the filler aborts if the user replaces the queue meanwhile.
-        gen = manager.queue.generation
+    # The filler runs in the background, so fail loudly NOW if no output is
+    # active — otherwise we'd return ok and silently drop everything. (This
+    # used to probe HQPlayer directly — a pre-refactor leftover that 503'd
+    # every DLNA/local/browser node even though their canonical append
+    # cannot be "unreachable".)
+    if manager.active is None:
+        raise HTTPException(status_code=503,
+                            detail="No active playback output — select one and try again.")
+    # A queue-append doesn't start a new session, so capture the CURRENT
+    # generation; the filler aborts if the user replaces the queue meanwhile.
+    gen = manager.queue.generation
     threading.Thread(target=_phantom_filler, args=(proxy, list(tokens), 0, gen),
                      daemon=True, name="phantom-queue").start()
     return {"ok": True, "provider": _provider_label(items),

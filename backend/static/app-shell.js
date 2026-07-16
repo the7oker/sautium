@@ -4752,7 +4752,7 @@
     await notifyDialog({
       title: 'Playback unavailable',
       message: escapeProfileHtml(
-        detail || 'HQPlayer is not responding. Make sure it is running, then try again.'),
+        detail || 'The playback output is not responding. Check it in Settings → Audio output, then try again.'),
       kind: 'error',
     });
     return false;
