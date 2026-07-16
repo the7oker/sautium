@@ -7179,10 +7179,11 @@
     out_of_scope: { mark: '⌀', label: 'Outside measured evidence',    cls: 'is-nodata' },
   };
 
-  async function renderGearAdvisor(root) {
+  async function renderGearAdvisor(root, targetVariant) {
+    targetVariant = targetVariant || 'harman';
     let data = null;
     try {
-      const r = await fetch('/api/profile/gear/advisor');
+      const r = await fetch('/api/profile/gear/advisor?target=' + targetVariant);
       if (r.ok) data = await r.json();
     } catch (_) { /* fall through */ }
     if (!data) {
@@ -7304,6 +7305,7 @@
             <div class="gadv-cand">
               <div class="gadv-cand-head">
                 <span class="gsys-target">${escapeProfileHtml(r.model_name)}</span>
+                ${r.two_rigs ? '<span class="gadv-rigs-badge">2 rigs</span>' : ''}
                 <button class="gadv-want-btn" data-registry-want="${r.entry_id}">+ Want</button>
               </div>
               <div class="gadv-cand-meta gadv-band-num">
@@ -7315,12 +7317,22 @@
                 <span class="gadv-src">${escapeProfileHtml(r.source)}</span>
               </div>
             </div>`).join('');
+          const gapNote = rm.axis.owned_best >= -1.5
+            ? `<p class="gsys-legend">Under this reference your owned gear has no meaningful gap on this
+               band (${rm.axis.owned_best.toFixed(1)} dB) — the list below is "equally target-true
+               alternatives", not gap-fillers.</p>` : '';
           return `
             <div class="profile-group-label">Measured matches · target-true where you have a gap</div>
+            <div class="gadv-target-row">
+              <button class="gadv-target-chip ${targetVariant === 'harman' ? 'active' : ''}" data-target-variant="harman">Harman (bass shelf)</button>
+              <button class="gadv-target-chip ${targetVariant === 'neutral' ? 'active' : ''}" data-target-variant="neutral">Neutral (no shelf)</button>
+            </div>
             <p class="gsys-context">Your best owned <b>${escapeProfileHtml(rm.axis.label)}</b> sits at
-              <span class="gadv-band-num">${rm.axis.owned_best.toFixed(1)} dB</span> vs target. These registry models
-              hold that band at the target with the rest of the signature tonally sane — measured only
-              (no price/sentiment yet: tap + Want to research).</p>
+              <span class="gadv-band-num">${rm.axis.owned_best.toFixed(1)} dB</span> vs the selected reference.
+              These registry models hold that band at the reference with the rest of the signature tonally
+              sane. FR-only shortlist — class signals (THD headroom, resolution, price) arrive with research
+              after + Want. "2 rigs" = independently confirmed on a second fixture.</p>
+            ${gapNote}
             <div class="gsys-group">${rows}</div>`;
         })()}
         <p class="gsys-legend">▲ addresses a criticized spot in your gear · + adds something yours isn't praised for ·
@@ -7343,8 +7355,11 @@
           await fetch('/api/profile/gear/registry/' + btn.dataset.registryWant + '/want',
                       { method: 'POST' });
         } catch (_) { /* research-state SSE repaints the true state */ }
-        renderGearAdvisor(root);
+        renderGearAdvisor(root, targetVariant);
       });
+    });
+    root.querySelectorAll('[data-target-variant]').forEach(btn => {
+      btn.addEventListener('click', () => renderGearAdvisor(root, btn.dataset.targetVariant));
     });
   }
 

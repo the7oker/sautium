@@ -4732,6 +4732,22 @@ body.has-miniplayer .more-overlay .drawer {
   padding: calc(5 * var(--px)) calc(9 * var(--px)); border-radius: var(--radius-sm);
   cursor: pointer;
 }
+.gadv-rigs-badge {
+  font: 600 calc(9 * var(--px)) / 1 var(--font-mono); letter-spacing: 0.05em;
+  color: var(--color-positive); background: rgba(141, 167, 123, 0.13);
+  padding: calc(3 * var(--px)) calc(5 * var(--px)); border-radius: var(--radius-sm);
+}
+.gadv-target-row { display: flex; gap: calc(6 * var(--px)); margin: calc(4 * var(--px)) 0 calc(8 * var(--px)); }
+.gadv-target-chip {
+  border: 1px solid var(--color-divider); background: var(--color-surface-lo);
+  color: var(--color-text-muted); font: 500 calc(11.5 * var(--px)) / 1 var(--font-sans);
+  padding: calc(6 * var(--px)) calc(10 * var(--px)); border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.gadv-target-chip.active {
+  color: var(--color-blue-hover); background: var(--color-blue-weak);
+  border-color: rgba(74, 127, 167, 0.4);
+}
 
 .research-chip .chip-sig {
   min-width: 0;

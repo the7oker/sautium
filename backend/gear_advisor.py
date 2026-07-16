@@ -382,11 +382,20 @@ def _registry_bands(model_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
 
 
 def _measured_candidates(analysis: Dict[str, Any], lib_axes: List[Dict[str, Any]],
-                         limit: int = 8) -> Dict[str, Any]:
+                         limit: int = 8, target_variant: str = "harman") -> Dict[str, Any]:
     """Registry entries (not in the catalog) that measurably close the
     user's weakest owned axis. Ranking along ONE physical band with an
     explicit source label is legitimate — it is an axis, not a merged
-    score. Tonal sanity gate: mids within ±2 dB of target."""
+    score. Tonal sanity gate: mids within ±2 dB of target.
+
+    target_variant selects the reference the adherence is judged
+    against: 'harman' (full preference target, bass shelf included) or
+    'neutral' (the same target without the bass shelf — the modern
+    DF-tilt / SBAF-adjacent taste). Deltas are STORED against full
+    Harman; the neutral view is a constant per-band shift, so no
+    reimport is involved. Primary ranking source: oratory1990; a
+    second rig (Rtings HMS, rebased to the same reference) marks
+    two_rigs agreement."""
     own_ids = [c["model_id"] for c in analysis["components"]
                if c["status"] == "own" and c["category"] in ("headphones", "iems")]
     own_bands = _registry_bands(own_ids)
@@ -409,6 +418,13 @@ def _measured_candidates(analysis: Dict[str, Any], lib_axes: List[Dict[str, Any]
     # (a shelf, not a boost — +12 dB of bass is a defect, not a cure)
     # while every other band stays tonally sane. Rank by overall
     # target adherence: measured neutrality that lacks the owned gap.
+    from gear_registry import TARGET_BASS_SHELF, _name_keys
+    shift = dict.fromkeys(
+        ("dev_sub_bass_db", "dev_bass_db", "dev_mids_db", "dev_presence_db", "dev_treble_db"), 0.0)
+    if target_variant == "neutral":
+        for k, v in TARGET_BASS_SHELF.items():
+            shift[k] = v  # dev_vs_neutral = dev_vs_full + shelf
+
     band = target_axis["band"]
     rows = db_query(
         f"""
@@ -419,22 +435,58 @@ def _measured_candidates(analysis: Dict[str, Any], lib_axes: List[Dict[str, Any]
         FROM gear_registry_entries e
         WHERE e.gear_model_id IS NULL
           AND e.category = 'headphones'
-          AND e.{band} BETWEEN -2.0 AND 3.0
-          AND ABS(COALESCE(e.dev_bass_db, 99)) <= 3.0
-          AND ABS(COALESCE(e.dev_mids_db, 99)) <= 2.0
+          AND e.source = 'autoeq:oratory1990'
+          AND (e.{band} + %(sh_t)s) BETWEEN -2.0 AND 3.0
+          AND ABS(COALESCE(e.dev_bass_db, 99) + %(sh_b)s) <= 3.0
+          AND ABS(COALESCE(e.dev_mids_db, 99) + %(sh_m)s) <= 2.0
           AND ABS(COALESCE(e.dev_presence_db, 99)) <= 3.5
           AND ABS(COALESCE(e.dev_treble_db, 99)) <= 3.5
-        ORDER BY ABS(e.{band})
-                 + 0.5 * (ABS(COALESCE(e.dev_bass_db, 0)) + ABS(COALESCE(e.dev_mids_db, 0))
+        ORDER BY ABS(e.{band} + %(sh_t)s)
+                 + 0.5 * (ABS(COALESCE(e.dev_bass_db, 0) + %(sh_b)s)
+                          + ABS(COALESCE(e.dev_mids_db, 0) + %(sh_m)s)
                           + ABS(COALESCE(e.dev_presence_db, 0)) + ABS(COALESCE(e.dev_treble_db, 0)))
         LIMIT %(lim)s
         """,
-        {"lim": limit},
+        {"lim": limit, "sh_t": shift[band], "sh_b": shift["dev_bass_db"],
+         "sh_m": shift["dev_mids_db"]},
     )
-    return {"axis": target_axis, "rows": rows}
+
+    # Second-rig confirmation: same model measured by Rtings (HMS,
+    # rebased to the same reference) also target-adherent → two_rigs.
+    second = db_query(
+        """
+        SELECT model_name, dev_sub_bass_db, dev_bass_db, dev_mids_db,
+               dev_presence_db, dev_treble_db
+        FROM gear_registry_entries
+        WHERE source = 'autoeq:Rtings' AND category = 'headphones'
+        """
+    )
+    second_by_key: Dict[str, Dict[str, Any]] = {}
+    for s in second:
+        for key in _name_keys(s["model_name"]):
+            second_by_key[key] = s
+    for r in rows:
+        confirm = None
+        for key in _name_keys(r["model_name"]):
+            confirm = second_by_key.get(key)
+            if confirm:
+                break
+        r["two_rigs"] = bool(
+            confirm
+            and confirm[band] is not None
+            and -2.0 <= confirm[band] + shift[band] <= 3.0
+            and abs((confirm["dev_mids_db"] or 99) + shift["dev_mids_db"]) <= 2.0
+        )
+        for k in shift:  # present numbers in the SELECTED reference
+            if r[k] is not None:
+                r[k] = round(r[k] + shift[k], 2)
+
+    owned_best_view = round(target_axis["owned_best"] + shift[band], 2)
+    return {"axis": {**target_axis, "owned_best": owned_best_view},
+            "target_variant": target_variant, "rows": rows}
 
 
-def advisor() -> Dict[str, Any]:
+def advisor(target_variant: str = "harman") -> Dict[str, Any]:
     analysis = system_analysis()
     library = _library_axes()
     transducer_ids = [c["model_id"] for c in analysis["components"]
@@ -480,7 +532,8 @@ def advisor() -> Dict[str, Any]:
         "coverage": coverage,
         "plateau": _plateau_diagnosis(analysis),
         "candidates": candidates,
-        "registry_matches": _measured_candidates(analysis, library["axes"]),
+        "registry_matches": _measured_candidates(analysis, library["axes"],
+                                                 target_variant=target_variant),
         "pool_note": (
             "Candidate pool = your want-list plus this node's researched catalog "
             f"({len(candidates)} model(s)). Measurement-registry imports (squig/ASR "

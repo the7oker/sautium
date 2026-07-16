@@ -39,11 +39,32 @@ BANDS = [
 ]
 ANCHOR = (200, 800)
 
-TARGETS = {
-    "over-ear": "Harman over-ear 2018.csv",
-    "in-ear": "Harman in-ear 2019.csv",
+# Targets are RIG-BOUND: a compensation curve only makes sense against
+# measurements taken on the rig family it was derived for. Each
+# measurer maps to the target files matching its fixture.
+SOURCE_TARGETS = {
+    "oratory1990": {  # GRAS 43AG — the rig Harman research used
+        "over-ear": "Harman over-ear 2018.csv",
+        "in-ear": "Harman in-ear 2019.csv",
+    },
+    "Rtings": {  # legacy HEAD acoustics HMS II.3 rig — AutoEq only ships
+        # the without-bass Harman variant for this fixture, so deltas are
+        # rebased to the full-Harman reference by adding the shelf back.
+        "over-ear": "HMS II.3 Harman over-ear 2018 without bass.csv",
+        "in-ear": "HMS II.3 Harman in-ear 2019 without bass.csv",
+        "rebase_shelf": True,
+        # Rtings nests per-rig subdirs; only the HMS branch is Harman-
+        # comparable. The B&K 5128 branch lives in a different reference
+        # system (DF-tilt) — skipped until it gets its own basis.
+        "subdir": "HMS II.3",
+    },
 }
 CATEGORY = {"over-ear": "headphones", "in-ear": "iems"}
+
+# Harman preference bass shelf per band (full target minus without-bass
+# variant, computed from the GRAS pair; the shelf is a property of the
+# target design, not the rig — reused for HMS rebasing within ~0.1 dB).
+TARGET_BASS_SHELF = {"dev_sub_bass_db": 5.86, "dev_bass_db": 2.82, "dev_mids_db": 0.05}
 
 
 def registry_entry_uuid(source: str, model_name: str) -> _uuid.UUID:
@@ -109,22 +130,27 @@ def band_signature(curve: List[Tuple[float, float]],
 
 def import_autoeq(root: str) -> Dict[str, int]:
     stats = {"entries": 0, "skipped": 0}
-    targets = {}
-    for kind, fname in TARGETS.items():
-        tpath = os.path.join(root, "targets", fname)
-        targets[kind] = _read_curve(tpath)
-        if not targets[kind]:
-            raise RuntimeError(f"target curve missing/empty: {tpath}")
-
     meas_root = os.path.join(root, "measurements")
     for measurer in sorted(os.listdir(meas_root)):
         data_dir = os.path.join(meas_root, measurer, "data")
-        if not os.path.isdir(data_dir):
+        if not os.path.isdir(data_dir) or measurer not in SOURCE_TARGETS:
             continue
+        cfg = SOURCE_TARGETS[measurer]
+        rebase = cfg.get("rebase_shelf", False)
+        targets = {}
+        for kind in CATEGORY:
+            if kind not in cfg:
+                continue
+            tpath = os.path.join(root, "targets", cfg[kind])
+            targets[kind] = _read_curve(tpath)
+            if not targets[kind]:
+                raise RuntimeError(f"target curve missing/empty: {tpath}")
         source = f"autoeq:{measurer}"
         for kind, category in CATEGORY.items():
             kdir = os.path.join(data_dir, kind)
-            if not os.path.isdir(kdir):
+            if cfg.get("subdir"):
+                kdir = os.path.join(kdir, cfg["subdir"])
+            if not os.path.isdir(kdir) or kind not in targets:
                 continue
             for fname in sorted(os.listdir(kdir)):
                 if not fname.endswith(".csv"):
@@ -135,6 +161,10 @@ def import_autoeq(root: str) -> Dict[str, int]:
                 if not sig:
                     stats["skipped"] += 1
                     continue
+                if rebase:
+                    for key, shelf in TARGET_BASS_SHELF.items():
+                        if key in sig:
+                            sig[key] = round(sig[key] - shelf, 2)
                 db_execute(
                     """
                     INSERT INTO gear_registry_entries
