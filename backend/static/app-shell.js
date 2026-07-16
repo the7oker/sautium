@@ -7228,7 +7228,8 @@
         </div>
         ${ax.strengths.map(s => `<div class="gadv-cov-row is-plus">+ ${escapeProfileHtml(s.name)}: ${escapeProfileHtml(s.term)}</div>`).join('')}
         ${ax.weaknesses.map(w => `<div class="gadv-cov-row is-minus">− ${escapeProfileHtml(w.name)}: ${escapeProfileHtml(w.term)}</div>`).join('')}
-        ${(!ax.strengths.length && !ax.weaknesses.length) ? '<div class="gadv-cov-row">no attributed terms yet</div>' : ''}
+        ${(ax.measured || []).map(m => `<div class="gadv-cov-row is-measured"><span class="gsys-tier gsys-tier-m">M</span> ${escapeProfileHtml(m.name)}: <span class="gadv-band-num">${m.value_db > 0 ? '+' : ''}${m.value_db.toFixed(1)} dB</span> vs target <span class="gadv-src">${escapeProfileHtml(m.source)}</span></div>`).join('')}
+        ${(!ax.strengths.length && !ax.weaknesses.length && !(ax.measured || []).length) ? '<div class="gadv-cov-row">no attributed terms yet</div>' : ''}
       </div>`).join('');
 
     const candHTML = (data.candidates || []).map(c => {
@@ -7252,6 +7253,13 @@
           <span class="gadv-delta-axis">with ${escapeProfileHtml(s.with.split(' ').slice(-2).join(' '))}</span>
           <span class="gadv-delta-terms">${escapeProfileHtml((s.terms || []).join(' · '))}<span class="gadv-delta-owned"> (~${s.sample || '?'} voices)</span></span>
         </div>`).join('');
+      const measured = (c.measured_bands || []).map(b => `
+        <div class="gadv-delta is-parity">
+          <span class="gadv-delta-mark"><span class="gsys-tier gsys-tier-m">M</span></span>
+          <span class="gadv-delta-axis">measured</span>
+          <span class="gadv-delta-terms gadv-band-num">sub ${b.sub_bass > 0 ? '+' : ''}${b.sub_bass?.toFixed(1)} · mids ${b.mids > 0 ? '+' : ''}${b.mids?.toFixed(1)} · treble ${b.treble > 0 ? '+' : ''}${b.treble?.toFixed(1)} dB
+            <span class="gadv-delta-owned">${escapeProfileHtml(b.variant)} · ${escapeProfileHtml(b.source)}</span></span>
+        </div>`).join('');
       return `
         <div class="gadv-cand">
           <div class="gadv-cand-head">
@@ -7264,7 +7272,7 @@
             ${c.driver_type ? `<span>${escapeProfileHtml(humanizeSpecValue(c.driver_type))}</span>` : ''}
             ${c.sentiment_score != null ? `<span class="gadv-sent">${c.sentiment_score}<small>/10 · n≈${c.sentiment_sample || '?'}</small></span>` : ''}
           </div>
-          ${(deltas || ergo || synergy) ? `<div class="gadv-deltas">${deltas}${ergo}${synergy}</div>` : ''}
+          ${(deltas || ergo || synergy || measured) ? `<div class="gadv-deltas">${deltas}${ergo}${synergy}${measured}</div>` : ''}
         </div>`;
     }).join('');
 
@@ -7288,6 +7296,33 @@
 
         <div class="profile-group-label">Candidates · what changes vs what you own</div>
         <div class="gsys-group">${candHTML || '<div class="placeholder">No researched candidates yet — add models with status Want.</div>'}</div>
+
+        ${(() => {
+          const rm = data.registry_matches || {};
+          if (!rm.axis || !(rm.rows || []).length) return '';
+          const rows = rm.rows.map(r => `
+            <div class="gadv-cand">
+              <div class="gadv-cand-head">
+                <span class="gsys-target">${escapeProfileHtml(r.model_name)}</span>
+                <button class="gadv-want-btn" data-registry-want="${r.entry_id}">+ Want</button>
+              </div>
+              <div class="gadv-cand-meta gadv-band-num">
+                sub ${r.dev_sub_bass_db > 0 ? '+' : ''}${r.dev_sub_bass_db?.toFixed(1)} ·
+                bass ${r.dev_bass_db > 0 ? '+' : ''}${r.dev_bass_db?.toFixed(1)} ·
+                mids ${r.dev_mids_db > 0 ? '+' : ''}${r.dev_mids_db?.toFixed(1)} ·
+                pres ${r.dev_presence_db > 0 ? '+' : ''}${r.dev_presence_db?.toFixed(1)} ·
+                treble ${r.dev_treble_db > 0 ? '+' : ''}${r.dev_treble_db?.toFixed(1)} dB
+                <span class="gadv-src">${escapeProfileHtml(r.source)}</span>
+              </div>
+            </div>`).join('');
+          return `
+            <div class="profile-group-label">Measured matches · target-true where you have a gap</div>
+            <p class="gsys-context">Your best owned <b>${escapeProfileHtml(rm.axis.label)}</b> sits at
+              <span class="gadv-band-num">${rm.axis.owned_best.toFixed(1)} dB</span> vs target. These registry models
+              hold that band at the target with the rest of the signature tonally sane — measured only
+              (no price/sentiment yet: tap + Want to research).</p>
+            <div class="gsys-group">${rows}</div>`;
+        })()}
         <p class="gsys-legend">▲ addresses a criticized spot in your gear · + adds something yours isn't praised for ·
           ≈ parity · ▼ trade-off. Terms are attributed community voice (forum tier), never converted to scores;
           compatibility comes from the deterministic pair engine — see System.</p>
@@ -7300,6 +7335,17 @@
     });
     root.querySelectorAll('[data-gear-nav]').forEach(el =>
       el.addEventListener('click', () => navigate('more/gear/' + el.dataset.gearNav)));
+    root.querySelectorAll('[data-registry-want]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        btn.textContent = 'Queued…';
+        try {
+          await fetch('/api/profile/gear/registry/' + btn.dataset.registryWant + '/want',
+                      { method: 'POST' });
+        } catch (_) { /* research-state SSE repaints the true state */ }
+        renderGearAdvisor(root);
+      });
+    });
   }
 
   /* Live research refresh. Never route through render() — it scrolls to

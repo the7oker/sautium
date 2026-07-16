@@ -1664,6 +1664,30 @@ CREATE TABLE IF NOT EXISTS gear_pair_notes (
 CREATE INDEX IF NOT EXISTS idx_gear_pair_notes_state
     ON gear_pair_notes(research_state) WHERE research_state IN ('queued','researching');
 
+-- Measurement-registry entries: models known from public FR databases
+-- (AutoEq mirrors of oratory1990/...), imported WITHOUT minting
+-- gear_models rows -- the research worker must never see thousands of
+-- queued models. An entry links to the catalog when the same model
+-- exists there (normalized-name match) or when the user promotes it
+-- to 'want'. source encodes the measurer (= the rig): band deltas are
+-- comparable ONLY within one source.
+CREATE TABLE IF NOT EXISTS gear_registry_entries (
+    id               UUID PRIMARY KEY,
+    source           VARCHAR(60) NOT NULL,
+    category         gear_category NOT NULL,
+    model_name       TEXT NOT NULL,
+    gear_model_id    UUID REFERENCES gear_models(id) ON DELETE SET NULL,
+    dev_sub_bass_db  REAL,
+    dev_bass_db      REAL,
+    dev_mids_db      REAL,
+    dev_presence_db  REAL,
+    dev_treble_db    REAL,
+    imported_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (source, model_name)
+);
+CREATE INDEX IF NOT EXISTS idx_gear_registry_model ON gear_registry_entries(gear_model_id);
+CREATE INDEX IF NOT EXISTS idx_gear_registry_cat ON gear_registry_entries(category);
+
 -- ============================================================
 -- MusicBrainz data-dump subset (Etap 1: artist + album canon)
 -- ============================================================

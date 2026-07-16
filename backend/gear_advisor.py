@@ -356,6 +356,84 @@ def _candidates(analysis: Dict[str, Any],
     return out
 
 
+# Listening axis ↔ FR band mapping. Only where physics actually maps:
+# soundstage/texture has no FR band — that axis stays sentiment-only.
+_AXIS_BAND = {"sub_bass": "dev_sub_bass_db", "timbre_vocal": "dev_mids_db"}
+
+
+def _registry_bands(model_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+    """Linked registry measurements per catalog model (one model may
+    carry several variants — pad sets — from the same rig)."""
+    if not model_ids:
+        return {}
+    rows = db_query(
+        """
+        SELECT gear_model_id::text AS model_id, source, model_name,
+               dev_sub_bass_db, dev_bass_db, dev_mids_db, dev_presence_db, dev_treble_db
+        FROM gear_registry_entries
+        WHERE gear_model_id = ANY(%(ids)s::uuid[])
+        """,
+        {"ids": model_ids},
+    )
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        out.setdefault(r["model_id"], []).append(r)
+    return out
+
+
+def _measured_candidates(analysis: Dict[str, Any], lib_axes: List[Dict[str, Any]],
+                         limit: int = 8) -> Dict[str, Any]:
+    """Registry entries (not in the catalog) that measurably close the
+    user's weakest owned axis. Ranking along ONE physical band with an
+    explicit source label is legitimate — it is an axis, not a merged
+    score. Tonal sanity gate: mids within ±2 dB of target."""
+    own_ids = [c["model_id"] for c in analysis["components"]
+               if c["status"] == "own" and c["category"] in ("headphones", "iems")]
+    own_bands = _registry_bands(own_ids)
+    # The weakest owned axis with an FR mapping, by the library's weight order.
+    target_axis = None
+    for ax in lib_axes:
+        band = _AXIS_BAND.get(ax["axis"])
+        if not band:
+            continue
+        owned_vals = [e[band] for entries in own_bands.values() for e in entries
+                      if e[band] is not None]
+        if owned_vals:
+            target_axis = {"axis": ax["axis"], "label": ax["label"], "band": band,
+                           "owned_best": max(owned_vals)}
+            break
+    if not target_axis:
+        return {"axis": None, "rows": []}
+
+    # "Closes the gap" means the target band sits NEAR the target
+    # (a shelf, not a boost — +12 dB of bass is a defect, not a cure)
+    # while every other band stays tonally sane. Rank by overall
+    # target adherence: measured neutrality that lacks the owned gap.
+    band = target_axis["band"]
+    rows = db_query(
+        f"""
+        SELECT e.source, e.model_name, e.category::text AS category,
+               e.dev_sub_bass_db, e.dev_bass_db, e.dev_mids_db,
+               e.dev_presence_db, e.dev_treble_db,
+               e.id::text AS entry_id
+        FROM gear_registry_entries e
+        WHERE e.gear_model_id IS NULL
+          AND e.category = 'headphones'
+          AND e.{band} BETWEEN -2.0 AND 3.0
+          AND ABS(COALESCE(e.dev_bass_db, 99)) <= 3.0
+          AND ABS(COALESCE(e.dev_mids_db, 99)) <= 2.0
+          AND ABS(COALESCE(e.dev_presence_db, 99)) <= 3.5
+          AND ABS(COALESCE(e.dev_treble_db, 99)) <= 3.5
+        ORDER BY ABS(e.{band})
+                 + 0.5 * (ABS(COALESCE(e.dev_bass_db, 0)) + ABS(COALESCE(e.dev_mids_db, 0))
+                          + ABS(COALESCE(e.dev_presence_db, 0)) + ABS(COALESCE(e.dev_treble_db, 0)))
+        LIMIT %(lim)s
+        """,
+        {"lim": limit},
+    )
+    return {"axis": target_axis, "rows": rows}
+
+
 def advisor() -> Dict[str, Any]:
     analysis = system_analysis()
     library = _library_axes()
@@ -366,11 +444,43 @@ def advisor() -> Dict[str, Any]:
     )]
     terms = _load_terms(list(set(transducer_ids + catalog_ids)))
     candidates = _candidates(analysis, terms)
+
+    # Measured overlay: linked registry band signatures for owned gear
+    # (coverage gains M-tier numbers) and for catalog candidates
+    # (delta rows gain measured evidence next to community terms).
+    bands = _registry_bands(transducer_ids)
+    coverage = _coverage(analysis, library["axes"], terms)
+    for ax in coverage:
+        band = _AXIS_BAND.get(ax["axis"])
+        if not band:
+            continue
+        measured = []
+        for c in analysis["components"]:
+            if c["status"] != "own":
+                continue
+            for e in bands.get(c["model_id"], []):
+                if e[band] is not None:
+                    measured.append({"name": e["model_name"],
+                                     "value_db": e[band], "source": e["source"]})
+        if measured:
+            ax["measured"] = sorted(measured, key=lambda m: -m["value_db"])
+    for c in candidates:
+        entries = bands.get(c["model_id"], [])
+        if entries:
+            c["measured_bands"] = [
+                {"variant": e["model_name"], "source": e["source"],
+                 "sub_bass": e["dev_sub_bass_db"], "bass": e["dev_bass_db"],
+                 "mids": e["dev_mids_db"], "presence": e["dev_presence_db"],
+                 "treble": e["dev_treble_db"]}
+                for e in entries
+            ]
+
     return {
         "library": library,
-        "coverage": _coverage(analysis, library["axes"], terms),
+        "coverage": coverage,
         "plateau": _plateau_diagnosis(analysis),
         "candidates": candidates,
+        "registry_matches": _measured_candidates(analysis, library["axes"]),
         "pool_note": (
             "Candidate pool = your want-list plus this node's researched catalog "
             f"({len(candidates)} model(s)). Measurement-registry imports (squig/ASR "

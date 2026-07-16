@@ -4722,6 +4722,16 @@ body.has-miniplayer .more-overlay .drawer {
 .gadv-delta-terms { color: var(--color-text); }
 .gadv-delta.is-parity .gadv-delta-terms { color: var(--color-text-muted); }
 .gadv-delta-owned { color: var(--color-text-dim); }
+.gadv-cov-row.is-measured { color: var(--color-text-muted); }
+.gadv-band-num { font-family: var(--font-mono); font-size: calc(11 * var(--px)); font-variant-numeric: tabular-nums; color: var(--color-blue-hover); }
+.gadv-src { color: var(--color-text-dim); font-size: calc(10 * var(--px)); margin-left: calc(6 * var(--px)); }
+.gadv-want-btn {
+  margin-left: auto; border: 1px solid rgba(232, 176, 111, 0.35);
+  background: var(--color-amber-weak); color: var(--color-amber);
+  font: 600 calc(11 * var(--px)) / 1 var(--font-sans);
+  padding: calc(5 * var(--px)) calc(9 * var(--px)); border-radius: var(--radius-sm);
+  cursor: pointer;
+}
 
 .research-chip .chip-sig {
   min-width: 0;

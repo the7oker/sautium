@@ -316,6 +316,40 @@ def gear_advisor() -> Dict[str, Any]:
     return advisor()
 
 
+@router.post("/gear/registry/{entry_id}/want")
+def promote_registry_entry(entry_id: str) -> Dict[str, Any]:
+    """Promote a measurement-registry match into the catalog as a
+    'want' candidate: splits brand off the registry's combined name
+    (longest known-brand prefix wins, first word otherwise), then runs
+    the normal add flow — research + pair-synergy jobs included."""
+    entry = db_query_one(
+        """
+        SELECT id::text AS id, model_name, category::text AS category
+        FROM gear_registry_entries WHERE id = %(id)s::uuid
+        """,
+        {"id": entry_id},
+    )
+    if not entry:
+        raise HTTPException(status_code=404, detail="registry entry not found")
+
+    name = entry["model_name"]
+    brands = db_query("SELECT name FROM gear_brands ORDER BY LENGTH(name) DESC")
+    brand = next((b["name"] for b in brands
+                  if name.lower().startswith(b["name"].lower() + " ")), None)
+    if brand:
+        model = name[len(brand):].strip()
+    else:
+        brand, _, model = name.partition(" ")
+        model = model.strip() or name
+    result = add_gear(GearAddRequest(brand=brand, model=model,
+                                     category=entry["category"], status="want"))
+    db_execute(
+        "UPDATE gear_registry_entries SET gear_model_id = %(g)s::uuid WHERE id = %(id)s::uuid",
+        {"g": result["gear_model_id"], "id": entry_id},
+    )
+    return result
+
+
 @router.post("/gear")
 def add_gear(req: GearAddRequest) -> Dict[str, Any]:
     if req.status not in VALID_STATUSES:

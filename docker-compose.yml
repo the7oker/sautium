@@ -136,6 +136,9 @@ services:
       - ./mcp:/app/mcp
       - ./data/cache:/root/.cache
       - ./data/generated_eq:/app/generated_eq
+      # Measurement-registry clones (AutoEq sparse checkout) — read-only
+      # source for gear_registry.py imports; refreshed via git pull.
+      - ./data/registry:/app/registry:ro
       # Self-signed TLS cert (generated on first start by entrypoint.py).
       # Persists across rebuilds so the phone doesn't need to re-accept it.
       - ./data/tls:/app/data/tls
