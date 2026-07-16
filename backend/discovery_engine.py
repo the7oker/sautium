@@ -464,6 +464,31 @@ _OWNED_GUARD = {
 }
 
 
+# Tie-break tail for EVERY ordering that a saturating score feeds. Lexical identity
+# SATURATES: an exact title clamps to the source ceil, so 1660 tracks named "intro"
+# and 17 named "Ursa Major" all score exactly 1.0 and `score DESC, name` has no key
+# left — the emitted rows were whatever the plan produced, and it changed with LIMIT.
+# Ownership is the only signal that survives the saturation (track_stats covers owned
+# rows only, 36k of 3M) and it is the right one: at equal relevance a lossless file
+# you own beats an MB-dump stub you cannot play. It stays a TIE-BREAK, never a score
+# term — as score it would let a weak owned match outrank a strong phantom one and
+# would skew _DOMINANCE_CUT's ratio. The pk tail makes the order TOTAL, without which
+# OFFSET pages duplicate and skip rows.
+#
+# This MUST also tail the retrieve branches, not just the final sort: they cut their
+# own top-K off the same saturated score, so an arbitrary cut there discards owned
+# rows before ranking ever sees them (5 of 33 owned "intro" tracks survived) and
+# hands two executions of one query different candidate sets. Measured cost of the
+# EXISTS in that ORDER BY, on the library's worst case (6462 candidates): 489→502ms.
+_TIE_BREAK = "is_owned DESC, name"          # by output-column name: the final sorts
+
+
+def _tie_break(entity: EntityDef) -> str:
+    """The same keys against `entity`'s own table, for the scopes that project no
+    is_owned/name column of their own (the retrieve branches)."""
+    return f"({_OWNED_GUARD[entity.key]}) DESC, {entity.name_col}, {entity.pk}"
+
+
 def _corpus_clause(entity: EntityDef, corpus: str) -> Optional[str]:
     """owned/phantom → an EXISTS(/NOT EXISTS) guard on the target's own table; 'all'
     → no guard. This is also the perf-critical narrowing: it cuts a track target
@@ -507,9 +532,16 @@ def _level(src: Source) -> str:
     return src.level or _TABLE_LEVEL[src.table]
 
 
+# How many rows each relevance source retrieves through its own index before the
+# rerank. Also the hard floor on how deep a result list can be paged: the union of
+# the branches is all that exists downstream, so nothing beyond it can surface.
+RETRIEVE_K = 500
+
+
 # ── Builder ─────────────────────────────────────────────────────────────────
 
-def build(active: dict, query: dict, corpus: str = "all", limit: int = 20) -> dict:
+def build(active: dict, query: dict, corpus: str = "all", limit: int = 20,
+          offset: int = 0) -> dict:
     """active = {tool_key: value}. ATOM-CENTRIC composition: the atom is the LOWEST
     level among all active sources (track < album < artist). matched(atom) applies
     every tool — atom-level relevance sources OR (union-retrieve), gates AND (all
@@ -521,7 +553,11 @@ def build(active: dict, query: dict, corpus: str = "all", limit: int = 20) -> di
     query (atom=artist) yields only artists. Governor: a browse where every active
     tool is broad (mode ~51% of the library) skips the above-atom roll-ups —
     count-ranking there degenerates to catalog size (corr 0.94). Returns
-    {target_key: (sql, params)}."""
+    {target_key: (sql, params)}.
+
+    `offset` pages the target list. Depth is bounded by RETRIEVE_K: every relevance
+    branch retrieves its own top-K, so nothing past K candidates per source exists to
+    page into — a page that comes back short IS the end of the list."""
     tools = [TOOLS[k] for k in active
              if k in TOOLS and active.get(k) not in (None, "", "any", [])]
     if not tools:
@@ -537,8 +573,9 @@ def build(active: dict, query: dict, corpus: str = "all", limit: int = 20) -> di
             continue
         if rank > _LEVEL_RANK[atom_lvl] and skip_rollups:
             continue
-        out[lvl] = (_build_atom(atom, tools, active, corpus, limit) if lvl == atom_lvl
-                    else _build_higher(atom, ENTITIES[lvl], tools, active, corpus, limit))
+        out[lvl] = (_build_atom(atom, tools, active, corpus, limit, offset) if lvl == atom_lvl
+                    else _build_higher(atom, ENTITIES[lvl], tools, active, corpus,
+                                       limit, offset))
     return out
 
 
@@ -546,7 +583,11 @@ def _retrieve_branch(src: Source, entity: EntityDef, corpus: str, gates: list, K
     """One relevance source → SELECT the target pk, top-K via the source's own index,
     gates + corpus pushed down so the top-K is already filtered. same-table: WHERE
     floor ORDER BY score. Bridged: join the source in along the route path and order
-    by its score (HNSW for vectors, trigram for names)."""
+    by its score (HNSW for vectors, trigram for names).
+
+    The top-K cut runs on the SAME saturated score the final sort does, so it carries
+    the same tie-break (_tie_break) — the pool has to be the deterministic top-K of
+    that order, not an arbitrary K of the tied plateau."""
     et = entity.table.split()[0]
     conds = list(gates)
     cg = _corpus_clause(entity, corpus)
@@ -569,7 +610,7 @@ def _retrieve_branch(src: Source, entity: EntityDef, corpus: str, gates: list, K
         frm += f" JOIN {entity.table} ON {path[0][1]}"
         conds.append(f"({src.score_sql}) >= {src.floor}")
         return (f"SELECT {entity.pk} AS id FROM {frm} WHERE {' AND '.join(conds)} "
-                f"ORDER BY ({src.score_sql}) DESC LIMIT {K}")
+                f"ORDER BY ({src.score_sql}) DESC, {_tie_break(entity)} LIMIT {K}")
     conds.append(src.retrieve or f"({src.score_sql}) >= {src.floor}")
     if src.table == et:
         frm = entity.table
@@ -577,10 +618,10 @@ def _retrieve_branch(src: Source, entity: EntityDef, corpus: str, gates: list, K
         path = _route(src.table, entity, corpus)
         frm = entity.table + " " + " ".join(f"JOIN {t} {_ALIAS[t]} ON {js}" for t, js in path)
     return (f"SELECT {entity.pk} AS id FROM {frm} WHERE {' AND '.join(conds)} "
-            f"ORDER BY ({src.score_sql}) DESC LIMIT {K}")
+            f"ORDER BY ({src.score_sql}) DESC, {_tie_break(entity)} LIMIT {K}")
 
 
-def _matched_core(atom, tools, active, corpus, K=500):
+def _matched_core(atom, tools, active, corpus, K=RETRIEVE_K):
     """The retrieve→rerank pieces at the atom level, shared by the atom target and
     every higher aggregation. Gates come from EVERY active tool (AND, promoted to the
     atom via _exists_gate) — NOT filtered by target, which is what let cross-level
@@ -654,20 +695,25 @@ def _matched_sql(atom, tools, gates, branches, at_terms, up_terms, lateral, corp
     return body, f"cand AS ({cand}), "
 
 
-def _build_atom(atom, tools, active, corpus, limit):
+def _build_atom(atom, tools, active, corpus, limit, offset):
     """Atom target: rerank the bounded candidate set on the full normalized score
-    (GREATEST within a tool, weighted sum across tools), gates + corpus in WHERE."""
+    (GREATEST within a tool, weighted sum across tools), gates + corpus in WHERE.
+    `scored` is un-paged, so the dominance cut always divides by the GLOBAL max —
+    OFFSET applies after it and can't rebase the bar on the page's own leader."""
     gates, branches, at_terms, _, lateral = _matched_core(atom, tools, active, corpus)
     cg = _corpus_clause(atom, corpus)
     filt = list(gates) + ([cg] if cg else [])
     where = (" WHERE " + " AND ".join(filt)) if filt else ""
+    page = f"LIMIT {int(limit)} OFFSET {int(offset)}"
     if not branches:
         if _relevance_requested(tools):    # every relevance source cold-skipped → honest empty
             return (f"SELECT {atom.pk} AS id, {atom.name_col} AS name, NULL AS score"
                     f"{atom.surface} FROM {atom.table} WHERE false"), _bind_params(tools, active)
-        # gates-only / browse
+        # gates-only / browse: no relevance to tie on, but a mixed corpus still ranks
+        # the user's own library first, and the pk keeps the pages disjoint.
         sql = (f"SELECT {atom.pk} AS id, {atom.name_col} AS name, NULL AS score{atom.surface} "
-               f"FROM {atom.table}{where} ORDER BY {atom.default_order} LIMIT {int(limit)}")
+               f"FROM {atom.table}{where} "
+               f"ORDER BY is_owned DESC, {atom.default_order}, {atom.pk} {page}")
         return sql, _bind_params(tools, active)
     score = " + ".join(at_terms)
     cand = " UNION ".join(f"({b})" for b in branches)
@@ -678,7 +724,7 @@ def _build_atom(atom, tools, active, corpus, limit):
            f"{' '.join(lateral)}{where}) "
            f"SELECT * FROM scored "
            f"WHERE score >= {_DOMINANCE_CUT} * (SELECT MAX(score) FROM scored) "
-           f"ORDER BY score DESC, name LIMIT {int(limit)}")
+           f"ORDER BY score DESC, {_TIE_BREAK}, id {page}")
     return sql, _bind_params(tools, active)
 
 
@@ -696,7 +742,7 @@ _ROLLUP_W = 0.5
 _DOMINANCE_CUT = 0.25
 
 
-def _build_higher(atom, L, tools, active, corpus, limit, K=500):
+def _build_higher(atom, L, tools, active, corpus, limit, offset, K=RETRIEVE_K):
     """Higher target = two channels. Roll-up: AVG of the matched atoms' s_up — the
     CHARACTERISTIC channel only (clap/lyrics), never lexical identity: 'the artists
     whose catalogue sounds like this' (Sade for romantic-sax), NOT 'artists who have
@@ -760,6 +806,19 @@ def _build_higher(atom, L, tools, active, corpus, limit, K=500):
     # MATERIALIZED is load-bearing: matched is referenced once, so PG12+ would
     # inline it into rolled's nested loop and re-evaluate its per-row vector
     # laterals for every (matched x link) pair — measured 9.2s vs 38ms isolated.
+    #
+    # slim stays a slim projection (id/score/n) so L.surface's pile of correlated
+    # subqueries only runs for the rows that survive. Its pool is limit+offset, not
+    # limit: the dominance cut below divides by `SELECT MAX(score) FROM slim`, so the
+    # LEADER must stay inside slim on every page — paging slim itself would rebase the
+    # bar on each page's own top row and let junk back in. The two ORDER BYs are the
+    # same key sequence (score, owned, matched-atom count, identity, pk) — the outer
+    # one re-sorts what slim picked, so a divergence would scramble the very ties slim
+    # ordered and make OFFSET pages overlap.
+    owned_L = _OWNED_GUARD[L.key]
+    tail = f"{L.default_order}, {L.pk}"
+    order_slim = f"2 DESC NULLS LAST, ({owned_L}) DESC, r.n DESC NULLS LAST, {tail}"
+    order_out = f"slim.score DESC NULLS LAST, is_owned DESC, slim.n DESC NULLS LAST, {tail}"
     sql = (f"WITH {ctes}matched AS MATERIALIZED ({body}), "
            f"rolled AS (SELECT lk.lid AS lid, SUM(m.s_up) / (COUNT(*) + 3.0) AS s, COUNT(*) AS n "
            f"FROM matched m {link} WHERE m.s_up > 0 OR m.s_up IS NULL GROUP BY lk.lid), "
@@ -768,13 +827,14 @@ def _build_higher(atom, L, tools, active, corpus, limit, K=500):
            f"JOIN {L.table} ON {L.pk} = cd.lid "
            f"LEFT JOIN rolled r ON r.lid = {L.pk} "
            f"{' '.join(own_lat)}{where} "
-           f"ORDER BY 2 DESC NULLS LAST, r.n DESC NULLS LAST, {L.default_order} "
-           f"LIMIT {int(limit)}) "
+           f"ORDER BY {order_slim} "
+           f"LIMIT {int(limit) + int(offset)}) "
            f"SELECT {L.pk} AS id, {L.name_col} AS name, slim.score{L.surface} "
            f"FROM slim JOIN {L.table} ON {L.pk} = slim.id "
            f"WHERE slim.score IS NULL "
            f"OR slim.score >= {_DOMINANCE_CUT} * (SELECT MAX(score) FROM slim) "
-           f"ORDER BY slim.score DESC NULLS LAST, slim.n DESC NULLS LAST")
+           f"ORDER BY {order_out} "
+           f"LIMIT {int(limit)} OFFSET {int(offset)}")
     return sql, _bind_params(tools, active)
 
 

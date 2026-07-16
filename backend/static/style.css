@@ -3008,6 +3008,27 @@ body.has-miniplayer .ai-fab {
   color: var(--color-text-dim);
 }
 
+/* Tracks-block pager. A title query saturates — every exact match scores the
+   same — so the first page is a slice of the matches, not all of them. Secondary
+   styling on purpose: amber is the CTA colour, and going deeper is not the
+   screen's primary action. */
+.discovery-screen .d-show-more {
+  display: block;
+  width: calc(100% - 2 * var(--space-4));
+  margin: calc(4 * var(--px)) var(--space-4) calc(12 * var(--px));
+  height: calc(36 * var(--px));
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-divider);
+  border-radius: calc(8 * var(--px));
+  font-family: inherit;
+  font-size: calc(12.5 * var(--px));
+  font-weight: 600;
+  cursor: pointer;
+}
+.discovery-screen .d-show-more:active { background: var(--color-surface-hi); }
+.discovery-screen .d-show-more:disabled { opacity: 0.5; cursor: default; }
+
 /* Streaming supplement tail under a results block */
 .discovery-screen .d-streaming-tail {
   margin-top: calc(8 * var(--px));

@@ -2479,6 +2479,49 @@
     else row.appendChild(frag);
   }
 
+  // Cursor paging over a list endpoint. Owns the request shape and the
+  // cursor / loading / exhausted state; the TRIGGER (the row sentinel below,
+  // or Discovery's Show-more button) owns when to pull and where the nodes go.
+  // One implementation so the two affordances can't drift on what a page is.
+  //
+  // `initialCursor` is an opaque object echoed verbatim back into the next
+  // request as query params — `{before, before_id}` for Home's new-in-library,
+  // `{seed, offset}` for Discovery shuffle, `{offset}` for a Discovery result
+  // block. The server decides the cursor shape; the utility just plumbs it
+  // through. `opts.baseParams` is a URLSearchParams the cursor rides on top of:
+  // a Discovery block pages the same composite query it was rendered with, and
+  // that query's repeated keys (instruments, genres) only survive as
+  // URLSearchParams — flattened into a cursor object they would collapse into
+  // one comma-joined value the API reads as a single label.
+  function createPager(endpoint, initialCursor, opts = {}) {
+    const state = { cursor: initialCursor, loading: false, exhausted: !initialCursor };
+    return {
+      get loading() { return state.loading; },
+      get exhausted() { return state.exhausted; },
+      // Rejects on transport failure WITHOUT consuming the cursor, so the
+      // caller's next trigger retries the same page.
+      async next() {
+        if (state.loading || state.exhausted) return [];
+        state.loading = true;
+        try {
+          const params = new URLSearchParams(opts.baseParams || {});
+          params.set('limit', String(opts.limit || 20));
+          for (const [k, v] of Object.entries(state.cursor)) {
+            if (v != null) params.set(k, String(v));
+          }
+          const resp = await fetch(`${endpoint}?${params}`);
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          const data = await resp.json();
+          if (data.next_cursor) state.cursor = data.next_cursor;
+          else state.exhausted = true;
+          return data.albums || data.artists || data.items || data.results || [];
+        } finally {
+          state.loading = false;
+        }
+      },
+    };
+  }
+
   // IntersectionObserver-based infinite scroll for horizontal rows.
   // Watches a 1px sentinel at the end of the row; when it enters the
   // viewport (with 200px rootMargin so we fetch *before* the user
@@ -2487,47 +2530,32 @@
   // scroll-induced intersection re-fires the observer, which is
   // event-driven not polling, so we stay within the project rule.
   //
-  // `initialCursor` is an opaque object echoed verbatim back into the
-  // next request as query params — `{before, before_id}` for Home's
-  // new-in-library, `{seed, offset}` for Discovery shuffle. The server
-  // decides the cursor shape; the utility just plumbs it through.
-  // `kind` is either a string ('artist'|'album') or a custom
-  // renderer function(item) -> HTMLElement.
+  // `kind` is either a string ('artist'|'album') or a custom renderer
+  // function(item) -> HTMLElement. Rows whose tiles come from a BATCH
+  // renderer instead pass `opts.renderPage(items) -> DocumentFragment`.
   function attachInfiniteScroll(row, endpoint, initialCursor, kind, opts = {}) {
     if (!initialCursor) return { disconnect() {} };
 
-    const limit = opts.limit || 20;
+    const pager = createPager(endpoint, initialCursor, opts);
     const sentinel = document.createElement('div');
     sentinel.className = 'home-row-sentinel';
     sentinel.setAttribute('aria-hidden', 'true');
     row.appendChild(sentinel);
 
-    const state = { cursor: initialCursor, loading: false, exhausted: false };
-
     const fetchNext = async () => {
-      if (state.loading || state.exhausted) return;
-      state.loading = true;
+      if (pager.loading || pager.exhausted) return;
+      let items;
       try {
-        const params = new URLSearchParams({ limit: String(limit) });
-        for (const [k, v] of Object.entries(state.cursor)) {
-          if (v != null) params.set(k, String(v));
-        }
-        const resp = await fetch(`${endpoint}?${params}`);
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        const data = await resp.json();
-        const items = data.albums || data.artists || data.items || [];
-        appendTilesBeforeSentinel(row, items, kind, sentinel);
-        if (data.next_cursor) {
-          state.cursor = data.next_cursor;
-        } else {
-          state.exhausted = true;
-          sentinel.remove();
-          observer.disconnect();
-        }
+        items = await pager.next();
       } catch (err) {
         console.warn('Infinite scroll fetch failed:', err);
-      } finally {
-        state.loading = false;
+        return;
+      }
+      if (opts.renderPage) row.insertBefore(opts.renderPage(items), sentinel);
+      else appendTilesBeforeSentinel(row, items, kind, sentinel);
+      if (pager.exhausted) {
+        sentinel.remove();
+        observer.disconnect();
       }
     };
 
@@ -2609,6 +2637,8 @@
   // every relevance signal (name/title trigram, bio, lyrics, CLAP sound) into
   // each block, so the old per-signal blocks (titles vs sound vs lyrics) are
   // gone: one Tracks list, and Albums/Artists aggregate the same matched set.
+  const DISCOVERY_SEARCH_URL = '/api/discovery/search';
+
   const DISCOVERY_BLOCKS = [
     { id: 'artists', title: 'Artists', target: 'artist', layout: 'artists' },
     { id: 'albums',  title: 'Albums',  target: 'album',  layout: 'albums'  },
@@ -3225,6 +3255,19 @@
     }
   }
 
+  // Emptying a block detaches its rows; the observer watching the old sentinel
+  // has to go with them, or it keeps pulling pages into dead DOM. Single
+  // teardown site for both callers that clear a block.
+  function clearDiscoveryBlock(screen, id) {
+    const scroll = screen._blockScrolls && screen._blockScrolls[id];
+    if (scroll) {
+      scroll.disconnect();
+      delete screen._blockScrolls[id];
+    }
+    const body = screen.querySelector('#dBody-' + id);
+    if (body) body.innerHTML = '';
+  }
+
   function showShuffle(screen) {
     const results = screen.querySelector('#discoveryResults');
     const shuffle = screen.querySelector('#discoveryShuffle');
@@ -3232,9 +3275,8 @@
       results.hidden = true;
       DISCOVERY_BLOCKS.forEach(b => {
         const blk = screen.querySelector('#dBlock-' + b.id);
-        const body = screen.querySelector('#dBody-' + b.id);
         if (blk) blk.hidden = true;
-        if (body) body.innerHTML = '';
+        clearDiscoveryBlock(screen, b.id);
       });
       const empty = screen.querySelector('#dEmpty');
       if (empty) empty.hidden = true;
@@ -3255,10 +3297,9 @@
 
     DISCOVERY_BLOCKS.forEach(b => {
       const blk = screen.querySelector('#dBlock-' + b.id);
-      const body = screen.querySelector('#dBody-' + b.id);
-      if (!blk || !body) return;
+      if (!blk) return;
       blk.hidden = true;
-      body.innerHTML = '';
+      clearDiscoveryBlock(screen, b.id);
       // Browse mode renames the tracks header to reflect its semantics.
       const head = blk.querySelector('.discovery-section-head h3');
       if (head) head.textContent = (!query && b.id === 'tracks')
@@ -3276,12 +3317,14 @@
       const params = new URLSearchParams({ target: b.target, limit: query ? '10' : '20' });
       if (query) params.set('q', query);
       appendFilterParams(params, filters);
-      fetch('/api/discovery/search?' + params)
+      fetch(DISCOVERY_SEARCH_URL + '?' + params)
         .then(r => r.ok ? r.json() : Promise.reject(r.status))
         .then(data => {
           if (queryId !== getActiveId()) return;  // stale; user typed again
           searching.hidden = true;
-          renderDiscoveryBlock(screen, b, data);
+          // `params` is handed on as the block's paging base — the next page is
+          // this exact query at a deeper offset.
+          renderDiscoveryBlock(screen, b, data, params);
           if ((data.results || []).length > 0) completion.hadAnyResults = true;
         })
         .catch(err => {
@@ -3383,7 +3426,14 @@
       });
   }
 
-  function renderDiscoveryBlock(screen, descriptor, data) {
+  // layout → the batch renderer that owns its markup. Page 1 and every page
+  // after it go through the same one, so a tile can't drift between them.
+  const DISCOVERY_RENDERERS = {
+    artists: renderArtistRow, albums: renderAlbumRow,
+    genres: renderGenrePills, tracks: renderTrackList,
+  };
+
+  function renderDiscoveryBlock(screen, descriptor, data, params) {
     const blk = screen.querySelector('#dBlock-' + descriptor.id);
     const body = screen.querySelector('#dBody-' + descriptor.id);
     if (!blk || !body) return;
@@ -3402,31 +3452,72 @@
       return;
     }
 
-    if (descriptor.layout === 'artists') {
-      body.innerHTML = renderArtistRow(items);
-      body.querySelectorAll('[data-artist-id]').forEach(el => {
-        el.addEventListener('click', () =>
-          navigateToEntity('artist', el.getAttribute('data-artist-id')));
-      });
-    } else if (descriptor.layout === 'albums') {
-      body.innerHTML = renderAlbumRow(items);
-      body.querySelectorAll('[data-album-id]').forEach(el => {
-        el.addEventListener('click', () =>
-          navigateToEntity('album', el.getAttribute('data-album-id')));
-      });
-    } else if (descriptor.layout === 'genres') {
-      body.innerHTML = renderGenrePills(items);
-      body.querySelectorAll('[data-genre-id]').forEach(el => {
-        el.addEventListener('click', () =>
-          navigateToEntity('genre', el.getAttribute('data-genre-id')));
-      });
-    } else {
-      body.innerHTML = renderTrackList(items) + warmingNote;
-      wireDetailHandlers(body);
-      updatePlayingHighlight();
-    }
+    body.innerHTML = DISCOVERY_RENDERERS[descriptor.layout](items) + warmingNote;
+    wireDetailHandlers(body);
+    if (descriptor.layout === 'tracks') updatePlayingHighlight();
+    attachBlockPaging(screen, descriptor, body, data.next_cursor, params);
 
     blk.hidden = false;
+  }
+
+  // A batch renderer's HTML → a wired fragment of the tiles/rows themselves.
+  // The renderer's own wrapper (.shuffle-row / .track-list) is dropped — the
+  // live container already IS that wrapper. Wiring runs on the detached nodes
+  // so it sees ONLY the new ones: wireDetailHandlers is additive, and a second
+  // pass over rows already in the DOM would double every click handler.
+  function wiredResultNodes(html) {
+    const wrap = document.createElement('div');
+    wrap.innerHTML = html;
+    const inner = wrap.firstElementChild;
+    wireDetailHandlers(inner);
+    const frag = document.createDocumentFragment();
+    frag.append(...inner.children);
+    return frag;
+  }
+
+  // Result blocks page the SAME composite query they were rendered with:
+  // `params` (target + q + every chip) with the server's {offset} cursor on
+  // top. Horizontal rows scroll infinitely — they have their own scroll axis,
+  // so growing one costs the page nothing. The vertical Tracks list gets an
+  // explicit button instead: it sits above the Genres block, and a list that
+  // auto-grows on scroll would push the rest of the results away forever.
+  function attachBlockPaging(screen, descriptor, body, cursor, params) {
+    if (!cursor || descriptor.layout === 'genres') return;
+
+    const render = DISCOVERY_RENDERERS[descriptor.layout];
+    const container = body.firstElementChild;
+    const opts = {
+      limit: Number(params.get('limit')),
+      baseParams: params,
+      renderPage: items => wiredResultNodes(render(items)),
+    };
+    if (descriptor.layout === 'tracks') {
+      attachShowMore(body, container, cursor, opts);
+      return;
+    }
+    screen._blockScrolls = screen._blockScrolls || {};
+    screen._blockScrolls[descriptor.id] =
+      attachInfiniteScroll(container, DISCOVERY_SEARCH_URL, cursor, null, opts);
+  }
+
+  function attachShowMore(body, list, cursor, opts) {
+    const pager = createPager(DISCOVERY_SEARCH_URL, cursor, opts);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'd-show-more';
+    btn.textContent = 'Show more';
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        list.appendChild(opts.renderPage(await pager.next()));
+        updatePlayingHighlight();
+      } catch (err) {
+        console.warn('Show more failed:', err);
+      }
+      if (pager.exhausted) btn.remove();
+      else btn.disabled = false;
+    });
+    body.appendChild(btn);
   }
 
   function renderArtistRow(items) {

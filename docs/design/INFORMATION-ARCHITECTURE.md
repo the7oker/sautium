@@ -358,6 +358,25 @@ Mobile-first vertical layout, minimal by default:
 When search runs or filters apply, the shuffle mosaic is replaced
 by results. Clearing search restores the mosaic.
 
+**Result blocks** — Artists · Albums · Tracks · Genres, each the same
+composite query answered at its own grain. A block is a *window* onto
+its matches, never the whole set: a title query saturates (72 tracks
+named "Casanova" all match perfectly and score identically), so a
+first page is a slice of the matches, not the matches. Depth is an
+affordance rather than a cap:
+
+- **Artists / Albums** — horizontal rows, infinite-scroll along their
+  own axis (a sentinel at the row's end pulls the next page).
+- **Tracks** — vertical list plus an explicit **Show more** button.
+  Deliberately not infinite-scroll: the block sits above Genres, and a
+  list that grew on scroll would push the rest of the results off the
+  screen forever.
+- **Genres** — wrap-row of pills, not paged.
+
+Ties rank **owned-first**: at equal relevance a track you own beats a
+phantom stub you cannot play. Below that the order is total, so paging
+never duplicates or skips a row.
+
 The **horizontal** (not vertical) shuffle mosaic is an intentional
 choice: keeps the search bar and advanced-filter affordance visible
 even while browsing, no vertical-scroll-trap.

@@ -24,6 +24,7 @@ from sqlalchemy import text
 import model_cache
 from database import get_db_context
 from db_pool import db_query
+from discovery_engine import RETRIEVE_K
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +280,7 @@ def discovery_search(
     sound: Optional[str] = Query(None),   # semantic-only channels (MCP/AI-chat):
     lyrics: Optional[str] = Query(None),  # CLAP text→audio / lyrics vectors, no lexical arm
     limit: int = Query(10, ge=1, le=30),
+    offset: int = Query(0, ge=0, le=RETRIEVE_K),
     bpm_min: Optional[float] = Query(None),
     bpm_max: Optional[float] = Query(None),
     key: Optional[str] = Query(None),
@@ -303,6 +305,11 @@ def discovery_search(
 
     `quality` is not an engine tool (owned-only file tiers were dropped; returns
     later as a two-source file+stream tool), so the chip row is gone from the UI.
+
+    `offset` walks the block deeper (the client echoes next_cursor back with the
+    same query + chips). A title query saturates — 72 tracks named "Casanova" all
+    score 1.0 — so a block cut at its first page is not "the matches", it is an
+    arbitrary tenth of them.
     """
     from discovery_engine import build
 
@@ -326,11 +333,11 @@ def discovery_search(
     warming = any(k in active for k in ("text", "sound", "lyrics")) and not all(
         model_cache.is_loaded(k) for k in needed)
     if not active:
-        return {"status": "ok", "results": [], "warming": warming}
+        return {"status": "ok", "results": [], "warming": warming, "next_cursor": None}
 
-    built = build(active, {}, corpus=corpus, limit=limit)
+    built = build(active, {}, corpus=corpus, limit=limit, offset=offset)
     if target not in built:                    # target below the atom — structurally absent
-        return {"status": "ok", "results": [], "warming": warming}
+        return {"status": "ok", "results": [], "warming": warming, "next_cursor": None}
     sql, params = built[target]
     with get_db_context() as db:
         # The segment-KNN retrieve branch overscans to 1000 rows (see Source.knn):
@@ -344,4 +351,12 @@ def discovery_search(
         # pure overhead and never pays for itself here (measured 1.87s → 0.80s).
         db.execute(text("SET LOCAL jit = off"))
         rows = db.execute(text(sql), params).fetchall()
-    return {"status": "ok", "results": _SHAPERS[target](rows), "warming": warming}
+    # A short page IS the end of the block: the engine bounds the candidate pool at
+    # its retrieve horizon and the dominance cut trims the junk tail, so there is no
+    # total to count against — and counting one would cost a second pass over the
+    # same vector laterals. The cursor carries the offset only; the client already
+    # holds the query + chips (and rebuilds list params like instruments correctly,
+    # which a flattened server-side echo could not).
+    nxt = offset + limit
+    return {"status": "ok", "results": _SHAPERS[target](rows), "warming": warming,
+            "next_cursor": {"offset": nxt} if len(rows) == limit and nxt <= RETRIEVE_K else None}
