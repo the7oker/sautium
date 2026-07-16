@@ -2522,6 +2522,31 @@
     };
   }
 
+  // Discovery blocks fetch a WINDOW and reveal it in STEPs. The engine's cost
+  // is per-query, not per-row (scoring runs on the full candidate pool; LIMIT
+  // only trims the output), so a 30-row window costs the same one engine run
+  // as a 10-row page — and the next two Show-more clicks / row swipes are
+  // served from what's already here instead of re-running the engine.
+  const DISCOVERY_FETCH_WINDOW = 30;
+  const DISCOVERY_TRACK_STEP = 10;
+
+  // createPager with a client-side buffer in front: `spill` (the fetched-but-
+  // unrendered tail of the current window) drains in `step`-sized slices, and
+  // the server is asked again only when the buffer runs dry. Same surface as
+  // createPager, so the Show-more trigger can't tell which it is driving.
+  function createBufferedPager(spill, cursor, opts, step) {
+    const buf = spill.slice();
+    const pager = createPager(DISCOVERY_SEARCH_URL, cursor, opts);
+    return {
+      get loading() { return pager.loading; },
+      get exhausted() { return buf.length === 0 && pager.exhausted; },
+      async next() {
+        if (!buf.length) buf.push(...await pager.next());
+        return buf.splice(0, step);
+      },
+    };
+  }
+
   // IntersectionObserver-based infinite scroll for horizontal rows.
   // Watches a 1px sentinel at the end of the row; when it enters the
   // viewport (with 200px rootMargin so we fetch *before* the user
@@ -3314,7 +3339,8 @@
       // targets on ALL filters (a Gender chip constrains the Tracks list, an
       // Instruments chip constrains the Artists list) and decides per target
       // whether it's reachable (a Gender-only browse yields artists only).
-      const params = new URLSearchParams({ target: b.target, limit: query ? '10' : '20' });
+      const params = new URLSearchParams({ target: b.target,
+                                            limit: String(DISCOVERY_FETCH_WINDOW) });
       if (query) params.set('q', query);
       appendFilterParams(params, filters);
       fetch(DISCOVERY_SEARCH_URL + '?' + params)
@@ -3452,10 +3478,17 @@
       return;
     }
 
-    body.innerHTML = DISCOVERY_RENDERERS[descriptor.layout](items) + warmingNote;
+    // Tracks show a step of the fetched window; the tail spills into the
+    // pager's client-side buffer so the first Show-more clicks are instant.
+    // Horizontal rows render the whole window — their tiles lazy-load images
+    // and scroll on their own axis, so the extra tiles cost nothing.
+    const visible = descriptor.layout === 'tracks'
+      ? items.slice(0, DISCOVERY_TRACK_STEP) : items;
+    body.innerHTML = DISCOVERY_RENDERERS[descriptor.layout](visible) + warmingNote;
     wireDetailHandlers(body);
     if (descriptor.layout === 'tracks') updatePlayingHighlight();
-    attachBlockPaging(screen, descriptor, body, data.next_cursor, params);
+    attachBlockPaging(screen, descriptor, body, data.next_cursor, params,
+                      items.slice(visible.length));
 
     blk.hidden = false;
   }
@@ -3481,8 +3514,10 @@
   // so growing one costs the page nothing. The vertical Tracks list gets an
   // explicit button instead: it sits above the Genres block, and a list that
   // auto-grows on scroll would push the rest of the results away forever.
-  function attachBlockPaging(screen, descriptor, body, cursor, params) {
-    if (!cursor || descriptor.layout === 'genres') return;
+  // `spill` = the fetched-but-unrendered tail of the tracks window; it drains
+  // client-side before the pager asks the server again.
+  function attachBlockPaging(screen, descriptor, body, cursor, params, spill) {
+    if (descriptor.layout === 'genres') return;
 
     const render = DISCOVERY_RENDERERS[descriptor.layout];
     const container = body.firstElementChild;
@@ -3492,16 +3527,19 @@
       renderPage: items => wiredResultNodes(render(items)),
     };
     if (descriptor.layout === 'tracks') {
-      attachShowMore(body, container, cursor, opts);
+      if (spill.length || cursor) {
+        attachShowMore(body, container, opts,
+                       createBufferedPager(spill, cursor, opts, DISCOVERY_TRACK_STEP));
+      }
       return;
     }
+    if (!cursor) return;
     screen._blockScrolls = screen._blockScrolls || {};
     screen._blockScrolls[descriptor.id] =
       attachInfiniteScroll(container, DISCOVERY_SEARCH_URL, cursor, null, opts);
   }
 
-  function attachShowMore(body, list, cursor, opts) {
-    const pager = createPager(DISCOVERY_SEARCH_URL, cursor, opts);
+  function attachShowMore(body, list, opts, pager) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'd-show-more';

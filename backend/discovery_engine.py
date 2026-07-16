@@ -27,6 +27,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import track_similarity
+from uuid_utils import artist_uuid
+
+_VA_ID = str(artist_uuid("Various Artists"))
 
 
 # ── Entities ────────────────────────────────────────────────────────────────
@@ -223,10 +226,14 @@ TOOLS: dict[str, Tool] = {
                "CASE WHEN al.title_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
                targets=("album",), floor=0.3, ceil=1.0, weight=1.0,
                retrieve="(al.title_latin % :ql OR al.title_latin LIKE :qlpfx)"),
+        # album/artist in targets = the lexical CONTAINER lift: "Casanova" surfaces
+        # Zorya (the album that HAS the track) and Floex. Genre stays out — "genres
+        # having a track with this name" is noise. Containers ride the MAX channel
+        # (s_lex), not the shrunk average: one exact-titled track IS full proof.
         Source("track_title", "tracks",
                "GREATEST(similarity(t.title_latin,:ql), "
                "CASE WHEN t.title_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
-               targets=("track",), floor=0.3, ceil=1.0, weight=1.0,
+               targets=("track", "album", "artist"), floor=0.3, ceil=1.0, weight=1.0,
                retrieve="(t.title_latin % :ql OR t.title_latin LIKE :qlpfx)"),
         # CLAP text→audio works against SEGMENTS (10s windows), not track means:
         # normalized means collapse toward the corpus centroid — text-query
@@ -621,26 +628,33 @@ def _retrieve_branch(src: Source, entity: EntityDef, corpus: str, gates: list, K
             f"ORDER BY ({src.score_sql}) DESC, {_tie_break(entity)} LIMIT {K}")
 
 
-def _matched_core(atom, tools, active, corpus, K=RETRIEVE_K):
+def _matched_core(atom, tools, active, corpus, K=RETRIEVE_K, up_level=None):
     """The retrieve→rerank pieces at the atom level, shared by the atom target and
     every higher aggregation. Gates come from EVERY active tool (AND, promoted to the
     atom via _exists_gate) — NOT filtered by target, which is what let cross-level
     filters (female+vocal on a track atom) silently drop out before. Relevance is
-    ATOM-LEVEL SOURCES ONLY (lexical identity doesn't cross levels — no name-down
-    flooding); each tool yields two score expressions: at_terms scores the atom
-    target, up_terms only the sources whose targets reach above the atom (the
-    characteristic channel that roll-ups AVG). Returns (gates, branches, at_terms,
-    up_terms, lateral)."""
+    ATOM-LEVEL SOURCES ONLY (higher-level lexical identity never enters the atom —
+    no name-down flooding); each tool yields three score expressions: at_terms
+    scores the atom target; up_terms and lex_terms serve exactly ONE higher level —
+    `up_level`, the level whose roll-up this build feeds (higher targets each build
+    their own matched) — and include only the atom sources that DECLARE that level
+    in targets. up_terms = characteristic (model-backed: clap/lyrics) → shrunk-AVG
+    roll-up; lex_terms = lexical containment (trigram) → MAX roll-up, because one
+    exact-titled track proves the container fully. None (atom target) → no up
+    channels at all. Returns (gates, branches, at_terms, up_terms, lex_terms,
+    lateral)."""
     et = atom.table.split()[0]
     gates = [src.score_sql if src.table == et else _exists_gate(src, atom, corpus)
              for tool in tools for src in tool.sources if src.is_gate]
     branches: list[str] = []
     at_terms: list[str] = []
     up_terms: list[str] = []
+    lex_terms: list[str] = []
     lateral: list[str] = []
     for tool in tools:
         at_norms: list[str] = []
         up_norms: list[str] = []
+        lex_norms: list[str] = []
         for src in tool.sources:
             if src.is_gate or _level(src) != atom.key:
                 continue
@@ -655,41 +669,45 @@ def _matched_core(atom, tools, active, corpus, K=RETRIEVE_K):
             # Weight INSIDE the GREATEST: an exact title (w=1.0) must outrank a
             # lyrics mention (w=0.6) — with an outer max-weight they tied at 1.0.
             at_norms.append(f"{src.weight} * {norm}")
-            if any(_LEVEL_RANK[t] > _LEVEL_RANK[atom.key] for t in src.targets):
-                up_norms.append(f"{src.weight} * {norm}")
+            if up_level and up_level in src.targets:
+                (up_norms if src.model else lex_norms).append(f"{src.weight} * {norm}")
             branches.append(_retrieve_branch(src, atom, corpus, gates, K))
         if at_norms:
             at_terms.append(f"GREATEST({', '.join(at_norms)})")
         if up_norms:
             up_terms.append(f"GREATEST({', '.join(up_norms)})")
-    return gates, branches, at_terms, up_terms, lateral
+        if lex_norms:
+            lex_terms.append(f"GREATEST({', '.join(lex_norms)})")
+    return gates, branches, at_terms, up_terms, lex_terms, lateral
 
 
 def _relevance_requested(tools) -> bool:
     return any(not s.is_gate for t in tools for s in t.sources)
 
 
-def _matched_sql(atom, tools, gates, branches, at_terms, up_terms, lateral, corpus):
-    """(matched-body, ctes-prefix). matched exposes (id, s_at, s_up) at the atom
-    level. Browse (no relevance branches) → every gate-matching atom, NULL scores
-    (roll-ups then rank by count). Relevance REQUESTED but every source skipped
-    (cold models) → an EMPTY matched set, not a full-library browse (a cold
-    lyrics-only query must answer nothing + warming, not the catalog A-Z).
-    Relevance without any up-eligible source → s_up = 0 so roll-ups pull in
-    nothing (a title-only match must not mint artist/album candidates)."""
+def _matched_sql(atom, tools, gates, branches, at_terms, up_terms, lex_terms, lateral, corpus):
+    """(matched-body, ctes-prefix). matched exposes (id, s_at, s_up, s_lex) at the
+    atom level. Browse (no relevance branches) → every gate-matching atom, NULL
+    scores (roll-ups then rank by count). Relevance REQUESTED but every source
+    skipped (cold models) → an EMPTY matched set, not a full-library browse (a cold
+    lyrics-only query must answer nothing + warming, not the catalog A-Z). A channel
+    with no eligible source for this build's up_level → constant 0 so its roll-up
+    pulls in nothing (a title-only query rolling to GENRE: track_title doesn't
+    declare genre, so the genre build sees s_lex = 0)."""
     cg = _corpus_clause(atom, corpus)
     filt = list(gates) + ([cg] if cg else [])
     where = (" WHERE " + " AND ".join(filt)) if filt else ""
     if not branches:
         if _relevance_requested(tools):
-            return (f"SELECT {atom.pk} AS id, NULL::float AS s_at, NULL::float AS s_up "
-                    f"FROM {atom.table} WHERE false"), ""
-        return (f"SELECT {atom.pk} AS id, NULL::float AS s_at, NULL::float AS s_up "
-                f"FROM {atom.table}{where}"), ""
+            return (f"SELECT {atom.pk} AS id, NULL::float AS s_at, NULL::float AS s_up, "
+                    f"NULL::float AS s_lex FROM {atom.table} WHERE false"), ""
+        return (f"SELECT {atom.pk} AS id, NULL::float AS s_at, NULL::float AS s_up, "
+                f"NULL::float AS s_lex FROM {atom.table}{where}"), ""
     s_at = " + ".join(at_terms)
     s_up = " + ".join(up_terms) if up_terms else "0.0"
+    s_lex = " + ".join(lex_terms) if lex_terms else "0.0"
     cand = " UNION ".join(f"({b})" for b in branches)
-    body = (f"SELECT {atom.pk} AS id, ({s_at}) AS s_at, ({s_up}) AS s_up "
+    body = (f"SELECT {atom.pk} AS id, ({s_at}) AS s_at, ({s_up}) AS s_up, ({s_lex}) AS s_lex "
             f"FROM (SELECT DISTINCT id FROM cand) c JOIN {atom.table} ON {atom.pk}=c.id "
             f"{' '.join(lateral)}{where}")
     return body, f"cand AS ({cand}), "
@@ -700,7 +718,7 @@ def _build_atom(atom, tools, active, corpus, limit, offset):
     (GREATEST within a tool, weighted sum across tools), gates + corpus in WHERE.
     `scored` is un-paged, so the dominance cut always divides by the GLOBAL max —
     OFFSET applies after it and can't rebase the bar on the page's own leader."""
-    gates, branches, at_terms, _, lateral = _matched_core(atom, tools, active, corpus)
+    gates, branches, at_terms, _, _, lateral = _matched_core(atom, tools, active, corpus)
     cg = _corpus_clause(atom, corpus)
     filt = list(gates) + ([cg] if cg else [])
     where = (" WHERE " + " AND ".join(filt)) if filt else ""
@@ -743,23 +761,34 @@ _DOMINANCE_CUT = 0.25
 
 
 def _build_higher(atom, L, tools, active, corpus, limit, offset, K=RETRIEVE_K):
-    """Higher target = two channels. Roll-up: AVG of the matched atoms' s_up — the
-    CHARACTERISTIC channel only (clap/lyrics), never lexical identity: 'the artists
-    whose catalogue sounds like this' (Sade for romantic-sax), NOT 'artists who have
-    a track titled like this'. Own-level: relevance sources whose targets include L
+    """Higher target = three channels, by evidence type. Characteristic roll-up:
+    shrunk AVG of the matched atoms' s_up (clap/lyrics) — 'the artists whose
+    catalogue SOUNDS like this' (Sade for romantic-sax). Lexical containment
+    roll-up: MAX of s_lex (track_title on album/artist targets) — 'the album/artist
+    that HAS the track you typed' (Casanova → Zorya, Floex); MAX, not the shrunk
+    AVG, because one exact-titled track proves containment fully — under the shrink
+    a container capped at 0.125 and died to the dominance cut whenever a namesake
+    identity leader existed. Own-level: relevance sources whose targets include L
     (artist name/alias/bio on an artist target) scored on the L row directly —
     identity matches, including track-less phantom stubs the roll-up can't reach.
     Gates of level ≥ L re-apply on the L row itself (Gender:Female means the ARTIST
     list holds only females, not males who share a matched track). ORDER by combined
     score, then matched-atom COUNT (browse mode: most matching atoms)."""
-    gates_a, branches_a, at_terms, up_terms, lat_a = _matched_core(atom, tools, active, corpus)
-    body, ctes = _matched_sql(atom, tools, gates_a, branches_a, at_terms, up_terms, lat_a, corpus)
+    gates_a, branches_a, at_terms, up_terms, lex_terms, lat_a = _matched_core(
+        atom, tools, active, corpus, up_level=L.key)
+    body, ctes = _matched_sql(atom, tools, gates_a, branches_a, at_terms, up_terms,
+                              lex_terms, lat_a, corpus)
     link = _agg_link(atom, L, corpus)
     Lt = L.table.split()[0]
     Lrank = _LEVEL_RANK[L.key]
     gate_srcs = [s for t in tools for s in t.sources if s.is_gate]
     gates_L = [s.score_sql if s.table == Lt else _exists_gate(s, L, corpus)
                for s in gate_srcs if _LEVEL_RANK[_level(s)] >= Lrank]
+    if L.key == "artist":
+        # The compilation pseudo-artist contains a track for almost any query —
+        # containment (and roll-ups generally) would surface it as a leading tile
+        # that navigates nowhere useful.
+        gates_L.append(f"{L.pk} != '{_VA_ID}'")
     cg = _corpus_clause(L, corpus)
     if cg:
         gates_L.append(cg)
@@ -794,15 +823,19 @@ def _build_higher(atom, L, tools, active, corpus, limit, offset, K=RETRIEVE_K):
     if own_branches:
         cand += " UNION " + " UNION ".join(
             f"SELECT id AS lid FROM ({b}) ob{i}" for i, b in enumerate(own_branches))
-    score = (" + ".join(own_terms + [f"{_ROLLUP_W} * COALESCE(r.s, 0)"])
+    rollup = f"{_ROLLUP_W} * GREATEST(COALESCE(r.s, 0), COALESCE(r.lex, 0))"
+    score = (" + ".join(own_terms + [rollup])
              if (at_terms or own_terms) else "NULL")
     where = (" WHERE " + " AND ".join(gates_L)) if gates_L else ""
-    # s_up > 0 keeps lexical-only matches out of the roll-up (they'd mint zero-score
-    # candidates); NULL passes for browse mode, where roll-ups rank by count.
+    # A matched atom enters the roll-up if it serves either channel; the FILTER
+    # keeps the shrink denominator at the characteristic count alone, so a
+    # title-only match doesn't dilute its container's sound-alike average.
+    # NULL passes for browse mode, where roll-ups rank by count.
     # SUM/(n+3) = AVG shrunk toward 0 (Bayesian prior): one lucky strong atom no
     # longer outranks a genre/artist with many solid ones (Space Rock beat Jazz on
     # a single Pink Floyd sax track), and stray CLAP junk on an identity word damps
-    # to noise level instead of minting flat 0.40 candidates.
+    # to noise level instead of minting flat 0.40 candidates. s_lex deliberately
+    # skips the shrink (MAX) — containment is binary evidence, see docstring.
     # MATERIALIZED is load-bearing: matched is referenced once, so PG12+ would
     # inline it into rolled's nested loop and re-evaluate its per-row vector
     # laterals for every (matched x link) pair — measured 9.2s vs 38ms isolated.
@@ -820,8 +853,11 @@ def _build_higher(atom, L, tools, active, corpus, limit, offset, K=RETRIEVE_K):
     order_slim = f"2 DESC NULLS LAST, ({owned_L}) DESC, r.n DESC NULLS LAST, {tail}"
     order_out = f"slim.score DESC NULLS LAST, is_owned DESC, slim.n DESC NULLS LAST, {tail}"
     sql = (f"WITH {ctes}matched AS MATERIALIZED ({body}), "
-           f"rolled AS (SELECT lk.lid AS lid, SUM(m.s_up) / (COUNT(*) + 3.0) AS s, COUNT(*) AS n "
-           f"FROM matched m {link} WHERE m.s_up > 0 OR m.s_up IS NULL GROUP BY lk.lid), "
+           f"rolled AS (SELECT lk.lid AS lid, "
+           f"SUM(m.s_up) / (COUNT(*) FILTER (WHERE m.s_up > 0) + 3.0) AS s, "
+           f"MAX(m.s_lex) AS lex, COUNT(*) AS n "
+           f"FROM matched m {link} "
+           f"WHERE m.s_up > 0 OR m.s_lex > 0 OR m.s_up IS NULL GROUP BY lk.lid), "
            f"slim AS (SELECT {L.pk} AS id, ({score}) AS score, r.n AS n "
            f"FROM (SELECT DISTINCT lid FROM ({cand}) c0) cd "
            f"JOIN {L.table} ON {L.pk} = cd.lid "
