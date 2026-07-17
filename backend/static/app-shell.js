@@ -7196,11 +7196,15 @@
     out_of_scope: { mark: '⌀', label: 'Outside measured evidence',    cls: 'is-nodata' },
   };
 
-  async function renderGearAdvisor(root, targetVariant) {
-    targetVariant = targetVariant || 'harman';
+  async function renderGearAdvisor(root, opts) {
+    opts = Object.assign({ target: 'harman', spkType: '', spkShape: '' }, opts || {});
+    const targetVariant = opts.target;
     let data = null;
     try {
-      const r = await fetch('/api/profile/gear/advisor?target=' + targetVariant);
+      const qs = new URLSearchParams({ target: targetVariant });
+      if (opts.spkType) qs.set('speaker_type', opts.spkType);
+      if (opts.spkShape) qs.set('speaker_shape', opts.spkShape);
+      const r = await fetch('/api/profile/gear/advisor?' + qs.toString());
       if (r.ok) data = await r.json();
     } catch (_) { /* fall through */ }
     if (!data) {
@@ -7359,7 +7363,9 @@
 
         ${(() => {
           const sr = data.speaker_registry || [];
-          if (!sr.length) return '';
+          // Keep the section (and its filter chips) visible when an
+          // active filter returns nothing — otherwise the filter traps.
+          if (!sr.length && !opts.spkType && !opts.spkShape) return '';
           const rows = sr.map(r => `
             <div class="gadv-cand">
               <div class="gadv-cand-head">
@@ -7376,13 +7382,18 @@
                 <button class="gadv-want-btn" data-registry-want="${r.entry_id}">+ Want</button>
               </div>
             </div>`).join('');
+          const typeChips = [['', 'All'], ['passive', 'Passive'], ['active', 'Active']]
+            .map(([v, l]) => `<button class="gadv-target-chip ${opts.spkType === v ? 'active' : ''}" data-spk-type="${v}">${l}</button>`).join('');
+          const shapeChips = [['', 'All'], ['bookshelves', 'Bookshelves'], ['floorstanders', 'Floorstanders']]
+            .map(([v, l]) => `<button class="gadv-target-chip ${opts.spkShape === v ? 'active' : ''}" data-spk-shape="${v}">${l}</button>`).join('');
           return `
             <div class="profile-group-label">Speakers · spinorama registry (CEA-2034)</div>
+            <div class="gadv-target-row">${typeChips}<span class="gadv-target-sep"></span>${shapeChips}</div>
             <p class="gsys-context">Top Klippel-grade measurements by the published Olive preference
-              model — quoting the model, not inventing a score. Passive speakers need a power amp in
-              the park (the pair engine takes over once added); actives take line level from a
-              preamp/DAC. + Want starts research and the System pairing math.</p>
-            <div class="gsys-group">${rows}</div>`;
+              model — quoting the model, not inventing a score. Filters re-run the selection.
+              Passive speakers need a power amp in the park (the pair engine takes over once added);
+              actives take line level from a preamp/DAC. + Want starts research and the System pairing math.</p>
+            <div class="gsys-group">${rows || '<div class="placeholder">No high-quality measurements match these filters.</div>'}</div>`;
         })()}
         <p class="gsys-legend">▲ addresses a criticized spot in your gear · + adds something yours isn't praised for ·
           ≈ parity · ▼ trade-off. Terms are attributed community voice (forum tier), never converted to scores;
@@ -7404,11 +7415,20 @@
           await fetch('/api/profile/gear/registry/' + btn.dataset.registryWant + '/want',
                       { method: 'POST' });
         } catch (_) { /* research-state SSE repaints the true state */ }
-        renderGearAdvisor(root, targetVariant);
+        renderGearAdvisor(root, opts);
       });
     });
     root.querySelectorAll('[data-target-variant]').forEach(btn => {
-      btn.addEventListener('click', () => renderGearAdvisor(root, btn.dataset.targetVariant));
+      btn.addEventListener('click', () =>
+        renderGearAdvisor(root, Object.assign({}, opts, { target: btn.dataset.targetVariant })));
+    });
+    root.querySelectorAll('[data-spk-type]').forEach(btn => {
+      btn.addEventListener('click', () =>
+        renderGearAdvisor(root, Object.assign({}, opts, { spkType: btn.dataset.spkType })));
+    });
+    root.querySelectorAll('[data-spk-shape]').forEach(btn => {
+      btn.addEventListener('click', () =>
+        renderGearAdvisor(root, Object.assign({}, opts, { spkShape: btn.dataset.spkShape })));
     });
   }
 

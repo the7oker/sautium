@@ -4755,6 +4755,7 @@ body.has-miniplayer .more-overlay .drawer {
   color: var(--color-blue-hover); background: var(--color-blue-weak);
   border-color: rgba(74, 127, 167, 0.4);
 }
+.gadv-target-sep { width: 1px; align-self: stretch; background: var(--color-divider); margin: 0 calc(4 * var(--px)); }
 
 .research-chip .chip-sig {
   min-width: 0;

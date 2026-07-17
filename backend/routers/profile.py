@@ -310,12 +310,15 @@ def gear_system_analysis() -> Dict[str, Any]:
 
 
 @router.get("/gear/advisor")
-def gear_advisor(target: str = "harman") -> Dict[str, Any]:
+def gear_advisor(target: str = "harman", speaker_type: Optional[str] = None,
+                 speaker_shape: Optional[str] = None) -> Dict[str, Any]:
     """Upgrade advisor: plateau diagnosis + library axes + candidate
     cards on the price axis (Gear Advisor Phases 4/5). `target` picks
-    the measured-matches reference: harman | neutral (no bass shelf)."""
+    the measured-matches reference: harman | neutral (no bass shelf);
+    speaker_type/speaker_shape filter the spinorama section."""
     from gear_advisor import advisor
-    return advisor(target_variant="neutral" if target == "neutral" else "harman")
+    return advisor(target_variant="neutral" if target == "neutral" else "harman",
+                   speaker_type=speaker_type, speaker_shape=speaker_shape)
 
 
 @router.post("/gear/registry/{entry_id}/want")
