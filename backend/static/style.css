@@ -4732,6 +4732,12 @@ body.has-miniplayer .more-overlay .drawer {
   padding: calc(5 * var(--px)) calc(9 * var(--px)); border-radius: var(--radius-sm);
   cursor: pointer;
 }
+.gadv-foot {
+  display: flex; align-items: center; gap: calc(8 * var(--px));
+  margin-top: calc(7 * var(--px));
+}
+.gadv-foot .gadv-src { margin-left: 0; flex: 1 1 auto; min-width: 0; }
+.gadv-foot .gadv-want-btn { flex: none; }
 .gadv-rigs-badge {
   font: 600 calc(9 * var(--px)) / 1 var(--font-mono); letter-spacing: 0.05em;
   color: var(--color-positive); background: rgba(141, 167, 123, 0.13);

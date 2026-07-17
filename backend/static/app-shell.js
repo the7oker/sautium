@@ -7329,7 +7329,6 @@
               <div class="gadv-cand-head">
                 <span class="gsys-target">${escapeProfileHtml(r.model_name)}</span>
                 ${r.two_rigs ? '<span class="gadv-rigs-badge">2 rigs</span>' : ''}
-                <button class="gadv-want-btn" data-registry-want="${r.entry_id}">+ Want</button>
               </div>
               <div class="gadv-cand-meta gadv-band-num">
                 sub ${r.dev_sub_bass_db > 0 ? '+' : ''}${r.dev_sub_bass_db?.toFixed(1)} ·
@@ -7337,7 +7336,10 @@
                 mids ${r.dev_mids_db > 0 ? '+' : ''}${r.dev_mids_db?.toFixed(1)} ·
                 pres ${r.dev_presence_db > 0 ? '+' : ''}${r.dev_presence_db?.toFixed(1)} ·
                 treble ${r.dev_treble_db > 0 ? '+' : ''}${r.dev_treble_db?.toFixed(1)} dB
+              </div>
+              <div class="gadv-foot">
                 <span class="gadv-src">${escapeProfileHtml(r.source)}</span>
+                <button class="gadv-want-btn" data-registry-want="${r.entry_id}">+ Want</button>
               </div>
             </div>`).join('');
           const gapNote = rm.axis.owned_best >= -1.5
@@ -7363,14 +7365,15 @@
               <div class="gadv-cand-head">
                 <span class="gadv-price">${r.price_usd != null ? '$' + Math.round(r.price_usd) : '$ —'}</span>
                 <span class="gsys-target">${escapeProfileHtml(r.model_name)}</span>
-                <span class="gadv-src">${r.active_speaker ? 'active' : 'passive'}${r.shape ? ' · ' + escapeProfileHtml(r.shape) : ''}</span>
-                <button class="gadv-want-btn" data-registry-want="${r.entry_id}">+ Want</button>
               </div>
               <div class="gadv-cand-meta gadv-band-num">
                 preference ${r.pref_score?.toFixed(1)}
                 ${r.pref_score_wsub != null ? ` · with sub ${r.pref_score_wsub.toFixed(1)}` : ''}
                 ${r.lfx_hz != null ? ` · bass to ${Math.round(r.lfx_hz)} Hz` : ''}
-                <span class="gadv-src">${escapeProfileHtml(r.source)}</span>
+              </div>
+              <div class="gadv-foot">
+                <span class="gadv-src">${r.active_speaker ? 'active' : 'passive'}${r.shape ? ' · ' + escapeProfileHtml(r.shape) : ''} · ${escapeProfileHtml(r.source)}</span>
+                <button class="gadv-want-btn" data-registry-want="${r.entry_id}">+ Want</button>
               </div>
             </div>`).join('');
           return `
