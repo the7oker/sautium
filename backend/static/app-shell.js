@@ -6988,6 +6988,11 @@
       const priceHtml = price ? `<span class="chip-price">${escapeProfileHtml(price)}</span>` : '';
       return `<span class="research-chip">${sigHtml}${priceHtml}</span>`;
     }
+    if (gear.research_state === 'failed') {
+      // Failed must never wear the "Awaiting" face — the sheet has
+      // the Retry button, the chip tells the truth.
+      return '<span class="research-pending is-failed">Research failed · open to retry</span>';
+    }
     return '<span class="research-pending">Awaiting research</span>';
   }
 
