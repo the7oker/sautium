@@ -191,6 +191,12 @@ class BackendAPIClient:
         """Cancel running enrichment."""
         return self._post_json("/enrich/cancel", timeout=5)
 
+    def refresh_gear_registries(self) -> Optional[dict]:
+        """Refresh measurement registries (spinorama fetched by the
+        backend itself; AutoEq reimported from its mount). Import
+        guardrails run server-side; slow-ish — network + ~2k upserts."""
+        return self._post_json("/api/gear-models/registry/refresh", timeout=300)
+
     def lastfm_auth_start(self) -> Optional[dict]:
         """Start Last.fm OAuth flow. Returns {"auth_url": "..."}."""
         return self._post_json("/lastfm/auth/start", timeout=10)

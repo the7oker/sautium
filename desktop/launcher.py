@@ -1000,6 +1000,32 @@ class LauncherApp(ctk.CTk):
             else:
                 self.after(0, lambda: self._show_update_dialog(count, old_hash))
 
+            # Same button also freshens the measurement registries —
+            # best-effort: needs a running backend, and the server-side
+            # import guardrails already refuse degraded datasets.
+            try:
+                self.after(0, lambda: self._progress_text.configure(
+                    text="Refreshing gear registries..."))
+                reg = self.api_client.refresh_gear_registries()
+                if reg:
+                    spk = (reg.get("spinorama") or {}).get("entries")
+                    hp = (reg.get("autoeq") or {}).get("entries")
+                    parts = []
+                    if spk is not None:
+                        parts.append(f"{spk} speakers")
+                    if hp is not None:
+                        parts.append(f"{hp} headphone curves")
+                    msg = ("Registries refreshed: " + ", ".join(parts)) if parts \
+                        else "Registries: " + "; ".join(
+                            str(v.get("error") or v.get("skipped") or "ok")
+                            for v in reg.values() if isinstance(v, dict))
+                else:
+                    msg = "Registries skipped (backend offline)"
+                self.after(0, lambda m=msg: self._progress_text.configure(text=m))
+                self.after(8000, lambda: self._progress_text.configure(text=""))
+            except Exception as e:
+                logger.debug(f"Registry refresh failed: {e}")
+
         threading.Thread(target=_check, daemon=True).start()
 
     def _check_updates_background(self):

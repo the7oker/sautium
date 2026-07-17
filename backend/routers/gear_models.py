@@ -176,6 +176,47 @@ def get_gear_model(model_id: str) -> Dict[str, Any]:
     return head
 
 
+@router.post("/registry/refresh")
+def refresh_registries() -> Dict[str, Any]:
+    """Refresh measurement registries from inside the node: spinorama
+    is fetched from the network directly (collect→validate→write
+    guardrails abort loudly before any write); the AutoEq clone is
+    reimported from its read-only mount — pulling that git repo is a
+    host-side action, so a stale clone reimports to the same state,
+    which is harmless. Called by the launcher's Check for Updates."""
+    import json
+    import os
+    import tempfile
+    from gear_registry import (RegistryImportError, fetch_json, import_autoeq,
+                               import_spinorama, match_to_catalog)
+    out: Dict[str, Any] = {}
+    try:
+        data = fetch_json("https://www.spinorama.org/json/metadata.json")
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp:
+            json.dump(data, tmp)
+            tmp_path = tmp.name
+        try:
+            out["spinorama"] = import_spinorama(tmp_path)
+        finally:
+            os.unlink(tmp_path)
+    except RegistryImportError as e:
+        out["spinorama"] = {"error": str(e)}
+    except Exception as e:
+        out["spinorama"] = {"error": f"fetch failed: {e}"}
+
+    autoeq_root = "/app/registry/autoeq"
+    if os.path.isdir(os.path.join(autoeq_root, "measurements")):
+        try:
+            out["autoeq"] = import_autoeq(autoeq_root)
+        except RegistryImportError as e:
+            out["autoeq"] = {"error": str(e)}
+    else:
+        out["autoeq"] = {"skipped": "no clone mounted"}
+
+    out["linked"] = match_to_catalog()
+    return out
+
+
 @router.post("/{model_id}/retry-research")
 def retry_research(model_id: str) -> Dict[str, Any]:
     """Deliberate user action — research burns real tokens, so gear never
