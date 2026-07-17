@@ -36,6 +36,10 @@ class PlaybackManager:
         self.queue = CanonicalQueue()
         self._active: Optional[PlayerBackend] = None
         self._active_lock = threading.Lock()
+        # Serializes ensure_active's check→detach→attach sequence so two
+        # concurrent play intents don't double-attach (it nests activate,
+        # which takes _active_lock — keep them separate).
+        self._ensure_lock = threading.Lock()
         self._mutate_lock = threading.RLock()
         self.radio_mode = False
 
@@ -53,6 +57,33 @@ class PlaybackManager:
         if b is None:
             raise ConnectionError("No playback output configured")
         return b
+
+    def ensure_active(self) -> PlayerBackend:
+        """Play-intent gate for a daemon whose outputs come and go (dozing
+        DAPs, phones, HQPlayer starts/stops): the configured output is a
+        preference, not a live connection. Called at the start of every
+        playback session — a dead or never-attached output is (re)attached
+        from the persisted settings right here; pause/stop/volume keep
+        using backend() and never wake a device."""
+        with self._ensure_lock:
+            b = self._active
+            if b is not None and b.healthy():
+                return b
+            from routers.settings import _read
+            otype = _read("output.type")
+            if otype is None:
+                return self.backend()   # legacy: honest ConnectionError
+            if otype == "dlna" and not _read("output.dlna_renderer"):
+                raise ConnectionError("No DLNA renderer configured")
+            logger.info("play intent on %s '%s' output — (re)attaching",
+                        "unhealthy" if b is not None else "inactive", otype)
+            if b is not None:
+                self.activate(None)      # clean detach of the dead instance
+            self.activate(otype,
+                          device_id=_read("output.local_device"),
+                          exclusive=bool(_read("output.local_exclusive")),
+                          renderer=_read("output.dlna_renderer"))
+            return self.backend()
 
     @property
     def active(self) -> Optional[PlayerBackend]:
@@ -321,7 +352,7 @@ class PlaybackManager:
         """Replace the queue (and start playback). Returns (added, generation);
         generation is what background fillers must guard their appends with."""
         with self._mutate_lock:
-            backend = self.backend()
+            backend = self.ensure_active() if play else self.backend()
             added = backend.queue_replace(items, play=play,
                                           probe_first=probe_first)
             if added:
@@ -388,7 +419,7 @@ class PlaybackManager:
             return result
 
     def jump(self, index: int) -> bool:
-        backend = self.backend()
+        backend = self.ensure_active()
         ok = backend.select(index)
         if ok:
             backend.play()

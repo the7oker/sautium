@@ -77,6 +77,14 @@ class PlayerBackend(ABC):
     def shutdown(self) -> None:
         """Stop status acquisition and release the output."""
 
+    def healthy(self) -> bool:
+        """Is the attached device still believed reachable? Backends whose
+        devices come and go (a dozing DLNA DAP) override this; the manager's
+        play-intent gate re-attaches an unhealthy output before starting a
+        session. Default True — HQPlayer's poller and the browser channel
+        self-heal on their own."""
+        return True
+
     @abstractmethod
     def capabilities(self) -> Capabilities: ...
 

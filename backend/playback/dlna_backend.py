@@ -114,6 +114,7 @@ class DlnaBackend(PlayerBackend):
 
         # dlna-loop-owned state
         self._dmr: Optional["DmrDevice"] = None
+        self._gone = False       # device believed off the network (see healthy)
         self._index = 0                          # 1-based canonical slot
         self._current_url: Optional[str] = None
         self._next_url: Optional[str] = None     # set via SetNextAVTransportURI
@@ -131,6 +132,8 @@ class DlnaBackend(PlayerBackend):
             fut.result(timeout=25)
         except Exception as e:
             reason = str(e).strip() or type(e).__name__
+            if len(reason) > 80:      # raw aiohttp reprs are debug noise
+                reason = reason[:77] + "…"
             msg = (f"'{self.label}' did not respond ({reason}) — "
                    "wake the device (phone renderers doze) and try again")
             logger.error("DLNA attach failed: %s", msg)
@@ -153,6 +156,13 @@ class DlnaBackend(PlayerBackend):
     def capabilities(self) -> Capabilities:
         return Capabilities(volume=True, volume_kind="percent", seek=True,
                             gapless=False)
+
+    def healthy(self) -> bool:
+        """Battery DAPs and phones drop off the network in deep sleep —
+        once that's detected (poll misses, connection-level command
+        failures) the next play intent must re-attach, not trust this
+        instance."""
+        return self._dmr is not None and not self._gone
 
     async def _async_start(self) -> None:
         # 10s over the default 5s: phone renderers in Wi-Fi power-save can
@@ -262,6 +272,7 @@ class DlnaBackend(PlayerBackend):
                         # Wi-Fi in deep sleep while playing from buffer) —
                         # a frozen "playing" status would just gaslight the
                         # user. Report the loss and stop pretending.
+                        self._gone = True
                         self._error = (f"'{self.label}' stopped responding — "
                                        "it may have left the network "
                                        "(deep sleep / Wi-Fi off)")
@@ -474,6 +485,11 @@ class DlnaBackend(PlayerBackend):
                 self._error = None   # a command went through — device is back
             return True
         except Exception as e:
+            if isinstance(e, (TimeoutError, OSError)):
+                # Connection-level failure (hang / refused / unreachable) —
+                # the doze signature. Mark the instance so the next play
+                # intent re-attaches instead of hammering a ghost.
+                self._gone = True
             reason = str(e).strip() or type(e).__name__
             # Surface it: a silently swallowed command is how "next" looked
             # like it worked while the renderer kept playing the old track.

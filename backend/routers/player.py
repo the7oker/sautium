@@ -166,8 +166,12 @@ def get_outputs(rescan: bool = False):
     backend = manager.active
     return {
         "active": {
-            "type": backend.id if backend else None,
+            # Configured output, not just the attached one: with lazy
+            # (re)attach the connection may not exist between sessions,
+            # but the user's selection must stay visible in the picker.
+            "type": backend.id if backend else _read("output.type"),
             "label": backend.label if backend else None,
+            "attached": backend is not None,
             "device_id": _read("output.local_device"),
             "exclusive": bool(_read("output.local_exclusive")),
             "renderer_udn": (persisted_renderer or {}).get("udn"),
@@ -805,7 +809,7 @@ def now_playing_detail(media_file_id: int = None, track_id: str = None,
 @router.post("/play")
 def play():
     try:
-        return {"ok": manager.backend().play()}
+        return {"ok": manager.ensure_active().play()}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -829,7 +833,7 @@ def stop():
 @router.post("/next")
 def next_track():
     try:
-        return {"ok": manager.backend().next()}
+        return {"ok": manager.ensure_active().next()}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -837,7 +841,7 @@ def next_track():
 @router.post("/previous")
 def previous_track():
     try:
-        return {"ok": manager.backend().previous()}
+        return {"ok": manager.ensure_active().previous()}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
