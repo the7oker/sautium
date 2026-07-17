@@ -244,18 +244,80 @@ def match_to_catalog() -> int:
     return linked
 
 
+def import_spinorama(path: str) -> Dict[str, int]:
+    """Loudspeaker registry from a spinorama.org metadata.json snapshot
+    (refresh: curl https://www.spinorama.org/json/metadata.json into
+    data/registry/spinorama/). Speakers carry CEA-2034 aggregates
+    instead of band deltas: Olive preference score (the loudspeaker
+    sibling of the Harman headphone research), score with an ideal
+    subwoofer, LFX bass extension, sensitivity — plus price and form
+    factor straight from the dataset. One entry per speaker from its
+    default (best-quality) measurement; origin recorded in source."""
+    import json
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    stats = {"entries": 0, "skipped": 0}
+    for sp in data.values():
+        brand, model = sp.get("brand"), sp.get("model")
+        meas = (sp.get("measurements") or {}).get(sp.get("default_measurement") or "", {})
+        pref = meas.get("pref_rating") or {}
+        if not brand or not model or not pref.get("pref_score"):
+            stats["skipped"] += 1
+            continue
+        source = f'spinorama:{meas.get("origin") or "unknown"}'
+        model_name = f"{brand} {model}"
+        sens = meas.get("computed_sensitivity") or sp.get("sensitivity")
+        if isinstance(sens, dict):  # newer schema nests it
+            sens = sens.get("sensitivity_1m") or sens.get("computed")
+        price = sp.get("price")
+        try:
+            price = float(price) if price not in (None, "") else None
+        except (TypeError, ValueError):
+            price = None
+        db_execute(
+            """
+            INSERT INTO gear_registry_entries
+                (id, source, category, model_name, pref_score, pref_score_wsub,
+                 lfx_hz, sens_db, price_usd, shape, quality, active_speaker)
+            VALUES (%(id)s::uuid, %(src)s, 'speakers', %(name)s, %(ps)s, %(psw)s,
+                    %(lfx)s, %(sens)s, %(price)s, %(shape)s, %(q)s, %(act)s)
+            ON CONFLICT (source, model_name) DO UPDATE
+            SET pref_score = EXCLUDED.pref_score,
+                pref_score_wsub = EXCLUDED.pref_score_wsub,
+                lfx_hz = EXCLUDED.lfx_hz, sens_db = EXCLUDED.sens_db,
+                price_usd = EXCLUDED.price_usd, shape = EXCLUDED.shape,
+                quality = EXCLUDED.quality, active_speaker = EXCLUDED.active_speaker,
+                imported_at = now()
+            """,
+            {"id": str(registry_entry_uuid(source, model_name)),
+             "src": source, "name": model_name,
+             "ps": pref.get("pref_score"), "psw": pref.get("pref_score_wsub"),
+             "lfx": pref.get("lfx_hz"), "sens": sens,
+             "price": price,
+             "shape": (sp.get("shape") or None),
+             "q": meas.get("quality") or None,
+             "act": sp.get("type") == "active"},
+        )
+        stats["entries"] += 1
+    logger.info("registry: spinorama imported")
+    return stats
+
+
 if __name__ == "__main__":
     import argparse
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     ap = argparse.ArgumentParser()
     ap.add_argument("--import-autoeq", metavar="PATH")
+    ap.add_argument("--import-spinorama", metavar="PATH")
     ap.add_argument("--match", action="store_true")
     ap.add_argument("--stats", action="store_true")
     args = ap.parse_args()
 
     if args.import_autoeq:
         print(import_autoeq(args.import_autoeq))
+    if args.import_spinorama:
+        print(import_spinorama(args.import_spinorama))
     if args.match:
         print(f"linked: {match_to_catalog()}")
     if args.stats:

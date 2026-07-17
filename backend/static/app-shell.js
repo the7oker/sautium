@@ -7354,6 +7354,33 @@
             ${gapNote}
             <div class="gsys-group">${rows}</div>`;
         })()}
+
+        ${(() => {
+          const sr = data.speaker_registry || [];
+          if (!sr.length) return '';
+          const rows = sr.map(r => `
+            <div class="gadv-cand">
+              <div class="gadv-cand-head">
+                <span class="gadv-price">${r.price_usd != null ? '$' + Math.round(r.price_usd) : '$ —'}</span>
+                <span class="gsys-target">${escapeProfileHtml(r.model_name)}</span>
+                <span class="gadv-src">${r.active_speaker ? 'active' : 'passive'}${r.shape ? ' · ' + escapeProfileHtml(r.shape) : ''}</span>
+                <button class="gadv-want-btn" data-registry-want="${r.entry_id}">+ Want</button>
+              </div>
+              <div class="gadv-cand-meta gadv-band-num">
+                preference ${r.pref_score?.toFixed(1)}
+                ${r.pref_score_wsub != null ? ` · with sub ${r.pref_score_wsub.toFixed(1)}` : ''}
+                ${r.lfx_hz != null ? ` · bass to ${Math.round(r.lfx_hz)} Hz` : ''}
+                <span class="gadv-src">${escapeProfileHtml(r.source)}</span>
+              </div>
+            </div>`).join('');
+          return `
+            <div class="profile-group-label">Speakers · spinorama registry (CEA-2034)</div>
+            <p class="gsys-context">Top Klippel-grade measurements by the published Olive preference
+              model — quoting the model, not inventing a score. Passive speakers need a power amp in
+              the park (the pair engine takes over once added); actives take line level from a
+              preamp/DAC. + Want starts research and the System pairing math.</p>
+            <div class="gsys-group">${rows}</div>`;
+        })()}
         <p class="gsys-legend">▲ addresses a criticized spot in your gear · + adds something yours isn't praised for ·
           ≈ parity · ▼ trade-off. Terms are attributed community voice (forum tier), never converted to scores;
           compatibility comes from the deterministic pair engine — see System.</p>

@@ -498,6 +498,25 @@ def _measured_candidates(analysis: Dict[str, Any], lib_axes: List[Dict[str, Any]
             "target_variant": target_variant, "rows": rows}
 
 
+def _speaker_registry(limit: int = 8) -> List[Dict[str, Any]]:
+    """Top loudspeakers from the spinorama registry by Olive preference
+    score (CEA-2034 aggregate — a published preference model, so
+    ranking by it is quoting the model, not inventing a score).
+    Klippel-grade measurements only (quality=high)."""
+    return db_query(
+        """
+        SELECT id::text AS entry_id, model_name, source, pref_score,
+               pref_score_wsub, lfx_hz, price_usd, shape, active_speaker
+        FROM gear_registry_entries
+        WHERE category = 'speakers' AND quality = 'high'
+          AND pref_score IS NOT NULL AND gear_model_id IS NULL
+        ORDER BY pref_score DESC
+        LIMIT %(lim)s
+        """,
+        {"lim": limit},
+    )
+
+
 def advisor(target_variant: str = "harman") -> Dict[str, Any]:
     analysis = system_analysis()
     library = _library_axes()
@@ -552,6 +571,7 @@ def advisor(target_variant: str = "harman") -> Dict[str, Any]:
         "candidates": candidates,
         "registry_matches": _measured_candidates(analysis, library["axes"],
                                                  target_variant=target_variant),
+        "speaker_registry": _speaker_registry(),
         "pool_note": (
             "Candidate pool = your want-list plus this node's researched catalog "
             f"({len(candidates)} model(s)). Measurement-registry imports (squig/ASR "

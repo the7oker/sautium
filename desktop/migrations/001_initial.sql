@@ -1696,6 +1696,16 @@ CREATE TABLE IF NOT EXISTS gear_registry_entries (
     dev_mids_db      REAL,
     dev_presence_db  REAL,
     dev_treble_db    REAL,
+    -- loudspeaker aggregates (spinorama sources): CEA-2034 Olive
+    -- preference score, score with ideal sub, LFX bass extension
+    pref_score       REAL,
+    pref_score_wsub  REAL,
+    lfx_hz           REAL,
+    sens_db          REAL,
+    price_usd        REAL,
+    shape            VARCHAR(30),
+    quality          VARCHAR(12),
+    active_speaker   BOOLEAN,
     imported_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (source, model_name)
 );
