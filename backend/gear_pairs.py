@@ -270,6 +270,25 @@ def _headroom_note(status: str) -> Optional[str]:
 def _pair_hp_transducer(src, s_role, dst, d_role) -> Dict[str, Any]:
     checks = []
 
+    # True-ribbon domain gate: a sub-ohm ribbon motor is a near-short
+    # for any voltage amplifier — the damping arithmetic below would
+    # grade it as a mild warn when the physics is "amp into protection,
+    # ribbon at risk". Same hard boundary as electrostats; the escape
+    # is the bundled current-drive/transformer interface, whose INPUT
+    # (typically ~32 ohm) is what an amp actually pairs with.
+    if (d_role.get("driver_type") or "").lower() == "ribbon" and \
+            d_role.get("z") is not None and d_role["z"] < 1:
+        checks.append(_check(
+            "domain", "fail",
+            f"true-ribbon motor at {d_role['z']:g} Ω — a near-short no conventional "
+            "headphone output may drive directly",
+            "ds",
+            "connect only through the ribbon's current-drive/transformer interface "
+            "(bundled with such headphones); the amp then sees the interface's "
+            "input impedance (~32 Ω class), and THAT is the load to judge power against",
+        ))
+        return _verdict(src, "hp_out", dst, "transducer", checks)
+
     # Electrostatic domain gate: bias supply + 100V-swing territory.
     # A conventional headphone output is a hard incompatibility, not a
     # headroom question — different connector, different physics.
