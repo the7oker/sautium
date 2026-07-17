@@ -276,6 +276,11 @@ def _pair_hp_transducer(src, s_role, dst, d_role) -> Dict[str, Any]:
     # ribbon at risk". Same hard boundary as electrostats; the escape
     # is the bundled current-drive/transformer interface, whose INPUT
     # (typically ~32 ohm) is what an amp actually pairs with.
+    if s_role.get("bias_v") is not None and not d_role.get("electrostatic"):
+        # Energizer × non-estat stays a non-pair regardless of the
+        # transducer's own domain quirks (ribbon gate below included).
+        return None
+
     if (d_role.get("driver_type") or "").lower() == "ribbon" and \
             d_role.get("z") is not None and d_role["z"] < 1:
         checks.append(_check(
