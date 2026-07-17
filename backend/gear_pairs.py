@@ -189,10 +189,15 @@ def _roles(item: Dict[str, Any]) -> List[Dict[str, Any]]:
         })
 
     if cat == "phono_stage":
+        mc_flag = (specs.get("mc_input") or "").lower()
         roles.append({
             "role": "phono_in",
             "mm_gain": _num(specs, "mm_gain_db"),
             "mc_gain": _num(specs, "mc_gain_db"),
+            # tri-state: True / False / None (not captured) — absence of
+            # a gain NUMBER must never read as absence of the INPUT
+            "mc_input": True if mc_flag == "true" else False if mc_flag == "false"
+                        else (_num(specs, "mc_gain_db") is not None or None),
             "mm_cap": _num(specs, "mm_input_capacitance_pf"),
             "load_min": _num(specs, "mc_load_min_ohm"),
             "load_max": _num(specs, "mc_load_max_ohm"),
@@ -460,12 +465,19 @@ def _pair_phono(src, s_role, dst, d_role) -> Dict[str, Any]:
     is_mc_low = ctype == "mc_low"
 
     gain = d_role["mc_gain"] if is_mc_low else d_role["mm_gain"]
-    if is_mc_low and d_role["mc_gain"] is None:
+    if is_mc_low and d_role.get("mc_input") is False:
         checks.append(_check(
             "domain", "fail",
             "low-output MC cartridge into an MM-only stage — 40 dB of gain leaves the "
             "signal in the noise floor; an MC input (60+ dB) or a step-up transformer is required",
             "ds",
+        ))
+        return _verdict(src, "phono_source", dst, "phono_in", checks)
+    if is_mc_low and d_role.get("mc_input") is None:
+        checks.append(_check(
+            "domain", "nodata",
+            "MC support not captured for this stage — verify an MC input exists before pairing",
+            "d",
         ))
         return _verdict(src, "phono_source", dst, "phono_in", checks)
 
