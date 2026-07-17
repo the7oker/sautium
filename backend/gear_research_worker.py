@@ -46,32 +46,27 @@ from uuid_utils import (gear_caveat_uuid, gear_pair_uuid,
 
 logger = logging.getLogger(__name__)
 
-# In-process drain trigger. Postgres NOTIFY fired from a pooled connection
-# does NOT reliably reach this process's own LISTEN socket in the Docker/WSL
-# deployment — external notifies arrive, in-process ones vanish, so a
-# freshly-added model sat in 'queued' forever. Local producers (add_gear,
-# retry/refresh, enqueue_pair) therefore kick the drain directly rather than
-# routing through Postgres or the LISTEN connection (which a mid-research
-# error can reconnect out from under a wake pipe). The lock keeps it
-# single-flight — a running drain already loops until the queue is empty, so
-# it absorbs any rows queued while it works. NOTIFY stays the cross-process
-# / P2P path.
-_drain_lock = threading.Lock()
-
-
-def _drain_once() -> None:
-    """Drain the queue unless a drain is already in progress."""
-    if not _drain_lock.acquire(blocking=False):
-        return
-    try:
-        _drain_queue()
-    finally:
-        _drain_lock.release()
+# In-process drain signal. One long-lived consumer thread owns the drain;
+# every producer just sets this Event. This deliberately replaces the old
+# "kick a daemon thread that try-acquires a lock" scheme: try-acquire
+# returned False mid-drain and dropped the wake-up on the floor, and the
+# fallback leaned on in-process Postgres NOTIFY, which does NOT reliably
+# reach this process's own LISTEN socket under Docker/WSL — together they
+# stranded freshly-added models in 'queued' forever (observed live). With an
+# Event the consumer clears-then-drains, so a set() that races an in-flight
+# drain is never lost: the next wait() returns immediately and re-drains.
+# NOTIFY + the LISTEN thread remain purely the cross-process / P2P wake path,
+# folded into the same Event.
+_drain_wake = threading.Event()
 
 
 def request_drain() -> None:
-    """Kick a drain from any producer thread in this process (non-blocking)."""
-    threading.Thread(target=_drain_once, daemon=True, name="gear-drain-kick").start()
+    """Signal the consumer that the queue has work (any thread, non-blocking).
+
+    Producers MUST commit their INSERT/UPDATE before calling this: the
+    consumer clears the Event before it drains, so the row has to be visible
+    by the time the woken drain runs its claim SELECT."""
+    _drain_wake.set()
 
 
 RESEARCH_TIMEOUT_SECONDS = 600   # one model = many web fetches; chat's 150s is far too small.
@@ -101,7 +96,8 @@ class ResearchInfraPause(Exception):
     """AI backend temporarily unavailable — requeue and pause the drain."""
 
 
-_worker_thread: Optional[threading.Thread] = None
+_consumer_thread: Optional[threading.Thread] = None
+_listener_thread: Optional[threading.Thread] = None
 _worker_running = False
 
 
@@ -653,17 +649,37 @@ def _requeue_orphans() -> None:
         logger.info(f"gear research: re-queued {len(n)} model + {len(n2)} pair orphan(s)")
 
 
-def _worker_loop() -> None:
+def _consumer_loop() -> None:
+    """Own the queue drain. Block on the wake Event until a producer (or the
+    LISTEN thread) signals work, then drain to empty. clear() precedes the
+    drain so a set() racing an in-flight drain survives for the next pass —
+    the row is already committed, so the worst case is one harmless empty
+    re-drain, never a lost wake-up."""
     _requeue_orphans()
+    _drain_wake.set()  # sweep anything already queued at startup
+    while _worker_running:
+        _drain_wake.wait()
+        if not _worker_running:
+            break
+        _drain_wake.clear()
+        try:
+            _drain_queue()
+        except Exception:
+            logger.exception("gear research: drain crashed; will re-drain on next wake")
+
+
+def _listener_loop() -> None:
+    """Bridge cross-process / P2P NOTIFY into the wake Event. In-process
+    producers set the Event directly via request_drain(); this thread exists
+    so a NOTIFY fired from another process still wakes the consumer.
+
+    Aggressive keepalives so a silently-dropped LISTEN socket (an idle TCP
+    conn reaped by Docker/WSL NAT with no RST) surfaces as a poll error and
+    forces a reconnect. Without them the thread keeps select()-ing a dead
+    socket, no exception fires, and every later NOTIFY is lost."""
     while _worker_running:
         conn = None
         try:
-            # Aggressive keepalives so a silently-dropped LISTEN socket (an
-            # idle TCP conn reaped by Docker/WSL NAT with no RST) surfaces
-            # as a poll error and forces a reconnect. Without them the
-            # worker keeps select()-ing a dead socket, no exception fires,
-            # and every later NOTIFY is lost — stranding freshly-queued
-            # gear in 'queued' forever.
             conn = psycopg2.connect(
                 settings.database_url,
                 keepalives=1, keepalives_idle=30,
@@ -672,18 +688,17 @@ def _worker_loop() -> None:
             conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
             with conn.cursor() as cur:
                 cur.execute("LISTEN gear_research")
-            # Sweep the queue on every (re)LISTEN. NOTIFY only reaches a
-            # live listener, so anything queued at startup or while the
-            # socket was down would otherwise never be picked up. Fired on
-            # the connect event, this is the reliability net, not a poll.
-            _drain_once()
+            # Re-sweep on every (re)connect: a NOTIFY only reaches a live
+            # listener, so anything queued while the socket was down would
+            # otherwise wait for the next producer.
+            _drain_wake.set()
             while _worker_running:
                 ready = select.select([conn], [], [], 5)
                 if ready[0]:
                     conn.poll()
                     if conn.notifies:
                         conn.notifies.clear()
-                        _drain_once()
+                        _drain_wake.set()
         except Exception as e:
             logger.warning(f"gear research listener error: {e}")
             if _worker_running:
@@ -697,22 +712,29 @@ def _worker_loop() -> None:
 
 
 def start_gear_research_worker() -> None:
-    global _worker_thread, _worker_running
-    if _worker_thread and _worker_thread.is_alive():
+    global _consumer_thread, _listener_thread, _worker_running
+    if _consumer_thread and _consumer_thread.is_alive():
         return
     _worker_running = True
-    _worker_thread = threading.Thread(
-        target=_worker_loop, daemon=True, name="gear-research-worker"
+    _consumer_thread = threading.Thread(
+        target=_consumer_loop, daemon=True, name="gear-research-worker"
     )
-    _worker_thread.start()
+    _consumer_thread.start()
+    _listener_thread = threading.Thread(
+        target=_listener_loop, daemon=True, name="gear-research-listener"
+    )
+    _listener_thread.start()
     logger.info("gear research worker started")
 
 
 def stop_gear_research_worker() -> None:
     global _worker_running
     _worker_running = False
-    if _worker_thread:
-        _worker_thread.join(timeout=3)
+    _drain_wake.set()  # unblock the consumer's wait() so it can observe the flag
+    if _consumer_thread:
+        _consumer_thread.join(timeout=3)
+    if _listener_thread:
+        _listener_thread.join(timeout=3)
 
 
 # ─── CLI ────────────────────────────────────────────────────────────────────

@@ -514,6 +514,8 @@ def reassign_gear_model(gear_id: str, req: GearReassignRequest) -> Dict[str, Any
         },
     )
     db_execute("SELECT pg_notify('gear_research', %(id)s)", {"id": new_gm_id})
+    from gear_research_worker import request_drain
+    request_drain()
 
     # Re-point. If the user happens to already own the target model
     # under a different user_gear row, UNIQUE(gear_model_id) on
