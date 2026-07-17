@@ -71,6 +71,62 @@ def registry_entry_uuid(source: str, model_name: str) -> _uuid.UUID:
     return _uuid.uuid5(NAMESPACE, f"gear_registry:{normalize(source)}:{normalize(model_name)}")
 
 
+# ── import guardrails ───────────────────────────────────────────────────────
+# Dataset imports follow collect → validate → write: rows are built in
+# memory, invariants run BEFORE any DB write, and a degraded source
+# aborts without touching good data. Learned live: a sparse-checkout
+# that silently materialized zero files, a per-rig subdir change that
+# yielded zero entries, a field that turned into a dict — silence is
+# the failure mode, so every anomaly must be loud.
+
+SHRINK_TOLERANCE = 0.8   # new count per source must be ≥ 80% of what DB has
+MAX_SKIP_RATIO = 0.3     # >30% unparsable rows in a source = malformed dataset
+
+
+class RegistryImportError(RuntimeError):
+    pass
+
+
+def _current_counts() -> Dict[str, int]:
+    return {r["source"]: r["n"] for r in db_query(
+        "SELECT source, COUNT(*) AS n FROM gear_registry_entries GROUP BY source")}
+
+
+def _validate_batch(source: str, rows: List[dict], skipped: int,
+                    current: Dict[str, int]) -> None:
+    if not rows:
+        raise RegistryImportError(
+            f"{source}: produced ZERO entries — layout change or empty checkout "
+            f"(configured sources must never import silence)")
+    total = len(rows) + skipped
+    if total and skipped / total > MAX_SKIP_RATIO:
+        raise RegistryImportError(
+            f"{source}: {skipped}/{total} rows unparsable — dataset format likely changed")
+    have = current.get(source, 0)
+    if have and len(rows) < have * SHRINK_TOLERANCE:
+        raise RegistryImportError(
+            f"{source}: import shrank to {len(rows)} entries vs {have} in DB "
+            f"(>{int((1-SHRINK_TOLERANCE)*100)}% regression) — refusing to overwrite")
+
+
+def fetch_json(url: str, min_bytes: int = 100_000):
+    """Refresh helper with explicit failure modes: HTTP status, body
+    size (a 404 page or truncated download must not masquerade as a
+    dataset), and JSON parse — each raises loudly."""
+    import httpx
+    import json
+    resp = httpx.get(url, timeout=120, follow_redirects=True)
+    if resp.status_code != 200:
+        raise RegistryImportError(f"fetch {url}: HTTP {resp.status_code}")
+    if len(resp.content) < min_bytes:
+        raise RegistryImportError(
+            f"fetch {url}: body {len(resp.content)} bytes < {min_bytes} floor — not a dataset")
+    try:
+        return json.loads(resp.content)
+    except json.JSONDecodeError as e:
+        raise RegistryImportError(f"fetch {url}: invalid JSON ({e})")
+
+
 def _read_curve(path: str) -> List[Tuple[float, float]]:
     pts = []
     with open(path, newline="", encoding="utf-8") as f:
@@ -130,11 +186,14 @@ def band_signature(curve: List[Tuple[float, float]],
 
 def import_autoeq(root: str) -> Dict[str, int]:
     stats = {"entries": 0, "skipped": 0}
+    current = _current_counts()
     meas_root = os.path.join(root, "measurements")
+    seen_configured = 0
     for measurer in sorted(os.listdir(meas_root)):
         data_dir = os.path.join(meas_root, measurer, "data")
         if not os.path.isdir(data_dir) or measurer not in SOURCE_TARGETS:
             continue
+        seen_configured += 1
         cfg = SOURCE_TARGETS[measurer]
         rebase = cfg.get("rebase_shelf", False)
         targets = {}
@@ -144,8 +203,11 @@ def import_autoeq(root: str) -> Dict[str, int]:
             tpath = os.path.join(root, "targets", cfg[kind])
             targets[kind] = _read_curve(tpath)
             if not targets[kind]:
-                raise RuntimeError(f"target curve missing/empty: {tpath}")
+                raise RegistryImportError(f"target curve missing/empty: {tpath}")
         source = f"autoeq:{measurer}"
+
+        # Phase 1: collect + validate before a single write.
+        batch, skipped = [], 0
         for kind, category in CATEGORY.items():
             kdir = os.path.join(data_dir, kind)
             if cfg.get("subdir"):
@@ -159,36 +221,49 @@ def import_autoeq(root: str) -> Dict[str, int]:
                 curve = _read_curve(os.path.join(kdir, fname))
                 sig = band_signature(curve, targets[kind]) if curve else None
                 if not sig:
-                    stats["skipped"] += 1
+                    skipped += 1
                     continue
                 if rebase:
                     for key, shelf in TARGET_BASS_SHELF.items():
                         if key in sig:
                             sig[key] = round(sig[key] - shelf, 2)
-                db_execute(
-                    """
-                    INSERT INTO gear_registry_entries
-                        (id, source, category, model_name,
-                         dev_sub_bass_db, dev_bass_db, dev_mids_db,
-                         dev_presence_db, dev_treble_db)
-                    VALUES (%(id)s::uuid, %(src)s, %(cat)s, %(name)s,
-                            %(sb)s, %(b)s, %(m)s, %(p)s, %(t)s)
-                    ON CONFLICT (source, model_name) DO UPDATE
-                    SET dev_sub_bass_db = EXCLUDED.dev_sub_bass_db,
-                        dev_bass_db     = EXCLUDED.dev_bass_db,
-                        dev_mids_db     = EXCLUDED.dev_mids_db,
-                        dev_presence_db = EXCLUDED.dev_presence_db,
-                        dev_treble_db   = EXCLUDED.dev_treble_db,
-                        imported_at     = now()
-                    """,
-                    {"id": str(registry_entry_uuid(source, model_name)),
-                     "src": source, "cat": category, "name": model_name,
-                     "sb": sig.get("dev_sub_bass_db"), "b": sig.get("dev_bass_db"),
-                     "m": sig.get("dev_mids_db"), "p": sig.get("dev_presence_db"),
-                     "t": sig.get("dev_treble_db")},
-                )
-                stats["entries"] += 1
-        logger.info(f"registry: {source} imported")
+                batch.append({"category": category, "model_name": model_name, "sig": sig})
+        _validate_batch(source, batch, skipped, current)
+
+        # Phase 2: write.
+        for row in batch:
+            sig = row["sig"]
+            db_execute(
+                """
+                INSERT INTO gear_registry_entries
+                    (id, source, category, model_name,
+                     dev_sub_bass_db, dev_bass_db, dev_mids_db,
+                     dev_presence_db, dev_treble_db)
+                VALUES (%(id)s::uuid, %(src)s, %(cat)s, %(name)s,
+                        %(sb)s, %(b)s, %(m)s, %(p)s, %(t)s)
+                ON CONFLICT (source, model_name) DO UPDATE
+                SET dev_sub_bass_db = EXCLUDED.dev_sub_bass_db,
+                    dev_bass_db     = EXCLUDED.dev_bass_db,
+                    dev_mids_db     = EXCLUDED.dev_mids_db,
+                    dev_presence_db = EXCLUDED.dev_presence_db,
+                    dev_treble_db   = EXCLUDED.dev_treble_db,
+                    imported_at     = now()
+                """,
+                {"id": str(registry_entry_uuid(source, row["model_name"])),
+                 "src": source, "cat": row["category"], "name": row["model_name"],
+                 "sb": sig.get("dev_sub_bass_db"), "b": sig.get("dev_bass_db"),
+                 "m": sig.get("dev_mids_db"), "p": sig.get("dev_presence_db"),
+                 "t": sig.get("dev_treble_db")},
+            )
+        stats["entries"] += len(batch)
+        stats["skipped"] += skipped
+        logger.info(f"registry: {source} imported ({len(batch)} entries, {skipped} skipped)")
+    if seen_configured < len(SOURCE_TARGETS):
+        missing = set(SOURCE_TARGETS) - {m for m in os.listdir(meas_root)
+                                         if os.path.isdir(os.path.join(meas_root, m, "data"))}
+        raise RegistryImportError(
+            f"configured sources absent from checkout: {sorted(missing)} — "
+            f"sparse paths or upstream layout changed")
     return stats
 
 
@@ -257,12 +332,18 @@ def import_spinorama(path: str) -> Dict[str, int]:
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     stats = {"entries": 0, "skipped": 0}
+    current = _current_counts()
+
+    # Phase 1: collect + validate before a single write. All spinorama
+    # origins are validated as one family — origin split is fine-grained
+    # provenance, not independent datasets.
+    batch, skipped = [], 0
     for sp in data.values():
         brand, model = sp.get("brand"), sp.get("model")
         meas = (sp.get("measurements") or {}).get(sp.get("default_measurement") or "", {})
         pref = meas.get("pref_rating") or {}
         if not brand or not model or not pref.get("pref_score"):
-            stats["skipped"] += 1
+            skipped += 1
             continue
         source = f'spinorama:{meas.get("origin") or "unknown"}'
         model_name = f"{brand} {model}"
@@ -274,6 +355,25 @@ def import_spinorama(path: str) -> Dict[str, int]:
             price = float(price) if price not in (None, "") else None
         except (TypeError, ValueError):
             price = None
+        batch.append({"source": source, "model_name": model_name, "pref": pref,
+                      "sens": sens, "price": price, "sp": sp, "meas": meas})
+
+    family_current = sum(n for s, n in current.items() if s.startswith("spinorama:"))
+    if not batch:
+        raise RegistryImportError("spinorama: produced ZERO entries — schema changed?")
+    total = len(batch) + skipped
+    if skipped / total > MAX_SKIP_RATIO:
+        raise RegistryImportError(
+            f"spinorama: {skipped}/{total} entries unparsable — schema likely changed")
+    if family_current and len(batch) < family_current * SHRINK_TOLERANCE:
+        raise RegistryImportError(
+            f"spinorama: import shrank to {len(batch)} vs {family_current} in DB — refusing")
+
+    # Phase 2: write.
+    for row in batch:
+        sp, meas, pref = row["sp"], row["meas"], row["pref"]
+        source, model_name = row["source"], row["model_name"]
+        sens, price = row["sens"], row["price"]
         db_execute(
             """
             INSERT INTO gear_registry_entries
@@ -299,7 +399,8 @@ def import_spinorama(path: str) -> Dict[str, int]:
              "act": sp.get("type") == "active"},
         )
         stats["entries"] += 1
-    logger.info("registry: spinorama imported")
+    stats["skipped"] = skipped
+    logger.info(f"registry: spinorama imported ({stats['entries']} entries, {skipped} skipped)")
     return stats
 
 
