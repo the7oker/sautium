@@ -367,14 +367,27 @@ def _pair_hp_transducer(src, s_role, dst, d_role) -> Dict[str, Any]:
                    if v is None]
         checks.append(_check("spl_headroom", "nodata", f"missing: {', '.join(missing)}", "d"))
     else:
+        # Two-regime amp model from the published per-load power points:
+        # voltage-limited above, current-limited below. Applying the
+        # best-case rail to every load flattered low-Z pairings — the
+        # original "optimistic at 16 ohms" gap this closes.
+        avail, avail_tier, current_limited = rail, s_role["rail_tier"], False
+        points = s_role.get("power_points") or []
+        if points:
+            i_max = max(math.sqrt(p / 1000 / load) for load, p in points)
+            v_at_z = i_max * z
+            if v_at_z < avail:
+                avail, avail_tier, current_limited = v_at_z, "d", True
         need_v = 10 ** ((PEAK_TARGET_DB - sens_v) / 20)
-        margin = 20 * math.log10(rail / need_v)
+        margin = 20 * math.log10(avail / need_v)
         status = ("ok" if margin >= THRESHOLDS["headroom_ok_db"]
                   else "warn" if margin >= 0 else "fail")
         checks.append(_check(
             "spl_headroom", status,
-            f"{PEAK_TARGET_DB} dB peaks need {need_v:.2f} Vrms; available ~{rail:.1f} Vrms → {margin:+.0f} dB",
-            s_role["rail_tier"],
+            f"{PEAK_TARGET_DB} dB peaks need {need_v:.2f} Vrms; available ~{avail:.1f} Vrms"
+            + (f" (current-limited at {z:g} Ω; rail ~{rail:.1f} V)" if current_limited else "")
+            + f" → {margin:+.0f} dB",
+            avail_tier,
             _headroom_note(status),
         ))
         if d_role["max_spl"] is not None:
