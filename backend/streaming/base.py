@@ -41,6 +41,9 @@ class TrackQuery:
     artist: str
     title: str
     album: str = ""
+    artist_alts: tuple = ()            # MB-canonical name + aliases — retried when
+                                       # the credited artist name misses (catalogs
+                                       # file lineup/spelling variants under one name)
     duration: Optional[float] = None   # seconds — for match disambiguation
     isrc: Optional[str] = None
     track_id: Optional[str] = None     # Sautium track UUID — for preview enrichment

@@ -30,7 +30,7 @@ def _dump_loaded() -> bool:
 def _bind(local: bool) -> None:
     """(Re)point the exported callables at the chosen backend."""
     global _b, search_artist, fetch_album_release_groups, fetch_release_tracklists
-    global cooldown_active, MBRateLimited
+    global artist_alt_names, cooldown_active, MBRateLimited
     if local:
         import mb_local as _b
         logger.info("MB canonicalization using LOCAL dump (mb_* tables)")
@@ -42,6 +42,9 @@ def _bind(local: bool) -> None:
     # Local-only (tracklist content fingerprint); the HTTP API can't page every
     # release's tracklist cheaply → empty there, the algorithm degrades to album-overlap.
     fetch_release_tracklists = getattr(_b, "fetch_release_tracklists", lambda *a, **k: [])
+    # Local-only: alias-bridged alternate artist names for streaming resolve;
+    # not worth an HTTP round-trip (and its ban risk) on the playback path.
+    artist_alt_names = getattr(_b, "artist_alt_names", lambda *a, **k: [])
     cooldown_active = _b.cooldown_active
     MBRateLimited = _b.MBRateLimited
 

@@ -113,6 +113,38 @@ def search_artist(name: str, limit: int = 5) -> List[dict]:
     return out
 
 
+def artist_alt_names(name: str, limit: int = 3) -> List[str]:
+    """Alternate names for a credited artist: the canonical MB name plus its
+    aliases, via exact name/alias equality. Streaming catalogs (Deezer, YouTube
+    "- Topic" channels) file a band under one canonical name even when a release
+    is credited to a lineup/spelling variant (Contemporary Noise Quartet /
+    Quintet / Sextet are aliases of Contemporary Noise Ensemble) — providers
+    retry these when the credited name finds nothing. Empty when the name is
+    ambiguous (several MB artists match): a namesake's alt names would let an
+    obscure track resolve to the wrong artist's recording."""
+    qn = (name or "").strip().lower()
+    if not qn:
+        return []
+    rows = db_query("""
+        WITH hit AS (
+            SELECT id FROM mb_artist WHERE lower(name) = %(qn)s
+            UNION
+            SELECT artist FROM mb_artist_alias WHERE lower(name) = %(qn)s
+        )
+        SELECT a.name AS nm, al.name AS alias
+        FROM mb_artist a
+        LEFT JOIN mb_artist_alias al ON al.artist = a.id
+        WHERE a.id IN (SELECT id FROM hit)
+          AND (SELECT count(*) FROM hit) = 1
+        ORDER BY al.id
+    """, {"qn": qn})
+    out: List[str] = []
+    for cand in [r["nm"] for r in rows] + [r["alias"] for r in rows]:
+        if cand and cand.lower() != qn and cand not in out:
+            out.append(cand)
+    return out[:limit]
+
+
 def fetch_album_release_groups(mbid: str) -> List[dict]:
     """First-party release-groups for an artist MBID via local joins, the
     overlap anchor for canonicalization. Primary types *Album*, *EP* and

@@ -48,6 +48,50 @@ class YouTubeProvider(StreamProvider):
         remixes, extended/edited cuts and wrong tracks that the bare top hit
         would otherwise grab. Title and official-channel signals break ties."""
         search = f"{query.artist} {query.title}".strip()
+        cands = self._flat_search(search)
+
+        # Artist gate on the CHANNEL: YouTube full-text search returns wrong-artist
+        # covers and same-title different songs for obscure artists; with duration-
+        # dominant scoring one of those would win and stream the WRONG recording
+        # (often not even downloadable — "video not available"). The reliable artist
+        # signal is the channel — official "<Artist> - Topic" Art Tracks, VEVO, or
+        # the artist's own channel — NOT the title (covers name the original artist
+        # in their title, e.g. a "Duo Diamanti" upload titled "Musica Nuda - Lunedì").
+        # Any MB-canonical alternate satisfies the gate — YouTube channels a band
+        # under its canonical name even when our credit is a lineup variant. A
+        # gate wipe-out retries the search ONCE under the canonical name; still
+        # nothing → the real recording isn't on YouTube — reject rather than
+        # stream a cover.
+        gates = [g for g in (_norm(a) for a in (query.artist, *query.artist_alts)) if g]
+        matched = ([c for c in cands if any(g in _norm(c["channel"]) for g in gates)]
+                   if gates else cands)
+        if not matched and query.artist_alts:
+            alt = self._flat_search(f"{query.artist_alts[0]} {query.title}".strip())
+            matched = [c for c in alt if any(g in _norm(c["channel"]) for g in gates)]
+            cands = cands or alt
+        if not cands:
+            raise ProviderError(f"youtube: no results for {search!r}")
+        if not matched:
+            raise ProviderError(
+                f"youtube: no artist match for {search!r} "
+                f"(top hit channel {cands[0]['channel']!r})")
+
+        best = max(matched, key=lambda c: self._score(c, query))
+        # Known length but even the best is >50% off (different recording / DJ
+        # mix / truncation) → no clean match; skip rather than stream the wrong
+        # thing. The endpoint drops the track from the queue.
+        if (query.duration and best["duration"]
+                and abs(best["duration"] - query.duration) > 0.5 * query.duration):
+            raise ProviderError(
+                f"youtube: no length match for {search!r} "
+                f"(want ~{query.duration:.0f}s, best {best['duration']:.0f}s)")
+        logger.info("youtube resolve %r -> %s (%ss, %s)",
+                    search, best["id"], best["duration"], best["channel"])
+        return ResolvedSource(
+            source_id=best["id"], duration=best["duration"],
+            artwork_url=f"https://i.ytimg.com/vi/{best['id']}/hqdefault.jpg")
+
+    def _flat_search(self, search: str) -> list[dict]:
         cmd = [self._ytdlp, f"ytsearch{self.SEARCH_N}:{search}", "--flat-playlist",
                "--no-warnings", "--quiet",
                "--print", "%(id)s\t%(title)s\t%(duration)s\t%(channel)s"]
@@ -69,41 +113,7 @@ class YouTubeProvider(StreamProvider):
             except ValueError:
                 dur = None
             cands.append({"id": p[0], "title": p[1], "duration": dur, "channel": p[3]})
-        if not cands:
-            raise ProviderError(f"youtube: no results for {search!r}")
-
-        # Artist gate on the CHANNEL: YouTube full-text search returns wrong-artist
-        # covers and same-title different songs for obscure artists; with duration-
-        # dominant scoring one of those would win and stream the WRONG recording
-        # (often not even downloadable — "video not available"). The reliable artist
-        # signal is the channel — official "<Artist> - Topic" Art Tracks, VEVO, or
-        # the artist's own channel — NOT the title (covers name the original artist
-        # in their title, e.g. a "Duo Diamanti" upload titled "Musica Nuda - Lunedì").
-        # If no channel carries the artist, the real recording isn't on YouTube —
-        # reject rather than stream a cover.
-        na = _norm(query.artist)
-        if na:
-            matched = [c for c in cands if na in _norm(c["channel"])]
-            if not matched:
-                raise ProviderError(
-                    f"youtube: no artist match for {search!r} "
-                    f"(top hit channel {cands[0]['channel']!r})")
-            cands = matched
-
-        best = max(cands, key=lambda c: self._score(c, query))
-        # Known length but even the best is >50% off (different recording / DJ
-        # mix / truncation) → no clean match; skip rather than stream the wrong
-        # thing. The endpoint drops the track from the queue.
-        if (query.duration and best["duration"]
-                and abs(best["duration"] - query.duration) > 0.5 * query.duration):
-            raise ProviderError(
-                f"youtube: no length match for {search!r} "
-                f"(want ~{query.duration:.0f}s, best {best['duration']:.0f}s)")
-        logger.info("youtube resolve %r -> %s (%ss, %s)",
-                    search, best["id"], best["duration"], best["channel"])
-        return ResolvedSource(
-            source_id=best["id"], duration=best["duration"],
-            artwork_url=f"https://i.ytimg.com/vi/{best['id']}/hqdefault.jpg")
+        return cands
 
     def _score(self, c: dict, query: TrackQuery) -> float:
         s = 0.0
@@ -116,14 +126,15 @@ class YouTubeProvider(StreamProvider):
                 s += 50 - (delta - tol) * 0.5       # plausible but off
             else:
                 s -= 200                            # mix / truncation / wrong
-        title_l, artist_l = query.title.lower(), query.artist.lower()
+        title_l = query.title.lower()
+        names_l = [a.lower() for a in (query.artist, *query.artist_alts) if a]
         ct = (c["title"] or "").lower()
         if title_l and title_l in ct:
             s += 20
-        if artist_l and artist_l in ct:
+        if any(a in ct for a in names_l):
             s += 12
         ch = (c["channel"] or "").lower()
-        if ch.endswith("- topic") or "vevo" in ch or (artist_l and artist_l in ch):
+        if ch.endswith("- topic") or "vevo" in ch or any(a in ch for a in names_l):
             s += 12                                 # official Art Track / channel
         return s
 

@@ -1349,6 +1349,15 @@ def _mix_quality(n_lossless: int, n_lossy: int) -> Optional[str]:
     return "mostly_lossless" if n_lossless > n_lossy else "mostly_lossy"
 
 
+def _artist_alts(name: str) -> tuple:
+    """MB-canonical alternates (name + aliases) for a credited artist name, for
+    provider resolve retries. Empty without the local MB dump (optional layer)."""
+    import mb_backend as mb
+    if not name or not mb.LOCAL_DUMP:
+        return ()
+    return tuple(mb.artist_alt_names(name))
+
+
 def _phantom_track_query(track_id: str):
     """Build a TrackQuery for one phantom track from album_tracks, or None."""
     from streaming.base import TrackQuery
@@ -1369,6 +1378,7 @@ def _phantom_track_query(track_id: str):
         return None
     return TrackQuery(
         artist=row["artist"] or "", title=row["title"], album=row["album"],
+        artist_alts=_artist_alts(row["artist"]),
         duration=(float(row["length_ms"]) / 1000.0 if row["length_ms"] else None),
         track_id=track_id, cover_url=row["cover_url"])
 
@@ -1389,9 +1399,11 @@ def _phantom_album_queries(album_id: str) -> list:
         WHERE atr.album_id = %(album_id)s
         ORDER BY atr.disc, atr.position
     """, {"album_id": album_id})
+    alts = {n: _artist_alts(n) for n in {r["artist"] for r in rows if r["artist"]}}
     return [
         TrackQuery(
             artist=r["artist"] or "", title=r["title"], album=r["album"],
+            artist_alts=alts.get(r["artist"], ()),
             duration=(float(r["length_ms"]) / 1000.0 if r["length_ms"] else None),
             track_id=r["track_id"], cover_url=r["cover_url"])
         for r in rows if r["title"]
@@ -1992,6 +2004,7 @@ def _radio_build_batch(seed_uuid: str) -> list:
     p_queries = [TrackQuery(
         artist=batch_rows[i]["artist"] or "", title=batch_rows[i]["title"],
         album=batch_rows[i]["phantom_album"] or "",
+        artist_alts=_artist_alts(batch_rows[i]["artist"]),
         duration=(float(batch_rows[i]["length_ms"]) / 1000.0
                   if batch_rows[i]["length_ms"] else None),
         track_id=batch_rows[i]["track_id"]) for i in p_positions]
