@@ -1382,8 +1382,9 @@ def gear_add_candidate(brand: str, model: str, category: str) -> str:
     ~2 minutes; results appear in the Upgrade advisor and via
     gear_advisor_report. Use when the user asks to consider/compare gear
     that is not in the catalog yet. category is one of: headphones, iems,
-    dac, amp, player, streamer, power, cable, speakers, power_amp, preamp,
-    integrated_amp, turntable, cartridge, phono_stage. Vinyl: a low-output
+    dac, amp, player, streamer, speakers, power_amp, preamp,
+    integrated_amp, turntable, cartridge, phono_stage (cables and power
+    products are not tracked — no analyzable physics). Vinyl: a low-output
     MC cartridge (Lyra-class) needs a phono stage with an MC input — add
     them together, like electrostats with energizers. For electrostatic headphones
     ALWAYS also add the energizer/amp candidates — conventional amps cannot

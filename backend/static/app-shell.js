@@ -6901,6 +6901,10 @@
     { id: 'power',          label: 'Power' },
     { id: 'cable',          label: 'Cable' },
   ];
+  // Cables and power products carry no analyzable physics — the pair
+  // engine has nothing to say about them, so they can't be ADDED. They
+  // stay in GEAR_CATEGORIES so records arriving via sync still render.
+  const ADDABLE_CATEGORIES = GEAR_CATEGORIES.filter(c => !['power', 'cable'].includes(c.id));
   function categoryLabel(id) {
     const c = GEAR_CATEGORIES.find(x => x.id === id);
     return c ? c.label : id;
@@ -8215,7 +8219,7 @@
             <button class="icon-btn" data-close aria-label="close">${PROFILE_ICONS.close}</button>
           </div>
           <div class="add-gear-category-row" id="agCatRow">
-            ${GEAR_CATEGORIES.map(c => `
+            ${ADDABLE_CATEGORIES.map(c => `
               <button class="filter-chip ${c.id === 'headphones' ? 'active' : ''}" data-cat="${c.id}">${c.label}</button>
             `).join('')}
           </div>
