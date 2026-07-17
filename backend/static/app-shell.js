@@ -8469,8 +8469,27 @@
       }
       let specsHTML = '';
       if (isCached && specsList.length > 0) {
+        specsList = specsList.filter(s => s.value != null && s.value !== '');
+        // Frequency bounds are one characteristic, not two grid cells —
+        // merged they can never land on a diagonal (user-reported).
+        const lo = specsList.find(s => s.key === 'freq_response_low_hz');
+        const hi = specsList.find(s => s.key === 'freq_response_high_hz');
+        if (lo && hi) {
+          lo.label = 'Frequency Response';
+          lo.value = `${lo.value} – ${hi.value}`;
+          lo.unit = 'Hz';
+          specsList = specsList.filter(s => s !== hi);
+        }
+        // Curated order beats the alphabet: identity → load → drive →
+        // range, with price trailing. Unlisted keys keep their order after.
+        const SPEC_ORDER = ['driver_type', 'cartridge_type', 'dac_architecture', 'amp_topology',
+          'form_factor', 'impedance_ohm', 'sensitivity_db_mw', 'sensitivity_db_v',
+          'freq_response_low_hz', 'frequency_response', 'weight_g', 'price_usd'];
+        specsList.sort((a, b) => {
+          const ia = SPEC_ORDER.indexOf(a.key), ib = SPEC_ORDER.indexOf(b.key);
+          return (ia === -1 ? 900 : ia) - (ib === -1 ? 900 : ib);
+        });
         const rows = specsList
-          .filter(s => s.value != null && s.value !== '')
           .map(s => `
             <div>
               <div class="spec-key">${escapeProfileHtml(s.label || humanizeSpecKey(s.key))}</div>
