@@ -360,6 +360,22 @@ def _candidates(analysis: Dict[str, Any],
 # soundstage/texture has no FR band — that axis stays sentiment-only.
 _AXIS_BAND = {"sub_bass": "dev_sub_bass_db", "timbre_vocal": "dev_mids_db"}
 
+_ALL_BANDS = ("dev_sub_bass_db", "dev_bass_db", "dev_mids_db",
+              "dev_presence_db", "dev_treble_db")
+
+
+def _target_shift(target_variant: str) -> Dict[str, float]:
+    """Per-band delta shift between the stored reference (full Harman)
+    and the selected viewing reference. The target choice is a page-
+    wide coordinate system: every measured number the advisor emits
+    goes through this one shift."""
+    shift = dict.fromkeys(_ALL_BANDS, 0.0)
+    if target_variant == "neutral":
+        from gear_registry import TARGET_BASS_SHELF
+        for k, v in TARGET_BASS_SHELF.items():
+            shift[k] = v  # dev_vs_neutral = dev_vs_full + shelf
+    return shift
+
 
 def _registry_bands(model_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
     """Linked registry measurements per catalog model (one model may
@@ -418,12 +434,8 @@ def _measured_candidates(analysis: Dict[str, Any], lib_axes: List[Dict[str, Any]
     # (a shelf, not a boost — +12 dB of bass is a defect, not a cure)
     # while every other band stays tonally sane. Rank by overall
     # target adherence: measured neutrality that lacks the owned gap.
-    from gear_registry import TARGET_BASS_SHELF, _name_keys
-    shift = dict.fromkeys(
-        ("dev_sub_bass_db", "dev_bass_db", "dev_mids_db", "dev_presence_db", "dev_treble_db"), 0.0)
-    if target_variant == "neutral":
-        for k, v in TARGET_BASS_SHELF.items():
-            shift[k] = v  # dev_vs_neutral = dev_vs_full + shelf
+    from gear_registry import _name_keys
+    shift = _target_shift(target_variant)
 
     band = target_axis["band"]
     rows = db_query(
@@ -501,6 +513,7 @@ def advisor(target_variant: str = "harman") -> Dict[str, Any]:
     # (coverage gains M-tier numbers) and for catalog candidates
     # (delta rows gain measured evidence next to community terms).
     bands = _registry_bands(transducer_ids)
+    shift = _target_shift(target_variant)
     coverage = _coverage(analysis, library["axes"], terms)
     for ax in coverage:
         band = _AXIS_BAND.get(ax["axis"])
@@ -513,17 +526,22 @@ def advisor(target_variant: str = "harman") -> Dict[str, Any]:
             for e in bands.get(c["model_id"], []):
                 if e[band] is not None:
                     measured.append({"name": e["model_name"],
-                                     "value_db": e[band], "source": e["source"]})
+                                     "value_db": round(e[band] + shift[band], 2),
+                                     "source": e["source"]})
         if measured:
             ax["measured"] = sorted(measured, key=lambda m: -m["value_db"])
+    def _sh(v, key):
+        return None if v is None else round(v + shift[key], 2)
+
     for c in candidates:
         entries = bands.get(c["model_id"], [])
         if entries:
             c["measured_bands"] = [
                 {"variant": e["model_name"], "source": e["source"],
-                 "sub_bass": e["dev_sub_bass_db"], "bass": e["dev_bass_db"],
-                 "mids": e["dev_mids_db"], "presence": e["dev_presence_db"],
-                 "treble": e["dev_treble_db"]}
+                 "sub_bass": _sh(e["dev_sub_bass_db"], "dev_sub_bass_db"),
+                 "bass": _sh(e["dev_bass_db"], "dev_bass_db"),
+                 "mids": _sh(e["dev_mids_db"], "dev_mids_db"),
+                 "presence": e["dev_presence_db"], "treble": e["dev_treble_db"]}
                 for e in entries
             ]
 

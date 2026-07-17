@@ -7289,6 +7289,12 @@
           (DR p50 ${lib.dr_p50 ?? '—'} / p90 ${lib.dr_p90 ?? '—'} dB).</p>
         <div class="tiles-row">${axesHTML}</div>
 
+        <div class="gadv-target-row">
+          <button class="gadv-target-chip ${targetVariant === 'harman' ? 'active' : ''}" data-target-variant="harman">Harman (bass shelf)</button>
+          <button class="gadv-target-chip ${targetVariant === 'neutral' ? 'active' : ''}" data-target-variant="neutral">Neutral (no shelf)</button>
+          <span class="gadv-target-hint">reference for every measured dB on this page</span>
+        </div>
+
         <div class="profile-group-label">How your gear covers these axes today</div>
         <div class="gsys-group">${coverageHTML || '<div class="placeholder">No owned transducers researched yet.</div>'}</div>
 
@@ -7323,10 +7329,6 @@
                alternatives", not gap-fillers.</p>` : '';
           return `
             <div class="profile-group-label">Measured matches · target-true where you have a gap</div>
-            <div class="gadv-target-row">
-              <button class="gadv-target-chip ${targetVariant === 'harman' ? 'active' : ''}" data-target-variant="harman">Harman (bass shelf)</button>
-              <button class="gadv-target-chip ${targetVariant === 'neutral' ? 'active' : ''}" data-target-variant="neutral">Neutral (no shelf)</button>
-            </div>
             <p class="gsys-context">Your best owned <b>${escapeProfileHtml(rm.axis.label)}</b> sits at
               <span class="gadv-band-num">${rm.axis.owned_best.toFixed(1)} dB</span> vs the selected reference.
               These registry models hold that band at the reference with the rest of the signature tonally

@@ -4737,7 +4737,8 @@ body.has-miniplayer .more-overlay .drawer {
   color: var(--color-positive); background: rgba(141, 167, 123, 0.13);
   padding: calc(3 * var(--px)) calc(5 * var(--px)); border-radius: var(--radius-sm);
 }
-.gadv-target-row { display: flex; gap: calc(6 * var(--px)); margin: calc(4 * var(--px)) 0 calc(8 * var(--px)); }
+.gadv-target-row { display: flex; align-items: center; flex-wrap: wrap; gap: calc(6 * var(--px)); margin: calc(4 * var(--px)) 0 calc(14 * var(--px)); }
+.gadv-target-hint { font-size: calc(10.5 * var(--px)); color: var(--color-text-dim); }
 .gadv-target-chip {
   border: 1px solid var(--color-divider); background: var(--color-surface-lo);
   color: var(--color-text-muted); font: 500 calc(11.5 * var(--px)) / 1 var(--font-sans);
