@@ -6888,7 +6888,7 @@
     { id: 'headphones',     label: 'Headphones' },
     { id: 'iems',           label: 'IEMs' },
     { id: 'dac',            label: 'DAC' },
-    { id: 'amp',            label: 'Amp' },
+    { id: 'amp',            label: 'Headphone amp' },
     { id: 'player',         label: 'Player' },
     { id: 'speakers',       label: 'Speakers' },
     { id: 'power_amp',      label: 'Power amp' },
