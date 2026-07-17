@@ -411,6 +411,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--import-autoeq", metavar="PATH")
     ap.add_argument("--import-spinorama", metavar="PATH")
+    ap.add_argument("--refresh-spinorama", action="store_true",
+                    help="fetch the live metadata.json and import it (guardrails apply)")
     ap.add_argument("--match", action="store_true")
     ap.add_argument("--stats", action="store_true")
     args = ap.parse_args()
@@ -419,6 +421,17 @@ if __name__ == "__main__":
         print(import_autoeq(args.import_autoeq))
     if args.import_spinorama:
         print(import_spinorama(args.import_spinorama))
+    if args.refresh_spinorama:
+        import json
+        import tempfile
+        data = fetch_json("https://www.spinorama.org/json/metadata.json")
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp:
+            json.dump(data, tmp)
+            tmp_path = tmp.name
+        try:
+            print(import_spinorama(tmp_path))
+        finally:
+            os.unlink(tmp_path)
     if args.match:
         print(f"linked: {match_to_catalog()}")
     if args.stats:
