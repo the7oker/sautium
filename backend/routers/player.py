@@ -2090,8 +2090,9 @@ def similar_tracks(track_uuid: str, limit: int = 7):
     """Now Playing 'Similar' shelf — the same two-tier scorer radio drifts on
     (track_similarity.similar_tracks), deterministic (no jitter). Mixed rows:
     owned ones carry media_file_id (play by file), phantom ones track_id +
-    cover_url (stream). `similarity` is the chamfer cosine, not the old
-    concentrated mean↔mean score."""
+    cover_url (stream). `similarity` is 1 - the ranking score (chamfer +
+    BPM/energy/genre continuity), so the shown numbers are monotonic with
+    the list order — the bare chamfer cosine wasn't."""
     rows = track_similarity.similar_tracks(track_uuid, limit=limit)
     for r in rows:
         del r["file_path"], r["file_format"], r["phantom_album"], r["length_ms"]

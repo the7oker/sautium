@@ -49,8 +49,9 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
     """Mixed (owned + phantom) two-tier similar tracks for a seed track UUID.
 
     Every row carries identity + display fields (album, year, cover_url,
-    similarity = the chamfer cosine) AND the playback fields radio needs
-    (file_path/file_format for owned, phantom_album/length_ms for phantom).
+    similarity = 1 - the ranking score, monotonic with the returned order)
+    AND the playback fields radio needs (file_path/file_format for owned,
+    phantom_album/length_ms for phantom).
     `artist_cap` keeps each artist to its best N rows (raw KNN clusters hard);
     `jitter` reshuffles near-ties for radio so the same seed never yields the
     same station twice — 0 gives a deterministic shelf. Excludes the seed and
@@ -155,7 +156,11 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
         )
         SELECT track_id, media_file_id, file_path, file_format, is_owned,
                title, artist, album, year, cover_url, phantom_album, length_ms,
-               round((1 - chamfer)::numeric, 4) AS similarity
+               -- The DISPLAYED number must be the RANKED number: 1 - score
+               -- (chamfer with the BPM/energy/genre continuity add-ons), not
+               -- the bare chamfer cosine — a sound-closer track that loses on
+               -- continuity would show a higher number below a lower one.
+               round((1 - score)::numeric, 4) AS similarity
         FROM (SELECT rescored.*, ROW_NUMBER() OVER (PARTITION BY artist_id
                                                     ORDER BY score) AS artist_rank
               FROM rescored) ranked
