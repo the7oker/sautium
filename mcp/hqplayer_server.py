@@ -1382,7 +1382,8 @@ def gear_add_candidate(brand: str, model: str, category: str) -> str:
     ~2 minutes; results appear in the Upgrade advisor and via
     gear_advisor_report. Use when the user asks to consider/compare gear
     that is not in the catalog yet. category is one of: headphones, iems,
-    dac, amp, player, streamer, power, cable. For electrostatic headphones
+    dac, amp, player, streamer, power, cable, speakers, power_amp, preamp,
+    integrated_amp. For electrostatic headphones
     ALWAYS also add the energizer/amp candidates — conventional amps cannot
     drive them, and the pair research will surface which energizers the
     community actually rates for that model."""

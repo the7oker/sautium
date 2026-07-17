@@ -53,7 +53,8 @@ class GearUpdate(BaseModel):
     notes:  Optional[str] = Field(default=None, max_length=4000)
 
 
-VALID_CATEGORIES = {"headphones", "iems", "dac", "amp", "player", "streamer", "power", "cable"}
+VALID_CATEGORIES = {"headphones", "iems", "dac", "amp", "player", "streamer", "power", "cable",
+                    "speakers", "power_amp", "preamp", "integrated_amp"}
 VALID_STATUSES = {"own", "want", "sell", "previously_owned"}
 
 

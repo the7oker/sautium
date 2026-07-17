@@ -142,15 +142,58 @@ def _roles(item: Dict[str, Any]) -> List[Dict[str, Any]]:
             "bias_v": _num(specs, "electrostatic_bias_v"),
         })
 
-    line_se = _num(specs, "line_out_vrms_se") or _num(specs, "output_voltage_rca_vrms")
-    line_bal = _num(specs, "line_out_vrms_bal") or _num(specs, "output_voltage_xlr_vrms")
+    line_se = (_num(specs, "line_out_vrms_se") or _num(specs, "output_voltage_rca_vrms")
+               or _num(specs, "preamp_out_vrms_max_se"))
+    line_bal = (_num(specs, "line_out_vrms_bal") or _num(specs, "output_voltage_xlr_vrms")
+                or _num(specs, "preamp_out_vrms_max_bal"))
     if line_se is not None or line_bal is not None:
         roles.append({
             "role": "line_out", "v_se": line_se, "v_bal": line_bal,
+            # Volume-controlled preamp outs report their MAX level; the
+            # fixed/max distinction matters for clipping, not bridging.
+            "variable": _num(specs, "preamp_out_vrms_max_se") is not None
+                        or _num(specs, "preamp_out_vrms_max_bal") is not None,
             "out_z_se": _num(specs, "output_impedance_rca_ohm")
                         or _num(specs, "line_output_impedance_ohm"),
             "out_z_bal": _num(specs, "output_impedance_xlr_ohm"),
         })
+
+    if cat in ("power_amp", "integrated_amp"):
+        roles.append({
+            "role": "speaker_out",
+            "p8": _num(specs, "output_power_8ohm_w"),
+            "p4": _num(specs, "output_power_4ohm_w"),
+            "stable_to": _num(specs, "stable_to_ohm"),
+            "damping": _num(specs, "damping_factor"),
+            "in_sens": _num(specs, "input_sensitivity_vrms"),
+        })
+        roles.append({
+            "role": "line_in",
+            "in_z_se": _num(specs, "line_input_impedance_ohm"),
+            "in_z_bal": _num(specs, "line_input_impedance_bal_ohm"),
+            "max_in_se": _num(specs, "max_input_vrms_se"),
+            "max_in_bal": _num(specs, "max_input_vrms_bal"),
+            "gain_max": _num(specs, "max_gain_db"),
+            "power_sens": _num(specs, "input_sensitivity_vrms"),
+        })
+
+    if cat == "speakers":
+        roles.append({
+            "role": "speaker_load",
+            "sens_2v83": _num(specs, "speaker_sensitivity_db_2v83"),
+            "z_nom": _num(specs, "impedance_ohm"),
+            "z_min": _num(specs, "impedance_min_ohm"),
+            "powered": (specs.get("powered_speaker") or "").lower() == "true",
+        })
+        if (specs.get("powered_speaker") or "").lower() == "true":
+            roles.append({
+                "role": "line_in",
+                "in_z_se": _num(specs, "line_input_impedance_ohm"),
+                "in_z_bal": _num(specs, "line_input_impedance_bal_ohm"),
+                "max_in_se": _num(specs, "max_input_vrms_se"),
+                "max_in_bal": _num(specs, "max_input_vrms_bal"),
+                "gain_max": None, "power_sens": None,
+            })
 
     if cat == "amp":
         roles.append({
@@ -238,15 +281,11 @@ def _pair_hp_transducer(src, s_role, dst, d_role) -> Dict[str, Any]:
         return _verdict(src, "hp_out", dst, "transducer", checks)
 
     if s_role.get("bias_v") is not None:
-        checks.append(_check(
-            "domain", "fail",
-            "electrostatic energizer output — cannot drive conventional low-impedance headphones",
-            "ds",
-            "an energizer drives only electrostats — a bias-referenced high-voltage "
-            "swing on a 5-pin socket that a dynamic or planar headphone can neither "
-            "accept nor plug into",
-        ))
-        return _verdict(src, "hp_out", dst, "transducer", checks)
+        # Energizer × conventional transducer is a non-pair, not a bad
+        # pair: a fail row per headphone is noise. The estat ×
+        # conventional-source direction stays — it explains what a
+        # candidate the user is actually eyeing is missing.
+        return None
 
     z, sens_v = d_role["z"], d_role["sens_v"]
     rail = s_role["rail_v"]
@@ -302,6 +341,88 @@ def _pair_hp_transducer(src, s_role, dst, d_role) -> Dict[str, Any]:
     return _verdict(src, "hp_out", dst, "transducer", checks)
 
 
+# Speaker SPL math needs a listening geometry; without a room model we
+# state the assumption instead of hiding it. Stereo pair summation and
+# typical room gain partially offset the distance loss — the note says so.
+LISTENING_DISTANCE_M = 2.5
+SPEAKER_PEAK_TARGET_DB = 105  # at the listening position, per channel basis
+
+
+def _pair_speaker(src, s_role, dst, d_role) -> Dict[str, Any]:
+    checks = []
+    if d_role.get("powered"):
+        checks.append(_check(
+            "domain", "warn",
+            "active speaker — feed it line level; a power amplifier output would damage it",
+            "ds",
+        ))
+        return _verdict(src, "speaker_out", dst, "speaker_load", checks)
+
+    sens, z_nom, z_min = d_role["sens_2v83"], d_role["z_nom"], d_role["z_min"]
+    load_z = z_min or z_nom
+    p_avail = None
+    if load_z is not None and load_z < 6 and s_role["p4"] is not None:
+        p_avail = s_role["p4"]
+    elif s_role["p8"] is not None:
+        p_avail = s_role["p8"]
+    else:
+        p_avail = s_role["p4"]
+
+    if sens is None or p_avail is None:
+        missing = [k for k, v in (("speaker sensitivity", sens),
+                                  ("amp power into this load", p_avail)) if v is None]
+        checks.append(_check("spl_headroom", "nodata", f"missing: {', '.join(missing)}", "d"))
+    else:
+        spl_1m = sens + 10 * math.log10(max(p_avail, 0.001))
+        spl_pos = spl_1m - 20 * math.log10(LISTENING_DISTANCE_M)
+        margin = spl_pos - SPEAKER_PEAK_TARGET_DB
+        status = ("ok" if margin >= THRESHOLDS["headroom_ok_db"]
+                  else "warn" if margin >= 0 else "fail")
+        checks.append(_check(
+            "spl_headroom", status,
+            f"{p_avail:.0f} W into ~{(load_z or 8):g} Ω → {spl_1m:.0f} dB @1m, ~{spl_pos:.0f} dB at "
+            f"{LISTENING_DISTANCE_M} m vs {SPEAKER_PEAK_TARGET_DB} dB peak target → {margin:+.0f} dB",
+            "d",
+            "assumes 2.5 m listening, per channel; stereo summation and room gain "
+            "add several dB on top — the geometry is stated, not hidden",
+        ))
+
+    if z_min is not None:
+        stable = s_role["stable_to"]
+        if stable is None:
+            checks.append(_check(
+                "load", "nodata",
+                f"speaker dips to {z_min:g} Ω; amp minimum stable load unpublished", "d",
+            ))
+        else:
+            status = "ok" if stable <= z_min else "fail"
+            checks.append(_check(
+                "load", status,
+                f"impedance minimum {z_min:g} Ω vs amp stable into {stable:g} Ω",
+                "ds",
+                None if status == "ok" else
+                "the speaker's impedance dips below what the amp is specified to drive",
+            ))
+    elif z_nom is not None:
+        checks.append(_check(
+            "load", "nodata",
+            f"nominal {z_nom:g} Ω only — impedance CURVE minimum unknown; nominal ratings hide dips",
+            "d",
+        ))
+
+    if s_role["damping"] is not None:
+        checks.append(_check(
+            "damping", "ok" if s_role["damping"] >= 50 else "warn",
+            f"damping factor {s_role['damping']:g} (ref 8 Ω)",
+            "ds",
+            None if s_role["damping"] >= 50 else
+            "single-digit damping interacts audibly with the speaker impedance curve — "
+            "tube-amp territory, a choice rather than a defect",
+        ))
+
+    return _verdict(src, "speaker_out", dst, "speaker_load", checks)
+
+
 def _pair_line(src, s_role, dst, d_role) -> Dict[str, Any]:
     checks = []
     balanced = s_role["v_bal"] is not None
@@ -328,22 +449,46 @@ def _pair_line(src, s_role, dst, d_role) -> Dict[str, Any]:
     if v is None:
         checks.append(_check("level", "nodata", "source line-out voltage unknown", "d"))
     else:
+        variable = bool(s_role.get("variable"))
         max_in = d_role["max_in_bal"] if balanced else d_role["max_in_se"]
         if max_in is not None:
             margin = 20 * math.log10(max_in / v)
-            status = "ok" if margin >= 0 else "fail"
+            if margin >= 0:
+                status, note = "ok", None
+            elif variable:
+                # A volume-controlled preamp quoting its MAX level can
+                # always back off — headroom deficit is operational, not
+                # a hard mismatch.
+                status, note = "ok", "preamp max exceeds amp input ceiling — volume stays below max, no clipping in normal use"
+            else:
+                status, note = "fail", None
             checks.append(_check(
                 "level", status,
-                f"{conn} {v:g} Vrms vs amp max input {max_in:g} Vrms → {margin:+.1f} dB input headroom"
+                f"{conn} {v:g} Vrms{' (max, volume-controlled)' if variable else ''} vs amp max input "
+                f"{max_in:g} Vrms → {margin:+.1f} dB input headroom"
                 + (f"; gain {d_role['gain_max']:+g} dB max" if d_role["gain_max"] is not None else ""),
-                "ds",
+                "ds", note,
             ))
         else:
             checks.append(_check(
                 "level", "ok",
-                f"{conn} line level {v:g} Vrms into amp input"
+                f"{conn} line level {v:g} Vrms{' (max, volume-controlled)' if variable else ''} into amp input"
                 + (f"; amp gain up to {d_role['gain_max']:+g} dB" if d_role["gain_max"] is not None else ""),
                 "ds", "amp max input level not captured — clipping check partial",
+            ))
+
+        # Power-amp gain staging: can this source drive the amp to its
+        # full rated power? Judged against input sensitivity when known.
+        power_sens = d_role.get("power_sens")
+        if power_sens is not None:
+            margin = 20 * math.log10(v / power_sens)
+            checks.append(_check(
+                "full_power", "ok" if margin >= 0 else "warn",
+                f"amp reaches full power at {power_sens:g} Vrms; source delivers up to {v:g} Vrms → {margin:+.1f} dB",
+                "ds",
+                None if margin >= 0 else
+                "full rated power is unreachable from this source — fine if the SPL "
+                "budget above already clears the target",
             ))
 
     return _verdict(src, "line_out", dst, "line_in", checks)
@@ -432,9 +577,13 @@ def system_analysis() -> Dict[str, Any]:
             # matters. The loop below only emits real (out-port, in-port)
             # pairs, so there is no want↔want noise to suppress here.
             if sr["role"] == "hp_out" and dr["role"] == "transducer":
-                pairs.append(_pair_hp_transducer(src, sr, dst, dr))
+                v = _pair_hp_transducer(src, sr, dst, dr)
+                if v:
+                    pairs.append(v)
             elif sr["role"] == "line_out" and dr["role"] == "line_in":
                 pairs.append(_pair_line(src, sr, dst, dr))
+            elif sr["role"] == "speaker_out" and dr["role"] == "speaker_load":
+                pairs.append(_pair_speaker(src, sr, dst, dr))
 
     # Community pair-synergy voice (the fourth voice, tier F): attached
     # to any pair whose model combination carries a cached, discussed

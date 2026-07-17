@@ -6885,11 +6885,18 @@
     .sort((a, b) => a.name.localeCompare(b.name));
 
   const GEAR_CATEGORIES = [
-    { id: 'headphones', label: 'Headphones' },
-    { id: 'iems',       label: 'IEMs' },
-    { id: 'dac',        label: 'DAC' },
-    { id: 'amp',        label: 'Amp' },
-    { id: 'player',     label: 'Player' },
+    { id: 'headphones',     label: 'Headphones' },
+    { id: 'iems',           label: 'IEMs' },
+    { id: 'dac',            label: 'DAC' },
+    { id: 'amp',            label: 'Amp' },
+    { id: 'player',         label: 'Player' },
+    { id: 'speakers',       label: 'Speakers' },
+    { id: 'power_amp',      label: 'Power amp' },
+    { id: 'preamp',         label: 'Preamp' },
+    { id: 'integrated_amp', label: 'Integrated amp' },
+    { id: 'streamer',       label: 'Streamer' },
+    { id: 'power',          label: 'Power' },
+    { id: 'cable',          label: 'Cable' },
   ];
   function categoryLabel(id) {
     const c = GEAR_CATEGORIES.find(x => x.id === id);
@@ -7057,6 +7064,8 @@
     damping:        'Damping · ⅛ rule',
     bridging:       'Impedance bridging',
     level:          'Gain staging',
+    full_power:     'Full power',
+    load:           'Load · Z min',
     measured:       'Measured',
     synergy:        'Community',
     domain:         'Domain',
@@ -7133,6 +7142,14 @@
     for (const src of Object.keys(hpBySource).sort()) {
       groups += `<div class="profile-group-label">${escapeProfileHtml(src)} → headphones</div>
         <div class="gsys-group">${sortPairs(hpBySource[src]).map(p => gsysPairHTML(p, wantIds)).join('')}</div>`;
+    }
+    const spkBySource = {};
+    for (const p of data.pairs.filter(p => p.source.role === 'speaker_out')) {
+      (spkBySource[p.source.name] || (spkBySource[p.source.name] = [])).push(p);
+    }
+    for (const src of Object.keys(spkBySource).sort()) {
+      groups += `<div class="profile-group-label">${escapeProfileHtml(src)} → speakers</div>
+        <div class="gsys-group">${sortPairs(spkBySource[src]).map(p => gsysPairHTML(p, wantIds)).join('')}</div>`;
     }
     if (!groups) {
       groups = '<div class="placeholder">No analyzable pairs yet — add gear and let research finish.</div>';
