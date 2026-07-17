@@ -177,6 +177,33 @@ def _roles(item: Dict[str, Any]) -> List[Dict[str, Any]]:
             "power_sens": _num(specs, "input_sensitivity_vrms"),
         })
 
+    if cat == "cartridge":
+        roles.append({
+            "role": "phono_source",
+            "type": specs.get("cartridge_type"),
+            "output_mv": _num(specs, "output_mv"),
+            "z_int": _num(specs, "internal_impedance_ohm"),
+            "rec_load": specs.get("recommended_load_ohm"),
+            "compliance": _num(specs, "compliance_cu"),
+            "mass_g": _num(specs, "cartridge_mass_g"),
+        })
+
+    if cat == "phono_stage":
+        roles.append({
+            "role": "phono_in",
+            "mm_gain": _num(specs, "mm_gain_db"),
+            "mc_gain": _num(specs, "mc_gain_db"),
+            "mm_cap": _num(specs, "mm_input_capacitance_pf"),
+            "load_min": _num(specs, "mc_load_min_ohm"),
+            "load_max": _num(specs, "mc_load_max_ohm"),
+        })
+
+    if cat == "turntable":
+        roles.append({
+            "role": "tonearm",
+            "eff_mass": _num(specs, "effective_mass_g"),
+        })
+
     if cat == "speakers":
         roles.append({
             "role": "speaker_load",
@@ -423,6 +450,105 @@ def _pair_speaker(src, s_role, dst, d_role) -> Dict[str, Any]:
     return _verdict(src, "speaker_out", dst, "speaker_load", checks)
 
 
+def _pair_phono(src, s_role, dst, d_role) -> Dict[str, Any]:
+    """Cartridge → phono stage: gain domain (MM vs MC is as hard a
+    boundary as the electrostatic one), noise-margin math on the
+    resulting line level, and MC resistive loading vs the stage's
+    selectable range."""
+    checks = []
+    ctype, out_mv = s_role.get("type"), s_role.get("output_mv")
+    is_mc_low = ctype == "mc_low"
+
+    gain = d_role["mc_gain"] if is_mc_low else d_role["mm_gain"]
+    if is_mc_low and d_role["mc_gain"] is None:
+        checks.append(_check(
+            "domain", "fail",
+            "low-output MC cartridge into an MM-only stage — 40 dB of gain leaves the "
+            "signal in the noise floor; an MC input (60+ dB) or a step-up transformer is required",
+            "ds",
+        ))
+        return _verdict(src, "phono_source", dst, "phono_in", checks)
+
+    if out_mv is None or gain is None:
+        missing = [k for k, v in (("cartridge output (mV)", out_mv),
+                                  ("stage gain for this type", gain)) if v is None]
+        checks.append(_check("gain", "nodata", f"missing: {', '.join(missing)}", "d"))
+    else:
+        line_v = out_mv / 1000 * (10 ** (gain / 20))
+        status = "ok" if 0.2 <= line_v <= 2.5 else "warn"
+        note = None
+        if line_v < 0.2:
+            note = "resulting line level is low — expect extra preamp gain and a higher noise floor"
+        elif line_v > 2.5:
+            note = "hot output — fine into a volume control, watch input ceilings downstream"
+        checks.append(_check(
+            "gain", status,
+            f"{out_mv:g} mV × {gain:g} dB → ~{line_v:.2f} Vrms line level",
+            "ds", note,
+        ))
+
+    if is_mc_low:
+        z_int = s_role.get("z_int")
+        lo, hi = d_role["load_min"], d_role["load_max"]
+        if z_int is not None and lo is not None and hi is not None:
+            want_lo, want_hi = z_int * 10, z_int * 25
+            overlap = not (hi < want_lo or lo > want_hi)
+            checks.append(_check(
+                "load", "ok" if overlap else "warn",
+                f"coil {z_int:g} Ω → wants ~{want_lo:.0f}-{want_hi:.0f} Ω; stage offers {lo:g}-{hi:g} Ω",
+                "ds",
+                None if overlap else
+                "no overlap with the 10-25x rule of thumb — tonally usable but check the "
+                "manufacturer's own loading advice"
+                + (f" ({s_role['rec_load']})" if s_role.get("rec_load") else ""),
+            ))
+        elif s_role.get("rec_load"):
+            checks.append(_check(
+                "load", "nodata",
+                f"manufacturer recommends {s_role['rec_load']} Ω; stage load options not captured",
+                "d",
+            ))
+    elif ctype == "mm" and d_role["mm_cap"] is not None:
+        checks.append(_check(
+            "load", "ok",
+            f"MM input capacitance {d_role['mm_cap']:g} pF (add tonearm cable ~100 pF against "
+            "the cartridge's recommended total)",
+            "ds",
+        ))
+
+    return _verdict(src, "phono_source", dst, "phono_in", checks)
+
+
+def _pair_tonearm(src, s_role, dst, d_role) -> Dict[str, Any]:
+    """Cartridge → tonearm: the classic resonance calculation.
+    f = 1000 / (2π · sqrt(M_total · compliance)), M in grams, compliance
+    in cu — target 8-12 Hz (below: warp-wow coupling; above: audible
+    band intrusion)."""
+    checks = []
+    compliance, mass = s_role.get("compliance"), s_role.get("mass_g")
+    eff = d_role.get("eff_mass")
+    if compliance is None or mass is None or eff is None:
+        missing = [k for k, v in (("compliance (10 Hz)", compliance),
+                                  ("cartridge mass", mass),
+                                  ("tonearm effective mass", eff)) if v is None]
+        checks.append(_check("resonance", "nodata", f"missing: {', '.join(missing)}", "d"))
+    else:
+        m_total = eff + mass + 1.0  # +1 g fasteners
+        f_res = 1000 / (2 * math.pi * math.sqrt(m_total * compliance))
+        status = "ok" if 8 <= f_res <= 12 else "warn"
+        note = None
+        if f_res < 8:
+            note = "below 8 Hz — couples with warp/footfall energy; a lighter arm or lower-mass cartridge helps"
+        elif f_res > 12:
+            note = "above 12 Hz — resonance creeps toward the audible band; a heavier arm or headshell weight helps"
+        checks.append(_check(
+            "resonance", status,
+            f"eff. mass {eff:g} g + cart {mass:g} g + 1 g → {f_res:.1f} Hz vs 8-12 Hz window",
+            "d", note,
+        ))
+    return _verdict(src, "phono_source", dst, "tonearm", checks)
+
+
 def _pair_line(src, s_role, dst, d_role) -> Dict[str, Any]:
     checks = []
     balanced = s_role["v_bal"] is not None
@@ -584,6 +710,10 @@ def system_analysis() -> Dict[str, Any]:
                 pairs.append(_pair_line(src, sr, dst, dr))
             elif sr["role"] == "speaker_out" and dr["role"] == "speaker_load":
                 pairs.append(_pair_speaker(src, sr, dst, dr))
+            elif sr["role"] == "phono_source" and dr["role"] == "phono_in":
+                pairs.append(_pair_phono(src, sr, dst, dr))
+            elif sr["role"] == "phono_source" and dr["role"] == "tonearm":
+                pairs.append(_pair_tonearm(src, sr, dst, dr))
 
     # Community pair-synergy voice (the fourth voice, tier F): attached
     # to any pair whose model combination carries a cached, discussed

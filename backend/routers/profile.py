@@ -54,7 +54,8 @@ class GearUpdate(BaseModel):
 
 
 VALID_CATEGORIES = {"headphones", "iems", "dac", "amp", "player", "streamer", "power", "cable",
-                    "speakers", "power_amp", "preamp", "integrated_amp"}
+                    "speakers", "power_amp", "preamp", "integrated_amp",
+                    "turntable", "cartridge", "phono_stage"}
 VALID_STATUSES = {"own", "want", "sell", "previously_owned"}
 
 

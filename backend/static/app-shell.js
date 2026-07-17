@@ -6895,6 +6895,9 @@
     { id: 'preamp',         label: 'Preamp' },
     { id: 'integrated_amp', label: 'Integrated amp' },
     { id: 'streamer',       label: 'Streamer' },
+    { id: 'turntable',      label: 'Turntable' },
+    { id: 'cartridge',      label: 'Cartridge' },
+    { id: 'phono_stage',    label: 'Phono stage' },
     { id: 'power',          label: 'Power' },
     { id: 'cable',          label: 'Cable' },
   ];
@@ -7066,6 +7069,8 @@
     level:          'Gain staging',
     full_power:     'Full power',
     load:           'Load · Z min',
+    gain:           'Phono gain',
+    resonance:      'Arm resonance',
     measured:       'Measured',
     synergy:        'Community',
     domain:         'Domain',
@@ -7150,6 +7155,14 @@
     for (const src of Object.keys(spkBySource).sort()) {
       groups += `<div class="profile-group-label">${escapeProfileHtml(src)} → speakers</div>
         <div class="gsys-group">${sortPairs(spkBySource[src]).map(p => gsysPairHTML(p, wantIds)).join('')}</div>`;
+    }
+    const phonoBySource = {};
+    for (const p of data.pairs.filter(p => p.source.role === 'phono_source')) {
+      (phonoBySource[p.source.name] || (phonoBySource[p.source.name] = [])).push(p);
+    }
+    for (const src of Object.keys(phonoBySource).sort()) {
+      groups += `<div class="profile-group-label">${escapeProfileHtml(src)} → phono chain</div>
+        <div class="gsys-group">${sortPairs(phonoBySource[src]).map(p => gsysPairHTML(p, wantIds)).join('')}</div>`;
     }
     if (!groups) {
       groups = '<div class="placeholder">No analyzable pairs yet — add gear and let research finish.</div>';
