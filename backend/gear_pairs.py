@@ -374,10 +374,14 @@ def _pair_hp_transducer(src, s_role, dst, d_role) -> Dict[str, Any]:
 
 
 # Speaker SPL math needs a listening geometry; without a room model we
-# state the assumption instead of hiding it. Stereo pair summation and
-# typical room gain partially offset the distance loss — the note says so.
+# state the assumption instead of hiding it. The per-channel free-field
+# figure is deliberately conservative, so the VERDICT must include the
+# known corrections as explicit terms — a model that knows it underrates
+# by "several dB" may not fail a pairing inside those several dB.
 LISTENING_DISTANCE_M = 2.5
-SPEAKER_PEAK_TARGET_DB = 105  # at the listening position, per channel basis
+SPEAKER_PEAK_TARGET_DB = 105   # at the listening position
+STEREO_SUM_DB = 3              # two channels: +3 (uncorrelated) to +6 (coherent bass)
+ROOM_GAIN_DB = 3               # domestic reverberant field vs free-field at 2.5 m
 
 
 def _pair_speaker(src, s_role, dst, d_role) -> Dict[str, Any]:
@@ -407,16 +411,18 @@ def _pair_speaker(src, s_role, dst, d_role) -> Dict[str, Any]:
     else:
         spl_1m = sens + 10 * math.log10(max(p_avail, 0.001))
         spl_pos = spl_1m - 20 * math.log10(LISTENING_DISTANCE_M)
-        margin = spl_pos - SPEAKER_PEAK_TARGET_DB
-        status = ("ok" if margin >= THRESHOLDS["headroom_ok_db"]
-                  else "warn" if margin >= 0 else "fail")
+        margin_cons = spl_pos - SPEAKER_PEAK_TARGET_DB
+        margin_real = margin_cons + STEREO_SUM_DB + ROOM_GAIN_DB
+        status = ("ok" if margin_real >= THRESHOLDS["headroom_ok_db"]
+                  else "warn" if margin_real >= 0 else "fail")
         checks.append(_check(
             "spl_headroom", status,
-            f"{p_avail:.0f} W into ~{(load_z or 8):g} Ω → {spl_1m:.0f} dB @1m, ~{spl_pos:.0f} dB at "
-            f"{LISTENING_DISTANCE_M} m vs {SPEAKER_PEAK_TARGET_DB} dB peak target → {margin:+.0f} dB",
+            f"{p_avail:.0f} W into ~{(load_z or 8):g} Ω → {spl_1m:.0f} dB @1m; per-channel free-field "
+            f"{margin_cons:+.0f} dB vs {SPEAKER_PEAK_TARGET_DB} dB at {LISTENING_DISTANCE_M} m, "
+            f"≈{margin_real:+.0f} dB with stereo +{STEREO_SUM_DB} and room +{ROOM_GAIN_DB}",
             "d",
-            "assumes 2.5 m listening, per channel; stereo summation and room gain "
-            "add several dB on top — the geometry is stated, not hidden",
+            "verdict uses the realistic figure; both terms shown — the free-field "
+            "number is the conservative floor, not the experience",
         ))
 
     if z_min is not None:
