@@ -106,14 +106,20 @@ def _roles(item: Dict[str, Any]) -> List[Dict[str, Any]]:
     roles: List[Dict[str, Any]] = []
 
     if cat in _TRANSDUCER_CATS:
-        z = _num(specs, "impedance_ohm")
+        z_raw = _num(specs, "impedance_ohm")
+        # A bundled domain interface (ribbon current-drive box) is what
+        # the amp actually loads into — the raw motor figure stays for
+        # the domain gate and the honest note.
+        iface = _num(specs, "interface_load_ohm")
+        z = iface or z_raw
         sens_mw = _num(specs, "sensitivity_db_mw")
         sens_v = None
         if sens_mw is not None and z:
             sens_v = sens_mw + 10 * math.log10(1000 / z)  # derived dB/V
         driver = specs.get("driver_type") or ""
         roles.append({
-            "role": "transducer", "z": z, "sens_mw": sens_mw, "sens_v": sens_v,
+            "role": "transducer", "z": z, "z_raw": z_raw, "iface": iface,
+            "sens_mw": sens_mw, "sens_v": sens_v,
             "max_spl": _num(specs, "max_spl_db"),
             "driver_type": driver,
             # Electrostats live in a different voltage domain entirely:
@@ -282,17 +288,25 @@ def _pair_hp_transducer(src, s_role, dst, d_role) -> Dict[str, Any]:
         return None
 
     if (d_role.get("driver_type") or "").lower() == "ribbon" and \
-            d_role.get("z") is not None and d_role["z"] < 1:
+            d_role.get("z_raw") is not None and d_role["z_raw"] < 1:
+        if not d_role.get("iface"):
+            checks.append(_check(
+                "domain", "fail",
+                f"true-ribbon motor at {d_role['z_raw']:g} Ω — a near-short no conventional "
+                "headphone output may drive directly",
+                "ds",
+                "connect only through the ribbon's current-drive/transformer interface "
+                "(bundled with such headphones); the amp then sees the interface's "
+                "input impedance (~32 Ω class), and THAT is the load to judge power against",
+            ))
+            return _verdict(src, "hp_out", dst, "transducer", checks)
         checks.append(_check(
-            "domain", "fail",
-            f"true-ribbon motor at {d_role['z']:g} Ω — a near-short no conventional "
-            "headphone output may drive directly",
+            "domain", "ok",
+            f"true-ribbon ({d_role['z_raw']:g} Ω motor) behind its bundled current-drive "
+            f"interface — the amp sees {d_role['iface']:g} Ω; checks below use that load",
             "ds",
-            "connect only through the ribbon's current-drive/transformer interface "
-            "(bundled with such headphones); the amp then sees the interface's "
-            "input impedance (~32 Ω class), and THAT is the load to judge power against",
+            "never bypass the interface: the raw ribbon is a near-short",
         ))
-        return _verdict(src, "hp_out", dst, "transducer", checks)
 
     # Electrostatic domain gate: bias supply + 100V-swing territory.
     # A conventional headphone output is a hard incompatibility, not a
