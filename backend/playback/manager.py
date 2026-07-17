@@ -103,8 +103,23 @@ class PlaybackManager:
                 backend = BrowserBackend(emit=self._on_backend_status, queue=self.queue)
             else:
                 raise ValueError(f"unknown output type: {output_type}")
+            # Assigned before start() so early emits resolve their output
+            # info — but a failed start MUST roll back: a half-constructed
+            # backend left as "active" is a zombie that swallows every
+            # later command (observed live: a dozing renderer failed the
+            # boot attach, and Stream-all then died on the husk with
+            # 'NoneType' errors and an empty Now Playing).
             self._active = backend
-            backend.start()
+            try:
+                backend.start()
+            except Exception:
+                self._active = None
+                try:
+                    backend.shutdown()
+                except Exception as e:
+                    logger.debug("rollback shutdown failed: %s", e)
+                self._push_status({"state": "disconnected"})
+                raise
             logger.info("playback backend activated: %s", backend.id)
 
     def init_from_settings(self) -> None:
