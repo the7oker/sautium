@@ -8552,7 +8552,10 @@
               <div class="sent-head">
                 <span class="sent-score">${escapeProfileHtml(String(sent.score))}</span>
                 <span class="sent-score-suffix">/ 10${sent.sample_size ? ' · n = ' + sent.sample_size : ''}</span>
-              </div>` : ''}
+              </div>
+              <p class="sent-caveat">Tone of the sourced community mentions — a conversation temperature,
+                not a verdict. Fresh releases run hot "worth it?" debates while settled legends coast on
+                consensus, so scores are not comparable across models.</p>` : ''}
             ${praise ? `<div class="sent-label">Praise</div><div class="sent-pills">${praise}</div>` : ''}
             ${crit ? `<div class="sent-pill-sec">Criticism</div><div class="sent-pills" style="margin-top:calc(6*var(--px));">${crit}</div>` : ''}
           </div>`;

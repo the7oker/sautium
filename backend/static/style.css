@@ -5283,6 +5283,12 @@ select.add-gear-input {
   gap: calc(10 * var(--px));
   margin-bottom: calc(10 * var(--px));
 }
+.sent-caveat {
+  font-size: calc(11 * var(--px));
+  line-height: 1.5;
+  color: var(--color-text-dim);
+  margin: calc(-4 * var(--px)) 0 calc(10 * var(--px));
+}
 .sent-score {
   font-family: var(--font-mono);
   font-size: calc(28 * var(--px));
