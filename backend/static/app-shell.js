@@ -7161,13 +7161,22 @@
       groups += `<div class="profile-group-label">${escapeProfileHtml(src)} → speakers</div>
         <div class="gsys-group">${sortPairs(spkBySource[src]).map(p => gsysPairHTML(p, wantIds)).join('')}</div>`;
     }
-    const phonoBySource = {};
+    // A cartridge pairs with two different beasts: phono stages
+    // (gain/loading electricity) and tonearms (mechanical resonance).
+    // One list made the turntable read as just another stage.
+    const phonoStages = {};
+    const tonearms = {};
     for (const p of data.pairs.filter(p => p.source.role === 'phono_source')) {
-      (phonoBySource[p.source.name] || (phonoBySource[p.source.name] = [])).push(p);
+      const bucket = p.target.role === 'tonearm' ? tonearms : phonoStages;
+      (bucket[p.source.name] || (bucket[p.source.name] = [])).push(p);
     }
-    for (const src of Object.keys(phonoBySource).sort()) {
-      groups += `<div class="profile-group-label">${escapeProfileHtml(src)} → phono chain</div>
-        <div class="gsys-group">${sortPairs(phonoBySource[src]).map(p => gsysPairHTML(p, wantIds)).join('')}</div>`;
+    for (const src of Object.keys(phonoStages).sort()) {
+      groups += `<div class="profile-group-label">${escapeProfileHtml(src)} → phono stages</div>
+        <div class="gsys-group">${sortPairs(phonoStages[src]).map(p => gsysPairHTML(p, wantIds)).join('')}</div>`;
+    }
+    for (const src of Object.keys(tonearms).sort()) {
+      groups += `<div class="profile-group-label">${escapeProfileHtml(src)} → tonearm · resonance</div>
+        <div class="gsys-group">${sortPairs(tonearms[src]).map(p => gsysPairHTML(p, wantIds)).join('')}</div>`;
     }
     if (!groups) {
       groups = '<div class="placeholder">No analyzable pairs yet — add gear and let research finish.</div>';
