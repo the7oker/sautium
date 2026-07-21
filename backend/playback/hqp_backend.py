@@ -337,6 +337,8 @@ class HqpBackend(PlayerBackend):
         self._running = False
         self._failures = 0
         self._drift_logged = False
+        # Slot to select on the first play after an output switch (resume_at).
+        self._resume_index: Optional[int] = None
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -379,6 +381,12 @@ class HqpBackend(PlayerBackend):
 
     def capabilities(self) -> Capabilities:
         return Capabilities(volume=True, volume_kind="db", seek=True, gapless=True)
+
+    def resume_at(self, index: int) -> None:
+        # HQPlayer owns its playlist pointer, and a select fired straight
+        # after the attach mirror does not stick (verified live) — defer it
+        # to the play press, where select+play is the proven jump sequence.
+        self._resume_index = index
 
     def poke(self) -> None:
         """Wake the poller for an immediate re-poll after a command."""
@@ -509,6 +517,14 @@ class HqpBackend(PlayerBackend):
     # -- transport -----------------------------------------------------------------
 
     def play(self) -> bool:
+        if self._resume_index is not None:
+            idx, self._resume_index = self._resume_index, None
+            logger.info("play: honoring resume slot %d", idx)
+            if self.select(idx):
+                # A SelectTrack on a STOPPED HQPlayer needs a beat to
+                # register before Play honors it — the resume-watcher's
+                # documented 1s boundary exception (04c46b8), same quirk.
+                time.sleep(1.0)
         ok = _hqp_cmd(lambda h: h.play())
         self.poke()
         return ok
@@ -524,16 +540,19 @@ class HqpBackend(PlayerBackend):
         return ok
 
     def next(self) -> bool:
+        self._resume_index = None    # explicit navigation overrides resume
         ok = _hqp_cmd(lambda h: h.next())
         self.poke()
         return ok
 
     def previous(self) -> bool:
+        self._resume_index = None    # explicit navigation overrides resume
         ok = _hqp_cmd(lambda h: h.previous())
         self.poke()
         return ok
 
     def select(self, index: int) -> bool:
+        self._resume_index = None    # explicit navigation overrides resume
         ok = _hqp_cmd(lambda h: h.select_track(index))
         self.poke()
         return ok

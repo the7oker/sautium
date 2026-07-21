@@ -85,6 +85,16 @@ class BrowserBackend(PlayerBackend):
         return Capabilities(volume=True, volume_kind="percent", seek=True,
                             gapless=False)
 
+    def resume_at(self, index: int) -> None:
+        item = self._queue.item_at(index)
+        if item is None:
+            return
+        self._index = index
+        self._current_ident = self._item_ident(item)
+        self._length = item.duration_seconds or 0.0
+        self._position = 0.0
+        self._emit_now()
+
     # -- renderer-tab channel (called from the SSE endpoint) -----------------
 
     def attach_tab(self, tab: str, channel: asyncio.Queue,

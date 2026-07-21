@@ -164,6 +164,13 @@ class DlnaBackend(PlayerBackend):
         instance."""
         return self._dmr is not None and not self._gone
 
+    def resume_at(self, index: int) -> None:
+        if self._queue.item_at(index) is None:
+            return
+        self._index = index
+        self._current_url = None     # play() loads this slot fresh
+        self._emit_now("stopped")
+
     async def _async_start(self) -> None:
         # 10s over the default 5s: phone renderers in Wi-Fi power-save can
         # stall the first request for seconds while the radio wakes up.

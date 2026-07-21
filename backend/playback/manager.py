@@ -40,6 +40,10 @@ class PlaybackManager:
         # concurrent play intents don't double-attach (it nests activate,
         # which takes _active_lock — keep them separate).
         self._ensure_lock = threading.Lock()
+        # Last known 1-based queue slot, independent of _latest_status —
+        # the output-switch path hops through activate(None), whose
+        # "disconnected" push wipes track_index from the status dict.
+        self._last_slot = 0
         self._mutate_lock = threading.RLock()
         self.radio_mode = False
 
@@ -103,6 +107,9 @@ class PlaybackManager:
             if (output_type is not None and self._active is not None
                     and self._active.id == output_type):
                 return
+            # The slot that was active on the OLD output — seeded into the
+            # new backend after attach so play continues from the same track.
+            prev_idx = self._last_slot
             old = self._active
             if old is not None:
                 self._active = None
@@ -151,6 +158,13 @@ class PlaybackManager:
                     logger.debug("rollback shutdown failed: %s", e)
                 self._push_status({"state": "disconnected"})
                 raise
+            if prev_idx >= 1 and self.queue.item_at(prev_idx) is not None:
+                try:
+                    backend.resume_at(prev_idx)
+                    logger.info("output switch keeps slot %d on %s",
+                                prev_idx, backend.id)
+                except Exception as e:
+                    logger.debug("resume_at(%d) failed: %s", prev_idx, e)
             logger.info("playback backend activated: %s", backend.id)
 
     def init_from_settings(self) -> None:
@@ -292,7 +306,7 @@ class PlaybackManager:
             "length": s.length,
             "volume": s.volume,
             "process_speed": s.extra.get("process_speed", 0.0),
-            "track_index": idx,
+            "track_index": idx,   # 1-based; also mirrored into _last_slot below
             "media_file_id": item.media_file_id if item else None,
             # Universal track UUID (owned + phantom) — Discovery's
             # similar-to-now-playing seed reads it off currentStatus.
@@ -347,6 +361,8 @@ class PlaybackManager:
             except Exception:
                 logger.exception("status observer failed")
 
+        if isinstance(idx, int) and idx >= 1:
+            self._last_slot = idx
         self._push_status(new_data)
 
     # -- queue mutations -----------------------------------------------------------
@@ -365,6 +381,7 @@ class PlaybackManager:
                                           probe_first=probe_first)
             if added:
                 gen = self.queue.replace(items[:added])
+                self._last_slot = 0   # fresh queue — no resume slot in it
                 backend.queue_changed("replace", play=play)
                 self._schedule_persist()
             else:

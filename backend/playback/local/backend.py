@@ -61,6 +61,14 @@ class LocalBackend(PlayerBackend):
 
     # -- transport ---------------------------------------------------------
 
+    def resume_at(self, index: int) -> None:
+        if self._queue.item_at(index) is None:
+            return
+        # Pre-play seed: the engine is idle right after start() (nothing
+        # reads _index until a command arrives), and its play command
+        # starts from _index.
+        self._engine._index = index
+
     def play(self) -> bool:
         if len(self._queue) == 0:
             return False

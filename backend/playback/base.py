@@ -77,6 +77,12 @@ class PlayerBackend(ABC):
     def shutdown(self) -> None:
         """Stop status acquisition and release the output."""
 
+    def resume_at(self, index: int) -> None:
+        """Seed the current queue slot right after attach, WITHOUT starting
+        playback — an output switch keeps the queue AND the position in it:
+        the play press on the new output continues from the track that was
+        active on the old one, not from slot 1."""
+
     def healthy(self) -> bool:
         """Is the attached device still believed reachable? Backends whose
         devices come and go (a dozing DLNA DAP) override this; the manager's
