@@ -3619,10 +3619,12 @@
       items.map(a => {
         const ph = avatarPlaceholder(a.artist || a.name || '?');
         const phantom = a.is_owned === false ? ' is-phantom' : '';
-        const url = coverUrl({cover_id: a.cover_id, media_file_id: a.media_file_id});
-        const inner = url
-          ? `<img src="${url}" alt="" loading="lazy" onerror="this.style.display='none'">`
-          : `<span class="d-artist-initials">${escapeHtml(ph.initials)}</span>`;
+        // Artist PHOTO first (covers/by-artist, Deezer/Last.fm resolved),
+        // album cover only as the on-error fallback, initials beneath both.
+        const fallback = coverUrl({cover_id: a.cover_id, media_file_id: a.media_file_id});
+        const inner = artistAvatarInner(a.artist_id,
+          `<span class="d-artist-initials">${escapeHtml(ph.initials)}</span>`,
+          fallback);
         return `
           <button class="d-artist-tile${phantom}" type="button"
                   data-artist-id="${escapeHtml(a.artist_id || '')}">

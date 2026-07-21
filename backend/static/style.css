@@ -3195,8 +3195,12 @@ body.has-miniplayer .ai-fab {
   font-weight: 600;
   font-size: calc(20 * var(--px));
   letter-spacing: 0.02em;
+  position: relative;
 }
+/* Layered avatar (artistAvatarInner): the photo overlays the initials and
+   removes itself / falls back to the album cover on error. */
 .d-artist-avatar img {
+  position: absolute; inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
