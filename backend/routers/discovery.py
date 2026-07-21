@@ -330,22 +330,36 @@ def discovery_search(
     active.update(_engine_filters(bpm_min, bpm_max, key, mode, vocalist,
                                   gender, danceable, energy, instruments, genres))
     # Warming is scope-aware: the default names scope needs no model at all.
+    # It is also computed against PROFILE-AVAILABLE models only — on a
+    # profile that never ships the translator, "warming" would otherwise
+    # promise an improvement that never comes; those queries get the
+    # distinct `limited` flag instead (HARDWARE-TIERS sound-scope policy).
     needed: set = set()
+    limited = False
     if "bio" in active:
         needed.add("enrichment")
     if "sound" in active:
-        # enrichment serves genre_desc; every sound query is translated
-        # (MADLAD, input language inferred — English passes as identity).
-        needed |= {"clap", "enrichment", "translate"}
+        # enrichment serves genre_desc; a sound query is translated
+        # (MADLAD, input language inferred — English passes as identity)
+        # only when it needs it: ASCII goes to CLAP directly.
+        needed |= {"clap", "enrichment"}
+        if not str(active["sound"]).isascii():
+            from hardware_profile import resolve as _hw
+            if _hw().translation_available:
+                needed.add("translate")
+            else:
+                limited = True
     if "lyrics" in active:
         needed.add("lyrics")
     warming = bool(needed) and not all(model_cache.is_loaded(k) for k in needed)
     if not active:
-        return {"status": "ok", "results": [], "warming": warming, "next_cursor": None}
+        return {"status": "ok", "results": [], "warming": warming,
+                "limited": limited, "next_cursor": None}
 
     built = build(active, {}, corpus=corpus, limit=limit, offset=offset)
     if target not in built:                    # target below the atom — structurally absent
-        return {"status": "ok", "results": [], "warming": warming, "next_cursor": None}
+        return {"status": "ok", "results": [], "warming": warming,
+                "limited": limited, "next_cursor": None}
     sql, params = built[target]
     with get_db_context() as db:
         # The segment-KNN retrieve branch overscans to 1000 rows (see Source.knn):
@@ -367,4 +381,5 @@ def discovery_search(
     # which a flattened server-side echo could not).
     nxt = offset + limit
     return {"status": "ok", "results": _SHAPERS[target](rows), "warming": warming,
+            "limited": limited,
             "next_cursor": {"offset": nxt} if len(rows) == limit and nxt <= RETRIEVE_K else None}

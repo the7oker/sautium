@@ -75,6 +75,14 @@ class HardwareProfile:
         return self.name != "lite"
 
     @property
+    def translation_available(self) -> bool:
+        """MADLAD ct2-int8 (~3GB RAM, CPU-only runtime): full pre-warms it,
+        standard lazy-loads on the first non-ASCII sound query, lite never
+        loads it — the sound scope degrades per query to English-only
+        (HARDWARE-TIERS sound-scope policy)."""
+        return self.name != "lite"
+
+    @property
     def background_enrichment_default(self) -> bool:
         """Default for enrichment.background_enabled when the user never
         set the key. An explicit user_settings row always wins."""

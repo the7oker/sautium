@@ -892,6 +892,13 @@ def _model_ready(key: str) -> bool:
 
 def _kick_model(key: str) -> None:
     import model_cache
+    # Profile veto: on a profile that never ships the translator (lite),
+    # a kick here would drag ~3GB into RAM against the tier policy — the
+    # per-query predicate keeps the sound scope English-only instead.
+    if key == "translate":
+        from hardware_profile import resolve as _hw
+        if not _hw().translation_available:
+            return
     from routers.discovery import (_clap_loader, _enrichment_loader,
                                    _lyrics_loader, _translate_loader)
     factory = {"enrichment": _enrichment_loader, "clap": _clap_loader,
@@ -944,13 +951,21 @@ def _clap_query(active: dict) -> str:
 
 
 def _clap_servable(active: dict) -> bool:
-    """CLAP's text encoder is English-only, and EVERY sound query goes through
-    the local MT model (MADLAD infers the input language itself; English
-    passes as identity) — so the clap+translate pair is servable as one unit.
-    Must agree between SQL assembly and _bind_params — model_cache loads are
-    monotonic, so a mid-build flip can only ADD an unused bind param, never
-    leave a referenced one missing."""
-    return _model_ready("clap") and _model_ready("translate")
+    """CLAP's text encoder is English-only; non-ASCII queries additionally
+    need the local MT model (MADLAD infers the input language itself).
+    Gating is PER QUERY, not per profile: an ASCII query is servable by
+    CLAP alone, a non-ASCII one needs the translator warm too. One
+    predicate covers every tier with no profile ifs — full keeps the
+    translator warm so everything passes; standard lazy-loads it on the
+    first non-ASCII query; lite vetoes the load so its sound scope is
+    English-only (the router reports `limited`, not eternal warming).
+    Must agree between SQL assembly and _bind_params — model_cache loads
+    are monotonic, so a mid-build flip can only ADD an unused bind param,
+    never leave a referenced one missing."""
+    if not _model_ready("clap"):
+        return False
+    q = _clap_query(active)
+    return (not q) or q.isascii() or _model_ready("translate")
 
 
 def _source_ready(src, active: dict) -> bool:
@@ -967,9 +982,19 @@ def _source_ready(src, active: dict) -> bool:
 
 
 def _to_english(q: str) -> str:
-    """Any language → English for CLAP encoding (English = identity pass).
-    Callers sit behind _clap_servable, so the translator is warm here."""
+    """Non-ASCII query → English for CLAP encoding.
+
+    ASCII queries BYPASS the translator on every profile — measured
+    2026-07-21: int8 MADLAD is not identity-safe for English (beam dropped
+    "with saxophone" from a plain English phrase, guards or not), and a
+    deterministic bypass beats depending on model behavior. The residual —
+    diacritic-less fr/de typed in ASCII hits CLAP untranslated — is the
+    accepted trade from the sound-scope tier policy, now uniform across
+    profiles. A cold translator is likewise only reachable by an ASCII
+    query (per-query _clap_servable), which this same branch covers."""
     import model_cache
+    if q.isascii() or not model_cache.is_loaded("translate"):
+        return q
     from routers.discovery import _translate_loader
     return model_cache.get_model("translate", _translate_loader).to_english(q)
 

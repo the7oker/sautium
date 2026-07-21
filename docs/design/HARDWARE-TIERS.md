@@ -366,3 +366,18 @@ cards, so the standard-tier VRAM floor deliberately stays at ≥5.5 GB until
     full re-discover on failure and pushes a changed external port into the
     DHT announce state.
 16. ✅ Dead `audio_analysis_batch_size` removed.
+17. ✅ MADLAD translator off the GPU (SHIPPED 2026-07-21): CTranslate2 int8
+    CPU (~3 GB RAM, 0 VRAM — backend resident VRAM 1.44 GB measured, was
+    ~7 GB with torch bf16 MADLAD), one-time conversion from the BYO HF
+    source (fp16 staging, tmp-dir + rename), warm-up call at load pays the
+    cold-mmap page-in (~60s on NTFS) inside the pre-warm thread. Per-query
+    sound-scope gating shipped with it: `_clap_servable` = clap AND
+    (ascii OR translate-ready), profile-vetoed kick-loads, `limited` UI
+    flag distinct from `warming`. ASCII queries bypass MT on EVERY profile
+    — verified 2026-07-21: int8 beam dropped "with saxophone" from a plain
+    English phrase (guards irrelevant), so EN identity is guaranteed by
+    construction instead of by model behavior. Verification protocol:
+    uk/ru/fr/de/es/zh byte-identical to the bf16 reference; warm int8
+    latency 0.3-0.5s/query (bf16 GPU was 0.3-0.45s). Follow-up: publish
+    our converted int8 artifact (Apache 2.0 permits) so fresh nodes pull
+    ~3 GB instead of the 12 GB source.

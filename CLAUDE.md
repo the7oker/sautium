@@ -30,13 +30,19 @@ See:
 - **BGE-M3** — 1024-d multilingual text embeddings (not sentence-transformers)
 - **MADLAD-400-3B-MT** (`google/madlad400-3b-mt`, **Apache 2.0**) — local
   any-language→English query translation for the English-only CLAP text
-  encoder (`backend/translation.py`). No source-language detection: the
-  model infers the input language, only the `<2en>` target prefix is set;
-  every Sound-scope query translates (English = identity pass). BYO-
-  downloaded from the official repo (~12 GB one-time, ~6 GB VRAM bf16).
-  Replaced NLLB-600M 2026-07-18 — its CC-BY-NC license blocked
+  encoder (`backend/translation.py`), running on **CTranslate2 int8, CPU**
+  (~3 GB RAM, 0 VRAM; one-time conversion from the BYO ~12 GB HF source,
+  written next to the HF cache). No source-language detection: the model
+  infers the input language, only the `<2en>` target prefix is set — that
+  property is load-bearing, LID alternatives are rejected. **ASCII queries
+  bypass MT entirely** (measured: int8 beam is not identity-safe for
+  English; the diacritic-less fr/de residual is the accepted sound-scope
+  trade). Profile policy: full pre-warms, standard lazy-loads on the first
+  non-ASCII Sound query, lite never loads (UI shows `limited`, not
+  warming). Replaced NLLB-600M 2026-07-18 — its CC-BY-NC license blocked
   monetization and its Cyrillic-only trigger silently skipped
-  French/German/CJK queries
+  French/German/CJK queries; torch bf16 GPU serving (5.5 GB VRAM) replaced
+  by ct2 int8 2026-07-21
 - **anthropic SDK** for Claude API; Claude Code + MCP tools for the AI DJ
 - **libtorrent** for DHT (NOT pure-python `kademlia` — incompatible with BT DHT)
 - **CustomTkinter + PyInstaller** for the Windows desktop launcher

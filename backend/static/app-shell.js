@@ -3369,7 +3369,7 @@
     });
 
     const completion = { remaining: DISCOVERY_BLOCKS.length, hadAnyResults: false,
-                         warming: false };
+                         warming: false, limited: false };
 
     const filters = screen._filters || {};
     DISCOVERY_BLOCKS.forEach(b => {
@@ -3398,6 +3398,7 @@
           renderDiscoveryBlock(screen, b, data, params);
           if ((data.results || []).length > 0) completion.hadAnyResults = true;
           if (data.warming) completion.warming = true;
+          if (data.limited) completion.limited = true;
         })
         .catch(err => {
           if (queryId !== getActiveId()) return;
@@ -3412,9 +3413,11 @@
               // A bio-scope search has no tracks block to carry the per-block
               // warming note — say it here instead of a false "No matches."
               const emptyP = empty.querySelector('p');
-              if (emptyP) emptyP.textContent = completion.warming
-                ? 'AI model is warming up — search again in a minute.'
-                : 'No matches.';
+              if (emptyP) emptyP.textContent = completion.limited
+                ? 'Limited on this device: non-English Sound queries match genre descriptions only.'
+                : completion.warming
+                  ? 'AI model is warming up — search again in a minute.'
+                  : 'No matches.';
               empty.hidden = false;
             }
             // Streaming supplement: names-scope searches also ask the provider
@@ -3524,13 +3527,19 @@
     // Only the AI scopes depend on vector models; the engine cold-skips them
     // (kicking their load) and the server flags warming. The default names
     // scope never warms — this note can only appear in an AI mode.
-    const warmingNote = (data.warming && descriptor.id === 'tracks')
-      ? '<p class="d-loading-notice">AI model is warming up — search again'
-        + ' in a minute.</p>'
-      : '';
+    // `limited` is DISTINCT from warming: this hardware profile never loads
+    // the translator, so a non-English Sound query permanently matches
+    // genre descriptions only — promising a warm-up would be a lie.
+    const stateNote = (descriptor.id === 'tracks' && data.limited)
+      ? '<p class="d-loading-notice">Limited on this device: non-English'
+        + ' Sound queries match genre descriptions only.</p>'
+      : (descriptor.id === 'tracks' && data.warming)
+        ? '<p class="d-loading-notice">AI model is warming up — search again'
+          + ' in a minute.</p>'
+        : '';
     if (items.length === 0) {
-      blk.hidden = !warmingNote;
-      body.innerHTML = warmingNote;
+      blk.hidden = !stateNote;
+      body.innerHTML = stateNote;
       return;
     }
 
@@ -3540,7 +3549,7 @@
     // and scroll on their own axis, so the extra tiles cost nothing.
     const visible = descriptor.layout === 'tracks'
       ? items.slice(0, DISCOVERY_TRACK_STEP) : items;
-    body.innerHTML = DISCOVERY_RENDERERS[descriptor.layout](visible) + warmingNote;
+    body.innerHTML = DISCOVERY_RENDERERS[descriptor.layout](visible) + stateNote;
     wireDetailHandlers(body);
     if (descriptor.layout === 'tracks') updatePlayingHighlight();
     attachBlockPaging(screen, descriptor, body, data.next_cursor, params,
