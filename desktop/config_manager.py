@@ -42,6 +42,11 @@ DEFAULT_CONFIG = {
         "postgres": 15432,
         "web": 18000,
         "tracker": 18765,
+        # Plain-http media surfaces, offset from the Docker node's 8830/8831
+        # (held by its netsh portproxy even while the container is down) so
+        # a launcher test node can drive DLNA on the same host.
+        "media": 8832,
+        "gena": 8833,
     },
     "claude_code_available": False,
     "first_run_complete": False,
@@ -219,6 +224,11 @@ def generate_env_file(config: dict, env_path: Path) -> None:
         "# the environment BEFORE sounddevice is first imported; harmless on",
         "# macOS/Linux and for users without ASIO drivers.",
         "SD_ENABLE_ASIO=1",
+        "",
+        "# Media surfaces (plain-http, LAN-only) — distinct from the Docker",
+        "# node's 8830/8831 so both nodes coexist on one host.",
+        f"MEDIA_PROXY_PORT={ports.get('media', 8832)}",
+        f"DLNA_GENA_PORT={ports.get('gena', 8833)}",
         "",
     ]
 

@@ -242,6 +242,8 @@ class LauncherApp(ctk.CTk):
 
     def _startup_sequence(self):
         """Start all services in a background thread."""
+        self.service_manager.on_backend_event = self._on_backend_event
+
         def _start():
             self._set_status("starting", "Starting services...")
 
@@ -266,6 +268,22 @@ class LauncherApp(ctk.CTk):
 
         # Check for updates in background (non-blocking)
         self._check_updates_background()
+
+    def _on_backend_event(self, state: str, message: str):
+        """Watchdog callback (backend-watchdog thread) — marshal to Tk."""
+        if self._shutting_down:
+            return
+
+        def apply():
+            if state == "crashed":
+                self._set_status("starting", "Backend crashed — restarting...")
+                self._progress_text.configure(text=message)
+            elif state == "restarted":
+                self._on_services_ready()
+            else:  # gave_up
+                self._set_status("error", "Backend down")
+                self._progress_text.configure(text=message)
+        self.after(0, apply)
 
     def _on_services_ready(self):
         """Called when all services are running."""

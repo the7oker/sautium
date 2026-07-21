@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional, Callable
@@ -21,6 +22,11 @@ import psutil
 
 logger = logging.getLogger(__name__)
 
+# A backend that survived this long crashed on its own trouble, not a boot
+# loop — the restart budget resets.
+_STABLE_UPTIME_SECONDS = 300
+_MAX_CRASH_RESTARTS = 3
+
 
 class ServiceManager:
     """Manages the lifecycle of backend services."""
@@ -28,6 +34,12 @@ class ServiceManager:
     def __init__(self, config: dict):
         self.config = config
         self.backend_proc: Optional[subprocess.Popen] = None
+        # Watchdog wiring: on_backend_event(state, message) fires from the
+        # watchdog thread with state ∈ {"crashed", "restarted", "gave_up"}.
+        self.on_backend_event: Optional[Callable[[str, str], None]] = None
+        self._backend_stopping = False
+        self._backend_started_at = 0.0
+        self._crash_restarts = 0
         from desktop.utils import get_project_root
         self._project_root = get_project_root()
         self._backend_dir = self._project_root / "backend"
@@ -414,6 +426,12 @@ class ServiceManager:
 
         # Ensure Windows Firewall allows LAN access
         self._ensure_firewall_rule(port)
+        # Media surfaces (DLNA renderers fetch audio / send GENA events):
+        # profile=any, or renderers on a "Public"-classified Wi-Fi can
+        # control playback but never pull the bytes.
+        self._ensure_firewall_rule(
+            f"{self.ports.get('media', 8832)},{self.ports.get('gena', 8833)}",
+            profile="any")
 
         # Log backend output to file instead of PIPE (PIPE can block on Windows)
         from desktop.config_manager import get_data_dir
@@ -432,6 +450,7 @@ class ServiceManager:
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
         try:
+            self._backend_stopping = False
             self.backend_proc = subprocess.Popen(cmd, **kwargs)
             logger.info(f"Backend started (PID {self.backend_proc.pid}) on port {port}")
             logger.info(f"Backend log: {backend_log}")
@@ -443,15 +462,53 @@ class ServiceManager:
         # Wait for /health endpoint
         if progress_cb:
             progress_cb("Waiting for backend to be ready...")
-        return self._wait_for_backend(port)
+        if not self._wait_for_backend(port):
+            return False
+        self._backend_started_at = time.time()
+        threading.Thread(target=self._watch_backend, args=(self.backend_proc,),
+                         daemon=True, name="backend-watchdog").start()
+        return True
 
     def stop_backend(self) -> None:
         """Stop the backend process."""
+        self._backend_stopping = True
         self._stop_process(self.backend_proc, "Backend")
         self.backend_proc = None
         if hasattr(self, "_backend_log_file") and self._backend_log_file:
             self._backend_log_file.close()
             self._backend_log_file = None
+
+    def _watch_backend(self, proc: subprocess.Popen) -> None:
+        """Event-driven death watch: blocks on the process handle, no
+        polling. A deliberate stop/replace exits silently; a crash logs the
+        log tail, notifies the UI and restarts — fast deaths burn a limited
+        budget so a boot-loop can't spin forever."""
+        proc.wait()
+        if self._backend_stopping or proc is not self.backend_proc:
+            return
+        uptime = time.time() - self._backend_started_at
+        logger.error(
+            f"Backend died unexpectedly (exit {proc.returncode}, "
+            f"uptime {uptime:.0f}s). Log tail:\n{self._read_backend_log_tail()}")
+        if uptime >= _STABLE_UPTIME_SECONDS:
+            self._crash_restarts = 0
+        self._crash_restarts += 1
+        if self._crash_restarts > _MAX_CRASH_RESTARTS:
+            self._notify_backend_event(
+                "gave_up", f"Backend crashed {self._crash_restarts} times in "
+                "a row — not restarting, see backend.log")
+            return
+        self._notify_backend_event(
+            "crashed", f"Backend crashed (exit {proc.returncode}) — restarting...")
+        if self.start_backend():
+            self._notify_backend_event("restarted", "Backend restarted after crash")
+        else:
+            self._notify_backend_event(
+                "gave_up", "Backend restart failed — see backend.log")
+
+    def _notify_backend_event(self, state: str, message: str) -> None:
+        if self.on_backend_event is not None:
+            self.on_backend_event(state, message)
 
     def _wait_for_backend(self, port: int, timeout: int = 120) -> bool:
         """Wait for the backend /health endpoint to respond."""
@@ -598,8 +655,14 @@ class ServiceManager:
         logger.info(f"{name} stopped")
 
     @staticmethod
-    def _ensure_firewall_rule(port: int, protocol: str = "TCP") -> None:
+    def _ensure_firewall_rule(port, protocol: str = "TCP",
+                              profile: str = "private") -> None:
         """Add Windows Firewall rule, with UAC elevation if needed.
+
+        `port` is an int or a netsh port list ("8832,8833"). Media-surface
+        rules need profile="any": Windows misclassifies networks as Public
+        often enough that a private-locked rule silently breaks renderer
+        fetches (the 2026-07-12 DLNA lesson).
 
         Skips silently if the rule already exists.  Tries without elevation
         first; on failure requests admin via ShellExecuteW (one-time UAC
@@ -624,7 +687,7 @@ class ServiceManager:
                 ["netsh", "advfirewall", "firewall", "add", "rule",
                  f"name={rule_name}",
                  "dir=in", "action=allow", f"protocol={protocol}",
-                 f"localport={port}", "profile=private"],
+                 f"localport={port}", f"profile={profile}"],
                 capture_output=True, text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
@@ -637,7 +700,7 @@ class ServiceManager:
             args = (
                 f'advfirewall firewall add rule name="{rule_name}" '
                 f"dir=in action=allow protocol={protocol} "
-                f"localport={port} profile=private"
+                f"localport={port} profile={profile}"
             )
             ret = ctypes.windll.shell32.ShellExecuteW(
                 None, "runas", "netsh", args, None, 0,

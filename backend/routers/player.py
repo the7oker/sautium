@@ -121,17 +121,14 @@ def get_outputs(rescan: bool = False):
     """Available playback outputs + the active selection — feeds the Output
     picker. Local devices appear only where the backend runs natively
     (PortAudio finds nothing inside the Docker container). `rescan=1`
-    reinitializes PortAudio to pick up hot-plugged devices — skipped while
-    a local stream is live, since reinit would invalidate it."""
+    reinitializes PortAudio to pick up hot-plugged devices — rescan() itself
+    refuses while any stream is open, since reinit would invalidate it."""
     from playback.local import devices as local_devices
     from routers.settings import _read
     from config import settings as app_settings
 
     if rescan:
-        backend = manager.active
-        if not (backend is not None and backend.id == "local"
-                and getattr(backend, "stream_open", False)):
-            local_devices.rescan()
+        local_devices.rescan()
 
     outputs = [{
         "type": "hqplayer",

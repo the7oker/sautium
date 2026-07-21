@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     media_proxy_host: str = "0.0.0.0"               # bind interface
     media_proxy_advertised_host: str = "127.0.0.1"  # host HQPlayer fetches from
     media_proxy_port: int = 8830
+    # DLNA GENA event listener (renderer → backend callbacks). The launcher
+    # overrides both this and media_proxy_port (8833/8832) so a native test
+    # node coexists with the Docker node's 8830/8831 portproxy on one host.
+    dlna_gena_port: int = 8831
     ytdlp_path: str = "yt-dlp"                       # external (user-installed) tool
     ffmpeg_location: Optional[str] = None            # dir containing ffmpeg; None = PATH
     # Tee previewed audio through CLAP/feature analysis (gated on known duration)

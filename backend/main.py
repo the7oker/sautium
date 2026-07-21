@@ -3,6 +3,9 @@ Sautium - FastAPI Application
 Main entry point for the API server.
 """
 
+import faulthandler
+faulthandler.enable()   # native crashes (PortAudio/ASIO AVs) leave a traceback in the log
+
 import asyncio
 import logging
 import logging.config

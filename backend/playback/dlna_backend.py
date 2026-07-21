@@ -37,9 +37,13 @@ except ImportError:
     HAS_UPNP = False
     logger.warning("async-upnp-client not installed — DLNA output disabled")
 
-GENA_PORT = 8831            # LAN listener for renderer event callbacks
 _CMD_TIMEOUT = 10.0
 _TRACK_END_SLACK = 3.0      # STOPPED within this many seconds of the length = track finished
+
+
+class DlnaAttachError(RuntimeError):
+    """Attach failure whose message is already user-ready — start() re-raises
+    it verbatim instead of wrapping it in the generic dozing-renderer hint."""
 
 # The dlna-loop and the GENA notify server are PROCESS singletons: the
 # notify port is a one-per-process resource, and rebinding it on every
@@ -70,10 +74,20 @@ def _ensure_loop() -> asyncio.AbstractEventLoop:
 async def _ensure_notify(requester):
     global _shared_notify
     if _shared_notify is None:
+        port = settings.dlna_gena_port
         server = AiohttpNotifyServer(
-            requester, source=("0.0.0.0", GENA_PORT),
-            callback_url=f"http://{media_host()}:{GENA_PORT}/notify")
-        await server.async_start_server()
+            requester, source=("0.0.0.0", port),
+            callback_url=f"http://{media_host()}:{port}/notify")
+        try:
+            await server.async_start_server()
+        except OSError as e:
+            # UpnpServerOSError str()s to "None" (library bug) — translate
+            # to the real story: the port is taken, most plausibly by another
+            # Sautium node whose media ports weren't kept distinct.
+            raise DlnaAttachError(
+                f"DLNA event port {port} is already in use by another "
+                "process on this host (another Sautium node?) — free it "
+                "or change the port, then retry") from e
         _shared_notify = server
     return _shared_notify
 
@@ -130,6 +144,9 @@ class DlnaBackend(PlayerBackend):
         fut = asyncio.run_coroutine_threadsafe(self._async_start(), self._loop)
         try:
             fut.result(timeout=25)
+        except DlnaAttachError as e:
+            logger.error("DLNA attach failed: %s", e)
+            raise
         except Exception as e:
             reason = str(e).strip() or type(e).__name__
             if len(reason) > 80:      # raw aiohttp reprs are debug noise

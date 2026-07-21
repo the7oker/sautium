@@ -93,12 +93,20 @@ def ensure_proxy() -> Optional[MediaProxy]:
     global _proxy
     if _proxy is None:
         from config import settings
-        _proxy = MediaProxy(
+        proxy = MediaProxy(
             port=settings.media_proxy_port,
             advertised_host=settings.media_proxy_advertised_host,
             bind_host=settings.media_proxy_host,
         )
-        _proxy.start()
+        try:
+            proxy.start()
+        except OSError as e:
+            raise RuntimeError(
+                f"media port {settings.media_proxy_port} is already in use by "
+                "another process on this host — likely another Sautium node "
+                "(Docker). Only one node per machine can serve DLNA/HQPlayer "
+                "media") from e
+        _proxy = proxy
         logger.info("media proxy started for local file serving (no providers)")
     return _proxy
 

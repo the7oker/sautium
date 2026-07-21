@@ -285,8 +285,14 @@ distribution model.
    `/art/{token}`; all gated by unguessable per-queue tokens (never the
    library at large) and exist because HQPlayer and DLNA renderers can
    neither sign HMAC nor trust the self-signed TLS. 8831 is the DLNA
-   GENA event listener (renderer → backend callbacks). Neither port may
-   ever be UPnP-forwarded or otherwise exposed beyond the LAN.
+   GENA event listener (renderer → backend callbacks). The launcher
+   node uses its own pair — 8832 (media) / 8833 (GENA), `ports.media`/
+   `ports.gena` in config.json → `MEDIA_PROXY_PORT`/`DLNA_GENA_PORT` —
+   because the Docker portproxy holds 0.0.0.0:8830-8831 even while the
+   container is down; the launcher auto-creates its firewall rule
+   "Sautium (TCP 8832,8833)" (profile=any). Same LAN-only rules apply.
+   None of these ports may ever be UPnP-forwarded or otherwise exposed
+   beyond the LAN.
    The browser output adds NO new port: `<audio>` media rides the
    existing HTTPS origin at `/api/player/media/{kind}/{id}` behind
    short-lived signed query params (`backend/media_urls.py`, 4 h TTL,

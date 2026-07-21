@@ -39,6 +39,7 @@ import numpy as np
 from config import settings
 
 from playback.base import PlaybackStatus
+from playback.local import devices as devices_mod
 from playback.queue import CanonicalQueue, QueueItem
 
 logger = logging.getLogger(__name__)
@@ -244,13 +245,15 @@ class Engine:
             self._running = False
         elif cmd.kind == "play":
             if self._state == "paused" and self._stream is not None:
-                self._stream.start()
+                with devices_mod.pa_lock:
+                    self._stream.start()
                 self._set_state("playing")
             elif self._state != "playing":
                 self._start_at(self._index if self._index >= 1 else 1)
         elif cmd.kind == "pause":
             if self._state == "playing" and self._stream is not None:
-                self._stream.stop()
+                with devices_mod.pa_lock:
+                    self._stream.stop()
                 self._set_state("paused")
         elif cmd.kind == "stop":
             self._teardown_pipeline()
@@ -315,7 +318,8 @@ class Engine:
                and time.monotonic() < deadline):
             time.sleep(0.02)
         try:
-            self._stream.start()
+            with devices_mod.pa_lock:
+                self._stream.start()
         except Exception as e:
             logger.error("stream start failed (rate=%d exclusive=%s): %s",
                          self._stream_rate, self._exclusive, e)
@@ -380,15 +384,15 @@ class Engine:
         if sd is None:
             self._set_state("stopped", error="sounddevice unavailable")
             return False
-        from playback.local import devices as devices_mod
         try:
-            device_index = devices_mod.resolve_device(self._device_id)
+            with devices_mod.pa_lock:
+                device_index = devices_mod.resolve_device(self._device_id)
+                hostapi = sd.query_hostapis(
+                    sd.query_devices(device_index)["hostapi"])["name"]
         except LookupError as e:
             self._set_state("stopped", error=str(e))
             return False
 
-        hostapi = sd.query_hostapis(
-            sd.query_devices(device_index)["hostapi"])["name"]
         extra = None
         if hostapi == "Windows WASAPI":
             # Shared mode MUST auto-convert: the OS mixer accepts only the
@@ -420,15 +424,17 @@ class Engine:
             # monitoring latency. Default (driver-preferred) ASIO buffers are
             # 5-10 ms — GIL contention from background enrichment/prewarm
             # blows those deadlines and stutters the first minute after boot.
-            stream = sd.RawOutputStream(
-                samplerate=rate, channels=channels, dtype="int32",
-                device=device_index, callback=callback,
-                latency="high", extra_settings=extra)
+            with devices_mod.pa_lock:
+                stream = sd.RawOutputStream(
+                    samplerate=rate, channels=channels, dtype="int32",
+                    device=device_index, callback=callback,
+                    latency="high", extra_settings=extra)
         except Exception as e:
             logger.error("stream open failed (%s ch=%d rate=%d exclusive=%s): %s",
                          hostapi, channels, rate, self._exclusive, e)
             self._set_state("stopped", error=f"device open failed: {e}")
             return False
+        devices_mod.stream_opened()
 
         self._ring = ring
         self._stream = stream
@@ -521,7 +527,8 @@ class Engine:
         index = self._index
         self._start_at(index, seek_to=max(0.0, seconds))
         if not was_playing and self._stream is not None:
-            self._stream.stop()
+            with devices_mod.pa_lock:
+                self._stream.stop()
             self._set_state("paused")
 
     def _resync_index(self) -> None:
@@ -572,11 +579,13 @@ class Engine:
             self._pump = None
         if self._stream is not None:
             try:
-                self._stream.abort()
-                self._stream.close()
+                with devices_mod.pa_lock:
+                    self._stream.abort()
+                    self._stream.close()
             except Exception as e:
                 logger.debug("stream close: %s", e)
             self._stream = None
+            devices_mod.stream_closed()
         self._ring = None
         self._stream_rate = 0
         self._stream_channels = 0
