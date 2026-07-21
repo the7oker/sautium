@@ -1,15 +1,21 @@
 """
 Local query translation for the English-only CLAP text encoder.
 
-NLLB-200 distilled 600M through transformers — the runtime that already
-serves CLAP/BGE — with weights BYO-downloaded from the official facebook/
-repo into the shared HF cache on first load; the app never redistributes
-them.
+MADLAD-400-3B-MT (google/madlad400-3b-mt, Apache 2.0) through transformers —
+the runtime that already serves CLAP/BGE — with weights BYO-downloaded from
+the official repo into the shared HF cache on first load.
 
-NLLB weights are CC-BY-NC 4.0: compatible with the free, donation-supported
-product, but must be swapped for a clean-licensed model (MADLAD-400 /
-OPUS-MT) before any commercial tier ships. The contract here is plain
-text-in → text-out, so the swap is a model-id change.
+MADLAD needs NO source-language detection: the model infers the input
+language itself and only the target is declared, as a `<2en>` prefix token.
+That property is load-bearing — the previous NLLB setup required a source
+tag, and its Cyrillic-only char heuristic silently skipped French/German/
+Spanish/CJK queries (they hit CLAP untranslated, as noise). Every sound
+query now goes through translation unconditionally; English input passes as
+an identity translation.
+
+Apache 2.0 also clears the commercial path — the NLLB CC-BY-NC swap-before-
+monetization caveat is gone. The contract stays text-in → text-out, so any
+future model swap is a model-id change.
 """
 
 import logging
@@ -23,21 +29,11 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
-MODEL_ID = "facebook/nllb-200-distilled-600M"
-
-# і/ї/є/ґ are Ukrainian-only, ы/э/ъ/ё Russian-only. Shared-subset queries
-# default to Ukrainian (primary user base) — NLLB tolerates a near-miss
-# src tag between close languages.
-_UK_ONLY = set("іїєґ")
-_RU_ONLY = set("ыэъё")
-
-
-def has_cyrillic(text: str) -> bool:
-    return any("\u0400" <= ch <= "\u04ff" for ch in text)
+MODEL_ID = "google/madlad400-3b-mt"
 
 
 class QueryTranslator:
-    """Cyrillic search queries → English for CLAP encoding.
+    """Search queries in any language → English for CLAP encoding.
 
     Not a general MT surface: inputs are ≤255-char search phrases, decoding
     is capped accordingly, and repeats (debounced search-as-you-type) hit a
@@ -58,30 +54,15 @@ class QueryTranslator:
         self.model = AutoModelForSeq2SeqLM.from_pretrained(
             MODEL_ID, dtype=get_model_dtype(self.device),
         ).to(self.device).eval()
-        self._eng = self.tokenizer.convert_tokens_to_ids("eng_Latn")
         logger.info("Translation model loaded")
-
-    def _src_lang(self, text: str) -> str:
-        letters = set(text.lower())
-        if letters & _UK_ONLY:
-            return "ukr_Cyrl"
-        if letters & _RU_ONLY:
-            return "rus_Cyrl"
-        return "ukr_Cyrl"
 
     def to_english(self, text: str) -> str:
         cached = self._cache.get(text)
         if cached is not None:
             return cached
-        self.tokenizer.src_lang = self._src_lang(text)
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
+        inputs = self.tokenizer(f"<2en> {text}", return_tensors="pt").to(self.device)
         with torch.inference_mode():
-            out = self.model.generate(
-                **inputs,
-                forced_bos_token_id=self._eng,
-                max_new_tokens=64,
-                num_beams=4,
-            )
+            out = self.model.generate(**inputs, max_new_tokens=64, num_beams=4)
         result = self.tokenizer.batch_decode(out, skip_special_tokens=True)[0]
         if len(self._cache) >= 512:
             self._cache.clear()

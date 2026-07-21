@@ -334,10 +334,9 @@ def discovery_search(
     if "bio" in active:
         needed.add("enrichment")
     if "sound" in active:
-        needed |= {"clap", "enrichment"}   # enrichment serves genre_desc
-        from translation import has_cyrillic
-        if has_cyrillic(str(active["sound"])):
-            needed.add("translate")   # English-only CLAP needs the translator warm
+        # enrichment serves genre_desc; every sound query is translated
+        # (MADLAD, input language inferred — English passes as identity).
+        needed |= {"clap", "enrichment", "translate"}
     if "lyrics" in active:
         needed.add("lyrics")
     warming = bool(needed) and not all(model_cache.is_loaded(k) for k in needed)

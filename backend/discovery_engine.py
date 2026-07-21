@@ -944,15 +944,13 @@ def _clap_query(active: dict) -> str:
 
 
 def _clap_servable(active: dict) -> bool:
-    """CLAP's text encoder is English-only: a Cyrillic query is servable only
-    once the local translator (translation.py) is warm too. Latin queries
-    need CLAP alone. Must agree between SQL assembly and _bind_params —
-    model_cache loads are monotonic, so a mid-build flip can only ADD an
-    unused bind param, never leave a referenced one missing."""
-    if not _model_ready("clap"):
-        return False
-    from translation import has_cyrillic
-    return not has_cyrillic(_clap_query(active)) or _model_ready("translate")
+    """CLAP's text encoder is English-only, and EVERY sound query goes through
+    the local MT model (MADLAD infers the input language itself; English
+    passes as identity) — so the clap+translate pair is servable as one unit.
+    Must agree between SQL assembly and _bind_params — model_cache loads are
+    monotonic, so a mid-build flip can only ADD an unused bind param, never
+    leave a referenced one missing."""
+    return _model_ready("clap") and _model_ready("translate")
 
 
 def _source_ready(src, active: dict) -> bool:
@@ -969,11 +967,8 @@ def _source_ready(src, active: dict) -> bool:
 
 
 def _to_english(q: str) -> str:
-    """Cyrillic → English for CLAP encoding; Latin passes through. Callers
-    sit behind _clap_servable, so the translator is warm here."""
-    from translation import has_cyrillic
-    if not has_cyrillic(q):
-        return q
+    """Any language → English for CLAP encoding (English = identity pass).
+    Callers sit behind _clap_servable, so the translator is warm here."""
     import model_cache
     from routers.discovery import _translate_loader
     return model_cache.get_model("translate", _translate_loader).to_english(q)
@@ -1038,10 +1033,11 @@ def _bind_params(tools, active: dict) -> dict:
         elif tool.key == "lyrics":
             if _model_ready("lyrics"):
                 p["qlyr"] = _encode_lyrics(str(v)[:255])
-    # CLAP's text encoder is English-only — Cyrillic sound queries go through
-    # the local NLLB translator; until it's warm _clap_servable skips the
-    # source. Since the scope split, only the sound tool reaches CLAP, so the
-    # default names-scope path costs zero encodes and zero translation.
+    # CLAP's text encoder is English-only — every sound query goes through the
+    # local MADLAD translator (input language inferred by the model; English
+    # passes as identity, no detection heuristics to get wrong). Until the
+    # pair is warm _clap_servable skips the source. Only the sound tool
+    # reaches CLAP, so the default names-scope path costs zero encodes.
     qc = _clap_query(active)
     if qc and _clap_servable(active):
         p["qclap"] = _encode_clap(_to_english(qc))

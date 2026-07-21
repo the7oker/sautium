@@ -28,11 +28,15 @@ See:
 - **librosa** + CLAP zero-shot for audio feature extraction (no essentia)
 - **CLAP** (`laion/clap-htsat-unfused`) — 512-d audio embeddings
 - **BGE-M3** — 1024-d multilingual text embeddings (not sentence-transformers)
-- **NLLB-200-distilled-600M** — local Cyrillic→English query translation for
-  the English-only CLAP text encoder (`backend/translation.py`). Weights are
-  **CC-BY-NC 4.0**, BYO-downloaded from the official repo — fine for the
-  free donation-supported product; **swap for a clean-licensed model
-  (MADLAD-400 / OPUS-MT) before any commercial tier ships**
+- **MADLAD-400-3B-MT** (`google/madlad400-3b-mt`, **Apache 2.0**) — local
+  any-language→English query translation for the English-only CLAP text
+  encoder (`backend/translation.py`). No source-language detection: the
+  model infers the input language, only the `<2en>` target prefix is set;
+  every Sound-scope query translates (English = identity pass). BYO-
+  downloaded from the official repo (~12 GB one-time, ~6 GB VRAM bf16).
+  Replaced NLLB-600M 2026-07-18 — its CC-BY-NC license blocked
+  monetization and its Cyrillic-only trigger silently skipped
+  French/German/CJK queries
 - **anthropic SDK** for Claude API; Claude Code + MCP tools for the AI DJ
 - **libtorrent** for DHT (NOT pure-python `kademlia` — incompatible with BT DHT)
 - **CustomTkinter + PyInstaller** for the Windows desktop launcher

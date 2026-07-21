@@ -343,17 +343,18 @@ async def lifespan(app: FastAPI):
     # Sequential, search-critical first: loads serialize anyway on
     # model_cache._factory_lock (HF loading is not thread-safe across
     # concurrent from_pretrained calls), and chaining pins the order so
-    # NLLB's one-time 2.4GB download can never delay CLAP/BGE.
+    # MADLAD's one-time 12GB download can never delay CLAP/BGE.
     #
     # The set comes from the hardware profile: full warms everything,
-    # standard drops NLLB (it lazy-loads on the first Cyrillic Discovery
-    # query via kick_load), lite warms nothing — every model cold-loads on
-    # first use and Discovery serves its non-ML blocks meanwhile.
+    # standard drops MADLAD (it lazy-loads on the first Sound-scope
+    # Discovery query via kick_load), lite warms nothing — every model
+    # cold-loads on first use and Discovery serves its non-ML blocks
+    # meanwhile.
     _prewarm_factories = {
         "clap":       ("CLAP",       _clap_factory),
         "enrichment": ("BGE-M3",     _enrichment_factory),
         "lyrics":     ("Lyrics-BGE", _lyrics_factory),
-        "translate":  ("NLLB",       _translate_factory),
+        "translate":  ("MADLAD",     _translate_factory),
     }
 
     async def _prewarm_all():
