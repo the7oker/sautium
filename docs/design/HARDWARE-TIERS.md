@@ -378,6 +378,11 @@ cards, so the standard-tier VRAM floor deliberately stays at ≥5.5 GB until
     English phrase (guards irrelevant), so EN identity is guaranteed by
     construction instead of by model behavior. Verification protocol:
     uk/ru/fr/de/es/zh byte-identical to the bf16 reference; warm int8
-    latency 0.3-0.5s/query (bf16 GPU was 0.3-0.45s). Follow-up: publish
-    our converted int8 artifact (Apache 2.0 permits) so fresh nodes pull
-    ~3 GB instead of the 12 GB source.
+    latency 0.3-0.5s/query (bf16 GPU was 0.3-0.45s). Follow-up RESOLVED
+    same day without self-hosting: fresh nodes pull the prebuilt
+    `Nextcloud-AI/madlad400-3b-mt-ct2-int8` (~3 GB, tokenizer bundled,
+    Apache 2.0, revision-pinned; verified 6/6 byte-identical to our own
+    conversion) with local conversion from the BYO source as the
+    independence fallback. Mega.nz was evaluated and rejected as a
+    bootstrap source (encrypted links need a Mega client, per-IP transfer
+    quotas, not a CDN).

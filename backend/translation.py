@@ -38,6 +38,15 @@ logger = logging.getLogger(__name__)
 
 MODEL_ID = "google/madlad400-3b-mt"
 
+# Prebuilt int8 conversion (Apache 2.0, tokenizer bundled) — saves fresh
+# nodes the 12GB source download + 10-min local conversion. Maintained by
+# Nextcloud (ships MADLAD in their translate app). REVISION IS PINNED:
+# verified byte-identical to our own conversion on the multilingual
+# protocol (2026-07-21); a moving revision would let upstream silently
+# swap weights under every fresh node.
+CT2_REPO = "Nextcloud-AI/madlad400-3b-mt-ct2-int8"
+CT2_REVISION = "aa32bbdeba7880eff2096ec044cb155a340a9400"
+
 
 def _ct2_model_dir() -> Path:
     """Converted-model home, sibling of the HF hub cache so it rides the
@@ -48,18 +57,31 @@ def _ct2_model_dir() -> Path:
 
 
 def ensure_ct2_model() -> Path:
-    """Convert the HF checkpoint to CTranslate2 int8 once; idempotent.
+    """Locate (or produce) the CTranslate2 int8 model; idempotent.
 
-    Loads the source as fp16 (≈6GB transient RAM instead of 12GB fp32),
-    writes to a tmp dir and renames — a crashed conversion never leaves a
-    half-model that loads. The 12GB HF source stays cached (it is still
-    the upgrade/verification base); publishing our converted artifact so
-    fresh nodes skip it entirely is the follow-up documented in
-    HARDWARE-TIERS.
+    Resolution order:
+    1. A locally converted copy (nodes that predate the prebuilt source).
+    2. The pinned prebuilt artifact (~3GB incl. tokenizer) — the fresh-node
+       path: no 12GB source, no conversion.
+    3. Local conversion from the BYO HF source — the independence fallback
+       if the prebuilt repo ever disappears. Loads the source as fp16
+       (≈6GB transient RAM instead of 12GB fp32), writes to a tmp dir and
+       renames — a crashed conversion never leaves a half-model that loads.
     """
     out = _ct2_model_dir()
     if (out / "model.bin").exists():
         return out
+
+    try:
+        from huggingface_hub import snapshot_download
+        path = Path(snapshot_download(CT2_REPO, revision=CT2_REVISION))
+        logger.info(
+            f"Using prebuilt ct2 int8 model {CT2_REPO}@{CT2_REVISION[:8]}")
+        return path
+    except Exception as e:
+        logger.warning(
+            f"Prebuilt ct2 model unavailable ({e}) — converting locally")
+
     import ctranslate2.converters
 
     tmp = out.with_name(out.name + ".tmp")
@@ -95,7 +117,13 @@ class QueryTranslator:
         import ctranslate2
         model_dir = ensure_ct2_model()
         logger.info(f"Loading translation model {MODEL_ID} (ct2 int8, cpu)")
-        self.tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+        # The prebuilt artifact bundles the tokenizer (fresh nodes never
+        # touch the 12GB source repo); a locally converted dir doesn't —
+        # those nodes have the source cached anyway.
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
+        except Exception:
+            self.tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         self.translator = ctranslate2.Translator(
             str(model_dir), device="cpu", compute_type="int8",
             inter_threads=1,
