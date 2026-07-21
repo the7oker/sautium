@@ -2706,6 +2706,8 @@
 
   function defaultDiscoveryFilters() {
     return {
+      scope: 'names',    // search-in mode for the text box, NOT a filter:
+                         // names (lexical, default) | bio | sound | lyrics
       bpm_min: null, bpm_max: null,
       key: '',
       mode: 'any', vocalist: 'any', gender: 'any',
@@ -2715,6 +2717,28 @@
       artists: [],       // multi-select: artist UUIDs (typeahead adds)
       seed: false,       // similar-to-now-playing context (track id read at search time)
     };
+  }
+
+  // Placeholder + badge follow the search scope — the input must say which
+  // game is played BEFORE the user types: the default matches names, the AI
+  // modes want a description in words.
+  const DISCOVERY_SCOPE_UI = {
+    names:  { badge: '',            ph: 'Artist, album, track, or genre name…' },
+    bio:    { badge: 'Bios · AI',   ph: 'Describe an artist: female jazz vocalist from Nigeria…' },
+    sound:  { badge: 'Sound · AI',  ph: 'Describe the sound: dark ambient with rain…' },
+    lyrics: { badge: 'Lyrics · AI', ph: 'Themes or quotes: songs about the sea…' },
+  };
+
+  function updateSearchScopeUi(screen) {
+    const cfg = DISCOVERY_SCOPE_UI[(screen._filters || {}).scope]
+      || DISCOVERY_SCOPE_UI.names;
+    const input = screen.querySelector('#discoverySearchInput');
+    if (input) input.placeholder = cfg.ph;
+    const badge = screen.querySelector('#discoveryScopeBadge');
+    if (badge) {
+      badge.textContent = cfg.badge;
+      badge.hidden = !cfg.badge;
+    }
   }
 
   // True iff at least one filter dimension is set to a non-default
@@ -2776,8 +2800,9 @@
       <div class="search-wrap">
         ${SVG_SEARCH}
         <input type="search" id="discoverySearchInput"
-               placeholder="Artist, album, track, lyrics, or a mood…"
+               placeholder="Artist, album, track, or genre name…"
                autocomplete="off" autocapitalize="off" spellcheck="false">
+        <span class="search-scope-badge" id="discoveryScopeBadge" hidden></span>
       </div>
 
       <button class="adv-row" type="button" id="discoveryAdvToggle"
@@ -2787,6 +2812,16 @@
       </button>
 
       <div class="filters-panel" id="discoveryFiltersPanel" hidden>
+        <div class="filter-row">
+          <span class="filter-label">Search in</span>
+          <div class="filter-chips" data-filter-key="scope">
+            <span class="f-chip is-active" data-value="names">Names &amp; titles</span>
+            <span class="f-chip" data-value="bio">Artist bios · AI</span>
+            <span class="f-chip" data-value="sound">Sound · AI</span>
+            <span class="f-chip" data-value="lyrics">Lyrics · AI</span>
+          </div>
+        </div>
+
         <div class="filter-row">
           <span class="filter-label">Context</span>
           <div class="filter-chips">
@@ -2949,6 +2984,7 @@
             .forEach(c => c.classList.remove('is-active'));
           chip.classList.add('is-active');
           screen._filters[key] = chip.getAttribute('data-value');
+          if (key === 'scope') updateSearchScopeUi(screen);
         });
       });
     });
@@ -3006,6 +3042,7 @@
       if (seedName) seedName.textContent = '';
       if (bpmMin) bpmMin.value = '';
       if (bpmMax) bpmMax.value = '';
+      updateSearchScopeUi(screen);
     });
 
     // Apply: 1.5c-a is UI-only — re-running the search with active
@@ -3331,7 +3368,8 @@
         ? 'Tracks matching filters' : b.title;
     });
 
-    const completion = { remaining: DISCOVERY_BLOCKS.length, hadAnyResults: false };
+    const completion = { remaining: DISCOVERY_BLOCKS.length, hadAnyResults: false,
+                         warming: false };
 
     const filters = screen._filters || {};
     DISCOVERY_BLOCKS.forEach(b => {
@@ -3341,7 +3379,14 @@
       // whether it's reachable (a Gender-only browse yields artists only).
       const params = new URLSearchParams({ target: b.target,
                                             limit: String(DISCOVERY_FETCH_WINDOW) });
-      if (query) params.set('q', query);
+      if (query) {
+        params.set('q', query);
+        // scope routes q to one relevance tool server-side; names is the
+        // server default, only the AI modes need saying.
+        if (filters.scope && filters.scope !== 'names') {
+          params.set('scope', filters.scope);
+        }
+      }
       appendFilterParams(params, filters);
       fetch(DISCOVERY_SEARCH_URL + '?' + params)
         .then(r => r.ok ? r.json() : Promise.reject(r.status))
@@ -3352,6 +3397,7 @@
           // this exact query at a deeper offset.
           renderDiscoveryBlock(screen, b, data, params);
           if ((data.results || []).length > 0) completion.hadAnyResults = true;
+          if (data.warming) completion.warming = true;
         })
         .catch(err => {
           if (queryId !== getActiveId()) return;
@@ -3362,12 +3408,22 @@
           completion.remaining -= 1;
           if (completion.remaining === 0) {
             searching.hidden = true;
-            if (!completion.hadAnyResults) empty.hidden = false;
-            // Streaming supplement: text-only searches also ask the provider
+            if (!completion.hadAnyResults) {
+              // A bio-scope search has no tracks block to carry the per-block
+              // warming note — say it here instead of a false "No matches."
+              const emptyP = empty.querySelector('p');
+              if (emptyP) emptyP.textContent = completion.warming
+                ? 'AI model is warming up — search again in a minute.'
+                : 'No matches.';
+              empty.hidden = false;
+            }
+            // Streaming supplement: names-scope searches also ask the provider
             // (Deezer) — AFTER the local blocks settled, so the tail append
             // can't be wiped by a local render. Filters active → skip (the
-            // provider can't honour our gates).
-            if (query && !hasActiveFilters(filters)) {
+            // provider can't honour our gates); AI scopes → skip (Deezer
+            // matches names, not descriptions).
+            if (query && (filters.scope || 'names') === 'names'
+                && !hasActiveFilters(filters)) {
               fetchStreamingTail(screen, query, queryId, getActiveId,
                                  () => { empty.hidden = true; });
             }
@@ -3465,12 +3521,12 @@
     if (!blk || !body) return;
 
     const items = data.results || [];
-    // The engine gracefully skips cold vector models (kicking their load), so
-    // first-search-after-restart results are lexical-only. Surface that on the
-    // tracks block — the semantic channels are track-grain.
+    // Only the AI scopes depend on vector models; the engine cold-skips them
+    // (kicking their load) and the server flags warming. The default names
+    // scope never warms — this note can only appear in an AI mode.
     const warmingNote = (data.warming && descriptor.id === 'tracks')
-      ? '<p class="d-loading-notice">Semantic models are warming up — results are'
-        + ' name-matches only for now. Search again in a minute.</p>'
+      ? '<p class="d-loading-notice">AI model is warming up — search again'
+        + ' in a minute.</p>'
       : '';
     if (items.length === 0) {
       blk.hidden = !warmingNote;

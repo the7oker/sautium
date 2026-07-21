@@ -197,8 +197,12 @@ _SEED_SCORE = f"""1 - (
 
 
 TOOLS: dict[str, Tool] = {
-    # Multi-source relevance. Each source scored + normalized; the tool's
-    # contribution is GREATEST(norm over its sources) — name OR bio OR ….
+    # SCOPED text search (2026-07-18): the old mega-tool blended lexical +
+    # three vector channels on every keystroke — expensive (3 GPU encodes +
+    # segment KNN for a plain artist-name query) and unexplainable ("sade"
+    # pulled sad-lyrics tracks via BGE). The UI's "Search in" scope now maps
+    # q to exactly ONE relevance tool: text (names & titles, the default),
+    # bio, sound, or lyrics.
     "text": Tool("text", sources=(
         # Trigram retrieve predicates use the GIN-indexed `%` operator (its
         # pg_trgm.similarity_threshold default 0.3 == these sources' floor) +
@@ -215,12 +219,6 @@ TOOLS: dict[str, Tool] = {
                "CASE WHEN ana.alias_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
                targets=("artist",), floor=0.3, ceil=1.0, weight=1.0,
                retrieve="(ana.alias_latin % :ql OR ana.alias_latin LIKE :qlpfx)"),
-        # Vector floors/ceils calibrated 2026-07-02 from live distributions (probe:
-        # 8 characteristic queries): floor ≈ corpus p90 (noise → 0), ceil ≈ top-10
-        # mean (strong match → ~1). The old bio/lyrics ceils (0.85/0.75) sat ABOVE
-        # the best score either source can produce (top1 0.59/0.64) — both were mute.
-        Source("artist_bio", "artist_bio_embeddings", "1-(abe.vector <=> CAST(:qvec AS vector))",
-               targets=("artist",), floor=0.47, ceil=0.57, weight=0.7, model="enrichment"),
         Source("album_title", "albums",
                "GREATEST(similarity(al.title_latin,:ql), "
                "CASE WHEN al.title_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
@@ -235,33 +233,19 @@ TOOLS: dict[str, Tool] = {
                "CASE WHEN t.title_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
                targets=("track", "album", "artist"), floor=0.3, ceil=1.0, weight=1.0,
                retrieve="(t.title_latin % :ql OR t.title_latin LIKE :qlpfx)"),
-        # CLAP text→audio works against SEGMENTS (10s windows), not track means:
-        # normalized means collapse toward the corpus centroid — text-query
-        # cosines span ~0.05 across 37k tracks (top-370 tie within 0.002) and
-        # HNSW breaks down in that space. Retrieve = segment KNN (knn=), score =
-        # MAX over the track's segments (the two-tier rerank — catches tracks
-        # where the query sounds in one act only). Floors from the 2026-07-05
-        # segment-MAX probe: floor = corpus p90 (.42); ceil sits ABOVE the probe's
-        # max top-1 (.726) — in a dense space a top-10 ceil clamps dozens of rows
-        # into 1.00 ties and the order degrades to the alphabet.
-        Source("clap", "embedding_segments", "1-(es.vector <=> CAST(:qclap AS vector))",
-               targets=("track", "album", "artist", "genre"),   # characteristic: aggregates up
-               floor=0.42, ceil=0.74, weight=0.8, model="clap",
-               knn="es.vector <=> CAST(:qclap AS vector)"),
-        Source("lyrics_sem", "lyrics_embeddings", "1-(le.vector <=> CAST(:qlyr AS vector))",
-               targets=("track", "album", "artist", "genre"),
-               floor=0.47, ceil=0.62, weight=0.6, model="lyrics"),
-        # Genre identity: name + curated description (BGE-M3, same encoder/params
-        # as bio → same calibration) — "saxophone" reaches Jazz via its description.
+        # Genre lexical identity — "Trip-Hop" typed as a name lands here.
         Source("genre_name", "genres",
                "GREATEST(similarity(g.name,:ql), "
                "CASE WHEN lower(g.name) LIKE :qlpfx THEN 0.85 ELSE 0 END)",
                targets=("genre",), level="genre", floor=0.3, ceil=1.0, weight=1.0,
                retrieve="(g.name % :ql OR lower(g.name) LIKE :qlpfx)"),
-        Source("genre_desc", "genre_desc_embeddings", "1-(gde.vector <=> CAST(:qvec AS vector))",
-               targets=("genre",), level="genre", floor=0.47, ceil=0.57, weight=0.7,
-               model="enrichment"),
     )),
+    # "Artist bios · AI" scope: describe an artist in words. Floor/ceil
+    # calibrated 2026-07-02 (probe: floor ≈ corpus p90, ceil ≈ top-10 mean —
+    # the old 0.85 ceil sat above the source's best producible score, top1 .59).
+    "bio": Tool("bio", sources=(
+        Source("artist_bio", "artist_bio_embeddings", "1-(abe.vector <=> CAST(:qvec AS vector))",
+               targets=("artist",), floor=0.47, ceil=0.57, weight=1.0, model="enrichment"),)),
     # Binary gates (artist-level).
     "vocalist": Tool("vocalist", sources=(
         Source("vocalist", "artists", "a.is_vocalist = :vocalist", is_gate=True),)),
@@ -328,12 +312,23 @@ TOOLS: dict[str, Tool] = {
     "artist": Tool("artist", sources=(
         Source("artist_sel", "artists", "a.id = ANY(CAST(:artist_ids AS uuid[]))",
                is_gate=True),)),
-    # Semantic-only track relevance (no title): CLAP text→audio, lyrics text→lyrics.
+    # "Sound · AI" scope: describe the music in words. CLAP text→audio works
+    # against SEGMENTS (10s windows), not track means: normalized means collapse
+    # toward the corpus centroid (text-query cosines span ~0.05 across 37k
+    # tracks) and HNSW breaks down in that space. Retrieve = segment KNN (knn=),
+    # score = MAX over the track's segments. Floors from the 2026-07-05
+    # segment-MAX probe: floor = corpus p90 (.42); ceil ABOVE the probe's max
+    # top-1 (.726) — a dense space clamps dozens of rows into 1.00 ties
+    # otherwise. genre_desc rides along (BGE, own :qgdesc param): a curated
+    # genre description IS a music description — "saxophone" reaches Jazz.
     "sound": Tool("sound", sources=(
         Source("sound", "embedding_segments", "1-(es.vector <=> CAST(:qclap AS vector))",
                targets=("track", "album", "artist", "genre"),
                floor=0.42, ceil=0.74, weight=1.0, model="clap",
-               knn="es.vector <=> CAST(:qclap AS vector)"),)),
+               knn="es.vector <=> CAST(:qclap AS vector)"),
+        Source("genre_desc", "genre_desc_embeddings", "1-(gde.vector <=> CAST(:qgdesc AS vector))",
+               targets=("genre",), level="genre", floor=0.47, ceil=0.57, weight=0.7,
+               model="enrichment"),)),
     "lyrics": Tool("lyrics", sources=(
         Source("lyrics", "lyrics_embeddings", "1-(le.vector <=> CAST(:qlyr AS vector))",
                targets=("track", "album", "artist", "genre"),
@@ -940,14 +935,12 @@ def _encode_lyrics(q: str) -> str:
 
 
 def _clap_query(active: dict) -> str:
-    """The effective CLAP text — sound owns the shared qclap channel over text.
+    """The effective CLAP text — only the sound tool carries a CLAP source
+    since the search-scope split (the lexical text tool never encodes).
     Mirrors build()'s tool-activation predicate so the bind side never encodes
     for a tool the SQL side dropped."""
-    for k in ("sound", "text"):
-        v = active.get(k)
-        if v not in (None, "", "any", []):
-            return str(v)[:255]
-    return ""
+    v = active.get("sound")
+    return str(v)[:255] if v not in (None, "", "any", []) else ""
 
 
 def _clap_servable(active: dict) -> bool:
@@ -997,14 +990,17 @@ def _bind_params(tools, active: dict) -> dict:
         if v in (None, "", "any", []):
             continue
         if tool.key == "text":
+            # Lexical scope only since the search-scope split — no vector params.
             q = str(v)[:255]
             ql = (latinize(q) or q)[:255]
             p["q"] = q
             p["ql"], p["qlpfx"] = ql, ql + "%"
+        elif tool.key == "bio":
             if _model_ready("enrichment"):
-                p["qvec"] = _encode_bge(q)   # bio source (BGE-M3, multilingual) — only if warm
-            if _model_ready("lyrics"):
-                p["qlyr"] = _encode_lyrics(q)  # lyrics source (BGE-M3, multilingual)
+                p["qvec"] = _encode_bge(str(v)[:255])   # BGE-M3, multilingual
+        elif tool.key == "sound":
+            if _model_ready("enrichment"):
+                p["qgdesc"] = _encode_bge(str(v)[:255])  # genre_desc side-channel
         elif tool.key in ("gender", "vocalist", "key", "mode"):
             p[tool.key] = v
         elif tool.key == "bpm":
@@ -1042,9 +1038,10 @@ def _bind_params(tools, active: dict) -> dict:
         elif tool.key == "lyrics":
             if _model_ready("lyrics"):
                 p["qlyr"] = _encode_lyrics(str(v)[:255])
-    # qclap is one channel shared by the text and sound tools (sound wins).
-    # CLAP's text encoder is English-only — Cyrillic queries go through the
-    # local NLLB translator; until it's warm _clap_servable skips the source.
+    # CLAP's text encoder is English-only — Cyrillic sound queries go through
+    # the local NLLB translator; until it's warm _clap_servable skips the
+    # source. Since the scope split, only the sound tool reaches CLAP, so the
+    # default names-scope path costs zero encodes and zero translation.
     qc = _clap_query(active)
     if qc and _clap_servable(active):
         p["qclap"] = _encode_clap(_to_english(qc))

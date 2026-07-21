@@ -486,12 +486,13 @@ finding albums by criteria, checking listening history, getting artist bios.
 similar tracks (CLAP audio embeddings), optionally narrowed by hard filters in the SAME query — \
 "more like this but instrumental", "similar + only Trip-Hop". track_id is media_files.id (integer).
 - **search_semantic(query, limit, vocalist, gender, genres, instruments, bpm_min, bpm_max, corpus)**: \
-Composite natural-language search — ONE query blends title/sound/lyrics/bio relevance AND hard filters \
-("romantic saxophone" + gender='female' + instruments=['saxophone']). Prefer it over chaining tools.
+Search tracks by a SOUND description (CLAP text→audio) AND hard filters in one query \
+("romantic saxophone" + gender='female' + instruments=['saxophone']). NOT a name search — \
+use search_tracks for names/titles.
 - **search_lyrics(query, limit)**: Search tracks by lyrics content ("songs about love", "rain and sadness"). \
 Uses AI embeddings of lyrics text.
-- **search_artists(query, limit)**: Search artists by name (any script) or biography description \
-("British rock band from the 70s", "female jazz vocalist", "мадонна").
+- **search_artists(query, limit, by_bio)**: Search artists by name (any script; default) or with \
+by_bio=true by biography description ("British rock band from the 70s", "female jazz vocalist").
 - **search_albums(query, limit)**: Search albums by title. Returns albums with artist/year.
 - **search_genres(query, limit)**: Search genres by name or description ("heavy distorted guitars", \
 "African rhythms"). Returns genres with owned-album counts.

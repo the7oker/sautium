@@ -515,15 +515,18 @@ def search_semantic(
     bpm_max: float | None = None,
     corpus: str = "owned",
 ) -> str:
-    """Search tracks by natural language, optionally with hard filters — ONE
-    composite discovery-engine query (the same engine as the Web UI search).
+    """Search tracks by a SOUND description (CLAP text→audio), optionally with
+    hard filters — one discovery-engine query (the same engine as the Web UI's
+    "Sound · AI" scope).
 
-    The text blends title match, CLAP text→audio sound similarity, lyrics
-    semantics and artist-bio signals; every filter is AND-composed. Example:
-    query='romantic saxophone', gender='female', vocalist='vocal'.
+    The query describes how the music SOUNDS ("dark ambient with rain",
+    "energetic rock with guitar solos") — it is NOT a name/title search (use
+    search_tracks for names) and NOT a lyrics search (use search_lyrics).
+    Every filter is AND-composed. Example: query='romantic saxophone',
+    gender='female', vocalist='vocal'.
 
     Args:
-        query: Natural language description or name ("energetic rock", "calm piano")
+        query: Natural language SOUND description ("energetic rock", "calm piano")
         limit: Maximum number of results (default 15)
         vocalist: 'vocal' | 'instrumental' (optional)
         gender: 'male' | 'female' | 'mixed' (optional)
@@ -534,7 +537,7 @@ def search_semantic(
         corpus: 'owned' (default, playable files) | 'all' (adds phantom discography)
     """
     try:
-        rows = _discovery("track", q=query, limit=limit, vocalist=vocalist,
+        rows = _discovery("track", sound=query, limit=limit, vocalist=vocalist,
                           gender=gender, genres=genres, instruments=instruments,
                           bpm_min=bpm_min, bpm_max=bpm_max, corpus=corpus)
         return _format_track_list(rows, f"Semantic search for '{query}' ({len(rows)} results):")
@@ -568,18 +571,22 @@ def search_lyrics(query: str, limit: int = 15) -> str:
 
 
 @mcp.tool()
-def search_artists(query: str, limit: int = 10) -> str:
-    """Search artists by biography/background. Returns artists, not tracks.
+def search_artists(query: str, limit: int = 10, by_bio: bool = False) -> str:
+    """Search artists by NAME (default) or by biography description. Returns
+    artists, not tracks.
 
-    Use for queries about artist origin, style, era, or background.
-    E.g. 'British rock band from the 70s', 'female jazz vocalist', 'German electronic producer'.
+    by_bio=False: fuzzy name/alias match — 'Madonna', 'мадонна', 'Floex'.
+    by_bio=True: AI search in biographies — 'British rock band from the 70s',
+    'female jazz vocalist', 'German electronic producer'.
 
     Args:
-        query: Description to search for in artist biographies
+        query: Artist name, or (with by_bio=True) a description of the artist
         limit: Maximum number of artists (default 10)
+        by_bio: Search biographies instead of names (default False)
     """
     try:
-        rows = _discovery("artist", q=query, limit=limit)
+        params = {"scope": "bio"} if by_bio else {}
+        rows = _discovery("artist", q=query, limit=limit, **params)
         lines = [f"Artist search for '{query}' ({len(rows)} results):"]
         for r in rows:
             tags = []

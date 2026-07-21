@@ -2689,8 +2689,20 @@ body.has-miniplayer .ai-fab {
   border: 1px solid var(--color-divider);
   border-radius: calc(8 * var(--px));
   display: grid;
-  grid-template-columns: calc(40 * var(--px)) 1fr;
+  grid-template-columns: calc(40 * var(--px)) 1fr auto;
   align-items: center;
+}
+/* Non-default search scope indicator — the AI modes must be visible at the
+   input, or a forgotten scope reads as broken search. */
+.discovery-screen .search-scope-badge {
+  margin-right: calc(10 * var(--px));
+  padding: calc(3 * var(--px)) calc(8 * var(--px));
+  font-size: calc(11 * var(--px));
+  line-height: 1.2;
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-divider);
+  border-radius: calc(999 * var(--px));
+  white-space: nowrap;
 }
 .discovery-screen .search-wrap svg {
   margin-left: calc(12 * var(--px));

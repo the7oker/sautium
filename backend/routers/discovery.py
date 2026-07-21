@@ -277,6 +277,7 @@ def instrument_options(q: str = Query("", max_length=50), limit: int = Query(8, 
 def discovery_search(
     target: str = Query(..., pattern="^(artist|album|track|genre)$"),
     q: Optional[str] = Query(None),
+    scope: str = Query("names", pattern="^(names|bio|sound|lyrics)$"),
     sound: Optional[str] = Query(None),   # semantic-only channels (MCP/AI-chat):
     lyrics: Optional[str] = Query(None),  # CLAP text→audio / lyrics vectors, no lexical arm
     limit: int = Query(10, ge=1, le=30),
@@ -315,8 +316,10 @@ def discovery_search(
 
     active: dict = {}
     if q and q.strip():
-        active["text"] = q.strip()[:255]
-    if sound and sound.strip():
+        # `scope` routes q to exactly ONE relevance tool: names (lexical
+        # trigram, the default — zero model deps), bio, sound, or lyrics.
+        active["text" if scope == "names" else scope] = q.strip()[:255]
+    if sound and sound.strip():          # explicit MCP params override the scope
         active["sound"] = sound.strip()[:255]
     if lyrics and lyrics.strip():
         active["lyrics"] = lyrics.strip()[:255]
@@ -326,12 +329,18 @@ def discovery_search(
         active["artist"] = artists
     active.update(_engine_filters(bpm_min, bpm_max, key, mode, vocalist,
                                   gender, danceable, energy, instruments, genres))
-    needed = {"clap", "lyrics", "enrichment"}
-    from translation import has_cyrillic
-    if has_cyrillic(str(active.get("sound") or active.get("text") or "")):
-        needed.add("translate")   # English-only CLAP needs the translator warm
-    warming = any(k in active for k in ("text", "sound", "lyrics")) and not all(
-        model_cache.is_loaded(k) for k in needed)
+    # Warming is scope-aware: the default names scope needs no model at all.
+    needed: set = set()
+    if "bio" in active:
+        needed.add("enrichment")
+    if "sound" in active:
+        needed |= {"clap", "enrichment"}   # enrichment serves genre_desc
+        from translation import has_cyrillic
+        if has_cyrillic(str(active["sound"])):
+            needed.add("translate")   # English-only CLAP needs the translator warm
+    if "lyrics" in active:
+        needed.add("lyrics")
+    warming = bool(needed) and not all(model_cache.is_loaded(k) for k in needed)
     if not active:
         return {"status": "ok", "results": [], "warming": warming, "next_cursor": None}
 
