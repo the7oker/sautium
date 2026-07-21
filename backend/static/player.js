@@ -307,7 +307,10 @@
           // in a frozen tab): `advanced` returns the refreshed tail —
           // including radio refills — and `ended` past the local tail
           // returns the next load directive.
-          if (resp.queue) this.playlist = resp.queue;
+          if (resp.queue) {
+            this.playlist = resp.queue;
+            this._relocate();
+          }
           if (resp.directive) this._onDirective(resp.directive);
         })
         .catch(() => {});
@@ -462,6 +465,25 @@
       return true;
     },
 
+    _relocate() {
+      // Queue mutations renumber the slots (removing a track before the
+      // playing one shifts everything down) — re-find OUR track in the
+      // fresh tail by media identity, closest slot wins.
+      if (this.queueIndex === null || !this.currentMediaId) return;
+      const at = this.playlist.find((e) => e.queue_index === this.queueIndex);
+      if (at && at.media === this.currentMediaId) return;
+      let best = null;
+      for (const e of this.playlist) {
+        if (e.media === this.currentMediaId
+            && (best === null
+                || Math.abs(e.queue_index - this.queueIndex)
+                   < Math.abs(best - this.queueIndex))) {
+          best = e.queue_index;
+        }
+      }
+      if (best !== null) this.queueIndex = best;
+    },
+
     _entryAfter(index) {
       if (index === null || !this.playlist.length) return null;
       const i = this.playlist.findIndex((e) => e.queue_index === index);
@@ -552,6 +574,7 @@
           break;
         case 'queue':
           this.playlist = d.queue || [];
+          this._relocate();
           this._prefetchNext();
           break;
         case 'play':   this._tryPlay(); break;

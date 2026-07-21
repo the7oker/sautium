@@ -49,6 +49,7 @@ class BrowserBackend(PlayerBackend):
         self._grace_timer: Optional[threading.Timer] = None
 
         self._index = 0                # 1-based canonical slot
+        self._current_ident: Optional[str] = None   # media identity of that slot
         self._state = "stopped"
         self._position = 0.0
         self._length = 0.0
@@ -183,6 +184,7 @@ class BrowserBackend(PlayerBackend):
             # event carries it, so a lost `advanced` POST self-heals here.
             self._index = int(queue_index)
             item = self._queue.item_at(self._index)
+            self._current_ident = self._item_ident(item) if item else None
             self._length = (item.duration_seconds or 0.0) if item else 0.0
             self._position = 0.0
         if position is not None:
@@ -227,6 +229,7 @@ class BrowserBackend(PlayerBackend):
             self._emit_now()
             return None
         self._index = nxt_index
+        self._current_ident = self._item_ident(item)
         self._position = 0.0
         self._length = item.duration_seconds or 0.0
         self._epoch += 1
@@ -316,6 +319,7 @@ class BrowserBackend(PlayerBackend):
                            item.artist, item.title)
             return self._start_at(index + 1, play=play)
         self._index = index
+        self._current_ident = self._item_ident(item)
         self._position = 0.0
         self._length = item.duration_seconds or 0.0
         if self._channel is None:
@@ -400,17 +404,35 @@ class BrowserBackend(PlayerBackend):
             else:
                 self.stop()
             return
-        # Re-locate the current slot by item identity after mutations.
-        current = self._queue.item_at(self._index)
-        if current is None and self._state != "stopped":
-            snapshot_len = len(self._queue)
-            if snapshot_len:
-                self._start_at(min(self._index, snapshot_len), play=self._state == "playing")
+        # Re-locate the current slot by MEDIA IDENTITY, not by number —
+        # removing/reordering a track before the playing one shifts every
+        # index (the DLNA backend does the same by URL). Closest match wins
+        # so a duplicate of the playing track elsewhere in the queue can't
+        # drag the slot to the wrong copy.
+        snapshot = self._queue.snapshot()
+        best = None
+        if self._current_ident is not None:
+            for i, it in enumerate(snapshot, start=1):
+                if self._item_ident(it) == self._current_ident:
+                    if best is None or abs(i - self._index) < abs(best - self._index):
+                        best = i
+        if best is not None:
+            if best != self._index:
+                self._index = best
+                self._emit_now()
+            # Keep the renderer's local tail in step with mutations (its
+            # entries carry the new numbering; the tab re-locates itself
+            # by media identity too).
+            self._push({"cmd": "queue", "queue": self._queue_tail(self._index)})
+            return
+        # The playing item itself is gone from the queue.
+        if self._state != "stopped":
+            if snapshot:
+                self._start_at(min(self._index, len(snapshot)),
+                               play=self._state == "playing")
             else:
                 self.stop()
             return
-        # Keep the renderer's local tail in step with mutations (append,
-        # remove, reorder) so background advancement walks the real queue.
         self._push({"cmd": "queue", "queue": self._queue_tail(self._index)})
 
     # -- status --------------------------------------------------------------------------

@@ -341,7 +341,29 @@ class HqpBackend(PlayerBackend):
     # -- lifecycle -------------------------------------------------------------
 
     def start(self) -> None:
-        self._adopt_hqp_playlist()
+        adopted = self._adopt_hqp_playlist()
+        if not adopted and len(self._queue):
+            # Output switch with a live queue (§2.6): HQPlayer becomes the
+            # mirror of the canonical queue — replace, no autoplay, the
+            # user presses play. Without this the switch left HQPlayer's
+            # playlist empty and the play button dead. Skipped only while
+            # HQPlayer is actively PLAYING/PAUSED (a backend restart
+            # mid-listening — clearing would cut live audio); a stopped
+            # HQPlayer gets the replace even if it holds a stale playlist.
+            try:
+                with _hqp_status_lock:
+                    st = _get_hqp_status().get_status()
+                hqp_busy = st is not None and st.state in (
+                    PlaybackState.PLAYING, PlaybackState.PAUSED)
+            except Exception:
+                hqp_busy = False
+            if not hqp_busy:
+                try:
+                    added = self.queue_replace(self._queue.snapshot(), play=False)
+                    logger.info("mirrored %d canonical tracks into HQPlayer "
+                                "on attach", added)
+                except Exception as e:
+                    logger.warning("canonical mirror on attach failed: %s", e)
         self._running = True
         self._thread = threading.Thread(target=self._poll_loop, daemon=True,
                                         name="hqp-status-poller")
@@ -385,6 +407,8 @@ class HqpBackend(PlayerBackend):
             self._queue.replace(items)
             logger.info("adopted %d tracks from the running HQPlayer playlist",
                         len(items))
+            return True
+        return False
 
     # -- status poll loop ------------------------------------------------------------
 

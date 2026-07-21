@@ -184,7 +184,15 @@ class PlaybackManager:
             self.activate("browser")
         elif otype == "hqplayer":
             if _hqp_configured():
-                self.activate("hqplayer")
+                # Restore BEFORE activate: with a non-empty canonical queue
+                # the attach mirrors it into an idle HQPlayer, while a
+                # still-playing HQPlayer keeps its playlist (adopt/mirror
+                # both step aside — see HqpBackend.start).
+                self._restore_persisted_queue()
+                try:
+                    self.activate("hqplayer")
+                except Exception as e:
+                    logger.error("HQPlayer output activation failed: %s", e)
             else:
                 logger.info("output=hqplayer but no endpoint configured — idle")
         else:
