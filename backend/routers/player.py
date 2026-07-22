@@ -1240,21 +1240,48 @@ def _phantom_lead_seconds(rtf: float, queries) -> float:
 
 
 def _phantom_filler(proxy, tokens: list, start_index: int, gen: int) -> None:
-    """Rolling-append the rest of a phantom album as each track finishes
+    """Rolling-append the rest of a phantom set as each track finishes
     fetching, in order — the backend only ever receives a ready buffer.
-    Stops the instant another playback session starts (the generation moved on)."""
+    Waits are UNBOUNDED: the fetch pipeline is globally sequential, so a
+    token's turn can be tens of minutes away behind other queued albums —
+    "not fetched yet" is not an error (a per-track timeout here silently
+    dropped every track whose turn hadn't come, so a queued album arrived
+    as just its last few tracks). A track is skipped only when its fetch
+    actually failed; a replaced session wakes every waiter (superseded)
+    and the generation guard stops the filler."""
     for j in range(start_index, len(tokens)):
         try:
-            e = proxy.wait_ready(tokens[j])
-        except (TimeoutError, KeyError):
-            continue   # a track that never fetched — skip it, keep the album going
-        if e is None or e.audio is None:
-            continue
+            e = proxy.wait_ready(tokens[j], timeout=None)
+        except KeyError:
+            return   # set dropped: a new session replaced these tokens
+        if e.audio is None:
+            continue   # fetch failed on every provider (or superseded) — skip
         item = queue_mod.item_for_proxy_token(tokens[j])
         if item is None:
             continue
         if _filler_append(item, gen) is None:
             return   # user moved to another queue → stop appending
+
+
+def _phantom_insert_next(proxy, tokens: list, gen: int) -> None:
+    """Wait for EVERY queued token (unbounded, same rationale as the filler),
+    then seamless-insert the whole block after the playing slot — 'next'
+    needs the block in hand, and on a backlogged channel readiness is far
+    away, so this runs off the request thread. The generation guard inside
+    append() discards the block if the queue was replaced meanwhile."""
+    ready_items = []
+    for tok in tokens:
+        try:
+            e = proxy.wait_ready(tok, timeout=None)
+        except KeyError:
+            return   # set dropped: a new session replaced these tokens
+        if e.audio is None:
+            continue
+        item = queue_mod.item_for_proxy_token(tok)
+        if item is not None:
+            ready_items.append(item)
+    if ready_items:
+        manager.append(ready_items, "next", generation=gen)
 
 
 def _parallel_resolve(provider, queries: list) -> list:
@@ -1635,7 +1662,11 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
 
 @router.post("/queue-phantom-track")
 def queue_phantom_track(req: PlayPhantomTrackRequest):
-    """Append one phantom track to the HQPlayer queue (streamed, no replace)."""
+    """Append one phantom track to the HQPlayer queue (streamed, no replace).
+    Same async model as the album endpoint: the response reports the resolve
+    outcome, and the track rolls into the queue when its (sequential, possibly
+    backlogged) fetch turn completes — an in-request wait here timed out and
+    502'd whenever other albums were still fetching ahead of it."""
     from streaming import service as streaming_service
     if not streaming_service.is_enabled():
         raise HTTPException(status_code=503, detail="Streaming preview is disabled")
@@ -1643,33 +1674,25 @@ def queue_phantom_track(req: PlayPhantomTrackRequest):
     q = _phantom_track_query(req.track_id)
     if q is None:
         raise HTTPException(status_code=404, detail="Phantom track not found")
-    missing = [{"track_id": req.track_id, "title": q.title}]
     chain = _resolve_waterfall([q])[0]        # Deezer lossless first, YouTube fallback
     if not chain:
-        return {"ok": True, "provider": None,
-                "track_count": 0, "requested": 1, "missing": missing}
+        return {"ok": True, "provider": None, "track_count": 0, "requested": 1,
+                "missing": [{"track_id": req.track_id, "title": q.title}]}
 
+    if manager.active is None:
+        raise HTTPException(status_code=503,
+                            detail="No active playback output — select one and try again.")
     proxy = streaming_service.get_proxy()
     tokens = proxy.add_tracks([(q, chain)])
-    try:
-        e = proxy.wait_ready(tokens[0])
-    except (TimeoutError, KeyError):
-        e = None
-    if e is None or e.audio is None:
-        raise HTTPException(status_code=502, detail="This track isn't available to stream right now.")
-
-    try:
-        item = queue_mod.item_for_proxy_token(tokens[0])
-        added = (manager.append([item], req.position) or 0) if item else 0
-        if not added:
-            raise HTTPException(status_code=503,
-                                detail="The playback output did not accept the tracks — try again.")
-        return {"ok": True, "provider": e.provider.manifest.id, "track_count": 1,
-                "requested": 1, "missing": []}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+    gen = manager.queue.generation
+    if req.position == "next":
+        threading.Thread(target=_phantom_insert_next, args=(proxy, list(tokens), gen),
+                         daemon=True, name="phantom-queue-next").start()
+    else:
+        threading.Thread(target=_phantom_filler, args=(proxy, list(tokens), 0, gen),
+                         daemon=True, name="phantom-queue").start()
+    return {"ok": True, "provider": chain[0][0].manifest.id, "track_count": 1,
+            "requested": 1, "missing": []}
 
 
 @router.post("/queue-phantom-album")
@@ -1696,42 +1719,26 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
                 "requested": len(queries), "missing": missing_payload}
 
     avail_q = [q for q, _ch in items]
-    tokens = proxy.add_tracks(items)
-    if req.position == "next":
-        # Inserting after current needs the whole block in hand, so wait for the
-        # available tracks (the UI shows buffering), then seamless-insert them.
-        ready_items = []
-        for tok in tokens:
-            try:
-                e = proxy.wait_ready(tok)
-            except (TimeoutError, KeyError):
-                e = None
-            if e is not None and e.audio is not None:
-                item = queue_mod.item_for_proxy_token(tok)
-                if item is not None:
-                    ready_items.append(item)
-        if not ready_items:
-            raise HTTPException(status_code=502, detail="No tracks could be fetched from the provider")
-        added = manager.append(ready_items, "next") or 0
-        if not added:
-            raise HTTPException(status_code=503,
-                                detail="The playback output did not accept the preview — try again.")
-        return {"ok": True, "provider": _provider_label(items), "track_count": added,
-                "requested": len(queries), "missing": missing_payload}
-    # 'end' → roll each available track into the back of the queue as it lands.
-    # The filler runs in the background, so fail loudly NOW if no output is
-    # active — otherwise we'd return ok and silently drop everything. (This
-    # used to probe HQPlayer directly — a pre-refactor leftover that 503'd
-    # every DLNA/local/browser node even though their canonical append
-    # cannot be "unreachable".)
+    # Both positions roll in from a background worker — fetching is sequential
+    # and possibly backlogged behind earlier albums, so readiness can be far
+    # away. Fail loudly NOW if no output is active — otherwise we'd return ok
+    # and silently drop everything. (This used to probe HQPlayer directly — a
+    # pre-refactor leftover that 503'd every DLNA/local/browser node even
+    # though their canonical append cannot be "unreachable".)
     if manager.active is None:
         raise HTTPException(status_code=503,
                             detail="No active playback output — select one and try again.")
+    tokens = proxy.add_tracks(items)
     # A queue-append doesn't start a new session, so capture the CURRENT
-    # generation; the filler aborts if the user replaces the queue meanwhile.
+    # generation; the workers abort if the user replaces the queue meanwhile.
     gen = manager.queue.generation
-    threading.Thread(target=_phantom_filler, args=(proxy, list(tokens), 0, gen),
-                     daemon=True, name="phantom-queue").start()
+    if req.position == "next":
+        threading.Thread(target=_phantom_insert_next, args=(proxy, list(tokens), gen),
+                         daemon=True, name="phantom-queue-next").start()
+    else:
+        # 'end' → roll each available track into the back of the queue as it lands.
+        threading.Thread(target=_phantom_filler, args=(proxy, list(tokens), 0, gen),
+                         daemon=True, name="phantom-queue").start()
     return {"ok": True, "provider": _provider_label(items),
             "track_count": len(avail_q), "requested": len(queries),
             "missing": missing_payload}

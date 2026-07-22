@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 _SCROBBLE_MIN_SECONDS = 240  # Last.fm: scrobble after >50% OR >4 min, whichever first
 
 _play_session: "Optional[_PlaySession]" = None
-_play_track_index: Optional[int] = None
 _scrobbler = None
 _scrobbler_init = False
 
@@ -203,43 +202,55 @@ def _save_play_session(s: "_PlaySession") -> None:
 
 
 def track_play_event(state_name: str, position: float, length: float,
-                     track_index, item) -> None:
+                     item) -> None:
     """Advance listening-history / scrobble state from one status tick. Mirrors
     the retired daemon's _handle_event, but resolves identity from the
     canonical queue item (source-agnostic) — so phantom previews are tracked
     too. Runs on the active backend's status thread, outside its locks;
-    DB writes go through the autocommit pool, Last.fm calls are fired async."""
-    global _play_session, _play_track_index
+    DB writes go through the autocommit pool, Last.fm calls are fired async.
+
+    Sessions are keyed on the item's track UUID, NOT its queue slot: queue
+    mutations shift every slot (a removal ahead of the playing track moves it
+    down one) while the LISTEN doesn't change — slot-keyed sessions were
+    closed+reopened on every shift, spraying a phantom play + scrobble per
+    removal. A tick whose slot resolves to no item (mid-mutation, the
+    backend's index momentarily stale) carries no identity: it only advances
+    the current session and must never close it. The same track re-starting
+    from the top (repeat-one, a duplicate slot, a deliberate replay) IS a new
+    listen — detected by the position falling back to the start."""
+    global _play_session
 
     if state_name != "playing":
         if _play_session is not None:
             _save_play_session(_play_session)
             _play_session = None
-            _play_track_index = None
         return
 
-    if track_index != _play_track_index:
+    ident = _play_identity(item)
+    if ident is None:
+        if _play_session is not None:
+            _play_session.update_position(position)
+        return
+
+    same_track = (_play_session is not None
+                  and ident["track_id"] == _play_session.track_id)
+    restarted = (same_track and position < 5.0
+                 and _play_session.max_position > 30.0)
+    if not same_track or restarted:
         if _play_session is not None:
             _save_play_session(_play_session)
-        ident = _play_identity(item)
-        if ident is None:
-            _play_session = None
-            _play_track_index = track_index
-            return
         _play_session = _PlaySession(ident, datetime.now(), length)
-        _play_track_index = track_index
         _scrobble_async(
             "update_now_playing", artist=ident["artist"] or "",
             title=ident["title"] or "", album=ident.get("album"),
             duration=int(ident["duration"]) if ident.get("duration") else None)
 
-    if _play_session is not None:
-        _play_session.update_position(position)
-        if (not _play_session.scrobbled and _play_session.scrobble_ready
-                and _scrobbling_enabled()):
-            _scrobble_async(
-                "scrobble", artist=_play_session.artist, title=_play_session.title,
-                timestamp=int(_play_session.started_at.timestamp()),
-                album=_play_session.album,
-                duration=int(_play_session.duration) if _play_session.duration else None)
-            _play_session.scrobbled = True
+    _play_session.update_position(position)
+    if (not _play_session.scrobbled and _play_session.scrobble_ready
+            and _scrobbling_enabled()):
+        _scrobble_async(
+            "scrobble", artist=_play_session.artist, title=_play_session.title,
+            timestamp=int(_play_session.started_at.timestamp()),
+            album=_play_session.album,
+            duration=int(_play_session.duration) if _play_session.duration else None)
+        _play_session.scrobbled = True

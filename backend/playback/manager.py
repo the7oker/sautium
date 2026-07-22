@@ -338,7 +338,7 @@ class PlaybackManager:
         # streamed phantom items both carry the track UUID). Separate from the
         # session/Home-shelf archival below — that snapshots the whole queue,
         # this records each play.
-        tracker.track_play_event(new_data["state"], s.position, s.length, idx, item)
+        tracker.track_play_event(new_data["state"], s.position, s.length, item)
 
         # Natural end-of-queue: the player stopped on the last track. Archive
         # the active session so a fully-listened album/queue lands in history

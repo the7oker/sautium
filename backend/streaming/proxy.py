@@ -29,6 +29,8 @@ from .events import preview_events
 
 logger = logging.getLogger(__name__)
 
+_UNSET_TIMEOUT = object()   # wait_ready sentinel: "use the proxy default"
+
 @dataclass
 class _FileEntry:
     """Disk-backed serving (owned tracks for DLNA renderers): the proxy
@@ -168,6 +170,12 @@ class MediaProxy:
         ``(provider, source_id)`` (see _Entry). Returns the per-track tokens; build
         URLs with ``url_for``."""
         with self._lock:
+            for e in self._entries.values():
+                if not e.ready.is_set():
+                    # Wake every waiter on the dropped set (fillers block
+                    # unbounded) — "superseded" is an event, not a timeout.
+                    e.error = "superseded by a new preview session"
+                    e.ready.set()
             self._entries.clear()
             self._fetch_q.clear()        # drop the previous session's pending fetches
             self._session = []
@@ -276,11 +284,15 @@ class MediaProxy:
                 "track_id": e.query.track_id, "cover_url": e.query.cover_url,
                 "duration": e.query.duration, "media_file_id": e.query.media_file_id}
 
-    def wait_ready(self, token: str, timeout: Optional[float] = None) -> _Entry:
+    def wait_ready(self, token: str, timeout=_UNSET_TIMEOUT) -> _Entry:
         """Block until a track is fetched (used by the endpoint to absorb the
-        first track's startup latency before telling HQPlayer to play)."""
-        return self._ensure_ready(token, timeout if timeout is not None
-                                  else self._prepare_timeout)
+        first track's startup latency before telling HQPlayer to play).
+        ``timeout=None`` waits indefinitely — safe because every enqueued token
+        reaches a terminal ready (fetch success, fetch failure, or the
+        superseded wake-up when a new session drops the set)."""
+        if timeout is _UNSET_TIMEOUT:
+            timeout = self._prepare_timeout
+        return self._ensure_ready(token, timeout)
 
     # ---- preparation -----------------------------------------------------
     def _prefetch(self, token: str) -> None:
@@ -349,7 +361,7 @@ class MediaProxy:
         with self._lock:
             return self._entries.get(token)
 
-    def _ensure_ready(self, token: str, timeout: float) -> _Entry:
+    def _ensure_ready(self, token: str, timeout: Optional[float]) -> _Entry:
         with self._lock:
             e = self._entries.get(token)
         if e is None:
