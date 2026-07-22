@@ -21,7 +21,7 @@ import threading
 from dataclasses import asdict
 from typing import Callable, Optional
 
-from config import ui_build
+from config import settings, ui_build
 from hqplayer_client import format_time
 
 from playback import sessions, tracker
@@ -29,6 +29,9 @@ from playback.base import PlaybackStatus, PlayerBackend, ReorderPlan
 from playback.queue import CanonicalQueue, QueueItem, resolved_artwork
 
 logger = logging.getLogger(__name__)
+
+_PREVIEW_AHEAD = 4    # slots past the playing one kept fetched (gapless horizon)
+_PREVIEW_BEHIND = 1   # instant "previous"
 
 
 class PlaybackManager:
@@ -53,6 +56,7 @@ class PlaybackManager:
         self._sse_clients_lock = threading.Lock()
         self._observers: list[Callable] = []
         self._persist_timer: Optional[threading.Timer] = None
+        self._preview_window_key = None   # (slot, queue version) the window last ran for
 
     # -- backend lifecycle ---------------------------------------------------
 
@@ -272,6 +276,46 @@ class PlaybackManager:
 
     # -- status pipeline ---------------------------------------------------------
 
+    def _maintain_preview_window(self, idx) -> None:
+        """Playback-position-keyed RAM bound for streamed/transcoded buffers —
+        the long-standing eviction follow-up (the OOM path: a long phantom
+        queue held every fetched FLAC in RAM forever). The window
+        [idx-1 .. idx+4] is untouchable and priority-(re)fetched so
+        transitions stay gapless; beyond it enforce_budget evicts
+        most-distant-first (behind the playhead before far-ahead), and an
+        evicted track refetches transparently on demand. Runs on the status
+        thread; the (slot, queue-version) guard keeps it off the 1 Hz tick."""
+        anchor = idx if isinstance(idx, int) and idx >= 1 else 1
+        key = (anchor, self.queue.version)
+        if key == self._preview_window_key:
+            return
+        self._preview_window_key = key
+        from streaming import service as streaming_service
+        proxy = streaming_service.get_proxy()
+        if proxy is None:
+            return
+
+        def ident(it: QueueItem):
+            if it.source.get("kind") == "proxy":
+                return it.source.get("token")
+            if it.media_file_id is not None:
+                return ("mf", it.media_file_id)
+            return None
+
+        lo = max(1, anchor - _PREVIEW_BEHIND)
+        hi = anchor + _PREVIEW_AHEAD
+        keys = [ident(it) for it in self.queue.snapshot()]
+        keep = {k for k in keys[lo - 1:hi] if k}
+        window = [k for k in keys[anchor - 1:hi] if k]
+        ranked = ([k for k in keys[:lo - 1] if k]             # behind: oldest first
+                  + [k for k in reversed(keys[hi:]) if k])    # ahead: farthest first
+        freed = proxy.enforce_budget(
+            keep, ranked, settings.streaming_preview_ram_mb * 1048576)
+        proxy.ensure_buffered(window)
+        if freed:
+            logger.info("preview budget: freed %.0f MiB beyond slots %d..%d",
+                        freed / 1048576, lo, hi)
+
     def _on_backend_status(self, s: PlaybackStatus) -> None:
         """One status tick from the active backend → SSE payload (exact
         legacy shape + `output`), play tracking, end-of-queue archival,
@@ -339,6 +383,7 @@ class PlaybackManager:
         # session/Home-shelf archival below — that snapshots the whole queue,
         # this records each play.
         tracker.track_play_event(new_data["state"], s.position, s.length, item)
+        self._maintain_preview_window(idx)
 
         # Natural end-of-queue: the player stopped on the last track. Archive
         # the active session so a fully-listened album/queue lands in history

@@ -59,6 +59,7 @@ class _Entry:
     error: Optional[str] = None
     fetch_seconds: Optional[float] = None   # wall time of the provider fetch
     _claimed: bool = False          # a worker is (or has) prepared this entry
+    evicted: bool = False           # audio dropped by the RAM budget; refetches on demand
 
 
 class MediaProxy:
@@ -153,15 +154,73 @@ class MediaProxy:
         with self._lock:
             return self._blobs.get(token)
 
-    def entry_bytes(self, token: str) -> Optional[tuple[bytes, str]]:
-        """(data, mime) of a READY preview entry — the browser output serves
-        phantom bytes through the HTTPS origin (an https page can't fetch the
-        plain-http proxy: mixed content), reading the same in-memory buffer."""
+    # ---- RAM budget (playback-position-keyed eviction) -------------------
+
+    @staticmethod
+    def _entry_keys(e: _Entry) -> set:
+        """Queue identities an entry answers to: its token (phantom rows carry
+        it in source) and ("mf", id) for an owned transcode (the queue row is
+        the file item; only the HQP mirror knows the token)."""
+        keys = {e.token}
+        if e.query.media_file_id:
+            keys.add(("mf", e.query.media_file_id))
+        return keys
+
+    def enforce_budget(self, keep: set, ranked: list, budget_bytes: int) -> int:
+        """Bound fetched preview/transcode audio to ``budget_bytes``. ``keep``
+        (the playback window) is untouchable; entries matching no known queue
+        identity (orphans — rows since removed from the queue) evict first,
+        then ``ranked`` order (most evictable first). Evicted entries keep
+        their metadata + chain and re-arm: the next wait/GET refetches
+        transparently. Returns bytes freed."""
         with self._lock:
-            e = self._entries.get(token)
-        if e is None or e.audio is None:
-            return None
-        return e.audio.data, e.audio.mime
+            fetched = [e for e in self._entries.values()
+                       if e.ready.is_set() and e.audio is not None]
+            excess = sum(len(e.audio.data) for e in fetched) - budget_bytes
+            if excess <= 0:
+                return 0
+            rank = {k: i for i, k in enumerate(ranked)}
+            known = set(rank) | keep
+
+            def order(e):
+                ks = self._entry_keys(e)
+                if not (ks & known):
+                    return -1                      # orphan — first out
+                return min(rank.get(k, len(ranked)) for k in ks)
+
+            freed = 0
+            for e in sorted(fetched, key=order):
+                if freed >= excess:
+                    break
+                if self._entry_keys(e) & keep:
+                    continue
+                freed += len(e.audio.data)
+                e.audio = None
+                e.error = None
+                e.fetch_seconds = None
+                e.evicted = True
+                e._claimed = False
+                # Fresh event: late waiters on the old (set) one read audio=None
+                # and skip; new waits see un-ready and re-arm the fetch.
+                e.ready = threading.Event()
+            return freed
+
+    def ensure_buffered(self, keys: list) -> None:
+        """Priority-(re)fetch the playback window, first key most urgent —
+        window tokens go to the HEAD of the sequential fetch queue, ahead of
+        background album fills. Keys are queue identities (see _entry_keys);
+        unknown ones are skipped."""
+        with self._lock:
+            by_mf = {e.query.media_file_id: e.token
+                     for e in self._entries.values() if e.query.media_file_id}
+            toks = []
+            for k in keys:
+                tok = by_mf.get(k[1]) if isinstance(k, tuple) else (
+                    k if k in self._entries else None)
+                if tok:
+                    toks.append(tok)
+        for tok in reversed(toks):
+            self._prefetch(tok, front=True)
 
     # ---- session API (called by the player endpoint) --------------------
     def start_session(self, items: list) -> list[str]:
@@ -257,11 +316,14 @@ class MediaProxy:
     def is_buffering(self, track_id: str) -> bool:
         """True if a track with this id is still in-flight in the served pool (an
         entry exists that hasn't finished fetching) — the UI buffering flag. Read
-        by /api/albums/{id} so one re-fetch carries buffering with the features."""
+        by /api/albums/{id} so one re-fetch carries buffering with the features.
+        A budget-evicted entry is NOT buffering — it refetches on demand and
+        would otherwise show an eternal spinner."""
         if not track_id:
             return False
         with self._lock:
             return any(e.query.track_id == track_id and not e.ready.is_set()
+                       and not e.evicted
                        for e in self._entries.values())
 
     def url_for(self, token: str) -> str:
@@ -284,25 +346,38 @@ class MediaProxy:
                 "track_id": e.query.track_id, "cover_url": e.query.cover_url,
                 "duration": e.query.duration, "media_file_id": e.query.media_file_id}
 
-    def wait_ready(self, token: str, timeout=_UNSET_TIMEOUT) -> _Entry:
+    def wait_ready(self, token: str, timeout=_UNSET_TIMEOUT, *,
+                   front: bool = False) -> _Entry:
         """Block until a track is fetched (used by the endpoint to absorb the
         first track's startup latency before telling HQPlayer to play).
         ``timeout=None`` waits indefinitely — safe because every enqueued token
         reaches a terminal ready (fetch success, fetch failure, or the
-        superseded wake-up when a new session drops the set)."""
+        superseded wake-up when a new session drops the set). ``front``
+        priority-fetches (an on-demand read, not a background fill)."""
         if timeout is _UNSET_TIMEOUT:
             timeout = self._prepare_timeout
-        return self._ensure_ready(token, timeout)
+        return self._ensure_ready(token, timeout, front=front)
 
     # ---- preparation -----------------------------------------------------
-    def _prefetch(self, token: str) -> None:
+    def _prefetch(self, token: str, *, front: bool = False) -> None:
         """Enqueue a token for the single sequential fetch worker (FIFO = playlist
-        order). Idempotent — a claimed or already-queued token is a no-op."""
+        order). Idempotent — a claimed token is a no-op. ``front`` puts the token
+        at the HEAD of the queue (and promotes an already-queued one): on-demand
+        requests and the playback window outrank background album fills."""
         with self._fetch_cv:
             e = self._entries.get(token)
-            if e is None or e._claimed or token in self._fetch_q:
+            if e is None or e._claimed:
                 return
-            self._fetch_q.append(token)
+            e.evicted = False
+            if token in self._fetch_q:
+                if front and self._fetch_q[0] != token:
+                    self._fetch_q.remove(token)
+                    self._fetch_q.insert(0, token)
+                return
+            if front:
+                self._fetch_q.insert(0, token)
+            else:
+                self._fetch_q.append(token)
             if not self._fetch_worker:
                 self._fetch_worker = True
                 threading.Thread(target=self._fetch_loop, daemon=True,
@@ -361,22 +436,23 @@ class MediaProxy:
         with self._lock:
             return self._entries.get(token)
 
-    def _ensure_ready(self, token: str, timeout: Optional[float]) -> _Entry:
+    def _ensure_ready(self, token: str, timeout: Optional[float], *,
+                      front: bool = False) -> _Entry:
         with self._lock:
             e = self._entries.get(token)
         if e is None:
             raise KeyError(token)
         if not e._claimed:
-            self._prefetch(token)           # enqueue (keeps fetching strictly sequential)
+            self._prefetch(token, front=front)  # enqueue (keeps fetching strictly sequential)
         if not e.ready.wait(timeout):
             raise TimeoutError(f"preview not ready: {e.query.title}")
         return e
 
     def _advance(self, index: int) -> None:
-        """Ensure the next track is fetched. Buffers are kept for the whole
-        session: HQPlayer GETs every URI at ADD time (not in playback order),
-        so evicting on GET dropped tracks before they were ever played. Memory-
-        bounded eviction keyed on the real playback position is a follow-up."""
+        """Ensure the next track is fetched. Never evicts on GET — HQPlayer
+        GETs every URI at ADD time (not in playback order), so that dropped
+        tracks before they were ever played. Memory-bounded eviction lives in
+        the manager's playback-position window (enforce_budget)."""
         with self._lock:
             nxt = index + 1
             tok = self._session[nxt] if nxt < len(self._session) else None
@@ -501,7 +577,7 @@ def _make_handler(proxy: MediaProxy):
             if tok is None:
                 return
             try:
-                e = proxy._ensure_ready(tok, proxy._prepare_timeout)
+                e = proxy._ensure_ready(tok, proxy._prepare_timeout, front=True)
             except KeyError:
                 self.send_error(404, "unknown token")
                 return
@@ -535,7 +611,7 @@ def _make_handler(proxy: MediaProxy):
             if tok is None:
                 return
             try:
-                e = proxy._ensure_ready(tok, proxy._prepare_timeout)
+                e = proxy._ensure_ready(tok, proxy._prepare_timeout, front=True)
             except KeyError:
                 self.send_error(404, "unknown token")
                 return

@@ -288,7 +288,9 @@ def _owned_play_uri(media_file_id: int, db_path: str, file_format: str) -> str:
     q = TrackQuery(artist="", title="", media_file_id=media_file_id)
     tokens = proxy.add_tracks([(q, [(_local_provider, container_path)])])
     try:
-        e = proxy.wait_ready(tokens[0])
+        # front: a local transcode the mirror is waiting on — it must not
+        # queue behind a backlog of network phantom fetches.
+        e = proxy.wait_ready(tokens[0], front=True)
     except (TimeoutError, KeyError):
         e = None
     if e is None or e.audio is None:

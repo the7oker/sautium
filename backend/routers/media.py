@@ -103,16 +103,22 @@ def media_preview(token: str, request: Request,
                   exp: Optional[str] = None, sig: Optional[str] = None):
     """Phantom-stream bytes re-served through the HTTPS origin — the browser
     can't fetch the plain-http LAN proxy from an https page (mixed content).
-    Reads the proxy's existing in-memory buffer, not a second fetch."""
+    Serves the proxy's in-memory buffer; a budget-evicted one transparently
+    refetches first (priority — this is the playhead asking)."""
     if not media_urls.verify("preview", token, exp, sig):
         raise HTTPException(status_code=401, detail="invalid or expired media signature")
 
     from streaming import service as streaming_service
     proxy = streaming_service.get_proxy()
-    entry = proxy.entry_bytes(token) if proxy else None
-    if entry is None:
+    if proxy is None:
         raise HTTPException(status_code=404, detail="preview buffer not available")
-    data, mime = entry
+    try:
+        e = proxy.wait_ready(token, front=True)
+    except (KeyError, TimeoutError):
+        e = None
+    if e is None or e.audio is None:
+        raise HTTPException(status_code=404, detail="preview buffer not available")
+    data, mime = e.audio.data, e.audio.mime
     total = len(data)
 
     span = _parse_range(request, total)

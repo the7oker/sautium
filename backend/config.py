@@ -94,6 +94,10 @@ class Settings(BaseSettings):
     # Directory for bring-your-own provider plugins (closed-repo Deezer etc.).
     # None → <streaming pkg>/providers. Gitignored; empty in the public tree.
     streaming_providers_dir: Optional[str] = None
+    # RAM ceiling for fetched preview/transcode buffers. Beyond it the manager
+    # evicts most-distant-from-the-playhead first (the playback window never
+    # evicts); evicted tracks refetch on demand. ~35 FLAC tracks per GiB.
+    streaming_preview_ram_mb: int = 1024
 
     # Native OS path prefix for stored DB paths (used when scanner runs inside Docker)
     # Docker: scanner sees /music/... → DB stores E:/Music/...
