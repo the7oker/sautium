@@ -122,6 +122,10 @@ class Source:
     model: Optional[str] = None   # model_cache key this source needs; gracefully skipped if cold
     level: str = ""            # entity level (track/album/artist); default derived from .table
     retrieve: str = ""         # index-friendly retrieve-branch predicate; default (score_sql) >= floor
+    retrieve_order: str = ""   # retrieve-branch ORDER BY override (carries its own direction).
+                               # For sources whose score_sql is expensive (seed's chamfer): order
+                               # the branch by something cheap instead of computing the score for
+                               # every member row.
     knn: str = ""              # HNSW-served distance ORDER expr (e.g. "es.vector <=> CAST(:q AS vector)"):
                                # the retrieve branch becomes inner-KNN-first — a bare
                                # `ORDER BY vector <=> q LIMIT n` uses the index, the wrapped
@@ -143,17 +147,35 @@ class Tool:
 
 
 # Seed (audio↔audio) two-tier score over an `embeddings e` row — the same
-# formula as track_similarity.similar_tracks (weights imported so calibration
-# stays single-source): segment chamfer + octave-folded BPM + energy delta −
-# shared album-genre bonus, expressed as correlated subqueries so it fits the
+# formula as track_similarity.similar_tracks: segment chamfer (for each seed
+# 10s window, the candidate's best window, averaged) minus the Last.fm
+# artist-tag bonus (W_TAG × weighted Jaccard of the two artists' tag
+# profiles — the one measured signal that hits GENRE; see
+# track_similarity.py, including why bios/genre-tags/BPM/energy/instruments
+# were all rejected). Expressed as correlated subqueries so it fits the
 # engine's per-row score grammar. Mean↔mean was dropped 2026-07-13: the
-# post-mean-flip space is concentrated (a whole KNN batch within dist
-# 0.042–0.070 against ~0.19 intra-track segment spread) and its ordering is
-# near-noise — see track_similarity.py. Mean-KNN survives only as the
-# retrieve branch (knn=), bounded by knn_limit to keep the per-row chamfer
-# rerank affordable (~1ms/row).
-_SEED_SCORE = f"""1 - (
-    (SELECT avg(w.best) FROM (
+# post-mean-flip space is concentrated and its ordering is near-noise.
+# Mean-KNN survives only as the seed source's retrieve branch (knn=); the
+# seed_kin source is the second recall arm (see the Tool below).
+_SEED_TAG_JAC = """(SELECT SUM(LEAST(st.w, COALESCE(cat.weight, 1)::numeric))
+             / NULLIF((SELECT COALESCE(SUM(COALESCE(at3.weight, 1)), 0)::numeric
+                       FROM artist_tags at3
+                       JOIN track_artists sta3 ON sta3.track_id = CAST(:seed_tid AS uuid)
+                           AND sta3.role = 'primary' AND at3.artist_id = sta3.artist_id)
+                      + (SELECT COALESCE(SUM(COALESCE(at4.weight, 1)), 0)::numeric
+                         FROM artist_tags at4
+                         JOIN track_artists cta4 ON cta4.track_id = e.track_id
+                             AND cta4.role = 'primary' AND at4.artist_id = cta4.artist_id)
+                      - SUM(LEAST(st.w, COALESCE(cat.weight, 1)::numeric)), 0)
+        FROM (SELECT at5.tag_id, MAX(COALESCE(at5.weight, 1))::numeric AS w
+              FROM artist_tags at5
+              JOIN track_artists sta5 ON sta5.track_id = CAST(:seed_tid AS uuid)
+                  AND sta5.role = 'primary' AND at5.artist_id = sta5.artist_id
+              GROUP BY at5.tag_id) st
+        JOIN track_artists cta ON cta.track_id = e.track_id AND cta.role = 'primary'
+        JOIN artist_tags cat ON cat.tag_id = st.tag_id AND cat.artist_id = cta.artist_id)"""
+
+_SEED_SCORE = f"""1 - ((SELECT avg(w.best) FROM (
         SELECT min(ss.vector <=> cs.vector) AS best
         FROM embedding_segments ss
         JOIN embeddings se ON se.id = ss.embedding_id
@@ -161,39 +183,22 @@ _SEED_SCORE = f"""1 - (
         WHERE se.track_id = CAST(:seed_tid AS uuid)
           AND cs.embedding_id = e.id
         GROUP BY ss.segment_index) w)
-    + {track_similarity.W_BPM} * COALESCE((
-        SELECT LEAST(abs(q.r), abs(q.r + 1), abs(q.r - 1)) FROM (
-            SELECT ln(NULLIF(c.bpm, 0) / NULLIF(s.bpm, 0)) / ln(2) AS r
-            FROM audio_features c, audio_features s
-            WHERE c.track_id = e.track_id
-              AND s.track_id = CAST(:seed_tid AS uuid)) q
-      ), {track_similarity.BPM_NEUTRAL})
-    + {track_similarity.W_ENERGY} * COALESCE((
-        SELECT abs(c.energy - s.energy)
-        FROM audio_features c, audio_features s
-        WHERE c.track_id = e.track_id
-          AND s.track_id = CAST(:seed_tid AS uuid)
-      ), {track_similarity.ENERGY_NEUTRAL})
-    - {track_similarity.W_GENRE} * LEAST((
-        SELECT count(DISTINCT sag.genre_id) FROM album_genres sag
-        WHERE sag.genre_id IN (
-                SELECT sag2.genre_id FROM album_genres sag2
-                WHERE sag2.album_id IN (
-                    SELECT sav.album_id FROM media_files smf
-                    JOIN album_variants sav ON sav.id = smf.album_variant_id
-                    WHERE smf.track_id = CAST(:seed_tid AS uuid)
-                    UNION
-                    SELECT satr.album_id FROM album_tracks satr
-                    WHERE satr.track_id = CAST(:seed_tid AS uuid)))
-          AND sag.album_id IN (
-                SELECT cav.album_id FROM media_files cmf
-                JOIN album_variants cav ON cav.id = cmf.album_variant_id
-                WHERE cmf.track_id = e.track_id
-                UNION
-                SELECT catr.album_id FROM album_tracks catr
-                WHERE catr.track_id = e.track_id)
-      ), {track_similarity.GENRE_CAP})
-)"""
+    - {track_similarity.W_TAG} * COALESCE({_SEED_TAG_JAC}, 0))"""
+
+# seed_kin retrieve predicate: candidate's primary artist is the seed's
+# primary artist or one of its Last.fm similars — the second recall arm
+# (mean-KNN misses the perceptual neighbourhood: Sade's own Sweetest Taboo
+# sat at mean-rank 678 for a Smooth Operator seed).
+_SEED_KIN_PRED = """EXISTS (
+    SELECT 1 FROM track_artists kta
+    JOIN (SELECT sta.artist_id FROM track_artists sta
+          WHERE sta.track_id = CAST(:seed_tid AS uuid) AND sta.role = 'primary'
+          UNION
+          SELECT sa.similar_artist_id FROM similar_artists sa
+          JOIN track_artists sta2 ON sta2.track_id = CAST(:seed_tid AS uuid)
+              AND sta2.role = 'primary' AND sa.artist_id = sta2.artist_id) kk
+        ON kk.artist_id = kta.artist_id
+    WHERE kta.track_id = e.track_id AND kta.role = 'primary')"""
 
 
 TOOLS: dict[str, Tool] = {
@@ -290,19 +295,26 @@ TOOLS: dict[str, Tool] = {
     # shelf, see track_similarity.py). Characteristic ⇒ rolls up: similar
     # tracks / albums / artists / genres from one checkbox, AND-composable with
     # every gate ("similar + Trip-Hop only"). Retrieve = mean-KNN (knn=, recall
-    # only — mean ordering is near-noise), rerank = chamfer + continuity on the
-    # knn_limit pool. Floor/ceil from the 2026-07-13 three-seed probe (pool
-    # p90 .80–.88, top-1 .87–.93): floor .78 keeps sparse corners alive (a
-    # Berlin-school seed's pool p90 was .796), ceil .95 sits ABOVE the probe's
-    # max top-1 so near-ties never clamp into 1.00. The self-exclusion gate
-    # keeps the seed out of the matched set, so its own album/artist rank only
-    # via their OTHER similar content.
+    # only — mean ordering is near-noise) UNION the seed_kin arm (same score,
+    # kin-membership retrieve ordered by the cheap mean distance — computing
+    # chamfer for every kin row just to pick the branch top-K would be the
+    # expensive way around). Rerank = chamfer − tag bonus. Floor .76 from the
+    # 2026-07-23 pure-chamfer probe (sparse Berlin-school corner p90 .785);
+    # ceil .98 sits above the tag-boosted top (chamfer .10 − bonus .08 →
+    # sim ≈ .977 for the seed artist's own tracks) so near-ties never clamp
+    # into 1.00. The self-exclusion gate keeps the seed out of the matched
+    # set, so its own album/artist rank only via their OTHER similar content.
     "seed": Tool("seed", sources=(
         Source("seed", "embeddings", _SEED_SCORE,
                targets=("track", "album", "artist", "genre"),
-               floor=0.78, ceil=0.95, weight=1.0,
+               floor=0.76, ceil=0.98, weight=1.0,
                knn="e.vector <=> CAST(:qseed AS vector)",
                knn_limit=track_similarity.POOL),
+        Source("seed_kin", "embeddings", _SEED_SCORE,
+               targets=("track", "album", "artist", "genre"),
+               floor=0.76, ceil=0.98, weight=1.0,
+               retrieve=_SEED_KIN_PRED,
+               retrieve_order="(e.vector <=> CAST(:qseed AS vector)) + 0"),
         Source("seed_not_self", "tracks", "t.id <> CAST(:seed_tid AS uuid)",
                is_gate=True),
     )),
@@ -619,8 +631,9 @@ def _retrieve_branch(src: Source, entity: EntityDef, corpus: str, gates: list, K
     else:
         path = _route(src.table, entity, corpus)
         frm = entity.table + " " + " ".join(f"JOIN {t} {_ALIAS[t]} ON {js}" for t, js in path)
+    order = src.retrieve_order or f"({src.score_sql}) DESC"
     return (f"SELECT {entity.pk} AS id FROM {frm} WHERE {' AND '.join(conds)} "
-            f"ORDER BY ({src.score_sql}) DESC, {_tie_break(entity)} LIMIT {K}")
+            f"ORDER BY {order}, {_tie_break(entity)} LIMIT {K}")
 
 
 def _matched_core(atom, tools, active, corpus, K=RETRIEVE_K, up_level=None):

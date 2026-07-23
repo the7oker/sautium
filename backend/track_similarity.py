@@ -4,17 +4,47 @@ behind radio batches and the Now Playing "Similar" shelf.
 
 Two-stage, one SQL statement:
 
-  1. Recall: the POOL nearest track means (HNSW). Mean↔mean cosine is
-     CONCENTRATED post-mean-flip — an entire radio batch fits in dist
-     0.042–0.070 while the intra-track segment spread is ~0.19 — so mean
-     ordering is near-noise and is used only to shortlist candidates. The
-     2026-07-13 probe found real matches out at mean-rank 475 (see POOL).
+  1. Recall, two arms: the POOL nearest track means (HNSW) UNION the "kin"
+     arm — every analyzed track by the seed's primary artist(s) and their
+     Last.fm similar artists (capped at KIN_ARM_CAP by exact mean distance).
+     Mean↔mean cosine is CONCENTRATED post-mean-flip — an entire radio batch
+     fits in dist 0.042–0.070 while the intra-track segment spread is ~0.19 —
+     so mean ordering is near-noise and is used only to shortlist candidates,
+     AND its recall misses the perceptual neighbourhood entirely: for a
+     Smooth Operator seed, Sade's own The Sweetest Taboo (the best-sounding
+     match of every probe) sat at mean-rank 678, outside any sane pool. The
+     kin arm is what brings the human-adjacent catalog in.
   2. Rank: segment chamfer — for each of the seed's canonical 10s windows,
-     the candidate's best-matching window, averaged — plus DJ-continuity
-     add-ons: octave-folded BPM distance (CLAP is timbre-dominant and near
-     tempo-blind: the probe's #1 mean neighbour halved the seed's tempo),
-     energy delta, and a shared album-genre bonus (file tags carry the
-     subgenre split CLAP audibly misses).
+     the candidate's best-matching window, averaged — minus a Last.fm
+     artist-tag bonus: W_TAG × weighted Jaccard between the seed's and the
+     candidate's artist tag profiles. Crowd tag profiles are the one
+     measured signal that hits GENRE (Sade↔Winehouse .66, ↔Baker .51 vs
+     ↔Huey Lewis/Queen .02/.006 — a 20–30× separation); they demote
+     same-era-production rock that chamfer can't hear apart from soul
+     without banishing it.
+
+Artist bio embeddings (BGE) were measured as the tag bonus's alternative and
+rejected: the bio space is concentrated (half the corpus within 0.44–0.49)
+and confounded by career shape — Queen's bio sits closer to Sade's (0.378)
+than Anita Baker's (0.455), so at working weights it pulls British legends
+into a Sade radio instead of quiet storm.
+
+Add-ons tried and REMOVED after listening probes:
+- Album-genre bonus (2026-07-23, Smooth Operator): file-tag overlap is
+  anti-signal at this grain — broad tags ("Pop") gave the max bonus to Bee
+  Gees/Santana-class rock against a Sade seed while the truly similar
+  artists (Anita Baker, Erykah Badu) carried adjacent-but-disjoint tags
+  (R&B) and got nothing; the bonus actively inverted the perceptual order.
+- Octave-folded BPM distance (2026-07-23, same probe): the beat tracker
+  locks on wrong metrical levels in NON-octave ratios the fold can't absorb
+  — Smooth Operator detected at 63 (real ~104) penalized Sade's own
+  correctly-detected Kiss of Life (99.4 → fold .34) while rewarding Huey
+  Lewis (123 ≈ 2×63 → fold .04); 85% of the pair inversion was this term.
+  A bad SEED detection poisons the whole pool's BPM column.
+- Energy delta (2026-07-23, same probe): energy is an honest RMS measurement
+  but it encodes MASTER loudness, not musical drive — at weight 0.15 it
+  moved 19 of the top-20 positions, pulling in same-loudness disco
+  ("Stayin' Alive") and pushing out closer-vibe quieter masters (Morcheeba).
 
 Hungarian assignment (album_similarity's rerank) and all-pairs averaging were
 both measured WORSE here: all-pairs is mathematically ≈ mean↔mean (mean of dot
@@ -26,21 +56,20 @@ autocorrelated windows.
 
 from db_pool import db_query_with_ef_search
 
-POOL = 600              # tier-1 recall horizon. Probe: widening 300→600 pulled
+POOL = 600              # mean-KNN recall horizon. Probe: widening 300→600 pulled
                         # 5 more tracks into the hybrid top-30 (one at mean-rank
                         # 475); 600→1000 added only 2 — diminishing returns.
-                        # Chamfer cost is linear in pool size (~0.6s at 600,
-                        # background-thread and shelf-async territory).
-
-# Rescoring weights, sized against the probe pool's chamfer span (0.115–0.19):
-# each add-on can reorder within a chamfer tier but not across tiers
-# (BPM <= .03, energy <= .04, genres <= .045 against a .075 chamfer span).
-W_BPM = 0.06            # x octave-folded |log2(bpm ratio)| (0–0.5)
-W_ENERGY = 0.15         # x |energy delta| (pool p50 0.07)
-W_GENRE = 0.015         # x shared album-genre count, capped below
-GENRE_CAP = 3           # shared-genre count saturates here
-BPM_NEUTRAL = 0.25      # pool-median penalties for rows with no usable
-ENERGY_NEUTRAL = 0.07   # bpm/energy — unknown ranks mid-pack, not first
+                        # Chamfer cost is linear in candidate count (~0.6s at
+                        # 600, background-thread and shelf-async territory).
+KIN_ARM_CAP = 1200      # kin recall arm bound: a seed whose similar artists
+                        # own huge catalogs (Queen-class) would otherwise pour
+                        # thousands of rows into the chamfer rerank; the cap
+                        # keeps the mean-closest kin tracks
+W_TAG = 0.08            # × weighted tag Jaccard. Sized on the Smooth Operator
+                        # probe: 0.04 left Huey Lewis at #4; 0.08 yields
+                        # Sade/Winehouse/Bassey/Franklin/Baker on top with
+                        # Huey demoted to ~#15 (still present — tags rank,
+                        # never gate)
 
 
 def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
@@ -65,25 +94,50 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
     """
     return db_query_with_ef_search("""
         WITH target AS (SELECT vector FROM embeddings WHERE track_id = %(seed)s::uuid),
-        seed_af AS (
-            SELECT NULLIF(bpm, 0) AS bpm, energy FROM audio_features
-            WHERE track_id = %(seed)s::uuid
-        ),
-        seed_genres AS (
-            SELECT DISTINCT ag.genre_id FROM album_genres ag
-            WHERE ag.album_id IN (
-                SELECT av.album_id FROM media_files mf
-                JOIN album_variants av ON av.id = mf.album_variant_id
-                WHERE mf.track_id = %(seed)s::uuid
-                UNION
-                SELECT atr.album_id FROM album_tracks atr
-                WHERE atr.track_id = %(seed)s::uuid)
-        ),
         seed_seg AS (
             SELECT es.segment_index, es.vector
             FROM embedding_segments es
             JOIN embeddings e ON e.id = es.embedding_id
             WHERE e.track_id = %(seed)s::uuid
+        ),
+        seed_artists AS (
+            SELECT ta.artist_id FROM track_artists ta
+            WHERE ta.track_id = %(seed)s::uuid AND ta.role = 'primary'
+        ),
+        kin AS (
+            SELECT artist_id FROM seed_artists
+            UNION
+            SELECT sa.similar_artist_id FROM similar_artists sa
+            JOIN seed_artists s ON s.artist_id = sa.artist_id
+        ),
+        seed_tags AS (
+            -- ::numeric is load-bearing: weight is INTEGER and the Jaccard
+            -- division below would silently floor to 0 in integer math.
+            SELECT at.tag_id, MAX(COALESCE(at.weight, 1))::numeric AS weight
+            FROM artist_tags at
+            JOIN seed_artists s ON s.artist_id = at.artist_id
+            GROUP BY at.tag_id
+        ),
+        seed_tag_total AS (SELECT COALESCE(SUM(weight), 0) AS total FROM seed_tags),
+        cand AS (
+            (SELECT e.track_id FROM embeddings e
+             WHERE e.track_id != %(seed)s::uuid
+               AND e.track_id <> ALL(%(exclude)s::uuid[])
+             ORDER BY e.vector <=> (SELECT vector FROM target)
+             LIMIT %(pool)s)
+            UNION
+            -- Kin arm: `+ 0` defeats the HNSW path on purpose — an
+            -- artist-filtered index walk over a sparse set would crawl the
+            -- graph and dry up; an exact top-N over the few-k joined rows
+            -- is cheap and complete.
+            (SELECT e.track_id FROM embeddings e
+             JOIN track_artists kta ON kta.track_id = e.track_id
+                 AND kta.role = 'primary'
+             JOIN kin k ON k.artist_id = kta.artist_id
+             WHERE e.track_id != %(seed)s::uuid
+               AND e.track_id <> ALL(%(exclude)s::uuid[])
+             ORDER BY (e.vector <=> (SELECT vector FROM target)) + 0
+             LIMIT %(kin_cap)s)
         ),
         pool AS (
             SELECT t.id AS track_uuid, t.id::text AS track_id, e.id AS emb_id,
@@ -94,7 +148,8 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
                    COALESCE(mf_rep.release_year, ph_rep.release_year) AS year,
                    ph_rep.cover_url,
                    ph_rep.album AS phantom_album, ph_rep.length_ms
-            FROM tracks t
+            FROM cand c
+            JOIN tracks t ON t.id = c.track_id
             JOIN embeddings e ON e.track_id = t.id
             JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
             JOIN artists a ON a.id = ta.artist_id
@@ -113,35 +168,16 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
                 WHERE atr.track_id = t.id
                 ORDER BY (al.cover_url IS NOT NULL) DESC, al.id LIMIT 1
             ) ph_rep ON true
-            WHERE t.id != %(seed)s::uuid
-              AND t.id <> ALL(%(exclude)s::uuid[])
-              AND (mf_rep.id IS NOT NULL OR ph_rep.album IS NOT NULL)
+            WHERE (mf_rep.id IS NOT NULL OR ph_rep.album IS NOT NULL)
               AND EXISTS (SELECT 1 FROM target)
-            ORDER BY e.vector <=> (SELECT vector FROM target)
-            LIMIT %(pool)s
         ),
         rescored AS (
-            SELECT pool.*, ch.chamfer,
+            SELECT pool.*,
                    ch.chamfer
-                   + %(w_bpm)s * COALESCE(LEAST(
-                         abs(ln(NULLIF(af.bpm, 0) / (SELECT bpm FROM seed_af)) / ln(2)),
-                         abs(ln(NULLIF(af.bpm, 0) / (SELECT bpm FROM seed_af)) / ln(2) + 1),
-                         abs(ln(NULLIF(af.bpm, 0) / (SELECT bpm FROM seed_af)) / ln(2) - 1)),
-                       %(bpm_neutral)s)
-                   + %(w_energy)s * COALESCE(
-                         abs(af.energy - (SELECT energy FROM seed_af)),
-                       %(energy_neutral)s)
-                   - %(w_genre)s * LEAST((
-                         SELECT count(DISTINCT ag.genre_id) FROM album_genres ag
-                         WHERE ag.genre_id IN (SELECT genre_id FROM seed_genres)
-                           AND ag.album_id IN (
-                               SELECT av.album_id FROM media_files mf2
-                               JOIN album_variants av ON av.id = mf2.album_variant_id
-                               WHERE mf2.track_id = pool.track_uuid
-                               UNION
-                               SELECT atr.album_id FROM album_tracks atr
-                               WHERE atr.track_id = pool.track_uuid)
-                     ), %(genre_cap)s) AS score
+                   - %(w_tag)s * COALESCE(
+                         tg.sum_min / NULLIF((SELECT total FROM seed_tag_total)
+                                             + tg.cand_total - tg.sum_min, 0),
+                       0) AS score
             FROM pool
             JOIN LATERAL (
                 SELECT avg(best) AS chamfer FROM (
@@ -152,14 +188,20 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
                     GROUP BY s.segment_index
                 ) per_seed_window
             ) ch ON true
-            LEFT JOIN audio_features af ON af.track_id = pool.track_uuid
+            -- Weighted Jaccard pieces: sum over shared tags of min(weight)
+            -- and the candidate's full tag mass; union mass = seed_total +
+            -- cand_total - sum_min.
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(SUM(LEAST(st.weight, COALESCE(at2.weight, 1)::numeric)), 0) AS sum_min,
+                       (SELECT COALESCE(SUM(COALESCE(weight, 1)), 0)::numeric
+                        FROM artist_tags WHERE artist_id = pool.artist_id) AS cand_total
+                FROM seed_tags st
+                JOIN artist_tags at2 ON at2.tag_id = st.tag_id
+                    AND at2.artist_id = pool.artist_id
+            ) tg ON true
         )
         SELECT track_id, media_file_id, file_path, file_format, is_owned,
                title, artist, album, year, cover_url, phantom_album, length_ms,
-               -- The DISPLAYED number must be the RANKED number: 1 - score
-               -- (chamfer with the BPM/energy/genre continuity add-ons), not
-               -- the bare chamfer cosine — a sound-closer track that loses on
-               -- continuity would show a higher number below a lower one.
                round((1 - score)::numeric, 4) AS similarity
         FROM (SELECT rescored.*, ROW_NUMBER() OVER (PARTITION BY artist_id
                                                     ORDER BY score) AS artist_rank
@@ -169,7 +211,5 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
         LIMIT %(limit)s
     """, {"seed": seed_uuid, "exclude": list(exclude), "limit": limit,
           "pool": pool, "artist_cap": artist_cap, "jitter": jitter,
-          "w_bpm": W_BPM, "w_energy": W_ENERGY,
-          "w_genre": W_GENRE, "genre_cap": GENRE_CAP,
-          "bpm_neutral": BPM_NEUTRAL, "energy_neutral": ENERGY_NEUTRAL},
+          "kin_cap": KIN_ARM_CAP, "w_tag": W_TAG},
         ef_search=max(pool, 500))

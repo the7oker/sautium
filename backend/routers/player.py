@@ -1939,9 +1939,12 @@ _RADIO_MAX_PHANTOM = 4          # cap streamed tracks per batch — owned ones b
 _RADIO_PHANTOM_EVERY = 2        # place a phantom only after this many owned (spacing)
 _RADIO_REFILL_AT = 3            # refill when <= this many tracks remain ahead
 _RADIO_ARTIST_CAP = 2           # tracks per artist within one pool — raw KNN
-                                # clusters hard (a Tangerine Dream seed put Edgar
-                                # Froese in 10 of the top 30) and radio must not
-                                # collapse into a single-artist run
+                                # clusters hard (a Tangerine Dream seed put
+                                # Edgar Froese in 10 of the top 30), and the
+                                # artist-grain tag bonus lifts an artist's
+                                # WHOLE catalog uniformly (45 Winehouse tracks
+                                # would flood a Sade radio), so the cap is
+                                # structural, not cosmetic
 _RADIO_JITTER = 0.2             # ORDER BY score * (1 + JITTER*random()): reshuffles
                                 # near-ties so the same seed never yields the same
                                 # station twice, while distant pool members still
@@ -1954,8 +1957,8 @@ _radio_last_artist: Optional[str] = None   # artist of the last queued track —
 
 def _radio_similar(seed_uuid: str, exclude: set, limit: int) -> list:
     """Mixed (owned + phantom) audio-similar to the seed — the shared two-tier
-    scorer (track_similarity.similar_tracks: mean-KNN recall pool, segment
-    chamfer + BPM/energy/genre continuity rerank) with radio's artist cap and
+    scorer (track_similarity.similar_tracks: mean-KNN recall pool, pure
+    segment-chamfer rerank) with radio's artist cap and
     jitter. Rows carry what the batch builder needs: identity + file fields
     (owned) or the MB tracklist fields (phantom)."""
     return track_similarity.similar_tracks(
