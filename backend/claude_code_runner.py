@@ -46,6 +46,32 @@ ALLOWED_MODELS = {"sonnet", "haiku"}
 TIMEOUT_SECONDS = 150
 CLAUDE_USER = "claudeuser"  # non-root user (--dangerously-skip-permissions requires non-root)
 
+# DJ turns are SQL + list-building; unbounded interleaved thinking burned
+# ~75% of output tokens on a measured chat turn (4.9k-token final turn =
+# 57s of UI silence, 2026-07-22). 1024 keeps short planning steps.
+_MAX_THINKING_TOKENS = "1024"
+
+
+def _claude_env() -> dict:
+    """Env for the Claude Code subprocess.
+
+    Drops ANTHROPIC_API_KEY so the CLI uses OAuth credentials (Claude
+    subscription) rather than the pay-as-you-go API account — when the
+    variable is set the CLI silently bills against it.
+
+    ENABLE_TOOL_SEARCH=false inlines every MCP tool schema upfront
+    instead of deferring them behind a ToolSearch call — with deferral
+    the model spent a whole API round-trip per conversation turn just
+    fetching the postgres tool schema (measured: 3 turns → 2 on the
+    same task). The schemas land in the prompt cache, so the extra
+    input tokens are cheap.
+    """
+    env = os.environ.copy()
+    env.pop("ANTHROPIC_API_KEY", None)
+    env["MAX_THINKING_TOKENS"] = _MAX_THINKING_TOKENS
+    env["ENABLE_TOOL_SEARCH"] = "false"
+    return env
+
 
 def _resolve_claude_executable() -> Optional[str]:
     """Path to the native Claude Code binary, bypassing npm's shim.
@@ -155,10 +181,7 @@ def call_claude_code(
     logger.info(f"Claude Code call: message={message[:80]!r}, resume={resume}, session={session_id}")
 
     try:
-        env = os.environ.copy()
-        # Force the CLI onto OAuth credentials (Claude subscription) rather
-        # than the pay-as-you-go API key — see same comment in _spawn_claude.
-        env.pop("ANTHROPIC_API_KEY", None)
+        env = _claude_env()
         kwargs = {
             "capture_output": True,
             "text": True,
@@ -250,15 +273,7 @@ def call_claude_code(
 def _spawn_claude(cmd: list[str], stdout=subprocess.PIPE, stderr=subprocess.PIPE):
     """Common subprocess setup — non-root user on Linux/Docker, no
     flashing console window on Windows. Returns the Popen handle."""
-    env = os.environ.copy()
-    # Force the CLI onto OAuth credentials (Claude subscription) rather
-    # than the pay-as-you-go API key. When ANTHROPIC_API_KEY is set in
-    # the env, the CLI silently uses it and bills against that account
-    # — which on this deployment was exhausted. The Python Anthropic
-    # SDK (used by the separate "anthropic_api" provider) keeps its
-    # env access via os.environ; only the Claude Code subprocess gets
-    # the variable stripped.
-    env.pop("ANTHROPIC_API_KEY", None)
+    env = _claude_env()
     kwargs: dict[str, Any] = {
         "stdout": stdout,
         "stderr": stderr,
@@ -500,10 +515,13 @@ def call_claude_code_stream(
         logger.error("Claude Code stream wait() timed out")
         error_msg = error_msg or "Claude Code timed out"
     except GeneratorExit:
-        # Client disconnected — terminate the subprocess so we don't
-        # leak a Claude Code instance and its API tokens. Re-raise so
-        # the caller's StreamingResponse cleanly unwinds.
-        logger.info("Claude Code stream cancelled by client")
+        # The consumer abandoned this generator. In the chat path that
+        # never happens on client disconnect — the producer thread
+        # (routers/chat.py) keeps iterating so the answer still gets
+        # persisted; this fires only when the generator itself is
+        # discarded (GC / caller crash). Kill the subprocess so we
+        # don't leak a Claude Code instance, then unwind.
+        logger.info("Claude Code stream generator dropped; killing subprocess")
         raise
     except Exception as e:
         logger.error(f"Claude Code stream error: {e}", exc_info=True)

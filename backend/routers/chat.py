@@ -270,7 +270,9 @@ async def delete_session(session_id: int):
 
 @router.get("/sessions/{session_id}/messages")
 async def get_messages(session_id: int):
-    """Get all messages in a session."""
+    """Get all messages in a session, plus whether a reply is being
+    generated right now — the client uses the flag to reattach to the
+    live stream after a page reload."""
     existing = _db_query_one(
         "SELECT id FROM chat_sessions WHERE id = %(id)s", {"id": session_id}
     )
@@ -283,7 +285,9 @@ async def get_messages(session_id: int):
         WHERE session_id = %(sid)s
         ORDER BY id
     """, {"sid": session_id})
-    return rows
+    with _active_runs_lock:
+        generating = session_id in _active_runs
+    return {"messages": rows, "generating": generating}
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +298,84 @@ def _format_sse(event: str, data: dict) -> str:
     """Encode one SSE message. `default=str` lets us pass datetimes
     straight through without extra serialization."""
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+# ---------------------------------------------------------------------------
+# Live generation registry (stream survives page reloads)
+# ---------------------------------------------------------------------------
+
+_RUN_CLOSED = object()
+KEEPALIVE_INTERVAL_SEC = 15.0
+
+
+class _LiveRun:
+    """One in-flight assistant generation for a chat session.
+
+    The producer thread publishes rendered SSE strings here; any number
+    of consumers — the original POST response and reattach clients that
+    arrive after a page reload — subscribe and get a full replay of
+    everything emitted so far, then live events. The run outlives the
+    HTTP connection that started it, so a dropped client never kills
+    the generation.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._history: list[str] = []
+        self._subscribers: list[queue.Queue] = []
+        self._closed = False
+
+    def publish(self, sse: str):
+        with self._lock:
+            self._history.append(sse)
+            for q in self._subscribers:
+                q.put(sse)
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+            for q in self._subscribers:
+                q.put(_RUN_CLOSED)
+            self._subscribers.clear()
+
+    def subscribe(self) -> "queue.Queue":
+        q: "queue.Queue" = queue.Queue()
+        with self._lock:
+            for sse in self._history:
+                q.put(sse)
+            if self._closed:
+                q.put(_RUN_CLOSED)
+            else:
+                self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: "queue.Queue"):
+        with self._lock:
+            if q in self._subscribers:
+                self._subscribers.remove(q)
+
+
+_active_runs: dict[int, _LiveRun] = {}
+_active_runs_lock = threading.Lock()
+
+
+def _run_event_stream(run: _LiveRun) -> Iterator[str]:
+    """SSE feed for one subscriber: replayed history, then live events,
+    with keepalive comments while the producer is inside a long tool
+    call so proxies/browsers don't drop the idle connection."""
+    q = run.subscribe()
+    try:
+        while True:
+            try:
+                item = q.get(timeout=KEEPALIVE_INTERVAL_SEC)
+            except queue.Empty:
+                yield ": keepalive\n\n"
+                continue
+            if item is _RUN_CLOSED:
+                break
+            yield item
+    finally:
+        run.unsubscribe(q)
 
 
 # Maximum characters in an AI-generated session title. The chat-list
@@ -612,64 +694,79 @@ async def send_message(session_id: int, req: ChatMessageRequest):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Persist the user message and bump session metadata before we
-    # start the model — that way reload-during-stream still shows the
-    # user's prompt, and we have a stable id to put on the meta event.
-    user_row = _db_execute("""
-        INSERT INTO chat_messages (session_id, role, content)
-        VALUES (%(sid)s, 'user', %(content)s)
-        RETURNING id, role, content, created_at
-    """, {"sid": session_id, "content": req.message})
-
-    if not session["title"]:
-        title = req.message[:80].strip()
-        _db_execute(
-            "UPDATE chat_sessions SET title = %(t)s WHERE id = %(id)s",
-            {"t": title, "id": session_id},
-        )
-    _db_execute(
-        "UPDATE chat_sessions SET updated_at = NOW() WHERE id = %(id)s",
-        {"id": session_id},
-    )
-
-    history_rows = _db_query("""
-        SELECT role, content FROM chat_messages
-        WHERE session_id = %(sid)s AND id < %(uid)s
-        ORDER BY id DESC LIMIT 10
-    """, {"sid": session_id, "uid": user_row["id"]})
-    history_rows.reverse()
-    history = [{"role": r["role"], "content": r["content"]} for r in history_rows]
-
-    player_context = _get_player_context()
+    # Atomically claim the session's generation slot — two concurrent
+    # sends (second tab, double-tap) must not spawn two subprocesses
+    # over the same Claude session.
+    run = _LiveRun()
+    with _active_runs_lock:
+        if session_id in _active_runs:
+            raise HTTPException(
+                status_code=409,
+                detail="A reply is already being generated for this session",
+            )
+        _active_runs[session_id] = run
 
     try:
-        provider_stream = _build_provider_stream(
-            provider_name=provider_name,
-            session_id=session_id,
-            message=req.message,
-            history=history,
-            player_context=player_context,
-            model=model_resolved,
+        # Persist the user message and bump session metadata before we
+        # start the model — that way reload-during-stream still shows the
+        # user's prompt, and we have a stable id to put on the meta event.
+        user_row = _db_execute("""
+            INSERT INTO chat_messages (session_id, role, content)
+            VALUES (%(sid)s, 'user', %(content)s)
+            RETURNING id, role, content, created_at
+        """, {"sid": session_id, "content": req.message})
+
+        if not session["title"]:
+            title = req.message[:80].strip()
+            _db_execute(
+                "UPDATE chat_sessions SET title = %(t)s WHERE id = %(id)s",
+                {"t": title, "id": session_id},
+            )
+        _db_execute(
+            "UPDATE chat_sessions SET updated_at = NOW() WHERE id = %(id)s",
+            {"id": session_id},
         )
-    except HTTPException:
+
+        history_rows = _db_query("""
+            SELECT role, content FROM chat_messages
+            WHERE session_id = %(sid)s AND id < %(uid)s
+            ORDER BY id DESC LIMIT 10
+        """, {"sid": session_id, "uid": user_row["id"]})
+        history_rows.reverse()
+        history = [{"role": r["role"], "content": r["content"]} for r in history_rows]
+
+        player_context = _get_player_context()
+
+        try:
+            provider_stream = _build_provider_stream(
+                provider_name=provider_name,
+                session_id=session_id,
+                message=req.message,
+                history=history,
+                player_context=player_context,
+                model=model_resolved,
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to build provider stream: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to start AI request")
+    except BaseException:
+        with _active_runs_lock:
+            _active_runs.pop(session_id, None)
+        run.close()
         raise
-    except Exception as e:
-        logger.error(f"Failed to build provider stream: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to start AI request")
 
-    # Sentinel marking end of producer output.
-    _PRODUCER_DONE = object()
-    KEEPALIVE_INTERVAL_SEC = 15.0
-
-    def producer(out_q: "queue.Queue"):
+    def producer(run: _LiveRun):
         """Run the full provider stream → filter → persist pipeline on
-        a worker thread, pushing rendered SSE strings into a queue.
+        a worker thread, publishing rendered SSE strings to the run.
 
         The pipeline is fundamentally synchronous (subprocess Popen,
         Anthropic context manager, etc.) and can sit on a blocking
-        read for many seconds at a time. Decoupling it from the main
-        SSE consumer lets us inject keepalive comments while the model
-        is mid-tool-call without rewriting every provider as async.
+        read for many seconds at a time. The run object decouples it
+        from every SSE consumer: the original client, reattach clients
+        after a reload, or nobody at all — generation and persistence
+        finish regardless.
         """
         blocks_filter = BlocksFilter()
         blocks: list[dict] = []
@@ -691,14 +788,14 @@ async def send_message(session_id: int, req: ChatMessageRequest):
             for ev in provider_stream:
                 if isinstance(ev, TextDelta):
                     for sse in feed_filter(blocks_filter.feed(ev.text)):
-                        out_q.put(sse)
+                        run.publish(sse)
                 elif isinstance(ev, ToolStart):
-                    out_q.put(_format_sse("tool", {"name": ev.name}))
+                    run.publish(_format_sse("tool", {"name": ev.name}))
                 elif isinstance(ev, StreamDone):
                     final = ev
 
             for sse in feed_filter(blocks_filter.flush()):
-                out_q.put(sse)
+                run.publish(sse)
 
             if not blocks:
                 raw_blocks, _ = extract_blocks_with_fallback(blocks_filter.full_text)
@@ -706,7 +803,7 @@ async def send_message(session_id: int, req: ChatMessageRequest):
                     hydrated = _hydrate_blocks(raw_blocks)
                     if hydrated:
                         blocks = hydrated
-                        out_q.put(_format_sse("blocks", {"blocks": hydrated}))
+                        run.publish(_format_sse("blocks", {"blocks": hydrated}))
 
             clean_text = strip_tracks_marker(strip_blocks_marker(blocks_filter.full_text))
             # When the provider failed before producing any tokens
@@ -807,47 +904,51 @@ async def send_message(session_id: int, req: ChatMessageRequest):
                 done_payload["provider_error"] = final.error
             if final and getattr(final, "error_action", None):
                 done_payload["provider_error_action"] = final.error_action
-            out_q.put(_format_sse("done", done_payload))
+            run.publish(_format_sse("done", done_payload))
         except Exception as e:
             logger.error(f"Provider stream error: {e}", exc_info=True)
-            out_q.put(_format_sse("error", {"message": str(e)}))
+            run.publish(_format_sse("error", {"message": str(e)}))
         finally:
-            out_q.put(_PRODUCER_DONE)
+            # Deregister before waking subscribers: a reattach arriving
+            # after this point gets a 404 and refetches messages — the
+            # assistant row is already persisted by now.
+            with _active_runs_lock:
+                _active_runs.pop(session_id, None)
+            run.close()
 
-    def event_generator() -> Iterator[str]:
-        yield _format_sse("meta", {
-            "user_msg": user_row,
-            "model": model_resolved,
-            "provider": provider_name,
-        })
-
-        out_q: "queue.Queue" = queue.Queue()
-        worker = threading.Thread(
-            target=producer, args=(out_q,), daemon=True, name="chat-stream-worker",
-        )
-        worker.start()
-
-        try:
-            while True:
-                try:
-                    item = out_q.get(timeout=KEEPALIVE_INTERVAL_SEC)
-                except queue.Empty:
-                    # SSE comment line — proxies and browsers see traffic
-                    # so the connection stays open while the model is in
-                    # a long tool-call or extended-thinking block.
-                    yield ": keepalive\n\n"
-                    continue
-                if item is _PRODUCER_DONE:
-                    break
-                yield item
-        finally:
-            # Producer is daemon, but provider_stream owns the cleanup
-            # (subprocess kill, SDK close). The worker thread exits when
-            # provider_stream raises GeneratorExit on its own iteration.
-            worker.join(timeout=1.0)
+    run.publish(_format_sse("meta", {
+        "user_msg": user_row,
+        "model": model_resolved,
+        "provider": provider_name,
+    }))
+    threading.Thread(
+        target=producer, args=(run,), daemon=True, name="chat-stream-worker",
+    ).start()
 
     return StreamingResponse(
-        event_generator(),
+        _run_event_stream(run),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/sessions/{session_id}/stream")
+async def reattach_stream(session_id: int):
+    """Reattach to an in-flight generation after a page reload.
+
+    Replays every SSE event emitted so far (meta, deltas, tool pips,
+    blocks), then streams live until `done`. 404 when nothing is being
+    generated — the caller should just load persisted messages.
+    """
+    with _active_runs_lock:
+        run = _active_runs.get(session_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="No generation in progress")
+    return StreamingResponse(
+        _run_event_stream(run),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

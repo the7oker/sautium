@@ -936,6 +936,23 @@ body.has-miniplayer .ai-fab {
   40%           { opacity: 1;   transform: scale(1); }
 }
 
+/* Tool-activity pip at the bottom of a streaming assistant bubble —
+   visible while the model is inside a tool call (SQL, library search)
+   so long silent stretches read as "working", not "hung". Removed on
+   the next text delta. */
+.ai-tool-pip {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--px));
+  margin-top: calc(8 * var(--px));
+  color: var(--color-text-muted);
+  font-size: calc(12 * var(--px));
+}
+.ai-tool-pip .ai-typing-dot {
+  width: calc(5 * var(--px));
+  height: calc(5 * var(--px));
+}
+
 .ai-empty {
   margin: auto;
   padding: calc(40 * var(--px)) calc(32 * var(--px));

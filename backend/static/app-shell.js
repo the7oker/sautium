@@ -1959,14 +1959,20 @@
       try {
         const resp = await fetch('/api/chat/sessions/' + id + '/messages');
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        const messages = await resp.json();
+        const data = await resp.json();
+        const messages = data.messages || [];
         this.thread.innerHTML = '';
-        if (!messages || messages.length === 0) {
+        if (messages.length === 0 && !data.generating) {
           this.renderEmpty('Ask the AI for recommendations, analysis or context.');
         } else {
           for (const m of messages) this.appendMessage(m);
           this.scrollToBottom();
         }
+        // A reply is still being generated on the backend (page was
+        // reloaded mid-stream, or the chat was reopened while the
+        // model worked). Attach to the live stream — errors are
+        // handled inside, so no await.
+        if (data.generating) this.reattachStream();
         setTimeout(() => this.input && this.input.focus(), 50);
       } catch (err) {
         console.warn('load messages failed:', err);
@@ -2065,13 +2071,55 @@
       this.thread.appendChild(typing);
       this.scrollToBottom();
 
-      // Lazily-built scaffolding for the assistant bubble. We only
-      // mount it on the first event from the server (meta with model,
-      // first delta, etc.) so that an early validation error keeps
-      // the typing indicator clean.
+      try {
+        const resp = await fetch(
+          '/api/chat/sessions/' + this.activeSessionId + '/messages',
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'text/event-stream',
+            },
+            body: JSON.stringify({ message: text }),
+          });
+        if (!resp.ok) {
+          // Pre-stream validation failure (no provider, missing
+          // session, generation already running). Body is plain
+          // JSON, not SSE.
+          let detail = 'send failed';
+          try { detail = (await resp.json()).detail || detail; } catch (_) {}
+          throw new Error(detail);
+        }
+        await this.consumeStream(resp, typing);
+      } catch (err) {
+        // Pre-stream failure only — stream-time errors are rendered
+        // by consumeStream next to the partial output.
+        if (typing.parentNode) typing.remove();
+        console.warn('send failed:', err);
+        const errRow = document.createElement('div');
+        errRow.className = 'ai-msg-row';
+        errRow.innerHTML =
+          '<div class="ai-msg-ai" style="color:var(--color-text-muted);">' +
+          escapeHtml(String(err.message || err)) + '</div>';
+        this.thread.appendChild(errRow);
+        this.scrollToBottom();
+      } finally {
+        this.sending = false;
+        this.sendBtn.disabled = false;
+        this.input.focus();
+      }
+    },
+
+    // Shared SSE consumer for the send() stream and the reattach
+    // stream: builds the assistant bubble lazily, renders deltas /
+    // blocks / tool pips, handles done + error events, refreshes
+    // session metadata at the end. `typing` is the indicator row the
+    // caller already appended; it's removed on the first content.
+    async consumeStream(resp, typing) {
       let aiRow = null, aiBody = null, proseDiv = null, blocksDiv = null;
       let modelTag = null, proseText = '';
       let pendingModelLabel = '';   // remembered between meta and bubble creation
+      let toolPip = null;
 
       const ensureAiRow = () => {
         if (aiRow) return;
@@ -2099,9 +2147,37 @@
           pendingModelLabel.split(':').pop() || pendingModelLabel;
       };
 
+      // Tool-activity pip: the model goes silent for tens of seconds
+      // while it runs SQL / library searches, and with the typing
+      // indicator already gone that silence used to read as "hung"
+      // (users refreshed mid-generation). The pip sits at the bottom
+      // of the bubble until the next text delta replaces it.
+      const showToolPip = (name) => {
+        ensureAiRow();
+        if (!toolPip) {
+          toolPip = document.createElement('div');
+          toolPip.className = 'ai-tool-pip';
+          toolPip.innerHTML =
+            '<span class="ai-typing">' +
+            '<span class="ai-typing-dot"></span>' +
+            '<span class="ai-typing-dot"></span>' +
+            '<span class="ai-typing-dot"></span></span>' +
+            '<span class="ai-tool-pip-label"></span>';
+          aiBody.appendChild(toolPip);
+        }
+        toolPip.querySelector('.ai-tool-pip-label').textContent =
+          toolPipLabel(name);
+        this.scrollToBottom();
+      };
+
+      const hideToolPip = () => {
+        if (toolPip) { toolPip.remove(); toolPip = null; }
+      };
+
       const onDelta = (chunk) => {
         if (!chunk) return;
         ensureAiRow();
+        hideToolPip();
         proseText += chunk;
         // Re-render the whole prose on each delta. Cheap for normal
         // response sizes (a few hundred tokens) and lets in-flight
@@ -2150,24 +2226,6 @@
       };
 
       try {
-        const resp = await fetch(
-          '/api/chat/sessions/' + this.activeSessionId + '/messages',
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'text/event-stream',
-            },
-            body: JSON.stringify({ message: text }),
-          });
-        if (!resp.ok) {
-          // Pre-stream validation failure (no provider, missing
-          // session). Body is plain JSON, not SSE.
-          let detail = 'send failed';
-          try { detail = (await resp.json()).detail || detail; } catch (_) {}
-          throw new Error(detail);
-        }
-
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -2194,8 +2252,7 @@
             } else if (evt.event === 'blocks') {
               onBlocks(evt.data.blocks || []);
             } else if (evt.event === 'tool') {
-              // Tool starts are informational. Future: show a small
-              // inline "searching tracks…" pip; for now, no-op.
+              showToolPip(evt.data.name || '');
             } else if (evt.event === 'done') {
               // Authoritative model name from the provider — overrides
               // the optimistic one we set on `meta`. Both usually agree
@@ -2235,6 +2292,7 @@
         }
 
         if (typing.parentNode) typing.remove();
+        hideToolPip();
         // Refresh sessions metadata so list-view picks up the new
         // preview / last_model. Title is already up-to-date from
         // the 'done' SSE event so we don't overwrite the title bar
@@ -2243,7 +2301,8 @@
         this.scrollToBottom();
       } catch (err) {
         if (typing.parentNode) typing.remove();
-        console.warn('send failed:', err);
+        hideToolPip();
+        console.warn('stream failed:', err);
         const action = err && err.action && err.action.url && err.action.label
           ? err.action
           : null;
@@ -2266,10 +2325,39 @@
           this.thread.appendChild(errRow);
         }
         this.scrollToBottom();
+      }
+    },
+
+    // A reply was still generating on the backend when this session
+    // was (re)opened — attach to the live stream. The backend replays
+    // everything emitted so far, so the partial answer appears
+    // instantly and keeps streaming to completion. 404 means it
+    // finished in the gap since the messages fetch; reload the
+    // session to pick up the persisted reply.
+    async reattachStream() {
+      const sessionId = this.activeSessionId;
+      this.sending = true;
+      this.sendBtn.disabled = true;
+      const typing = this.typingIndicator();
+      this.thread.appendChild(typing);
+      this.scrollToBottom();
+      try {
+        const resp = await fetch(
+          '/api/chat/sessions/' + sessionId + '/stream',
+          { headers: { 'Accept': 'text/event-stream' } });
+        if (resp.status === 404) {
+          if (typing.parentNode) typing.remove();
+          await this.switchToSession(sessionId);
+          return;
+        }
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        await this.consumeStream(resp, typing);
+      } catch (err) {
+        if (typing.parentNode) typing.remove();
+        console.warn('reattach failed:', err);
       } finally {
         this.sending = false;
         this.sendBtn.disabled = false;
-        this.input.focus();
       }
     },
 
@@ -2292,6 +2380,19 @@
       this.renderChatList();
     },
   };
+
+  // Human label for the tool-activity pip. Tool names are MCP ids
+  // (mcp__postgres__query, mcp__hqplayer__search_semantic…) — map
+  // them to what the model is actually doing for the user.
+  function toolPipLabel(raw) {
+    const n = String(raw || '');
+    if (/postgres|query|sql/i.test(n)) return 'querying the library…';
+    if (/search|similar/i.test(n)) return 'searching the library…';
+    if (/play|queue|volume|pause|next|previous|stop/i.test(n)) return 'controlling playback…';
+    if (/lyrics/i.test(n)) return 'reading lyrics…';
+    if (/track_info|album|artist|genre/i.test(n)) return 'gathering details…';
+    return 'working…';
+  }
 
   // Friendly label for the model tag — strips the provider prefix
   // and the date suffix (claude-haiku-4-5-20251001 → Haiku 4.5) so
