@@ -258,6 +258,11 @@ class DlnaBackend(PlayerBackend):
         asyncio.ensure_future(self._handle_state_change(), loop=self._loop)
 
     async def _handle_state_change(self) -> None:
+        if self._loading:
+            # A manual track change owns the transport: its own Stop and
+            # URI flapping must not be read as track-end or auto-advance,
+            # and its `loading` status must not be overwritten.
+            return
         state = self._state_name()
         if state == "playing":
             self._ensure_poll()
@@ -293,6 +298,8 @@ class DlnaBackend(PlayerBackend):
                 await asyncio.sleep(1.0)
                 if self._dmr is None:
                     return
+                if self._loading:
+                    continue   # the load sequence owns the status right now
                 try:
                     await self._dmr.async_update()
                     misses = 0
@@ -461,6 +468,20 @@ class DlnaBackend(PlayerBackend):
         self._length = item.duration_seconds or 0.0
         if play:
             self._emit_now("loading")
+        # Disarm the gapless auto-advance detector: a manual jump to the
+        # very track that SetNext armed makes CurrentURI == _next_url and
+        # looked exactly like an auto-advance — the index bumped one PAST
+        # the tapped track (observed live on BubbleUPnP).
+        self._next_url = None
+        if play and self._state_name() in ("playing", "paused"):
+            # Renderers with gapless (BubbleUPnP) do NOT interrupt current
+            # playback on SetAVTransportURI while PLAYING: the display
+            # adopts the new track, the audio keeps the old one, and Play
+            # is a no-op. An explicit Stop makes the switch real.
+            try:
+                await self._avt("Stop")
+            except Exception as e:
+                logger.debug("pre-load stop: %s", e)
         # Direct AVT actions, never the DmrDevice helpers: they gate on the
         # renderer's CurrentTransportActions report and silently NO-OP when
         # an action is missing from it (the Phase-2 Pause lesson). A gated
