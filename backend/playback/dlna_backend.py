@@ -280,7 +280,17 @@ class DlnaBackend(PlayerBackend):
         self._emit_now(state)
 
     def _ensure_poll(self) -> None:
-        if self._poll_task is None or self._poll_task.done():
+        # The track-end advance runs INSIDE the exiting poll task: a naive
+        # aliveness check sees "the poll" still running (it is the caller,
+        # one `return` from death) and skips the restart — every track that
+        # started through that path played deaf (position frozen at 0, no
+        # end-of-track backstop; radio died on the next boundary).
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if (self._poll_task is None or self._poll_task.done()
+                or self._poll_task is current):
             self._poll_task = asyncio.ensure_future(self._poll_position(),
                                                     loop=self._loop)
 
@@ -293,10 +303,13 @@ class DlnaBackend(PlayerBackend):
         (documented boundary exception, §2.6). Also our track-end detector:
         some renderers under-report the final GENA STOPPED."""
         misses = 0
+        first_pos_logged = False
+        logger.info("position poll started (slot %d)", self._index)
         try:
             while True:
                 await asyncio.sleep(1.0)
                 if self._dmr is None:
+                    logger.info("position poll exit: dmr gone")
                     return
                 if self._loading:
                     continue   # the load sequence owns the status right now
@@ -323,6 +336,9 @@ class DlnaBackend(PlayerBackend):
                     continue
                 pos = self._dmr.media_position
                 if pos is not None:
+                    if not first_pos_logged:
+                        first_pos_logged = True
+                        logger.debug("poll: first position %.1f (slot %d)", float(pos), self._index)
                     self._position = float(pos)
                 dur = self._dmr.media_duration
                 if dur:
@@ -331,6 +347,8 @@ class DlnaBackend(PlayerBackend):
                 if state == "stopped":
                     finished = (self._length > 0 and
                                 self._position >= self._length - _TRACK_END_SLACK)
+                    logger.info("position poll exit: device stopped (pos=%.1f/%.1f finished=%s)",
+                                self._position, self._length, finished)
                     if finished:
                         await self._advance()
                     else:
@@ -341,7 +359,7 @@ class DlnaBackend(PlayerBackend):
                     self._advanced_to_next()
                 self._emit_now(state)
         except asyncio.CancelledError:
-            pass
+            logger.info("position poll exit: cancelled")
 
     # -- queue walking -----------------------------------------------------------
 
