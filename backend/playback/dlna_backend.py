@@ -136,6 +136,10 @@ class DlnaBackend(PlayerBackend):
         self._length = 0.0
         self._poll_task: Optional[asyncio.Task] = None
         self._error: Optional[str] = None
+        # Track-change SOAP sequence in flight → status reports `loading`
+        # (the UI shows a transition spinner on the tapped track).
+        self._loading = False
+        self._load_lock = asyncio.Lock()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -229,6 +233,10 @@ class DlnaBackend(PlayerBackend):
         return "stopped"
 
     def _emit_now(self, state: Optional[str] = None) -> None:
+        if state is None and self._loading:
+            # Poll/GENA ticks that land mid-track-change would report the
+            # OLD track's transport state against the NEW index.
+            state = "loading"
         extra = {}
         if self._error:
             extra["error"] = self._error
@@ -424,6 +432,17 @@ class DlnaBackend(PlayerBackend):
         return xml
 
     async def _load_and_play(self, index: int, *, play: bool = True) -> bool:
+        # Serialized: fire-and-forget track changes must not interleave
+        # their SOAP sequences. The lock lives OUTSIDE the recursion in
+        # _load_seq (asyncio.Lock is not reentrant).
+        async with self._load_lock:
+            self._loading = True
+            try:
+                return await self._load_seq(index, play=play)
+            finally:
+                self._loading = False
+
+    async def _load_seq(self, index: int, *, play: bool = True) -> bool:
         item = self._queue.item_at(index)
         if item is None:
             self._emit_now("stopped")
@@ -432,7 +451,16 @@ class DlnaBackend(PlayerBackend):
         if url is None:
             logger.warning("DLNA: skipping unreachable item %s — %s",
                            item.artist, item.title)
-            return await self._load_and_play(index + 1, play=play)
+            return await self._load_seq(index + 1, play=play)
+        # A track change is seconds of SOAP + renderer buffering: adopt the
+        # new slot and report `loading` FIRST, so the UI shows the tapped
+        # track with a transition spinner instead of either lying
+        # ("playing") or looking dead while the old audio rides on.
+        self._index = index
+        self._position = 0.0
+        self._length = item.duration_seconds or 0.0
+        if play:
+            self._emit_now("loading")
         # Direct AVT actions, never the DmrDevice helpers: they gate on the
         # renderer's CurrentTransportActions report and silently NO-OP when
         # an action is missing from it (the Phase-2 Pause lesson). A gated
@@ -440,15 +468,14 @@ class DlnaBackend(PlayerBackend):
         # index while the renderer kept playing the old track.
         await self._avt("SetAVTransportURI", CurrentURI=url,
                         CurrentURIMetaData=await self._transport_meta(url, item))
-        self._index = index
         self._current_url = url
-        self._position = 0.0
-        self._length = item.duration_seconds or 0.0
         if play:
             await self._avt("Play", Speed="1")
             self._ensure_poll()
         await self._preload_next()
-        self._emit_now()
+        # Explicit state: _loading is still set here, and the default
+        # resolution would keep reporting "loading" after the work is done.
+        self._emit_now("playing" if play else self._state_name())
         return True
 
     async def _preload_next(self) -> None:
@@ -499,6 +526,20 @@ class DlnaBackend(PlayerBackend):
             raise RuntimeError(f"renderer lacks AVTransport/{name}")
         return await action.async_call(InstanceID=0, **kwargs)
 
+    def _cmd_failed(self, e: Exception) -> None:
+        if isinstance(e, (TimeoutError, OSError)):
+            # Connection-level failure (hang / refused / unreachable) —
+            # the doze signature. Mark the instance so the next play
+            # intent re-attaches instead of hammering a ghost.
+            self._gone = True
+        reason = str(e).strip() or type(e).__name__
+        # Surface it: a silently swallowed command is how "next" looked
+        # like it worked while the renderer kept playing the old track.
+        self._error = (f"'{self.label}' command failed ({reason}) — "
+                       "the renderer may be asleep")
+        logger.warning("DLNA command failed: %s", reason)
+        self._emit_now()
+
     def _call(self, coro) -> bool:
         if self._loop is None:
             return False
@@ -509,19 +550,27 @@ class DlnaBackend(PlayerBackend):
                 self._error = None   # a command went through — device is back
             return True
         except Exception as e:
-            if isinstance(e, (TimeoutError, OSError)):
-                # Connection-level failure (hang / refused / unreachable) —
-                # the doze signature. Mark the instance so the next play
-                # intent re-attaches instead of hammering a ghost.
-                self._gone = True
-            reason = str(e).strip() or type(e).__name__
-            # Surface it: a silently swallowed command is how "next" looked
-            # like it worked while the renderer kept playing the old track.
-            self._error = (f"'{self.label}' command failed ({reason}) — "
-                           "the renderer may be asleep")
-            logger.warning("DLNA command failed: %s", reason)
-            self._emit_now()
+            self._cmd_failed(e)
             return False
+
+    def _call_async(self, coro) -> bool:
+        """Track changes: accept immediately and run on the loop — a DLNA
+        load is seconds of SOAP + renderer buffering, and blocking the API
+        request on it made every tap feel dead. Progress reaches the UI as
+        the `loading` state; failures land in the status error field."""
+        if self._loop is None:
+            return False
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+
+        def _done(f):
+            try:
+                f.result()
+                if self._error:
+                    self._error = None
+            except Exception as e:
+                self._cmd_failed(e)
+        fut.add_done_callback(_done)
+        return True
 
     def play(self) -> bool:
         async def _p():
@@ -531,7 +580,7 @@ class DlnaBackend(PlayerBackend):
                 await self._avt("Play", Speed="1")
                 self._ensure_poll()
                 self._emit_now("playing")
-        return self._call(_p())
+        return self._call_async(_p())
 
     def pause(self) -> bool:
         async def _p():
@@ -547,15 +596,15 @@ class DlnaBackend(PlayerBackend):
         return self._call(_s())
 
     def next(self) -> bool:
-        return self._call(self._load_and_play(self._index + 1))
+        return self._call_async(self._load_and_play(self._index + 1))
 
     def previous(self) -> bool:
-        return self._call(self._load_and_play(max(1, self._index - 1)))
+        return self._call_async(self._load_and_play(max(1, self._index - 1)))
 
     def select(self, index: int) -> bool:
         if self._queue.item_at(index) is None:
             return False
-        return self._call(self._load_and_play(index))
+        return self._call_async(self._load_and_play(index))
 
     def seek(self, seconds: int) -> bool:
         async def _s():
@@ -586,7 +635,7 @@ class DlnaBackend(PlayerBackend):
     def queue_changed(self, kind: str, *, play: bool = False) -> None:
         if kind == "replace":
             if play and len(self._queue):
-                self._call(self._load_and_play(1))
+                self._call_async(self._load_and_play(1))
             else:
                 self.stop()
             return

@@ -5879,3 +5879,23 @@ select.add-gear-input {
   letter-spacing: 0.02em;
   white-space: nowrap;
 }
+
+/* Track-change in flight on a slow output (DLNA: SOAP round-trips + the
+   renderer buffering the new file). The tapped track shows immediately;
+   the transport button spins until the audio actually switches — honest
+   feedback without pretending, and no urge to re-tap. */
+.is-loading {
+  position: relative;
+  pointer-events: none;
+}
+.is-loading svg { opacity: 0.35; }
+.is-loading::after {
+  content: '';
+  position: absolute;
+  inset: calc(5 * var(--px));
+  border: calc(2 * var(--px)) solid transparent;
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: transport-spin 0.9s linear infinite;
+}
+@keyframes transport-spin { to { transform: rotate(360deg); } }

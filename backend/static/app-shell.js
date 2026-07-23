@@ -797,6 +797,10 @@
           playing
             ? 'M9 5h4v20H9V5zm8 0h4v20h-4V5z'   // pause bars
             : 'M9 5v20l16-10z');                 // play triangle
+        // Slow outputs (DLNA) report `loading` while a track change is in
+        // flight — spin the transport button so the tap visibly landed.
+        const btn = this.playPauseIcon.closest('button');
+        if (btn) btn.classList.toggle('is-loading', data.state === 'loading');
       }
       // Radio toggle visual reflects backend flag every tick. Stashed
       // mfId so the radio start handler can use the current seed
@@ -1109,6 +1113,7 @@
       const playing = data && data.state === 'playing';
       const paused = data && data.state === 'paused';
       const stopped = data && data.state === 'stopped';
+      const loading = data && data.state === 'loading';
       // Stopped HQPlayer reports no track metadata (index 0) even though
       // the canonical queue is intact — e.g. after a heavy DSP-filter
       // rebuild. Per the IA the bar stays visible while the queue is
@@ -1123,7 +1128,7 @@
                  provider_cover_url: first.provider_cover_url };
       }
       const hasTrack = !!(data && data.song);
-      const visible = hasTrack && (playing || paused || stopped);
+      const visible = hasTrack && (playing || paused || stopped || loading);
 
       if (!visible) {
         this.el.hidden = true;
@@ -1144,6 +1149,8 @@
           playing
             ? 'M6 5h4v14H6V5zm8 0h4v14h-4V5z'   // pause bars
             : 'M8 5v14l11-7z');                  // play triangle
+        const btn = this.playPauseIcon.closest('button');
+        if (btn) btn.classList.toggle('is-loading', loading);
       }
 
       // Reset cover to gradient placeholder only when the track changes,
