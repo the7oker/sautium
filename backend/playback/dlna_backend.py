@@ -522,10 +522,20 @@ class DlnaBackend(PlayerBackend):
         gaplessly on its own; we detect the URI change and follow."""
         self._next_url = None
         nxt = self._queue.item_at(self._index + 1)
-        if nxt is None:
-            return
-        url = self._url_for(nxt)
+        url = self._url_for(nxt) if nxt is not None else None
         if url is None:
+            # DISARM, don't just skip: the renderer still holds the last
+            # armed NextURI — e.g. a track the user just REMOVED from the
+            # queue (its proxy buffer outlives the removal) — and would
+            # gapless-transition into it at track end, playing deleted
+            # content while the indication stays frozen (our detector no
+            # longer knows that URL). Observed live: a de-duplicated
+            # streamed album "restarting from the top".
+            try:
+                await self._avt("SetNextAVTransportURI",
+                                NextURI="", NextURIMetaData="")
+            except Exception as e:
+                logger.debug("SetNext disarm unsupported/failed: %s", e)
             return
         try:
             await self._avt("SetNextAVTransportURI", NextURI=url,
