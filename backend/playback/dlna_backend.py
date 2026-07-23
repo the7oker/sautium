@@ -524,6 +524,14 @@ class DlnaBackend(PlayerBackend):
         item = self._queue.item_at(self._index)
         self._length = (item.duration_seconds or 0.0) if item else 0.0
         self._position = 0.0
+        # The poll exits on any STOPPED observation (including the brief
+        # blip some renderers emit at a gapless boundary) — a track that
+        # starts through THIS path must restart it, or the backend goes
+        # deaf: position frozen at 0, and the poll-side track-end backstop
+        # (which caught radio's queue walking when GENA went quiet) never
+        # fires again. Observed live: radio died at the end of the first
+        # auto-advanced track.
+        self._ensure_poll()
         asyncio.ensure_future(self._preload_next(), loop=self._loop)
         self._emit_now("playing")
 
