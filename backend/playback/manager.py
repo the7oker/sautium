@@ -483,7 +483,7 @@ class PlaybackManager:
         with self._mutate_lock:
             backend = self.backend()
             result = backend.queue_reorder(plan)
-            self.queue.reorder_by_media_ids(plan.order)
+            self.queue.reorder_by_track_ids(plan.order)
             backend.queue_changed("reorder")
             self._schedule_persist()
             return result

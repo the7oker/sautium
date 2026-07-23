@@ -119,14 +119,16 @@ class CanonicalQueue:
                 return item
             return None
 
-    def reorder_by_media_ids(self, order: list[int]) -> None:
-        """Reorder to `order` (media_file_ids; the endpoint has already
-        validated it as a permutation of the current owned-only queue).
-        Duplicate ids keep their relative order via per-id buckets."""
+    def reorder_by_track_ids(self, order: list[str]) -> None:
+        """Reorder to `order` (universal track UUIDs — the one identity
+        BOTH owned and phantom items carry; media_file_id is None for
+        phantoms, which made radio queues unreorderable). The endpoint has
+        already validated the permutation. Duplicate ids keep their
+        relative order via per-id buckets."""
         with self._lock:
-            by_id: dict[Optional[int], list[QueueItem]] = {}
+            by_id: dict[Optional[str], list[QueueItem]] = {}
             for it in self._items:
-                by_id.setdefault(it.media_file_id, []).append(it)
+                by_id.setdefault(it.track_id, []).append(it)
             new_items = []
             for mid in order:
                 bucket = by_id.get(mid)

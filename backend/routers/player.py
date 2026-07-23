@@ -108,7 +108,10 @@ class RemoveRequest(BaseModel):
     index: int  # 1-based — HQPlayer's PlaylistRemove convention
 
 class ReorderRequest(BaseModel):
-    order: list[int]  # full new order of media_file_ids, current track included at its original position
+    # Full new order of universal track UUIDs (owned + phantom), current
+    # track included at its original position. media_file_ids can't key
+    # this: phantoms have none, so radio queues were unreorderable.
+    order: list[str]
 
 class SeekRequest(BaseModel):
     position: float  # seconds into the current track
@@ -930,7 +933,7 @@ def reorder(req: ReorderRequest):
         raise HTTPException(status_code=400, detail="order is empty")
 
     current_items = manager.queue.snapshot()
-    current_ids = [it.media_file_id for it in current_items]
+    current_ids = [it.track_id for it in current_items]
 
     status_idx = manager.latest_status.get("track_index") or 0
     if status_idx < 1 or status_idx > len(current_ids):
@@ -986,7 +989,7 @@ def reorder(req: ReorderRequest):
 
     items_by_id = {}
     for it in current_items:
-        items_by_id.setdefault(it.media_file_id, it)
+        items_by_id.setdefault(it.track_id, it)
 
     plan = ReorderPlan(
         seamless=seamless,

@@ -1622,7 +1622,9 @@
       this.tracks = newTracks;
       this.render();
 
-      const order = newTracks.map(t => t.id).filter(Boolean);
+      // Universal track UUIDs — media ids are null for phantom (radio)
+      // rows and made the permutation check reject the whole reorder.
+      const order = newTracks.map(t => t.track_id);
       try {
         const resp = await fetch('/api/player/reorder', {
           method: 'POST',
@@ -5420,14 +5422,20 @@
         //    (stopped / no playlist), we leave it at the end — same
         //    fallback as a plain End. Skip when the append itself failed.
         if (resp.ok && currentIdx >= 0 && currentIdx < tracks.length) {
-          const newOrder = tracks.map(t => t.id);
-          newOrder.push(mfId);
-          newOrder.splice(currentIdx + 1, 0, newOrder.pop());
-          await fetch('/api/player/reorder', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ order: newOrder }),
-          });
+          // Refetch: /reorder is keyed on track UUIDs now, and the
+          // appended row's UUID only exists in the fresh playlist.
+          const fresh = await fetch('/api/player/playlist')
+            .then(r => r.json()).catch(() => null);
+          const rows = (fresh && fresh.tracks) || [];
+          if (rows.length > 1) {
+            const newOrder = rows.map(t => t.track_id);
+            newOrder.splice(currentIdx + 1, 0, newOrder.pop());
+            await fetch('/api/player/reorder', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ order: newOrder }),
+            });
+          }
         }
       } catch (err) { console.warn('queue-tracks (next) failed', err); }
         closeQueueConfirm(row);
