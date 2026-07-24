@@ -396,6 +396,7 @@ class BrowserBackend(PlayerBackend):
     def seek(self, seconds: int) -> bool:
         self._push({"cmd": "seek", "position": int(seconds)})
         self._position = float(seconds)
+        self._emit_now()   # reflect the new position without waiting for a timeupdate
         return True
 
     def set_volume(self, level: float) -> bool:

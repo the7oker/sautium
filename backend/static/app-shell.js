@@ -604,6 +604,7 @@
       this.bpmNum = document.getElementById('npBpmNum');
       this.energy = document.getElementById('npEnergy');
       this.energyDots = document.getElementById('npEnergyDots');
+      this.progressTrack = document.getElementById('npProgressTrack');
       this.progressFill = document.getElementById('npProgressFill');
       this.progressHead = document.getElementById('npProgressHead');
       this.timeCurrent = document.getElementById('npTimeCurrent');
@@ -625,6 +626,7 @@
         e.stopPropagation();
         if (typeof window.togglePlayPause === 'function') window.togglePlayPause();
       });
+      this._wireScrub();
       this.prev.addEventListener('click', e => {
         e.stopPropagation();
         if (typeof window.playerCmd === 'function') window.playerCmd('previous');
@@ -779,21 +781,96 @@
       updateFabVisibility(currentRoute);
     },
 
-    onStatus(data) {
-      if (!data) return;
+    _fmtTime(s) {
+      s = Math.max(0, Math.floor(s || 0));
+      const m = Math.floor(s / 60);
+      return m + ':' + String(s % 60).padStart(2, '0');
+    },
 
-      const pct = data.progress_percent || 0;
+    _paintProgress(pct) {
+      pct = Math.max(0, Math.min(100, pct));
       if (this.progressFill) {
         this.progressFill.style.width = pct + '%';
-        // .progress-fill border-radius right corners flatten when not 100%
+        // .progress-fill right corners flatten until 100%.
         this.progressFill.style.borderRadius = pct >= 99
           ? 'calc(4 * var(--px))'
           : 'calc(4 * var(--px)) 0 0 calc(4 * var(--px))';
       }
-      if (this.progressHead) {
-        this.progressHead.style.left = pct + '%';
+      if (this.progressHead) this.progressHead.style.left = pct + '%';
+    },
+
+    // Tap or drag the progress bar to seek. Backend seek is universal (all
+    // four outputs report capabilities().seek). The bar paints optimistically
+    // during the drag; the seek POSTs on release, and onStatus holds the SSE
+    // repaint briefly so the bar doesn't snap back before the backend catches
+    // up (DLNA reports position at 1 Hz).
+    _wireScrub() {
+      const track = this.progressTrack;
+      if (!track) return;
+      this._scrubbing = false;
+      this._trackLength = 0;
+      this._seekHoldUntil = 0;
+
+      const fracAt = (e) => {
+        const r = track.getBoundingClientRect();
+        if (r.width <= 0) return 0;
+        return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+      };
+      const preview = (frac) => {
+        this._paintProgress(frac * 100);
+        if (this.timeCurrent) {
+          this.timeCurrent.textContent = this._fmtTime(frac * this._trackLength);
+        }
+      };
+
+      track.addEventListener('pointerdown', (e) => {
+        if (!this._trackLength) return;   // nothing playing / unknown length
+        this._scrubbing = true;
+        track.classList.add('scrubbing');
+        try { track.setPointerCapture(e.pointerId); } catch (_) {}
+        preview(fracAt(e));
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      track.addEventListener('pointermove', (e) => {
+        if (this._scrubbing) preview(fracAt(e));
+      });
+      const finish = (e) => {
+        if (!this._scrubbing) return;
+        this._scrubbing = false;
+        track.classList.remove('scrubbing');
+        const frac = fracAt(e);
+        preview(frac);
+        const pos = Math.round(frac * this._trackLength);
+        this._seekHoldUntil = Date.now() + 1500;
+        fetch('/api/player/seek', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ position: pos }),
+        }).catch(() => {});
+      };
+      track.addEventListener('pointerup', finish);
+      track.addEventListener('pointercancel', () => {
+        this._scrubbing = false;
+        track.classList.remove('scrubbing');
+      });
+    },
+
+    onStatus(data) {
+      if (!data) return;
+
+      // Track length for the scrub → seek-target math (seconds).
+      this._trackLength = data.length || 0;
+      // Don't repaint the bar from the SSE feed while the user is dragging,
+      // nor during the brief settle after a seek (the backend's position
+      // catches up a beat later — DLNA's poll is 1 Hz — and an early tick
+      // would snap the bar back to the old spot).
+      const holding = this._scrubbing
+        || (this._seekHoldUntil && Date.now() < this._seekHoldUntil);
+      if (!holding) {
+        this._paintProgress(data.progress_percent || 0);
+        if (this.timeCurrent) this.timeCurrent.textContent = data.position_formatted || '0:00';
       }
-      if (this.timeCurrent) this.timeCurrent.textContent = data.position_formatted || '0:00';
       if (this.timeTotal) this.timeTotal.textContent = data.length_formatted || '0:00';
       if (this.playPauseIcon) {
         const playing = data.state === 'playing';

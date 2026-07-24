@@ -1447,6 +1447,22 @@ body.has-miniplayer .ai-fab {
   height: calc(3 * var(--px));
   background: rgba(237, 226, 212, 0.14);
   border-radius: calc(4 * var(--px));
+  cursor: pointer;
+  touch-action: none;   /* the drag scrubs, it must not scroll the sheet */
+}
+/* Tall invisible hit area — a 3px bar is untappable, especially on touch. */
+.np-progress-track::before {
+  content: '';
+  position: absolute;
+  left: 0; right: 0;
+  top: calc(-12 * var(--px));
+  height: calc(27 * var(--px));
+}
+/* While scrubbing, grow the head so the grab reads as active. */
+.np-progress-track.scrubbing .np-progress-head {
+  width: calc(16 * var(--px));
+  height: calc(16 * var(--px));
+  box-shadow: 0 0 0 calc(6 * var(--px)) rgba(74, 127, 167, 0.24);
 }
 .np-progress-fill {
   position: absolute; top: 0; left: 0;
