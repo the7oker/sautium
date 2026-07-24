@@ -2845,11 +2845,12 @@
     bio:    { badge: 'Bios · AI',   ph: 'Describe an artist: female jazz vocalist from Nigeria…' },
     sound:  { badge: 'Sound · AI',  ph: 'Describe the sound: dark ambient with rain…' },
     lyrics: { badge: 'Lyrics · AI', ph: 'Themes or quotes: songs about the sea…' },
+    mb:     { badge: 'MusicBrainz', ph: 'Artist or album…' },
   };
 
   function updateSearchScopeUi(screen) {
-    const cfg = DISCOVERY_SCOPE_UI[(screen._filters || {}).scope]
-      || DISCOVERY_SCOPE_UI.names;
+    const scope = (screen._filters || {}).scope;
+    const cfg = DISCOVERY_SCOPE_UI[scope] || DISCOVERY_SCOPE_UI.names;
     const input = screen.querySelector('#discoverySearchInput');
     if (input) input.placeholder = cfg.ph;
     const badge = screen.querySelector('#discoveryScopeBadge');
@@ -2857,6 +2858,12 @@
       badge.textContent = cfg.badge;
       badge.hidden = !cfg.badge;
     }
+    // MB scope searches the dump, not the library — every filter below the
+    // Search-in row goes inert (visibly, with a note, not silently).
+    const panel = screen.querySelector('#discoveryFiltersPanel');
+    if (panel) panel.classList.toggle('is-mb-scope', scope === 'mb');
+    const note = screen.querySelector('#discoveryMbNote');
+    if (note) note.hidden = scope !== 'mb';
   }
 
   // True iff at least one filter dimension is set to a non-default
@@ -2930,15 +2937,20 @@
       </button>
 
       <div class="filters-panel" id="discoveryFiltersPanel" hidden>
-        <div class="filter-row">
+        <div class="filter-row" id="discoveryScopeRow">
           <span class="filter-label">Search in</span>
           <div class="filter-chips" data-filter-key="scope">
             <span class="f-chip is-active" data-value="names">Names &amp; titles</span>
             <span class="f-chip" data-value="bio">Artist bios · AI</span>
             <span class="f-chip" data-value="sound">Sound · AI</span>
             <span class="f-chip" data-value="lyrics">Lyrics · AI</span>
+            <span class="f-chip" data-value="mb" id="discoveryMbChip">MusicBrainz</span>
           </div>
         </div>
+        <p class="mb-scope-note" id="discoveryMbNote" hidden>
+          Filters apply to library scopes — MusicBrainz searches the whole
+          catalog by name.
+        </p>
 
         <div class="filter-row">
           <span class="filter-label">Context</span>
@@ -3065,6 +3077,17 @@
     fetchShuffle(screen);
     wireDiscoverySearch(screen);
     wireDiscoveryFilters(screen);
+
+    // MB scope availability — chip disabled (with a download hint on tap)
+    // until the optional dump is loaded.
+    fetch('/api/discovery/mb-status')
+      .then(r => r.ok ? r.json() : { available: false })
+      .then(s => {
+        screen._mbAvailable = !!s.available;
+        const chip = screen.querySelector('#discoveryMbChip');
+        if (chip) chip.classList.toggle('is-disabled', !s.available);
+      })
+      .catch(() => {});
   }
 
   // Minimum query length before fanning out the target-block search.
@@ -3098,6 +3121,19 @@
       const key = group.getAttribute('data-filter-key');
       group.querySelectorAll('.f-chip').forEach(chip => {
         chip.addEventListener('click', () => {
+          if (chip.classList.contains('is-disabled')) {
+            // Only the MB scope chip disables (no dump) — tapping it must
+            // say why instead of dying silently.
+            if (chip.id === 'discoveryMbChip') {
+              window.notifyDialog({
+                title: 'MusicBrainz search', kind: 'info',
+                message: 'Searching the whole MusicBrainz catalog needs the '
+                  + 'optional local dump. Download it in '
+                  + '<b>More → Settings → MusicBrainz</b>.',
+              });
+            }
+            return;
+          }
           group.querySelectorAll('.f-chip')
             .forEach(c => c.classList.remove('is-active'));
           chip.classList.add('is-active');
@@ -3486,10 +3522,17 @@
         ? 'Tracks matching filters' : b.title;
     });
 
+    const filters = screen._filters || {};
+    // MB scope bypasses the engine entirely: one dump query fills the
+    // Artists/Albums blocks with mintable MB rows (see runMbSearch).
+    if ((filters.scope || 'names') === 'mb') {
+      runMbSearch(screen, query, queryId, getActiveId, searching, empty);
+      return;
+    }
+
     const completion = { remaining: DISCOVERY_BLOCKS.length, hadAnyResults: false,
                          warming: false, limited: false };
 
-    const filters = screen._filters || {};
     DISCOVERY_BLOCKS.forEach(b => {
       // Every block carries the full composite query — the engine gates ALL
       // targets on ALL filters (a Gender chip constrains the Tracks list, an
@@ -3551,6 +3594,123 @@
           }
         });
     });
+  }
+
+  // ── MusicBrainz scope ─────────────────────────────────────────────────
+  // One dump query fills the Artists/Albums blocks with mintable MB rows.
+  // A click either navigates (already-local entity) or mints the artist's
+  // WHOLE slice through the canon pipeline (an empty artist page would
+  // make the goal — listening — unreachable), then lands on the entity
+  // that was clicked: album rows on the album page, canon-declined groups
+  // fall back to the artist.
+  function runMbSearch(screen, query, queryId, getActiveId, searching, empty) {
+    fetch('/api/discovery/mb-search?' + new URLSearchParams({ q: query, limit: '20' }))
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(data => {
+        if (queryId !== getActiveId()) return;
+        searching.hidden = true;
+        const artists = data.artists || [];
+        const albums = data.albums || [];
+        renderMbBlock(screen, 'artists', 'Artists · MusicBrainz',
+                      renderMbArtistRow(artists), artists.length);
+        renderMbBlock(screen, 'albums', 'Albums · MusicBrainz',
+                      renderMbAlbumRow(albums), albums.length);
+        if (!artists.length && !albums.length) {
+          const emptyP = empty.querySelector('p');
+          if (emptyP) emptyP.textContent = data.available === false
+            ? 'MusicBrainz dump is not loaded on this device.'
+            : 'No matches in MusicBrainz.';
+          empty.hidden = false;
+        }
+      })
+      .catch(err => {
+        if (queryId !== getActiveId()) return;
+        searching.hidden = true;
+        console.warn('mb search failed:', err);
+      });
+  }
+
+  function renderMbBlock(screen, id, title, html, count) {
+    const blk = screen.querySelector('#dBlock-' + id);
+    const body = screen.querySelector('#dBody-' + id);
+    if (!blk || !body) return;
+    const head = blk.querySelector('.discovery-section-head h3');
+    if (head) head.textContent = title;
+    if (!count) { blk.hidden = true; return; }
+    body.innerHTML = html;
+    body.querySelectorAll('[data-mb-artist-gid]').forEach(el =>
+      el.addEventListener('click', () => mintMbTile(el)));
+    blk.hidden = false;
+  }
+
+  function renderMbArtistRow(items) {
+    return `<div class="shuffle-row d-artist-row">${
+      items.map(a => {
+        const ph = avatarPlaceholder(a.name || '?');
+        // The MB disambiguation line is what tells five artists named
+        // "Sade" apart — surface it (release count as the fallback).
+        const sub = a.comment || (a.rg_count ? `${a.rg_count} releases` : '');
+        return `
+          <button class="d-artist-tile is-phantom" type="button"
+                  data-mb-artist-gid="${escapeHtml(a.gid)}"
+                  data-local-artist-id="${escapeHtml(a.local_artist_id || '')}">
+            <div class="d-artist-avatar" style="background: ${ph.bg};">
+              <span class="d-artist-initials">${escapeHtml(ph.initials)}</span></div>
+            <div class="d-artist-name">${escapeHtml(a.name)}</div>
+            <div class="d-artist-sub">${escapeHtml(sub)}</div>
+          </button>`;
+      }).join('')
+    }</div>`;
+  }
+
+  function renderMbAlbumRow(items) {
+    return `<div class="shuffle-row d-album-row">${
+      items.map(a => {
+        const c = coverPlaceholderColors(a.title || '');
+        const cover = a.cover_url
+          ? `<img src="${escapeHtml(a.cover_url)}" alt="" loading="lazy" onerror="this.style.display='none'">`
+          : '';
+        const yr = a.year ? ` · ${a.year}` : '';
+        return `
+          <button class="mosaic-tile is-phantom" type="button"
+                  data-mb-artist-gid="${escapeHtml(a.artist_gid || '')}"
+                  data-mb-rg-gid="${escapeHtml(a.gid)}"
+                  data-local-album-id="${escapeHtml(a.local_album_id || '')}">
+            <div class="mosaic-cover"
+                 style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}</div>
+            <div class="mosaic-title">${escapeHtml(a.title || '')}</div>
+            <div class="mosaic-artist">${escapeHtml((a.artist || '') + yr)}</div>
+          </button>`;
+      }).join('')
+    }</div>`;
+  }
+
+  function mintMbTile(el) {
+    const rgGid = el.getAttribute('data-mb-rg-gid');
+    const localArtist = el.getAttribute('data-local-artist-id');
+    const localAlbum = el.getAttribute('data-local-album-id');
+    if (rgGid && localAlbum) return navigateToEntity('album', localAlbum);
+    if (!rgGid && localArtist) return navigateToEntity('artist', localArtist);
+    const artistGid = el.getAttribute('data-mb-artist-gid');
+    if (!artistGid || el.classList.contains('is-minting')) return;
+    el.classList.add('is-minting');
+    fetch('/api/discovery/mb-mint', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(rgGid ? { artist_gid: artistGid, rg_gid: rgGid }
+                                 : { artist_gid: artistGid }),
+    })
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(out => {
+        if (rgGid && out.album_id) navigateToEntity('album', out.album_id);
+        else if (out.artist_id) navigateToEntity('artist', out.artist_id);
+      })
+      .catch(err => {
+        console.warn('mb mint failed:', err);
+        window.notifyDialog({ title: 'Import failed', kind: 'error',
+          message: 'Could not import this MusicBrainz entity.' });
+      })
+      .finally(() => el.classList.remove('is-minting'));
   }
 
   function fetchStreamingTail(screen, query, queryId, getActiveId, onAnyResults) {

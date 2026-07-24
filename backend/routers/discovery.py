@@ -255,6 +255,45 @@ def streaming_mint(body: dict = Body(...)):
         raise HTTPException(status_code=502, detail=f"mint failed: {e}")
 
 
+@router.get("/mb-status")
+def mb_status():
+    """Whether the MusicBrainz scope can serve — the optional local dump is
+    loaded. The UI renders the Search-in chip disabled (with a download
+    hint) when false."""
+    import mb_discovery
+    return {"available": mb_discovery.available()}
+
+
+@router.get("/mb-search")
+def mb_search(q: str = Query(..., min_length=2, max_length=255),
+              limit: int = Query(20, ge=1, le=30)):
+    """MusicBrainz-scope search: artists + release groups from the local
+    dump (see mb_discovery). No engine involvement — filters don't apply
+    to dump rows, so the UI disables them in this scope."""
+    import mb_discovery
+    if not mb_discovery.available():
+        return {"available": False, "artists": [], "albums": []}
+    return {"available": True, **mb_discovery.search(q.strip(), limit=limit)}
+
+
+@router.post("/mb-mint")
+def mb_mint(body: dict = Body(...)):
+    """Mint a clicked MB entity: the artist's whole slice materializes as
+    phantom entities (canon pipeline), the response carries local ids to
+    navigate to — album_id when an album row was clicked and survived
+    canon's type policy, artist_id always."""
+    import mb_discovery
+    if not mb_discovery.available():
+        raise HTTPException(status_code=503, detail="MusicBrainz dump not loaded")
+    artist_gid = str(body.get("artist_gid") or "")
+    if not artist_gid:
+        raise HTTPException(status_code=422, detail="artist_gid required")
+    out = mb_discovery.mint(artist_gid, body.get("rg_gid"))
+    if out["status"] == "unknown_artist":
+        raise HTTPException(status_code=404, detail="artist not in the dump")
+    return out
+
+
 @router.get("/instrument-options")
 def instrument_options(q: str = Query("", max_length=50), limit: int = Query(8, ge=1, le=20)):
     """Instrument labels present in the corpus (raw AST/PaSST tags) matching a

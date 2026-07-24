@@ -3074,6 +3074,30 @@ body.has-miniplayer .ai-fab {
 }
 .discovery-screen .is-minting { opacity: 0.4; pointer-events: none; }
 
+/* MusicBrainz scope */
+.f-chip.is-disabled { opacity: 0.4; }
+/* Every filter below Search-in goes inert in MB scope — visibly, so a
+   forgotten chip can't silently gut the results. The actions row stays
+   live: Reset is the escape hatch back to library scopes. */
+.filters-panel.is-mb-scope .filter-row:not(#discoveryScopeRow) {
+  opacity: 0.35;
+  pointer-events: none;
+}
+.filters-panel .mb-scope-note {
+  margin: calc(-4 * var(--px)) 0 calc(8 * var(--px));
+  font-size: calc(11 * var(--px));
+  color: var(--color-text-muted);
+}
+.d-artist-sub {
+  font-size: calc(10 * var(--px));
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: calc(96 * var(--px));
+  margin-top: calc(-4 * var(--px));
+}
+
 /* Genres results block: wrap-row of navigable pills */
 .discovery-screen .d-genre-row {
   display: flex;

@@ -49,7 +49,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- confidence. MB-verified only — Last.fm is out of the MBID contour.
 -- NULL = no MBID assigned.
 DO $$ BEGIN
-    CREATE TYPE mb_match_confidence AS ENUM ('phantom', 'name_fuzzy', 'alias_exact', 'name_exact', 'overlap_verified', 'ai');
+    CREATE TYPE mb_match_confidence AS ENUM ('phantom', 'name_fuzzy', 'alias_exact', 'name_exact', 'overlap_verified', 'ai', 'user');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
