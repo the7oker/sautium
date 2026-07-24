@@ -229,7 +229,15 @@ class MediaProxy:
         ``(query, chain)`` pair where chain is the lossless-first fallback list of
         ``(provider, source_id)`` (see _Entry). Returns the per-track tokens; build
         URLs with ``url_for``."""
+        reused = 0
         with self._lock:
+            # Carry already-fetched audio into the new session: a repeat of
+            # the same album (double [Stream all], re-open) must NOT
+            # re-download what's still in RAM — wasteful, and repeated
+            # identical pulls read as scraping to the providers. Keyed by the
+            # phantom track UUID.
+            in_ram = {e.query.track_id: e for e in self._entries.values()
+                      if e.ready.is_set() and e.audio is not None and e.query.track_id}
             for e in self._entries.values():
                 if not e.ready.is_set():
                     # Wake every waiter on the dropped set (fillers block
@@ -241,17 +249,29 @@ class MediaProxy:
             self._session = []
             for i, (q, chain) in enumerate(items):
                 tok = secrets.token_urlsafe(12)
-                self._entries[tok] = _Entry(tok, q, i, chain=chain,
-                                            provider=chain[0][0] if chain else None)
+                prior = in_ram.get(q.track_id)
+                if prior is not None and prior.audio is not None:
+                    e = _Entry(tok, q, i, chain=chain, provider=prior.provider)
+                    e.audio = prior.audio
+                    e.fetch_seconds = prior.fetch_seconds
+                    e._claimed = True
+                    e.ready.set()        # already in hand — waiters return at once
+                    reused += 1
+                else:
+                    e = _Entry(tok, q, i, chain=chain,
+                               provider=chain[0][0] if chain else None)
+                self._entries[tok] = e
                 self._session.append(tok)
         # Priority start: fetch ONLY track 0 now (full bandwidth → fastest first
-        # track). The caller measures its throughput, then calls prefetch_from(1)
-        # to fan out the rest concurrently while track 0 buffers and plays. This
-        # is rolling-append: HQPlayer HEAD-probes each URI at ADD time, so we add
-        # the ready prefix, play, then append the tail as each track lands.
-        if self._session:
+        # track), unless it was reused from RAM. The caller measures its
+        # throughput, then calls prefetch_from(1) to fan out the rest
+        # concurrently while track 0 buffers and plays. This is rolling-append:
+        # HQPlayer HEAD-probes each URI at ADD time, so we add the ready
+        # prefix, play, then append the tail as each track lands.
+        if self._session and not self._entries[self._session[0]].ready.is_set():
             self._prefetch(self._session[0])
-        logger.info("preview session: %d tracks", len(items))
+        logger.info("preview session: %d tracks (%d reused from RAM)",
+                    len(items), reused)
         preview_events.ping()   # new buffering set → open album page re-fetches
         return list(self._session)
 
