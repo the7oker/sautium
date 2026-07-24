@@ -10111,13 +10111,13 @@
       </div>`;
     const qualityGroup = `
       <div class="form-group">
-        <div class="form-row"><span class="form-label">Stream quality · DLNA / This device</span></div>
         ${qOpt('lossless', 'Lossless (FLAC)', 'Full quality — the everyday default. HQPlayer and local outputs are always lossless regardless of this.')}
         ${qOpt('opus_192', 'High · Opus 192k', 'Indistinguishable on the go, ~4× less data. For remote listening over mobile.')}
         ${qOpt('opus_96', 'Data saver · Opus 96k', 'Great quality, ~7–8× less data. For metered or weak connections. Changing this applies from the next track.')}
       </div>`;
 
     return `
+      <div class="profile-group-label">Output device</div>
       <div class="form-group">
         ${hqpRow}
         ${deviceRows}
@@ -10125,6 +10125,7 @@
         ${browserRow}
       </div>
       ${exclusiveGroup}
+      <div class="profile-group-label">Output quality · DLNA / This device</div>
       ${qualityGroup}
       <div class="btn-row single">
         <button class="btn btn-secondary" data-action="refresh-outputs">Rescan devices</button>
