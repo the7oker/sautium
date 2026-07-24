@@ -75,14 +75,32 @@ class PlaybackManager:
         using backend() and never wake a device."""
         with self._ensure_lock:
             b = self._active
+            # Fast offline-fail: a powered-off DLNA renderer must 503 in ~2s
+            # with a clear message, not after stacked SOAP + re-attach
+            # timeouts (34s, live) — and the first attempt must not silently
+            # accept (fire-and-forget commands return 200 while the failure
+            # is async). A dozing-but-networked renderer passes the probe.
+            if b is not None and not b.reachable():
+                b._gone = True
+                raise ConnectionError(
+                    f"'{b.label}' is offline — turn it on, or pick another "
+                    "output in Settings → Audio output")
             if b is not None and b.healthy():
                 return b
             from routers.settings import _read
             otype = _read("output.type")
             if otype is None:
                 return self.backend()   # legacy: honest ConnectionError
-            if otype == "dlna" and not _read("output.dlna_renderer"):
-                raise ConnectionError("No DLNA renderer configured")
+            if otype == "dlna":
+                renderer = _read("output.dlna_renderer")
+                if not renderer:
+                    raise ConnectionError("No DLNA renderer configured")
+                from playback.dlna_backend import renderer_reachable
+                if not renderer_reachable(renderer.get("location", "")):
+                    raise ConnectionError(
+                        f"'{renderer.get('name', 'DLNA renderer')}' is offline "
+                        "— turn it on, or pick another output in "
+                        "Settings → Audio output")
             logger.info("play intent on %s '%s' output — (re)attaching",
                         "unhealthy" if b is not None else "inactive", otype)
             if b is not None:

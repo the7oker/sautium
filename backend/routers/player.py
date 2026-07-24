@@ -1496,6 +1496,16 @@ class PlayPhantomAlbumRequest(BaseModel):
     position: str = "end"     # queue endpoint only: 'next' | 'end'
 
 
+def _ensure_output_ready() -> None:
+    """Fast offline pre-flight for the streaming paths: fail with a clear
+    503 BEFORE resolving/buffering a whole album, so a powered-off renderer
+    is reported in ~2s instead of after the buffer + stacked SOAP timeouts."""
+    try:
+        manager.ensure_active()
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
 @router.post("/play-phantom-album")
 def play_phantom_album(req: PlayPhantomAlbumRequest):
     """Stream a phantom (not-in-library) album onto HQPlayer.
@@ -1511,6 +1521,7 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
 
     if not streaming_service.is_enabled():
         raise HTTPException(status_code=503, detail="Streaming preview is disabled")
+    _ensure_output_ready()
 
     queries = _phantom_album_queries(req.album_id)
     if not queries:
@@ -1625,6 +1636,7 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
 
     if not streaming_service.is_enabled():
         raise HTTPException(status_code=503, detail="Streaming preview is disabled")
+    _ensure_output_ready()
 
     q = _phantom_track_query(req.track_id)
     if q is None:

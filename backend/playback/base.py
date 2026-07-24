@@ -91,6 +91,13 @@ class PlayerBackend(ABC):
         self-heal on their own."""
         return True
 
+    def reachable(self) -> bool:
+        """Fast, synchronous liveness probe at play-intent time. Overridden
+        by outputs that can be physically off (DLNA renderers) so a powered-
+        off device fails in ~2s with a clear message instead of stacked
+        command/attach timeouts. Default True — no cheap probe, trust it."""
+        return True
+
     @abstractmethod
     def capabilities(self) -> Capabilities: ...
 

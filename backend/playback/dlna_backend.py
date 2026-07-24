@@ -98,6 +98,25 @@ _MIME_BY_FORMAT = {
 }
 
 
+def renderer_reachable(location: str, timeout: float = 2.0) -> bool:
+    """Cheap TCP-connect liveness check on a renderer's description host:port.
+    A powered-off renderer fails this in ~timeout s, so the play-intent gate
+    can report it offline fast instead of eating stacked SOAP/attach
+    timeouts. A dozing-but-networked renderer still accepts the connect and
+    wakes on the SOAP that follows."""
+    import socket
+    from urllib.parse import urlparse
+    try:
+        u = urlparse(location)
+        host, port = u.hostname, u.port or 80
+        if not host:
+            return False
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def media_host() -> str:
     """LAN-reachable host for renderer-pulled media URLs. An explicit
     MEDIA_PROXY_ADVERTISED_HOST wins; the localhost default (fine for
@@ -191,6 +210,9 @@ class DlnaBackend(PlayerBackend):
         failures) the next play intent must re-attach, not trust this
         instance."""
         return self._dmr is not None and not self._gone
+
+    def reachable(self) -> bool:
+        return renderer_reachable(self._renderer.get("location", ""))
 
     def resume_at(self, index: int) -> None:
         if self._queue.item_at(index) is None:
