@@ -140,6 +140,7 @@ class DlnaBackend(PlayerBackend):
         # (the UI shows a transition spinner on the tapped track).
         self._loading = False
         self._load_lock = asyncio.Lock()
+        self._closed = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -162,6 +163,7 @@ class DlnaBackend(PlayerBackend):
         logger.info("DLNA backend attached to %s", self.label)
 
     def shutdown(self) -> None:
+        self._closed = True   # stop emitting / polling before cleanup runs
         if self._loop is not None:
             # Unsubscribe only — the shared loop and notify server outlive
             # this backend by design (see the singleton note above).
@@ -233,6 +235,13 @@ class DlnaBackend(PlayerBackend):
         return "stopped"
 
     def _emit_now(self, state: Optional[str] = None) -> None:
+        if self._closed:
+            # A detached backend must never touch the manager's status —
+            # its GENA subscription rides the SHARED notify server and can
+            # deliver one more event after unsubscribe; without this guard
+            # the zombie and the live backend flap the status (observed:
+            # track_index oscillating between two slots, even paused).
+            return
         if state is None and self._loading:
             # Poll/GENA ticks that land mid-track-change would report the
             # OLD track's transport state against the NEW index.
@@ -258,6 +267,8 @@ class DlnaBackend(PlayerBackend):
         asyncio.ensure_future(self._handle_state_change(), loop=self._loop)
 
     async def _handle_state_change(self) -> None:
+        if self._closed:
+            return
         if self._loading:
             # A manual track change owns the transport: its own Stop and
             # URI flapping must not be read as track-end or auto-advance,
@@ -280,6 +291,8 @@ class DlnaBackend(PlayerBackend):
         self._emit_now(state)
 
     def _ensure_poll(self) -> None:
+        if self._closed:
+            return
         # The track-end advance runs INSIDE the exiting poll task: a naive
         # aliveness check sees "the poll" still running (it is the caller,
         # one `return` from death) and skips the restart — every track that
@@ -308,8 +321,7 @@ class DlnaBackend(PlayerBackend):
         try:
             while True:
                 await asyncio.sleep(1.0)
-                if self._dmr is None:
-                    logger.info("position poll exit: dmr gone")
+                if self._dmr is None or self._closed:
                     return
                 if self._loading:
                     continue   # the load sequence owns the status right now
