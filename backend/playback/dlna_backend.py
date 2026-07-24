@@ -536,29 +536,37 @@ class DlnaBackend(PlayerBackend):
         return xml
 
     async def _load_and_play(self, index: int, *, play: bool = True,
-                             ss: float = 0.0) -> bool:
+                             ss: float = 0.0,
+                             url_override: Optional[str] = None) -> bool:
         # Serialized: fire-and-forget track changes must not interleave
         # their SOAP sequences. The lock lives OUTSIDE the recursion in
         # _load_seq (asyncio.Lock is not reentrant). `ss` (seconds) is a
-        # server-side seek — the track re-encodes from the offset.
+        # server-side seek — the track re-encodes from the offset;
+        # `url_override` reuses the currently-playing stream's exact URL
+        # (a seek must keep the format the track was dispatched in).
         async with self._load_lock:
             self._loading = True
             try:
-                return await self._load_seq(index, play=play, ss=ss)
+                return await self._load_seq(index, play=play, ss=ss,
+                                            url_override=url_override)
             finally:
                 self._loading = False
 
-    async def _load_seq(self, index: int, *, play: bool = True, ss: float = 0.0) -> bool:
+    async def _load_seq(self, index: int, *, play: bool = True, ss: float = 0.0,
+                        url_override: Optional[str] = None) -> bool:
         item = self._queue.item_at(index)
         if item is None:
             self._emit_now("stopped")
             return False
-        url = self._url_for(item)
+        # url_override (a seek) carries the currently-playing stream's URL,
+        # already including ?ss — keeping the format the track was dispatched
+        # in even if the global quality has since changed.
+        url = url_override or self._url_for(item)
         if url is None:
             logger.warning("DLNA: skipping unreachable item %s — %s",
                            item.artist, item.title)
             return await self._load_seq(index + 1, play=play)
-        if ss > 0:
+        if ss > 0 and not url_override:
             # Server-side seek: re-encode the track from the offset (the
             # media route honors ?ss). Only Opus URLs (which carry ?q) take
             # this path, so the "&" join is always right.
@@ -753,18 +761,24 @@ class DlnaBackend(PlayerBackend):
             return False
         return self._call_async(self._load_and_play(index))
 
-    @staticmethod
-    def _is_opus() -> bool:
-        from routers.settings import _read
-        return _read("output.stream_quality") in ("opus_192", "opus_96")
-
     def seek(self, seconds: int) -> bool:
-        if self._is_opus():
-            # VBR Opus renderers (KANN) can't time-seek the stream — reload
-            # the current track re-encoded from the offset (server-side seek).
-            # Fire-and-forget like a track change; the UI holds the scrubbed
-            # position while the offset stream buffers.
-            return self._call_async(self._load_and_play(self._index, ss=float(seconds)))
+        # Decide by the CURRENTLY-PLAYING stream's format, not the global
+        # quality setting: a mid-track quality switch leaves the current
+        # track playing its ORIGINAL format (the change applies from the
+        # next track), so its URL — not the setting — is the source of truth.
+        cur = self._current_url or ""
+        if "q=opus" in cur:
+            # VBR Opus renderers (KANN) can't time-seek — reload the SAME
+            # stream at the offset (reusing cur keeps its Opus format even
+            # after the setting flipped to lossless). Fire-and-forget like a
+            # track change; the UI holds the scrubbed position meanwhile.
+            base = cur
+            for sep in ("&ss=", "?ss="):
+                if sep in base:
+                    base = base.split(sep)[0]
+            url = base + ("&" if "?" in base else "?") + f"ss={int(seconds)}"
+            return self._call_async(
+                self._load_and_play(self._index, ss=float(seconds), url_override=url))
 
         async def _s():
             total = int(seconds)
