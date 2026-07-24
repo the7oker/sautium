@@ -18,6 +18,7 @@ host (renderers can't fetch from 127.0.0.1).
 import asyncio
 import logging
 import threading
+import time
 from datetime import timedelta
 from typing import Optional
 
@@ -133,6 +134,10 @@ class DlnaBackend(PlayerBackend):
         self._current_url: Optional[str] = None
         self._next_url: Optional[str] = None     # set via SetNextAVTransportURI
         self._position = 0.0
+        # Wall-clock position estimate for renderers that don't report RelTime
+        # (KANN on VBR Opus): position at the last baseline + elapsed since.
+        self._wall_base = 0.0
+        self._wall_t0 = 0.0
         self._length = 0.0
         self._poll_task: Optional[asyncio.Task] = None
         self._error: Optional[str] = None
@@ -290,6 +295,14 @@ class DlnaBackend(PlayerBackend):
                 return
         self._emit_now(state)
 
+    def _rebaseline(self, pos: float) -> None:
+        """Anchor the wall-clock position estimate at `pos` now — called
+        whenever the true position is known (track start, resume, seek, or a
+        real RelTime reading)."""
+        self._position = pos
+        self._wall_base = pos
+        self._wall_t0 = time.monotonic()
+
     def _ensure_poll(self) -> None:
         if self._closed:
             return
@@ -346,16 +359,23 @@ class DlnaBackend(PlayerBackend):
                         self._emit_now("stopped")
                         return
                     continue
-                pos = self._dmr.media_position
-                if pos is not None:
-                    if not first_pos_logged:
-                        first_pos_logged = True
-                        logger.debug("poll: first position %.1f (slot %d)", float(pos), self._index)
-                    self._position = float(pos)
                 dur = self._dmr.media_duration
                 if dur:
                     self._length = float(dur)
                 state = self._state_name()
+                # Position: trust the renderer's RelTime when it advances, but
+                # some renderers (KANN on VBR Opus, live) play fine yet report
+                # RelTime 00:00:00 forever. So keep a wall-clock estimate and
+                # snap to RelTime whenever it gives a real value — FLAC and
+                # software renderers self-correct every tick; the frozen ones
+                # ride the clock instead of a stuck slider.
+                rel = self._dmr.media_position
+                now = time.monotonic()
+                if rel is not None and rel > 0.5:
+                    self._rebaseline(float(rel))
+                elif state == "playing":
+                    est = self._wall_base + (now - self._wall_t0)
+                    self._position = min(est, self._length) if self._length else est
                 if state == "stopped":
                     finished = (self._length > 0 and
                                 self._position >= self._length - _TRACK_END_SLACK)
@@ -471,6 +491,15 @@ class DlnaBackend(PlayerBackend):
             url, item.title or "Sautium",
             override_upnp_class="object.item.audioItem.musicTrack",
             meta_data=self._didl_meta(item))
+        # Declare the track duration on <res>. Lossless (FLAC/PCM) renderers
+        # infer elapsed time from byte offset × a fixed rate, so they track
+        # RelTime without it — but VBR Opus has no such mapping, and a
+        # renderer with no res@duration then plays fine yet reports RelTime
+        # 00:00:00 forever (KANN, live). Standard DLNA metadata anyway.
+        if item.duration_seconds:
+            total = int(item.duration_seconds)
+            dur = f"{total // 3600}:{total % 3600 // 60:02d}:{total % 60:02d}.000"
+            xml = xml.replace("<res ", f'<res duration="{dur}" ', 1)
         art = await self._art_url(item)
         if art:
             from xml.sax.saxutils import escape
@@ -533,6 +562,7 @@ class DlnaBackend(PlayerBackend):
         self._current_url = url
         if play:
             await self._avt("Play", Speed="1")
+            self._rebaseline(0.0)     # fresh track — clock starts now
             self._ensure_poll()
         await self._preload_next()
         # Explicit state: _loading is still set here, and the default
@@ -574,7 +604,7 @@ class DlnaBackend(PlayerBackend):
         self._next_url = None
         item = self._queue.item_at(self._index)
         self._length = (item.duration_seconds or 0.0) if item else 0.0
-        self._position = 0.0
+        self._rebaseline(0.0)     # gapless auto-advance → fresh track clock
         # The poll exits on any STOPPED observation (including the brief
         # blip some renderers emit at a gapless boundary) — a track that
         # starts through THIS path must restart it, or the backend goes
@@ -658,6 +688,7 @@ class DlnaBackend(PlayerBackend):
                 await self._load_and_play(self._index if self._index >= 1 else 1)
             else:
                 await self._avt("Play", Speed="1")
+                self._rebaseline(self._position)   # resume from where we are
                 self._ensure_poll()
                 self._emit_now("playing")
         return self._call_async(_p())
@@ -691,7 +722,7 @@ class DlnaBackend(PlayerBackend):
             total = int(seconds)
             target = f"{total // 3600}:{total % 3600 // 60:02d}:{total % 60:02d}"
             await self._avt("Seek", Unit="REL_TIME", Target=target)
-            self._position = float(total)
+            self._rebaseline(float(total))   # clock continues from the seek target
             self._emit_now()
         return self._call(_s())
 
