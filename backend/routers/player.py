@@ -176,6 +176,7 @@ def get_outputs(rescan: bool = False):
             "exclusive": bool(_read("output.local_exclusive")),
             "renderer_udn": (persisted_renderer or {}).get("udn"),
             "renderer_attached": getattr(backend, "renderer_attached", None),
+            "stream_quality": _read("output.stream_quality") or "lossless",
         },
         "outputs": outputs,
     }

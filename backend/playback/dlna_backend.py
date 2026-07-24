@@ -379,19 +379,30 @@ class DlnaBackend(PlayerBackend):
         from streaming import service as streaming_service
         src = item.source
         host = media_host()
+        # Snapshot the global quality setting into the URL — the proxy
+        # transcodes to Opus for the remote/bandwidth tiers. HQPlayer's own
+        # _url_for equivalent never appends this, so its previews (same
+        # /preview route) stay lossless.
+        qs = self._quality_suffix()
         if src["kind"] == "file":
             proxy = streaming_service.ensure_proxy()
             path = settings.translate_to_local_path(src["path"])
             mime = _MIME_BY_FORMAT.get((src.get("format") or "").upper(),
                                        "application/octet-stream")
             tok = proxy.register_file(path, mime)
-            return f"http://{host}:{proxy.port}/file/{tok}"
+            return f"http://{host}:{proxy.port}/file/{tok}{qs}"
         if src["kind"] == "proxy":
             proxy = streaming_service.get_proxy()
             if proxy is None:
                 return None
-            return f"http://{host}:{proxy.port}/preview/{src['token']}"
+            return f"http://{host}:{proxy.port}/preview/{src['token']}{qs}"
         return None   # foreign URIs (file:// passthrough) aren't renderer-reachable
+
+    @staticmethod
+    def _quality_suffix() -> str:
+        from routers.settings import _read
+        q = _read("output.stream_quality")
+        return f"?q={q}" if q and q != "lossless" else ""
 
     @staticmethod
     def _didl_meta(item: QueueItem) -> dict:

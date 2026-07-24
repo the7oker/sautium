@@ -34,13 +34,18 @@ def _sign(kind: str, ident: str, exp: int) -> str:
     return hmac.new(_secret(), canonical.encode(), hashlib.sha256).hexdigest()
 
 
-def signed_media_url(kind: str, ident: str) -> str:
+def signed_media_url(kind: str, ident: str, quality: Optional[str] = None) -> str:
     """Relative URL (same HTTPS origin as the app — no mixed content) for
     one media object. kind ∈ file (owned media_file_id) | preview (proxy
-    token)."""
+    token). `quality` is an Opus tier the route transcodes to — an UNSIGNED
+    serving hint (tampering it only changes the caller's own audio quality,
+    never access), snapshotting the global setting at dispatch time."""
     exp = int(time.time()) + _TTL_SECONDS
     sig = _sign(kind, str(ident), exp)
-    return f"/api/player/media/{kind}/{ident}?exp={exp}&sig={sig}"
+    url = f"/api/player/media/{kind}/{ident}?exp={exp}&sig={sig}"
+    if quality and quality != "lossless":
+        url += f"&q={quality}"
+    return url
 
 
 def verify(kind: str, ident: str, exp: Optional[str], sig: Optional[str]) -> bool:

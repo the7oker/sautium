@@ -262,6 +262,11 @@ _DEFAULTS: Dict[str, Any] = {
     "output.local_device":       None,   # "{hostapi}::{device name}"
     "output.local_exclusive":    False,  # WASAPI exclusive / bit-perfect claim
     "output.dlna_renderer":      None,   # {udn, location, name} of the picked renderer
+    # Stream quality for DLNA / This device (browser) — outdoor bandwidth
+    # saving. Lossless is the default and the everyday mode; the Opus tiers
+    # are a deliberate metered-connection choice. HQPlayer / local always
+    # lossless (they never carry the quality param into the media URL).
+    "output.stream_quality":     "lossless",   # lossless | opus_192 | opus_96
 }
 
 
@@ -1166,6 +1171,7 @@ class OutputPrefs(BaseModel):
     device_id: Optional[str] = None     # local: "{hostapi}::{name}"
     exclusive: Optional[bool] = None    # local: WASAPI exclusive mode
     renderer: Optional[Dict[str, Any]] = None   # dlna: {udn, location, name}
+    stream_quality: Optional[str] = None    # lossless | opus_192 | opus_96
 
 
 @router.get("/output")
@@ -1175,6 +1181,7 @@ def get_output_prefs() -> Dict[str, Any]:
         "device_id": _read("output.local_device"),
         "exclusive": bool(_read("output.local_exclusive")),
         "renderer": _read("output.dlna_renderer"),
+        "stream_quality": _read("output.stream_quality") or "lossless",
     }
 
 
@@ -1196,6 +1203,11 @@ def put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
                        "(launcher mode) for WASAPI/ASIO/CoreAudio output")
     if req.type == "dlna" and not (req.renderer or _read("output.dlna_renderer")):
         raise HTTPException(status_code=409, detail="No DLNA renderer selected")
+    if req.stream_quality is not None:
+        if req.stream_quality not in ("lossless", "opus_192", "opus_96"):
+            raise HTTPException(status_code=400,
+                                detail=f"unknown stream quality: {req.stream_quality}")
+        _write("output.stream_quality", req.stream_quality)
     if req.type is not None:
         _write("output.type", req.type)
     if req.device_id is not None:
@@ -1204,6 +1216,14 @@ def put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
         _write("output.local_exclusive", bool(req.exclusive))
     if req.renderer is not None:
         _write("output.dlna_renderer", req.renderer or None)
+
+    # A quality-only change must NOT re-activate the output (that would cut
+    # the current track). It just alters the next track's media URL —
+    # exactly the "current track plays out, change applies from the next
+    # one" behavior. Re-activate only when the output identity changed.
+    if not (req.type is not None or req.device_id is not None
+            or req.exclusive is not None or req.renderer is not None):
+        return get_output_prefs()
 
     otype = _read("output.type")
     try:

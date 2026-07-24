@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Optional
 
+from . import transcode
 from .base import FetchedAudio, ProviderError, StreamProvider, TrackQuery
 from .events import preview_events
 
@@ -481,6 +482,15 @@ def _make_handler(proxy: MediaProxy):
                 return None
             return self.path[len("/file/"):].split("?", 1)[0]
 
+        def _q(self) -> Optional[str]:
+            """Opus quality tier from the URL (?q=opus_192). DLNA mints it
+            from the global setting; HQPlayer never does → its previews stay
+            lossless through the very same /preview route."""
+            if "?" not in self.path:
+                return None
+            from urllib.parse import parse_qs, urlparse
+            return parse_qs(urlparse(self.path).query).get("q", [None])[0]
+
         # DLNA renderers gate playability on these headers (OP=01: Range
         # seek supported). Harmless for HQPlayer, so both routes send them.
         def _dlna_headers(self):
@@ -505,25 +515,38 @@ def _make_handler(proxy: MediaProxy):
             return None
 
         def _serve_file(self, fe, *, body: bool):
-            span = self._parse_range(fe.size)
+            path, mime, size = fe.path, fe.mime, fe.size
+            q = self._q()
+            if transcode.wants_opus(q):
+                try:
+                    opus = transcode.opus_path_for_file(fe.path, q)
+                    if opus:
+                        import os
+                        path, mime, size = opus, transcode.MIME, os.path.getsize(opus)
+                except Exception as e:
+                    logger.warning("opus transcode failed %s — lossless: %s",
+                                   fe.path, e)
+            self._serve_disk_file(path, mime, size, body=body)
+
+        def _serve_disk_file(self, path: str, mime: str, size: int, *, body: bool):
+            span = self._parse_range(size)
             if span:
                 start, end = span
                 self.send_response(206)
             else:
-                start, end = 0, fe.size - 1
+                start, end = 0, size - 1
                 self.send_response(200)
-            self.send_header("Content-Type", fe.mime)
+            self.send_header("Content-Type", mime)
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Length", str(end - start + 1))
             if span:
-                self.send_header("Content-Range",
-                                 f"bytes {start}-{end}/{fe.size}")
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self._dlna_headers()
             self.end_headers()
             if not body:
                 return
             try:
-                with open(fe.path, "rb") as f:
+                with open(path, "rb") as f:
                     f.seek(start)
                     remaining = end - start + 1
                     while remaining > 0:
@@ -535,7 +558,20 @@ def _make_handler(proxy: MediaProxy):
             except (BrokenPipeError, ConnectionResetError):
                 pass   # renderers probe-then-reset, like HQPlayer
             except OSError as e:
-                logger.error("file serve failed %s: %s", fe.path, e)
+                logger.error("file serve failed %s: %s", path, e)
+
+        def _opus_for_preview(self, token, e) -> Optional[str]:
+            """Cached Opus path for a phantom buffer when ?q asks for it, else
+            None (serve the lossless in-memory bytes)."""
+            q = self._q()
+            if not transcode.wants_opus(q):
+                return None
+            try:
+                return transcode.opus_path_for_bytes(token, e.audio.data, q)
+            except Exception as ex:
+                logger.warning("opus transcode failed for preview %s — lossless: %s",
+                               token, ex)
+                return None
 
         def _art_token(self) -> Optional[str]:
             if not self.path.startswith("/art/"):
@@ -587,6 +623,12 @@ def _make_handler(proxy: MediaProxy):
             if e.error or e.audio is None:
                 self.send_error(502, "provider could not fetch this track")
                 return
+            opus = self._opus_for_preview(tok, e)
+            if opus:
+                import os
+                self._serve_disk_file(opus, transcode.MIME,
+                                      os.path.getsize(opus), body=False)
+                return
             self.send_response(200)
             self.send_header("Content-Type", e.audio.mime)
             self.send_header("Accept-Ranges", "bytes")
@@ -622,6 +664,12 @@ def _make_handler(proxy: MediaProxy):
                 self.send_error(502, "provider could not fetch this track")
                 return
             proxy._advance(e.index)
+            opus = self._opus_for_preview(tok, e)
+            if opus:
+                import os
+                self._serve_disk_file(opus, transcode.MIME,
+                                      os.path.getsize(opus), body=True)
+                return
             data = e.audio.data
             total = len(data)
             rng = self.headers.get("Range")

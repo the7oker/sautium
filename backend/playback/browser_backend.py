@@ -252,11 +252,16 @@ class BrowserBackend(PlayerBackend):
 
     @staticmethod
     def _media_url(item: QueueItem) -> Optional[str]:
+        # Snapshot the global quality setting into each track's signed URL —
+        # the media route transcodes to Opus for the bandwidth tiers. Read
+        # fresh per track so a mid-session change applies from the next one.
+        from routers.settings import _read
+        q = _read("output.stream_quality")
         src = item.source
         if src["kind"] == "file":
-            return media_urls.signed_media_url("file", str(item.media_file_id))
+            return media_urls.signed_media_url("file", str(item.media_file_id), q)
         if src["kind"] == "proxy":
-            return media_urls.signed_media_url("preview", src["token"])
+            return media_urls.signed_media_url("preview", src["token"], q)
         return None
 
     @staticmethod

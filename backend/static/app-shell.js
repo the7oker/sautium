@@ -10097,6 +10097,26 @@
         </div>
       </div>` : '';
 
+    // Stream quality — DLNA / This device only. Lossless is the everyday
+    // default; the Opus tiers save bandwidth for remote listening. HQPlayer
+    // and local outputs ignore it (always lossless).
+    const q = active.stream_quality || 'lossless';
+    const qOpt = (val, label, sub) => `
+      <div class="form-row stacked" data-action="set-quality" data-quality="${val}" style="cursor:pointer;">
+        <div class="row-stack">
+          <span class="row-stack-label">${label}</span>
+          ${mark(q === val)}
+        </div>
+        <div class="row-stack-sub">${sub}</div>
+      </div>`;
+    const qualityGroup = `
+      <div class="form-group">
+        <div class="form-row"><span class="form-label">Stream quality · DLNA / This device</span></div>
+        ${qOpt('lossless', 'Lossless (FLAC)', 'Full quality — the everyday default. HQPlayer and local outputs are always lossless regardless of this.')}
+        ${qOpt('opus_192', 'High · Opus 192k', 'Indistinguishable on the go, ~4× less data. For remote listening over mobile.')}
+        ${qOpt('opus_96', 'Data saver · Opus 96k', 'Great quality, ~7–8× less data. For metered or weak connections. Changing this applies from the next track.')}
+      </div>`;
+
     return `
       <div class="form-group">
         ${hqpRow}
@@ -10105,6 +10125,7 @@
         ${browserRow}
       </div>
       ${exclusiveGroup}
+      ${qualityGroup}
       <div class="btn-row single">
         <button class="btn btn-secondary" data-action="refresh-outputs">Rescan devices</button>
       </div>`;
@@ -10149,6 +10170,9 @@
         renderOutputSettings(root, true);
       });
     }
+    root.querySelectorAll('[data-action="set-quality"]').forEach(el =>
+      el.addEventListener('click', () =>
+        putOutput({ stream_quality: el.dataset.quality })));
     root.querySelectorAll('[data-action="select-renderer"]').forEach(el =>
       el.addEventListener('click', async () => {
         const outs = await fetch('/api/player/outputs').then(r => r.json()).catch(() => null);
