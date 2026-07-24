@@ -157,6 +157,10 @@ class DlnaBackend(PlayerBackend):
         # (KANN on VBR Opus): position at the last baseline + elapsed since.
         self._wall_base = 0.0
         self._wall_t0 = 0.0
+        # Server-side seek offset: the current stream may be a track
+        # re-encoded from N seconds (Opus seek), so a renderer's RelTime is
+        # 0-based on that stream — the real track position is offset + rel.
+        self._pos_offset = 0.0
         self._length = 0.0
         self._poll_task: Optional[asyncio.Task] = None
         self._error: Optional[str] = None
@@ -394,7 +398,8 @@ class DlnaBackend(PlayerBackend):
                 rel = self._dmr.media_position
                 now = time.monotonic()
                 if rel is not None and rel > 0.5:
-                    self._rebaseline(float(rel))
+                    # RelTime is 0-based on the (possibly offset) stream.
+                    self._rebaseline(self._pos_offset + float(rel))
                 elif state == "playing":
                     est = self._wall_base + (now - self._wall_t0)
                     self._position = min(est, self._length) if self._length else est
@@ -530,18 +535,20 @@ class DlnaBackend(PlayerBackend):
                 f"<upnp:albumArtURI>{escape(art)}</upnp:albumArtURI></item>", 1)
         return xml
 
-    async def _load_and_play(self, index: int, *, play: bool = True) -> bool:
+    async def _load_and_play(self, index: int, *, play: bool = True,
+                             ss: float = 0.0) -> bool:
         # Serialized: fire-and-forget track changes must not interleave
         # their SOAP sequences. The lock lives OUTSIDE the recursion in
-        # _load_seq (asyncio.Lock is not reentrant).
+        # _load_seq (asyncio.Lock is not reentrant). `ss` (seconds) is a
+        # server-side seek — the track re-encodes from the offset.
         async with self._load_lock:
             self._loading = True
             try:
-                return await self._load_seq(index, play=play)
+                return await self._load_seq(index, play=play, ss=ss)
             finally:
                 self._loading = False
 
-    async def _load_seq(self, index: int, *, play: bool = True) -> bool:
+    async def _load_seq(self, index: int, *, play: bool = True, ss: float = 0.0) -> bool:
         item = self._queue.item_at(index)
         if item is None:
             self._emit_now("stopped")
@@ -551,12 +558,18 @@ class DlnaBackend(PlayerBackend):
             logger.warning("DLNA: skipping unreachable item %s — %s",
                            item.artist, item.title)
             return await self._load_seq(index + 1, play=play)
+        if ss > 0:
+            # Server-side seek: re-encode the track from the offset (the
+            # media route honors ?ss). Only Opus URLs (which carry ?q) take
+            # this path, so the "&" join is always right.
+            url += ("&" if "?" in url else "?") + f"ss={int(ss)}"
         # A track change is seconds of SOAP + renderer buffering: adopt the
         # new slot and report `loading` FIRST, so the UI shows the tapped
         # track with a transition spinner instead of either lying
         # ("playing") or looking dead while the old audio rides on.
         self._index = index
-        self._position = 0.0
+        self._pos_offset = ss   # 0 for a fresh track; the seek offset otherwise
+        self._position = ss     # so the loading state shows the seek target
         self._length = item.duration_seconds or 0.0
         if play:
             self._emit_now("loading")
@@ -584,7 +597,7 @@ class DlnaBackend(PlayerBackend):
         self._current_url = url
         if play:
             await self._avt("Play", Speed="1")
-            self._rebaseline(0.0)     # fresh track — clock starts now
+            self._rebaseline(ss)      # clock starts at the offset (0 for a fresh track)
             self._ensure_poll()
         await self._preload_next()
         # Explicit state: _loading is still set here, and the default
@@ -626,6 +639,7 @@ class DlnaBackend(PlayerBackend):
         self._next_url = None
         item = self._queue.item_at(self._index)
         self._length = (item.duration_seconds or 0.0) if item else 0.0
+        self._pos_offset = 0.0    # a gapless auto-advance is always a fresh track
         self._rebaseline(0.0)     # gapless auto-advance → fresh track clock
         # The poll exits on any STOPPED observation (including the brief
         # blip some renderers emit at a gapless boundary) — a track that
@@ -739,7 +753,19 @@ class DlnaBackend(PlayerBackend):
             return False
         return self._call_async(self._load_and_play(index))
 
+    @staticmethod
+    def _is_opus() -> bool:
+        from routers.settings import _read
+        return _read("output.stream_quality") in ("opus_192", "opus_96")
+
     def seek(self, seconds: int) -> bool:
+        if self._is_opus():
+            # VBR Opus renderers (KANN) can't time-seek the stream — reload
+            # the current track re-encoded from the offset (server-side seek).
+            # Fire-and-forget like a track change; the UI holds the scrubbed
+            # position while the offset stream buffers.
+            return self._call_async(self._load_and_play(self._index, ss=float(seconds)))
+
         async def _s():
             total = int(seconds)
             target = f"{total // 3600}:{total % 3600 // 60:02d}:{total % 60:02d}"

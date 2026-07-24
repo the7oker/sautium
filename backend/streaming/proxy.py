@@ -511,6 +511,18 @@ def _make_handler(proxy: MediaProxy):
             from urllib.parse import parse_qs, urlparse
             return parse_qs(urlparse(self.path).query).get("q", [None])[0]
 
+        def _ss(self) -> float:
+            """Server-side seek offset (?ss=N seconds) — Opus is re-encoded
+            from N so renderers that can't time-seek VBR Opus (KANN) seek by
+            reloading the URL at the offset."""
+            if "?" not in self.path:
+                return 0.0
+            from urllib.parse import parse_qs, urlparse
+            try:
+                return float(parse_qs(urlparse(self.path).query).get("ss", ["0"])[0])
+            except ValueError:
+                return 0.0
+
         # DLNA renderers gate playability on these headers (OP=01: Range
         # seek supported). Harmless for HQPlayer, so both routes send them.
         def _dlna_headers(self):
@@ -539,7 +551,7 @@ def _make_handler(proxy: MediaProxy):
             q = self._q()
             if transcode.wants_opus(q):
                 try:
-                    opus = transcode.opus_path_for_file(fe.path, q)
+                    opus = transcode.opus_path_for_file(fe.path, q, ss=self._ss())
                     if opus:
                         import os
                         path, mime, size = opus, transcode.MIME, os.path.getsize(opus)
@@ -587,7 +599,8 @@ def _make_handler(proxy: MediaProxy):
             if not transcode.wants_opus(q):
                 return None
             try:
-                return transcode.opus_path_for_bytes(token, e.audio.data, q)
+                return transcode.opus_path_for_bytes(token, e.audio.data, q,
+                                                     ss=self._ss())
             except Exception as ex:
                 logger.warning("opus transcode failed for preview %s — lossless: %s",
                                token, ex)

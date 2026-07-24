@@ -96,9 +96,17 @@ def _run_ffmpeg(args_in: list, bitrate: int, out_path: Path,
         tmp.unlink(missing_ok=True)
 
 
-def opus_path_for_file(source_path: str, quality: str) -> Optional[str]:
-    """Cached Opus of an owned file. Keyed by path + mtime + bitrate, so an
-    edited source re-encodes. Returns None if the quality tier isn't Opus."""
+def _seek_args(ss: float, tail: list) -> list:
+    """`-ss N` BEFORE -i (input seeking) so ffmpeg starts decoding at the
+    offset — the server-side seek for renderers that can't time-seek VBR
+    Opus themselves. ss=0 is the whole track (the common case)."""
+    return (["-ss", str(int(ss))] + tail) if ss and ss > 0 else tail
+
+
+def opus_path_for_file(source_path: str, quality: str, ss: float = 0.0) -> Optional[str]:
+    """Cached Opus of an owned file, optionally starting at `ss` seconds
+    (server-side seek). Keyed by path + mtime + bitrate + offset. Returns
+    None if the quality tier isn't Opus."""
     bitrate = OPUS_BITRATES.get(quality)
     if bitrate is None:
         return None
@@ -106,18 +114,22 @@ def opus_path_for_file(source_path: str, quality: str) -> Optional[str]:
         mtime = int(os.path.getmtime(source_path))
     except OSError:
         return None
-    key = hashlib.sha1(f"{source_path}|{mtime}|{bitrate}".encode()).hexdigest()
-    return _produce(key, bitrate, args_in=["-i", source_path], stdin_bytes=None)
+    key = hashlib.sha1(f"{source_path}|{mtime}|{bitrate}|{int(ss)}".encode()).hexdigest()
+    return _produce(key, bitrate, args_in=_seek_args(ss, ["-i", source_path]),
+                    stdin_bytes=None)
 
 
-def opus_path_for_bytes(token: str, source_bytes: bytes, quality: str) -> Optional[str]:
-    """Cached Opus of an in-memory buffer (phantom stream). Keyed by the
-    proxy token + bitrate — a token maps to one fetched buffer for its life."""
+def opus_path_for_bytes(token: str, source_bytes: bytes, quality: str,
+                        ss: float = 0.0) -> Optional[str]:
+    """Cached Opus of an in-memory buffer (phantom stream), optionally from
+    `ss` seconds. Keyed by the proxy token + bitrate + offset — a token maps
+    to one fetched buffer for its life."""
     bitrate = OPUS_BITRATES.get(quality)
     if bitrate is None:
         return None
-    key = hashlib.sha1(f"{token}|{bitrate}".encode()).hexdigest()
-    return _produce(key, bitrate, args_in=["-i", "pipe:0"], stdin_bytes=source_bytes)
+    key = hashlib.sha1(f"{token}|{bitrate}|{int(ss)}".encode()).hexdigest()
+    return _produce(key, bitrate, args_in=_seek_args(ss, ["-i", "pipe:0"]),
+                    stdin_bytes=source_bytes)
 
 
 def _produce(key: str, bitrate: int, *, args_in: list,
