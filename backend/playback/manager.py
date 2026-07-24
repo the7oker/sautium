@@ -453,14 +453,19 @@ class PlaybackManager:
 
     def append(self, items: list[QueueItem], position: str = "end",
                generation: Optional[int] = None) -> Optional[int]:
-        """Append/insert. Returns the count applied, or None when
-        `generation` is stale (the queue was replaced — the filler must
-        stop). 'next' inserts after the playing slot; with nothing playing
-        it appends at the end (legacy behavior)."""
+        """Append/insert into the CANONICAL queue. Returns the count applied,
+        or None when `generation` is stale (the queue was replaced — the
+        filler must stop). 'next' inserts after the playing slot; with
+        nothing playing it appends at the end.
+
+        The queue is authoritative and independent of the output: building it
+        needs no live device. A None/absent backend just skips the mirror —
+        the user can queue tracks before any output is reachable and press
+        play once it is (that press attaches/probes the output)."""
         with self._mutate_lock:
             if generation is not None and self.queue.generation != generation:
                 return None
-            backend = self.backend()
+            backend = self._active
             if position == "next":
                 anchor = self._latest_status.get("track_index")
                 anchor = anchor if (isinstance(anchor, int)
@@ -468,30 +473,70 @@ class PlaybackManager:
             else:
                 anchor = None
             if position == "next" and anchor is not None:
-                added = backend.queue_insert_next(items, anchor)
+                added = backend.queue_insert_next(items, anchor) if backend else len(items)
                 if added:
                     self.queue.insert_after(anchor, items[:added])
-                    backend.queue_changed("insert_next")
+                    if backend:
+                        backend.queue_changed("insert_next")
                     self._schedule_persist()
             else:
-                added = backend.queue_append(items)
+                added = backend.queue_append(items) if backend else len(items)
                 if added:
                     self.queue.append(items[:added])
-                    backend.queue_changed("append")
+                    if backend:
+                        backend.queue_changed("append")
                     self._schedule_persist()
+            if added and self._latest_status.get("state") not in (
+                    "playing", "paused", "loading"):
+                # Nothing is playing (fresh/stopped queue, or no backend) —
+                # surface the queue so the mini-player appears with a Play
+                # button. A stopped backend doesn't reliably emit on append.
+                self._emit_idle_status()
             return added
 
     def remove(self, index: int) -> bool:
         with self._mutate_lock:
             if self.queue.item_at(index) is None:
                 return False
-            backend = self.backend()
-            ok = backend.queue_remove(index)
+            backend = self._active
+            ok = backend.queue_remove(index) if backend else True
             if ok:
                 self.queue.remove(index)
-                backend.queue_changed("remove")
+                if backend:
+                    backend.queue_changed("remove")
+                else:
+                    self._emit_idle_status()
                 self._schedule_persist()
             return ok
+
+    def _emit_idle_status(self) -> None:
+        """Nothing playing but the canonical queue exists — emit a stopped
+        status anchored on the track Play would start (the last slot, or 1
+        for a never-played queue) so the mini-player shows with a Play button
+        (pressing it runs ensure_active → attach/probe/play)."""
+        slot = self._last_slot if self._last_slot >= 1 else 1
+        first = self.queue.item_at(slot) or self.queue.item_at(1)
+        if first is None:
+            return   # empty queue — leave the current status untouched
+        self._push_status({
+            "state": "stopped",
+            "artist": first.artist, "album": first.album or "", "song": first.title,
+            "genre": "", "position": 0.0, "length": first.duration_seconds or 0.0,
+            "volume": 0.0, "process_speed": 0.0,
+            "track_index": self._last_slot if self._last_slot >= 1 else 0,
+            "media_file_id": first.media_file_id, "track_id": first.track_id,
+            "cover_id": first.cover_id, "cover_url": first.cover_url,
+            "provider_cover_url": (resolved_artwork.get(first.track_id)
+                                   if first.preview else None),
+            "progress_percent": 0.0, "position_formatted": "0:00",
+            "length_formatted": format_time(first.duration_seconds or 0),
+            "playlist_version": self.queue.version,
+            "radio_mode": self.radio_mode,
+            "preview": bool(first.preview),
+            "provider": first.provider if first.preview else None,
+            "output": self._output_info(self._active),
+            "ui_build": ui_build(),
+        })
 
     def apply_reorder(self, plan: ReorderPlan) -> dict:
         """Execute a validated reorder. The mirror runs first (it can raise
@@ -499,10 +544,12 @@ class PlaybackManager:
         canary flags the divergence; a retry reconverges); on success the
         canonical queue adopts the new order."""
         with self._mutate_lock:
-            backend = self.backend()
-            result = backend.queue_reorder(plan)
+            backend = self._active   # queue reorder is output-independent
+            result = (backend.queue_reorder(plan) if backend
+                      else {"removed": 0, "added": 0, "interrupted": False})
             self.queue.reorder_by_track_ids(plan.order)
-            backend.queue_changed("reorder")
+            if backend:
+                backend.queue_changed("reorder")
             self._schedule_persist()
             return result
 

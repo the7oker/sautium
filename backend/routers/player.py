@@ -1695,9 +1695,6 @@ def queue_phantom_track(req: PlayPhantomTrackRequest):
         return {"ok": True, "provider": None, "track_count": 0, "requested": 1,
                 "missing": [{"track_id": req.track_id, "title": q.title}]}
 
-    if manager.active is None:
-        raise HTTPException(status_code=503,
-                            detail="No active playback output — select one and try again.")
     proxy = streaming_service.get_proxy()
     tokens = proxy.add_tracks([(q, chain)])
     gen = manager.queue.generation
@@ -1737,13 +1734,9 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
     avail_q = [q for q, _ch in items]
     # Both positions roll in from a background worker — fetching is sequential
     # and possibly backlogged behind earlier albums, so readiness can be far
-    # away. Fail loudly NOW if no output is active — otherwise we'd return ok
-    # and silently drop everything. (This used to probe HQPlayer directly — a
-    # pre-refactor leftover that 503'd every DLNA/local/browser node even
-    # though their canonical append cannot be "unreachable".)
-    if manager.active is None:
-        raise HTTPException(status_code=503,
-                            detail="No active playback output — select one and try again.")
+    # away. The canonical queue is authoritative and independent of the
+    # output, so queueing works with no active/reachable device — the user
+    # plays once it's back (that press attaches/probes it).
     tokens = proxy.add_tracks(items)
     # A queue-append doesn't start a new session, so capture the CURRENT
     # generation; the workers abort if the user replaces the queue meanwhile.
