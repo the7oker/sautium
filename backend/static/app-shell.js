@@ -1491,11 +1491,15 @@
     async jumpTo(index) {
       window.maybeClaimRenderer();
       try {
-        await fetch('/api/player/jump', {
+        const resp = await fetch('/api/player/jump', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({index}),
         });
+        if (!resp.ok && resp.status === 503) {
+          const err = await resp.json().catch(() => ({}));
+          window.reportOutputUnavailable(err.detail || '');
+        }
         // The queue sheet stays open — user typically wants to keep
         // browsing. Status SSE will repaint the active row.
       } catch (err) {
@@ -4918,6 +4922,22 @@
     finally { delete el.dataset.busy; }
   }
 
+  // Playback 503 = the configured output can't take the command (a dozing
+  // renderer, a closed HQPlayer, no output at all). One dialog, one useful
+  // action: jump straight to the Output picker.
+  async function reportOutputUnavailable(detail) {
+    const go = await confirmDestructive({
+      title: 'Audio output unavailable',
+      message: escapeProfileHtml(detail ||
+        'The playback device is not responding. Wake it, or pick another output.'),
+      confirmText: 'Audio output',
+      cancelText: 'Close',
+      confirmKind: 'primary',
+    });
+    if (go) location.hash = '#more/output';
+  }
+  window.reportOutputUnavailable = reportOutputUnavailable;
+
   async function reportPlaybackResult(resp, body) {
     if (resp && resp.ok) return true;
     // A Response body is one-shot: callers that already read resp.json() must
@@ -4925,6 +4945,10 @@
     let detail = (body && body.detail) || '';
     if (!detail && body === undefined) {
       try { if (resp) detail = (await resp.json()).detail || ''; } catch (_) {}
+    }
+    if (resp && resp.status === 503) {
+      await reportOutputUnavailable(detail);
+      return false;
     }
     await notifyDialog({
       title: 'Playback unavailable',
@@ -7937,17 +7961,19 @@
   /* Destructive-action confirm dialog. Replaces window.confirm so
      the prompt sits inside our visual language (warm dark sheet,
      terracotta primary). Returns a Promise<boolean>. */
-  function confirmDestructive({ title, message, confirmText = 'Remove', cancelText = 'Cancel' }) {
+  function confirmDestructive({ title, message, confirmText = 'Remove', cancelText = 'Cancel', confirmKind = 'destructive' }) {
     return new Promise(resolve => {
       const overlay = document.createElement('div');
       overlay.className = 'confirm-overlay';
+      const confirmCls = confirmKind === 'destructive'
+        ? 'profile-btn destructive' : 'profile-btn primary';
       overlay.innerHTML = `
         <div class="confirm-sheet" role="dialog" aria-modal="true">
           <h2 class="confirm-title">${escapeProfileHtml(title)}</h2>
           <p class="confirm-message">${message}</p>
           <div class="confirm-actions">
             <button class="profile-btn secondary" data-cancel>${escapeProfileHtml(cancelText)}</button>
-            <button class="profile-btn destructive" data-confirm>${escapeProfileHtml(confirmText)}</button>
+            <button class="${confirmCls}" data-confirm>${escapeProfileHtml(confirmText)}</button>
           </div>
         </div>
       `;

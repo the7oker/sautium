@@ -163,8 +163,19 @@
 
   async function playerCmd(cmd) {
     if (cmd === 'play') maybeClaimRenderer();
-    try { await fetch('/api/player/' + cmd, { method: 'POST' }); }
-    catch (e) { console.error('Player command failed:', e); }
+    try {
+      const resp = await fetch('/api/player/' + cmd, { method: 'POST' });
+      // Play intents against an unreachable output (dozing renderer,
+      // closed HQPlayer) 503 — surface the one dialog with a way to the
+      // Output picker instead of dying in the console. Volume/pause/stop
+      // stay quiet: nagging on every tick helps nobody.
+      if (!resp.ok && resp.status === 503
+          && (cmd === 'play' || cmd === 'next' || cmd === 'previous')
+          && window.reportOutputUnavailable) {
+        const err = await resp.json().catch(() => ({}));
+        window.reportOutputUnavailable(err.detail || '');
+      }
+    } catch (e) { console.error('Player command failed:', e); }
   }
 
   function togglePlayPause() {
