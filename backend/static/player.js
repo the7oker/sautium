@@ -677,14 +677,27 @@
   async function playTrack(mediaFileId) {
     maybeClaimRenderer();
     try {
-      await fetch('/api/player/play-track', {
+      const resp = await fetch('/api/player/play-track', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ track_id: mediaFileId }),
       });
-      // No client-side refetch — the backend bumps playlist_version on
-      // the next SSE tick and processStatusEvent awaits fetchPlaylist()
-      // before notifying subscribers.
+      // No client-side refetch on success — the backend bumps
+      // playlist_version on the next SSE tick and processStatusEvent
+      // awaits fetchPlaylist() before notifying subscribers.
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        if (resp.status === 503 && window.reportOutputUnavailable) {
+          window.reportOutputUnavailable(err.detail || '');
+        } else if (window.notifyDialog) {
+          const esc = window.escapeProfileHtml || ((s) => s);
+          window.notifyDialog({
+            title: 'Playback unavailable',
+            message: esc(err.detail || 'Could not play the track.'),
+            kind: 'error',
+          });
+        }
+      }
     } catch (e) {
       console.error('Play track failed:', e);
     }

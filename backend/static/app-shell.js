@@ -676,8 +676,12 @@
             if (!resp.ok) {
               let msg = 'Could not start radio.';
               try { const b = await resp.json(); if (b && b.detail) msg = b.detail; } catch (_) {}
-              await window.notifyDialog({
-                title: 'Radio', message: window.escapeProfileHtml(msg), kind: 'error' });
+              if (resp.status === 503) {
+                await reportOutputUnavailable(msg);
+              } else {
+                await window.notifyDialog({
+                  title: 'Radio', message: window.escapeProfileHtml(msg), kind: 'error' });
+              }
             }
           } catch (err) { console.warn('radio start failed', err); }
         });
