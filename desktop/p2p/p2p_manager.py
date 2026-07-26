@@ -33,10 +33,11 @@ from desktop.sync_client import SyncClient
 
 logger = logging.getLogger(__name__)
 
-# DHT artist sync searches in slices, not all-at-once: a productive seed found
-# in one slice is drained for ALL remaining artists (Step B), so the rest never
-# pay the per-artist get_peers timeout. Sized ~ DHT batch concurrency (20).
-_DHT_SEARCH_SLICE = 25
+# How many residual artists get a targeted per-artist DHT lookup after node
+# discovery has been drained. Each lookup costs a get_peers timeout, and only
+# the rare tail is announced by key at all — so this stays a probe, not a
+# sweep. Sized ~2 waves of the DHT batch concurrency (20).
+_DHT_TAIL_PROBE = 50
 
 
 class P2PManager:
@@ -289,24 +290,25 @@ class P2PManager:
                         f"User announced: {account_info['invite_code']}"
                     )
 
-                # Announce enriched artists. Paced (dht_service.ANNOUNCE_CHUNK)
-                # — a full sweep takes minutes, so it runs as a background
-                # task; awaiting it would stall the whole P2P startup.
+                # The discovery key — how peers find this node at all.
+                await self._dht_service.announce_node()
+
+                # Rare-artist tail. Paced (dht_service.ANNOUNCE_CHUNK), so it
+                # runs as a background task; awaiting it would stall startup.
                 _progress("Querying enriched artists...")
-                artist_uuids = await self._get_enriched_artists()
-                if artist_uuids:
+                enriched = await self._get_enriched_artists()
+                self._lan_discovery.update_enriched_count(len(enriched))
+                tail = await self._get_announce_tail()
+                if tail:
                     asyncio.create_task(
-                        self._dht_service.announce_artists(artist_uuids)
-                    )
-                    self._lan_discovery.update_enriched_count(
-                        len(artist_uuids)
+                        self._dht_service.announce_artists(tail)
                     )
                     _progress(
-                        f"P2P online: {len(artist_uuids)} artists queued "
-                        f"for DHT announce"
+                        f"P2P online: node announced, {len(tail)} rare "
+                        f"artists queued"
                     )
                 else:
-                    _progress("P2P online: no enriched artists yet")
+                    _progress("P2P online: node announced")
 
                 # Advertise the MB dump capability so dump-less nodes can
                 # find this node beyond LAN/manual peers
@@ -571,6 +573,24 @@ class P2PManager:
                 conn.close()
         return await asyncio.get_event_loop().run_in_executor(None, _blocking)
 
+    async def _get_announce_tail(self) -> list[str]:
+        """Rare-artist tail for DHT announcing, sized by sync.announce_limit
+        (0/null = node key only)."""
+        def _blocking() -> list[str]:
+            conn = psycopg2.connect(self.db_dsn)
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT value FROM user_settings WHERE key = %s",
+                        ("sync.announce_limit",))
+                    row = cur.fetchone()
+                limit = int(row[0]) if row and row[0] else 0
+                return sync_queries.get_announce_tail_uuids(conn, limit)
+            finally:
+                conn.close()
+        return await asyncio.get_event_loop().run_in_executor(None, _blocking)
+
     async def _get_unenriched_artists(self) -> list[str]:
         """Audio-only-empty artists — DHT lookup candidates (cheap to
         skip when we have any audio data; partial gaps are filled by
@@ -779,112 +799,73 @@ class P2PManager:
             logger.debug(f"DHT skip list: {skip_dht_addrs}")
 
         if self._dht_service and self._dht_service.is_available:
-            # A slice artist still unenriched after this round's peers were all
-            # drained has no productive announcer in the current DHT view → retire
-            # it (don't re-pay its get_peers timeout); a DHT-flaky-absent seed is
-            # caught by the next sync run (`unreachable` is per-run). This resolves
-            # every slice artist each round (enriched or retired), so `pending`
-            # shrinks by ≥ one slice per round — strict, fast termination.
-            unreachable: set[str] = set()
-            while True:
-                pending = [
-                    a for a in await self._get_unenriched_artists()
-                    if a not in unreachable
-                ]
-                if not pending:
-                    break
+            dht_seen: set[str] = set()
 
-                # Search only a slice. A productive seed found here is drained
-                # for ALL of `pending` by Step B below, so the rest of pending
-                # is enriched without ever hitting the DHT — and a peer already
-                # in `synced_peers` is skipped, so its other artist
-                # announcements are correctly ignored (we asked it everything).
-                search_slice = pending[:_DHT_SEARCH_SLICE]
+            async def _drain_peer(peer_addr: str):
+                """Ask one peer about everything we're still missing. The
+                inventory call does the matching, so there is no reason to
+                ask about a subset — this is what made per-artist discovery
+                pointless in the first place."""
+                remaining = await self._get_unenriched_artists()
+                if not remaining:
+                    return
+                tracks = await self._get_tracks_for_artists(remaining)
+                if not tracks:
+                    return
                 _progress(
-                    f"Searching DHT ({len(search_slice)} of {len(pending)} "
-                    f"remaining artists)..."
+                    f"Asking {peer_addr} about {len(tracks)} tracks..."
                 )
-                peer_map = await self._dht_service.lookup_artists_batch(
-                    search_slice
+                synced = await self._sync_from_peer(
+                    peer_addr, tracks, _progress, progress_cb,
                 )
-
-                new_peers: dict[tuple, list[str]] = {}
-                for artist_uuid, peers in peer_map.items():
-                    for ip, port in peers:
-                        key = f"{ip}:{port}"
-                        if key in synced_peers or key in skip_dht_addrs:
-                            continue
-                        new_peers.setdefault(
-                            (ip, port), []
-                        ).append(artist_uuid)
-
-                if not new_peers:
-                    unreachable.update(search_slice)
-                    continue
-
-                for (ip, port), artist_uuids in new_peers.items():
-                    peer_addr = f"{ip}:{port}"
-
-                    # Step A: sync tracks for the artists DHT told us about
-                    peer_tracks = await self._get_tracks_for_artists(
-                        artist_uuids
-                    )
-                    if not peer_tracks:
-                        continue
-
-                    synced = await self._sync_from_peer(
-                        peer_addr, peer_tracks, _progress, progress_cb,
-                    )
-                    peer_items = sum(
-                        v for v in synced.values() if isinstance(v, int)
-                    )
-                    for k, v in synced.items():
-                        if isinstance(v, int):
-                            total_stats[k] = total_stats.get(k, 0) + v
-
-                    if peer_items == 0:
-                        continue  # not a Sautium peer, skip
-
+                items = 0
+                for k, v in synced.items():
+                    if isinstance(v, int):
+                        total_stats[k] = total_stats.get(k, 0) + v
+                        items += v
+                if items:
                     synced_peers.add(peer_addr)
 
-                    # Step B: this peer has data — ask it about ALL remaining
-                    # unenriched tracks (the whole point: one seed drains many)
-                    remaining = await self._get_unenriched_artists()
-                    if not remaining:
-                        break
-                    all_remaining_tracks = (
-                        await self._get_tracks_for_artists(remaining)
-                    )
-                    if all_remaining_tracks:
-                        _progress(
-                            f"Peer {peer_addr} has data, asking about "
-                            f"{len(all_remaining_tracks)} more tracks..."
-                        )
-                        synced2 = await self._sync_from_peer(
-                            peer_addr, all_remaining_tracks,
-                            _progress, progress_cb,
-                        )
-                        for k, v in synced2.items():
-                            if isinstance(v, int):
-                                total_stats[k] = total_stats.get(k, 0) + v
+            async def _drain_new(peers) -> None:
+                for ip, port in peers:
+                    addr = f"{ip}:{port}"
+                    if (addr in dht_seen or addr in synced_peers
+                            or addr in skip_dht_addrs):
+                        continue
+                    dht_seen.add(addr)
+                    await _drain_peer(addr)
 
-                # Every peer this round's search pointed to is now drained; any
-                # slice artist still unenriched can't be had now → retire it.
-                after = set(await self._get_unenriched_artists())
-                unreachable.update(a for a in search_slice if a in after)
+            # Step A: node discovery — ONE lookup yields nodes, and each
+            # node's inventory answers for the whole library at once.
+            _progress("Searching DHT for nodes...")
+            await _drain_new(await self._dht_service.lookup_nodes())
 
-        # Re-announce newly enriched artists (paced — background task, the
-        # sync result must not wait ~minutes for the announce sweep)
+            # Step B: residual artists — targeted keys against the rare-artist
+            # tail peers announce. Small by construction: whatever is common
+            # enough to sit on a random node was already drained in Step A.
+            residual = await self._get_unenriched_artists()
+            if residual:
+                probe = residual[:_DHT_TAIL_PROBE]
+                _progress(
+                    f"Searching DHT for {len(probe)} of {len(residual)} "
+                    f"rare artists..."
+                )
+                peer_map = await self._dht_service.lookup_artists_batch(probe)
+                for peers in peer_map.values():
+                    await _drain_new(peers)
+
+        # Sync may have enriched artists that now belong in the rare tail
+        # (paced — background task, the sync result must not wait for it).
         if total_stats and self._dht_service:
-            _progress("Re-announcing newly enriched artists...")
-            new_enriched = await self._get_enriched_artists()
-            asyncio.create_task(self._dht_service.announce_artists(new_enriched))
+            tail = await self._get_announce_tail()
+            if tail:
+                _progress("Re-announcing the rare-artist tail...")
+                asyncio.create_task(self._dht_service.announce_artists(tail))
+            self._lan_discovery.update_enriched_count(
+                len(await self._get_enriched_artists()))
 
         total_items = sum(
             v for v in total_stats.values() if isinstance(v, int)
-        )
-        peers_used = len(manual_peers) + len(
-            peer_to_artists if 'peer_to_artists' in dir() else {}
         )
         _progress(f"P2P sync complete: {total_items} items synced")
         return total_stats

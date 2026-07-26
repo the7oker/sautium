@@ -531,7 +531,8 @@ PULL_HANDLERS = {
 def get_enriched_artist_uuids(conn) -> list[str]:
     """
     Return artist UUIDs that have at least 1 track with embedding or audio_features.
-    These are the artists worth announcing in DHT.
+    Used for the LAN-discovery enriched counter, NOT for DHT announcing —
+    announcing scales with the node key + a rare tail (see dht_service).
     """
     rows = db_query(
         conn,
@@ -539,6 +540,34 @@ def get_enriched_artist_uuids(conn) -> list[str]:
            FROM track_artists ta
            WHERE EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = ta.track_id)
               OR EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id)""",
+    )
+    return [r["artist_uuid"] for r in rows]
+
+
+def get_announce_tail_uuids(conn, limit: int) -> list[str]:
+    """The rare-artist tail to announce by exact key (see dht_service).
+
+    OWNED and analyzed only — a phantom carries no material this node can
+    stand behind, and phantom rows outnumber owned ones tenfold. Ranked by
+    Last.fm listeners as the rarity proxy: a peer's random node sample will
+    surface anything popular anyway, so an exact key is only worth spending
+    on artists nobody else is likely to have. NULL listeners (unknown to
+    Last.fm) rank rarest.
+    """
+    if limit <= 0:
+        return []
+    rows = db_query(
+        conn,
+        """SELECT ta.artist_id::text AS artist_uuid
+           FROM track_artists ta
+           JOIN media_files mf ON mf.track_id = ta.track_id
+           LEFT JOIN artist_bios ab ON ab.artist_id = ta.artist_id
+           WHERE EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = ta.track_id)
+              OR EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id)
+           GROUP BY ta.artist_id
+           ORDER BY MAX(ab.listeners) ASC NULLS FIRST
+           LIMIT %s""",
+        [limit],
     )
     return [r["artist_uuid"] for r in rows]
 

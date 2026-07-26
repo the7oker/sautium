@@ -266,25 +266,27 @@ async def lifespan(app: FastAPI):
 
             _dht_service.set_activity_probe(_node_busy)
 
+            # The discovery key — how peers find this node at all.
+            await _dht_service.announce_node()
+
             # Announce user identity in DHT
             if _p2p_identity:
                 await _dht_service.announce_user(
                     _p2p_identity["invite_code"]
                 )
 
-            # Query and announce enriched artists. Announces are PACED
-            # (dht_service.ANNOUNCE_CHUNK) so a full sweep takes minutes —
-            # run it as a background task; awaiting it here would hold the
+            # Rare-artist tail. Paced (dht_service.ANNOUNCE_CHUNK), so it
+            # runs as a background task; awaiting it here would hold the
             # whole app startup (uvicorn accepts no requests mid-lifespan).
-            artist_uuids = await asyncio.to_thread(_get_enriched_artist_uuids)
+            artist_uuids = await asyncio.to_thread(_get_announce_tail_uuids)
             if artist_uuids:
                 asyncio.create_task(_dht_service.announce_artists(artist_uuids))
                 logger.info(
-                    f"P2P online: {len(artist_uuids)} artists queued for DHT "
-                    f"announce (HTTP port {settings.p2p_announce_port})"
+                    f"P2P online: node announced, {len(artist_uuids)} rare "
+                    f"artists queued (HTTP port {settings.p2p_announce_port})"
                 )
             else:
-                logger.info("P2P online: no enriched artists to announce")
+                logger.info("P2P online: node announced (no rare-artist tail)")
 
             # Periodic re-announce
             _dht_reannounce_task = asyncio.create_task(
@@ -471,18 +473,36 @@ def test_db_connection() -> bool:
         conn.close()
 
 
-def _get_enriched_artist_uuids() -> list[str]:
-    """Query enriched artist UUIDs (has embedding or audio_features)."""
+def _get_announce_tail_uuids() -> list[str]:
+    """The rare-artist tail to announce by exact key (dht_service docstring).
+
+    OWNED and analyzed only — a phantom carries no material this node can
+    stand behind, and phantom rows outnumber owned ones tenfold. Ranked by
+    Last.fm listeners as the rarity proxy: a peer's random node sample will
+    surface anything popular anyway, so an exact key is only worth spending
+    on artists nobody else is likely to have. NULL listeners (unknown to
+    Last.fm) rank rarest.
+    """
+    from routers.settings import _read
+    limit = _read("sync.announce_limit")
+    limit = int(limit) if limit else 0
+    if limit <= 0:
+        return []
     conn = psycopg2.connect(settings.database_url)
     conn.autocommit = True
     try:
         cur = conn.cursor()
         cur.execute("""
-            SELECT DISTINCT ta.artist_id::text
+            SELECT ta.artist_id::text
             FROM track_artists ta
+            JOIN media_files mf ON mf.track_id = ta.track_id
+            LEFT JOIN artist_bios ab ON ab.artist_id = ta.artist_id
             WHERE EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = ta.track_id)
                OR EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id)
-        """)
+            GROUP BY ta.artist_id
+            ORDER BY MAX(ab.listeners) ASC NULLS FIRST
+            LIMIT %s
+        """, (limit,))
         return [row[0] for row in cur.fetchall()]
     finally:
         conn.close()
@@ -574,13 +594,14 @@ async def health_check() -> Dict[str, Any]:
 
 @app.post("/dht/reannounce")
 async def dht_reannounce() -> Dict[str, Any]:
-    """Re-query enriched artists and announce new ones in DHT. Paced —
-    the announce sweep runs in the background, the response returns the
-    queued count immediately."""
+    """Re-announce the node key and re-query the rare-artist tail. Paced —
+    the tail sweep runs in the background, the response returns the queued
+    count immediately."""
     if not _dht_service:
         return {"success": False, "message": "DHT not running"}
 
-    artist_uuids = await asyncio.to_thread(_get_enriched_artist_uuids)
+    await _dht_service.announce_node()
+    artist_uuids = await asyncio.to_thread(_get_announce_tail_uuids)
     new_count = len(set(artist_uuids) - _dht_service._announced)
     asyncio.create_task(_dht_service.announce_artists(artist_uuids))
     return {

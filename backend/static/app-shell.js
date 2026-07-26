@@ -9309,16 +9309,13 @@
     { id: 60,  label: 'Every 1 hour' },
     { id: 240, label: 'Every 4 hours' },
   ];
+  // The node itself is always announced; this sizes the extra per-artist
+  // keys published for the RAREST owned artists (see backend/dht_service.py).
   const ANNOUNCE_LIMIT_OPTIONS = [
-    { id: 0,   label: 'All artists' },
-    { id: 10,  label: '10 artists' },
-    { id: 50,  label: '50 artists' },
-    { id: 200, label: '200 artists' },
-  ];
-  const ROTATION_OPTIONS = [
-    { id: 15, label: 'Every 15 min' },
-    { id: 30, label: 'Every 30 min' },
-    { id: 60, label: 'Every 1 hour' },
+    { id: 0,    label: 'Node only' },
+    { id: 100,  label: '100 rare artists' },
+    { id: 300,  label: '300 rare artists' },
+    { id: 1000, label: '1000 rare artists' },
   ];
 
   function fmtPathForDisplay(p) {
@@ -9908,11 +9905,8 @@
     const intervalLabel = (AUTO_SYNC_OPTIONS.find(o => o.id === (interval || 0)) || AUTO_SYNC_OPTIONS[0]).label;
     const limit = sync.announce_limit;
     const limitLabel = (ANNOUNCE_LIMIT_OPTIONS.find(o => o.id === (limit || 0)) || ANNOUNCE_LIMIT_OPTIONS[0]).label;
-    const rotation = sync.announce_rotation_min || 30;
-    const rotationLabel = (ROTATION_OPTIONS.find(o => o.id === rotation) || ROTATION_OPTIONS[1]).label;
     const bgEnrich = !!sync.background_enrichment;
     const bgStatusLine = _bgEnrichStatusLine(sync.background_status, bgEnrich);
-    const showRotation = !!limit;  // hidden when "All"
 
     if (!on) {
       // Sharing OFF — consolidated explainer in place of the three
@@ -9926,7 +9920,7 @@
           </div>
           <div class="form-row stacked">
             <div class="row-stack">
-              <span class="row-stack-label" style="color:var(--color-text-dim);">Auto-sync · Announce · Rotation</span>
+              <span class="row-stack-label" style="color:var(--color-text-dim);">Auto-sync · Rare-artist keys</span>
               <span></span>
             </div>
             <div class="row-stack-sub">Turn P2P sharing on to configure sync and node-announce limits.</div>
@@ -9954,20 +9948,12 @@
           </button>
         </div>
         <div class="form-row">
-          <span class="form-label">Announce limit</span>
+          <span class="form-label">Rare-artist keys</span>
           <button class="select-trigger" data-action="pick-limit">
             ${escapeProfileHtml(limitLabel)}
             <span class="chev">${SETTINGS_ICONS.chev}</span>
           </button>
         </div>
-        ${showRotation ? `
-        <div class="form-row">
-          <span class="form-label">Announce rotation</span>
-          <button class="select-trigger" data-action="pick-rotation">
-            ${escapeProfileHtml(rotationLabel)}
-            <span class="chev">${SETTINGS_ICONS.chev}</span>
-          </button>
-        </div>` : ''}
         <div class="form-row">
           <span class="form-label">Background enrichment</span>
           <button class="toggle ${bgEnrich ? 'on' : ''}" data-action="toggle-bg-enrich"><span class="knob"></span></button>
@@ -10899,12 +10885,8 @@
       if (id != null) await putSync({ auto_interval_min: Number(id) });
     });
     onAction('[data-action="pick-limit"]', async () => {
-      const id = await openSettingsPicker({ title: 'Announce limit', options: ANNOUNCE_LIMIT_OPTIONS, currentId: sync.announce_limit || 0 });
+      const id = await openSettingsPicker({ title: 'Rare-artist keys', options: ANNOUNCE_LIMIT_OPTIONS, currentId: sync.announce_limit || 0 });
       if (id != null) await putSync({ announce_limit: Number(id) });
-    });
-    onAction('[data-action="pick-rotation"]', async () => {
-      const id = await openSettingsPicker({ title: 'Announce rotation', options: ROTATION_OPTIONS, currentId: sync.announce_rotation_min || 30 });
-      if (id != null) await putSync({ announce_rotation_min: Number(id) });
     });
     onAction('[data-action="force-sync"]', async () => {
       if (_syncInFlight) return;  // double-click guard

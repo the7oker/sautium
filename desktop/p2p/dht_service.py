@@ -1,14 +1,34 @@
 """
 libtorrent DHT service for Sautium.
 
-Announces enriched artists in the BitTorrent DHT so other launchers
-can find this node and sync enrichment data via HTTP.
+Two announce layers, by design (2026-07-11):
 
-Each enriched artist is announced under a unique infohash:
-    SHA1("Sautium-artist:" + artist_uuid)
+  1. NODE — one key, SHA1("Sautium-node"), announced by every node. This is
+     the discovery highway: a peer finds nodes with ONE lookup and then asks
+     each for an inventory, which answers "what do you have of mine?" for a
+     whole library in a single HTTP call. Announcing every artist instead
+     never paid for itself — the sync flow only ever used those per-artist
+     announcements as a generator of *some* productive peer, and a library
+     of N artists cost N announcements to answer a question one answers.
+  2. TAIL — targeted SHA1("Sautium-artist:" + uuid) keys for a bounded set
+     of the node's RAREST owned artists. Announcing a popular artist is
+     wasted traffic (every second node has them, inventory finds them
+     anyway); a rare one is invisible to a random peer sample, so it earns
+     an exact key. Budget ~300 keys instead of thousands.
 
-Other launchers search for the same infohash to discover peers
-that have enrichment data for a specific artist.
+Bucketing artists into a fixed number of slots was considered and rejected:
+slot occupancy is driven by the ANNOUNCER's library size, so with thousands
+of artists every slot is occupied on every node — a slot lookup returns
+~the whole network, i.e. exactly what the node key returns, for a thousand
+times the announce cost.
+
+The node key deliberately has no shard suffix yet. When the network outgrows
+one key (hot-key eviction on the 8 nodes storing it), nodes start ALSO
+announcing SHA1("Sautium-node" + prefix) levels; the global key stays, so
+old and new clients keep seeing each other.
+
+MIRRORS backend/dht_service.py (the launcher build cannot import backend
+modules) — the announce/lookup key formats are the wire contract.
 """
 
 import asyncio
@@ -31,21 +51,21 @@ except ImportError:
 INFOHASH_PREFIX = "Sautium-artist:"
 INFOHASH_PREFIX_USER = "Sautium-user:"
 INFOHASH_PREFIX_CAP = "Sautium-cap:"
+INFOHASH_PREFIX_NODE = "Sautium-node"
 
 # DHT re-announce interval (seconds)
 REANNOUNCE_INTERVAL = 15 * 60  # 15 minutes
 
-# dht_announce initiations per pacing pause. A tight announce loop over
-# thousands of infohashes floods the host NAT with UDP (each announce fans
-# out into a get_peers traversal) and starves concurrent flows — on the
-# Docker master it measurably knocked out the HQPlayer control socket every
-# 15 minutes. Pacing spreads ~3k announces over ~2 min; DHT entries live
-# 15-30 min, so a staggered refresh costs nothing in discoverability.
+# dht_announce initiations per pacing pause. Each announce fans out into a
+# get_peers traversal, so a tight loop floods the host NAT with UDP and
+# starves concurrent flows — on the Docker master it measurably knocked out
+# the HQPlayer control socket every 15 minutes.
 # 5/s: initiation must stay under the DHT's traversal-completion rate or the
 # backlog of concurrent traversals accumulates through the window and
 # saturates the path anyway (measured: 25/s still produced timeout bursts
-# near the END of the paced window and ~1 min past it). 3173 announces at
-# 5/s = ~10.6 min, still inside the 15-min re-announce cycle.
+# near the END of the paced window and ~1 min past it). The mass per-artist
+# sweep this pacing was built for is gone (node + tail, see module
+# docstring): a ~300-key tail takes ~60s of the 15-min cycle.
 ANNOUNCE_CHUNK = 5
 ANNOUNCE_CHUNK_PAUSE = 1.0
 
@@ -86,6 +106,15 @@ def capability_infohash(capability: str) -> bytes:
     dump-less nodes discover volunteer dump holders beyond known peers."""
     return hashlib.sha1(
         f"{INFOHASH_PREFIX_CAP}{capability}".encode()
+    ).digest()
+
+
+def node_infohash(prefix: str = "") -> bytes:
+    """Compute SHA1 infohash of the node-discovery key. `prefix` is the
+    (currently unused) shard level — empty means the global key every node
+    announces; see the module docstring for the growth path."""
+    return hashlib.sha1(
+        f"{INFOHASH_PREFIX_NODE}{prefix}".encode()
     ).digest()
 
 
@@ -208,40 +237,22 @@ class DHTService:
 
     async def lookup_user(self, invite_code: str) -> list[tuple[str, int]]:
         """Find a user by their invite code. Returns list of (ip, port)."""
-        cache_key = f"user:{invite_code}"
-        cached = self._get_cached_peers(cache_key)
-        if cached is not None:
-            return cached
+        return await self._lookup(user_infohash(invite_code),
+                                  f"user:{invite_code}")
 
+    async def announce_node(self):
+        """Announce this node on the discovery key — the highway a peer
+        finds us by (one lookup, then inventory). Unconditional and cheap:
+        one announce regardless of library size."""
         if not self._session:
-            return []
+            return
+        sha1 = lt.sha1_hash(node_infohash())
+        self._session.dht_announce(sha1, self._announce_port, 0)
+        logger.info(f"DHT: node announced (port {self._announce_port})")
 
-        ih = user_infohash(invite_code)
-        sha1 = lt.sha1_hash(ih)
-        ih_hex = sha1.to_string().hex()
-
-        loop = asyncio.get_event_loop()
-        future = loop.create_future()
-        self._pending_lookups.setdefault(ih_hex, []).append(future)
-        self._session.dht_get_peers(sha1)
-
-        try:
-            peers = await asyncio.wait_for(future, timeout=GET_PEERS_TIMEOUT)
-        except asyncio.TimeoutError:
-            if ih_hex in self._pending_lookups:
-                futures = self._pending_lookups[ih_hex]
-                if future in futures:
-                    futures.remove(future)
-                if not futures:
-                    del self._pending_lookups[ih_hex]
-            logger.debug(f"DHT lookup timeout for user {invite_code}")
-            return []
-
-        now = time.time()
-        self._peer_cache[cache_key] = [
-            (ip, port, now) for ip, port in peers
-        ]
-        return peers
+    async def lookup_nodes(self) -> list[tuple[str, int]]:
+        """Find Sautium nodes on the discovery key. Returns (ip, port)."""
+        return await self._lookup(node_infohash(), "node")
 
     async def announce_capability(self, capability: str):
         """Announce a node capability (e.g. 'mbdump') on its well-known infohash."""
@@ -254,52 +265,22 @@ class DHTService:
 
     async def lookup_capability(self, capability: str) -> list[tuple[str, int]]:
         """Find nodes announcing a capability. Returns list of (ip, port)."""
-        cache_key = f"cap:{capability}"
-        cached = self._get_cached_peers(cache_key)
-        if cached is not None:
-            return cached
-
-        if not self._session:
-            return []
-
-        sha1 = lt.sha1_hash(capability_infohash(capability))
-        ih_hex = sha1.to_string().hex()
-
-        loop = asyncio.get_event_loop()
-        future = loop.create_future()
-        self._pending_lookups.setdefault(ih_hex, []).append(future)
-        self._session.dht_get_peers(sha1)
-
-        try:
-            peers = await asyncio.wait_for(future, timeout=GET_PEERS_TIMEOUT)
-        except asyncio.TimeoutError:
-            if ih_hex in self._pending_lookups:
-                futures = self._pending_lookups[ih_hex]
-                if future in futures:
-                    futures.remove(future)
-                if not futures:
-                    del self._pending_lookups[ih_hex]
-            logger.debug(f"DHT lookup timeout for capability {capability}")
-            return []
-
-        now = time.time()
-        self._peer_cache[cache_key] = [
-            (ip, port, now) for ip, port in peers
-        ]
-        return peers
+        return await self._lookup(capability_infohash(capability),
+                                  f"cap:{capability}")
 
     async def announce_artists(self, artist_uuids: list[str]):
-        """Announce all enriched artists in DHT."""
+        """Announce the rare-artist tail (see module docstring). The caller
+        decides WHICH artists — this is a bounded set, not the library."""
         if not self._session:
             return
 
         new_uuids = set(artist_uuids) - self._announced
         if not new_uuids:
-            logger.info("No new artists to announce")
+            logger.info("No new tail artists to announce")
             return
 
         logger.info(
-            f"Announcing {len(new_uuids)} artists in DHT "
+            f"Announcing {len(new_uuids)} rare artists in DHT "
             f"(announce port {self._announce_port})"
         )
         for i, uuid in enumerate(new_uuids):
@@ -313,55 +294,48 @@ class DHTService:
                     return
 
         logger.info(
-            f"DHT: {len(self._announced)} artists announced total"
+            f"DHT: {len(self._announced)} rare artists announced total"
         )
 
-    async def lookup_artist(self, artist_uuid: str) -> list[tuple[str, int]]:
-        """
-        Find peers that have enrichment for this artist.
-
-        Returns list of (ip, port) tuples.
-        """
-        # Check cache first
-        cached = self._get_cached_peers(artist_uuid)
+    async def _lookup(self, infohash: bytes, cache_key: str
+                      ) -> list[tuple[str, int]]:
+        """get_peers on an infohash, with the shared peer cache."""
+        cached = self._get_cached_peers(cache_key)
         if cached is not None:
             return cached
 
         if not self._session:
             return []
 
-        ih = artist_infohash(artist_uuid)
-        sha1 = lt.sha1_hash(ih)
+        sha1 = lt.sha1_hash(infohash)
         ih_hex = sha1.to_string().hex()
 
-        # Create a future for this lookup
         loop = asyncio.get_event_loop()
         future = loop.create_future()
         self._pending_lookups.setdefault(ih_hex, []).append(future)
 
-        # Initiate DHT get_peers
         self._session.dht_get_peers(sha1)
 
-        # Wait for result with timeout
         try:
             peers = await asyncio.wait_for(future, timeout=GET_PEERS_TIMEOUT)
         except asyncio.TimeoutError:
-            # Remove pending future
             if ih_hex in self._pending_lookups:
                 futures = self._pending_lookups[ih_hex]
                 if future in futures:
                     futures.remove(future)
                 if not futures:
                     del self._pending_lookups[ih_hex]
-            logger.debug(f"DHT lookup timeout for artist {artist_uuid[:8]}...")
+            logger.debug(f"DHT lookup timeout for {cache_key}")
             return []
 
-        # Cache results
         now = time.time()
-        self._peer_cache[artist_uuid] = [
-            (ip, port, now) for ip, port in peers
-        ]
+        self._peer_cache[cache_key] = [(ip, port, now) for ip, port in peers]
         return peers
+
+    async def lookup_artist(self, artist_uuid: str) -> list[tuple[str, int]]:
+        """Find peers announcing this specific artist — the targeted path for
+        residual rare artists a node-discovery sweep failed to cover."""
+        return await self._lookup(artist_infohash(artist_uuid), artist_uuid)
 
     async def lookup_artists_batch(
         self, artist_uuids: list[str], max_concurrent: int = 20
@@ -400,11 +374,16 @@ class DHTService:
         return valid
 
     async def periodic_reannounce(self):
-        """Re-announce all artists and user every REANNOUNCE_INTERVAL seconds."""
+        """Refresh node key, user key, capabilities and the rare-artist tail
+        every REANNOUNCE_INTERVAL seconds (DHT entries live 15-30 min)."""
         while self._running:
             await asyncio.sleep(REANNOUNCE_INTERVAL)
             if not self._running or not self._session:
                 break
+
+            # The discovery key first — it is what every peer looks up.
+            self._session.dht_announce(
+                lt.sha1_hash(node_infohash()), self._announce_port, 0)
 
             # Re-announce user
             if self._user_invite_code:

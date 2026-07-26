@@ -227,8 +227,8 @@ def stop_sync_listener() -> None:
 _DEFAULTS: Dict[str, Any] = {
     "sync.p2p_enabled":          True,
     "sync.auto_interval_min":    30,
-    "sync.announce_limit":       None,   # null = announce all
-    "sync.announce_rotation_min": 30,
+    # Size of the rare-artist DHT announce tail (0/null = node key only).
+    "sync.announce_limit":       300,
     "enrichment.background_enabled": True,
     # Provider/model default to None so the first-run UI shows
     # "Not selected" instead of pretending Claude is picked when the
@@ -616,7 +616,6 @@ def _sync_state() -> Dict[str, Any]:
         "p2p_enabled":             bool(_read("sync.p2p_enabled")),
         "auto_interval_min":       _read("sync.auto_interval_min"),
         "announce_limit":          _read("sync.announce_limit"),
-        "announce_rotation_min":   _read("sync.announce_rotation_min"),
         "background_enrichment":   bool(_read("enrichment.background_enabled")),
         "background_status":       bg_status,
         "last_sync_at":            _read("sync.last_at"),
@@ -1276,8 +1275,7 @@ def load_hqplayer_from_db() -> None:
 class SyncPrefs(BaseModel):
     p2p_enabled:             Optional[bool] = None
     auto_interval_min:       Optional[int]  = None  # null disables
-    announce_limit:          Optional[int]  = None  # null = announce all
-    announce_rotation_min:   Optional[int]  = None
+    announce_limit:          Optional[int]  = None  # rare-artist tail size
     background_enrichment:   Optional[bool] = None
 
 
@@ -1294,8 +1292,6 @@ def put_sync_prefs(req: SyncPrefs) -> Dict[str, Any]:
     if req.announce_limit is not None:
         _write("sync.announce_limit",
                int(req.announce_limit) if req.announce_limit > 0 else None)
-    if req.announce_rotation_min is not None:
-        _write("sync.announce_rotation_min", int(req.announce_rotation_min))
     if req.background_enrichment is not None:
         want = bool(req.background_enrichment)
         _write("enrichment.background_enabled", want)
