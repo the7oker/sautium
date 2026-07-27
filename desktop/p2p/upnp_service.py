@@ -19,6 +19,55 @@ except ImportError:
 LEASE_DURATION = 3600  # 1 hour
 
 
+def discover_igd():
+    """Find the router's IGD and return a ready miniupnpc handle, or None.
+
+    Shared by the service and the `portmap` CLI — every UPnP operation
+    starts here, and a router that answers SSDP is the precondition for
+    all of them."""
+    if not HAS_UPNP:
+        return None
+    try:
+        u = miniupnpc.UPnP()
+        u.discoverdelay = 2000
+        if u.discover() == 0:
+            return None
+        u.selectigd()
+        return u
+    except Exception as e:
+        logger.info(f"UPnP discovery failed: {e}")
+        return None
+
+
+def add_mapping(u, external: int, internal: int, protocol: str = "TCP",
+                lease: int = LEASE_DURATION, description: str = "") -> bool:
+    """Add one port mapping to the IGD. Returns True on success."""
+    try:
+        return bool(u.addportmapping(
+            external, protocol, u.lanaddr, internal,
+            description or f"Sautium ({internal})", "", lease))
+    except Exception:
+        return False
+
+
+def list_mappings(u, limit: int = 200) -> list[dict]:
+    """Enumerate the router's port-mapping table."""
+    out = []
+    for i in range(limit):
+        try:
+            m = u.getgenericportmapping(i)
+        except Exception:
+            break
+        if m is None:
+            break
+        out.append({
+            "external": m[0], "protocol": m[1],
+            "internal_host": m[2][0], "internal_port": m[2][1],
+            "description": m[3],
+        })
+    return out
+
+
 class UPnPService:
     """Manages UPnP port mappings for P2P connectivity."""
 
@@ -60,13 +109,11 @@ class UPnPService:
             return None
 
         try:
-            u = miniupnpc.UPnP()
-            u.discoverdelay = 2000
-            if u.discover() == 0:
+            u = discover_igd()
+            if u is None:
                 logger.info("No UPnP devices found")
                 return None
 
-            u.selectigd()
             external_ip = u.externalipaddress()
             if not external_ip:
                 logger.warning("UPnP: could not determine external IP")
@@ -95,19 +142,12 @@ class UPnPService:
         """Map a single port, trying the same external port first."""
         port = internal_port
         for _ in range(5):
-            try:
-                result = u.addportmapping(
-                    port, "TCP", u.lanaddr, internal_port,
-                    f"Sautium ({internal_port})", "", LEASE_DURATION,
+            if add_mapping(u, port, internal_port):
+                logger.info(
+                    f"UPnP: {u.externalipaddress()}:{port} -> "
+                    f"{u.lanaddr}:{internal_port}"
                 )
-                if result:
-                    logger.info(
-                        f"UPnP: {u.externalipaddress()}:{port} -> "
-                        f"{u.lanaddr}:{internal_port}"
-                    )
-                    return port
-            except Exception:
-                pass
+                return port
             port += 1
         logger.warning(f"UPnP: could not map port {internal_port}")
         return None
@@ -126,10 +166,7 @@ class UPnPService:
             return self.open_ports() is not None
         try:
             for ext, intn in list(self._mapped):
-                self._upnp.addportmapping(
-                    ext, "TCP", self._upnp.lanaddr, intn,
-                    f"Sautium ({intn})", "", LEASE_DURATION,
-                )
+                add_mapping(self._upnp, ext, intn)
             logger.debug("UPnP: %d mappings renewed", len(self._mapped))
             return True
         except Exception as e:
