@@ -67,6 +67,35 @@ logger = logging.getLogger(__name__)
 # Global DHT service reference (set during lifespan)
 _dht_service: DHTService | None = None
 _dht_reannounce_task: asyncio.Task | None = None
+_p2p_server_task: asyncio.Task | None = None
+
+
+async def _serve_p2p(port: int) -> None:
+    """Serve the peer surface (p2p_app) on its own port, HTTPS with the same
+    self-signed cert as the Web UI. A second uvicorn in this process rather
+    than a second container: it shares the DB pool and the DHT service, and
+    the split that matters is which ROUTES face the port, not which process
+    serves them."""
+    import os
+
+    import uvicorn
+    from tls_gen import ensure_cert
+    from p2p_app import app as peer_app
+
+    cert_path, key_path = ensure_cert(
+        _Path(os.getenv("SAUTIUM_TLS_DIR", "/app/data/tls")),
+        [s.strip() for s in os.getenv("SAUTIUM_HOST_IPS", "").split(",") if s.strip()],
+    )
+    config = uvicorn.Config(
+        peer_app, host="0.0.0.0", port=port, log_level="info",
+        ssl_keyfile=str(key_path), ssl_certfile=str(cert_path),
+    )
+    try:
+        await uvicorn.Server(config).serve()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(f"P2P sync server on :{port} stopped: {e}")
 
 
 @asynccontextmanager
@@ -238,13 +267,22 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning(f"P2P identity derivation failed: {e}")
 
+    # The peer surface: sync protocol only, on its own port (p2p_app.py).
+    # Everything a peer is told about this node points here — never at the
+    # Web UI port, whose page carries the API secret.
+    global _p2p_server_task
+    announce_port = settings.p2p_announce_port or settings.p2p_sync_port
+    if settings.p2p_sync_port:
+        _p2p_server_task = asyncio.create_task(
+            _serve_p2p(settings.p2p_sync_port))
+
     # Start DHT service for P2P peer discovery
     global _dht_service, _dht_reannounce_task
-    if settings.p2p_enabled and HAS_LIBTORRENT:
+    if settings.p2p_enabled and HAS_LIBTORRENT and settings.p2p_sync_port:
         try:
             _dht_service = DHTService(
                 listen_port=settings.p2p_dht_port,
-                http_port=settings.p2p_announce_port,
+                http_port=announce_port,
             )
             await _dht_service.start()
 
@@ -283,7 +321,7 @@ async def lifespan(app: FastAPI):
                 asyncio.create_task(_dht_service.announce_artists(artist_uuids))
                 logger.info(
                     f"P2P online: node announced, {len(artist_uuids)} rare "
-                    f"artists queued (HTTP port {settings.p2p_announce_port})"
+                    f"artists queued (peer port {announce_port})"
                 )
             else:
                 logger.info("P2P online: node announced (no rare-artist tail)")
@@ -411,6 +449,12 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    if _p2p_server_task:
+        _p2p_server_task.cancel()
+        try:
+            await _p2p_server_task
+        except asyncio.CancelledError:
+            pass
     if _dht_reannounce_task:
         _dht_reannounce_task.cancel()
         try:

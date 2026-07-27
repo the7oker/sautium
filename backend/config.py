@@ -119,7 +119,12 @@ class Settings(BaseSettings):
     # P2P / DHT Configuration
     p2p_enabled: bool = True              # Docker backend announces in DHT by default
     p2p_dht_port: int = 19001             # UDP port for libtorrent DHT
-    p2p_announce_port: int = 8800         # external HTTP port announced to peers
+    # The peer surface (backend/p2p_app.py) — sync protocol only, no Web UI,
+    # so this is the port that may be published to the internet. 0 disables
+    # the second server, and then nothing is announced either: the Web UI
+    # port must never be handed to peers (it carries the API secret).
+    p2p_sync_port: int = 8801
+    p2p_announce_port: int = 0            # external port announced; 0 = p2p_sync_port
     p2p_username: str = ""
     p2p_password: str = ""
 

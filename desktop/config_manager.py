@@ -58,7 +58,10 @@ DEFAULT_CONFIG = {
     "p2p": {
         "node_name": None,
         "listen_port": None,  # auto-generated on first run (random port)
-        "docker_ports": [8800],  # localhost ports to probe for Docker backends
+        # Localhost ports probed for a Docker node on this host. 8801 is its
+        # peer surface (announced to the LAN in our beacon); 8800 is the Web
+        # UI port, kept for backends predating the split.
+        "docker_ports": [8801, 8800],
         "manual_peers": [],
         "chat_enabled": True,
     },
