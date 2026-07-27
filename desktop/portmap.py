@@ -65,10 +65,10 @@ def _serves_web_ui(port: int) -> bool:
     return False
 
 
-def _port_is_listening(port: int) -> bool:
+def _port_is_listening(port: int, host: str = "127.0.0.1") -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(2)
-        return s.connect_ex(("127.0.0.1", port)) == 0
+        return s.connect_ex((host, port)) == 0
 
 
 def cmd_status(args) -> None:
@@ -128,6 +128,23 @@ def cmd_map(args) -> None:
 
     print(f"mapped {u.externalipaddress()}:{external}/{proto} -> "
           f"{u.lanaddr}:{port}")
+
+    # A router mapping is only half the path: the port must also answer on
+    # this machine's LAN address. A published Docker port that listens
+    # IPv6-only (Docker Desktop does this) passes a loopback check and still
+    # refuses every LAN and internet connection.
+    if proto == "TCP" and not _port_is_listening(port, u.lanaddr):
+        print(f"warning: {u.lanaddr}:{port} does not accept IPv4 connections, "
+              f"so the mapping cannot work yet")
+        if sys.platform == "win32":
+            print(f"         on Windows a published Docker port is often "
+                  f"IPv6-only; it needs (as admin):")
+            print(f"           netsh interface portproxy add v4tov4 "
+                  f"listenaddress=0.0.0.0 listenport={port} "
+                  f"connectaddress=<WSL-IP> connectport={port}")
+            print(f"           netsh advfirewall firewall add rule "
+                  f'name="Sautium P2P (TCP {port})" dir=in action=allow '
+                  f"protocol=TCP localport={port} profile=any")
     if permanent:
         print("lease: permanent (survives until removed or the router reboots)")
         return
