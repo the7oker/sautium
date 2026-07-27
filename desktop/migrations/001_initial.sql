@@ -447,7 +447,14 @@ CREATE TABLE IF NOT EXISTS media_files (
 CREATE TABLE IF NOT EXISTS analysis_sources (
     id            SERIAL PRIMARY KEY,
     track_id      UUID NOT NULL REFERENCES tracks(id) ON UPDATE CASCADE ON DELETE CASCADE,
-    origin        analysis_origin NOT NULL,
+    origin        analysis_origin,        -- NULL for rows imported over P2P:
+                                          -- the wire deliberately omits how a
+                                          -- peer obtained its audio (file vs
+                                          -- stream), since that turns "I
+                                          -- analysed this" into "I hold this
+                                          -- file". Only OUR OWN rows carry it,
+                                          -- and only they need it (overwrite
+                                          -- ranking + the signing gate).
     media_file_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
     pcm_hash      CHAR(64) NOT NULL,
     chromaprint   TEXT,                   -- NULL only if fpcalc failed

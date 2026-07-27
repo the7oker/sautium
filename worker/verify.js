@@ -61,11 +61,16 @@ const BIRTH_CERT_VERSION = 1;
 // Timestamp-notary payload version. v2 binds the submitter's ip_hash into the
 // signed root (accountability for who notarized a batch). Decoupled from
 // BIRTH_CERT_VERSION — they were incidentally equal at v1 — and mirrored by
-// TIMESTAMP_VERSION in backend/record_sig.py; bump both together. UUID_NAMESPACE
-// MIRRORS backend/uuid_utils.py NAMESPACE so ip_hash is identical on Worker and
-// backend.
+// TIMESTAMP_VERSION in backend/record_sig.py; bump both together.
 const TIMESTAMP_VERSION = 2;
-const UUID_NAMESPACE = "adc1ec0b-2c81-5e26-9938-a369c6f7a5e1";
+
+// How ip_hash is derived. v1 was uuid5 over a namespace shipped in this file —
+// reversible by brute-forcing the IPv4 space, which published the submitter's
+// address to every peer holding a sealed record. v2 is HMAC under IP_PEPPER:
+// same equality (so Sybil merging by address still works), no search.
+// A stamp whose ipv is older is re-issued on the next submission of that root,
+// keeping its original date — authorship priority never regresses.
+const IP_HASH_VERSION = 2;
 
 // Enforced on account creation client-side; re-checked here because invite
 // codes arrive from the network. Guarantees '#' appears exactly once in an
@@ -297,15 +302,17 @@ async function handleTimestamp(request, env, corsHeaders) {
   // FIRST-issuance moment — preserved across a re-sign so authorship priority
   // never regresses; only ip_hash reflects whoever re-submits.
   let record = await env.RATE_LIMITS.get(`ts:${root}`, "json");
-  if (!record || record.v !== TIMESTAMP_VERSION) {
+  if (!record || record.v !== TIMESTAMP_VERSION
+      || record.ipv !== IP_HASH_VERSION) {
     const date = record?.date || nowIsoSeconds();
-    const ipHash = await ipHashUuid(ip);
+    const ipHash = await ipHashUuid(env, ip);
     const key = await birthSigningKey(env);
     const sig = bytesToHex(new Uint8Array(await crypto.subtle.sign(
       "Ed25519", key,
       new TextEncoder().encode(
         `sautium-timestamp:v${TIMESTAMP_VERSION}:${root}:${date}:${ipHash}`))));
-    record = { v: TIMESTAMP_VERSION, date, ip_hash: ipHash, sig };
+    record = { v: TIMESTAMP_VERSION, ipv: IP_HASH_VERSION, date,
+               ip_hash: ipHash, sig };
     await env.RATE_LIMITS.put(`ts:${root}`, JSON.stringify(record));
   }
 
@@ -884,25 +891,31 @@ function normalizeText(text) {
   return text.trim().toLowerCase().normalize("NFC").replace(/\s+/g, " ");
 }
 
-async function uuid5(namespaceUuid, name) {
-  // Deterministic UUID v5 (SHA-1), byte-identical to Python uuid.uuid5 for the
-  // same namespace+name — the network's shared id primitive.
-  const ns = hexToBytes(namespaceUuid.replace(/-/g, ""));
-  const nameBytes = new TextEncoder().encode(name);
-  const data = new Uint8Array(ns.length + nameBytes.length);
-  data.set(ns);
-  data.set(nameBytes, ns.length);
-  const h = new Uint8Array(await crypto.subtle.digest("SHA-1", data)).slice(0, 16);
-  h[6] = (h[6] & 0x0f) | 0x50; // version 5
+
+async function ipHashUuid(env, ip) {
+  // Pseudonym for the notary submitter's IP. It exists to MERGE identities:
+  // keys are free, addresses are not, so a thousand Sybil keys stamped from
+  // one address collapse into one subject — a signal no keypair can fake.
+  //
+  // Keyed, not plain: a uuid5 over a namespace that ships in this file is
+  // reversible by brute force (the whole IPv4 space is ~4.3e9 SHA-1s, minutes
+  // on a laptop), which would publish the author's address to every peer that
+  // pulls a sealed record. HMAC under IP_PEPPER keeps equality — the only
+  // property the merge needs — while making that search impossible without
+  // the secret. UUID shape is preserved so the wire format, the signed
+  // timestamp string and the `uuid` column all stay as they are.
+  const pepper = env.IP_PEPPER;
+  if (!pepper) throw new Error("IP_PEPPER is not configured");
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(pepper),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign(
+    "HMAC", key, new TextEncoder().encode(`ip:${normalizeText(ip)}`)));
+  const h = mac.slice(0, 16);
+  h[6] = (h[6] & 0x0f) | 0x40; // version 4 shape: this is keyed, not a uuid5
   h[8] = (h[8] & 0x3f) | 0x80; // RFC 4122 variant
   const x = bytesToHex(h);
   return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20)}`;
-}
-
-async function ipHashUuid(ip) {
-  // Deterministic pseudonym for the notary submitter's IP — accountability
-  // without storing the raw address. Same uuid5 shape as artist/track ids.
-  return await uuid5(UUID_NAMESPACE, `ip:${normalizeText(ip)}`);
 }
 
 function isValidEmail(email) {

@@ -604,28 +604,30 @@ class SyncClient:
         return {(track_uuid, pcm_hash): analysis_sources.id}. media_file_id is
         always NULL and imported=true — the sender's material is not ours, so
         these sources are never signable here (sign_audio excludes imported).
-        Origin/values of an already-known source are kept (local knowledge
-        wins, imported stays false for first-hand rows); only missing
+
+        `origin` is NULL for imported rows, and honestly so: the wire no
+        longer says whether the author analysed a file or a stream (see
+        _provenance_item), and the field exists only to rank OUR OWN
+        analysis. Local knowledge always wins on conflict; only missing
         chromaprint/duration are filled in."""
         prov = {}
         for item in items:
             p = item.get("provenance")
-            if p and p.get("pcm_hash") and p.get("origin"):
+            if p and p.get("pcm_hash"):
                 prov[(item["track_uuid"], p["pcm_hash"])] = p
         if not prov:
             return {}
         values = [
-            (tid, p["origin"], p["pcm_hash"], p.get("chromaprint"),
+            (tid, p["pcm_hash"], p.get("chromaprint"),
              p.get("duration_seconds"),
-             p.get("grid_version", 1), p.get("sample_rate"),
-             p.get("bit_depth"), p.get("is_lossless"))
+             p.get("grid_version", 1), p.get("is_lossless"))
             for (tid, _), p in prov.items()
         ]
         rows = psycopg2.extras.execute_values(
             cur,
             """INSERT INTO analysis_sources
-               (track_id, origin, pcm_hash, chromaprint, duration_seconds,
-                grid_version, sample_rate, bit_depth, is_lossless, imported)
+               (track_id, pcm_hash, chromaprint, duration_seconds,
+                grid_version, is_lossless, imported)
                VALUES %s
                ON CONFLICT (track_id, pcm_hash) DO UPDATE SET
                    chromaprint = COALESCE(analysis_sources.chromaprint,
@@ -634,7 +636,7 @@ class SyncClient:
                                                EXCLUDED.duration_seconds)
                RETURNING id, track_id::text, pcm_hash""",
             values,
-            template="(%s::uuid, %s::analysis_origin, %s, %s, %s, %s, %s, %s, %s, true)",
+            template="(%s::uuid, %s, %s, %s, %s, %s, true)",
             fetch=True,
         )
         return {(r[1], r[2]): r[0] for r in rows}

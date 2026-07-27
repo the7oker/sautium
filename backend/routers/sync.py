@@ -359,26 +359,34 @@ async def pull_tracks(req: PullRequest) -> dict:
 
 def _provenance_item(r: dict) -> Optional[dict]:
     """Nested provenance payload from p_-prefixed LEFT JOIN columns; None for
-    rows not linked to an analysis_sources row (legacy / failed fingerprints)."""
+    rows not linked to an analysis_sources row (legacy / failed fingerprints).
+
+    Carries the material declaration the signature commits to, and nothing
+    that describes the author's copy of it. `origin`, `sample_rate` and
+    `bit_depth` are deliberately NOT sent: a signature already says "I had
+    this audio", and those three would turn it into "I hold this FILE" —
+    origin says so outright, and a 96kHz/24-bit source says it just as
+    plainly, since no streaming tier serves hi-res. Withholding them leaves
+    a local rip and a lossless stream indistinguishable on the wire, which
+    is the same possession-privacy line the three-tier signing policy draws.
+    None of the three is part of the signed payload, so seals are unaffected.
+    `is_lossless` stays: Deezer FLAC is lossless too, so it grades analysis
+    quality without implying a file."""
     if r.get("p_pcm_hash") is None:
         return None
     return {
-        "origin": r["p_origin"],
         "pcm_hash": r["p_pcm_hash"],
         "chromaprint": r["p_chromaprint"],
         "duration_seconds": r["p_duration_seconds"],
         "grid_version": r["p_grid_version"],
-        "sample_rate": r["p_sample_rate"],
-        "bit_depth": r["p_bit_depth"],
         "is_lossless": r["p_is_lossless"],
     }
 
 
-_PROVENANCE_COLS = """s.origin::text AS p_origin, s.pcm_hash AS p_pcm_hash,
+_PROVENANCE_COLS = """s.pcm_hash AS p_pcm_hash,
                       s.chromaprint AS p_chromaprint,
                       s.duration_seconds AS p_duration_seconds,
                       s.grid_version AS p_grid_version,
-                      s.sample_rate AS p_sample_rate, s.bit_depth AS p_bit_depth,
                       s.is_lossless AS p_is_lossless"""
 
 
