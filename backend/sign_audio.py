@@ -284,19 +284,22 @@ def verify_all() -> bool:
 
 
 def resign_timestamps():
-    """Re-timestamp existing batches under the current format (adds ip_hash).
+    """Re-timestamp existing batches under the Worker's current format.
 
     Author signatures and Merkle roots depend on neither the IP nor the date,
-    so re-submitting the same root refreshes ONLY the Worker countersignature —
-    the per-record seals (488k rows) are untouched. The Worker preserves each
-    root's original date and re-signs it bound to the submitter's ip_hash.
-    Idempotent: only batches still missing an ip_hash are re-submitted."""
+    so re-submitting a root refreshes ONLY the Worker countersignature — the
+    per-record seals (488k rows) are untouched, and the Worker preserves each
+    root's original date, so authorship priority never regresses.
+
+    Every batch is re-submitted and the WORKER decides what to refresh (it
+    versions both the timestamp payload and the ip_hash derivation): a root
+    already in the current format comes back byte-identical, so this stays
+    idempotent without the client having to know which formats exist."""
     conn = psycopg2.connect(settings.database_url)
     conn.cursor_factory = psycopg2.extras.RealDictCursor
     cur = conn.cursor()
 
-    cur.execute("SELECT batch_root FROM signing_batches "
-                "WHERE ip_hash IS NULL ORDER BY created_at")
+    cur.execute("SELECT batch_root FROM signing_batches ORDER BY created_at")
     roots = [r["batch_root"] for r in cur.fetchall()]
     if not roots:
         logger.info("no batches to re-timestamp")
