@@ -226,7 +226,14 @@ def verify_all() -> bool:
             payload, r["signature"], r["author_pubkey"], r["merkle_proof"],
             r["batch_root"], b[0], b[1], b[2], b[3], TRUSTED_AUTHORITIES))
 
-    cur.execute("""SELECT s.author_pubkey, s.signature, s.merkle_proof, s.batch_root,
+    # Server-side cursor: a signed library is hundreds of thousands of
+    # segments, each row carrying a 512-float vector as text — fetchall()
+    # here was an OOM kill waiting for the library to grow (it did: the tool
+    # worked at 3.7k records and was killed at 452k).
+    seg_cur = conn.cursor(name="verify_segments",
+                          cursor_factory=psycopg2.extras.RealDictCursor)
+    seg_cur.itersize = 2000
+    seg_cur.execute("""SELECT s.author_pubkey, s.signature, s.merkle_proof, s.batch_root,
                           e.track_id::text tid, e.model_id::text model,
                           s.segment_index idx, s.vector::text vec,
                           p.pcm_hash, p.chromaprint, p.duration_seconds,
@@ -235,7 +242,7 @@ def verify_all() -> bool:
                    JOIN embeddings e ON e.id = s.embedding_id
                    LEFT JOIN analysis_sources p ON p.id = e.analysis_source_id
                    WHERE s.signature IS NOT NULL""")
-    for r in cur.fetchall():
+    for r in seg_cur:
         if r["pcm_hash"] is None:
             bad += 1
             if len(bad_samples) < 5:
@@ -252,15 +259,20 @@ def verify_all() -> bool:
             bad += 1
             if len(bad_samples) < 5:
                 bad_samples.append(f"segment {r['tid'][:8]}#{r['idx']}")
+    seg_cur.close()
+    logger.info("segments checked: %d valid, %d invalid", ok, bad)
 
-    cur.execute(f"""SELECT a.author_pubkey, a.signature, a.merkle_proof, a.batch_root,
+    feat_cur = conn.cursor(name="verify_features",
+                           cursor_factory=psycopg2.extras.RealDictCursor)
+    feat_cur.itersize = 2000
+    feat_cur.execute(f"""SELECT a.author_pubkey, a.signature, a.merkle_proof, a.batch_root,
                            a.track_id::text tid, a.analysis_version,
                            {', '.join('a.' + c for c in FEATURE_ORDER)},
                            p.pcm_hash, p.chromaprint, p.duration_seconds
                     FROM audio_features a
                     LEFT JOIN analysis_sources p ON p.id = a.analysis_source_id
                     WHERE a.signature IS NOT NULL""")
-    for r in cur.fetchall():
+    for r in feat_cur:
         if r["pcm_hash"] is None:
             bad += 1
             if len(bad_samples) < 5:
@@ -276,6 +288,7 @@ def verify_all() -> bool:
             bad += 1
             if len(bad_samples) < 5:
                 bad_samples.append(f"features {r['tid'][:8]}")
+    feat_cur.close()
 
     logger.info("seal verification: %d valid, %d invalid", ok, bad)
     if bad_samples:
