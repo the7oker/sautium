@@ -46,6 +46,31 @@ ALLOWED_MODELS = {"sonnet", "haiku"}
 TIMEOUT_SECONDS = 150
 CLAUDE_USER = "claudeuser"  # non-root user (--dangerously-skip-permissions requires non-root)
 
+# The DJ must reach its MCP servers and nothing else. Chat text arrives as the
+# agent's prompt, and the chat is reachable by anyone holding the API secret —
+# which `GET /` hands to any browser that can load the page. Left unrestricted
+# the agent also carries Bash/Write/Edit/Read under
+# --dangerously-skip-permissions, while /app is a read-write bind mount of the
+# backend source: one prompt injection would be arbitrary code execution that
+# persists to the host, plus .env (ANTHROPIC_API_KEY, POSTGRES_PASSWORD) and
+# .api_secret in plain sight.
+#
+# DENY-list, not allow-list: --allowed-tools is enforced through the permission
+# system that --dangerously-skip-permissions turns off, so pairing the two is
+# silently useless — measured 2026-07-27, the agent happily wrote a file while
+# allow-listed to MCP only. --disallowed-tools is honoured regardless (same
+# probe answered "CANNOT" and wrote nothing). Keep this list in step with the
+# CLI's built-in tools; MCP tools stay reachable because they are never named
+# here. Nothing is lost — claude_dj_prompt.py drives search and playback
+# entirely through the MCP servers (the postgres one being read-only).
+_FILESYSTEM_AND_SHELL = ("Bash,Write,Edit,MultiEdit,NotebookEdit,Read,Glob,"
+                         "Grep,Task,KillShell,BashOutput")
+# The DJ never browses; the gear researcher exists to browse (mcp=False,
+# WebSearch/WebFetch are its whole toolset), so the web pair is denied only
+# on the library path.
+DISALLOWED_TOOLS_MCP = _FILESYSTEM_AND_SHELL + ",WebFetch,WebSearch"
+DISALLOWED_TOOLS_RESEARCH = _FILESYSTEM_AND_SHELL
+
 # DJ turns are SQL + list-building; unbounded interleaved thinking burned
 # ~75% of output tokens on a measured chat turn (4.9k-token final turn =
 # 57s of UI silence, 2026-07-22). 1024 keeps short planning steps.
@@ -168,6 +193,8 @@ def call_claude_code(
         "--output-format", "json",
         "--model", use_model,
         "--system-prompt", system_prompt,
+        "--disallowed-tools",
+        DISALLOWED_TOOLS_MCP if mcp else DISALLOWED_TOOLS_RESEARCH,
         "--dangerously-skip-permissions",
     ]
     if mcp:
@@ -338,6 +365,7 @@ def call_claude_code_stream(
         "--mcp-config", MCP_CONFIG_PATH,
         "--model", use_model,
         "--system-prompt", system_prompt,
+        "--disallowed-tools", DISALLOWED_TOOLS_MCP,
         "--dangerously-skip-permissions",
     ]
     if resume and session_id:
