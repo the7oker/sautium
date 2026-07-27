@@ -313,6 +313,15 @@ async def lifespan(app: FastAPI):
                     _p2p_identity["invite_code"]
                 )
 
+            # Advertise the MB dump so dump-less nodes can find this one as a
+            # slice source without a LAN beacon or a hand-written peer entry.
+            try:
+                from routers.sync import mb_dump_version
+                if mb_dump_version():
+                    await _dht_service.announce_capability("mbdump")
+            except Exception as e:
+                logger.warning(f"MB dump capability announce failed: {e}")
+
             # Rare-artist tail. Paced (dht_service.ANNOUNCE_CHUNK), so it
             # runs as a background task; awaiting it here would hold the
             # whole app startup (uvicorn accepts no requests mid-lifespan).

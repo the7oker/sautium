@@ -50,6 +50,7 @@ except ImportError:
 INFOHASH_PREFIX = "Sautium-artist:"
 INFOHASH_PREFIX_USER = "Sautium-user:"
 INFOHASH_PREFIX_NODE = "Sautium-node"
+INFOHASH_PREFIX_CAP = "Sautium-cap:"
 
 # dht_announce initiations per pacing pause. Each announce fans out into a
 # get_peers traversal, so a tight loop floods the docker-bridge/WSL2 NAT with
@@ -121,6 +122,16 @@ def node_infohash(prefix: str = "") -> bytes:
     ).digest()
 
 
+def capability_infohash(capability: str) -> bytes:
+    """Compute SHA1 infohash for a node capability (e.g. 'mbdump' — the node
+    serves MB dump slices). One well-known infohash per capability lets
+    dump-less nodes discover volunteer dump holders beyond known peers.
+    MIRRORS desktop/p2p/dht_service.py."""
+    return hashlib.sha1(
+        f"{INFOHASH_PREFIX_CAP}{capability}".encode()
+    ).digest()
+
+
 class DHTService:
     """libtorrent-based DHT service for per-artist peer discovery."""
 
@@ -134,6 +145,7 @@ class DHTService:
         self.http_port = http_port
         self._session: Optional[object] = None  # lt.session
         self._announced: set[str] = set()  # tail artist UUIDs announced
+        self._capabilities: set[str] = set()  # announced node capabilities
         self._user_invite_code: Optional[str] = None
         self._peer_cache: dict[str, list[tuple[str, int, float]]] = {}
         self._running = False
@@ -289,6 +301,23 @@ class DHTService:
         """Find Sautium nodes on the discovery key. Returns (ip, port)."""
         return await self._lookup(node_infohash(), "node")
 
+    async def announce_capability(self, capability: str):
+        """Announce a capability (e.g. 'mbdump') on its well-known infohash.
+        Without this a Docker node holding the MB dump is discoverable only
+        over LAN or as a manual peer — invisible to exactly the dump-less
+        nodes the slice protocol exists for."""
+        if not self._session:
+            return
+        self._capabilities.add(capability)
+        sha1 = lt.sha1_hash(capability_infohash(capability))
+        self._session.dht_announce(sha1, self.http_port, 0)
+        logger.info(f"DHT: capability announced ({capability})")
+
+    async def lookup_capability(self, capability: str) -> list[tuple[str, int]]:
+        """Find nodes announcing a capability. Returns (ip, port)."""
+        return await self._lookup(capability_infohash(capability),
+                                  f"cap:{capability}")
+
     async def announce_artists(self, artist_uuids: list[str]):
         """Announce the rare-artist tail (see module docstring). The caller
         decides WHICH artists — this is a bounded set, not the library."""
@@ -414,6 +443,10 @@ class DHTService:
                 ih = user_infohash(self._user_invite_code)
                 sha1 = lt.sha1_hash(ih)
                 self._session.dht_announce(sha1, self.http_port, 0)
+
+            for cap in list(self._capabilities):
+                self._session.dht_announce(
+                    lt.sha1_hash(capability_infohash(cap)), self.http_port, 0)
 
             uuids = sorted(self._announced)
             logger.info(
