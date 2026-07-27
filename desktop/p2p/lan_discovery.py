@@ -75,14 +75,14 @@ class LANDiscovery:
         """Get metadata for a specific LAN peer."""
         return self._peers.get((ip, port))
 
-    def _make_beacon(self, enriched_artists: int = 0) -> bytes:
-        """Build beacon payload."""
-        return json.dumps({
-            "sautium": PROTOCOL_VERSION,
-            "node_id": self.node_id,
-            "sync_port": self.sync_port,
-            "artists": enriched_artists,
-        }, separators=(",", ":")).encode("utf-8")
+    def _local_node_ports(self) -> list[int]:
+        """Ports of sibling nodes found on THIS host by the localhost probe
+        (a Docker backend). They are announced so LAN peers can reach them
+        at OUR address: a container cannot broadcast for itself, and its DHT
+        announcement carries the router's external address — which nothing on
+        the LAN can connect back to (the backend port is never forwarded)."""
+        return sorted({port for (ip, port), info in self._peers.items()
+                       if info.get("localhost")})
 
     def _parse_beacon(self, data: bytes, sender_ip: str) -> Optional[Tuple[str, int, dict]]:
         """Parse beacon, return (ip, sync_port, info) or None."""
@@ -102,10 +102,13 @@ class LANDiscovery:
         if msg.get("node_id") and msg["node_id"] == self.node_id:
             return None
 
+        nodes = [p for p in (msg.get("nodes") or [])
+                 if isinstance(p, int) and 0 < p < 65536]
         return (sender_ip, sync_port, {
             "node_id": msg.get("node_id", ""),
             "artists": msg.get("artists", 0),
             "invite_code": msg.get("invite_code", ""),
+            "nodes": nodes,
         })
 
     async def start(self):
@@ -247,6 +250,27 @@ class LANDiscovery:
                         asyncio.ensure_future(
                             self._warmup_peer(loop, ip, port)
                         )
+                    # Sibling nodes on the sender's host (its Docker backend):
+                    # reachable at the sender's address, invisible otherwise.
+                    for extra in info.get("nodes", ()):
+                        sib = (ip, extra)
+                        if sib == (ip, port):
+                            continue
+                        sib_new = sib not in self._peers
+                        self._peers[sib] = {
+                            "node_id": "", "artists": 0,
+                            "invite_code": "",
+                            "last_seen": info["last_seen"],
+                            "sibling_of": info["node_id"],
+                        }
+                        if sib_new:
+                            logger.info(
+                                f"LAN peer discovered: {ip}:{extra} "
+                                f"(node on peer host)"
+                            )
+                            asyncio.ensure_future(
+                                self._warmup_peer(loop, ip, extra)
+                            )
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -364,12 +388,17 @@ class LANDiscovery:
         return None
 
     def _make_beacon(self, enriched_artists: int = 0) -> bytes:
-        """Build beacon payload."""
+        """Build beacon payload. `nodes` is optional — older peers ignore it,
+        so it needs no protocol bump."""
         count = getattr(self, "_enriched_count", enriched_artists)
-        return json.dumps({
+        payload = {
             "sautium": PROTOCOL_VERSION,
             "node_id": self.node_id,
             "sync_port": self.sync_port,
             "artists": count,
             "invite_code": self.invite_code,
-        }, separators=(",", ":")).encode("utf-8")
+        }
+        local_nodes = self._local_node_ports()
+        if local_nodes:
+            payload["nodes"] = local_nodes
+        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
