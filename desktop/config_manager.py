@@ -47,11 +47,14 @@ DEFAULT_CONFIG = {
         # a launcher test node can drive DLNA on the same host.
         "media": 8832,
         "gena": 8833,
-        # Peer surface (backend/p2p_app.py). Offset from the Docker node's
-        # 8801 for the same reason as media above: on a dev host Docker
-        # Desktop publishes its port on Windows, so a launcher trying to
-        # bind the same number gets WinError 10048.
-        "p2p_sync": 8802,
+        # Peer surface of the BACKEND (backend/p2p_app.py) — off in launcher
+        # mode. A launcher already serves the peer protocol from its own
+        # aiohttp sync server on p2p.listen_port, which is randomised per
+        # install precisely so several Sautium instances can share a network;
+        # a second surface on a fixed port would both duplicate it and
+        # reintroduce that collision. Docker has no launcher, which is the
+        # only reason the backend grew this surface at all.
+        "p2p_sync": 0,
     },
     "claude_code_available": False,
     "first_run_complete": False,
@@ -238,9 +241,9 @@ def generate_env_file(config: dict, env_path: Path) -> None:
         f"MEDIA_PROXY_PORT={ports.get('media', 8832)}",
         f"DLNA_GENA_PORT={ports.get('gena', 8833)}",
         "",
-        "# Peer surface — sync protocol only, the one port that may face the",
-        "# internet. Distinct from the Docker node's 8801, same reasoning.",
-        f"P2P_SYNC_PORT={ports.get('p2p_sync', 8802)}",
+        "# Backend peer surface: 0 = off, because the launcher's own sync",
+        "# server (random port, see p2p.listen_port) already serves peers.",
+        f"P2P_SYNC_PORT={ports.get('p2p_sync', 0)}",
         "",
     ]
 

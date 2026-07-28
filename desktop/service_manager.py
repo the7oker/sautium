@@ -437,9 +437,11 @@ class ServiceManager:
         self._ensure_firewall_rule(
             f"{self.ports.get('media', 8832)},{self.ports.get('gena', 8833)}",
             profile="any")
-        # Peer surface: LAN peers sync through it, and it is the one port a
-        # user may forward (desktop/portmap.py).
-        self._ensure_firewall_rule(self.ports.get("p2p_sync", 8802))
+        # Backend peer surface, only if this install runs one (0 = off, the
+        # launcher default — its own sync server serves peers instead and
+        # opens its own rule).
+        if self.ports.get("p2p_sync"):
+            self._ensure_firewall_rule(self.ports["p2p_sync"])
 
         # Log backend output to file instead of PIPE (PIPE can block on Windows)
         from desktop.config_manager import get_data_dir
