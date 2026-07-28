@@ -563,18 +563,19 @@ def _get_announce_tail_uuids() -> list[str]:
 
 @app.get("/")
 async def root() -> HTMLResponse:
-    """Serve the Web UI shell with the HMAC secret inlined.
+    """Serve the Web UI shell. Carries NO key.
 
-    The frontend reads ``window.__SAUTIUM_SECRET`` to sign every
-    request. Inlining it into HTML at the same origin keeps the
-    secret unreachable from cross-origin scripts (browsers refuse to
-    expose response bodies cross-origin without explicit CORS), and
-    avoids a separate auth-less endpoint.
+    This page used to inline the HMAC secret, on the reasoning that
+    cross-origin scripts cannot read a response body. True — but it made the
+    key readable by every device that could load the page, permanent,
+    unrevocable and shared, and DNS rebinding defeats the same-origin
+    argument by making the attacker's page *be* the origin. The browser now
+    signs with a device token it obtains through /api/auth (see
+    backend/device_auth.py) and keeps in localStorage, which a rebinding
+    origin cannot reach.
     """
-    secret = _get_api_secret().decode("ascii")
     html = _get_index_html()
-    inject = (f'<script>window.__SAUTIUM_SECRET="{secret}";'
-              f'window.__SAUTIUM_BUILD={ui_build()};</script>')
+    inject = f'<script>window.__SAUTIUM_BUILD={ui_build()};</script>'
     if "</head>" in html:
         html = html.replace("</head>", f"  {inject}\n</head>", 1)
     else:
@@ -1397,6 +1398,9 @@ app.include_router(eq_router)
 from routers.sync import router as sync_router, mb_router as mb_sync_router
 app.include_router(sync_router)
 app.include_router(mb_sync_router)
+
+from routers.auth import router as auth_router
+app.include_router(auth_router)
 
 from routers.p2p import router as p2p_router
 app.include_router(p2p_router)

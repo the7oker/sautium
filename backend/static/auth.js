@@ -4,36 +4,54 @@
 //   X-Sautium-Ts   unix seconds
 //   X-Sautium-Sig  hex(HMAC-SHA256(secret, METHOD\nPATH_AND_QUERY\nTS\nsha256_hex(body)))
 //
-// The secret is inlined into the HTML by the backend (see
-// backend/main.py @app.get("/")). It lives in window.__SAUTIUM_SECRET
-// and never leaves this origin (browsers forbid cross-origin reads
-// of HTML responses without explicit CORS).
+// The signing key is a DEVICE TOKEN this browser earned once — by the
+// account password or a pairing PIN shown on the host — and keeps in
+// localStorage (see backend/device_auth.py). The page itself carries no
+// key: it used to inline the shared secret, which handed it to every
+// device that could load the page and to any rebinding origin.
+//
+// localStorage is bound to an origin, which is the point: a rebinding
+// attacker on evil.com opens their own empty storage.
 //
 // This module:
 //   • monkey-patches window.fetch so all in-app calls auto-sign,
 //   • exports sseStream(path, onMessage, onError) — the EventSource
 //     replacement that uses fetch+ReadableStream so we can attach
-//     auth headers (EventSource API can't).
+//     auth headers (EventSource API can't),
+//   • exports Sautium.auth for the login screen (login / pair / forget).
 //
 // Whitelisted backend paths (see backend/auth_hmac.py) accept
 // unsigned requests, so we sign blindly — the backend ignores
 // signatures on those paths.
 
 (function () {
-  const SECRET_RAW = window.__SAUTIUM_SECRET;
-  if (!SECRET_RAW) {
-    console.error("Sautium: window.__SAUTIUM_SECRET missing — auth disabled");
-    return;
-  }
-
+  const TOKEN_KEY = "sautium.device_token";
   const enc = new TextEncoder();
   let _key = null;
 
+  function storedToken() {
+    try {
+      return localStorage.getItem(TOKEN_KEY) || "";
+    } catch {
+      return "";               // private mode / storage disabled
+    }
+  }
+
+  function setToken(tok) {
+    try {
+      if (tok) localStorage.setItem(TOKEN_KEY, tok);
+      else localStorage.removeItem(TOKEN_KEY);
+    } catch { /* nothing to do — auth degrades to "log in every load" */ }
+    _key = null;               // force re-import on next signature
+  }
+
   async function getKey() {
     if (_key) return _key;
+    const tok = storedToken();
+    if (!tok) return null;
     _key = await crypto.subtle.importKey(
       "raw",
-      enc.encode(SECRET_RAW),
+      enc.encode(tok),
       { name: "HMAC", hash: "SHA-256" },
       false,
       ["sign"]
@@ -71,10 +89,11 @@
   }
 
   async function signRequest(method, pathAndQuery, body) {
+    const key = await getKey();
+    if (!key) return null;     // not paired yet — send the request unsigned
     const ts = Math.floor(Date.now() / 1000).toString();
     const bodyHash = await sha256Hex(await bodyBytes(body));
     const canonical = `${method}\n${pathAndQuery}\n${ts}\n${bodyHash}`;
-    const key = await getKey();
     const sigBuf = await crypto.subtle.sign("HMAC", key, enc.encode(canonical));
     return { ts, sig: toHex(sigBuf) };
   }
@@ -107,14 +126,150 @@
     // The pattern in our codebase is fetch(url, { method, body }) so
     // init.body is always present when body matters.
     const body = init.body != null ? init.body : "";
-    const { ts, sig } = await signRequest(method, pathAndQuery, body);
+    const signed = await signRequest(method, pathAndQuery, body);
 
     const headers = new Headers(init.headers || {});
-    headers.set("X-Sautium-Ts", ts);
-    headers.set("X-Sautium-Sig", sig);
+    if (signed) {
+      headers.set("X-Sautium-Ts", signed.ts);
+      headers.set("X-Sautium-Sig", signed.sig);
+    }
 
-    return _origFetch(input, { ...init, headers });
+    const resp = await _origFetch(input, { ...init, headers });
+    // A 401 on a signed request means the token was revoked (epoch bumped
+    // by a password change or "log out everywhere"). Drop it so the app
+    // falls back to the login screen instead of looping on failures.
+    if (resp.status === 401 && signed) {
+      setToken("");
+      window.dispatchEvent(new CustomEvent("sautium:auth-required"));
+    }
+    return resp;
   };
+
+  // -- login surface ---------------------------------------------------------
+
+  window.Sautium = window.Sautium || {};
+  window.Sautium.auth = {
+    hasToken: () => !!storedToken(),
+    forget: () => setToken(""),
+    status: async () => (await fetch("/api/auth/status")).json(),
+    async login(username, password) {
+      const r = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      if (!r.ok) return false;
+      setToken((await r.json()).token);
+      return true;
+    },
+    async pair(code) {
+      const r = await fetch("/api/auth/pair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      if (!r.ok) return false;
+      setToken((await r.json()).token);
+      return true;
+    },
+    async logoutEverywhere() {
+      // The server hands back a fresh token so the browser that pressed the
+      // button is not logged out by its own action.
+      const r = await fetch("/api/auth/logout-all", { method: "POST" });
+      if (!r.ok) return false;
+      setToken((await r.json()).token);
+      return true;
+    },
+  };
+
+  // -- login gate ------------------------------------------------------------
+
+  // Shown when this browser has no token: on first visit, after "log out
+  // everywhere", or after a password change. Built here rather than in
+  // app-shell because auth.js loads first — the app must not start issuing
+  // 401s before the user has a way to sign in.
+  function showLoginGate() {
+    if (document.getElementById("auth-gate")) return;
+
+    const overlay = document.createElement("div");
+    overlay.id = "auth-gate";
+    overlay.className = "confirm-overlay";
+    overlay.innerHTML = `
+      <div class="confirm-sheet">
+        <h3 class="confirm-title">Sign in</h3>
+        <p class="confirm-message" id="auth-gate-msg">Checking…</p>
+        <div id="auth-gate-fields"></div>
+        <div class="confirm-actions single">
+          <button class="profile-btn primary" id="auth-gate-submit">Continue</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const msg = overlay.querySelector("#auth-gate-msg");
+    const fields = overlay.querySelector("#auth-gate-fields");
+    const submit = overlay.querySelector("#auth-gate-submit");
+    const input = (id, type, ph, value) =>
+      `<input class="add-gear-input" id="${id}" type="${type}" placeholder="${ph}"
+              value="${value || ""}" autocapitalize="off" autocorrect="off"
+              spellcheck="false" style="width:100%;margin-bottom:calc(10*var(--px));">`;
+
+    let mode = "pin";
+
+    window.Sautium.auth.status().then((st) => {
+      mode = st.password_login ? "password" : "pin";
+      if (mode === "password") {
+        msg.textContent = "Enter your Sautium account password.";
+        fields.innerHTML = input("auth-user", "text", "username", st.username) +
+                           input("auth-pass", "password", "password");
+      } else {
+        msg.textContent =
+          "Open Sautium on the computer that runs it, press “Pair a device” " +
+          "in Settings, and type the code shown there.";
+        fields.innerHTML = input("auth-pin", "text", "XXXX-XXXX");
+      }
+      const first = fields.querySelector("input:not([value]), input[value='']")
+                 || fields.querySelector("input");
+      if (first) first.focus();
+    }).catch(() => {
+      msg.textContent = "Cannot reach the server.";
+    });
+
+    async function attempt() {
+      submit.disabled = true;
+      const prev = submit.textContent;
+      submit.textContent = "Checking…";
+      let ok = false;
+      if (mode === "password") {
+        ok = await window.Sautium.auth.login(
+          overlay.querySelector("#auth-user").value.trim(),
+          overlay.querySelector("#auth-pass").value);
+      } else {
+        ok = await window.Sautium.auth.pair(
+          overlay.querySelector("#auth-pin").value.trim());
+      }
+      if (ok) { location.reload(); return; }
+      submit.disabled = false;
+      submit.textContent = prev;
+      msg.textContent = mode === "password"
+        ? "Wrong username or password."
+        : "That code is wrong or has expired — get a new one on the host.";
+    }
+
+    submit.addEventListener("click", attempt);
+    overlay.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") attempt();
+    });
+  }
+
+  window.Sautium.auth.showLoginGate = showLoginGate;
+  window.addEventListener("sautium:auth-required", showLoginGate);
+  if (!storedToken()) {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", showLoginGate);
+    } else {
+      showLoginGate();
+    }
+  }
 
   // -- SSE replacement -------------------------------------------------------
 

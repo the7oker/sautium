@@ -50,6 +50,8 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+import device_auth
+
 logger = logging.getLogger(__name__)
 
 REPLAY_WINDOW_SECONDS = 60
@@ -58,6 +60,12 @@ WHITELIST_EXACT = {
     "/health",
     "/",
     "/api/p2p/chat/wake",
+    # A client with no token yet cannot sign — these ARE the credential
+    # checks. They defend themselves: /login costs an Argon2id derivation
+    # under a semaphore, /pair burns one of five attempts under a lock.
+    "/api/auth/status",
+    "/api/auth/login",
+    "/api/auth/pair",
 }
 
 WHITELIST_PREFIX = (
@@ -208,10 +216,20 @@ class HMACAuthMiddleware(BaseHTTPMiddleware):
         if request.url.query:
             path_and_query = f"{path}?{request.url.query}"
 
-        expected = sign(
-            self._get_secret(), request.method, path_and_query, ts_raw, body
-        )
-        if not hmac.compare_digest(sig, expected):
+        # Two keys are accepted, for two kinds of caller:
+        #   * the DEVICE TOKEN — what a browser gets after logging in. The
+        #     page no longer carries any key, so this is the only thing a
+        #     remote client can sign with, and one epoch bump revokes it.
+        #   * the SERVER SECRET — for callers that already live on the host
+        #     and read the file directly (launcher, MCP server). Nothing is
+        #     gained by rejecting them: whoever can read the file has the
+        #     host anyway.
+        secret = self._get_secret()
+        for key in (device_auth.current_token(secret).encode(), secret):
+            if hmac.compare_digest(
+                    sig, sign(key, request.method, path_and_query, ts_raw, body)):
+                break
+        else:
             return JSONResponse({"detail": "bad signature"}, status_code=401)
 
         _mark_ui_activity()
