@@ -26,7 +26,8 @@ def _secret() -> bytes:
 
 
 class LoginRequest(BaseModel):
-    username: str = Field(default="", max_length=64)
+    # No username: the node has one account, and which one is not the
+    # signer's choice — the server reads it from its own settings.
     password: str = Field(default="", max_length=256)
 
 
@@ -48,8 +49,8 @@ async def auth_status() -> dict:
 
 @router.post("/login")
 async def login(req: LoginRequest) -> dict:
-    """Exchange account credentials for a device token."""
-    if not await device_auth.verify_password(req.username, req.password):
+    """Exchange the account password for a device token."""
+    if not await device_auth.verify_password(req.password):
         raise HTTPException(status_code=401, detail="invalid credentials")
     return {"token": device_auth.current_token(_secret())}
 

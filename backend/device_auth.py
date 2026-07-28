@@ -117,20 +117,25 @@ def _expected_pubkey() -> Optional[str]:
         format=serialization.PublicFormat.Raw).hex()
 
 
-async def verify_password(username: str, password: str) -> bool:
-    """Check credentials by DERIVING the identity and comparing public keys.
+async def verify_password(password: str) -> bool:
+    """Check the account password by DERIVING the identity and comparing
+    public keys.
 
-    The account is deterministic (username+password -> Argon2id -> Ed25519),
-    so the derivation itself is the check — there is no password hash to
-    store, leak or rotate."""
+    Only the password is asked for: a node has exactly one account, so its
+    username is not a choice the person signing in makes — the server reads
+    it from its own settings. The account is deterministic
+    (username+password -> Argon2id -> Ed25519), so the derivation itself is
+    the check; there is no password hash to store, leak or rotate."""
+    from config import settings
     expected = _expected_pubkey()
-    if not expected or not username or not password:
+    if not expected or not settings.p2p_username or not password:
         return False
     from p2p_identity import derive_identity
     async with _derive_semaphore:
         try:
-            got = await asyncio.to_thread(derive_identity, username, password)
-        except Exception as e:                      # bad username shape, etc.
+            got = await asyncio.to_thread(
+                derive_identity, settings.p2p_username, password)
+        except Exception as e:
             logger.info("password verification failed: %s", e)
             return False
     return hmac.compare_digest(got.get("public_key_hex", ""), expected)

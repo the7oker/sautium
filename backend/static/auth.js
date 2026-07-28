@@ -152,11 +152,11 @@
     hasToken: () => !!storedToken(),
     forget: () => setToken(""),
     status: async () => (await fetch("/api/auth/status")).json(),
-    async login(username, password) {
+    async login(password) {
       const r = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ password }),
       });
       if (!r.ok) return false;
       setToken((await r.json()).token);
@@ -218,17 +218,18 @@
     window.Sautium.auth.status().then((st) => {
       mode = st.password_login ? "password" : "pin";
       if (mode === "password") {
-        msg.textContent = "Enter your Sautium account password.";
-        fields.innerHTML = input("auth-user", "text", "username", st.username) +
-                           input("auth-pass", "password", "password");
+        // The username is shown, not asked for — a node has one account.
+        msg.textContent = st.username
+          ? `Signing in as ${st.username}. Enter the account password.`
+          : "Enter the account password.";
+        fields.innerHTML = input("auth-pass", "password", "password");
       } else {
         msg.textContent =
           "Open Sautium on the computer that runs it, press “Pair a device” " +
           "in Settings, and type the code shown there.";
         fields.innerHTML = input("auth-pin", "text", "XXXX-XXXX");
       }
-      const first = fields.querySelector("input:not([value]), input[value='']")
-                 || fields.querySelector("input");
+      const first = fields.querySelector("input");
       if (first) first.focus();
     }).catch(() => {
       msg.textContent = "Cannot reach the server.";
@@ -241,7 +242,6 @@
       let ok = false;
       if (mode === "password") {
         ok = await window.Sautium.auth.login(
-          overlay.querySelector("#auth-user").value.trim(),
           overlay.querySelector("#auth-pass").value);
       } else {
         ok = await window.Sautium.auth.pair(
