@@ -68,11 +68,12 @@ async def create_account(req: CreateAccountRequest) -> dict:
 
     The account is the node's P2P identity, not a local login — so this also
     turns on sync, chat and analysis signing, which stay dark without one."""
-    if device_auth.account_configured():
-        raise HTTPException(status_code=409, detail="account already exists")
     try:
-        info = await asyncio.to_thread(
-            device_auth.create_account, req.username, req.password)
+        # The check lives inside create_account, under its lock — testing it
+        # out here as well would only re-open the race it exists to close.
+        info = await device_auth.create_account(req.username, req.password)
+    except device_auth.AccountExists:
+        raise HTTPException(status_code=409, detail="account already exists")
     except ValueError as e:                       # username shape
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

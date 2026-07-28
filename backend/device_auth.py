@@ -61,6 +61,11 @@ MAX_PIN_ATTEMPTS = 5
 # Everything else waits rather than racing the container into an OOM kill.
 _derive_semaphore = asyncio.Semaphore(2)
 _pin_lock = asyncio.Lock()
+# First-run setup is check-then-write around a ~1s Argon2id derivation — a
+# wide enough window for two concurrent requests to both pass the "no account
+# yet" test and for the second to overwrite the first's identity. Serialise
+# the whole operation, and re-check inside it.
+_create_lock = asyncio.Lock()
 
 _pin: Optional[dict] = None          # {"code", "expires_at", "attempts"}
 
@@ -127,13 +132,33 @@ def account_configured() -> bool:
     return bool(account_username()) and _expected_pubkey() is not None
 
 
-def create_account(username: str, password: str) -> dict:
+class AccountExists(Exception):
+    """Raised when setup is attempted on a node that already has an identity."""
+
+
+async def create_account(username: str, password: str) -> dict:
     """Create the node's identity from username+password and persist it.
 
     Mirrors desktop/node_identity._save_keypair so a Docker node and a
     launcher node are the same thing on disk: the private key as PKCS8 PEM
     plus node_info.json. Nothing about the password is written — the key IS
-    the derivation, and losing the password means a new identity."""
+    the derivation, and losing the password means a new identity.
+
+    Single-shot by construction: the whole check-derive-write runs under a
+    lock, the account test is repeated inside it, and the key file is opened
+    O_EXCL. Setup is the one moment this node has no owner, and it must
+    produce exactly one."""
+    d = _identity_dir()
+    if d is None:
+        raise RuntimeError("no identity directory configured")
+
+    async with _create_lock:
+        if account_configured():
+            raise AccountExists()
+        return await asyncio.to_thread(_write_identity, d, username, password)
+
+
+def _write_identity(d, username: str, password: str) -> dict:
     import json
     import os
     import stat
@@ -143,18 +168,25 @@ def create_account(username: str, password: str) -> dict:
 
     from p2p_identity import derive_identity, derive_private_key
 
-    d = _identity_dir()
-    if d is None:
-        raise RuntimeError("no identity directory configured")
     info = derive_identity(username, password)          # validates the name
     key: Ed25519PrivateKey = derive_private_key(username, password)
 
     d.mkdir(parents=True, exist_ok=True)
     key_path = d / "node_ed25519.key"
-    key_path.write_bytes(key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()))
+    # O_EXCL, not "check then write": an identity already on disk must never
+    # be overwritten, and the filesystem enforces that even against a second
+    # process that never saw our lock. A half-written node_info.json would
+    # slip past account_configured(), but the key file still exists — and
+    # overwriting it would silently change who this node is.
+    try:
+        fd = os.open(key_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        raise AccountExists()
+    with os.fdopen(fd, "wb") as f:
+        f.write(key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()))
     try:
         os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
     except OSError:
