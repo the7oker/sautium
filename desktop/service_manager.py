@@ -424,6 +424,11 @@ class ServiceManager:
             "--timeout-graceful-shutdown", "5",
         ]
 
+        # The peer surface (backend/p2p_app.py) runs as a second uvicorn
+        # inside that process and mints its cert itself — point it at the
+        # same directory, or it would look for the container path.
+        env["SAUTIUM_TLS_DIR"] = str(tls_dir)
+
         # Ensure Windows Firewall allows LAN access
         self._ensure_firewall_rule(port)
         # Media surfaces (DLNA renderers fetch audio / send GENA events):
@@ -432,6 +437,9 @@ class ServiceManager:
         self._ensure_firewall_rule(
             f"{self.ports.get('media', 8832)},{self.ports.get('gena', 8833)}",
             profile="any")
+        # Peer surface: LAN peers sync through it, and it is the one port a
+        # user may forward (desktop/portmap.py).
+        self._ensure_firewall_rule(self.ports.get("p2p_sync", 8802))
 
         # Log backend output to file instead of PIPE (PIPE can block on Windows)
         from desktop.config_manager import get_data_dir

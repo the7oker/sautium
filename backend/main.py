@@ -75,12 +75,33 @@ async def _serve_p2p(port: int) -> None:
     self-signed cert as the Web UI. A second uvicorn in this process rather
     than a second container: it shares the DB pool and the DHT service, and
     the split that matters is which ROUTES face the port, not which process
-    serves them."""
+    serves them.
+
+    Nothing here may take the main server down with it. uvicorn answers a
+    failed bind with sys.exit(), i.e. SystemExit — which is a BaseException
+    and sails straight past `except Exception`. On a dev host where Docker
+    already publishes this port, that killed the whole backend seconds after
+    startup (WinError 10048, measured 2026-07-28). The peer surface is
+    optional; the Web UI is not."""
     import os
+    import socket
 
     import uvicorn
     from tls_gen import ensure_cert
     from p2p_app import app as peer_app
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind(("0.0.0.0", port))
+    except OSError as e:
+        logger.error(
+            "P2P peer surface disabled — port %d is already in use (%s). "
+            "Another Sautium node on this host? Set P2P_SYNC_PORT to a free "
+            "port; the Web UI is unaffected.", port, e)
+        return
+    finally:
+        probe.close()
 
     cert_path, key_path = ensure_cert(
         _Path(os.getenv("SAUTIUM_TLS_DIR", "/app/data/tls")),
@@ -94,6 +115,9 @@ async def _serve_p2p(port: int) -> None:
         await uvicorn.Server(config).serve()
     except asyncio.CancelledError:
         raise
+    except SystemExit as e:
+        logger.error("P2P peer surface on :%d failed to start (exit %s) — "
+                     "continuing without it", port, e.code)
     except Exception as e:
         logger.error(f"P2P sync server on :{port} stopped: {e}")
 
