@@ -325,8 +325,11 @@ class LauncherApp(ctk.CTk):
         # Fetch and display library stats
         self._fetch_and_display_stats()
 
-        # Generate QR code for LAN access
-        qr_img = generate_qr_ctk(lan_url, size=180)
+        # QR for LAN access, carrying a one-time pairing code so scanning the
+        # phone straight into a signed-in session needs no typing. Refreshed
+        # whenever services come up — the code expires in minutes and is
+        # consumed by the first device that scans it.
+        qr_img = generate_qr_ctk(lan_url + "/" + self._pairing_fragment(), size=180)
         if qr_img:
             self._qr_label.configure(image=qr_img, text="")
         else:
@@ -732,9 +735,26 @@ class LauncherApp(ctk.CTk):
         self._status_dot.configure(fg_color=colors.get(state, "gray"))
         self._status_text.configure(text=text)
 
+    def _pairing_fragment(self) -> str:
+        """`#pair=<code>` to append to a Web UI URL, or "" if unavailable.
+
+        The code is never shown to anyone: it rides inside the button and the
+        QR, so signing in a device costs one click or one scan. It goes in the
+        FRAGMENT rather than the query on purpose — fragments are not sent to
+        the server, so the one-time code stays out of access logs and out of
+        any Referer header. It is single-use and expires in minutes, so a
+        stale copy in browser history is inert."""
+        try:
+            resp = self.api_client.request_pairing_code()
+        except Exception as e:
+            logger.debug("pairing code unavailable: %s", e)
+            return ""
+        code = (resp or {}).get("code")
+        return f"#pair={code}" if code else ""
+
     def _open_web_ui(self):
         port = self.config.get("ports", {}).get("web", 8000)
-        webbrowser.open(f"https://localhost:{port}")
+        webbrowser.open(f"https://localhost:{port}/{self._pairing_fragment()}")
 
     def _scan_library(self):
         """Open folder picker and scan selected folder."""

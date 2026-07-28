@@ -127,50 +127,6 @@ class SettingsDialog(ctk.CTkToplevel):
             fg_color="transparent", border_width=1,
         ).pack(side="left")
 
-        # Device pairing. The code has to be minted HERE, on the machine that
-        # runs Sautium: a phone that cannot sign in has no way to ask the Web
-        # UI for one, and an account created by skipping the wizard form has a
-        # random password nobody has ever seen. Holding the API secret on disk
-        # is what lets the launcher authorise this call without a token.
-        ctk.CTkLabel(tab, text="Devices", font=ctk.CTkFont(weight="bold")).pack(
-            anchor="w", pady=(12, 3)
-        )
-
-        self._pair_status = ctk.CTkLabel(
-            tab,
-            text="Sign in on a phone or laptop with a one-time code.",
-            text_color="gray", font=ctk.CTkFont(size=11),
-        )
-        self._pair_status.pack(anchor="w", padx=10)
-
-        ctk.CTkButton(
-            tab, text="Show pairing code", width=200,
-            command=self._show_pairing_code,
-            fg_color="transparent", border_width=1,
-        ).pack(anchor="w", padx=10, pady=4)
-
-    def _show_pairing_code(self):
-        """Ask the backend for a one-time code and display it."""
-        try:
-            port = (self.config.get("ports", {}) or {}).get("web", 18000)
-            api = BackendAPIClient(f"https://127.0.0.1:{port}")
-            resp = api.request_pairing_code()
-        except Exception as e:                       # backend down, etc.
-            resp = None
-            logger.warning("pairing code request failed: %s", e)
-
-        if not resp or not resp.get("code"):
-            self._pair_status.configure(
-                text="Could not get a code — is the backend running?",
-                text_color="#d9534f")
-            return
-
-        minutes = max(1, int(resp.get("expires_in", 300)) // 60)
-        self._pair_status.configure(
-            text=f"Enter  {resp['code']}  on the other device "
-                 f"(valid {minutes} min, one use).",
-            text_color="#e8a33d")
-
     def _cert_status_text(self) -> str:
         from desktop.p2p.birth_cert import load_certificate
         cert = load_certificate()

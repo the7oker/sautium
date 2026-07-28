@@ -263,12 +263,35 @@
 
   window.Sautium.auth.showLoginGate = showLoginGate;
   window.addEventListener("sautium:auth-required", showLoginGate);
-  if (!storedToken()) {
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", showLoginGate);
-    } else {
-      showLoginGate();
+
+  // A pairing code can arrive in the URL fragment — that is how the launcher's
+  // "Open Web UI" button and its QR sign a device in without anyone reading a
+  // code aloud. The fragment never reaches the server (so the one-time code
+  // stays out of access logs and Referer), and it is stripped from the address
+  // bar the moment it is redeemed.
+  async function redeemFragmentCode() {
+    const m = /(?:^|[#&])pair=([A-Za-z0-9-]+)/.exec(location.hash || "");
+    if (!m) return false;
+    const ok = await window.Sautium.auth.pair(m[1]);
+    const clean = (location.hash || "").replace(/(?:^|[#&])pair=[A-Za-z0-9-]+/, "");
+    history.replaceState(null, "", location.pathname + location.search +
+                         (clean && clean !== "#" ? clean : ""));
+    return ok;
+  }
+
+  async function bootAuth() {
+    if (storedToken()) return;
+    if (await redeemFragmentCode()) {
+      location.reload();
+      return;
     }
+    showLoginGate();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bootAuth);
+  } else {
+    bootAuth();
   }
 
   // -- SSE replacement -------------------------------------------------------
