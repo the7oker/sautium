@@ -8061,6 +8061,20 @@
               <span class="link-chev">${PROFILE_ICONS.chev}</span>
             </span>
           </div>
+          <div class="form-row is-clickable" data-action="pair-device">
+            <span class="form-label">Another device</span>
+            <span class="form-actions">
+              <span class="form-value action">Pair</span>
+              <span class="link-chev">${PROFILE_ICONS.chev}</span>
+            </span>
+          </div>
+          <div class="form-row is-clickable" data-action="logout-all">
+            <span class="form-label">Sign out</span>
+            <span class="form-actions">
+              <span class="form-value action">All devices</span>
+              <span class="link-chev">${PROFILE_ICONS.chev}</span>
+            </span>
+          </div>
           ${(() => {
             const lfmUser = (config && config.lastfm_username) || '';
             const lfmOn   = !!(config && config.lastfm_authorized);
@@ -8159,6 +8173,37 @@
 
     const lfmRow = root.querySelector('[data-action="lastfm"]');
     if (lfmRow) lfmRow.addEventListener('click', () => openLastfmAuthFlow());
+
+    const pairRow = root.querySelector('[data-action="pair-device"]');
+    if (pairRow) pairRow.addEventListener('click', async () => {
+      const r = await fetch('/api/auth/pin', { method: 'POST' });
+      if (!r.ok) {
+        await notifyDialog({ title: 'Could not create a code', kind: 'error',
+          message: 'The server refused to open a pairing window.' });
+        return;
+      }
+      const { code, expires_in } = await r.json();
+      await notifyDialog({
+        title: 'Pair a device',
+        message: `On the other device, open Sautium and enter:\n\n<b>${escapeProfileHtml(code)}</b>\n\n`
+               + `The code works once and expires in ${Math.round((expires_in || 300) / 60)} minutes.`,
+      });
+    });
+
+    const signOutRow = root.querySelector('[data-action="logout-all"]');
+    if (signOutRow) signOutRow.addEventListener('click', async () => {
+      const ok = await confirmDestructive({
+        title: 'Sign out everywhere?',
+        message: 'Every phone, tablet and browser will have to sign in again. '
+               + 'This device stays signed in.',
+        confirmText: 'Sign out all',
+      });
+      if (!ok) return;
+      const done = await window.Sautium.auth.logoutEverywhere();
+      await notifyDialog(done
+        ? { title: 'Done', kind: 'success', message: 'All other devices were signed out.' }
+        : { title: 'Failed', kind: 'error', message: 'Could not sign devices out.' });
+    });
 
     const scrobBtn = root.querySelector('[data-action="scrobble-toggle"]');
     if (scrobBtn) {
@@ -9975,19 +10020,6 @@
       <div class="btn-row single">
         <button class="btn btn-secondary" data-action="force-sync"${_syncInFlight ? ' disabled' : ''}>${_syncInFlight ? 'Syncing…' : 'Force sync now'}</button>
       </div>
-      <div class="form-group">
-        <div class="form-row stacked">
-          <div class="row-stack">
-            <span class="row-stack-label">This device is signed in</span>
-            <span></span>
-          </div>
-          <div class="row-stack-sub">Pair another phone or laptop with a one-time code, or sign every device out at once.</div>
-        </div>
-        <div class="btn-row">
-          <button class="btn btn-secondary" data-action="pair-device">Pair a device</button>
-          <button class="btn btn-secondary" data-action="logout-all">Sign out everywhere</button>
-        </div>
-      </div>
     `;
   }
 
@@ -10900,33 +10932,6 @@
     onAction('[data-action="pick-limit"]', async () => {
       const id = await openSettingsPicker({ title: 'Rare-artist keys', options: ANNOUNCE_LIMIT_OPTIONS, currentId: sync.announce_limit || 0 });
       if (id != null) await putSync({ announce_limit: Number(id) });
-    });
-    onAction('[data-action="pair-device"]', async () => {
-      const r = await fetch('/api/auth/pin', { method: 'POST' });
-      if (!r.ok) {
-        await notifyDialog({ title: 'Could not create a code', kind: 'error',
-          message: 'The server refused to open a pairing window.' });
-        return;
-      }
-      const { code, expires_in } = await r.json();
-      await notifyDialog({
-        title: 'Pair a device',
-        message: `On the other device, open Sautium and enter:\n\n<b>${escapeProfileHtml(code)}</b>\n\n`
-               + `The code works once and expires in ${Math.round((expires_in || 300) / 60)} minutes.`,
-      });
-    });
-    onAction('[data-action="logout-all"]', async () => {
-      const ok = await confirmDestructive({
-        title: 'Sign out everywhere?',
-        message: 'Every phone, tablet and browser will have to sign in again. '
-               + 'This device stays signed in.',
-        confirmText: 'Sign out all',
-      });
-      if (!ok) return;
-      const done = await window.Sautium.auth.logoutEverywhere();
-      await notifyDialog(done
-        ? { title: 'Done', kind: 'success', message: 'All other devices were signed out.' }
-        : { title: 'Failed', kind: 'error', message: 'Could not sign devices out.' });
     });
     onAction('[data-action="force-sync"]', async () => {
       if (_syncInFlight) return;  // double-click guard
