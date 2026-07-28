@@ -8064,18 +8064,6 @@
               <span class="link-chev">${PROFILE_ICONS.chev}</span>
             </span>
           </div>
-          ${authStatus && authStatus.password_login === false ? `
-          <!-- Only for accounts nobody can log into: the wizard's anonymous
-               identity has a random password its owner has never seen, so a
-               one-time code is the only way to add a device. With a known
-               password this row is noise — the other device just types it. -->
-          <div class="form-row is-clickable" data-action="pair-device">
-            <span class="form-label">Another device</span>
-            <span class="form-actions">
-              <span class="form-value action">Pair</span>
-              <span class="link-chev">${PROFILE_ICONS.chev}</span>
-            </span>
-          </div>` : ''}
           <div class="form-row is-clickable" data-action="logout-all">
             <span class="form-label">Sign out</span>
             <span class="form-actions">
@@ -8181,22 +8169,6 @@
 
     const lfmRow = root.querySelector('[data-action="lastfm"]');
     if (lfmRow) lfmRow.addEventListener('click', () => openLastfmAuthFlow());
-
-    const pairRow = root.querySelector('[data-action="pair-device"]');
-    if (pairRow) pairRow.addEventListener('click', async () => {
-      const r = await fetch('/api/auth/pin', { method: 'POST' });
-      if (!r.ok) {
-        await notifyDialog({ title: 'Could not create a code', kind: 'error',
-          message: 'The server refused to open a pairing window.' });
-        return;
-      }
-      const { code, expires_in } = await r.json();
-      await notifyDialog({
-        title: 'Pair a device',
-        message: `On the other device, open Sautium and enter:\n\n<b>${escapeProfileHtml(code)}</b>\n\n`
-               + `The code works once and expires in ${Math.round((expires_in || 300) / 60)} minutes.`,
-      });
-    });
 
     const signOutRow = root.querySelector('[data-action="logout-all"]');
     if (signOutRow) signOutRow.addEventListener('click', async () => {

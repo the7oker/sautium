@@ -231,6 +231,13 @@ class BackendAPIClient:
             timeout=300,
         )
 
+    def request_pairing_code(self) -> Optional[dict]:
+        """Mint a one-time device-pairing code. Authorised by the shared API
+        secret this process reads from disk — which is the point: the code
+        must come from the machine running Sautium, not from a browser that
+        would already need to be signed in to ask."""
+        return self._post_json("/api/auth/pin", body={}, timeout=15)
+
     def mb_slice(self, names: list[str]) -> Optional[dict]:
         """Fetch raw mb_* rows for artist names from a dump-holding peer.
         Long timeout: a batch of prolific namesakes is a large payload."""
