@@ -129,7 +129,12 @@ class Settings(BaseSettings):
     p2p_password: str = ""
 
     p2p_email: str = ""
-    p2p_identity_dir: str = ""  # Path to node_identity dir (desktop mode)
+    # Where the node's Ed25519 identity lives. The launcher passes its own
+    # path; a Docker node defaults to the bind-mounted data dir so an account
+    # created through onboarding survives container recreates. Env
+    # credentials (P2P_USERNAME/PASSWORD) remain the alternative for anyone
+    # who prefers configuring identity by hand.
+    p2p_identity_dir: str = "/app/data/node_identity"
     p2p_listen_port: int = 0   # Desktop sync server port (direct chat delivery)
 
     model_config = SettingsConfigDict(

@@ -6,6 +6,7 @@ credential check. See backend/device_auth.py for the model and for why the
 brute-force defences differ between password and PIN.
 """
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -13,7 +14,6 @@ from pydantic import BaseModel, Field
 
 import device_auth
 from auth_hmac import ensure_secret
-from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +40,47 @@ async def auth_status() -> dict:
     """What this node accepts, so the UI knows which form to show. Says
     nothing secret — only whether an account exists to log into and whether a
     pairing PIN is currently outstanding."""
+    configured = device_auth.account_configured()
     return {
-        "password_login": device_auth.account_configured(),
+        "password_login": configured,
+        # No account yet: the node cannot be signed into at all, so the UI
+        # offers to create one. The window closes for good the moment it is.
+        "onboarding": not configured,
         "pairing_open": device_auth.pin_state() is not None,
-        "username": settings.p2p_username or None,
+        "username": device_auth.account_username(),
     }
+
+
+class CreateAccountRequest(BaseModel):
+    username: str = Field(default="", max_length=32)
+    password: str = Field(default="", min_length=8, max_length=256)
+
+
+@router.post("/create-account")
+async def create_account(req: CreateAccountRequest) -> dict:
+    """First-run setup for a node with no identity — the Docker case, where
+    there is no launcher to show a pairing code and no password to know.
+
+    Deliberately unauthenticated, because nothing exists yet to authenticate
+    against; the window shuts the instant an account exists, and a second
+    call is refused. This is the Jellyfin/Home Assistant bargain: whoever
+    reaches the machine first during setup owns it.
+
+    The account is the node's P2P identity, not a local login — so this also
+    turns on sync, chat and analysis signing, which stay dark without one."""
+    if device_auth.account_configured():
+        raise HTTPException(status_code=409, detail="account already exists")
+    try:
+        info = await asyncio.to_thread(
+            device_auth.create_account, req.username, req.password)
+    except ValueError as e:                       # username shape
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"account creation failed: {e}")
+        raise HTTPException(status_code=500, detail="could not create account")
+    return {"token": device_auth.current_token(_secret()),
+            "invite_code": info.get("invite_code"),
+            "username": info.get("username")}
 
 
 @router.post("/login")

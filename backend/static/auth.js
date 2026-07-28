@@ -162,6 +162,19 @@
       setToken((await r.json()).token);
       return true;
     },
+    async createAccount(username, password) {
+      const r = await fetch("/api/auth/create-account", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      if (r.ok) { setToken((await r.json()).token); return true; }
+      if (r.status === 409) return "This node already has an account — reload.";
+      if (r.status === 422) return "Name: 3-32 letters, digits, - or _. Password: 8+ characters.";
+      try {
+        return (await r.json()).detail || "Could not create the account.";
+      } catch { return "Could not create the account."; }
+    },
     async pair(code) {
       const r = await fetch("/api/auth/pair", {
         method: "POST",
@@ -216,8 +229,22 @@
     let mode = "pin";
 
     window.Sautium.auth.status().then((st) => {
-      mode = st.password_login ? "password" : "pin";
-      if (mode === "password") {
+      mode = st.onboarding ? "create" : (st.password_login ? "password" : "pin");
+      if (mode === "create") {
+        // No identity at all — a fresh node. What is created here is the P2P
+        // account (username+password -> Argon2id -> Ed25519), not a local
+        // login, so it also switches on sync, chat and analysis signing.
+        overlay.querySelector(".confirm-title").textContent = "Set up Sautium";
+        msg.innerHTML =
+          "Choose an account name and password. This is your identity on the " +
+          "Sautium network, not just a local login.<br><br>" +
+          "<b>The password is never stored</b> — it derives your keys. If you " +
+          "lose it you get a new identity, and your invite code and friends " +
+          "with it.";
+        fields.innerHTML = input("auth-user", "text", "account name") +
+                           input("auth-pass", "password", "password (8+ characters)");
+        submit.textContent = "Create account";
+      } else if (mode === "password") {
         // The username is shown, not asked for — a node has one account.
         msg.textContent = st.username
           ? `Signing in as ${st.username}. Enter the account password.`
@@ -239,20 +266,26 @@
       submit.disabled = true;
       const prev = submit.textContent;
       submit.textContent = "Checking…";
-      let ok = false;
-      if (mode === "password") {
+      let ok = false, why = "";
+      if (mode === "create") {
+        const res = await window.Sautium.auth.createAccount(
+          overlay.querySelector("#auth-user").value.trim(),
+          overlay.querySelector("#auth-pass").value);
+        ok = res === true;
+        why = typeof res === "string" ? res : "Could not create the account.";
+      } else if (mode === "password") {
         ok = await window.Sautium.auth.login(
           overlay.querySelector("#auth-pass").value);
+        why = "Wrong password.";
       } else {
         ok = await window.Sautium.auth.pair(
           overlay.querySelector("#auth-pin").value.trim());
+        why = "That code is wrong or has expired — get a new one on the host.";
       }
       if (ok) { location.reload(); return; }
       submit.disabled = false;
       submit.textContent = prev;
-      msg.textContent = mode === "password"
-        ? "Wrong username or password."
-        : "That code is wrong or has expired — get a new one on the host.";
+      msg.textContent = why;
     }
 
     submit.addEventListener("click", attempt);

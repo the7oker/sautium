@@ -98,11 +98,75 @@ def bump_epoch() -> int:
 # Password login
 # ---------------------------------------------------------------------------
 
-def account_configured() -> bool:
-    """True when this node has an account whose password its owner knows —
-    i.e. a password login can succeed at all."""
+def _identity_dir():
+    from pathlib import Path
+
     from config import settings
-    return bool(settings.p2p_username and settings.p2p_password)
+    return Path(settings.p2p_identity_dir) if settings.p2p_identity_dir else None
+
+
+def account_username() -> Optional[str]:
+    """The account this node signs in as, from the stored identity or from
+    env credentials. Onboarding writes the former; a hand-configured Docker
+    node has the latter."""
+    import json
+
+    from config import settings
+    d = _identity_dir()
+    if d:
+        info = d / "node_info.json"
+        try:
+            return json.loads(info.read_text(encoding="utf-8")).get("username")
+        except (OSError, ValueError):
+            pass
+    return settings.p2p_username or None
+
+
+def account_configured() -> bool:
+    """True when this node has an account to log into at all."""
+    return bool(account_username()) and _expected_pubkey() is not None
+
+
+def create_account(username: str, password: str) -> dict:
+    """Create the node's identity from username+password and persist it.
+
+    Mirrors desktop/node_identity._save_keypair so a Docker node and a
+    launcher node are the same thing on disk: the private key as PKCS8 PEM
+    plus node_info.json. Nothing about the password is written — the key IS
+    the derivation, and losing the password means a new identity."""
+    import json
+    import os
+    import stat
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from p2p_identity import derive_identity, derive_private_key
+
+    d = _identity_dir()
+    if d is None:
+        raise RuntimeError("no identity directory configured")
+    info = derive_identity(username, password)          # validates the name
+    key: Ed25519PrivateKey = derive_private_key(username, password)
+
+    d.mkdir(parents=True, exist_ok=True)
+    key_path = d / "node_ed25519.key"
+    key_path.write_bytes(key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()))
+    try:
+        os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+    (d / "node_ed25519.pub").write_bytes(key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo))
+    (d / "node_info.json").write_text(json.dumps(info, indent=2),
+                                      encoding="utf-8")
+    logger.info("account created: %s (invite %s)",
+                info.get("username"), info.get("invite_code"))
+    return info
 
 
 def _expected_pubkey() -> Optional[str]:
@@ -126,15 +190,14 @@ async def verify_password(password: str) -> bool:
     it from its own settings. The account is deterministic
     (username+password -> Argon2id -> Ed25519), so the derivation itself is
     the check; there is no password hash to store, leak or rotate."""
-    from config import settings
     expected = _expected_pubkey()
-    if not expected or not settings.p2p_username or not password:
+    username = account_username()
+    if not expected or not username or not password:
         return False
     from p2p_identity import derive_identity
     async with _derive_semaphore:
         try:
-            got = await asyncio.to_thread(
-                derive_identity, settings.p2p_username, password)
+            got = await asyncio.to_thread(derive_identity, username, password)
         except Exception as e:
             logger.info("password verification failed: %s", e)
             return False

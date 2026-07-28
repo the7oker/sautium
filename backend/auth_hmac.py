@@ -62,10 +62,13 @@ WHITELIST_EXACT = {
     "/api/p2p/chat/wake",
     # A client with no token yet cannot sign — these ARE the credential
     # checks. They defend themselves: /login costs an Argon2id derivation
-    # under a semaphore, /pair burns one of five attempts under a lock.
+    # under a semaphore, /pair burns one of five attempts under a lock, and
+    # /create-account only answers while the node has no identity at all
+    # (first-run setup) and refuses every call after that.
     "/api/auth/status",
     "/api/auth/login",
     "/api/auth/pair",
+    "/api/auth/create-account",
 }
 
 WHITELIST_PREFIX = (
