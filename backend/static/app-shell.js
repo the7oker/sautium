@@ -7953,17 +7953,20 @@
     // status seldom changes, so checking-in-the-background is the
     // honest pattern here.
     const emailStatus = null;
+    let authStatus = null;
     try {
-      const [pr, ar, cr, sr] = await Promise.all([
+      const [pr, ar, cr, sr, au] = await Promise.all([
         fetch('/api/profile'),
         fetch('/api/p2p/account'),
         fetch('/config'),
         fetch('/api/profile/scrobbling'),
+        fetch('/api/auth/status'),
       ]);
       if (pr.ok) profile = await pr.json();
       if (ar.ok) account = await ar.json();
       if (cr.ok) config = await cr.json();
       if (sr.ok) scrobbling = await sr.json();
+      if (au.ok) authStatus = await au.json();
     } catch (_) { /* fall through */ }
 
     if (!profile) {
@@ -8061,13 +8064,18 @@
               <span class="link-chev">${PROFILE_ICONS.chev}</span>
             </span>
           </div>
+          ${authStatus && authStatus.password_login === false ? `
+          <!-- Only for accounts nobody can log into: the wizard's anonymous
+               identity has a random password its owner has never seen, so a
+               one-time code is the only way to add a device. With a known
+               password this row is noise — the other device just types it. -->
           <div class="form-row is-clickable" data-action="pair-device">
             <span class="form-label">Another device</span>
             <span class="form-actions">
               <span class="form-value action">Pair</span>
               <span class="link-chev">${PROFILE_ICONS.chev}</span>
             </span>
-          </div>
+          </div>` : ''}
           <div class="form-row is-clickable" data-action="logout-all">
             <span class="form-label">Sign out</span>
             <span class="form-actions">
