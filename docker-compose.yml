@@ -106,6 +106,13 @@ services:
       # container recreated from this file silently lost streaming (2026-07-10).
       STREAMING_PREVIEW_ENABLED: ${STREAMING_PREVIEW_ENABLED:-false}
       MEDIA_PROXY_PORT: ${MEDIA_PROXY_PORT:-8830}
+      # Must be passed even though config.py already defaults to 8831: the
+      # image reads backend/.env, and that file is written by the LAUNCHER
+      # with the launcher's own ports (8832/8833). Anything compose does not
+      # state explicitly is silently inherited from it — which is how the
+      # GENA listener ended up on an unpublished 8833 while 8831 sat empty,
+      # leaving every DLNA session in poll-only mode.
+      DLNA_GENA_PORT: ${DLNA_GENA_PORT:-8831}
       MEDIA_PROXY_ADVERTISED_HOST: ${MEDIA_PROXY_ADVERTISED_HOST:-127.0.0.1}
 
       # Multi-provider LLM support

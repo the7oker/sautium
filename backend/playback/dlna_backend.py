@@ -21,6 +21,7 @@ import threading
 import time
 from datetime import timedelta
 from typing import Optional
+from urllib.parse import urlparse
 
 from config import settings
 
@@ -55,6 +56,7 @@ class DlnaAttachError(RuntimeError):
 _shared_lock = threading.Lock()
 _shared_loop: Optional[asyncio.AbstractEventLoop] = None
 _shared_notify = None
+_shared_notify_host: Optional[str] = None   # address its callback URL names
 
 
 def _ensure_loop() -> asyncio.AbstractEventLoop:
@@ -72,13 +74,25 @@ def _ensure_loop() -> asyncio.AbstractEventLoop:
         return _shared_loop
 
 
-async def _ensure_notify(requester):
-    global _shared_notify
+async def _ensure_notify(requester, peer: Optional[str] = None):
+    """The GENA callback server, rebuilt when the address it advertises stops
+    being right. It is shared per process but its callback URL is not
+    universal: a renderer reached over a tunnel must be told our tunnel
+    address, and one on the LAN our LAN address, so switching between them
+    means the server has to be re-announced."""
+    global _shared_notify, _shared_notify_host
+    host = media_host(peer)
+    if _shared_notify is not None and _shared_notify_host != host:
+        try:
+            await _shared_notify.async_stop_server()
+        except Exception as e:
+            logger.debug("notify server stop failed: %s", e)
+        _shared_notify = None
     if _shared_notify is None:
         port = settings.dlna_gena_port
         server = AiohttpNotifyServer(
             requester, source=("0.0.0.0", port),
-            callback_url=f"http://{media_host()}:{port}/notify")
+            callback_url=f"http://{host}:{port}/notify")
         try:
             await server.async_start_server()
         except OSError as e:
@@ -90,6 +104,7 @@ async def _ensure_notify(requester):
                 "process on this host (another Sautium node?) — free it "
                 "or change the port, then retry") from e
         _shared_notify = server
+        _shared_notify_host = host
     return _shared_notify
 
 _MIME_BY_FORMAT = {
@@ -105,7 +120,6 @@ def renderer_reachable(location: str, timeout: float = 2.0) -> bool:
     timeouts. A dozing-but-networked renderer still accepts the connect and
     wakes on the SOAP that follows."""
     import socket
-    from urllib.parse import urlparse
     try:
         u = urlparse(location)
         host, port = u.hostname, u.port or 80
@@ -117,16 +131,53 @@ def renderer_reachable(location: str, timeout: float = 2.0) -> bool:
         return False
 
 
-def media_host() -> str:
-    """LAN-reachable host for renderer-pulled media URLs. An explicit
-    MEDIA_PROXY_ADVERTISED_HOST wins; the localhost default (fine for
-    HQPlayer on the same machine) is replaced by a detected private IP —
-    inside Docker that detection only sees the bridge, so DLNA-from-Docker
-    requires the explicit setting (documented in docker-compose)."""
-    configured = settings.media_proxy_advertised_host
-    if configured and configured != "127.0.0.1":
-        return configured
+def _same_network(a: str, b: str) -> bool:
+    """Would a device at `b` reach a server at `a` without leaving its own
+    network? CGNAT is treated whole because a tailnet hands out /32s from
+    100.64/10 with no subnet structure — two peers there reach each other
+    regardless of how far apart the addresses look."""
+    import ipaddress
+    try:
+        ia, ib = ipaddress.ip_address(a), ipaddress.ip_address(b)
+    except ValueError:
+        return False
+    cgnat = ipaddress.ip_network("100.64.0.0/10")
+    if ia in cgnat or ib in cgnat:
+        return ia in cgnat and ib in cgnat
+    return (ipaddress.ip_network(f"{a}/24", strict=False)
+            == ipaddress.ip_network(f"{b}/24", strict=False))
+
+
+def media_host(peer: Optional[str] = None) -> str:
+    """The address to hand a renderer so it can pull media back from us.
+
+    A host has several addresses and which one is correct depends entirely on
+    who is asking: a renderer on the LAN must be told the LAN address, one
+    joined over a tunnel must be told the tunnel address, and giving either
+    the other's is a request that goes nowhere. So `peer` — the renderer's own
+    address — picks among our candidates by which network it shares.
+
+    Inside Docker none of this is discoverable: every socket reports the
+    bridge address, and what the outside world sees is a NAT the container
+    cannot look through. The candidates therefore have to be told to us, via
+    MEDIA_PROXY_ADVERTISED_HOST and SAUTIUM_HOST_IPS."""
+    import os
     from tls_gen import detect_private_host_ips
+    configured = settings.media_proxy_advertised_host
+    candidates = [ip for ip in
+                  ([configured] if configured and configured != "127.0.0.1" else [])
+                  + [s.strip() for s in os.getenv("SAUTIUM_HOST_IPS", "").split(",")]
+                  if ip]
+    if peer:
+        match = next((ip for ip in candidates if _same_network(ip, peer)), None)
+        if match:
+            return match
+        logger.warning(
+            "no local address on %s's network — media URLs will point at %s "
+            "and the renderer will not reach them; add its address to "
+            "SAUTIUM_HOST_IPS", peer, candidates[0] if candidates else configured)
+    if candidates:
+        return candidates[0]
     ips = detect_private_host_ips()
     lan = [ip for ip in ips if not ip.startswith("172.")]
     if lan or ips:
@@ -143,6 +194,9 @@ class DlnaBackend(PlayerBackend):
             raise RuntimeError("async-upnp-client not installed")
         self._queue = queue
         self._renderer = renderer                # {udn, location, name}
+        # The renderer's own address decides which of our addresses it can
+        # reach us at — see media_host().
+        self._peer_host = urlparse(renderer.get("location") or "").hostname
         self.label = renderer.get("name") or "DLNA renderer"
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -229,7 +283,7 @@ class DlnaBackend(PlayerBackend):
         # 10s over the default 5s: phone renderers in Wi-Fi power-save can
         # stall the first request for seconds while the radio wakes up.
         requester = AiohttpRequester(timeout=10)
-        notify_server = await _ensure_notify(requester)
+        notify_server = await _ensure_notify(requester, self._peer_host)
         factory = UpnpFactory(requester, non_strict=True)
         device = await factory.async_create_device(self._renderer["location"])
 
@@ -425,7 +479,7 @@ class DlnaBackend(PlayerBackend):
     def _url_for(self, item: QueueItem) -> Optional[str]:
         from streaming import service as streaming_service
         src = item.source
-        host = media_host()
+        host = media_host(self._peer_host)
         # Snapshot the global quality setting into the URL — the proxy
         # transcodes to Opus for the remote/bandwidth tiers. HQPlayer's own
         # _url_for equivalent never appends this, so its previews (same
@@ -501,7 +555,7 @@ class DlnaBackend(PlayerBackend):
                 if data is None:
                     return None
                 tok = proxy.register_blob(item.cover_id, data, "image/jpeg")
-            return f"http://{media_host()}:{proxy.port}/art/{tok}"
+            return f"http://{media_host(self._peer_host)}:{proxy.port}/art/{tok}"
         if item.preview:
             from playback.queue import resolved_artwork
             return resolved_artwork.get(item.track_id) or item.cover_url

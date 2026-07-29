@@ -89,6 +89,10 @@ services:
       # port on this host).
       STREAMING_PREVIEW_ENABLED: ${STREAMING_PREVIEW_ENABLED:-false}
       MEDIA_PROXY_PORT: ${MEDIA_PROXY_PORT:-8830}
+      # Explicit for the same reason as MEDIA_PROXY_PORT: backend/.env is the
+      # launcher's file (ports 8832/8833), and it wins for anything compose
+      # leaves unsaid.
+      DLNA_GENA_PORT: ${DLNA_GENA_PORT:-8831}
       MEDIA_PROXY_ADVERTISED_HOST: ${MEDIA_PROXY_ADVERTISED_HOST:-127.0.0.1}
       MUSIC_HOST_PATH: ${MUSIC_HOST_PATH:-}
       CLAUDE_CODE_ENABLED: ${CLAUDE_CODE_ENABLED:-true}
