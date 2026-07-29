@@ -312,11 +312,10 @@ class LauncherApp(ctk.CTk):
             gpu_text = "GPU: check failed"
 
         self._set_status("running", "All services running")
-        url_text = f"Local: {local_url}  |  LAN: {lan_url}"
-        ts_ip = get_tailscale_ip()
-        if ts_ip:
-            url_text += f"  |  Tailscale: https://{ts_ip}:{port}"
-        self._url_label.configure(text=url_text)
+        # Only the loopback URL here — the reachable addresses are captioned
+        # under their own QR, port included, and a window this narrow cannot
+        # hold three of them on one line.
+        self._url_label.configure(text=f"Local: {local_url}")
         self._url_hint_label.configure(
             text="First visit shows a browser security warning — accept it to continue (self-signed cert)."
         )
@@ -427,7 +426,7 @@ class LauncherApp(ctk.CTk):
         port = self.config.get("ports", {}).get("web", 8000)
         fragment = f"#pair={code}" if code else ""
 
-        for ip, caption, detail in targets:
+        for ip, caption in targets:
             widget = self._qr_labels.get(caption)
             if widget is None:
                 column = ctk.CTkFrame(self._qr_frame, fg_color="transparent")
@@ -436,10 +435,11 @@ class LauncherApp(ctk.CTk):
                 widget.pack()
                 # Captioned by what it achieves, not by the technology: the
                 # person holding the phone knows where they will be, not which
-                # interface the packet leaves by.
+                # interface the packet leaves by. The address carries the port
+                # so a device with no camera has something to type.
                 ctk.CTkLabel(column, text=caption, text_color="gray",
                              font=ctk.CTkFont(size=11)).pack()
-                ctk.CTkLabel(column, text=detail, text_color="gray",
+                ctk.CTkLabel(column, text=f"{ip}:{port}", text_color="gray",
                              font=ctk.CTkFont(size=10)).pack()
                 self._qr_labels[caption] = widget
 
@@ -456,17 +456,17 @@ class LauncherApp(ctk.CTk):
             self._qr_timer = self.after(int(ttl * 800), self._refresh_pairing_qr)
 
     def _qr_targets(self) -> list:
-        """(address, caption, detail) per way this node can be reached.
+        """(address, caption) per way this node can be reached.
 
         Tailscale is offered only when it is actually up, so the second code
         appears for the people who set it up and for nobody else — which is
         also why no switch is needed: the state that would need explaining
         only exists for someone who built it. Home first: it works for more
         devices, including the ones with no Tailscale at all."""
-        targets = [(get_local_ip(), "In this network", get_local_ip())]
+        targets = [(get_local_ip(), "In this network")]
         ts = get_tailscale_ip()
         if ts:
-            targets.append((ts, "From anywhere", "needs Tailscale"))
+            targets.append((ts, "From anywhere (Tailscale)"))
         return targets
 
     def _ensure_node_identity(self):
