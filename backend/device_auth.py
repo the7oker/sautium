@@ -28,8 +28,8 @@ empty storage. The vector that made the inlined secret reachable from the
 internet closes on its own.
 
 BRUTE FORCE. The two doors need different locks:
-  * PIN — small enough to guess, so it is one-shot, expires in minutes, dies
-    after MAX_PIN_ATTEMPTS, and every check passes through a lock. Sleeping
+  * PIN — small enough to guess, so it expires in minutes, dies after
+    MAX_PIN_ATTEMPTS, and every check passes through a lock. Sleeping
     between attempts would be useless: a thousand parallel requests sleep
     concurrently. Serialising them is what makes attempts countable.
   * password — Argon2id at 256 MB already makes guessing hopeless (a thousand
@@ -42,6 +42,7 @@ import asyncio
 import hmac
 import logging
 import secrets
+import threading
 import time
 from typing import Optional
 
@@ -56,6 +57,9 @@ PIN_GROUPS = 2
 PIN_GROUP_LEN = 4
 PIN_TTL_SECONDS = 5 * 60
 MAX_PIN_ATTEMPTS = 5
+# How long a just-rotated code stays acceptable. Covers the gap between a
+# camera reading the QR and the phone finishing the request.
+PIN_ROTATE_GRACE = 30
 
 # One Argon2id derivation is ~256 MB; two concurrent is already half a gig.
 # Everything else waits rather than racing the container into an OOM kill.
@@ -68,6 +72,13 @@ _pin_lock = asyncio.Lock()
 _create_lock = asyncio.Lock()
 
 _pin: Optional[dict] = None          # {"code", "expires_at", "attempts"}
+_pin_prev: Optional[dict] = None     # {"code", "valid_until"} — rotation grace
+
+# Hosts watching the pairing code. Wake-event, not payload: the client pulls
+# the fresh code over the signed API, so the code itself never rides an SSE
+# frame that a proxy might buffer or log.
+_pin_sse_clients: list = []
+_pin_sse_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -240,9 +251,44 @@ async def verify_password(password: str) -> bool:
 # PIN pairing (for accounts whose password the owner does not know)
 # ---------------------------------------------------------------------------
 
+def notify_pin_subscribers() -> None:
+    """Wake every client watching the pairing code. Called when the code
+    changes under the host's feet — i.e. burned by failed attempts, which is
+    the one transition the host cannot predict from the deadline it was
+    given."""
+    with _pin_sse_lock:
+        for evt, loop in list(_pin_sse_clients):
+            try:
+                loop.call_soon_threadsafe(evt.set)
+            except RuntimeError:
+                continue          # loop closed; generator cleans itself up
+
+
+def pin_subscribe() -> tuple:
+    evt = asyncio.Event()
+    entry = (evt, asyncio.get_event_loop())
+    with _pin_sse_lock:
+        _pin_sse_clients.append(entry)
+    return entry
+
+
+def pin_unsubscribe(entry: tuple) -> None:
+    with _pin_sse_lock:
+        _pin_sse_clients[:] = [e for e in _pin_sse_clients if e[0] is not entry[0]]
+
+
 def issue_pin() -> str:
-    """Mint a fresh pairing PIN, replacing any outstanding one."""
-    global _pin
+    """Mint a fresh pairing PIN, demoting the outstanding one to a short
+    grace period rather than killing it outright.
+
+    Rotation is otherwise a race the scanner cannot win: a camera reads the
+    QR a moment before the code turns over, and the phone submits a code that
+    stopped existing in between. Keeping the previous one briefly acceptable
+    makes that impossible rather than unlikely."""
+    global _pin, _pin_prev
+    if _pin and time.time() <= _pin["expires_at"]:
+        _pin_prev = {"code": _pin["code"],
+                     "valid_until": time.time() + PIN_ROTATE_GRACE}
     code = "-".join(
         "".join(secrets.choice(_PIN_ALPHABET) for _ in range(PIN_GROUP_LEN))
         for _ in range(PIN_GROUPS))
@@ -250,6 +296,22 @@ def issue_pin() -> str:
             "attempts": 0}
     logger.info("pairing PIN issued (valid %d min)", PIN_TTL_SECONDS // 60)
     return code
+
+
+def current_pin() -> dict:
+    """The code to put on screen, plus how long it is good for.
+
+    Idempotent within a code's life: the QR and the "Open Web UI" button must
+    show the same code, and they used to disagree because merely asking for
+    one replaced it. But not idempotent forever — a code past its half-life
+    is replaced here, so what the host draws always has minutes left on it.
+    Rotating on read rather than on a clock is what keeps the two in step:
+    the host redraws, and the redraw is itself the rotation."""
+    state = pin_state()
+    if state and state["expires_in"] > PIN_TTL_SECONDS // 2:
+        return state
+    issue_pin()
+    return pin_state()
 
 
 def pin_state() -> Optional[dict]:
@@ -262,19 +324,31 @@ def pin_state() -> Optional[dict]:
 
 
 async def redeem_pin(code: str) -> bool:
-    """Consume the PIN. One-shot: a correct code burns it, and so does the
-    attempt limit. Serialised, because parallel guesses are the whole attack —
-    a delay would just make a thousand requests wait together."""
-    global _pin
+    """Check the PIN. Valid until it expires or the attempt limit kills it —
+    a successful pairing does NOT consume it.
+
+    One-shot bought nothing here and cost real usability: the code lives for
+    minutes on the owner's own screen, so whoever can read it can pair either
+    way, while burning it on first use meant a second device (or the same
+    device on the node's other address, since a token is bound to one origin)
+    silently failed until the code rotated. Serialised, because parallel
+    guesses are the whole attack — a delay would just make a thousand
+    requests wait together."""
+    global _pin, _pin_prev
     async with _pin_lock:
+        given = (code or "").strip().upper()
+        if (_pin_prev and time.time() <= _pin_prev["valid_until"]
+                and hmac.compare_digest(_pin_prev["code"], given)):
+            return True
         if not _pin or time.time() > _pin["expires_at"]:
             return False
         _pin["attempts"] += 1
-        if not hmac.compare_digest(_pin["code"], (code or "").strip().upper()):
+        if not hmac.compare_digest(_pin["code"], given):
             if _pin["attempts"] >= MAX_PIN_ATTEMPTS:
                 logger.warning("pairing PIN burned after %d failed attempts",
                                _pin["attempts"])
                 _pin = None
+                _pin_prev = None
+                notify_pin_subscribers()
             return False
-        _pin = None
         return True

@@ -10,6 +10,7 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 import device_auth
@@ -111,10 +112,53 @@ async def logout_all() -> dict:
     return {"token": device_auth.current_token(_secret())}
 
 
-@router.post("/pin")
-async def issue_pin() -> dict:
-    """Mint a pairing PIN. Signature-protected: the launcher (which holds the
-    server secret) and already-paired devices may open a pairing window; a
-    stranger on the LAN may not."""
-    return {"code": device_auth.issue_pin(),
-            "expires_in": device_auth.PIN_TTL_SECONDS}
+@router.get("/pin")
+async def get_pin() -> dict:
+    """The pairing code to put on screen, with the deadline the host needs to
+    schedule its own refresh. Idempotent: repeated calls return the same code
+    while it lives, so the QR and the button that mints the URL cannot drift
+    apart — asking used to replace it, which silently invalidated whatever was
+    already drawn.
+
+    Signature-protected: the launcher holds the server secret, a stranger on
+    the LAN does not."""
+    return device_auth.current_pin()
+
+
+@router.get("/pin/stream")
+async def pin_stream() -> StreamingResponse:
+    """SSE wake channel for the host displaying the code.
+
+    The host knows when the code expires — it was told — so expiry needs no
+    channel. What it cannot foresee is the code being burned by someone
+    guessing at /pair, which would otherwise leave a dead QR on screen until
+    the next scheduled refresh. Wake-event only; the code itself is pulled
+    over the signed API."""
+    entry = device_auth.pin_subscribe()
+    evt = entry[0]
+
+    async def event_generator():
+        try:
+            yield "data: {}\n\n"
+            while True:
+                try:
+                    await asyncio.wait_for(evt.wait(), timeout=20.0)
+                    evt.clear()
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                yield "data: {}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            device_auth.pin_unsubscribe(entry)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

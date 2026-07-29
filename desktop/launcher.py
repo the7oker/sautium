@@ -19,7 +19,7 @@ import customtkinter as ctk
 from desktop.api_client import BackendAPIClient
 from desktop.config_manager import load_config, save_config, update_config
 from desktop.service_manager import ServiceManager
-from desktop.utils import get_local_ip, generate_qr_ctk
+from desktop.utils import get_local_ip, get_tailscale_ip, generate_qr_ctk
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +50,10 @@ class LauncherApp(ctk.CTk):
         self._p2p_starting = False
         self.tray = None
         self._update_thread = None
-        self._stats_timer = None
         self._shutting_down = False   # gates the stats worker from touching Tk after the loop is torn down
+        self._streams_started = False
+        self._active_job = None       # "scan" | "enrich" — what a Library wake refers to
+        self._qr_timer = None
 
         # Check first run
         if not self.config.get("first_run_complete"):
@@ -113,12 +115,14 @@ class LauncherApp(ctk.CTk):
         )
         self._status_text.pack(side="left", padx=5, pady=10)
 
-        # QR Code
+        # QR codes. One per reachable address, built lazily by
+        # _draw_pairing_qr — the second only exists on hosts that actually run
+        # Tailscale, so a user who never heard of it sees exactly what they
+        # saw before. Both carry the same pairing code; which one works
+        # depends on the scanning phone, which this machine cannot know.
         self._qr_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._qr_frame.pack(pady=5)
-
-        self._qr_label = ctk.CTkLabel(self._qr_frame, text="")
-        self._qr_label.pack()
+        self._qr_labels: dict = {}
 
         # URL label
         self._url_label = ctk.CTkLabel(
@@ -308,7 +312,11 @@ class LauncherApp(ctk.CTk):
             gpu_text = "GPU: check failed"
 
         self._set_status("running", "All services running")
-        self._url_label.configure(text=f"Local: {local_url}  |  LAN: {lan_url}")
+        url_text = f"Local: {local_url}  |  LAN: {lan_url}"
+        ts_ip = get_tailscale_ip()
+        if ts_ip:
+            url_text += f"  |  Tailscale: https://{ts_ip}:{port}"
+        self._url_label.configure(text=url_text)
         self._url_hint_label.configure(
             text="First visit shows a browser security warning — accept it to continue (self-signed cert)."
         )
@@ -325,15 +333,12 @@ class LauncherApp(ctk.CTk):
         # Fetch and display library stats
         self._fetch_and_display_stats()
 
-        # QR for LAN access, carrying a one-time pairing code so scanning the
-        # phone straight into a signed-in session needs no typing. Refreshed
-        # whenever services come up — the code expires in minutes and is
-        # consumed by the first device that scans it.
-        qr_img = generate_qr_ctk(lan_url + "/" + self._pairing_fragment(), size=180)
-        if qr_img:
-            self._qr_label.configure(image=qr_img, text="")
-        else:
-            self._qr_label.configure(text=f"Scan: {lan_url}")
+        # QRs carry a pairing code so scanning the phone straight into a
+        # signed-in session needs no typing. They keep themselves current
+        # from here on: scheduled against the code's own deadline, and
+        # redrawn out of turn if the code is burned.
+        self._start_event_streams()
+        self._refresh_pairing_qr()
 
         # Silently generate node identity if not present
         self._ensure_node_identity()
@@ -352,6 +357,117 @@ class LauncherApp(ctk.CTk):
 
         # Auto-trigger Last.fm auth if pending from wizard
         self._check_lastfm_pending_auth()
+
+    def _start_event_streams(self):
+        """Subscribe to the backend's wake channels — once per process, not
+        once per backend start: the reader reconnects on its own, which is
+        exactly what a scan's backend restart needs."""
+        if self._streams_started:
+            return
+        self._streams_started = True
+
+        def _consume(path: str, handler):
+            for _ in self.api_client.stream(path):
+                if self._shutting_down:
+                    return
+                try:
+                    self.after(0, handler)
+                except RuntimeError:
+                    return          # main loop gone
+
+        for path, handler in (
+            ("/api/settings/library/stream", self._on_library_event),
+            ("/api/auth/pin/stream", self._refresh_pairing_qr),
+        ):
+            threading.Thread(target=_consume, args=(path, handler),
+                             daemon=True).start()
+
+    def _on_library_event(self):
+        """A scan or enrich worker reached a checkpoint. Read the job we
+        started; stats follow from that. If we started nothing, the change
+        came from the Web UI and only the counters can have moved."""
+        if self._active_job == "scan":
+            self._refresh_scan()
+        elif self._active_job == "enrich":
+            self._refresh_enrich()
+        else:
+            self._fetch_and_display_stats()
+
+    def _refresh_pairing_qr(self):
+        """Draw the QR with a code that is current, and arrange to redraw it
+        before that stops being true.
+
+        Two triggers, and they need different mechanisms. Expiry is a
+        deadline the server hands us, so we schedule against it — no polling,
+        we are not asking whether anything happened. A burn by failed /pair
+        guesses is unforeseeable, and that is what the SSE channel is for."""
+        if self._qr_timer is not None:
+            self.after_cancel(self._qr_timer)
+            self._qr_timer = None
+
+        def _fetch():
+            # Both halves off the Tk thread: asking Tailscale whether it is up
+            # spawns a process, and a frozen window is a worse bug than a
+            # slightly late QR.
+            info = self.api_client.request_pairing_code() or {}
+            targets = self._qr_targets()
+            if self._shutting_down:
+                return
+            try:
+                self.after(0, lambda: self._draw_pairing_qr(info, targets))
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _draw_pairing_qr(self, info: dict, targets: list):
+        if self._shutting_down:
+            return
+        code = info.get("code")
+        port = self.config.get("ports", {}).get("web", 8000)
+        fragment = f"#pair={code}" if code else ""
+
+        for ip, caption, detail in targets:
+            widget = self._qr_labels.get(caption)
+            if widget is None:
+                column = ctk.CTkFrame(self._qr_frame, fg_color="transparent")
+                column.pack(side="left", padx=8)
+                widget = ctk.CTkLabel(column, text="")
+                widget.pack()
+                # Captioned by what it achieves, not by the technology: the
+                # person holding the phone knows where they will be, not which
+                # interface the packet leaves by.
+                ctk.CTkLabel(column, text=caption, text_color="gray",
+                             font=ctk.CTkFont(size=11)).pack()
+                ctk.CTkLabel(column, text=detail, text_color="gray",
+                             font=ctk.CTkFont(size=10)).pack()
+                self._qr_labels[caption] = widget
+
+            img = generate_qr_ctk(f"https://{ip}:{port}/{fragment}", size=180)
+            if img:
+                widget.configure(image=img, text="")
+            else:
+                widget.configure(text=f"Scan: https://{ip}:{port}")
+
+        # Redraw at 80% of the code's life, so what is on screen is never the
+        # code that just died.
+        ttl = int(info.get("expires_in") or 0)
+        if ttl > 0:
+            self._qr_timer = self.after(int(ttl * 800), self._refresh_pairing_qr)
+
+    def _qr_targets(self) -> list:
+        """(address, caption, detail) per way this node can be reached.
+
+        Tailscale is offered only when it is actually up, so the second code
+        appears for the people who set it up and for nobody else — which is
+        also why no switch is needed: the state that would need explaining
+        only exists for someone who built it. Home first: it works for more
+        devices, including the ones with no Tailscale at all."""
+        targets = [(get_local_ip(), "In this network", get_local_ip())]
+        ts = get_tailscale_ip()
+        if ts:
+            targets.append((ts, "From anywhere", "needs Tailscale"))
+        return targets
 
     def _ensure_node_identity(self):
         """Generate node identity on first run (non-blocking)."""
@@ -651,35 +767,30 @@ class LauncherApp(ctk.CTk):
 
         threading.Thread(target=_complete, daemon=True).start()
 
-    def _fetch_and_display_stats(self, schedule_next: bool = True):
-        """Fetch library stats from backend and update UI labels."""
-        # Cancel any pending refresh to avoid stacking timers
-        if self._stats_timer is not None:
-            self.after_cancel(self._stats_timer)
-            self._stats_timer = None
-
+    def _fetch_and_display_stats(self):
+        """Fetch library stats from backend and update UI labels. Driven by
+        the Library SSE channel, which the scan and enrich workers already
+        wake at every checkpoint — no timer."""
         def _fetch():
             data = self.api_client.get_stats()
-            # Marshal back to the Tk main thread — including the reschedule, which
-            # must not run off-thread. Guard the shutdown window: the loop can be
-            # torn down while this worker is blocked on the network call.
+            # Marshal back to the Tk main thread. Guard the shutdown window:
+            # the loop can be torn down while this worker is blocked on the
+            # network call.
             if self._shutting_down:
                 return
             try:
-                self.after(0, lambda: self._apply_stats(data, schedule_next))
+                self.after(0, lambda: self._apply_stats(data))
             except RuntimeError:
                 pass   # main loop gone between the check and the call
 
         threading.Thread(target=_fetch, daemon=True).start()
 
-    def _apply_stats(self, data: dict, schedule_next: bool):
-        """Apply fetched stats and (re)arm the timer — always on the main thread."""
+    def _apply_stats(self, data: dict):
+        """Apply fetched stats — always on the main thread."""
         if self._shutting_down:
             return
         if data:
             self._update_stats_labels(data)
-        if schedule_next:
-            self._stats_timer = self.after(60_000, self._fetch_and_display_stats)
 
     def _update_stats_labels(self, data: dict):
         """Update stats labels from API response."""
@@ -742,8 +853,8 @@ class LauncherApp(ctk.CTk):
         QR, so signing in a device costs one click or one scan. It goes in the
         FRAGMENT rather than the query on purpose — fragments are not sent to
         the server, so the one-time code stays out of access logs and out of
-        any Referer header. It is single-use and expires in minutes, so a
-        stale copy in browser history is inert."""
+        any Referer header. It expires in minutes, so a stale copy in browser
+        history is inert."""
         try:
             resp = self.api_client.request_pairing_code()
         except Exception as e:
@@ -808,7 +919,8 @@ class LauncherApp(ctk.CTk):
 
             result = self.api_client.start_scan(subpath)
             if result and result.get("success"):
-                self.after(500, self._poll_scan)
+                self._active_job = "scan"
+                self.after(0, self._refresh_scan)
             else:
                 self.after(0, lambda: self._progress_text.configure(
                     text="Failed to start scan"))
@@ -816,8 +928,10 @@ class LauncherApp(ctk.CTk):
 
         threading.Thread(target=_do_start, daemon=True).start()
 
-    def _poll_scan(self):
-        """Poll scan status every 1 second."""
+    def _refresh_scan(self):
+        """Read scan status once. Called when the Library channel says the
+        worker moved — the worker itself wakes it at every checkpoint, so
+        this lands on real transitions instead of on a clock."""
         def _check():
             status = self.api_client.scan_status()
             if not status:
@@ -828,23 +942,12 @@ class LauncherApp(ctk.CTk):
             running = status.get("running", False)
 
             self.after(0, lambda: self._progress_text.configure(text=progress))
-
-            # Update live stats from scan progress
-            scan_stats = status.get("stats")
-            if scan_stats:
-                self.after(0, lambda: self._update_scan_live_stats(scan_stats))
-
-            if running:
-                self.after(1000, self._poll_scan)
-            else:
+            if status.get("stats"):
+                self.after(0, self._fetch_and_display_stats)
+            if not running:
                 self.after(0, self._scan_done)
 
         threading.Thread(target=_check, daemon=True).start()
-
-    def _update_scan_live_stats(self, scan_stats: dict):
-        """Update Library stats labels with live scan data during scanning."""
-        # Refresh full stats from backend (without scheduling next timer)
-        self._fetch_and_display_stats(schedule_next=False)
 
     def _cancel_scan(self):
         """Request cancellation of running scan."""
@@ -854,6 +957,7 @@ class LauncherApp(ctk.CTk):
 
     def _scan_done(self):
         """Restore UI after scan completes."""
+        self._active_job = None
         self._btn_scan.configure(
             text="Scan Library", command=self._scan_library,
             state="normal", fg_color="transparent",
@@ -876,10 +980,11 @@ class LauncherApp(ctk.CTk):
                                    fg_color="#8B0000", hover_color="#A52A2A")
         self._btn_scan.configure(state="disabled")
         self._progress_text.configure(text="Starting enrichment...")
-        self._poll_enrich()
+        self._active_job = "enrich"
+        self._refresh_enrich()
 
-    def _poll_enrich(self):
-        """Poll enrichment status every 2 seconds."""
+    def _refresh_enrich(self):
+        """Read enrichment status once, on a Library channel wake."""
         def _check():
             status = self.api_client.enrich_status()
             if not status:
@@ -891,10 +996,7 @@ class LauncherApp(ctk.CTk):
 
             self.after(0, lambda: self._progress_text.configure(text=progress))
             self.after(0, self._fetch_and_display_stats)
-
-            if running:
-                self.after(1000, self._poll_enrich)
-            else:
+            if not running:
                 self.after(0, self._enrich_done)
 
         threading.Thread(target=_check, daemon=True).start()
@@ -907,6 +1009,7 @@ class LauncherApp(ctk.CTk):
 
     def _enrich_done(self):
         """Restore UI after enrichment completes."""
+        self._active_job = None
         self._btn_enrich.configure(
             text="Enrich Library", command=self._enrich_library,
             state="normal", fg_color="transparent",
@@ -1206,6 +1309,9 @@ class LauncherApp(ctk.CTk):
     def _quit(self):
         """Full quit: stop services and exit."""
         self._shutting_down = True   # stop the stats worker from rescheduling onto a dying loop
+        # SSE readers block on a socket that is never going to close by
+        # itself — unblock them before anything waits on their threads.
+        self.api_client.close_streams()
         self._set_status("starting", "Shutting down...")
         self._progress_text.configure(text="Stopping services...")
         self.update()
@@ -1222,13 +1328,12 @@ class LauncherApp(ctk.CTk):
         threading.Thread(target=_shutdown, daemon=True).start()
 
     def _final_quit(self):
-        # Cancel periodic stats timer
-        if self._stats_timer:
+        if self._qr_timer:
             try:
-                self.after_cancel(self._stats_timer)
+                self.after_cancel(self._qr_timer)
             except Exception:
                 pass
-            self._stats_timer = None
+            self._qr_timer = None
         if self.tray:
             try:
                 self.tray.stop()

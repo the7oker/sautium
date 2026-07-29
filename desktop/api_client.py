@@ -23,7 +23,7 @@ import urllib.parse
 import urllib.request
 import urllib.error
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,8 @@ class BackendAPIClient:
         self._ssl_ctx = (
             _get_ssl_context() if self.base_url.startswith("https://") else None
         )
+        self._streams: list = []
+        self._stream_closed = False
 
     def set_port(self, port: int):
         """Update the backend port."""
@@ -232,11 +234,69 @@ class BackendAPIClient:
         )
 
     def request_pairing_code(self) -> Optional[dict]:
-        """Mint a one-time device-pairing code. Authorised by the shared API
-        secret this process reads from disk — which is the point: the code
-        must come from the machine running Sautium, not from a browser that
-        would already need to be signed in to ask."""
-        return self._post_json("/api/auth/pin", body={}, timeout=15)
+        """The current device-pairing code and how long it has left.
+        Authorised by the shared API secret this process reads from disk —
+        which is the point: the code must come from the machine running
+        Sautium, not from a browser that would already need to be signed in
+        to ask.
+
+        Idempotent — every caller here (the QR, the Open Web UI button) must
+        see the same code, so this reads rather than mints."""
+        return self._get_json("/api/auth/pin", timeout=15)
+
+    def stream(self, path: str) -> Iterator[None]:
+        """Yield once per server-sent event on `path`, forever.
+
+        Deliberately not a payload reader: every channel we consume is a wake
+        event whose whole meaning is "re-read state over the signed API", so
+        parsing frames would only invite the two to disagree. Blocks; run it
+        on a thread and stop it by closing the handle this stores.
+
+        Reconnects on drop with a backoff, because the launcher restarts the
+        backend under itself (a scan does exactly that) and a tight retry
+        would spin through the whole restart."""
+        delay = 1.0
+        while not self._stream_closed:
+            try:
+                url = f"{self.base_url}{path}"
+                req = urllib.request.Request(url, method="GET")
+                req.add_header("Accept", "text/event-stream")
+                for k, v in _sign_headers("GET", path, b"").items():
+                    req.add_header(k, v)
+                # No read timeout: an idle channel is normal, and the server
+                # sends a keepalive comment every 20s to prove it is alive.
+                resp = urllib.request.urlopen(req, context=self._ssl_ctx)
+                self._streams.append(resp)
+                delay = 1.0
+                try:
+                    for raw in resp:
+                        if self._stream_closed:
+                            return
+                        if raw.startswith(b"data:"):
+                            yield None
+                finally:
+                    self._streams.remove(resp)
+                    resp.close()
+            except GeneratorExit:
+                raise
+            except Exception as e:
+                logger.debug(f"SSE {path} dropped — {e}")
+            if self._stream_closed:
+                return
+            time.sleep(delay)
+            # Capped low: the far end is localhost, and the gap after a
+            # restart is a gap in visible scan progress.
+            delay = min(delay * 2, 5.0)
+
+    def close_streams(self) -> None:
+        """Unblock every reader so launcher shutdown does not wait on a
+        connection that is, by design, never going to end on its own."""
+        self._stream_closed = True
+        for resp in list(self._streams):
+            try:
+                resp.close()
+            except Exception:
+                pass
 
     def mb_slice(self, names: list[str]) -> Optional[dict]:
         """Fetch raw mb_* rows for artist names from a dump-holding peer.

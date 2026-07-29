@@ -10,6 +10,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -337,13 +338,66 @@ def find_available_port(preferred: int) -> int:
 
 
 def get_local_ip() -> str:
-    """Get the local network IP address for LAN access."""
+    """Get the local network IP address for LAN access.
+
+    This asks the kernel which source address it would use to reach the
+    internet, so it returns the default route's interface. Tailscale does not
+    take the default route, which is why it never shows up here — see
+    get_tailscale_ip()."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
             return s.getsockname()[0]
     except Exception:
         return "127.0.0.1"
+
+
+_TAILSCALE_BINARIES = (
+    r"C:\Program Files\Tailscale\tailscale.exe",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    "/usr/local/bin/tailscale",
+    "/usr/bin/tailscale",
+    "tailscale",
+)
+
+
+_tailscale_cache: Tuple[float, Optional[str]] = (0.0, None)
+
+
+def get_tailscale_ip() -> Optional[str]:
+    """This node's Tailscale address, or None when Tailscale is not running.
+
+    Asks the CLI rather than scanning interfaces, because the question is
+    "is Tailscale up right now", not "is it installed" — and because an
+    interface scan for 100.64/10 has a real false positive: a laptop tethered
+    to a phone gets a carrier CGNAT address in exactly that range.
+
+    Cached briefly: this spawns a process, and callers redraw on a timer."""
+    global _tailscale_cache
+    checked, cached = _tailscale_cache
+    if time.monotonic() - checked < 60.0:
+        return cached
+
+    result = _probe_tailscale()
+    _tailscale_cache = (time.monotonic(), result)
+    return result
+
+
+def _probe_tailscale() -> Optional[str]:
+    for binary in _TAILSCALE_BINARIES:
+        try:
+            out = subprocess.run(
+                [binary, "ip", "-4"], capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out.returncode != 0:
+            continue                      # installed but logged out / down
+        ip = out.stdout.strip().splitlines()[0].strip() if out.stdout.strip() else ""
+        if ip:
+            return ip
+    return None
 
 
 def generate_qr_image(url: str, size: int = 200):
