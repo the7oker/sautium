@@ -338,6 +338,46 @@ async def _dlna_describe(location: str) -> dict:
     }
 
 
+_TAILSCALE_BINARIES = (
+    r"C:\Program Files\Tailscale\tailscale.exe",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    "/usr/local/bin/tailscale",
+    "/usr/bin/tailscale",
+    "tailscale",
+)
+
+
+def _tailnet_peers() -> list:
+    """Online tailnet peers, so the scan can reach a renderer that is not on
+    any local segment.
+
+    Sweeping a tunnel the way we sweep a LAN is not an option: the range is
+    100.64.0.0/10, four million addresses, and peers land anywhere in it with
+    no subnet structure — two devices in the same tailnet here sit in
+    different /24s. But Tailscale already knows exactly who is reachable, so
+    the sweep is a handful of addresses rather than a search.
+
+    Only a natively-run backend can ask: there is no CLI in the container, and
+    even given the address the bridge's NAT drops SSDP replies from the
+    ephemeral ports phone renderers answer on."""
+    import subprocess
+    for binary in _TAILSCALE_BINARIES:
+        try:
+            out = subprocess.run([binary, "status", "--json"],
+                                 capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out.returncode != 0:
+            continue
+        try:
+            peers = (json.loads(out.stdout).get("Peer") or {}).values()
+        except json.JSONDecodeError:
+            return []
+        return [ip for p in peers if p.get("Online")
+                for ip in (p.get("TailscaleIPs") or [])[:1] if ":" not in ip]
+    return []
+
+
 def _lan_subnets() -> list:
     """/24s worth sweeping with unicast. SAUTIUM_HOST_IPS is the host's real
     LAN address, which is the only way a container can know it — its own
@@ -403,7 +443,8 @@ async def _unicast_sweep(found: dict) -> None:
             s.close()
         return hits
 
-    targets = [str(h) for net in _lan_subnets() for h in net.hosts()]
+    targets = ([str(h) for net in _lan_subnets() for h in net.hosts()]
+               + await asyncio.to_thread(_tailnet_peers))
     with ThreadPoolExecutor(max_workers=64) as pool:
         for hits in await asyncio.gather(
                 *(loop.run_in_executor(pool, _probe, ip) for ip in targets)):
