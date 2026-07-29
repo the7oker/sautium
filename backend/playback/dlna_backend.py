@@ -148,6 +148,24 @@ def _same_network(a: str, b: str) -> bool:
             == ipaddress.ip_network(f"{b}/24", strict=False))
 
 
+def _source_address_toward(peer: str) -> Optional[str]:
+    """Which of our addresses the kernel would speak from to reach `peer`.
+
+    Costs nothing and sends nothing — connecting a UDP socket only resolves a
+    route. This is the authoritative answer wherever the process runs on the
+    real host: it needs no configuration and gets tunnels right for free,
+    because the route to a tailnet peer leaves by the tailnet interface and
+    the kernel says so. It is exactly wrong inside a container, where every
+    route ends at the bridge; the caller checks for that."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((peer, 9))
+            return s.getsockname()[0]
+    except OSError:
+        return None
+
+
 def media_host(peer: Optional[str] = None) -> str:
     """The address to hand a renderer so it can pull media back from us.
 
@@ -172,6 +190,14 @@ def media_host(peer: Optional[str] = None) -> str:
         match = next((ip for ip in candidates if _same_network(ip, peer)), None)
         if match:
             return match
+        routed = _source_address_toward(peer)
+        # Accept the kernel's answer only if it lands on the renderer's own
+        # network. That is the whole requirement, and it doubles as the
+        # container check for free: a bridge address shares a network with
+        # nothing outside, so inside Docker this rejects itself and the answer
+        # falls back to configuration, where it belongs.
+        if routed and _same_network(routed, peer):
+            return routed
         logger.warning(
             "no local address on %s's network — media URLs will point at %s "
             "and the renderer will not reach them; add its address to "
