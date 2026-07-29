@@ -379,22 +379,39 @@ def _tailnet_peers() -> list:
 
 
 def _lan_subnets() -> list:
-    """/24s worth sweeping with unicast. SAUTIUM_HOST_IPS is the host's real
-    LAN address, which is the only way a container can know it — its own
-    interface sits on the docker bridge and names a subnet with nothing on
-    it."""
+    """The /24 worth sweeping with unicast — the real LAN, and only it.
+
+    Every candidate costs 254 probes, so this must not be "every private
+    address the host has". A developer machine carries Hyper-V, WSL, two
+    VMware adapters and a few link-local ones, none of which has ever hosted a
+    renderer; sweeping them all took 45s, long enough to read as a hang.
+
+    The default route names the LAN exactly, which is the native answer. A
+    container cannot use it — its route ends at the bridge — so there the
+    host's address has to be supplied, and SAUTIUM_HOST_IPS is where it lives.
+    """
     import ipaddress
-    from tls_gen import detect_private_host_ips
+    from playback.dlna_backend import _source_address_toward
     explicit = [s.strip() for s in os.getenv("SAUTIUM_HOST_IPS", "").split(",")
                 if s.strip()]
+    seeds = explicit or [ip for ip in [_source_address_toward("8.8.8.8")] if ip]
+    if not seeds:
+        from tls_gen import detect_private_host_ips
+        seeds = detect_private_host_ips()
     nets = []
-    for ip in explicit or detect_private_host_ips():
+    for ip in seeds:
         try:
+            addr = ipaddress.ip_address(ip)
             net = ipaddress.ip_network(f"{ip}/24", strict=False)
         except ValueError:
             continue
-        if net not in nets:
-            nets.append(net)
+        # Link-local means DHCP failed on that adapter; nothing is configured
+        # there to answer. CGNAT is a tunnel, where a /24 is meaningless — its
+        # members are enumerated by _tailnet_peers(), not searched for.
+        if (addr.is_link_local or net in nets
+                or addr in ipaddress.ip_network("100.64.0.0/10")):
+            continue
+        nets.append(net)
     return nets
 
 
