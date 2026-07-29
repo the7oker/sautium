@@ -8,8 +8,10 @@ but exposed as HTTP endpoints for the Web UI.
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -186,10 +188,18 @@ def get_outputs(rescan: bool = False):
 
 # Two renderer tiers served by /outputs. Discovered = the LAST scan's
 # snapshot, replaced wholesale each Rescan so powered-off devices drop out
-# (in-memory by design). Pinned = manual adds — deliberate config: on
-# Docker nodes the scan is blind (multicast dies at the bridge, and the
-# NAT drops unicast M-SEARCH replies), so pins are the ONLY population
-# mechanism and live in user_settings to survive restarts.
+# (in-memory by design). Pinned = manual adds — deliberate config, kept in
+# user_settings so they survive restarts.
+#
+# Pins used to be the ONLY way to populate a Docker node, because multicast
+# dies at the bridge. The unicast sweep changed that, but only partly, and
+# the boundary is worth knowing: SSDP replies come back from whatever source
+# port the device chose, and the bridge's NAT is port-restricted for UDP, so
+# only devices answering from 1900 traverse it. Measured: a router replies
+# from 1900 and is found; BubbleUPnP replies from an ephemeral port and is
+# not, even though TCP to the same host works fine. For those — and for
+# anything on another subnet or across a tunnel — pinning a full description
+# URL is still the way in, and backend/dlna_locate.py prints one.
 _dlna_discovered: dict[str, dict] = {}
 
 
@@ -205,6 +215,23 @@ def _dlna_save_pins(pins: dict[str, dict]) -> None:
 
 class DlnaAddRequest(BaseModel):
     url: str   # renderer IP — or a full device-description URL
+
+
+def _rehost(location: str, ip: str) -> str:
+    """Point a description URL at the address that actually answered.
+
+    SSDP devices advertise a LOCATION built from their own interface address,
+    which is only reachable by whoever shares that segment. Reach one across a
+    VPN — a phone on mobile data, joined to the same tailnet — and it answers
+    on the tunnel while naming its carrier-side address, which resolves to
+    nothing here. The port and path are the device's to choose; the host is
+    ours to know, because we just spoke to it."""
+    from urllib.parse import urlparse, urlunparse
+    parts = urlparse(location)
+    if not parts.hostname or parts.hostname == ip:
+        return location
+    netloc = f"{ip}:{parts.port}" if parts.port else ip
+    return urlunparse(parts._replace(netloc=netloc))
 
 
 def _msearch_location(ip: str, timeout: float = 3.0) -> Optional[str]:
@@ -236,9 +263,9 @@ def _msearch_location(ip: str, timeout: float = 3.0) -> Optional[str]:
                 elif low.startswith("st:"):
                     st = line.split(":", 1)[1].strip()
             if loc and "MediaRenderer" in st:
-                return loc
+                return _rehost(loc, ip)
             if loc and fallback is None:
-                fallback = loc
+                fallback = _rehost(loc, ip)
     finally:
         s.close()
     return fallback
@@ -270,11 +297,84 @@ async def _dlna_describe(location: str) -> dict:
     }
 
 
+def _lan_subnets() -> list:
+    """/24s worth sweeping with unicast. SAUTIUM_HOST_IPS is the host's real
+    LAN address, which is the only way a container can know it — its own
+    interface sits on the docker bridge and names a subnet with nothing on
+    it."""
+    import ipaddress
+    from tls_gen import detect_private_host_ips
+    explicit = [s.strip() for s in os.getenv("SAUTIUM_HOST_IPS", "").split(",")
+                if s.strip()]
+    nets = []
+    for ip in explicit or detect_private_host_ips():
+        try:
+            net = ipaddress.ip_network(f"{ip}/24", strict=False)
+        except ValueError:
+            continue
+        if net not in nets:
+            nets.append(net)
+    return nets
+
+
+async def _unicast_sweep(found: dict) -> None:
+    """M-SEARCH every address of the LAN, one at a time rather than by
+    multicast.
+
+    Multicast is the protocol's answer and it is the wrong one here: it dies
+    at the docker bridge, so a containerised node has never discovered a
+    single renderer and pinning by hand was the only way in. Unicast crosses
+    the bridge like any other UDP, which the router answering this sweep from
+    inside the container proves. 254 datagrams is a rounding error next to a
+    user waiting for a device list."""
+    loop = asyncio.get_running_loop()
+
+    def _probe(ip: str) -> list:
+        import socket as sock
+        msg = ("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n"
+               'MAN: "ssdp:discover"\r\nMX: 1\r\n'
+               'ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n').encode()
+        s = sock.socket(sock.AF_INET, sock.SOCK_DGRAM)
+        s.settimeout(0.4)
+        hits = []
+        try:
+            s.sendto(msg, (ip, 1900))
+            deadline = time.time() + 1.5
+            while time.time() < deadline:
+                try:
+                    data, addr = s.recvfrom(4096)
+                except OSError:
+                    continue
+                if addr[0] != ip:
+                    continue
+                loc = usn = ""
+                for line in data.decode(errors="replace").splitlines():
+                    low = line.lower()
+                    if low.startswith("location:"):
+                        loc = line.split(":", 1)[1].strip()
+                    elif low.startswith("usn:"):
+                        usn = line.split(":", 1)[1].strip()
+                if loc:
+                    hits.append((usn or loc, _rehost(loc, ip)))
+        except OSError:
+            pass
+        finally:
+            s.close()
+        return hits
+
+    targets = [str(h) for net in _lan_subnets() for h in net.hosts()]
+    with ThreadPoolExecutor(max_workers=64) as pool:
+        for hits in await asyncio.gather(
+                *(loop.run_in_executor(pool, _probe, ip) for ip in targets)):
+            for usn, loc in hits:
+                found.setdefault(usn, loc)
+
+
 @router.post("/outputs/dlna/scan")
 async def dlna_scan():
-    """SSDP-search the LAN for MediaRenderer devices (~3 s). Works from
-    native deployments; the Docker bridge has no LAN multicast — use
-    /outputs/dlna/add with the renderer's description URL there."""
+    """Find MediaRenderer devices on the LAN: SSDP multicast from every local
+    interface, then a unicast sweep of the LAN for the containerised case
+    where multicast cannot leave the bridge."""
     try:
         from async_upnp_client.search import async_search
     except ImportError:
@@ -301,6 +401,8 @@ async def dlna_scan():
                 search_target="urn:schemas-upnp-org:device:MediaRenderer:1")
         except Exception as e:
             logger.debug("SSDP search on %s failed: %s", source, e)
+
+    await _unicast_sweep(found)
 
     renderers = []
     fresh: dict[str, dict] = {}

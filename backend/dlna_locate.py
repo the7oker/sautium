@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
-"""Print UPnP device-description URLs for DLNA renderers on the LAN.
+"""Print UPnP device-description URLs for DLNA renderers.
 
-The Docker backend cannot discover renderers itself (multicast dies at the
-docker bridge and the NAT drops unicast M-SEARCH replies), so its
-"Add renderer by address" field needs a full description URL. This tool
-runs where UDP works — the WSL shell or any host on the LAN:
+A companion to the Output picker's scan, for the addresses a scan cannot
+reach: a renderer on another subnet, or one joined to the same VPN rather
+than the same LAN.
 
     python3 backend/dlna_locate.py 192.168.1.235      # one device
-    python3 backend/dlna_locate.py                    # sweep the /24
+    python3 backend/dlna_locate.py 100.66.130.110     # one over the tunnel
+    python3 backend/dlna_locate.py                    # sweep the local /24
+    python3 backend/dlna_locate.py 192.168.7          # sweep another /24
 
 Wake the device first (a dozing KANN or phone stops answering SSDP), then
 paste the [RENDERER] location into the Output picker. Media-server entries
 of the same device are marked [server] — the picker rejects those.
+
+Printed locations are rehosted onto the address that answered. Devices build
+their LOCATION from their own interface address, so one reached across a
+tunnel names an address that means nothing here — a phone on mobile data
+advertises its carrier-side 10.x while answering perfectly well on the
+tunnel. Port and path stay as the device chose them.
 """
 
 import ipaddress
@@ -19,9 +26,19 @@ import socket
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse, urlunparse
 
 MSEARCH = ("M-SEARCH * HTTP/1.1\r\nHOST: {ip}:1900\r\n"
            'MAN: "ssdp:discover"\r\nMX: 2\r\nST: ssdp:all\r\n\r\n')
+
+
+def rehost(location: str, ip: str) -> str:
+    """Point the description URL at the address that answered."""
+    parts = urlparse(location)
+    if not parts.hostname or parts.hostname == ip:
+        return location
+    netloc = f"{ip}:{parts.port}" if parts.port else ip
+    return urlunparse(parts._replace(netloc=netloc))
 
 
 def probe(ip: str, wait: float = 2.5) -> set:
@@ -46,7 +63,7 @@ def probe(ip: str, wait: float = 2.5) -> set:
                 elif low.startswith("usn:"):
                     usn = line.split(":", 1)[1].strip()
             if loc:
-                found.add((usn or "?", st or "?", loc))
+                found.add((usn or "?", st or "?", rehost(loc, ip)))
     except OSError:
         pass
     finally:
@@ -54,12 +71,25 @@ def probe(ip: str, wait: float = 2.5) -> set:
     return found
 
 
+def local_ip() -> str:
+    """The address this host would use to reach the internet.
+
+    Not gethostbyname(gethostname()), which on a multi-homed box answers with
+    whichever address the resolver happens to name first — a Hyper-V adapter,
+    the docker bridge, or a VPN's own address. Sweeping the /24 around any of
+    those finds nothing and reports it as "no devices"."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+
+
 def main() -> None:
-    if len(sys.argv) > 1:
-        targets = [sys.argv[1]]
+    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    if arg.count(".") == 3:
+        targets = [arg]
     else:
-        local = socket.gethostbyname(socket.gethostname())
-        net = ipaddress.ip_network(f"{local}/24", strict=False)
+        net = ipaddress.ip_network(f"{arg or local_ip()}.0/24"
+                                   if arg else f"{local_ip()}/24", strict=False)
         targets = [str(h) for h in net.hosts()]
         print(f"sweeping {net} …", file=sys.stderr)
 
