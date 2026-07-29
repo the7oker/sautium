@@ -10094,6 +10094,20 @@
           </div>
         </div>`;
       }).join('');
+      // Re-detecting local hardware is a separate, riskier act than looking
+      // for renderers on the network: it unloads and reloads every audio
+      // driver installed on this machine, third-party ASIO ones included. It
+      // belongs where a user who just plugged in a DAC would look for it, and
+      // nowhere else — bundling it into the renderer Rescan meant every
+      // search for a speaker put the backend at the mercy of a driver.
+      deviceRows += `
+        <div class="form-row stacked" data-action="redetect-devices" style="cursor:pointer;">
+          <div class="row-stack">
+            <span class="row-stack-label">Re-detect audio devices</span>
+            <span style="color:var(--color-text-dim);display:inline-flex;">${SETTINGS_ICONS.rightCh}</span>
+          </div>
+          <div class="row-stack-sub">For hardware plugged in after startup. Reloads the audio drivers.</div>
+        </div>`;
     } else {
       deviceRows = `
         <div class="form-row disabled stacked">
@@ -10225,7 +10239,7 @@
       <div class="profile-group-label">Output quality · DLNA / This device</div>
       ${qualityGroup}
       <div class="btn-row single">
-        <button class="btn btn-secondary" data-action="refresh-outputs">Rescan devices</button>
+        <button class="btn btn-secondary" data-action="refresh-outputs">Rescan renderers</button>
       </div>`;
   }
 
@@ -10265,8 +10279,14 @@
         refresh.textContent = 'Scanning…';
         try { await fetch('/api/player/outputs/dlna/scan', { method: 'POST' }); }
         catch (_) {}
-        renderOutputSettings(root, true);
+        // 'soft', not true: this button looks for renderers on the network
+        // and has no business reloading the machine's audio drivers.
+        renderOutputSettings(root, 'soft');
       });
+    }
+    const redetect = root.querySelector('[data-action="redetect-devices"]');
+    if (redetect) {
+      redetect.addEventListener('click', () => renderOutputSettings(root, true));
     }
     root.querySelectorAll('[data-action="set-quality"]').forEach(el =>
       el.addEventListener('click', () =>

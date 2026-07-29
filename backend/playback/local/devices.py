@@ -88,6 +88,44 @@ def list_devices() -> list[dict]:
     return devices
 
 
+def _reinit_survives_elsewhere() -> bool:
+    """Run the same terminate+initialize in a process we can afford to lose.
+
+    A reinit unloads and reloads every registered ASIO driver, and those are
+    third-party native code with our address space in their hands. A vendor
+    driver whose USB device is unplugged is a common way to get an access
+    violation out of one, and an access violation cannot be caught — no
+    `except`, no lock, no amount of serialisation saves the process. Observed
+    twice on this host: pressing Rescan killed the backend outright, with WER
+    naming libportaudio64bit-asio.dll.
+
+    So the dangerous half runs in a child first. If the child dies, the same
+    call would most likely have killed us, and the honest response is to skip
+    the rescan and say why — a stale device list is a far smaller failure than
+    a backend that vanishes when someone opens a settings screen."""
+    import subprocess
+    import sys
+    probe = ("import sounddevice as sd; sd._terminate(); sd._initialize(); "
+             "sd.query_hostapis(); sd.query_devices(); print('ok')")
+    try:
+        out = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True,
+            timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning("PortAudio reinit probe could not run (%s)", e)
+        return False
+    if out.returncode == 0 and "ok" in out.stdout:
+        return True
+    logger.error(
+        "PortAudio reinit crashes this machine's audio drivers (probe exit %s) "
+        "— skipping device rescan. A driver for an unplugged ASIO device is "
+        "the usual cause; the existing device list stays in use.",
+        out.returncode)
+    return False
+
+
 def rescan() -> None:
     """Re-enumerate hardware. PortAudio snapshots the device list at library
     init — a DAC plugged in AFTER the backend started is invisible until a
@@ -99,6 +137,8 @@ def rescan() -> None:
         if _open_streams > 0:
             logger.warning("device rescan skipped: %d stream(s) open",
                            _open_streams)
+            return
+        if not _reinit_survives_elsewhere():
             return
         try:
             sd._terminate()
