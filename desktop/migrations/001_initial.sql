@@ -2139,13 +2139,32 @@ SELECT
     -- no variants/files) are discovery data, not library contents
     (SELECT COUNT(*) FROM albums al
       WHERE EXISTS (SELECT 1 FROM album_variants av
+                    JOIN media_files mf ON mf.album_variant_id = av.id
                     WHERE av.album_id = al.id)) as total_albums,
     (SELECT COUNT(*) FROM tracks t
       WHERE EXISTS (SELECT 1 FROM media_files mf
                     WHERE mf.track_id = t.id)) as total_tracks,
     (SELECT COUNT(*) FROM media_files) as total_media_files,
-    (SELECT COUNT(*) FROM embeddings) as tracks_with_embeddings,
-    (SELECT COUNT(*) FROM track_lyrics) as tracks_with_lyrics,
+    -- The coverage counters carry the SAME physical-presence rule as the
+    -- totals they are read against. Counting whole tables instead made the
+    -- numerator describe a different library from the denominator: phantoms
+    -- carry embeddings, and a synced node holds analysis for tracks it has no
+    -- file for, so "977 / 442 (221%)" was an honest report of two unrelated
+    -- numbers. Per-track counts, not row counts — a second embedding model
+    -- would otherwise double the figure on its own.
+    (SELECT COUNT(*) FROM tracks t
+      WHERE EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
+        AND EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = t.id)
+    ) as tracks_with_embeddings,
+    (SELECT COUNT(*) FROM tracks t
+      WHERE EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
+        AND EXISTS (SELECT 1 FROM track_lyrics tl WHERE tl.track_id = t.id)
+    ) as tracks_with_lyrics,
     (SELECT SUM(duration_seconds) FROM media_files) as total_duration_seconds,
     (SELECT SUM(file_size_bytes) FROM media_files) as total_file_size_bytes,
-    (SELECT COUNT(*) FROM genres) as unique_genres;
+    -- Genres present in the owned library, not every genre name the node has
+    -- ever heard of — a synced node knows thousands it owns no track in.
+    (SELECT COUNT(DISTINCT ag.genre_id) FROM album_genres ag
+      WHERE EXISTS (SELECT 1 FROM album_variants av
+                    JOIN media_files mf ON mf.album_variant_id = av.id
+                    WHERE av.album_id = ag.album_id)) as unique_genres;

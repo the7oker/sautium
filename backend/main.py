@@ -743,7 +743,13 @@ async def get_stats() -> Dict[str, Any]:
             # Enrichment coverage stats
             enrichment_sql = """
             SELECT
-                (SELECT COUNT(*) FROM audio_features) as tracks_with_features,
+                -- Owned tracks only, like every other coverage figure — see
+                -- library_stats. A raw table count includes phantoms and
+                -- peer-imported analysis and reads as >100% coverage.
+                (SELECT COUNT(*) FROM tracks t
+                  WHERE EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
+                    AND EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = t.id)
+                ) as tracks_with_features,
                 (SELECT COUNT(DISTINCT ta.artist_id) FROM track_artists ta) as library_artists,
                 (SELECT COUNT(DISTINCT a.id) FROM artists a
                  JOIN track_artists ta ON ta.artist_id = a.id
