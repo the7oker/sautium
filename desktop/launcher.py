@@ -124,12 +124,8 @@ class LauncherApp(ctk.CTk):
         self._qr_frame.pack(pady=5)
         self._qr_labels: dict = {}
 
-        # URL label
-        self._url_label = ctk.CTkLabel(
-            self, text="", text_color="gray",
-            font=ctk.CTkFont(size=12),
-        )
-        self._url_label.pack(pady=(0, 2))
+        # No loopback URL line: "Open Web UI" already opens exactly that, and
+        # the addresses another device would use are captioned under their QR.
 
         # First-visit hint about self-signed certificate. Hidden until
         # services are running — see _on_services_ready.
@@ -292,9 +288,6 @@ class LauncherApp(ctk.CTk):
     def _on_services_ready(self):
         """Called when all services are running."""
         port = self.config.get("ports", {}).get("web", 8000)
-        local_ip = get_local_ip()
-        local_url = f"https://localhost:{port}"
-        lan_url = f"https://{local_ip}:{port}"
 
         # Check GPU status via backend Python (torch is in python312, not launcher)
         gpu_text = ""
@@ -312,10 +305,6 @@ class LauncherApp(ctk.CTk):
             gpu_text = "GPU: check failed"
 
         self._set_status("running", "All services running")
-        # Only the loopback URL here — the reachable addresses are captioned
-        # under their own QR, port included, and a window this narrow cannot
-        # hold three of them on one line.
-        self._url_label.configure(text=f"Local: {local_url}")
         self._url_hint_label.configure(
             text="First visit shows a browser security warning — accept it to continue (self-signed cert)."
         )
@@ -443,7 +432,11 @@ class LauncherApp(ctk.CTk):
                              font=ctk.CTkFont(size=10)).pack()
                 self._qr_labels[caption] = widget
 
-            img = generate_qr_ctk(f"https://{ip}:{port}/{fragment}", size=180)
+            # 150, not 180: the window is a fixed 900 tall and the Quit button
+            # is the thing that falls off the bottom. Horizontal room is what
+            # we have to spend, and a ~30-module code at 150px is still 5px
+            # per module — well inside what a phone camera reads.
+            img = generate_qr_ctk(f"https://{ip}:{port}/{fragment}", size=150)
             if img:
                 widget.configure(image=img, text="")
             else:
