@@ -640,11 +640,15 @@ class LauncherApp(ctk.CTk):
                 p2p_cfg = self.config.get("p2p", {})
                 sync_port = p2p_cfg.get("listen_port", 20000)
 
-                # Open firewall for P2P ports (Windows)
+                # Open firewall for P2P ports (Windows), and clear the ones
+                # earlier ports left behind — the draw is per install, so a
+                # rebuilt node otherwise keeps every port it has ever used
+                # open forever.
                 self.service_manager._ensure_firewall_rule(
                     LAN_DISCOVERY_PORT, "UDP")
                 self.service_manager._ensure_firewall_rule(
                     sync_port, "TCP")
+                self.service_manager._prune_stale_p2p_rules(sync_port)
 
                 self.p2p_manager = P2PManager(db_dsn, self.config)
                 self.p2p_manager.start(

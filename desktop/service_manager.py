@@ -665,6 +665,59 @@ class ServiceManager:
         logger.info(f"{name} stopped")
 
     @staticmethod
+    def _prune_stale_p2p_rules(current_port: int) -> None:
+        """Delete firewall rules left behind by earlier P2P ports.
+
+        The P2P port is drawn once per install and kept, so a normal user
+        accumulates one rule. Reinstalling — or wiping the config, which is
+        how a test node is rebuilt — draws a new one and leaves the old rule
+        behind forever. Sixty-five had piled up on the development machine:
+        sixty-four open inbound ports with nothing listening on them, waiting
+        for some unrelated program to bind one and find itself exposed to the
+        LAN.
+
+        Only the 20000-29999 range is swept, which is exactly where the random
+        draw lands. The fixed-port rules (web UI, media, GENA, peer surface)
+        are named the same way and must survive."""
+        if sys.platform != "win32":
+            return
+        import re
+        try:
+            out = subprocess.run(
+                ["netsh", "advfirewall", "firewall", "show", "rule", "name=all"],
+                capture_output=True, text=True, errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            stale = sorted({
+                m.group(1) for m in re.finditer(r"Sautium \(TCP (2\d{4})\)", out.stdout)
+                if m.group(1) != str(current_port)
+            })
+            if not stale:
+                return
+            batch = " & ".join(
+                f'netsh advfirewall firewall delete rule name="Sautium (TCP {p})"'
+                for p in stale)
+            done = subprocess.run(["cmd", "/c", batch], capture_output=True,
+                                  text=True, errors="replace",
+                                  creationflags=subprocess.CREATE_NO_WINDOW)
+            if done.returncode == 0:
+                logger.info("Removed %d stale P2P firewall rule(s)", len(stale))
+                return
+            # One elevation for the whole batch — a prompt per rule would be
+            # sixty-five prompts, which is the same as not offering it.
+            import ctypes
+            ret = ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", "cmd", f'/c "{batch}"', None, 0)
+            if ret > 32:
+                logger.info("Removed %d stale P2P firewall rule(s) (elevated)",
+                            len(stale))
+            else:
+                logger.warning("Firewall cleanup declined — %d stale rule(s) "
+                               "remain", len(stale))
+        except Exception as e:
+            logger.debug(f"Firewall cleanup skipped: {e}")
+
+    @staticmethod
     def _ensure_firewall_rule(port, protocol: str = "TCP",
                               profile: str = "private") -> None:
         """Add Windows Firewall rule, with UAC elevation if needed.
