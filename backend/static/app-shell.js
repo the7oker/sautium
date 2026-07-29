@@ -10113,10 +10113,19 @@
     if (dlna && dlna.available) {
       const rows = (dlna.renderers || []).map(r => {
         const sel = active.type === 'dlna' && active.renderer_udn === r.udn;
-        const unpin = r.pinned ? `
+        // Removable whatever put it in the list. A renderer that was
+        // discovered once and has since moved networks is exactly the entry a
+        // user most wants gone, and it used to be the one entry they couldn't
+        // touch.
+        const unpin = `
             <button data-action="remove-renderer" data-udn="${escapeProfileHtml(r.udn)}"
               style="background:none;border:none;color:var(--color-text-dim);font-size:calc(15*var(--px));padding:0 calc(4*var(--px));cursor:pointer;line-height:1;"
-              title="Remove pinned renderer">&times;</button>` : '';
+              title="Forget this renderer">&times;</button>`;
+        // The address, because which network a device is on decides whether
+        // it can play at all — and two entries named "BubbleUPnP" are
+        // otherwise indistinguishable.
+        let host = '';
+        try { host = new URL(r.location || '').hostname; } catch (e) { host = ''; }
         return `
         <div class="form-row stacked" data-action="select-renderer" data-udn="${escapeProfileHtml(r.udn)}" style="cursor:pointer;">
           <div class="row-stack">
@@ -10124,7 +10133,7 @@
             <span style="display:inline-flex;align-items:center;gap:calc(6*var(--px));">${unpin}${mark(sel)}</span>
           </div>
           <div class="row-stack-value">
-            <span style="font-family:var(--font-mono);font-size:calc(11.5*var(--px));color:var(--color-text-dim);letter-spacing:0.04em;">DLNA · ${escapeProfileHtml(r.model || '')}${r.pinned ? ' · pinned' : ''}</span>
+            <span style="font-family:var(--font-mono);font-size:calc(11.5*var(--px));color:var(--color-text-dim);letter-spacing:0.04em;">${escapeProfileHtml(host || 'DLNA')}${r.model ? ' · ' + escapeProfileHtml(r.model) : ''}${r.pinned ? ' · pinned' : ''}</span>
           </div>
         </div>`;
       }).join('');

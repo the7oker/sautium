@@ -296,7 +296,11 @@ class DlnaBackend(PlayerBackend):
         return self._dmr is not None and not self._gone
 
     def reachable(self) -> bool:
-        return renderer_reachable(self._renderer.get("location", ""))
+        # Any known address counts: the play-intent gate must not call a
+        # renderer offline just because it moved networks since we last saw it.
+        return any(renderer_reachable(loc) for loc in
+                   [self._renderer.get("location", "")]
+                   + list(self._renderer.get("locations") or []) if loc)
 
     def resume_at(self, index: int) -> None:
         if self._queue.item_at(index) is None:
@@ -305,13 +309,52 @@ class DlnaBackend(PlayerBackend):
         self._current_url = None     # play() loads this slot fresh
         self._emit_now("stopped")
 
+    async def _create_device(self, factory):
+        """Build the device from whichever known address answers.
+
+        A renderer moves between networks — the same phone is on the LAN at
+        home and on a tunnel from a train — so the stored address is a guess
+        with a good prior, not a fact. Trying it first and the rest after
+        costs nothing when the guess holds and is the difference between
+        working and "device unavailable" when it does not."""
+        known = []
+        for loc in ([self._renderer.get("location")]
+                    + list(self._renderer.get("locations") or [])):
+            if loc and loc not in known:
+                known.append(loc)
+
+        # Probe first, and all at once. A device that has left a network does
+        # not refuse the connection, it swallows it, so walking the list with
+        # full description fetches lets one dead address spend the entire
+        # attach budget before a live one is ever tried — which is precisely
+        # how this failed. A TCP connect costs 2s worst case and they overlap.
+        alive = [loc for loc, ok in zip(known, await asyncio.gather(
+            *(asyncio.to_thread(renderer_reachable, loc, 2.0) for loc in known)
+        )) if ok]
+
+        for loc in alive:
+            try:
+                return await factory.async_create_device(loc), loc
+            except Exception as e:
+                logger.debug("renderer answered at %s but described badly: %s", loc, e)
+        raise DlnaAttachError(
+            f"'{self.label}' did not answer at any known address "
+            f"({', '.join(urlparse(t).hostname or t for t in known) or 'none'})"
+            " — if it moved networks, add it again by its current address")
+
     async def _async_start(self) -> None:
         # 10s over the default 5s: phone renderers in Wi-Fi power-save can
         # stall the first request for seconds while the radio wakes up.
         requester = AiohttpRequester(timeout=10)
-        notify_server = await _ensure_notify(requester, self._peer_host)
         factory = UpnpFactory(requester, non_strict=True)
-        device = await factory.async_create_device(self._renderer["location"])
+        device, location = await self._create_device(factory)
+        if location != self._renderer.get("location"):
+            self._renderer = {**self._renderer, "location": location}
+            self._peer_host = urlparse(location).hostname
+            from routers.player import note_renderer_location
+            note_renderer_location(self._renderer["udn"], location)
+            logger.info("renderer %s answered at %s instead", self.label, location)
+        notify_server = await _ensure_notify(requester, self._peer_host)
 
         self._dmr = DmrDevice(device, notify_server.event_handler)
         self._dmr.on_event = self._on_gena_event
