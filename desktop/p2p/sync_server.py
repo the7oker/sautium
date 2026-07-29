@@ -56,6 +56,8 @@ class SyncServer:
         self._site: Optional[web.TCPSite] = None
         # Rate limiting state
         self._request_counts: dict[str, list[float]] = defaultdict(list)
+        self._sharing = True
+        self._sharing_checked = 0.0
 
     def set_chat_service(self, chat_service, on_message_cb: Callable = None):
         """Attach chat service for handling chat endpoints."""
@@ -73,6 +75,32 @@ class SyncServer:
         with conn.cursor() as cur:
             cur.execute("SET timezone = 'UTC'")
         return conn
+
+    def _sharing_enabled(self) -> bool:
+        """The "P2P sharing" switch from Settings. Peer endpoints have no
+        login by design, so this flag is the only thing between "off" and a
+        full inventory dump — a launcher must honour it exactly like the
+        backend does. Cached briefly: one sync run fires many pulls.
+        Unreadable settings fail closed."""
+        now = time.time()
+        if now - self._sharing_checked < 10.0:
+            return self._sharing
+        self._sharing_checked = now
+        try:
+            conn = self._new_db()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT value FROM user_settings "
+                                "WHERE key = 'sync.p2p_enabled'")
+                    row = cur.fetchone()
+                # Absent row means the default, which is on.
+                self._sharing = True if row is None else bool(row[0])
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning("sharing flag unreadable (%s) — refusing to serve", e)
+            self._sharing = False
+        return self._sharing
 
     def _check_rate_limit(self, ip: str) -> bool:
         """Return True if the request is allowed, False if rate-limited."""
@@ -140,6 +168,10 @@ class SyncServer:
                 request, {"error": "rate limited"}, status=429
             )
 
+        if not self._sharing_enabled():
+            return self._json_response(
+                request, {"error": "sharing disabled"}, status=403)
+
         try:
             body = await request.json()
             track_uuids = body.get("track_uuids", [])
@@ -172,6 +204,10 @@ class SyncServer:
             return self._json_response(
                 request, {"error": "rate limited"}, status=429
             )
+
+        if not self._sharing_enabled():
+            return self._json_response(
+                request, {"error": "sharing disabled"}, status=403)
 
         category = request.match_info.get("category", "")
         handler = sync_queries.PULL_HANDLERS.get(category)
@@ -213,6 +249,10 @@ class SyncServer:
             return self._json_response(
                 request, {"error": "rate limited"}, status=429
             )
+
+        if not self._sharing_enabled():
+            return self._json_response(
+                request, {"error": "sharing disabled"}, status=403)
 
         if not self.mb_dump_version:
             return self._json_response(

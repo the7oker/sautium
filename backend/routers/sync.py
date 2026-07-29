@@ -44,6 +44,39 @@ SYNC_CAPABILITIES = ["segments"]
 # segments pulls get a tighter per-request cap than plain-row categories.
 SEGMENTS_MAX_UUIDS = 500
 
+# "P2P sharing" in Settings. Until now nothing read it: the switch was
+# written to user_settings and never consulted, so a node kept serving its
+# whole catalogue to any caller after its owner had explicitly turned
+# sharing off. These endpoints are unauthenticated by design (the peer
+# protocol has no login), which makes the switch the ONLY thing standing
+# between "off" and a full inventory dump — it has to actually work.
+# Cached briefly: a sync run fires many pulls and each would otherwise cost
+# a settings query.
+_SHARING_TTL = 10.0
+_sharing_cache: tuple[float, bool] = (0.0, True)
+
+
+def sharing_enabled() -> bool:
+    import time as _time
+    global _sharing_cache
+    now = _time.monotonic()
+    ts, val = _sharing_cache
+    if now - ts < _SHARING_TTL:
+        return val
+    try:
+        from routers.settings import _read
+        val = bool(_read("sync.p2p_enabled"))
+    except Exception as e:                       # settings unreadable: fail closed
+        logger.warning(f"sharing flag unreadable ({e}) — refusing to serve")
+        val = False
+    _sharing_cache = (now, val)
+    return val
+
+
+def _require_sharing() -> None:
+    if not sharing_enabled():
+        raise HTTPException(status_code=403, detail="sharing disabled")
+
 # Single source: desktop/p2p/mb_slice_queries.py. In Docker the desktop/p2p
 # dir is bind-mounted at /app/desktop_p2p; a native repo run finds it at
 # ../desktop/p2p. Loaded by file path (not sys.path) so desktop modules can
@@ -142,6 +175,7 @@ def mb_slice(req: MBSliceRequest) -> dict:
     """Serve raw mb_* subtrees for a batch of artist names — the P2P
     canonicalization source for dump-less peers. Mirrors
     desktop/p2p/sync_server.handle_mb_slice."""
+    _require_sharing()
     if not mb_dump_version():
         raise HTTPException(status_code=404, detail="no MB dump on this node")
     try:
@@ -195,6 +229,7 @@ async def get_inventory(req: InventoryRequest) -> dict:
 
     Uses 3 consolidated CTE queries instead of 15 separate ones.
     """
+    _require_sharing()
     if not req.track_uuids:
         return dict(_EMPTY_INVENTORY)
 
@@ -290,6 +325,7 @@ def _parse_vector(vec_text: str) -> list[float]:
 
 def _pull_handler(category: str, sql: str, uuids: list[str], post_process=None) -> dict:
     """Common handler for pull endpoints."""
+    _require_sharing()
     if not uuids:
         return {"category": category, "items": []}
     try:
@@ -310,6 +346,7 @@ def _pull_handler(category: str, sql: str, uuids: list[str], post_process=None) 
 @router.post("/pull/tracks")
 async def pull_tracks(req: PullRequest) -> dict:
     """Pull track metadata with associated artists."""
+    _require_sharing()
     if not req.uuids:
         return {"category": "tracks", "items": []}
 
@@ -422,6 +459,7 @@ async def pull_segments(req: PullRequest) -> dict:
     travel as base64 of the canonical float32-LE bytes so vector_hash verifies
     over the received bytes; the `batches` map carries the Worker timestamps.
     Mirrors desktop/p2p/sync_queries.pull_segments."""
+    _require_sharing()
     if not req.uuids:
         return {"category": "segments", "items": [], "batches": {}}
     if len(req.uuids) > SEGMENTS_MAX_UUIDS:
@@ -485,6 +523,7 @@ async def pull_segments(req: PullRequest) -> dict:
 async def pull_embeddings(req: PullRequest) -> dict:
     """Legacy mean-vector pull — kept for peers without the `segments`
     capability. Capable peers pull `segments` and derive the mean locally."""
+    _require_sharing()
     if not req.uuids:
         return {"category": "embeddings", "items": []}
 
@@ -524,6 +563,7 @@ async def pull_audio_features(req: PullRequest) -> dict:
     """Pull audio analysis features with their provenance. Rows travel WITH
     their seals + a `batches` map (Worker timestamps) — imported rows stay
     verifiable and re-servable with authorship intact."""
+    _require_sharing()
     if not req.uuids:
         return {"category": "audio_features", "items": [], "batches": {}}
 
