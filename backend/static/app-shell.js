@@ -10046,15 +10046,25 @@
     // Opening the picker IS the discovery intent: kick an SSDP scan in the
     // background (multi-interface, ~10 s) and refresh the list once it lands
     // — but only if the user is still on this screen.
-    if (!rescan) {
-      fetch('/api/player/outputs/dlna/scan', { method: 'POST' })
+    if (!rescan) _dlnaScanOnce(root);
+  }
+
+  // Opening the picker starts a scan and so does the Rescan button. Both share
+  // one request and one repaint: two would race to replace the same list, and
+  // the loser's repaint would land after the button had already gone idle.
+  let _dlnaScanInFlight = null;
+  function _dlnaScanOnce(root) {
+    if (!_dlnaScanInFlight) {
+      _dlnaScanInFlight = fetch('/api/player/outputs/dlna/scan', { method: 'POST' })
+        .catch(() => {})
         .then(() => {
+          _dlnaScanInFlight = null;
           if (root.querySelector('[data-output-content]')) {
             renderOutputSettings(root, 'soft');
           }
-        })
-        .catch(() => {});
+        });
     }
+    return _dlnaScanInFlight;
   }
 
   function _renderOutputs(data) {
@@ -10277,11 +10287,12 @@
       refresh.addEventListener('click', async () => {
         refresh.disabled = true;
         refresh.textContent = 'Scanning…';
-        try { await fetch('/api/player/outputs/dlna/scan', { method: 'POST' }); }
-        catch (_) {}
-        // 'soft', not true: this button looks for renderers on the network
-        // and has no business reloading the machine's audio drivers.
-        renderOutputSettings(root, 'soft');
+        // Joins a scan already running rather than starting a second, and the
+        // repaint that clears this button happens inside — so "Scanning…"
+        // lasts exactly as long as the scan whose results it is waiting for.
+        // The scan alone is what this does: reloading the machine's audio
+        // drivers belongs to Re-detect, in the Local devices group.
+        await _dlnaScanOnce(root);
       });
     }
     const redetect = root.querySelector('[data-action="redetect-devices"]');

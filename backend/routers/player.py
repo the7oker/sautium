@@ -469,11 +469,33 @@ async def _unicast_sweep(found: dict) -> None:
                 found.setdefault(usn, loc)
 
 
+_dlna_scan_task: Optional[asyncio.Task] = None
+
+
 @router.post("/outputs/dlna/scan")
 async def dlna_scan():
-    """Find MediaRenderer devices on the LAN: SSDP multicast from every local
-    interface, then a unicast sweep of the LAN for the containerised case
-    where multicast cannot leave the bridge."""
+    """Find MediaRenderer devices. One scan at a time; concurrent callers wait
+    for the one already running instead of starting another.
+
+    Opening the Output picker starts a scan by itself, so pressing Rescan
+    while that is in flight used to run two. Both end by replacing the
+    discovered set wholesale, so the LAST one to finish won — and the button,
+    which tracks only its own request, went back to idle while the other scan
+    was still going. That is what "the device appeared after Rescan said it
+    was done" was: the two racing, not the device being slow. Two concurrent
+    sweeps of the whole subnet also make discovery less reliable, not more,
+    since a dozing phone renderer answers one M-SEARCH and drops the other."""
+    global _dlna_scan_task
+    if _dlna_scan_task is None or _dlna_scan_task.done():
+        _dlna_scan_task = asyncio.create_task(_dlna_scan_run())
+    # Not the task's owner, so a client that walks away cannot cancel the scan
+    # everyone else is waiting on.
+    return await asyncio.shield(_dlna_scan_task)
+
+
+async def _dlna_scan_run():
+    """SSDP multicast from every local interface, then a unicast sweep for the
+    containerised case where multicast cannot leave the bridge."""
     try:
         from async_upnp_client.search import async_search
     except ImportError:
