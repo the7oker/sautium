@@ -38,6 +38,21 @@ from database import get_db_context
 logger = logging.getLogger(__name__)
 
 
+# How long a negative verdict from the source keeps an entity out of the
+# planner. It expires because none of these are permanent facts: a Last.fm
+# HTTP 500 is a bad minute, and an artist absent today gets added tomorrow —
+# without a window the first bad answer we ever got about an entity is the
+# last answer we ever accept.
+#
+# No attempt counter and no exponential curve: a repeated failure refreshes
+# updated_at, so the window itself already spaces the retries.
+_NEGATIVE_CACHE_WINDOW = """
+    AND em.updated_at > NOW() - (CASE em.fetch_status
+                                     WHEN 'not_found' THEN INTERVAL '90 days'
+                                     ELSE INTERVAL '7 days' END)
+"""
+
+
 # Tunables. These are intentionally module-level constants — there is
 # no production reason to make them user-configurable until we have
 # data showing the defaults are wrong.
@@ -104,7 +119,7 @@ _PRIORITY_SQL = text("""
               AND em.entity_id = t.id::text
               AND em.source = 'lastfm'
               AND em.metadata_type = 'stats'
-              AND em.fetch_status IN ('not_found', 'error')
+              AND em.fetch_status IN ('not_found', 'error')""" + _NEGATIVE_CACHE_WINDOW + """
         )
         GROUP BY t.id, t.title, a.name
     )
@@ -237,7 +252,7 @@ def _step_missing_artists(limit: int) -> Dict[str, int]:
               AND em.entity_id = a.id::text
               AND em.source = 'lastfm'
               AND em.metadata_type = 'bio'
-              AND em.fetch_status IN ('not_found', 'error')
+              AND em.fetch_status IN ('not_found', 'error')""" + _NEGATIVE_CACHE_WINDOW + """
         )
         ORDER BY a.name
         LIMIT :batch
@@ -293,7 +308,7 @@ def _step_missing_genres(limit: int) -> Dict[str, int]:
               AND em.entity_id = g.id::text
               AND em.source = 'lastfm'
               AND em.metadata_type = 'description'
-              AND em.fetch_status IN ('not_found', 'error')
+              AND em.fetch_status IN ('not_found', 'error')""" + _NEGATIVE_CACHE_WINDOW + """
         )
         ORDER BY g.name
         LIMIT :batch

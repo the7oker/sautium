@@ -40,6 +40,28 @@ class RateLimitExhausted(Exception):
     keep hammering a source that is actively refusing us."""
 
 
+
+def _is_our_failure(exc: Exception) -> bool:
+    """Did WE fail, or did the source give a verdict?
+
+    A UniqueViolation or a value-too-long says nothing about the artist and
+    everything about our code at that moment. Recording it as a negative cache
+    entry turns a transient bug of ours into permanent data loss: the planner
+    then skips that artist forever, long after the bug is fixed. Measured on
+    the master before this existed — 26 of 49 cached "errors" were our own
+    database errors, one of them literally captioned "(transient)" and five
+    months old.
+
+    Only the source's own verdict belongs in the cache. Ours belongs in the
+    log, and the entity simply stays unenriched until the next pass."""
+    try:
+        from sqlalchemy.exc import SQLAlchemyError
+    except ImportError:          # pragma: no cover
+        return False
+    return isinstance(exc, (SQLAlchemyError, AttributeError, TypeError,
+                            KeyError, ValueError))
+
+
 class LastFmService:
     """Service for fetching and storing Last.fm metadata."""
 
@@ -681,7 +703,16 @@ class LastFmService:
             logger.error(f"Failed to enrich artist {artist_name}: {e}")
             db.rollback()
 
-            # Store error in external_metadata to avoid re-processing
+            if _is_our_failure(e):
+                # Do NOT negative-cache: nothing here is a statement about the
+                # artist, and remembering it would bar a retry once the bug is
+                # gone. It stays unenriched and comes back next pass.
+                logger.error("  ^ internal failure, not cached — %s will be "
+                             "retried", artist_name)
+                return {"status": "error", "artist_id": artist_id,
+                        "artist_name": artist_name, "error": str(e)}
+
+            # Store the SOURCE's error so the planner can back off from it
             try:
                 self._upsert_metadata(
                     db,
@@ -1133,6 +1164,14 @@ class LastFmService:
             db.rollback()
 
             # Record error in external_metadata to avoid re-processing
+            if _is_our_failure(e):
+                # Same rule as the artist path: our own failure is not a fact
+                # about this track, so it must not bar a retry.
+                logger.error("  ^ internal failure, not cached — track %s will "
+                             "be retried", track_id)
+                return {"status": "error", "track_id": track_id,
+                        "artist_name": artist_name,
+                        "track_title": track_title, "error": str(e)}
             try:
                 self._upsert_metadata(
                     db,
