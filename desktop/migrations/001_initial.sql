@@ -662,6 +662,12 @@ CREATE TRIGGER trg_audio_features_seal_guard
 BEFORE UPDATE ON audio_features
 FOR EACH ROW EXECUTE FUNCTION seal_guard_audio_features();
 
+-- -- Enrichment seals (Phase B) --------------------------------------------
+--
+-- The enrichment tables are defined further down; these columns and guards are
+-- applied to them at the end of this file, where they exist. Kept as one block
+-- so the seal story reads in one place.
+
 -- ============================================================
 -- Metadata tables (UUID FKs)
 -- ============================================================
@@ -2168,3 +2174,135 @@ SELECT
       WHERE EXISTS (SELECT 1 FROM album_variants av
                     JOIN media_files mf ON mf.album_variant_id = av.id
                     WHERE av.album_id = ag.album_id)) as unique_genres;
+
+
+-- Phase B: enrichment records become signable.
+--
+-- fetched_at is when the SOURCE told us, not when the row was written. It is
+-- the basis on which one copy of a fact beats another across the network, and
+-- it rides inside the signed payload — a freshness stamp an importer could
+-- edit would decide precedence while the signature still verified.
+--
+-- Backfilled from updated_at for existing rows: it is the closest honest
+-- approximation we have, and leaving it NULL would make every pre-existing row
+-- lose to any imported one.
+
+DO $$
+DECLARE t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['artist_bios', 'artist_tags', 'similar_artists',
+                             'track_stats', 'genre_descriptions']
+    LOOP
+        EXECUTE format($f$
+            ALTER TABLE %I
+                ADD COLUMN IF NOT EXISTS fetched_at    TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS author_pubkey CHAR(64),
+                ADD COLUMN IF NOT EXISTS signature     CHAR(128),
+                ADD COLUMN IF NOT EXISTS batch_root    CHAR(64)
+                    REFERENCES signing_batches(batch_root),
+                ADD COLUMN IF NOT EXISTS merkle_proof  JSONB
+        $f$, t);
+        EXECUTE format(
+            'UPDATE %I SET fetched_at = updated_at WHERE fetched_at IS NULL', t);
+        EXECUTE format($f$
+            CREATE INDEX IF NOT EXISTS idx_%s_unsigned ON %I (updated_at)
+                WHERE signature IS NULL
+        $f$, t, t);
+    END LOOP;
+END $$;
+
+
+-- Seal invalidation for the enrichment tables, same invariant as the audio
+-- ones: an UPDATE that changes a signed payload column without presenting a
+-- new signature loses the seal. Writers need no seal awareness and cannot
+-- silently leave a signature attached to data it does not cover.
+--
+-- source and fetched_at are payload here — both ride inside the signed bytes,
+-- so editing either must shed the seal exactly as editing the content does.
+-- Linking columns (artist_id, genre_id, track_id) are NOT payload: the
+-- artist-normalisation rewrites re-key rows by design and must not shed seals.
+
+CREATE OR REPLACE FUNCTION seal_guard_artist_bios() RETURNS trigger AS $$
+BEGIN
+    IF (NEW.summary IS DISTINCT FROM OLD.summary
+        OR NEW.content IS DISTINCT FROM OLD.content
+        OR NEW.url IS DISTINCT FROM OLD.url
+        OR NEW.listeners IS DISTINCT FROM OLD.listeners
+        OR NEW.playcount IS DISTINCT FROM OLD.playcount
+        OR NEW.source IS DISTINCT FROM OLD.source
+        OR NEW.fetched_at IS DISTINCT FROM OLD.fetched_at)
+       AND NEW.signature IS NOT DISTINCT FROM OLD.signature THEN
+        NEW.author_pubkey := NULL; NEW.signature := NULL;
+        NEW.batch_root := NULL;    NEW.merkle_proof := NULL;
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION seal_guard_artist_tags() RETURNS trigger AS $$
+BEGIN
+    IF (NEW.tag_id IS DISTINCT FROM OLD.tag_id
+        OR NEW.weight IS DISTINCT FROM OLD.weight
+        OR NEW.source IS DISTINCT FROM OLD.source
+        OR NEW.fetched_at IS DISTINCT FROM OLD.fetched_at)
+       AND NEW.signature IS NOT DISTINCT FROM OLD.signature THEN
+        NEW.author_pubkey := NULL; NEW.signature := NULL;
+        NEW.batch_root := NULL;    NEW.merkle_proof := NULL;
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION seal_guard_similar_artists() RETURNS trigger AS $$
+BEGIN
+    IF (NEW.similar_artist_id IS DISTINCT FROM OLD.similar_artist_id
+        OR NEW.match_score IS DISTINCT FROM OLD.match_score
+        OR NEW.source IS DISTINCT FROM OLD.source
+        OR NEW.fetched_at IS DISTINCT FROM OLD.fetched_at)
+       AND NEW.signature IS NOT DISTINCT FROM OLD.signature THEN
+        NEW.author_pubkey := NULL; NEW.signature := NULL;
+        NEW.batch_root := NULL;    NEW.merkle_proof := NULL;
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION seal_guard_track_stats() RETURNS trigger AS $$
+BEGIN
+    IF (NEW.listeners IS DISTINCT FROM OLD.listeners
+        OR NEW.playcount IS DISTINCT FROM OLD.playcount
+        OR NEW.source IS DISTINCT FROM OLD.source
+        OR NEW.fetched_at IS DISTINCT FROM OLD.fetched_at)
+       AND NEW.signature IS NOT DISTINCT FROM OLD.signature THEN
+        NEW.author_pubkey := NULL; NEW.signature := NULL;
+        NEW.batch_root := NULL;    NEW.merkle_proof := NULL;
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION seal_guard_genre_descriptions() RETURNS trigger AS $$
+BEGIN
+    IF (NEW.summary IS DISTINCT FROM OLD.summary
+        OR NEW.content IS DISTINCT FROM OLD.content
+        OR NEW.url IS DISTINCT FROM OLD.url
+        OR NEW.source IS DISTINCT FROM OLD.source
+        OR NEW.fetched_at IS DISTINCT FROM OLD.fetched_at)
+       AND NEW.signature IS NOT DISTINCT FROM OLD.signature THEN
+        NEW.author_pubkey := NULL; NEW.signature := NULL;
+        NEW.batch_root := NULL;    NEW.merkle_proof := NULL;
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_seal_guard_artist_bios ON artist_bios;
+CREATE TRIGGER trg_seal_guard_artist_bios BEFORE UPDATE ON artist_bios
+    FOR EACH ROW EXECUTE FUNCTION seal_guard_artist_bios();
+DROP TRIGGER IF EXISTS trg_seal_guard_artist_tags ON artist_tags;
+CREATE TRIGGER trg_seal_guard_artist_tags BEFORE UPDATE ON artist_tags
+    FOR EACH ROW EXECUTE FUNCTION seal_guard_artist_tags();
+DROP TRIGGER IF EXISTS trg_seal_guard_similar_artists ON similar_artists;
+CREATE TRIGGER trg_seal_guard_similar_artists BEFORE UPDATE ON similar_artists
+    FOR EACH ROW EXECUTE FUNCTION seal_guard_similar_artists();
+DROP TRIGGER IF EXISTS trg_seal_guard_track_stats ON track_stats;
+CREATE TRIGGER trg_seal_guard_track_stats BEFORE UPDATE ON track_stats
+    FOR EACH ROW EXECUTE FUNCTION seal_guard_track_stats();
+DROP TRIGGER IF EXISTS trg_seal_guard_genre_descriptions ON genre_descriptions;
+CREATE TRIGGER trg_seal_guard_genre_descriptions BEFORE UPDATE ON genre_descriptions
+    FOR EACH ROW EXECUTE FUNCTION seal_guard_genre_descriptions();

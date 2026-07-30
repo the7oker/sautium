@@ -1,9 +1,5 @@
 """Signed audio-analysis records — the attribution + content-address layer.
 
-MIRROR of backend/record_sig.py (the launcher build cannot import backend
-modules). Keep both copies in step, byte for byte below this header — the
-payload formats here ARE the wire contract sync verify-on-import checks.
-
 Phase 1 of enrichment signing (see docs/design/P2P-SYNC-INTEGRITY.md). A
 signature proves *who* produced the data and *from what material*; it is
 weight, never proof of truth — truth is established by a verifier who owns
@@ -31,8 +27,13 @@ subsets, so each segment is signed independently and travels self-contained.
 Only hashes and IDs enter the signed string — never raw floats — so the
 payload is byte-stable across signer and verifier. Float determinism lives
 only in vector_hash / features_hash, taken over fixed-layout bytes.
+
+Producer (signing) AND verifier (import) contract in one file. MIRRORED at
+desktop/p2p/record_sig.py — the launcher build cannot import backend modules;
+keep both copies in step, byte for byte below the header.
 """
 
+import datetime
 import hashlib
 import json
 import struct
@@ -175,6 +176,90 @@ def canonical_features_blob(row: dict) -> bytes:
     JSON round-trip exactly (floats keep their shortest repr, JSONB dicts are
     re-dumped with sorted keys), so signer and verifier hash the same bytes."""
     return "|".join(_fmt_feature(row[c]) for c in FEATURE_ORDER).encode("utf-8")
+
+
+# -- Enrichment records --------------------------------------------------------
+#
+# These say something DIFFERENT from the audio records above, and the difference
+# is the whole design. A segment signature is a derivation claim: "I computed
+# this vector from this exact PCM", and a verifier with the same file can redo
+# it. Nobody derives a Last.fm biography. The node fetched it, and all it can
+# honestly assert is "at this instant, this source told ME this".
+#
+# So the payload binds three things and no material hash: WHO relayed it, WHAT
+# they relayed (content hash), and WHEN they were told. fetched_at lives INSIDE
+# the signed bytes rather than beside them, because freshness is the entire
+# basis on which one copy beats another — a timestamp an importer could edit
+# would decide precedence while the signature went on looking valid.
+#
+# What this buys is attribution, not verifiability: a fabricated bio is
+# indistinguishable from a real one until someone checks the source, but it is
+# never anonymous, and one DELETE by author_pubkey removes everything a bad
+# relay ever introduced.
+
+ENRICHMENT_KINDS = ("artist_bio", "artist_tag", "similar_artist",
+                    "track_stat", "genre_description")
+
+
+def _fmt_fetched_at(fetched_at) -> str:
+    """Whole seconds, UTC, RFC3339-ish. Sub-second precision would survive the
+    signer and not the JSON round-trip through the wire, and a signature that
+    depends on what a serialiser did to a microsecond is not a signature."""
+    if fetched_at is None:
+        return ""
+    if isinstance(fetched_at, str):
+        return fetched_at
+    return fetched_at.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def enrichment_payload(
+    author_pubkey_hex: str,
+    kind: str,
+    entity_uuid: str,
+    source: str,
+    content_hash_hex: str,
+    fetched_at,
+) -> bytes:
+    """The bytes an author signs for one enrichment row.
+
+    `entity_uuid` is the artist/track/genre the row hangs off; `source` is the
+    provider name as stored, so the same fact from Last.fm and from MusicBrainz
+    are separate claims rather than one contested one."""
+    if kind not in ENRICHMENT_KINDS:
+        raise ValueError(f"unknown enrichment kind: {kind}")
+    return ":".join([
+        "sautium-record", f"v{RECORD_VERSION}", kind, author_pubkey_hex.lower(),
+        entity_uuid.lower(), (source or "").lower(),
+        content_hash_hex.lower(), _fmt_fetched_at(fetched_at),
+    ]).encode("utf-8")
+
+
+# Per-kind field order for the content hash. Signer and verifier must agree
+# byte-for-byte, so this is a contract, not a convenience — appending a field
+# invalidates every existing signature of that kind and needs a version bump.
+# Field names are the WIRE names, not the column names, and deliberately so:
+# a peer verifies what it received. tag_name and similar_artist_uuid travel
+# where the local rows hold tag_id and similar_artist_id — both are UUIDv5 of
+# the name, so the two forms are interchangeable, and the portable one is what
+# the signature should cover.
+ENRICHMENT_ORDER = {
+    "artist_bio":        ["summary", "content", "url", "listeners", "playcount"],
+    "artist_tag":        ["tag_name", "weight"],
+    "similar_artist":    ["similar_artist_uuid", "match_score"],
+    "track_stat":        ["listeners", "playcount"],
+    "genre_description": ["summary", "content", "url"],
+}
+
+
+def canonical_enrichment_blob(kind: str, row: dict) -> bytes:
+    """Byte-stable serialization of an enrichment row's payload fields.
+
+    Reuses _fmt_feature: the same repr rules that survived the audio blob's
+    JSON round-trip apply here for exactly the same reason."""
+    order = ENRICHMENT_ORDER.get(kind)
+    if order is None:
+        raise ValueError(f"unknown enrichment kind: {kind}")
+    return "|".join(_fmt_feature(row.get(c)) for c in order).encode("utf-8")
 
 
 def record_leaf(signature_hex: str) -> str:
