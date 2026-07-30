@@ -34,7 +34,11 @@ DEFAULT_CONFIG = {
         "name": None,
     },
     "hqplayer": {
-        "enabled": True,
+        # Off until the owner picks HQPlayer in the Output picker. Setup used to
+        # ask with the box pre-ticked, which made _hqp_configured() true and let
+        # manager's legacy branch hand a brand-new node to HQPlayer — an output
+        # most people do not own. Existing installs keep their saved value.
+        "enabled": False,
         "host": "localhost",
         "port": 4321,
     },

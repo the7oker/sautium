@@ -59,7 +59,6 @@ class SetupWizard(ctk.CTkToplevel):
             self._step_welcome,
             self._step_account,
             self._step_provider,
-            self._step_hqplayer,
             self._step_lastfm,
             self._step_summary,
         ]
@@ -143,8 +142,14 @@ class SetupWizard(ctk.CTkToplevel):
         else:
             self._finish()
 
+    def _step_name(self) -> str:
+        """Which step we are on, by name. Positional indices used to decide this,
+        so removing a step silently shifted every later step's save code onto
+        the wrong screen."""
+        return self.steps[self.current_step].__name__
+
     def _validate_step(self) -> bool:
-        if self.current_step == 1:  # Account
+        if self._step_name() == "_step_account":
             # Phase 2: verify email code (the Worker holds the expected
             # value — registration happens right here, with the birth
             # certificate attached by register_verified_email)
@@ -275,7 +280,7 @@ class SetupWizard(ctk.CTkToplevel):
 
             return True
 
-        if self.current_step == 2:  # Provider
+        if self._step_name() == "_step_provider":
             provider = self._provider_var.get()
             self.config["provider"] = provider
 
@@ -301,17 +306,7 @@ class SetupWizard(ctk.CTkToplevel):
 
             return True
 
-        if self.current_step == 3:  # HQPlayer
-            self.config["hqplayer"]["enabled"] = self._hqp_enabled_var.get()
-            if self._hqp_enabled_var.get():
-                self.config["hqplayer"]["host"] = self._hqp_host_var.get().strip() or "localhost"
-                try:
-                    self.config["hqplayer"]["port"] = int(self._hqp_port_var.get())
-                except ValueError:
-                    self.config["hqplayer"]["port"] = 4321
-            return True
-
-        if self.current_step == 4:  # Last.fm
+        if self._step_name() == "_step_lastfm":
             self.config.setdefault("lastfm", {})
             if self._lastfm_enabled_var.get():
                 self.config["lastfm"]["pending_auth"] = True
@@ -989,97 +984,6 @@ class SetupWizard(ctk.CTkToplevel):
                 pass
             self._claude_poll_after_id = None
 
-    def _step_hqplayer(self):
-        ctk.CTkLabel(
-            self.content_frame,
-            text="HQPlayer Integration",
-            font=ctk.CTkFont(size=22, weight="bold"),
-        ).pack(pady=(20, 5))
-
-        ctk.CTkLabel(
-            self.content_frame,
-            text="Connect to HQPlayer Desktop for playback control and Last.fm scrobbling.",
-        ).pack(pady=5)
-
-        hqp = self.config.get("hqplayer", {})
-        self._hqp_enabled_var = ctk.BooleanVar(value=hqp.get("enabled", True))
-        self._hqp_host_var = ctk.StringVar(value=hqp.get("host", "localhost"))
-        self._hqp_port_var = ctk.StringVar(value=str(hqp.get("port", 4321)))
-
-        ctk.CTkCheckBox(
-            self.content_frame,
-            text="Enable HQPlayer integration",
-            variable=self._hqp_enabled_var,
-            command=self._toggle_hqp_fields,
-        ).pack(pady=10)
-
-        self._hqp_fields_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
-        self._hqp_fields_frame.pack(fill="x", padx=30, pady=5)
-
-        self._toggle_hqp_fields()
-
-    def _toggle_hqp_fields(self):
-        for widget in self._hqp_fields_frame.winfo_children():
-            widget.destroy()
-
-        if not self._hqp_enabled_var.get():
-            return
-
-        ctk.CTkLabel(self._hqp_fields_frame, text="Host:").pack(anchor="w")
-        ctk.CTkEntry(
-            self._hqp_fields_frame,
-            textvariable=self._hqp_host_var,
-            width=300,
-        ).pack(fill="x", pady=(0, 5))
-
-        ctk.CTkLabel(self._hqp_fields_frame, text="Port:").pack(anchor="w")
-        ctk.CTkEntry(
-            self._hqp_fields_frame,
-            textvariable=self._hqp_port_var,
-            width=100,
-        ).pack(anchor="w", pady=(0, 10))
-
-        ctk.CTkButton(
-            self._hqp_fields_frame,
-            text="Test Connection",
-            width=150,
-            command=self._test_hqplayer,
-        ).pack(anchor="w")
-
-        self._hqp_status_label = ctk.CTkLabel(
-            self._hqp_fields_frame, text="", text_color="gray",
-        )
-        self._hqp_status_label.pack(anchor="w", pady=5)
-
-    def _test_hqplayer(self):
-        """Test HQPlayer connection."""
-        import socket
-
-        host = self._hqp_host_var.get().strip() or "localhost"
-        try:
-            port = int(self._hqp_port_var.get())
-        except ValueError:
-            self._hqp_status_label.configure(
-                text="Invalid port", text_color="red"
-            )
-            return
-
-        self._hqp_status_label.configure(
-            text="Testing...", text_color="gray"
-        )
-        self.update()
-
-        try:
-            sock = socket.create_connection((host, port), timeout=3)
-            sock.close()
-            self._hqp_status_label.configure(
-                text="Connection successful!", text_color="green"
-            )
-        except (ConnectionRefusedError, socket.timeout, OSError) as e:
-            self._hqp_status_label.configure(
-                text=f"Connection failed: {e}", text_color="red"
-            )
-
     def _step_lastfm(self):
         ctk.CTkLabel(
             self.content_frame,
@@ -1139,12 +1043,9 @@ class SetupWizard(ctk.CTkToplevel):
                 "anthropic": "Anthropic API",
                 "openai": "OpenAI API",
             }.get(self.config.get("provider", "none"), self.config.get("provider", "none"))),
-            (
-                "HQPlayer",
-                f"{self.config['hqplayer']['host']}:{self.config['hqplayer']['port']}"
-                if self.config.get("hqplayer", {}).get("enabled")
-                else "Disabled",
-            ),
+            # No HQPlayer line: setup no longer asks about it. Output is chosen
+            # in Settings → Audio output, where the alternatives are visible.
+            ("Audio output", "This device (change in Settings)"),
             (
                 "Last.fm",
                 f"{lastfm_cfg['username']} (connected)"

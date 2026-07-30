@@ -6639,6 +6639,17 @@
     async _refreshHqpStatus() {
       const hint = this.el && this.el.querySelector('#hqpHint');
       if (!hint) return;
+      // The HQPlayer screen is about operating HQPlayer — filters, shapers,
+      // matrix profiles. It only means something while HQPlayer is the output,
+      // and listing it otherwise offers a whole settings screen for a device
+      // the sound is not going to. The row is hidden then; the route stays
+      // reachable, which is how the Output picker sends people here to
+      // configure an endpoint in the first place.
+      const row = hint.closest('.more-row');
+      const out = window.currentStatus && window.currentStatus.output;
+      const isHqp = out ? out.type === 'hqplayer' : false;
+      if (row) row.hidden = !isHqp;
+      if (!isHqp) return;
       hint.className = 'more-hint';
       hint.textContent = '…';
       try {
@@ -10076,7 +10087,8 @@
       : `<span style="color:var(--color-text-dim);display:inline-flex;">${SETTINGS_ICONS.rightCh}</span>`;
 
     const hqpRow = `
-      <div class="form-row stacked" data-action="select-hqp" style="cursor:pointer;">
+      <div class="form-row stacked" data-action="select-hqp"
+           data-configured="${hqp.available ? '1' : '0'}" style="cursor:pointer;">
         <div class="row-stack">
           <span class="row-stack-label">HQPlayer</span>
           ${mark(active.type === 'hqplayer')}
@@ -10273,7 +10285,16 @@
       renderOutputSettings(root);
     };
     root.querySelectorAll('[data-action="select-hqp"]').forEach(el =>
-      el.addEventListener('click', () => putOutput({ type: 'hqplayer' })));
+      el.addEventListener('click', () => {
+        // Selecting an endpoint the backend has never been told about is
+        // refused with a 409, and the HQPlayer screen is not in the More list
+        // until HQPlayer is the active output — so the tap has to lead there
+        // itself, or the setting could never be reached at all. It also puts
+        // the filter/DSP screen in front of someone who just asked for
+        // HQPlayer, which is where they were heading anyway.
+        if (el.dataset.configured !== '1') { location.hash = '#more/hqplayer'; return; }
+        putOutput({ type: 'hqplayer' });
+      }));
     root.querySelectorAll('[data-action="select-device"]').forEach(el =>
       el.addEventListener('click', () =>
         putOutput({ type: 'local', device_id: el.dataset.deviceId })));

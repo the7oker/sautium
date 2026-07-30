@@ -1155,7 +1155,10 @@ def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
     try:
         from routers.player import (start_status_poller, stop_status_poller,
                                     _hqp_configured)
-        if _read("output.type") in (None, "hqplayer"):
+        # Only when HQPlayer IS the selection. Unset no longer means "HQPlayer
+        # may have it" — an unset output resolves to this device, so saving an
+        # address here must not quietly move playback.
+        if _read("output.type") == "hqplayer":
             if _hqp_configured():
                 start_status_poller()
             else:

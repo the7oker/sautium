@@ -190,14 +190,22 @@ class PlaybackManager:
             logger.info("playback backend activated: %s", backend.id)
 
     def init_from_settings(self) -> None:
-        """Boot-time output activation from persisted settings. output.type
-        unset → HQPlayer when an endpoint is configured (legacy behavior),
-        else no active output at all (§2.6)."""
+        """Boot-time output activation from persisted settings.
+
+        Nothing chosen yet resolves to the browser: it is the only output that
+        works with no configuration on either runtime — local needs PortAudio
+        (absent in the image), DLNA needs a renderer, HQPlayer needs HQPlayer.
+        A node therefore comes up able to play instead of coming up idle.
+
+        The HQPlayer branch above it is kept for installs that predate the
+        Output picker: there was no choice to record then, so an endpoint
+        being configured IS the choice. It no longer fires for new nodes —
+        nothing configures HQPlayer unasked any more."""
         from routers.settings import _read
         from routers.player import _hqp_configured
         otype = _read("output.type")
         if otype is None:
-            otype = "hqplayer" if _hqp_configured() else None
+            otype = "hqplayer" if _hqp_configured() else "browser"
         if otype == "local":
             self._restore_persisted_queue()
             try:

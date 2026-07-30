@@ -57,9 +57,17 @@ def _hqp_configured() -> bool:
 
 
 def start_status_poller():
-    """Activate the HQPlayer output backend (no-op without a configured
-    endpoint — see _hqp_configured). Name kept for the main.py and
-    settings.py call sites."""
+    """Attach the HQPlayer backend — and with it the 1s status poll — only when
+    HQPlayer is the chosen output.
+
+    Being *configured* used to be enough, which meant a node whose owner listens
+    through the browser or a DLNA renderer still opened a socket to HQPlayer
+    every second, and saving an HQPlayer address could take the output over from
+    whatever was selected. Configuration is not consent."""
+    from routers.settings import _read
+    if _read("output.type") != "hqplayer":
+        logger.info("HQPlayer is not the selected output — not polling it")
+        return
     if not _hqp_configured():
         logger.info("No HQPlayer configured — playback output idle")
         return

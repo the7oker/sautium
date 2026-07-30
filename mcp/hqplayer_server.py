@@ -94,7 +94,15 @@ def _backend_post(path: str, body: dict) -> dict:
         resp = client.post(path, content=payload,
                            headers={"x-sautium-ts": ts, "x-sautium-sig": sig,
                                     "content-type": "application/json"})
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            # Surface the backend's own reason. raise_for_status() reports the
+            # status and the URL, which tells an agent nothing it can act on —
+            # "No track IDs provided" does.
+            try:
+                detail = resp.json().get("detail")
+            except Exception:
+                detail = None
+            raise RuntimeError(detail or f"backend returned {resp.status_code}")
         return resp.json()
 
 
@@ -118,8 +126,31 @@ _hqp_client: HQPlayerClient | None = None
 _db_conn: psycopg2.extensions.connection | None = None
 
 
+def _active_output() -> str:
+    """Which output the node is playing through, per the backend."""
+    try:
+        return (_backend_get("/api/settings/output", {}) or {}).get("type") or ""
+    except Exception:
+        return ""          # backend unreachable: don't block on a guess
+
+
 def _get_hqp() -> HQPlayerClient:
-    """Get or create HQPlayer client (lazy, auto-reconnect)."""
+    """Get or create HQPlayer client (lazy, auto-reconnect).
+
+    Refuses when HQPlayer is not the chosen output. Every tool that commands
+    HQPlayer comes through here, so this is the one place the rule has to
+    exist. It exists because the tools are named for what they do and an agent
+    will reach for one: asking to change a filter, or to skip a track, while
+    the sound is going to a phone over DLNA would reconfigure — or start —
+    a device in another room, with the canonical queue none the wiser."""
+    active = _active_output()
+    if active and active != "hqplayer":
+        raise ConnectionError(
+            f"HQPlayer is not the active audio output (currently: {active}). "
+            "Its transport and DSP controls are unavailable. Use play_track / "
+            "play_album / play_similar / add_to_queue, which play through "
+            "whatever output the user has chosen."
+        )
     global _hqp_client
     if _hqp_client is None or not _hqp_client.is_connected():
         _hqp_client = HQPlayerClient(host=HQPLAYER_HOST, port=HQPLAYER_PORT, timeout=10.0)
@@ -780,267 +811,74 @@ def get_track_info(track_id: int) -> str:
 
 @mcp.tool()
 def play_track(track_id: int) -> str:
-    """Play a specific track by its database ID on HQPlayer.
+    """Play a specific track by its media-file ID on the user's chosen output.
 
     Args:
-        track_id: The track ID from the database
+        track_id: media_files.id from the database
     """
     try:
-        row = _db_query_one("""
-            SELECT mf.file_path, t.title, a.name as artist, al.title as album
-            FROM media_files mf
-            JOIN tracks t ON mf.track_id = t.id
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            JOIN album_variants av ON mf.album_variant_id = av.id
-            JOIN albums al ON av.album_id = al.id
-            WHERE mf.id = %(track_id)s
-        """, {"track_id": track_id})
-
-        if not row:
-            return f"Track with ID {track_id} not found."
-
-        uri = file_path_to_uri(row["file_path"])
-        hqp = _get_hqp()
-
-        # Register BEFORE play() so the tracker has the index→track_id
-        # map by the time HQPlayer emits its first status update — otherwise
-        # the now-playing scrobble for track 0 is silently dropped.
-        hqp.stop()
-        hqp.playlist_add(uri, clear=True)
-        hqp.select_track(0)
-        _register_playlist([track_id])
-        hqp.play()
-
-        return f"Now playing: {row['artist']} - {row['title']}\nAlbum: {row['album']}"
+        r = _backend_post("/api/player/play-track", {"track_id": track_id})
+        if not r.get("ok"):
+            return f"Could not play track {track_id}: {r.get('detail') or r}"
+        return (f"Now playing: {r.get('artist')} - {r.get('title')}\n"
+                f"Album: {r.get('album')}")
     except Exception as e:
         return f"Error playing track: {e}"
 
 
 @mcp.tool()
 def play_album(album_name: str, artist_name: str = "") -> str:
-    """Find an album and play all its tracks on HQPlayer.
-    Tolerant to typos and misspellings (uses fuzzy trigram matching).
+    """Find an album and play all of it on the user's chosen output.
 
     Args:
-        album_name: Album name (fuzzy match, typo-tolerant)
-        artist_name: Optional artist name to narrow the search (fuzzy match)
+        album_name: Album title (partial match works)
+        artist_name: Optional artist to disambiguate same-titled albums
     """
     try:
-        # First, find the best matching album using trigram similarity
-        match_conditions = [
-            "(similarity(al.title, %(album)s) > 0.15 OR al.title ILIKE %(album_like)s)"
-        ]
-        match_params: dict = {"album": album_name, "album_like": f"%{album_name}%"}
-        order_parts = ["similarity(al.title, %(album)s)"]
-
-        if artist_name:
-            match_conditions.append(
-                "(similarity(a.name, %(artist)s) > 0.15 OR a.name ILIKE %(artist_like)s)"
-            )
-            match_params["artist"] = artist_name
-            match_params["artist_like"] = f"%{artist_name}%"
-            order_parts.append("similarity(a.name, %(artist)s)")
-
-        match_where = " AND ".join(match_conditions)
-        order_expr = " + ".join(order_parts)
-
-        # Find the best matching album (by name + optional artist)
-        best_album = _db_query_one(f"""
-            SELECT DISTINCT al.id, al.title as album, a.name as artist
-            FROM albums al
-            JOIN album_variants av ON av.album_id = al.id
-            JOIN media_files mf ON mf.album_variant_id = av.id
-            JOIN tracks t ON mf.track_id = t.id
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            WHERE {match_where}
-            ORDER BY {order_expr} DESC
-            LIMIT 1
-        """, match_params)
-
-        if not best_album:
-            return f"Album '{album_name}' not found."
-
-        # Now get all tracks from that specific album
-        rows = _db_query("""
-            SELECT mf.id, mf.file_path, t.title, mf.track_number,
-                   a.name as artist, al.title as album
-            FROM media_files mf
-            JOIN tracks t ON mf.track_id = t.id
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            JOIN album_variants av ON mf.album_variant_id = av.id
-            JOIN albums al ON av.album_id = al.id
-            WHERE al.id = %(album_id)s
-            ORDER BY mf.disc_number, mf.track_number
-        """, {"album_id": best_album["id"]})
-
-        if not rows:
-            return f"Album '{album_name}' not found."
-
-        hqp = _get_hqp()
-
-        hqp.stop()
-        first_uri = file_path_to_uri(rows[0]["file_path"])
-        hqp.playlist_add(first_uri, clear=True)
-
-        for row in rows[1:]:
-            uri = file_path_to_uri(row["file_path"])
-            hqp.playlist_add(uri)
-
-        hqp.select_track(0)
-        track_ids = [row["id"] for row in rows]
-        _register_playlist(track_ids)
-        hqp.play()
-
-        album_title = rows[0]["album"]
-        artist = rows[0]["artist"]
-        track_list = "\n".join(
-            f"  {r.get('track_number', i+1)}. {r['title']}" for i, r in enumerate(rows)
-        )
-
-        return (
-            f"Playing album: {artist} - {album_title} ({len(rows)} tracks)\n"
-            f"{track_list}"
-        )
+        r = _backend_post("/api/player/play-album",
+                          {"album_name": album_name, "artist_name": artist_name})
+        if not r.get("ok"):
+            return f"Could not play album: {r.get('detail') or r}"
+        return (f"Now playing album: {r.get('artist')} - {r.get('album')}"
+                f" ({r.get('track_count', '?')} tracks)")
     except Exception as e:
         return f"Error playing album: {e}"
 
 
 @mcp.tool()
 def play_similar(track_id: int, limit: int = 10) -> str:
-    """Find tracks similar to the given track and play them on HQPlayer.
+    """Play a track and queue acoustically similar ones after it, on the
+    user's chosen output.
 
     Args:
-        track_id: Source track ID to find similar tracks for
-        limit: Number of similar tracks to queue (default 10)
+        track_id: media_files.id of the seed track
+        limit: How many similar tracks to queue (default 10)
     """
     try:
-        # Get track_id for the given media file
-        track_row = _db_query_one("""
-            SELECT track_id FROM media_files WHERE id = %(track_id)s
-        """, {"track_id": track_id})
-        if not track_row:
-            return f"Track with ID {track_id} not found."
-        db_track_id = track_row["track_id"]
-
-        sql = """
-            WITH target AS (
-                SELECT e.vector FROM embeddings e WHERE e.track_id = %(db_track_id)s LIMIT 1
-            ),
-            nn AS (
-                SELECT e2.track_id,
-                       1 - (e2.vector <=> (SELECT vector FROM target)) as similarity
-                FROM embeddings e2
-                WHERE e2.track_id != %(db_track_id)s
-                ORDER BY e2.vector <=> (SELECT vector FROM target)
-                LIMIT %(nn_limit)s
-            )
-            SELECT sub.id, sub.file_path, sub.title, sub.artist, sub.album,
-                   nn.similarity
-            FROM nn
-            JOIN LATERAL (
-                SELECT mf.id, mf.file_path, mf.duration_seconds,
-                       a.name as artist, al.title as album,
-                       (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
-                        WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre,
-                       t.title
-                FROM media_files mf
-                JOIN tracks t ON mf.track_id = nn.track_id
-                JOIN track_artists ta ON nn.track_id = ta.track_id AND ta.role = 'primary'
-                JOIN artists a ON ta.artist_id = a.id
-                JOIN album_variants av ON mf.album_variant_id = av.id
-                JOIN albums al ON av.album_id = al.id
-                WHERE mf.track_id = nn.track_id
-                ORDER BY mf.id LIMIT 1
-            ) sub ON true
-            ORDER BY nn.similarity DESC
-            LIMIT %(limit)s
-        """
-        rows = _db_query(sql, {"db_track_id": db_track_id, "limit": limit, "nn_limit": limit * 2})
-
-        if not rows:
-            return "No similar tracks found."
-
-        hqp = _get_hqp()
-
-        hqp.stop()
-        first_uri = file_path_to_uri(rows[0]["file_path"])
-        hqp.playlist_add(first_uri, clear=True)
-
-        for row in rows[1:]:
-            uri = file_path_to_uri(row["file_path"])
-            hqp.playlist_add(uri)
-
-        hqp.select_track(0)
-        track_ids = [row["id"] for row in rows]
-        _register_playlist(track_ids)
-        hqp.play()
-
-        # Get source track info
-        source = _db_query_one("""
-            SELECT t.title, a.name as artist
-            FROM media_files mf
-            JOIN tracks t ON mf.track_id = t.id
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            WHERE mf.id = %(track_id)s
-        """, {"track_id": track_id})
-
-        header = f"Playing {len(rows)} tracks similar to: {source['artist']} - {source['title']}" if source else f"Playing {len(rows)} similar tracks"
-
-        track_list = "\n".join(
-            f"  {i+1}. {r['artist']} - {r['title']} ({float(r['similarity']):.0%})"
-            for i, r in enumerate(rows)
-        )
-
-        return f"{header}\n{track_list}"
+        r = _backend_post("/api/player/play-similar",
+                          {"track_id": track_id, "limit": limit})
+        if not r.get("ok"):
+            return f"Could not start similar playback: {r.get('detail') or r}"
+        first = (r.get("tracks") or [{}])[0]
+        return (f"Now playing: {first.get('artist')} - {first.get('title')}\n"
+                f"Queued {r.get('count', '?')} tracks by acoustic similarity.")
     except Exception as e:
         return f"Error playing similar tracks: {e}"
 
 
 @mcp.tool()
 def add_to_queue(track_ids: list[int]) -> str:
-    """Add tracks to the current HQPlayer playlist/queue by their IDs.
+    """Append tracks to the current queue on the user's chosen output,
+    without clearing what is already there.
 
     Args:
-        track_ids: List of track IDs to add to the queue
+        track_ids: media_files.id values, in the order to append
     """
     try:
-        if not track_ids:
-            return "No track IDs provided."
-
-        placeholders = ", ".join(str(int(tid)) for tid in track_ids)
-        rows = _db_query(f"""
-            SELECT mf.id, mf.file_path, t.title, a.name as artist
-            FROM media_files mf
-            JOIN tracks t ON mf.track_id = t.id
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            WHERE mf.id IN ({placeholders})
-            ORDER BY array_position(ARRAY[{placeholders}]::int[], mf.id)
-        """)
-
-        if not rows:
-            return "None of the specified tracks were found."
-
-        hqp = _get_hqp()
-
-        added = []
-        for row in rows:
-            uri = file_path_to_uri(row["file_path"])
-            hqp.playlist_add(uri)
-            added.append(f"{row['artist']} - {row['title']}")
-
-        return f"Added {len(added)} tracks to queue:\n" + "\n".join(f"  {i+1}. {t}" for i, t in enumerate(added))
+        r = _backend_post("/api/player/queue-tracks", {"track_ids": track_ids})
+        return f"Added {r.get('count', len(track_ids))} track(s) to the queue."
     except Exception as e:
         return f"Error adding to queue: {e}"
-
-
-# =============================================================================
-# DSP SETTINGS (2 tools)
-# =============================================================================
 
 @mcp.tool()
 def hqplayer_get_settings() -> str:
