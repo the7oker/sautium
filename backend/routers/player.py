@@ -201,22 +201,21 @@ def get_outputs(rescan: bool = False):
 #
 # Pins used to be the ONLY way to populate a Docker node, because multicast
 # dies at the bridge. The unicast sweep changed that, but less than it looks,
-# and the boundary is worth knowing because it is TWO boundaries:
+# and the boundary is a single sharp one: SSDP answers come back from whatever
+# source port the device chose, and the bridge's NAT is port-restricted for
+# UDP, so only devices replying from 1900 traverse it.
 #
-#   - SSDP replies come from whatever source port the device chose, and the
-#     bridge's NAT is port-restricted for UDP, so only devices answering from
-#     1900 traverse it. Measured: a router answers from 1900 and is found;
-#     BubbleUPnP answers from an ephemeral port and is not, though TCP to the
-#     same host works fine.
-#   - Some renderers ignore unicast M-SEARCH altogether. Measured on the
-#     KANN ULTRA, powered on and answering TCP: zero replies to unicast on
-#     1900 from WSL, where no NAT is involved at all. It is discoverable by
-#     multicast only — which is why a native node finds it and a container
-#     never will.
+# Measured on this network, same request from WSL and from the container:
+#   router          replies from 1900   → found from both
+#   KANN ULTRA      replies from 40201  → found from WSL, invisible to the container
+#   BubbleUPnP      replies from 35510  → same
 #
-# So on Docker the sweep helps some devices and neither of the two renderers
-# on this network. Pinning a full description URL remains the way in there,
-# and backend/dlna_locate.py prints one.
+# Both renderers here answer unicast perfectly well; the container simply never
+# hears them. MX and the collection window are NOT the factor — the KANN
+# answers identically at MX=1/1.5s and MX=2/3.5s. So the sweep earns its place
+# for 1900-replying devices, and on Docker pinning a full description URL
+# remains the way in for the rest; backend/dlna_locate.py, run where no NAT is
+# in the path, prints one.
 _dlna_discovered: dict[str, dict] = {}
 
 
