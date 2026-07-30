@@ -706,9 +706,22 @@ class DlnaBackend(PlayerBackend):
                 self._loading = False
 
     async def _load_seq(self, index: int, *, play: bool = True, ss: float = 0.0,
-                        url_override: Optional[str] = None) -> bool:
+                        url_override: Optional[str] = None,
+                        skipped: int = 0) -> bool:
         item = self._queue.item_at(index)
         if item is None:
+            # Running off the end having skipped everything is not the same as
+            # reaching the end of a queue, and it used to look identical: a
+            # silent stop, with the reason only in the log. It happens for
+            # real — a queue adopted from HQPlayer's own playlist holds entries
+            # this library has no media_files row for, so no token can be
+            # minted and no renderer but HQPlayer itself can be handed them.
+            if skipped:
+                self._error = (
+                    f"None of the {skipped} queued item(s) can be sent to this "
+                    "renderer — they came from HQPlayer's own playlist and are "
+                    "not in this library. Play something from the library to "
+                    "replace the queue.")
             self._emit_now("stopped")
             return False
         # url_override (a seek) carries the currently-playing stream's URL,
@@ -718,7 +731,8 @@ class DlnaBackend(PlayerBackend):
         if url is None:
             logger.warning("DLNA: skipping unreachable item %s — %s",
                            item.artist, item.title)
-            return await self._load_seq(index + 1, play=play)
+            return await self._load_seq(index + 1, play=play,
+                                        skipped=skipped + 1)
         if ss > 0 and not url_override:
             # Server-side seek: re-encode the track from the offset (the
             # media route honors ?ss). Only Opus URLs (which carry ?q) take
@@ -732,6 +746,7 @@ class DlnaBackend(PlayerBackend):
         self._pos_offset = ss   # 0 for a fresh track; the seek offset otherwise
         self._position = ss     # so the loading state shows the seek target
         self._length = item.duration_seconds or 0.0
+        self._error = None      # something in the queue is playable after all
         if play:
             self._emit_now("loading")
         # Disarm the gapless auto-advance detector: a manual jump to the
