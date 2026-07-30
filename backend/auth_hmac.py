@@ -71,6 +71,61 @@ WHITELIST_EXACT = {
     "/api/auth/create-account",
 }
 
+# -- Host guard ---------------------------------------------------------------
+#
+# DNS rebinding: a page on evil.com whose name resolves to this node's address.
+# The browser then talks to us from that page, same-origin as far as it is
+# concerned, and sends `Host: evil.com`. Signed routes already survive that —
+# the device token lives in localStorage, which is bound to an origin the
+# attacker does not have — but the WHITELIST does not, and the whitelist is
+# where account creation, login and pairing live.
+#
+# The question to ask is NOT "is this address private". That was the obvious
+# predicate and it is wrong twice over: it says yes to any RFC1918 name an
+# attacker points at us, and no to 100.64/10, which is how a phone off the
+# home network legitimately reaches this node. The question is "is this one of
+# MY addresses" — a closed set we compute from our own interfaces and our own
+# configuration.
+#
+# Nothing here resolves a name the client supplied. Resolving attacker input is
+# the attack; our own configured names are resolved once, at startup.
+_allowed_hosts: set | None = None
+
+
+def _allowed_host_set() -> set:
+    global _allowed_hosts
+    if _allowed_hosts is not None:
+        return _allowed_hosts
+    import os
+    from tls_gen import detect_reachable_host_ips
+    entries = [s.strip() for s in os.getenv("SAUTIUM_HOST_IPS", "").split(",")
+               if s.strip()]
+    allowed = {"localhost", "host.docker.internal", "127.0.0.1", "::1", "[::1]"}
+    allowed |= set(detect_reachable_host_ips(entries))
+    # The configured entries themselves, so browsing to the node by name works
+    # — a MagicDNS name is a legitimate way to reach it, and it is OUR name.
+    allowed |= {e.lower() for e in entries}
+    # Escape hatch for anything the operator knows about and we cannot infer
+    # (a reverse proxy's name, a second tunnel).
+    allowed |= {s.strip().lower()
+                for s in os.getenv("SAUTIUM_ALLOWED_HOSTS", "").split(",")
+                if s.strip()}
+    _allowed_hosts = allowed
+    logger.info("Host guard accepts: %s", sorted(allowed))
+    return allowed
+
+
+def _host_allowed(host_header: str) -> bool:
+    if not host_header:
+        return True          # HTTP/1.0 and health probes send none
+    host = host_header.strip().lower()
+    if host.startswith("["):                  # [::1]:8000
+        host = host.split("]")[0] + "]"
+    elif ":" in host:
+        host = host.rsplit(":", 1)[0]
+    return host in _allowed_host_set()
+
+
 WHITELIST_PREFIX = (
     "/static/",
     "/api/covers/",
@@ -188,6 +243,11 @@ class HMACAuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
+
+        if not _host_allowed(request.headers.get("host", "")):
+            # Refuse before anything else, whitelist included — the whitelist
+            # is precisely what a rebinding attack has to work with.
+            return JSONResponse({"detail": "unrecognised Host"}, status_code=421)
 
         if _is_whitelisted(path):
             return await call_next(request)

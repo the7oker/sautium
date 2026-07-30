@@ -38,7 +38,18 @@ STATIC_DNS_SAN = ("localhost", "host.docker.internal")
 STATIC_IP_SAN = ("127.0.0.1", "::1")
 
 
+# RFC 6598 "shared address space" — carrier NAT, and what Tailscale hands out.
+# Python does not count it as private, which is correct in the abstract and
+# wrong for both questions below, in opposite directions.
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+
+
 def _is_private_ipv4(ip: str) -> bool:
+    """On a LAN segment we can send multicast to.
+
+    Deliberately excludes CGNAT: a tunnel address is not on any segment, its
+    interface cannot carry multicast, and searching from it costs a timeout
+    per scan for nothing."""
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
@@ -51,10 +62,49 @@ def _is_private_ipv4(ip: str) -> bool:
     )
 
 
+def _is_reachable_ipv4(ip: str) -> bool:
+    """An address a device could legitimately reach US at.
+
+    The wider of the two: everything _is_private_ipv4 accepts, plus CGNAT,
+    because a tunnel address is exactly how a phone off the home network
+    reaches this node. Used for the cert SAN and the Host guard — both answer
+    "who might legitimately be talking to us", not "where can we shout"."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return _is_private_ipv4(ip) or (
+        isinstance(addr, ipaddress.IPv4Address) and addr in _CGNAT)
+
+
 def detect_private_host_ips() -> list[str]:
-    """Public alias — LAN-reachable address detection is also needed by the
-    DLNA output (renderers must pull media from a LAN IP, not 127.0.0.1)."""
+    """LAN addresses only — the SSDP search sources and the media host the
+    DLNA output hands a renderer on the same segment."""
     return _detect_private_host_ips()
+
+
+def detect_reachable_host_ips(extra: list[str] | None = None) -> list[str]:
+    """Every address this node can be addressed at, tunnels included.
+
+    `extra` is SAUTIUM_HOST_IPS — the only way a container learns the host's
+    real addresses, since its own interfaces are all bridge."""
+    found = set(_detect_private_host_ips())
+    for entry in (extra or []):
+        if _is_reachable_ipv4(entry):
+            found.add(entry)
+            continue
+        # A name, which is the better way to write a tunnel address down —
+        # it survives the address changing. Resolving OUR OWN configured name
+        # is safe; the thing rebinding attacks is resolving a name an attacker
+        # supplied, which nothing here ever does.
+        try:
+            resolved = socket.gethostbyname(entry)
+        except OSError as e:
+            logger.warning("host entry %r does not resolve (%s)", entry, e)
+            continue
+        if _is_reachable_ipv4(resolved):
+            found.add(resolved)
+    return sorted(found)
 
 
 def _detect_private_host_ips() -> list[str]:
@@ -193,9 +243,11 @@ def ensure_cert(
     cert_path = data_dir / CERT_FILENAME
     key_path = data_dir / KEY_FILENAME
 
-    detected = _detect_private_host_ips()
-    explicit = [ip for ip in (extra_host_ips or []) if _is_private_ipv4(ip)]
-    needed_ips = sorted(set(detected) | set(explicit))
+    # The SAN answers "which addresses may a browser have typed", so a tunnel
+    # address belongs in it. Filtering the explicit list through the LAN
+    # predicate used to drop it even when SAUTIUM_HOST_IPS named it outright,
+    # and the phone got a name-mismatch warning on top of the self-signed one.
+    needed_ips = detect_reachable_host_ips(extra_host_ips)
 
     if cert_path.exists() and key_path.exists():
         existing = _read_existing_san_ips(cert_path)
