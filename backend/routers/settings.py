@@ -1243,10 +1243,22 @@ def put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
                              device_id=_read("output.local_device"),
                              exclusive=bool(_read("output.local_exclusive")))
         elif otype == "hqplayer":
-            from routers.player import _hqp_configured
-            if not _hqp_configured():
-                raise HTTPException(status_code=409,
-                                    detail="HQPlayer host is not configured")
+            # Choosing HQPlayer IS configuring it. There is always an effective
+            # endpoint (the config default, localhost:4321), so persist it if
+            # nothing was saved and carry on.
+            #
+            # This used to refuse with a 409 when no host had been saved, using
+            # the same predicate that decides whether to POLL HQPlayer. Those
+            # are different questions, and conflating them left the setting
+            # unreachable: nothing configures HQPlayer during setup any more,
+            # so a new node could not select it, and the screen where a host is
+            # entered is only listed while HQPlayer is the active output.
+            if not _read("hqplayer.host"):
+                _write("hqplayer.host", app_settings.hqplayer_host)
+                _write("hqplayer.port", app_settings.hqplayer_port)
+                logger.info("HQPlayer selected with no saved host — recorded "
+                            "the default %s:%s", app_settings.hqplayer_host,
+                            app_settings.hqplayer_port)
             manager.activate(None)
             manager.activate("hqplayer")
     except HTTPException:

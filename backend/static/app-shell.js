@@ -10285,15 +10285,18 @@
       renderOutputSettings(root);
     };
     root.querySelectorAll('[data-action="select-hqp"]').forEach(el =>
-      el.addEventListener('click', () => {
-        // Selecting an endpoint the backend has never been told about is
-        // refused with a 409, and the HQPlayer screen is not in the More list
-        // until HQPlayer is the active output — so the tap has to lead there
-        // itself, or the setting could never be reached at all. It also puts
-        // the filter/DSP screen in front of someone who just asked for
-        // HQPlayer, which is where they were heading anyway.
-        if (el.dataset.configured !== '1') { location.hash = '#more/hqplayer'; return; }
-        putOutput({ type: 'hqplayer' });
+      el.addEventListener('click', async () => {
+        // Always select. Sending the tap to the settings screen instead —
+        // which is what "not configured yet" used to do — meant the output
+        // could not be chosen at all: nothing on that screen needs saving when
+        // the defaults are already right, so it never became "configured" and
+        // every tap bounced back.
+        const first = el.dataset.configured !== '1';
+        await putOutput({ type: 'hqplayer' });
+        // First time only: show the screen that exists for HQPlayer, so its
+        // filters and DSP are not a secret. Selection has already happened, so
+        // this informs rather than blocks.
+        if (first) location.hash = '#more/hqplayer';
       }));
     root.querySelectorAll('[data-action="select-device"]').forEach(el =>
       el.addEventListener('click', () =>
