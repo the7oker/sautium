@@ -326,10 +326,29 @@ class ServiceManager:
         # Kill orphan backend from a previous launcher session
         self._kill_orphan_on_port(port)
 
-        env_path = self._backend_dir / ".env"
-
-        # Generate .env
-        from desktop.config_manager import generate_env_file, generate_mcp_config
+        # Generated config goes to the launcher's own data dir, NOT into the
+        # repo's backend/ — that directory is bind-mounted into the Docker
+        # image as /app, and the backend's pydantic Settings reads ".env" from
+        # its working directory. A file written here for the launcher was
+        # therefore also read by the container, and every key compose did not
+        # state explicitly leaked in: the container ran with the launcher's
+        # GENA port (breaking DLNA eventing until compose was made explicit),
+        # the launcher's random P2P port, and p2p_identity_dir pointing at a
+        # Windows path. Two runtimes cannot share one config file.
+        #
+        # The launcher's backend does not need the file found — _load_env_file
+        # below puts every key into the child's real environment, which
+        # pydantic prefers over any file anyway.
+        from desktop.config_manager import (generate_env_file, generate_mcp_config,
+                                            get_data_dir)
+        env_path = get_data_dir() / "backend.env"
+        stale = self._backend_dir / ".env"
+        if stale.exists():
+            try:
+                stale.unlink()
+                logger.info("Removed shared backend/.env — the container read it too")
+            except OSError as e:
+                logger.warning("Could not remove stale backend/.env: %s", e)
         generate_env_file(self.config, env_path)
         generate_mcp_config(self.config, self._backend_dir / "mcp-windows.json")
 
