@@ -82,32 +82,21 @@ def _require_sharing() -> None:
 # ../desktop/p2p. Loaded by file path (not sys.path) so desktop modules can
 # never shadow backend ones. Absent → the endpoint 404s (launcher-mode
 # backends serve slices through the launcher's own sync server instead).
-def _load_shared(name: str):
-    """Load a module from the bind-mounted desktop/p2p by path, so desktop
-    modules can never shadow backend ones on sys.path."""
+def _load_mb_slice_queries():
     import importlib.util
     here = Path(__file__).parent.parent
-    for candidate in (here / "desktop_p2p" / f"{name}.py",
-                      here.parent / "desktop" / "p2p" / f"{name}.py"):
+    for candidate in (here / "desktop_p2p" / "mb_slice_queries.py",
+                      here.parent / "desktop" / "p2p" / "mb_slice_queries.py"):
         if candidate.exists():
-            spec = importlib.util.spec_from_file_location(name, candidate)
+            spec = importlib.util.spec_from_file_location(
+                "mb_slice_queries", candidate)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             return module
     return None
 
 
-mb_slice_queries = _load_shared("mb_slice_queries")
-
-# The set-digest expressions come from the launcher's shared module — one
-# definition, two server implementations. Restating them here would be two
-# sources of truth for a hash that must match byte for byte across the network.
-_digests = _load_shared("sync_digests")
-if _digests is None:                       # bind-mount missing: fail loudly
-    raise RuntimeError("desktop/p2p/sync_digests.py not reachable — inventory "
-                       "digests must come from the single shared definition")
-TAG_SET_DIGEST = _digests.TAG_SET_DIGEST
-SIMILAR_SET_DIGEST = _digests.SIMILAR_SET_DIGEST
+mb_slice_queries = _load_mb_slice_queries()
 
 mb_router = APIRouter(prefix="/api/mb", tags=["sync"])
 
@@ -285,27 +274,13 @@ async def get_inventory(req: InventoryRequest) -> dict:
                 ARRAY(SELECT artist_id::text FROM rel) AS artists,
                 ARRAY(SELECT DISTINCT ab.artist_id::text FROM artist_bios ab
                       WHERE ab.artist_id IN (SELECT artist_id FROM rel)) AS artist_bios,
-                -- Set digests, not bare uuids: see sync_queries.TAG_SET_DIGEST
-                -- for why, and note the expression is defined THERE — the two
-                -- server implementations must agree byte for byte or every
-                -- artist looks divergent to every peer.
-                (SELECT COALESCE(json_agg(json_build_array(x.artist_id, x.digest)), '[]'::json)
-                 FROM (SELECT at2.artist_id::text AS artist_id,
-                              %(tag_digest)s AS digest
-                       FROM artist_tags at2
-                       INNER JOIN tags t ON t.id = at2.tag_id
-                       WHERE at2.artist_id IN (SELECT artist_id FROM rel)
-                       GROUP BY at2.artist_id) x) AS artist_tags,
-                (SELECT COALESCE(json_agg(json_build_array(y.artist_id, y.digest)), '[]'::json)
-                 FROM (SELECT sa.artist_id::text AS artist_id,
-                              %(sim_digest)s AS digest
-                       FROM similar_artists sa
-                       WHERE sa.artist_id IN (SELECT artist_id FROM rel)
-                       GROUP BY sa.artist_id) y) AS similar_artists,
+                ARRAY(SELECT DISTINCT at2.artist_id::text FROM artist_tags at2
+                      WHERE at2.artist_id IN (SELECT artist_id FROM rel)) AS artist_tags,
+                ARRAY(SELECT DISTINCT sa.artist_id::text FROM similar_artists sa
+                      WHERE sa.artist_id IN (SELECT artist_id FROM rel)) AS similar_artists,
                 ARRAY(SELECT DISTINCT am.compound_artist_id::text FROM artist_members am
                       WHERE am.compound_artist_id IN (SELECT artist_id FROM rel)) AS artist_members
-        """.replace("%(tag_digest)s", TAG_SET_DIGEST)
-             .replace("%(sim_digest)s", SIMILAR_SET_DIGEST), {"u": uuids})
+        """, {"u": uuids})
 
         return {
             "tracks": track_row["tracks"],

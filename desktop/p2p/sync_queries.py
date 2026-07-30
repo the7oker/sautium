@@ -67,12 +67,6 @@ def _parse_vector(vec_text: str) -> list[float]:
 # Inventory
 # ---------------------------------------------------------------------------
 
-# Set digests live in their own dependency-free module — the backend loads
-# that file by path from inside the container, where this module's imports
-# do not resolve.
-from desktop.p2p.sync_digests import (  # noqa: F401
-    SIMILAR_SET_DIGEST, TAG_SET_DIGEST)
-
 EMPTY_INVENTORY = {
     "tracks": [], "embeddings": [],
     "audio_features": [], "track_stats": [],
@@ -138,23 +132,18 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
              WHERE ta.track_id = ANY(%s::uuid[])"""),
         "artist_id",
     )
-    artist_tags = [
-        [r["artist_id"], r["digest"]] for r in
-        q(f"""SELECT at2.artist_id::text AS artist_id, {TAG_SET_DIGEST} AS digest
-              FROM artist_tags at2
-              INNER JOIN tags t ON t.id = at2.tag_id
-              INNER JOIN track_artists ta ON ta.artist_id = at2.artist_id
-              WHERE ta.track_id = ANY(%s::uuid[])
-              GROUP BY at2.artist_id""")
-    ]
-    similar_artists = [
-        [r["artist_id"], r["digest"]] for r in
-        q(f"""SELECT sa.artist_id::text AS artist_id, {SIMILAR_SET_DIGEST} AS digest
-              FROM similar_artists sa
-              INNER JOIN track_artists ta ON ta.artist_id = sa.artist_id
-              WHERE ta.track_id = ANY(%s::uuid[])
-              GROUP BY sa.artist_id""")
-    ]
+    artist_tags = _uuid_list(
+        q("""SELECT DISTINCT at2.artist_id FROM artist_tags at2
+             INNER JOIN track_artists ta ON ta.artist_id = at2.artist_id
+             WHERE ta.track_id = ANY(%s::uuid[])"""),
+        "artist_id",
+    )
+    similar_artists = _uuid_list(
+        q("""SELECT DISTINCT sa.artist_id FROM similar_artists sa
+             INNER JOIN track_artists ta ON ta.artist_id = sa.artist_id
+             WHERE ta.track_id = ANY(%s::uuid[])"""),
+        "artist_id",
+    )
     artist_members = _uuid_list(
         q("""SELECT DISTINCT am.compound_artist_id AS artist_id
              FROM artist_members am

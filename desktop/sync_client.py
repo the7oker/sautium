@@ -30,7 +30,6 @@ import psycopg2.extras
 
 from desktop.api_client import BackendAPIClient
 from desktop.p2p import record_sig as rs
-from desktop.p2p import sync_digests as sq
 from desktop.p2p.birth_cert import TRUSTED_AUTHORITIES
 
 logger = logging.getLogger(__name__)
@@ -82,18 +81,6 @@ _ENRICHMENT_KIND_BY_CATEGORY = {
     "similar_artists": "similar_artist",
     "genre_descriptions": "genre_description",
 }
-
-# Local side of the inventory digests. The EXPRESSION lives in
-# desktop/p2p/sync_queries — this only wraps it in the local query, so a peer
-# and this client can never disagree about what the hash covers.
-_LOCAL_TAG_DIGEST = f"""
-    SELECT at2.artist_id::text, {sq.TAG_SET_DIGEST}
-    FROM artist_tags at2 JOIN tags t ON t.id = at2.tag_id
-    GROUP BY at2.artist_id"""
-_LOCAL_SIMILAR_DIGEST = f"""
-    SELECT sa.artist_id::text, {sq.SIMILAR_SET_DIGEST}
-    FROM similar_artists sa
-    GROUP BY sa.artist_id"""
 
 DEFAULT_BATCH_SIZE = 500
 # A segments batch is K=12..24 vectors + proofs per track (~50KB) — keep the
@@ -172,17 +159,6 @@ class SyncClient:
         except psycopg2.errors.UndefinedTable:
             conn.rollback()
             return set()
-
-    def _local_digests(self, sql: str) -> dict[str, str]:
-        """uuid -> set digest for this node's own rows."""
-        conn = self._get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                return {row[0]: row[1] for row in cur.fetchall()}
-        except psycopg2.errors.UndefinedTable:
-            conn.rollback()
-            return {}
 
     def _get_existing_versions(self, table: str, uuid_col: str) -> dict[str, int]:
         """uuid -> analysis_version for a versioned enrichment table."""
@@ -338,15 +314,6 @@ class SyncClient:
         # delivers upgrades.
         versioned = {emb_cat, "audio_features"}
 
-        # Set-digest categories: many rows per entity, so presence proves
-        # nothing. The inventory carries [uuid, digest] and we pull wherever
-        # the peer's set differs from ours — including when ours is merely
-        # SMALLER, which the old presence check could never see.
-        digested = {
-            "artist_tags": _LOCAL_TAG_DIGEST,
-            "similar_artists": _LOCAL_SIMILAR_DIGEST,
-        }
-
         needed = {}
         for cat_key, (table, uuid_col) in local_check.items():
             inv_key = "embeddings" if cat_key == "segments" else cat_key
@@ -374,20 +341,6 @@ class SyncClient:
                         f"  {cat_key}: {len(new)} new + {len(outdated)} outdated "
                         f"/ {len(available_versions)} available"
                     )
-                continue
-
-            if cat_key in digested:
-                remote = {row[0]: row[1] for row in inventory.get(cat_key, [])}
-                if not remote:
-                    continue
-                local = self._local_digests(digested[cat_key])
-                differing = [u for u, d in remote.items() if local.get(u) != d]
-                if differing:
-                    needed[cat_key] = differing
-                    fresh = sum(1 for u in differing if u not in local)
-                    self._progress(
-                        f"  {cat_key}: {fresh} new + {len(differing) - fresh} "
-                        f"divergent / {len(remote)} available")
                 continue
 
             available = set(inventory.get(cat_key, []))
