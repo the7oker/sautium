@@ -200,14 +200,23 @@ def get_outputs(rescan: bool = False):
 # user_settings so they survive restarts.
 #
 # Pins used to be the ONLY way to populate a Docker node, because multicast
-# dies at the bridge. The unicast sweep changed that, but only partly, and
-# the boundary is worth knowing: SSDP replies come back from whatever source
-# port the device chose, and the bridge's NAT is port-restricted for UDP, so
-# only devices answering from 1900 traverse it. Measured: a router replies
-# from 1900 and is found; BubbleUPnP replies from an ephemeral port and is
-# not, even though TCP to the same host works fine. For those — and for
-# anything on another subnet or across a tunnel — pinning a full description
-# URL is still the way in, and backend/dlna_locate.py prints one.
+# dies at the bridge. The unicast sweep changed that, but less than it looks,
+# and the boundary is worth knowing because it is TWO boundaries:
+#
+#   - SSDP replies come from whatever source port the device chose, and the
+#     bridge's NAT is port-restricted for UDP, so only devices answering from
+#     1900 traverse it. Measured: a router answers from 1900 and is found;
+#     BubbleUPnP answers from an ephemeral port and is not, though TCP to the
+#     same host works fine.
+#   - Some renderers ignore unicast M-SEARCH altogether. Measured on the
+#     KANN ULTRA, powered on and answering TCP: zero replies to unicast on
+#     1900 from WSL, where no NAT is involved at all. It is discoverable by
+#     multicast only — which is why a native node finds it and a container
+#     never will.
+#
+# So on Docker the sweep helps some devices and neither of the two renderers
+# on this network. Pinning a full description URL remains the way in there,
+# and backend/dlna_locate.py prints one.
 _dlna_discovered: dict[str, dict] = {}
 
 
