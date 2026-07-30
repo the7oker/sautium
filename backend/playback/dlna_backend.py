@@ -148,6 +148,37 @@ def _same_network(a: str, b: str) -> bool:
             == ipaddress.ip_network(f"{b}/24", strict=False))
 
 
+def _resolve_candidates(entries: list) -> list:
+    """Turn configured entries into addresses, accepting names as well.
+
+    Writing our tunnel address into a config file is the wrong shape: it is a
+    lease, not a property. The machine's NAME is the stable thing, and on a
+    tunnel with MagicDNS it resolves to the current address from anywhere —
+    including from inside the container, which cannot ask Tailscale directly
+    (no CLI, and the local API is on the host). So `SAUTIUM_HOST_IPS=vh11`
+    keeps working after the address changes, where a literal would rot
+    silently and hand renderers an address nobody answers on."""
+    import ipaddress
+    import socket
+    out = []
+    for entry in entries:
+        if not entry:
+            continue
+        try:
+            ipaddress.ip_address(entry)
+            resolved = [entry]
+        except ValueError:
+            try:
+                resolved = [socket.gethostbyname(entry)]
+            except OSError as e:
+                logger.warning("host candidate %r does not resolve (%s)", entry, e)
+                resolved = []
+        for ip in resolved:
+            if ip not in out:
+                out.append(ip)
+    return out
+
+
 def _source_address_toward(peer: str) -> Optional[str]:
     """Which of our addresses the kernel would speak from to reach `peer`.
 
@@ -182,10 +213,9 @@ def media_host(peer: Optional[str] = None) -> str:
     import os
     from tls_gen import detect_private_host_ips
     configured = settings.media_proxy_advertised_host
-    candidates = [ip for ip in
-                  ([configured] if configured and configured != "127.0.0.1" else [])
-                  + [s.strip() for s in os.getenv("SAUTIUM_HOST_IPS", "").split(",")]
-                  if ip]
+    candidates = _resolve_candidates(
+        ([configured] if configured and configured != "127.0.0.1" else [])
+        + [s.strip() for s in os.getenv("SAUTIUM_HOST_IPS", "").split(",")])
     if peer:
         match = next((ip for ip in candidates if _same_network(ip, peer)), None)
         if match:
