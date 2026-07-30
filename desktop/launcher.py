@@ -123,6 +123,7 @@ class LauncherApp(ctk.CTk):
         self._qr_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._qr_frame.pack(pady=5)
         self._qr_labels: dict = {}
+        self._qr_drawn: Optional[list] = None   # targets the row currently shows
 
         # No loopback URL line: "Open Web UI" already opens exactly that, and
         # the addresses another device would use are captioned under their QR.
@@ -415,9 +416,18 @@ class LauncherApp(ctk.CTk):
         port = self.config.get("ports", {}).get("web", 8000)
         fragment = f"#pair={code}" if code else ""
 
-        for ip, caption in targets:
-            widget = self._qr_labels.get(caption)
-            if widget is None:
+        # Rebuild whenever the set of addresses changes, rather than adding to
+        # what is there. The addresses are not fixed: Tailscale can be
+        # installed (or stopped) while the launcher runs, and a DHCP renewal
+        # or a Wi-Fi/Ethernet switch moves the LAN one. Growing the row only
+        # ever forwards left a column for a tunnel that was gone, and printed
+        # an address that had since changed — the QR image was regenerated,
+        # but the caption beneath it kept the old number and quietly lied.
+        if targets != self._qr_drawn:
+            for child in self._qr_frame.winfo_children():
+                child.destroy()
+            self._qr_labels = {}
+            for ip, caption in targets:
                 column = ctk.CTkFrame(self._qr_frame, fg_color="transparent")
                 column.pack(side="left", padx=8)
                 widget = ctk.CTkLabel(column, text="")
@@ -431,7 +441,12 @@ class LauncherApp(ctk.CTk):
                 ctk.CTkLabel(column, text=f"{ip}:{port}", text_color="gray",
                              font=ctk.CTkFont(size=10)).pack()
                 self._qr_labels[caption] = widget
+            self._qr_drawn = list(targets)
 
+        for ip, caption in targets:
+            widget = self._qr_labels.get(caption)
+            if widget is None:
+                continue
             # 150, not 180: the window is a fixed 900 tall and the Quit button
             # is the thing that falls off the bottom. Horizontal room is what
             # we have to spend, and a ~30-module code at 150px is still 5px
