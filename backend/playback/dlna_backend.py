@@ -21,7 +21,7 @@ import threading
 import time
 from datetime import timedelta
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from config import settings
 
@@ -705,6 +705,41 @@ class DlnaBackend(PlayerBackend):
             finally:
                 self._loading = False
 
+    def _unplayable_reason(self, skipped: int) -> str:
+        """Why a queue of adopted items has nothing this renderer can play.
+
+        The two cases are not the same problem and must not read the same. A
+        file UNDER the library root with no media_files row is an indexing gap
+        — scanning fixes it. A file outside the root is not a gap at all:
+        HQPlayer can open anything on the machine, while the library is defined
+        by its root, so importing whatever HQPlayer happened to be playing
+        would catalogue files the owner never chose — and in a node that syncs,
+        mint rows that travel to peers as a side effect of pressing play."""
+        root = (settings.music_host_path or settings.music_library_path or "")
+        norm = lambda p: p.replace("\\", "/").rstrip("/").lower()
+        inside = outside = 0
+        for i in range(skipped):
+            item = self._queue.item_at(self._index + i)
+            uri = (item.source or {}).get("uri", "") if item else ""
+            path = unquote(uri[8:] if uri.startswith("file:///") else uri)
+            if root and norm(path).startswith(norm(root) + "/"):
+                inside += 1
+            else:
+                outside += 1
+        if inside and not outside:
+            return (f"{inside} queued item(s) are in your library folder but "
+                    "have not been scanned yet, so they cannot be streamed to a "
+                    "renderer. Run Scan Library, then try again.")
+        if outside and not inside:
+            return (f"{outside} queued item(s) live outside this node's library "
+                    f"({root or 'unset'}) — HQPlayer can open them directly, but "
+                    "they cannot be streamed to another renderer. Play something "
+                    "from the library to replace the queue.")
+        return (f"None of the {skipped} queued item(s) can be sent to this "
+                f"renderer: {inside} not scanned yet, {outside} outside the "
+                "library folder. Play something from the library to replace "
+                "the queue.")
+
     async def _load_seq(self, index: int, *, play: bool = True, ss: float = 0.0,
                         url_override: Optional[str] = None,
                         skipped: int = 0) -> bool:
@@ -717,11 +752,7 @@ class DlnaBackend(PlayerBackend):
             # this library has no media_files row for, so no token can be
             # minted and no renderer but HQPlayer itself can be handed them.
             if skipped:
-                self._error = (
-                    f"None of the {skipped} queued item(s) can be sent to this "
-                    "renderer — they came from HQPlayer's own playlist and are "
-                    "not in this library. Play something from the library to "
-                    "replace the queue.")
+                self._error = self._unplayable_reason(skipped)
             self._emit_now("stopped")
             return False
         # url_override (a seek) carries the currently-playing stream's URL,
