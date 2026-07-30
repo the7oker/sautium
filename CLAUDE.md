@@ -255,6 +255,19 @@ distribution model.
   also sign requests. Accepted: this is a single-user home
   appliance, the bar is "no random scanner", not "no targeted LAN
   attacker".
+- ✅ DNS rebinding — a page on a hostile domain whose name resolves
+  to this node, talking to us from the victim's own browser. Signed
+  routes never fell to it (the device token is in localStorage, bound
+  to an origin the attacker lacks), but the whitelist did, and that is
+  where create-account/login/pair live. `_host_allowed` in
+  `auth_hmac.py` runs BEFORE the whitelist and accepts only addresses
+  that are OURS — own interfaces, `SAUTIUM_HOST_IPS` (names resolved
+  once at startup), `SAUTIUM_ALLOWED_HOSTS`, loopback. NOT "is it
+  private": that says yes to any RFC1918 name an attacker points at
+  us and no to 100.64/10, which is how a phone reaches this node over
+  Tailscale. Nothing ever resolves a client-supplied name. The peer
+  surface (8801) has no such guard and must not get one — it answers
+  to whatever Host a UPnP-mapped port produces.
 - ❌ Malicious browser extensions / processes on the host machine —
   also out of scope.
 
