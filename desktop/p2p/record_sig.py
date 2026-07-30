@@ -208,7 +208,18 @@ def _fmt_fetched_at(fetched_at) -> str:
     if fetched_at is None:
         return ""
     if isinstance(fetched_at, str):
-        return fetched_at
+        # The wire carries whatever the serialiser produced — isoformat gives
+        # "+00:00" where the signer wrote "Z". Re-render rather than trust the
+        # spelling: the format belongs to this contract, not to whichever JSON
+        # encoder the row passed through, and a signature that depends on that
+        # would verify on one path and fail on the other.
+        try:
+            fetched_at = datetime.datetime.fromisoformat(
+                fetched_at.replace("Z", "+00:00"))
+        except ValueError:
+            return fetched_at
+    if fetched_at.tzinfo is None:
+        fetched_at = fetched_at.replace(tzinfo=datetime.timezone.utc)
     return fetched_at.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 

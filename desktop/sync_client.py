@@ -50,6 +50,38 @@ CATEGORIES = [
     ("genre_descriptions", "genre-descriptions", "genre"),
 ]
 
+# When an incoming enrichment record may replace the local one. The rules, in
+# the order they matter:
+#
+#   1. Never overwrite first-hand data. What this node fetched itself outranks
+#      anything a peer says, always — the alternative is a network where the
+#      loudest relay rewrites your own observations.
+#   2. A signed record beats an unsigned one. Attribution is the point; a claim
+#      nobody stands behind should not displace one somebody does.
+#   3. Otherwise the fresher fetch wins, on fetched_at — which is inside the
+#      signed payload precisely so this comparison cannot be gamed.
+#
+# COALESCE on the local side so a legacy row with no fetched_at loses to a
+# stamped one rather than making the comparison NULL and blocking every update.
+_ENRICHMENT_PRECEDENCE = """
+    {t}.imported
+    AND (
+        (EXCLUDED.signature IS NOT NULL AND {t}.signature IS NULL)
+        OR EXCLUDED.fetched_at > COALESCE({t}.fetched_at, '-infinity'::timestamptz)
+    )
+"""
+
+# Pull category -> record kind. Membership in this map is what makes a category
+# verified; a new enrichment category is unverified until it appears here, which
+# is the failure mode we want (visible, not silent).
+_ENRICHMENT_KIND_BY_CATEGORY = {
+    "track_stats": "track_stat",
+    "artist_bios": "artist_bio",
+    "artist_tags": "artist_tag",
+    "similar_artists": "similar_artist",
+    "genre_descriptions": "genre_description",
+}
+
 DEFAULT_BATCH_SIZE = 500
 # A segments batch is K=12..24 vectors + proofs per track (~50KB) — keep the
 # per-request payload in the single-digit-MB range.
@@ -397,7 +429,19 @@ class SyncClient:
                 count = importer(conn, result["items"],
                                  result.get("batches") or {})
             else:
-                count = importer(conn, result["items"])
+                items = result["items"]
+                # Enrichment verifies here rather than inside each importer:
+                # one gate, five categories, and no way to add a sixth that
+                # quietly skips it.
+                kind = _ENRICHMENT_KIND_BY_CATEGORY.get(category)
+                if kind:
+                    items = self._verify_enrichment(
+                        kind, items, result.get("batches") or {})
+                    if not items:
+                        return 0
+                    self._insert_batches_for(conn, result.get("batches") or {},
+                                             items)
+                count = importer(conn, items)
             conn.commit()
             return count
         except Exception as e:
@@ -406,6 +450,69 @@ class SyncClient:
             return 0
 
     # -- Seal verification (verify-on-import) -------------------------------
+
+    # Which wire field names the entity a record hangs off.
+    _ENRICHMENT_ENTITY = {
+        "artist_bio": "artist_uuid",
+        "artist_tag": "artist_uuid",
+        "similar_artist": "artist_uuid",
+        "track_stat": "track_uuid",
+        "genre_description": "genre_uuid",
+    }
+
+    def _verify_enrichment(self, kind: str, items: list, batches: dict) -> list:
+        """Keep the records whose seal checks out, plus the unsigned ones.
+
+        Unsigned records are accepted deliberately — a peer that has not signed
+        yet is not a liar, and it stays identifiable by author_pubkey IS NULL.
+        A record carrying a signature that does NOT check out is a different
+        matter and gets dropped: it is either corrupt or forged, and there is
+        no version of "accept it anyway" that leaves the seal meaning anything."""
+        batch_ok = self._batch_verifier(batches or {})
+        key = self._ENRICHMENT_ENTITY[kind]
+        kept, dropped = [], 0
+        for it in items:
+            if not it.get("signature"):
+                kept.append(it)
+                continue
+            try:
+                content = rs.blake2b_hex(rs.canonical_enrichment_blob(kind, it))
+                payload = rs.enrichment_payload(
+                    it.get("author_pubkey") or "", kind, it.get(key) or "",
+                    it.get("source") or "", content, it.get("fetched_at"))
+            except (ValueError, KeyError):
+                payload = None
+            if not (payload
+                    and rs.verify(payload, it["signature"],
+                                  it.get("author_pubkey") or "")
+                    and rs.verify_proof(rs.record_leaf(it["signature"]),
+                                        it.get("merkle_proof") or [],
+                                        it.get("batch_root") or "")
+                    and batch_ok(it.get("batch_root"))):
+                dropped += 1
+                continue
+            kept.append(it)
+        if dropped:
+            logger.warning("sync import: dropped %d %s record(s) — seal invalid",
+                           dropped, kind)
+        return kept
+
+    def _insert_batches_for(self, conn, batches: dict, items: list) -> None:
+        """Store the Worker timestamps the surviving seals reference, so this
+        node can re-serve the whole chain instead of relaying orphaned seals."""
+        roots = {i["batch_root"] for i in items if i.get("batch_root")}
+        if not roots:
+            return
+        with conn.cursor() as cur:
+            self._insert_batches(cur, batches, roots)
+
+    @staticmethod
+    def _seal_values(item: dict) -> tuple:
+        """The five seal columns in a fixed order, for the INSERT templates."""
+        return (item.get("fetched_at"), item.get("author_pubkey"),
+                item.get("signature"), item.get("batch_root"),
+                psycopg2.extras.Json(item.get("merkle_proof"))
+                if item.get("merkle_proof") is not None else None)
 
     @staticmethod
     def _batch_verifier(batches: dict):
@@ -842,19 +949,29 @@ class SyncClient:
                 (
                     item["track_uuid"], item.get("source", "sync"),
                     item.get("listeners"), item.get("playcount"),
+                    *self._seal_values(item),
                 )
                 for item in items
             ]
             psycopg2.extras.execute_values(
                 cur,
-                """INSERT INTO track_stats (track_id, source, listeners, playcount)
+                """INSERT INTO track_stats
+                       (track_id, source, listeners, playcount, fetched_at,
+                        author_pubkey, signature, batch_root, merkle_proof,
+                        imported)
                    VALUES %s
                    ON CONFLICT (track_id, source) DO UPDATE SET
                        listeners = EXCLUDED.listeners,
                        playcount = EXCLUDED.playcount,
-                       updated_at = CURRENT_TIMESTAMP""",
+                       fetched_at = EXCLUDED.fetched_at,
+                       author_pubkey = EXCLUDED.author_pubkey,
+                       signature = EXCLUDED.signature,
+                       batch_root = EXCLUDED.batch_root,
+                       merkle_proof = EXCLUDED.merkle_proof,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE """ + _ENRICHMENT_PRECEDENCE.format(t="track_stats"),
                 values,
-                template="(%s, %s, %s, %s)",
+                template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)",
                 page_size=500,
             )
         return len(items)
@@ -889,13 +1006,17 @@ class SyncClient:
                     item.get("summary"), item.get("content"),
                     item.get("url"), item.get("listeners"),
                     item.get("playcount"),
+                    *self._seal_values(item),
                 )
                 for item in unique_items
             ]
             psycopg2.extras.execute_values(
                 cur,
                 """INSERT INTO artist_bios
-                   (artist_id, source, summary, content, url, listeners, playcount)
+                   (artist_id, source, summary, content, url, listeners, playcount,
+                    fetched_at,
+                        author_pubkey, signature, batch_root, merkle_proof,
+                        imported)
                    VALUES %s
                    ON CONFLICT (artist_id, source) DO UPDATE SET
                        summary = EXCLUDED.summary,
@@ -903,9 +1024,15 @@ class SyncClient:
                        url = EXCLUDED.url,
                        listeners = EXCLUDED.listeners,
                        playcount = EXCLUDED.playcount,
-                       updated_at = CURRENT_TIMESTAMP""",
+                       fetched_at = EXCLUDED.fetched_at,
+                       author_pubkey = EXCLUDED.author_pubkey,
+                       signature = EXCLUDED.signature,
+                       batch_root = EXCLUDED.batch_root,
+                       merkle_proof = EXCLUDED.merkle_proof,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE """ + _ENRICHMENT_PRECEDENCE.format(t="artist_bios"),
                 values,
-                template="(%s, %s, %s, %s, %s, %s, %s)",
+                template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)",
                 page_size=500,
             )
         return len(items)
@@ -947,20 +1074,28 @@ class SyncClient:
                 [(item["tag_uuid"], item["tag_name"]) for item in items])
             values = [
                 (item["artist_uuid"], local[item["tag_name"]],
-                 item["weight"], item.get("source", "sync"))
+                 item["weight"], item.get("source", "sync"),
+                 *self._seal_values(item))
                 for item in items if item["tag_name"] in local
             ]
             if values:
                 psycopg2.extras.execute_values(
                     cur,
                     """INSERT INTO artist_tags
-                       (artist_id, tag_id, weight, source)
+                       (artist_id, tag_id, weight, source, fetched_at,
+                        author_pubkey, signature, batch_root, merkle_proof, imported)
                        VALUES %s
                        ON CONFLICT (artist_id, tag_id, source) DO UPDATE SET
                            weight = EXCLUDED.weight,
-                           updated_at = CURRENT_TIMESTAMP""",
+                           fetched_at = EXCLUDED.fetched_at,
+                           author_pubkey = EXCLUDED.author_pubkey,
+                           signature = EXCLUDED.signature,
+                           batch_root = EXCLUDED.batch_root,
+                           merkle_proof = EXCLUDED.merkle_proof,
+                           updated_at = CURRENT_TIMESTAMP
+                       WHERE """ + _ENRICHMENT_PRECEDENCE.format(t="artist_tags"),
                     values,
-                    template="(%s, %s, %s, %s)",
+                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)",
                     page_size=500,
                 )
         return len(items)
@@ -1000,19 +1135,27 @@ class SyncClient:
                 (
                     item["artist_uuid"], item["similar_artist_uuid"],
                     item["match_score"], item.get("source", "sync"),
+                    *self._seal_values(item),
                 )
                 for item in items
             ]
             psycopg2.extras.execute_values(
                 cur,
                 """INSERT INTO similar_artists
-                   (artist_id, similar_artist_id, match_score, source)
+                   (artist_id, similar_artist_id, match_score, source, fetched_at,
+                        author_pubkey, signature, batch_root, merkle_proof, imported)
                    VALUES %s
                    ON CONFLICT (artist_id, similar_artist_id, source) DO UPDATE SET
                        match_score = EXCLUDED.match_score,
-                       updated_at = CURRENT_TIMESTAMP""",
+                       fetched_at = EXCLUDED.fetched_at,
+                       author_pubkey = EXCLUDED.author_pubkey,
+                       signature = EXCLUDED.signature,
+                       batch_root = EXCLUDED.batch_root,
+                       merkle_proof = EXCLUDED.merkle_proof,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE """ + _ENRICHMENT_PRECEDENCE.format(t="similar_artists"),
                 values,
-                template="(%s, %s, %s, %s)",
+                template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)",
                 page_size=500,
             )
         return len(items)
@@ -1089,7 +1232,7 @@ class SyncClient:
                 (
                     local[item["genre_name"]], item.get("source", "sync"),
                     item.get("summary"), item.get("content"),
-                    item.get("url"),
+                    item.get("url"), *self._seal_values(item),
                 )
                 for item in items if item.get("genre_name") in local
             ]
@@ -1097,15 +1240,22 @@ class SyncClient:
                 psycopg2.extras.execute_values(
                     cur,
                     """INSERT INTO genre_descriptions
-                       (genre_id, source, summary, content, url)
+                       (genre_id, source, summary, content, url, fetched_at,
+                        author_pubkey, signature, batch_root, merkle_proof, imported)
                        VALUES %s
                        ON CONFLICT (genre_id, source) DO UPDATE SET
                            summary = EXCLUDED.summary,
                            content = EXCLUDED.content,
                            url = EXCLUDED.url,
-                           updated_at = CURRENT_TIMESTAMP""",
+                           fetched_at = EXCLUDED.fetched_at,
+                           author_pubkey = EXCLUDED.author_pubkey,
+                           signature = EXCLUDED.signature,
+                           batch_root = EXCLUDED.batch_root,
+                           merkle_proof = EXCLUDED.merkle_proof,
+                           updated_at = CURRENT_TIMESTAMP
+                       WHERE """ + _ENRICHMENT_PRECEDENCE.format(t="genre_descriptions"),
                     values,
-                    template="(%s, %s, %s, %s, %s)",
+                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)",
                     page_size=500,
                 )
         return len(items)

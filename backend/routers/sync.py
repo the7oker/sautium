@@ -324,7 +324,12 @@ def _parse_vector(vec_text: str) -> list[float]:
 
 
 def _pull_handler(category: str, sql: str, uuids: list[str], post_process=None) -> dict:
-    """Common handler for pull endpoints."""
+    """Common handler for pull endpoints.
+
+    Any category whose rows carry a batch_root also ships the signing_batches
+    rows those roots name — the importer cannot verify a Merkle inclusion or a
+    Worker timestamp without them, and a seal it cannot check is a seal it must
+    drop."""
     _require_sharing()
     if not uuids:
         return {"category": category, "items": []}
@@ -333,6 +338,10 @@ def _pull_handler(category: str, sql: str, uuids: list[str], post_process=None) 
         items = [_serialize_row(r) for r in rows]
         if post_process:
             items = [post_process(item) for item in items]
+        roots = {i["batch_root"] for i in items if i.get("batch_root")}
+        if roots:
+            return {"category": category, "items": items,
+                    "batches": _batches_map(roots)}
         return {"category": category, "items": items}
     except Exception as e:
         logger.error(f"Pull {category} failed: {e}")
@@ -605,7 +614,8 @@ async def pull_track_stats(req: PullRequest) -> dict:
     """Pull track statistics (listeners, playcount)."""
     return _pull_handler(
         "track_stats",
-        """SELECT track_id::text AS track_uuid, source, listeners, playcount
+        """SELECT track_id::text AS track_uuid, source, listeners, playcount,
+                  fetched_at, author_pubkey, signature, batch_root, merkle_proof
            FROM track_stats
            WHERE track_id = ANY(%s::uuid[])""",
         req.uuids,
@@ -619,7 +629,8 @@ async def pull_artist_bios(req: PullRequest) -> dict:
         "artist_bios",
         """SELECT ab.artist_id::text AS artist_uuid, a.name AS artist_name,
                   ab.source, ab.summary, ab.content, ab.url,
-                  ab.listeners, ab.playcount
+                  ab.listeners, ab.playcount, ab.fetched_at,
+                  ab.author_pubkey, ab.signature, ab.batch_root, ab.merkle_proof
            FROM artist_bios ab
            INNER JOIN artists a ON a.id = ab.artist_id
            WHERE ab.artist_id = ANY(%s::uuid[])""",
@@ -634,7 +645,8 @@ async def pull_artist_tags(req: PullRequest) -> dict:
         "artist_tags",
         """SELECT at2.artist_id::text AS artist_uuid,
                   t.id::text AS tag_uuid, t.name AS tag_name,
-                  at2.weight, at2.source
+                  at2.weight, at2.source, at2.fetched_at,
+                  at2.author_pubkey, at2.signature, at2.batch_root, at2.merkle_proof
            FROM artist_tags at2
            INNER JOIN tags t ON t.id = at2.tag_id
            WHERE at2.artist_id = ANY(%s::uuid[])""",
@@ -650,7 +662,8 @@ async def pull_similar_artists(req: PullRequest) -> dict:
         """SELECT sa.artist_id::text AS artist_uuid,
                   sa.similar_artist_id::text AS similar_artist_uuid,
                   a.name AS similar_artist_name,
-                  sa.match_score::float, sa.source
+                  sa.match_score::float, sa.source, sa.fetched_at,
+                  sa.author_pubkey, sa.signature, sa.batch_root, sa.merkle_proof
            FROM similar_artists sa
            INNER JOIN artists a ON a.id = sa.similar_artist_id
            WHERE sa.artist_id = ANY(%s::uuid[])""",
@@ -683,7 +696,8 @@ async def pull_genre_descriptions(req: PullRequest) -> dict:
     return _pull_handler(
         "genre_descriptions",
         """SELECT gd.genre_id::text AS genre_uuid, g.name AS genre_name,
-                  gd.source, gd.summary, gd.content, gd.url
+                  gd.source, gd.summary, gd.content, gd.url, gd.fetched_at,
+                  gd.author_pubkey, gd.signature, gd.batch_root, gd.merkle_proof
            FROM genre_descriptions gd
            INNER JOIN genres g ON g.id = gd.genre_id
            WHERE gd.genre_id = ANY(%s::uuid[])""",
