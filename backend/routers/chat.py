@@ -46,16 +46,42 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 # ---------------------------------------------------------------------------
 
 def _get_player_context() -> Optional[str]:
-    """Get current HQPlayer state by calling player router functions directly."""
+    """Current playback state, straight from the player router.
+
+    Output-agnostic: get_status() reports whatever backend is active, so this
+    is right whether the sound is going to HQPlayer, a renderer, a local
+    device or the browser."""
     try:
         from routers.player import get_status, get_playlist
 
+        from routers.settings import _read
+
         status = get_status()
-
-        if status.get("state") == "disconnected":
-            return None
-
         parts = []
+
+        # Which output is chosen, because it decides which tools work at all:
+        # the hqplayer_* family commands the HQPlayer device and refuses when
+        # the sound is going elsewhere. Without this the agent has to guess,
+        # and it guesses HQPlayer.
+        #
+        # Read from settings when the status carries none — nothing is attached
+        # while a renderer is asleep or a browser tab is closed, and "which
+        # output did the user pick" still has an answer. This used to return
+        # nothing at all in that case, leaving the agent blind precisely when
+        # it most needed to explain why playback would not start.
+        out = status.get("output") or {}
+        otype = out.get("type") or _read("output.type") or "none"
+        label = out.get("label")
+        attached = status.get("state") not in ("disconnected", None)
+        parts.append(
+            f"Active audio output: {otype}{f' ({label})' if label else ''}"
+            f"{'' if attached else ' — not currently attached'}. "
+            + ("HQPlayer transport/DSP tools are available."
+               if otype == "hqplayer" else
+               "hqplayer_* tools will refuse — use play_track / play_album / "
+               "play_similar / add_to_queue, which follow this output."))
+        if not attached:
+            return "\n".join(parts)
 
         # Now playing
         state = status.get("state", "unknown")

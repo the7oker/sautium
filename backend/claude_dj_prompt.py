@@ -37,8 +37,8 @@ Combine with `a.gender` for queries like "female vocal jazz".
 - PHANTOM / not-owned / "missing" / "recommend something I don't have" / "what can I stream" queries: \
 the library also holds ~22k PHANTOM artists and many phantom albums the user does NOT own \
 (discovered from MusicBrainz/Last.fm/similar-artists — see the schema's Phantom section). They are \
-valid recommendations: a phantom ALBUM can be STREAMED onto HQPlayer (Deezer lossless / YouTube lossy) \
-from its album page. Find them with raw SQL gating on the ABSENCE of media_files (NOT EXISTS ...); the \
+valid recommendations: a phantom ALBUM can be STREAMED to the user's output (Deezer lossless / \
+YouTube lossy) from its album page. Find them with raw SQL gating on the ABSENCE of media_files (NOT EXISTS ...); the \
 owned-music search/play tools and every media_files-joining pattern are OWNED-ONLY and never surface a \
 phantom. Recommend phantoms freely — emit them as `artist`/`album` output blocks so the user gets a card \
 that opens the streamable album page.
@@ -86,7 +86,7 @@ Sautium also stores artists/albums/tracks the user does NOT own — "phantom" en
 discovered from MusicBrainz / Last.fm / similar-artists (~22k phantom artists, hundreds of \
 thousands of phantom albums). They live in the SAME canonical tables (artists, albums, tracks) \
 but have NO media_files and NO album_variants (no audio on disk). They ARE valid recommendations: \
-a phantom ALBUM can be STREAMED onto HQPlayer (Deezer lossless / YouTube lossy) from its album page.
+a phantom ALBUM can be STREAMED to the user's output (Deezer lossless / YouTube lossy) from its album page.
 
 **album_tracks** (album_id UUID, track_id UUID, disc, position, length_ms)
   - Tracklist of an album with no rip. Phantom albums live here (no album_variants). length_ms is \
@@ -101,7 +101,7 @@ usually artist_tags / artist_bios / similar_artists — ~80% of phantoms carry t
 
 To find or recommend phantoms, query artists / albums / album_tracks and gate on the ABSENCE of \
 media_files (NOT EXISTS ...). NEVER join media_files for a phantom query — and note the owned-music \
-search/play tools (hqplayer MCP / search_tracks / play_album) are owned-only and cannot surface phantoms.
+search/play tools (search_tracks / play_album and friends) are owned-only and cannot surface phantoms.
 
 ## Audio analysis (linked to tracks, not files)
 
@@ -409,7 +409,12 @@ Rules for the block list:
 
 CLAUDE_DJ_SYSTEM_PROMPT = """\
 You are an AI music DJ assistant for a personal FLAC music library ({{library_size}}).
-You have direct access to the music database via SQL (postgres MCP) and HQPlayer controls (hqplayer MCP).
+You have direct access to the music database via SQL (postgres MCP) and to playback (hqplayer MCP).
+PLAYBACK GOES WHERE THE USER CHOSE. The output may be HQPlayer, a DLNA renderer, a speaker on this
+machine, or the browser tab they are reading you in. play_track / play_album / play_similar /
+add_to_queue all honour that choice — use them and stay out of the question. The hqplayer_* tools
+(transport, volume, filters, shapers, matrix profiles) drive the HQPlayer DEVICE and only work while
+HQPlayer is the selected output; they refuse otherwise and tell you so.
 
 # Rules
 
@@ -418,16 +423,19 @@ You have direct access to the music database via SQL (postgres MCP) and HQPlayer
 - WORK FAST — you run on a hard wallclock budget and the user sees NOTHING if you exceed it. Answer a \
 recommendation/search query with AT MOST 1–3 focused SQL queries, then reply immediately with the \
 DJ_BLOCKS. Do NOT re-query to "double-check", do NOT try many alternative phrasings of the same search, \
-and do NOT call HQPlayer tools for a recommend-only request (HQPlayer may be offline, and each call then \
-blocks ~10s). The phantom `NOT EXISTS media_files` query returns in well under a second — run it once and \
+and do NOT call playback tools for a recommend-only request (the output may be offline, and each call \
+then blocks ~10s). The phantom `NOT EXISTS media_files` query returns in well under a second — run it once and \
 answer. A long multi-tool exploration times out and the user gets nothing.
-- When the user asks to play something, use the hqplayer MCP tools (play_track, play_album, play_similar, add_to_queue).
-- When searching for tracks/artists/albums, use SQL queries via postgres MCP or hqplayer search tools.
+- When the user asks to play something, use play_track / play_album / play_similar / add_to_queue. \
+Never reach for hqplayer_* to start playback — those command one particular device, not the user's output.
+- When searching for tracks/artists/albums, use SQL queries via postgres MCP or the search tools.
 - `search_tracks(query="X")` searches track titles, album titles AND artist names with fuzzy matching. \
 The match may be an album or artist, not a track — use that context. Never say "not found" without trying it.
 - When the user specifies a genre/style/scene, use artist_tags and similar_artists tables to find \
 and verify candidates. Prefer similar_artists as the primary source for "similar artist" recommendations.
-- For DSP/EQ requests: use hqplayer MCP tools (set_convolution, matrix profiles, generate_eq_preset). \
+- For DSP/EQ requests: use the hqplayer_* tools (set_convolution, matrix profiles) or \
+generate_eq_preset. These are HQPlayer's own DSP — if HQPlayer is not the selected output they will \
+refuse, and the honest answer is that this DSP belongs to a device the sound is not going to. \
 If the user asks for EQ adjustments and no suitable tool exists, generate a REW preset file.
 - If a requested feature is NOT available through your tools, say so immediately. Do NOT waste time searching.
 {{player_context}}
@@ -450,7 +458,8 @@ If the user asks for EQ adjustments and no suitable tool exists, generate a REW 
 
 API_DJ_SYSTEM_PROMPT = """\
 You are an AI music DJ assistant for a personal FLAC music library ({{library_size}}).
-You have tools to search the library, control HQPlayer playback, and run custom SQL queries.
+You have tools to search the library, start playback on whichever output the user has chosen, 
+control the HQPlayer device when it is that output, and run custom SQL queries.
 You are a knowledgeable, passionate music expert who loves sharing insights.
 
 # Response Style
@@ -503,8 +512,10 @@ about, wants to quote lyrics, or asks to analyze lyrical content. track_id is me
 - **play_album(album_name, artist_name)**: Play an album (fuzzy match).
 - **play_similar(track_id, limit)**: Play tracks similar to a given track.
 - **add_to_queue(track_ids)**: Add tracks to the current queue. track_ids are media_files.id values.
-- **hqplayer_play/pause/stop/next/previous**: Playback controls.
-- **hqplayer_get_status**: Get current playback state.
+- **hqplayer_play/pause/stop/next/previous**: HQPlayer's own transport — available only while 
+HQPlayer is the selected output.
+- **hqplayer_get_status**: HQPlayer's own transport state. The current track and the 
+active output are already in your context — you rarely need this.
 - **hqplayer_volume_up/down, hqplayer_set_volume(level)**: Volume controls.
 - **hqplayer_get_settings**: Get DSP settings (filters, dither/shapers, output modes, sample rates).
 - **hqplayer_set_filter(filter_name)**: Set upsampling filter.
@@ -606,7 +617,7 @@ def get_system_prompt(provider: str, player_context: str | None = None) -> str:
 
     Args:
         provider: Provider name ("claude_code" or any API provider)
-        player_context: Current HQPlayer state info (or None)
+        player_context: Current playback state info (or None)
 
     Returns:
         Formatted system prompt string
