@@ -2200,7 +2200,12 @@ BEGIN
                 ADD COLUMN IF NOT EXISTS signature     CHAR(128),
                 ADD COLUMN IF NOT EXISTS batch_root    CHAR(64)
                     REFERENCES signing_batches(batch_root),
-                ADD COLUMN IF NOT EXISTS merkle_proof  JSONB
+                ADD COLUMN IF NOT EXISTS merkle_proof  JSONB,
+                -- Arrived over sync rather than fetched here. The signer skips
+                -- these: a signature says "this source told ME this", and
+                -- re-signing a peer's observation as our own would erase the
+                -- only thing these signatures carry.
+                ADD COLUMN IF NOT EXISTS imported BOOLEAN NOT NULL DEFAULT FALSE
         $f$, t);
         EXECUTE format(
             'UPDATE %I SET fetched_at = updated_at WHERE fetched_at IS NULL', t);

@@ -89,6 +89,62 @@ def _signable_tracks(cur) -> list:
     return [r["tid"] for r in cur.fetchall()]
 
 
+# Enrichment records join the SAME batch as the audio ones: one Merkle root,
+# one Worker timestamp, one round trip. They are cheap to sign and there is no
+# reason to pay for a second notarisation.
+#
+# Only NOT imported rows. A signature here says "this source told ME this" —
+# signing a row a peer sent us would restate their observation as our own, and
+# the network would lose the one thing these signatures are for.
+_ENRICHMENT_SOURCES = {
+    "artist_bio": ("""
+        SELECT b.id, b.artist_id::text AS entity, b.source, b.fetched_at,
+               b.summary, b.content, b.url, b.listeners, b.playcount
+        FROM artist_bios b
+        WHERE b.signature IS NULL AND NOT b.imported""", "artist_bios"),
+    "artist_tag": ("""
+        SELECT at2.id, at2.artist_id::text AS entity, at2.source, at2.fetched_at,
+               t.name AS tag_name, at2.weight
+        FROM artist_tags at2 JOIN tags t ON t.id = at2.tag_id
+        WHERE at2.signature IS NULL AND NOT at2.imported""", "artist_tags"),
+    "similar_artist": ("""
+        SELECT sa.id, sa.artist_id::text AS entity, sa.source, sa.fetched_at,
+               sa.similar_artist_id::text AS similar_artist_uuid,
+               sa.match_score::float AS match_score
+        FROM similar_artists sa
+        WHERE sa.signature IS NULL AND NOT sa.imported""", "similar_artists"),
+    "track_stat": ("""
+        SELECT ts.id, ts.track_id::text AS entity, ts.source, ts.fetched_at,
+               ts.listeners, ts.playcount
+        FROM track_stats ts
+        WHERE ts.signature IS NULL AND NOT ts.imported""", "track_stats"),
+    "genre_description": ("""
+        SELECT gd.id, gd.genre_id::text AS entity, gd.source, gd.fetched_at,
+               gd.summary, gd.content, gd.url
+        FROM genre_descriptions gd
+        WHERE gd.signature IS NULL AND NOT gd.imported""", "genre_descriptions"),
+}
+
+
+def _collect_enrichment(cur, author, key, pending, chunk=20000) -> int:
+    """Append signed enrichment records to `pending`. Returns how many."""
+    added = 0
+    for kind, (sql, table) in _ENRICHMENT_SOURCES.items():
+        cur.execute(sql)
+        while True:
+            rows = cur.fetchmany(chunk)
+            if not rows:
+                break
+            for r in rows:
+                content = rs.blake2b_hex(rs.canonical_enrichment_blob(kind, r))
+                payload = rs.enrichment_payload(author, kind, r["entity"],
+                                                r["source"], content,
+                                                r["fetched_at"])
+                pending.append((table, r["id"], rs.sign(payload, key)))
+                added += 1
+    return added
+
+
 def run(limit=None, dry_run=False):
     key = load_signing_key(settings)
     if key is None:
@@ -154,6 +210,10 @@ def run(limit=None, dry_run=False):
 
         tracks_touched += touched
 
+    enriched = _collect_enrichment(cur, author, key, pending)
+    if enriched:
+        logger.info("enrichment records to sign: %d", enriched)
+
     if not pending:
         logger.info("nothing to sign")
         return
@@ -180,12 +240,25 @@ def run(limit=None, dry_run=False):
                    VALUES (%s, %s, %s, %s, %s, %s)""",
                 (root, author, ts["date"], ts["ip_hash"], ts["sig"],
                  ts["authority"]))
+    # Grouped and batched: a statement per record was fine at audio scale and
+    # is not at enrichment scale — the first unified pass seals 300k+ rows.
+    by_table: dict = {}
     for (table, pk, sig), proof in zip(pending, proofs):
-        cur.execute(f"""UPDATE {table}
-                        SET author_pubkey=%s, signature=%s, batch_root=%s,
-                            merkle_proof=%s
-                        WHERE id=%s""",
-                    (author, sig, root, json.dumps(proof), pk))
+        by_table.setdefault(table, []).append(
+            (pk, author, sig, root, json.dumps(proof)))
+    for table, rows in by_table.items():
+        psycopg2.extras.execute_values(
+            cur,
+            f"""UPDATE {table} AS t
+                SET author_pubkey = v.author, signature = v.sig,
+                    batch_root = v.root, merkle_proof = v.proof::jsonb
+                FROM (VALUES %s) AS v(id, author, sig, root, proof)
+                WHERE t.id = v.id""",
+            rows,
+            template="(%s::int, %s, %s, %s, %s)",
+            page_size=500,
+        )
+        logger.info("sealed %d rows in %s", len(rows), table)
     conn.commit()
     logger.info("signed %d records in batch %s @ %s",
                 len(pending), root[:16], ts["date"])
