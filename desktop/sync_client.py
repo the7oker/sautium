@@ -119,7 +119,6 @@ class SyncClient:
         self.batch_size = batch_size
         self.progress_cb = progress_cb
         self._conn: Optional[psycopg2.extensions.connection] = None
-        self._offered_digests: dict = {}   # category -> {uuid: peer digest}
 
     def _progress(self, msg: str):
         logger.info(msg)
@@ -174,39 +173,6 @@ class SyncClient:
             conn.rollback()
             return set()
 
-    def _seen_digests(self, peer_id: str, category: str) -> dict[str, str]:
-        """Digests already ingested from this peer for this category."""
-        if not peer_id:
-            return {}
-        conn = self._get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT entity_id::text, digest FROM sync_seen_digests "
-                    "WHERE peer_id = %s AND category = %s", (peer_id, category))
-                return {row[0]: row[1] for row in cur.fetchall()}
-        except psycopg2.errors.UndefinedTable:
-            conn.rollback()
-            return {}
-
-    def _record_seen(self, peer_id: str, category: str, uuids: list) -> None:
-        """Note the peer's advertised digests for what we just took from it."""
-        offered = self._offered_digests.get(category) or {}
-        rows = [(peer_id, category, u, offered[u]) for u in uuids if u in offered]
-        if not (peer_id and rows):
-            return
-        conn = self._get_conn()
-        with conn.cursor() as cur:
-            psycopg2.extras.execute_values(
-                cur,
-                """INSERT INTO sync_seen_digests
-                       (peer_id, category, entity_id, digest)
-                   VALUES %s
-                   ON CONFLICT (peer_id, category, entity_id) DO UPDATE
-                       SET digest = EXCLUDED.digest, seen_at = NOW()""",
-                rows, template="(%s, %s, %s::uuid, %s)", page_size=500)
-        conn.commit()
-
     def _local_digests(self, sql: str) -> dict[str, str]:
         """uuid -> set digest for this node's own rows."""
         conn = self._get_conn()
@@ -260,12 +226,6 @@ class SyncClient:
         # Step 2: Capability probe — which audio category does the peer speak?
         health = self.api.get_health() or {}
         peer_caps = set(health.get("capabilities") or [])
-        # Stable identity of the source, so the digest memo survives the peer
-        # changing address. Without one the memo cannot key anything and the
-        # convergence check falls back to "digests differ" — correct, just
-        # noisy — so an anonymous peer degrades rather than breaks.
-        peer_id = health.get("node_id") or ""
-        self._offered_digests = {}
         use_segments = "segments" in peer_caps
         if not use_segments:
             self._progress(
@@ -288,7 +248,7 @@ class SyncClient:
             self._log_missing_tracks(not_found)
 
         # Step 4: Filter out what we already have locally
-        needed = self._compute_needed(inventory, use_segments, peer_id)
+        needed = self._compute_needed(inventory, use_segments)
 
         # Step 5: Pull and import each category in batches
         stats = {}
@@ -305,10 +265,6 @@ class SyncClient:
                 cat_key, pull_endpoint, uuids_to_pull
             )
             stats[cat_key] = imported
-            # Only after the import survived: a failed pull must be retried,
-            # not remembered as satisfied.
-            if imported and cat_key in self._offered_digests:
-                self._record_seen(peer_id, cat_key, uuids_to_pull)
 
         # Step 6: Recompute artist gender and vocalist status from imported bios
         if stats.get("artist_bios", 0) > 0:
@@ -358,8 +314,7 @@ class SyncClient:
             )
             return {row[0] for row in cur.fetchall()}
 
-    def _compute_needed(self, inventory: dict, use_segments: bool,
-                        peer_id: str = "") -> dict:
+    def _compute_needed(self, inventory: dict, use_segments: bool) -> dict:
         """Compare inventory with local data to find what's missing."""
         emb_cat = "segments" if use_segments else "embeddings"
         # Map category to (table, uuid_column) for local existence check.
@@ -426,19 +381,7 @@ class SyncClient:
                 if not remote:
                     continue
                 local = self._local_digests(digested[cat_key])
-                # Two tests, and the second is what makes this terminate.
-                # "Digests differ" answers "are the sets identical", which is
-                # NOT the question — they also differ when WE hold more, and
-                # that never stops being true. After importing a peer's set
-                # ours is a superset of it, so on the next cycle the digests
-                # still differ and we would pull the same rows again, every
-                # cycle, forever. Remembering the digest we already ingested
-                # FROM THIS PEER turns the test into "has the peer changed
-                # since", which converges and still fires on any real change.
-                seen = self._seen_digests(peer_id, cat_key)
-                differing = [u for u, d in remote.items()
-                             if local.get(u) != d and seen.get(u) != d]
-                self._offered_digests[cat_key] = remote
+                differing = [u for u, d in remote.items() if local.get(u) != d]
                 if differing:
                     needed[cat_key] = differing
                     fresh = sum(1 for u in differing if u not in local)

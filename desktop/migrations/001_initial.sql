@@ -2311,22 +2311,3 @@ CREATE TRIGGER trg_seal_guard_track_stats BEFORE UPDATE ON track_stats
 DROP TRIGGER IF EXISTS trg_seal_guard_genre_descriptions ON genre_descriptions;
 CREATE TRIGGER trg_seal_guard_genre_descriptions BEFORE UPDATE ON genre_descriptions
     FOR EACH ROW EXECUTE FUNCTION seal_guard_genre_descriptions();
-
-
--- Digest memo: which set-digest we have already ingested from which peer.
---
--- The inventory reports a digest of the tag / similar-artist SET per artist,
--- and the client pulls where it differs from ours. On its own that never
--- terminates: after importing a peer's set ours is a SUPERSET of it, so the
--- digests still differ next cycle and the same rows come again, every cycle,
--- forever. Remembering what we already took from a given peer turns the test
--- into "has the peer changed since", which converges and still fires on any
--- real change at the source.
-CREATE TABLE IF NOT EXISTS sync_seen_digests (
-    peer_id    CHAR(64)    NOT NULL,
-    category   VARCHAR(32) NOT NULL,
-    entity_id  UUID        NOT NULL,
-    digest     CHAR(32)    NOT NULL,
-    seen_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (peer_id, category, entity_id)
-);
