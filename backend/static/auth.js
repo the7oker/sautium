@@ -134,11 +134,27 @@
       headers.set("X-Sautium-Sig", signed.sig);
     }
 
-    const resp = await _origFetch(input, { ...init, headers });
-    // A 401 on a signed request means the token was revoked (epoch bumped
-    // by a password change or "log out everywhere"). Drop it so the app
-    // falls back to the login screen instead of looping on failures.
-    if (resp.status === 401 && signed) {
+    let resp = await _origFetch(input, { ...init, headers });
+
+    // Stale timestamp: the request sat in the network queue past the replay
+    // window — a frozen phone tab flushes requests signed minutes ago on
+    // wake. The token is fine and the server rejected the request before
+    // handling it, so re-signing and retrying once is always safe.
+    if (resp.status === 401 && signed &&
+        resp.headers.get("X-Sautium-Auth-Error") === "stale-ts") {
+      const fresh = await signRequest(method, pathAndQuery, body);
+      const retryHeaders = new Headers(init.headers || {});
+      retryHeaders.set("X-Sautium-Ts", fresh.ts);
+      retryHeaders.set("X-Sautium-Sig", fresh.sig);
+      resp = await _origFetch(input, { ...init, headers: retryHeaders });
+    }
+
+    // Only a rejected signature means the token is dead (epoch bumped by a
+    // password change or "log out everywhere") — drop it so the app falls
+    // back to the login screen. Any other 401 is the route's own verdict
+    // (e.g. an expired media URL) and says nothing about the token.
+    if (resp.status === 401 && signed &&
+        resp.headers.get("X-Sautium-Auth-Error") === "bad-sig") {
       setToken("");
       window.dispatchEvent(new CustomEvent("sautium:auth-required"));
     }

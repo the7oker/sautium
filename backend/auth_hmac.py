@@ -59,6 +59,10 @@ REPLAY_WINDOW_SECONDS = 60
 WHITELIST_EXACT = {
     "/health",
     "/",
+    # Browsers fetch this on their own, outside the signing fetch wrapper.
+    # No route serves it — whitelisting turns a misleading 401 in the access
+    # log into an honest 404.
+    "/favicon.ico",
     "/api/p2p/chat/wake",
     # A client with no token yet cannot sign — these ARE the credential
     # checks. They defend themselves: /login costs an Argon2id derivation
@@ -252,21 +256,31 @@ class HMACAuthMiddleware(BaseHTTPMiddleware):
         if _is_whitelisted(path):
             return await call_next(request)
 
+        # The error kind rides a response header so the client can tell a
+        # replay-window rejection (re-sign and retry — the token is fine)
+        # from a revoked token (re-authenticate). A frozen phone tab flushes
+        # queued requests with timestamps minutes old on wake; treating that
+        # 401 as revocation logged the user out on every screen-on.
         ts_raw = request.headers.get("x-sautium-ts")
         sig = request.headers.get("x-sautium-sig")
         if not ts_raw or not sig:
             return JSONResponse(
-                {"detail": "missing signature headers"}, status_code=401
+                {"detail": "missing signature headers"}, status_code=401,
+                headers={"X-Sautium-Auth-Error": "missing"},
             )
 
         try:
             ts_int = int(ts_raw)
         except ValueError:
-            return JSONResponse({"detail": "bad timestamp"}, status_code=401)
+            return JSONResponse({"detail": "bad timestamp"}, status_code=401,
+                                headers={"X-Sautium-Auth-Error": "bad-ts"})
 
         skew = abs(time.time() - ts_int)
         if skew > REPLAY_WINDOW_SECONDS:
-            return JSONResponse({"detail": "stale timestamp"}, status_code=401)
+            logger.warning("stale request timestamp (%ds skew): %s %s",
+                           int(skew), request.method, path)
+            return JSONResponse({"detail": "stale timestamp"}, status_code=401,
+                                headers={"X-Sautium-Auth-Error": "stale-ts"})
 
         body = await request.body()
         # Restore body for downstream handlers — Starlette consumes the
@@ -293,7 +307,10 @@ class HMACAuthMiddleware(BaseHTTPMiddleware):
                     sig, sign(key, request.method, path_and_query, ts_raw, body)):
                 break
         else:
-            return JSONResponse({"detail": "bad signature"}, status_code=401)
+            logger.warning("bad request signature: %s %s",
+                           request.method, path)
+            return JSONResponse({"detail": "bad signature"}, status_code=401,
+                                headers={"X-Sautium-Auth-Error": "bad-sig"})
 
         _mark_ui_activity()
         return await call_next(request)
