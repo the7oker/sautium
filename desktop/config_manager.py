@@ -70,10 +70,13 @@ DEFAULT_CONFIG = {
     "p2p": {
         "node_name": None,
         "listen_port": None,  # auto-generated on first run (random port)
-        # Localhost ports probed for a Docker node on this host. 8801 is its
-        # peer surface (announced to the LAN in our beacon); 8800 is the Web
-        # UI port, kept for backends predating the split.
-        "docker_ports": [8801, 8800],
+        # Localhost ports probed for a Docker node on this host — its peer
+        # surface only. 8800 must never appear here: it serves the Web UI,
+        # whose page carries the API secret, and a probed port becomes a
+        # peer address we hand out in LAN beacons and dial for chat. It
+        # answers /health with type "sautium-peer" (one health route for
+        # both apps), so nothing downstream would catch the mistake.
+        "docker_ports": [8801],
         "manual_peers": [],
         "chat_enabled": True,
     },
@@ -143,6 +146,15 @@ def load_config() -> dict:
         config["p2p"] = p2p
         changed = True
         logger.info(f"Generated random P2P port: {p2p['listen_port']}")
+
+    # Migrate configs written before the peer-port split: 8800 is the Web
+    # UI, never a peer address (see docker_ports in DEFAULT_CONFIG).
+    docker_ports = p2p.get("docker_ports") or []
+    if 8800 in docker_ports:
+        p2p["docker_ports"] = [p for p in docker_ports if p != 8800]
+        config["p2p"] = p2p
+        changed = True
+        logger.info("Dropped 8800 from p2p.docker_ports (Web UI port)")
 
     if changed:
         save_config(config)

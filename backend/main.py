@@ -587,10 +587,17 @@ async def root() -> HTMLResponse:
 
 @app.get("/health")
 async def health_check() -> Dict[str, Any]:
-    """Detailed health check including database, GPU, and P2P status."""
+    """Detailed health check including database, GPU, and P2P status.
+
+    Deliberately NOT `type: "sautium-peer"` — that marker is how probes
+    recognise a peer surface, and this port serves the Web UI, whose page
+    carries the API secret. Claiming it here is how the Web UI port ended
+    up in peer candidate lists after the peer-protocol moved to its own
+    port (p2p_app.py). The peer surface is the only thing that may claim
+    it."""
     health_status = {
         "status": "healthy",
-        "type": "sautium-peer",
+        "type": "sautium-webui",
         "checks": {}
     }
 
