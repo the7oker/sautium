@@ -313,11 +313,20 @@ distribution model.
    the signing headers — that prefix is whitelisted in `auth_hmac.py`
    and does its own verification. A leaked media URL exposes one track
    for hours, never the API.
-4. **The P2P sync server is the only network surface that *is*
-   safe to expose to the public internet** (random port
-   20000–29999, UPnP-mapped). It uses self-signed TLS + Ed25519
-   request signatures (see `desktop/p2p/sync_server.py:372,464`).
-   Do not move backend endpoints into the sync server, or vice
+4. **The peer surface is the only network surface that *is* safe to
+   expose to the public internet** — the launcher's sync server
+   (random port 20000–29999, UPnP-mapped) and the Docker peer app
+   (`backend/p2p_app.py`, port 8801, `python -m desktop.portmap map 8801`
+   or a manual forward; portmap refuses any port serving the secret).
+   Self-signed TLS, per-IP rate limits, and per-endpoint auth: sync
+   pulls are open by design (gated only by `sync.p2p_enabled`), while
+   `/api/chat/*` and `/api/relay/*` require an invite-code↔pubkey
+   binding plus, on the token/grant/wake/probe paths, an Ed25519
+   signature over a **timestamp-bound** message (±60 s, mirroring the
+   HMAC window). The peer surface may write ONLY to P2P domain tables
+   (friends, p2p_messages, invite-token tables) behind that gating —
+   it must never gain a route that reveals a secret or configuration.
+   Do not move backend endpoints into the peer surface, or vice
    versa, without redoing the auth story.
 5. **No `Bearer` / cookie / `request.client.host` auth in Docker
    without thinking about NAT.** Containerised backend sees every
@@ -349,26 +358,33 @@ distribution model.
    are isolated and have separate certs — phone accepts one warning
    per mode, then both stick.
 
-**Known consequence — internet sync to Docker requires a native
-launcher running on the same host.** Docker has no UPnP code and
-libtorrent is not installed inside the image (`backend.log` says
-"P2P enabled but libtorrent not installed — DHT disabled"), so on
-its own the Docker backend is invisible to the public internet —
-which is exactly what rule #2 wants. The native launcher is the
-component that owns UPnP mapping (`desktop/p2p/upnp_service.py`)
-and DHT announce; when it's running it maps its own random sync
-port for launcher↔launcher P2P, but **not** the Docker backend
-port 8800. Empirically verified 2026-05-01: a remote Sautium
-(e.g. Mac on a different LAN) cannot reach the Docker master
-directly. Cross-internet sync between distant nodes is therefore
-mediated through each side's native launcher (which acts as a P2P
-gateway in front of its local Docker, syncing first to its own
-embedded postgres, then serving that to remote peers). This is an
-accepted trade-off — exposing 8800 via UPnP would defeat the
-entire defence layer. The proper fix is the "P2P standalone
-service" refactor (split `p2p_manager` out of the launcher GUI
-process so Docker-only deployments can serve remote peers
-directly), tracked as future work.
+**A Docker node is a full peer on its own** (since the peer-port
+split, 2026-07-27). libtorrent IS installed in the image
+(`backend/Dockerfile`), DHT announce/lookup runs from
+`backend/dht_service.py`, and `backend/p2p_app.py` serves sync, MB
+slices and — since the invite-token work — the chat/relay protocol
+(`backend/routers/peer_chat.py`) on 8801. What Docker still lacks is
+UPnP (SSDP multicast doesn't survive the bridge), so reaching it from
+the internet needs `python -m desktop.portmap map 8801` from the host
+or a manual router forward. On Windows also add the `netsh portproxy`
++ firewall pair (see rule #3's note; `connectaddress` goes stale
+whenever the WSL VM IP changes after a reboot).
+
+**Master node + reachability.** The maintainer's Docker node ships as
+a contact in every install: `master_node.py` (mirrored
+`desktop/p2p/` ↔ `backend/`) pins its invite code, full pubkey and
+public support-token UUID; `P2PManager._ensure_master_contact` seeds
+it as a pending friend at start (silently — deleting it sets
+`p2p.master_removed` and it never comes back on its own). Nodes that
+cannot accept inbound connections (CGNAT) hold ONE outbound SSE
+subscription to the master's `/api/relay/wake-stream` and pull chat
+history when pinged, and they **suppress their own DHT announces**
+(`DHTService.set_announces_enabled`) — a dead address in the DHT
+helps nobody. The reachability verdict lives in `user_settings`
+(`p2p.reachability`) and comes from the router WAN address, the
+DHT-observed external IP, `/api/relay/probe-connect` (the master
+connects back to the request's source address, BT-tracker style) and
+passive inbound traffic.
 
 **Before any public release, multi-user deployment, or remote-access
 feature** (Tailscale exposure, "headless mode", reverse proxy), the
@@ -607,7 +623,11 @@ responsibility).
 | `docs/design/INFORMATION-ARCHITECTURE.md` | Navigation model, screen inventory, state flows (source of truth for UI layout) |
 | `docs/design/reference/claude-design-bundle/` | Claude Design handoff bundle — visual-intent reference |
 | `backend/routers/sync.py` | Backend sync endpoints (P2P protocol) |
-| `backend/routers/p2p.py` | Web UI Friends/Chat endpoints |
+| `backend/routers/p2p.py` | Web UI Friends/Chat/invite-token endpoints |
+| `backend/p2p_app.py` | Docker peer surface (8801): sync + chat/relay |
+| `backend/routers/peer_chat.py` | Peer chat + `/api/relay/*` (mirrors sync_server) |
+| `backend/master_node.py` | Shipped master identity pins (mirrored in desktop/p2p/) |
+| `backend/invite_tokens.py` | Invite tokens + signed grants (mirrored in desktop/p2p/) |
 | `backend/dht_service.py` | Docker backend libtorrent DHT integration |
 | `desktop/launcher.py` | Windows launcher (CustomTkinter) |
 | `desktop/node_identity.py` | Ed25519 identity + account system (Argon2id) |

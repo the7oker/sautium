@@ -140,10 +140,25 @@ def _node_signing_key():
     return Ed25519PrivateKey.from_private_bytes(seed)
 
 
+def node_signing_key():
+    """The key this node is KNOWN BY on the peer surface: the account key
+    when configured — then /health node_id, receipt authorship, the DHT
+    user announce and the chat identity all name the same key — with the
+    random .node_key as the bare-backend fallback."""
+    try:
+        from p2p_identity import load_signing_key
+        key = load_signing_key(settings)
+        if key is not None:
+            return key
+    except Exception as e:
+        logger.debug(f"Account signing key unavailable: {e}")
+    return _node_signing_key()
+
+
 def node_pubkey_hex() -> Optional[str]:
     from cryptography.hazmat.primitives import serialization
     try:
-        return _node_signing_key().public_key().public_bytes(
+        return node_signing_key().public_key().public_bytes(
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw,
         ).hex()
@@ -156,7 +171,7 @@ def _attach_slice_receipt(result: dict) -> None:
     """Authorship receipt: one Ed25519 signature over the canonical payload
     hash. Mirrors desktop/p2p/sync_server._attach_slice_receipt."""
     try:
-        key = _node_signing_key()
+        key = node_signing_key()
         result["author_pubkey"] = node_pubkey_hex()
         result["receipt"] = key.sign(
             mb_slice_queries.receipt_message(result)).hex()

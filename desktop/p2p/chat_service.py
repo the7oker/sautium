@@ -33,6 +33,14 @@ except ImportError:
     logger.info("PyNaCl not installed — chat encryption disabled")
 
 
+# Wire caps on one chat message (mirror backend/p2p_chat.py — keep in step):
+# ciphertext as received (base64 text) and plaintext after decryption. The UI
+# caps composition at 10k chars; the peer surface enforces the same bound
+# against hand-rolled clients.
+MAX_ENCRYPTED_CHARS = 90_000
+MAX_PLAINTEXT_CHARS = 10_000
+
+
 def ed25519_to_curve25519_private(ed25519_seed: bytes) -> "PrivateKey":
     """Convert Ed25519 seed (32 bytes) to Curve25519 private key."""
     signing_key = SigningKey(ed25519_seed)
@@ -124,8 +132,13 @@ class ChatService:
         invite_code: str,
         username: str = "",
         display_name: str = "",
+        source: Optional[str] = None,
+        source_token_id: Optional[str] = None,
     ) -> Optional[int]:
-        """Add a friend. Resolves pending entries by invite_code. Returns friend ID."""
+        """Add a friend. Resolves pending entries by invite_code. Returns
+        friend ID. `source`/`source_token_id` are set only when passed
+        (token-handshake accepts) — None preserves whatever the row has, so
+        resolving a guest-side 'master' stub never relabels it."""
         conn = self._get_db()
         try:
             with conn.cursor() as cur:
@@ -134,10 +147,13 @@ class ChatService:
                     UPDATE friends
                     SET public_key_hex = %s,
                         username = COALESCE(NULLIF(%s, ''), username),
-                        display_name = COALESCE(NULLIF(%s, ''), display_name)
+                        display_name = COALESCE(NULLIF(%s, ''), display_name),
+                        source = COALESCE(%s::friend_source, source),
+                        source_token_id = COALESCE(%s, source_token_id)
                     WHERE invite_code = %s AND public_key_hex LIKE 'pending:%%'
                     RETURNING id
-                """, (public_key_hex, username, display_name, invite_code))
+                """, (public_key_hex, username, display_name, source,
+                      source_token_id, invite_code))
                 row = cur.fetchone()
                 if row:
                     logger.info(
@@ -148,14 +164,17 @@ class ChatService:
 
                 # No pending entry — regular upsert by public_key_hex
                 cur.execute("""
-                    INSERT INTO friends (public_key_hex, invite_code, username, display_name)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO friends (public_key_hex, invite_code, username,
+                                         display_name, source, source_token_id)
+                    VALUES (%s, %s, %s, %s,
+                            COALESCE(%s::friend_source, 'manual'), %s)
                     ON CONFLICT (public_key_hex) DO UPDATE
                         SET invite_code = EXCLUDED.invite_code,
                             username = EXCLUDED.username,
                             display_name = COALESCE(NULLIF(EXCLUDED.display_name, ''), friends.display_name)
                     RETURNING id
-                """, (public_key_hex, invite_code, username, display_name))
+                """, (public_key_hex, invite_code, username, display_name,
+                      source, source_token_id))
                 row = cur.fetchone()
                 return row[0] if row else None
         finally:
@@ -178,7 +197,9 @@ class ChatService:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT id, username, public_key_hex, invite_code,
-                           display_name, added_at, last_seen, is_blocked
+                           display_name, added_at, last_seen, is_blocked,
+                           source::text AS source,
+                           join_token_id::text AS join_token_id, favorite
                     FROM friends
                     ORDER BY display_name, username
                 """)
@@ -187,6 +208,11 @@ class ChatService:
         finally:
             self._return_db(conn)
 
+    def db_conn(self):
+        """The service's persistent DB connection — for invite_tokens calls
+        from the sync server (same pool-of-one the chat queries use)."""
+        return self._get_db()
+
     def get_friend_by_public_key(self, public_key_hex: str) -> Optional[dict]:
         """Find a friend by their public key."""
         conn = self._get_db()
@@ -194,7 +220,7 @@ class ChatService:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT id, username, public_key_hex, invite_code,
-                           display_name, is_blocked
+                           display_name, is_blocked, source::text AS source
                     FROM friends WHERE public_key_hex = %s
                 """, (public_key_hex,))
                 row = cur.fetchone()
@@ -254,7 +280,8 @@ class ChatService:
                 """, (friend_id, direction, content, timestamp, delivered,
                       message_uuid))
                 msg_id = cur.fetchone()[0]
-                cur.execute("NOTIFY sautium_chat")
+                # NOTIFY comes from the trg_p2p_messages_notify trigger —
+                # the single wake source for ALL p2p_messages writers.
                 return msg_id
         finally:
             self._return_db(conn)
@@ -394,20 +421,35 @@ class ChatService:
             with conn.cursor() as cur:
                 if since:
                     cur.execute("""
-                        SELECT message_uuid, direction, content, timestamp
+                        SELECT id, message_uuid, direction, content, timestamp
                         FROM p2p_messages
                         WHERE friend_id = %s AND timestamp > %s
                         ORDER BY timestamp
                     """, (friend_id, since))
                 else:
                     cur.execute("""
-                        SELECT message_uuid, direction, content, timestamp
+                        SELECT id, message_uuid, direction, content, timestamp
                         FROM p2p_messages
                         WHERE friend_id = %s
                         ORDER BY timestamp
                     """, (friend_id,))
                 cols = [d[0] for d in cur.description]
                 return [dict(zip(cols, row)) for row in cur.fetchall()]
+        finally:
+            self._return_db(conn)
+
+    def mark_exported_delivered(self, friend_id: int, max_id: int) -> int:
+        """A requester that proved key ownership HAS the export — export is
+        delivery (mirrors backend/p2p_chat.mark_exported_delivered)."""
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE p2p_messages SET delivered = TRUE
+                     WHERE friend_id = %s AND direction = 'out'
+                       AND delivered = FALSE AND id <= %s
+                """, (friend_id, max_id))
+                return cur.rowcount
         finally:
             self._return_db(conn)
 
@@ -643,6 +685,9 @@ class ChatService:
         if friend.get("is_blocked"):
             logger.info(f"Message from blocked friend: {friend.get('username', '?')}")
             return None
+        if len(encrypted_b64) > MAX_ENCRYPTED_CHARS:
+            logger.warning(f"Oversized ciphertext from {friend.get('username', '?')} rejected")
+            return None
 
         # Dedup by message_uuid
         if message_uuid and self._has_message_uuid(message_uuid):
@@ -654,6 +699,9 @@ class ChatService:
             content = self.decrypt_message(encrypted_b64, sender_public_key)
         except CryptoError:
             logger.error(f"Failed to decrypt message from {sender_public_key[:16]}...")
+            return None
+        if len(content) > MAX_PLAINTEXT_CHARS:
+            logger.warning(f"Oversized plaintext from {friend.get('username', '?')} rejected")
             return None
 
         ts = datetime.fromisoformat(timestamp_iso)

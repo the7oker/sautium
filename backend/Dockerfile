@@ -95,6 +95,10 @@ RUN pip install --no-cache-dir unidic-lite && touch /usr/local/etc/mecabrc
 # Optional: libtorrent for P2P DHT peer discovery (graceful degradation if unavailable)
 RUN pip install --no-cache-dir libtorrent || echo "WARNING: libtorrent not available — DHT peer discovery disabled"
 
+# PyNaCl for the peer-chat surface (E2E Box, mirrors the launcher's chat
+# stack). Standalone late layer so it never busts the pip-install cache.
+RUN pip install --no-cache-dir pynacl
+
 # Parallel bzip2 — fast MusicBrainz dump decompression (mb_dump_load). Kept in a
 # late, standalone layer so it never busts the expensive pip-install cache above.
 RUN apt-get update && apt-get install -y lbzip2 \

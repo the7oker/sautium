@@ -11,6 +11,7 @@ Identity is derived in-memory at startup (no files saved).
 import hashlib
 import logging
 import re
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,51 @@ ARGON2_HASH_LEN = 32
 # username is embedded in invite codes and Worker KV keys, so it must stay
 # URL/CLI-safe at every identity-creation boundary.
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
+
+
+def make_invite_code(username: str, public_key_raw: bytes) -> str:
+    """Mirror of desktop/node_identity.make_invite_code — keep in step."""
+    digest = hashlib.sha256(public_key_raw).digest()[:6]
+    h = digest.hex().upper()
+    return f"{username}#{h[:4]}-{h[4:8]}-{h[8:]}"
+
+
+def parse_invite_code(invite_code: str) -> tuple:
+    """Mirror of desktop/node_identity.parse_invite_code — keep in step."""
+    if "#" not in invite_code:
+        raise ValueError(f"Invalid invite code format: {invite_code}")
+    username, hash_part = invite_code.split("#", 1)
+    clean = hash_part.replace("-", "")
+    if len(clean) != 12:
+        raise ValueError(f"Invalid invite code hash length: {hash_part}")
+    return username, clean.upper()
+
+
+def verify_invite_code(invite_code: str, public_key_hex: str) -> bool:
+    """Mirror of desktop/node_identity.verify_invite_code — keep in step."""
+    try:
+        _username, hash_part = parse_invite_code(invite_code)
+    except ValueError:
+        return False
+    pub_raw = bytes.fromhex(public_key_hex)
+    digest = hashlib.sha256(pub_raw).digest()[:6]
+    return digest.hex().upper() == hash_part
+
+
+def parse_share_string(share: str) -> tuple:
+    """Mirror of desktop/node_identity.parse_share_string — keep in step.
+
+    `username#XXXX-XXXX-XXXX[#token-uuid]` -> (invite_code, token_id|None);
+    downstream consumers always receive the canonical 2-segment code."""
+    import uuid as uuid_mod
+    parts = share.strip().split("#")
+    if len(parts) not in (2, 3):
+        raise ValueError(f"Invalid share string: {share}")
+    invite_code = f"{parts[0]}#{parts[1]}"
+    parse_invite_code(invite_code)
+    if len(parts) == 2:
+        return invite_code, None
+    return invite_code, str(uuid_mod.UUID(parts[2].strip()))
 
 
 def derive_identity(username: str, password: str, email: str = "") -> dict:
@@ -60,10 +106,7 @@ def derive_identity(username: str, password: str, email: str = "") -> dict:
     )
     node_id = pub_raw.hex()
 
-    # Generate invite code (same as desktop)
-    digest = hashlib.sha256(pub_raw).digest()[:6]
-    h = digest.hex().upper()
-    invite_code = f"{username}#{h[:4]}-{h[4:8]}-{h[8:]}"
+    invite_code = make_invite_code(username, pub_raw)
 
     logger.info(f"P2P identity: {username} ({invite_code})")
     return {
@@ -94,6 +137,14 @@ def derive_private_key(username: str, password: str):
     return Ed25519PrivateKey.from_private_bytes(seed)
 
 
+# Cached on success only: identity sources are fixed for the process
+# lifetime, but a web-first-run account can appear mid-process — a cached
+# None would then hide it until restart. Argon2id costs ~1-2 s per
+# derivation, so uncached per-call use is not an option.
+_signing_key_cache = None
+_identity_cache = None
+
+
 def load_signing_key(settings):
     """The node's Ed25519 signing key — desktop PEM or docker-derived — or
     None when no identity is configured."""
@@ -101,11 +152,51 @@ def load_signing_key(settings):
 
     from cryptography.hazmat.primitives import serialization
 
+    global _signing_key_cache
+    if _signing_key_cache is not None:
+        return _signing_key_cache
+
     if settings.p2p_identity_dir:
         key_path = Path(settings.p2p_identity_dir) / "node_ed25519.key"
         if key_path.exists():
-            return serialization.load_pem_private_key(
+            _signing_key_cache = serialization.load_pem_private_key(
                 key_path.read_bytes(), password=None)
+            return _signing_key_cache
     if settings.p2p_username and settings.p2p_password:
-        return derive_private_key(settings.p2p_username, settings.p2p_password)
-    return None
+        _signing_key_cache = derive_private_key(
+            settings.p2p_username, settings.p2p_password)
+    return _signing_key_cache
+
+
+def resolve_identity(settings) -> Optional[dict]:
+    """The node's account identity dict — node_info.json (desktop mode)
+    first, env-derived (Docker mode) second, None without either. The
+    single resolution point mirrored by main.py's lifespan and
+    routers/p2p._get_identity."""
+    import json
+    from pathlib import Path
+
+    global _identity_cache
+    if _identity_cache is not None:
+        return _identity_cache
+
+    if settings.p2p_identity_dir:
+        info_path = Path(settings.p2p_identity_dir) / "node_info.json"
+        if info_path.exists():
+            try:
+                data = json.loads(info_path.read_text(encoding="utf-8"))
+                if data.get("username"):
+                    _identity_cache = {
+                        "node_id": data["node_id"],
+                        "public_key_hex": data["public_key_hex"],
+                        "username": data["username"],
+                        "invite_code": data["invite_code"],
+                        "email": data.get("email", ""),
+                    }
+                    return _identity_cache
+            except Exception as e:
+                logger.warning(f"Failed to read node_info.json: {e}")
+    if settings.p2p_username and settings.p2p_password:
+        _identity_cache = derive_identity(
+            settings.p2p_username, settings.p2p_password, settings.p2p_email)
+    return _identity_cache

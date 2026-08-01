@@ -98,7 +98,12 @@ services:
       CLAUDE_CODE_ENABLED: ${CLAUDE_CODE_ENABLED:-true}
       P2P_ENABLED: ${P2P_ENABLED:-true}
       P2P_DHT_PORT: ${P2P_DHT_PORT:-19001}
-      P2P_ANNOUNCE_PORT: ${P2P_ANNOUNCE_PORT:-8800}
+      # 0 = announce the peer-surface port we actually serve. NEVER default
+      # this to 8800 — that is the secret-bearing Web UI port, and a DHT
+      # full of 8800 addresses invites exactly the exposure the peer-port
+      # split exists to prevent (mirrors docker-compose.yml).
+      P2P_ANNOUNCE_PORT: ${P2P_ANNOUNCE_PORT:-0}
+      P2P_SYNC_PORT: ${P2P_SYNC_PORT:-8801}
       P2P_USERNAME: ${P2P_USERNAME:-}
       P2P_PASSWORD: ${P2P_PASSWORD:-}
       P2P_EMAIL: ${P2P_EMAIL:-}
@@ -144,6 +149,9 @@ services:
       - "${MEDIA_PROXY_PORT:-8830}:${MEDIA_PROXY_PORT:-8830}"   # phantom-preview media proxy (plain http, HQPlayer pulls)
       # DLNA GENA event callbacks from LAN renderers (plain http listener).
       - "8831:8831"
+      # The peer surface — the ONLY port that may be forwarded to the
+      # internet (sync + chat/relay protocol, no secrets; see p2p_app.py).
+      - "${P2P_SYNC_PORT:-8801}:${P2P_SYNC_PORT:-8801}"
       - "${P2P_DHT_PORT:-19001}:${P2P_DHT_PORT:-19001}/udp"
     networks:
       - sautium-network

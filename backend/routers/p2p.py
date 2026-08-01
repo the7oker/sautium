@@ -5,6 +5,7 @@ Provides endpoints for account info, friend management, and messaging.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import select
@@ -87,9 +88,27 @@ def _chat_db_listener():
                 if ready[0]:
                     conn.poll()
                     if conn.notifies:
+                        out_friend_ids = set()
                         while conn.notifies:
-                            conn.notifies.pop(0)
+                            note = conn.notifies.pop(0)
+                            # trg_p2p_messages_notify payload:
+                            # msg:{friend_id}:{direction}. An 'out' insert
+                            # means a reply for that friend — ping their
+                            # relay wake stream so they pull immediately.
+                            parts = (note.payload or "").split(":")
+                            if (len(parts) == 3 and parts[0] == "msg"
+                                    and parts[2] == "out"):
+                                try:
+                                    out_friend_ids.add(int(parts[1]))
+                                except ValueError:
+                                    pass
                         _wake_chat_sse_clients()
+                        if out_friend_ids:
+                            from routers.peer_chat import (
+                                ping_wake_by_friend_id,
+                            )
+                            for fid in out_friend_ids:
+                                ping_wake_by_friend_id(fid)
         except Exception as e:
             logger.debug(f"Chat DB listener error: {e}")
             if _chat_listener_running:
@@ -131,35 +150,9 @@ _cached_identity = None
 
 def _get_identity():
     global _cached_identity
-    if _cached_identity is not None:
-        return _cached_identity
-    # Try reading pre-derived identity from node_info.json (desktop mode)
-    if settings.p2p_identity_dir:
-        import json
-        from pathlib import Path
-        info_path = Path(settings.p2p_identity_dir) / "node_info.json"
-        if info_path.exists():
-            try:
-                data = json.loads(info_path.read_text(encoding="utf-8"))
-                if data.get("username"):
-                    _cached_identity = {
-                        "node_id": data["node_id"],
-                        "public_key_hex": data["public_key_hex"],
-                        "username": data["username"],
-                        "invite_code": data["invite_code"],
-                        "email": data.get("email", ""),
-                    }
-                    return _cached_identity
-            except Exception:
-                pass
-    # Fallback: derive from username+password (Docker mode)
-    if settings.p2p_username:
-        from p2p_identity import derive_identity
-        _cached_identity = derive_identity(
-            settings.p2p_username,
-            settings.p2p_password,
-            settings.p2p_email,
-        )
+    if _cached_identity is None:
+        from p2p_identity import resolve_identity
+        _cached_identity = resolve_identity(settings)
     return _cached_identity
 
 
@@ -295,52 +288,339 @@ async def set_account_email(req: SetEmailRequest) -> Dict[str, Any]:
     return {"email": email, "email_verified": False}
 
 
+# One server-side truth for "online" — imported by routers/settings.py's
+# sync state; the client renders row.is_online and computes nothing.
+ONLINE_WINDOW_MIN = 5
+
+_FRIEND_SORT = "LOWER(COALESCE(NULLIF(f.display_name, ''), f.username))"
+
+_FRIENDS_SELECT = f"""
+    SELECT f.id, f.username, f.public_key_hex, f.invite_code,
+           f.display_name, f.added_at, f.last_seen, f.is_blocked,
+           f.favorite, f.source::text AS source,
+           {_FRIEND_SORT} AS sort_name,
+           COALESCE(f.last_seen > NOW() - make_interval(
+               mins => {ONLINE_WINDOW_MIN}), FALSE) AS is_online,
+           COALESCE(u.unread, 0) AS unread_count,
+           COALESCE(r.rights, '{{}}') AS rights_granted,
+           COALESCE(g.rights, '{{}}') AS grant_rights,
+           EXISTS (SELECT 1 FROM friend_grants fg
+                   WHERE fg.friend_id = f.id) AS has_grant
+    FROM friends f
+    LEFT JOIN (
+        SELECT friend_id, COUNT(*) AS unread
+        FROM p2p_messages
+        WHERE direction = 'in' AND read = FALSE
+        GROUP BY friend_id
+    ) u ON u.friend_id = f.id
+    LEFT JOIN (
+        SELECT friend_id,
+               array_agg(p2p_right::text ORDER BY p2p_right) AS rights
+        FROM friend_rights GROUP BY friend_id
+    ) r ON r.friend_id = f.id
+    LEFT JOIN (
+        SELECT friend_id,
+               array_agg(p2p_right::text ORDER BY p2p_right) AS rights
+        FROM friend_grant_rights GROUP BY friend_id
+    ) g ON g.friend_id = f.id
+"""
+
+
+def _friend_row_out(row: dict) -> dict:
+    row.pop("sort_name", None)
+    for k in ("added_at", "last_seen"):
+        if row.get(k):
+            row[k] = row[k].isoformat()
+    return row
+
+
 @router.get("/friends")
-async def list_friends() -> List[Dict[str, Any]]:
-    """List all friends with unread counts."""
+async def list_friends(cursor: str = "", limit: int = 50,
+                       q: str = "") -> Dict[str, Any]:
+    """Friends list built for scale: pinned favorites fetched whole
+    (user-curated, small by definition), the rest keyset-paginated over
+    (sort_name, id) — the home.py cursor pattern on idx_friends_page."""
+    limit = max(1, min(int(limit), 200))
+    search = q.strip()
+    q_clause = ""
+    q_params: list = []
+    if search:
+        q_clause = " AND (f.display_name ILIKE %s OR f.username ILIKE %s)"
+        q_params = [f"%{search}%", f"%{search}%"]
+
+    pinned = _db_query(
+        _FRIENDS_SELECT + f" WHERE f.favorite = TRUE{q_clause}"
+        f" ORDER BY {_FRIEND_SORT}, f.id", q_params)
+
+    after = None
+    if cursor:
+        try:
+            after = json.loads(
+                base64.urlsafe_b64decode(cursor.encode()).decode())
+            assert isinstance(after, list) and len(after) == 2
+        except Exception:
+            raise HTTPException(status_code=400, detail="Bad cursor")
+
+    cur_clause = ""
+    cur_params: list = []
+    if after:
+        cur_clause = f" AND ({_FRIEND_SORT}, f.id) > (%s, %s)"
+        cur_params = [after[0], int(after[1])]
+
+    items = _db_query(
+        _FRIENDS_SELECT + f" WHERE f.favorite = FALSE{q_clause}{cur_clause}"
+        f" ORDER BY {_FRIEND_SORT}, f.id LIMIT %s",
+        q_params + cur_params + [limit + 1])
+
+    next_cursor = None
+    if len(items) > limit:
+        items = items[:limit]
+        last = items[-1]
+        next_cursor = base64.urlsafe_b64encode(
+            json.dumps([last["sort_name"], last["id"]]).encode()).decode()
+
+    total = _db_query_one(
+        "SELECT count(*) AS c FROM friends f WHERE TRUE" + q_clause,
+        q_params)["c"]
+
+    return {
+        "pinned": [_friend_row_out(r) for r in pinned],
+        "items": [_friend_row_out(r) for r in items],
+        "next_cursor": next_cursor,
+        "total": total,
+    }
+
+
+@router.post("/friends/add")
+async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
+    """Add a friend by share string (`user#XXXX-XXXX-XXXX[#token]`).
+
+    Token invites skip the Worker entirely — the token handshake replaces
+    Worker reciprocation. A manual re-add of the master invite is consent:
+    it clears the removal flag and re-arms the auto-contact."""
+    from master_node import MASTER_INVITE_CODE, MASTER_TOKEN_ID
+    from p2p_identity import parse_share_string
+
+    try:
+        invite_code, token_id = parse_share_string(req.invite_code)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid invite code")
+    username = invite_code.split("#")[0]
+
+    source = "manual"
+    if MASTER_INVITE_CODE and invite_code == MASTER_INVITE_CODE:
+        source = "master"
+        token_id = token_id or MASTER_TOKEN_ID or None
+        _db_execute(
+            "DELETE FROM user_settings WHERE key = 'p2p.master_removed'")
+
+    try:
+        row = _db_execute("""
+            INSERT INTO friends (username, public_key_hex, invite_code,
+                                 display_name, source, join_token_id)
+            VALUES (%s, %s, %s, %s, %s::friend_source, %s)
+            ON CONFLICT (public_key_hex) DO UPDATE
+                SET invite_code = EXCLUDED.invite_code,
+                    username = EXCLUDED.username,
+                    join_token_id = COALESCE(EXCLUDED.join_token_id,
+                                             friends.join_token_id)
+            RETURNING id
+        """, (username, f"pending:{invite_code}", invite_code, username,
+              source, token_id))
+
+        if not token_id:
+            # Fire-and-forget: notify Worker that we accepted this invite
+            asyncio.create_task(_accept_invite_on_worker(invite_code))
+
+        _wake_chat_sse_clients()
+        return {"id": row["id"], "username": username,
+                "invite_code": invite_code, "token_id": token_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to add friend: {e}")
+        raise HTTPException(status_code=500, detail="Failed to add friend")
+
+
+class FriendPatch(BaseModel):
+    display_name: Optional[str] = Field(None, max_length=128)
+    favorite: Optional[bool] = None
+    is_blocked: Optional[bool] = None
+
+
+@router.patch("/friends/{friend_id}")
+async def patch_friend(friend_id: int, req: FriendPatch) -> Dict[str, Any]:
+    """Rename, pin/unpin, block/unblock — one edit endpoint."""
+    sets, params = [], []
+    if req.display_name is not None:
+        sets.append("display_name = %s")
+        params.append(req.display_name.strip())
+    if req.favorite is not None:
+        sets.append("favorite = %s")
+        params.append(req.favorite)
+    if req.is_blocked is not None:
+        sets.append("is_blocked = %s")
+        params.append(req.is_blocked)
+    if not sets:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    row = _db_execute(
+        f"UPDATE friends SET {', '.join(sets)} WHERE id = %s"
+        " RETURNING id, display_name, favorite, is_blocked",
+        params + [friend_id])
+    if not row:
+        raise HTTPException(status_code=404, detail="Friend not found")
+    _wake_chat_sse_clients()
+    return row
+
+
+@router.delete("/friends/{friend_id}")
+async def delete_friend(friend_id: int) -> Dict[str, Any]:
+    """Delete a friend (messages CASCADE). Deleting the master contact sets
+    the removal flag so the auto-add never resurrects it — a later manual
+    re-add of the master invite clears the flag (consent)."""
+    row = _db_execute(
+        "DELETE FROM friends WHERE id = %s RETURNING source::text AS source",
+        (friend_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="Friend not found")
+    if row["source"] == "master":
+        _db_execute("""
+            INSERT INTO user_settings (key, value, updated_at)
+            VALUES ('p2p.master_removed', 'true'::jsonb, NOW())
+            ON CONFLICT (key) DO UPDATE
+                SET value = 'true'::jsonb, updated_at = NOW()
+        """)
+    _wake_chat_sse_clients()
+    return {"ok": True}
+
+
+# -- Invite tokens (issuer-side management) -----------------------------------
+
+class TokenCreate(BaseModel):
+    label: str = Field(default="", max_length=128)
+    rights: List[str] = Field(default_factory=lambda: ["can_message"])
+    max_uses: Optional[int] = Field(default=None, ge=1)
+    expires_at: Optional[str] = None          # ISO timestamp
+    welcome_message: Optional[str] = Field(default=None, max_length=2000)
+    # Custom id = the device-transfer path: re-create the token with the
+    # UUID from your old share string and existing grants keep working.
+    id: Optional[str] = None
+
+
+class TokenPatch(BaseModel):
+    label: Optional[str] = Field(default=None, max_length=128)
+    rights: Optional[List[str]] = None
+    max_uses: Optional[int] = Field(default=None, ge=1)
+    expires_at: Optional[str] = None
+    welcome_message: Optional[str] = Field(default=None, max_length=2000)
+
+
+def _validate_rights(rights: List[str]) -> List[str]:
+    from invite_tokens import ALL_RIGHTS
+    bad = [r for r in rights if r not in ALL_RIGHTS]
+    if bad:
+        raise HTTPException(status_code=400,
+                            detail=f"Unknown rights: {', '.join(bad)}")
+    return sorted(set(rights))
+
+
+@router.get("/tokens")
+async def list_tokens() -> List[Dict[str, Any]]:
     rows = _db_query("""
-        SELECT f.id, f.username, f.public_key_hex, f.invite_code,
-               f.display_name, f.added_at, f.last_seen, f.is_blocked,
-               COALESCE(u.unread, 0) as unread_count
-        FROM friends f
+        SELECT t.id::text AS id, t.label, t.max_uses, t.use_count,
+               t.expires_at, t.revoked_at, t.require_birth_cert,
+               t.welcome_message, t.created_at,
+               COALESCE(r.rights, '{}') AS rights
+        FROM invite_tokens t
         LEFT JOIN (
-            SELECT friend_id, COUNT(*) as unread
-            FROM p2p_messages
-            WHERE direction = 'in' AND read = FALSE
-            GROUP BY friend_id
-        ) u ON u.friend_id = f.id
-        ORDER BY f.display_name, f.username
+            SELECT token_id,
+                   array_agg(p2p_right::text ORDER BY p2p_right) AS rights
+            FROM invite_token_rights GROUP BY token_id
+        ) r ON r.token_id = t.id
+        ORDER BY t.created_at DESC
     """)
     for row in rows:
-        for k in ("added_at", "last_seen"):
+        for k in ("expires_at", "revoked_at", "created_at"):
             if row.get(k):
                 row[k] = row[k].isoformat()
     return rows
 
 
-@router.post("/friends/add")
-async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
-    """Add a friend by invite code. Also notifies the Worker for auto-reciprocate."""
-    invite_code = req.invite_code.strip()
-    username = invite_code.split("#")[0]
-
+@router.post("/tokens")
+async def create_token(req: TokenCreate) -> Dict[str, Any]:
+    rights = _validate_rights(req.rights)
+    token_id = str(uuid.uuid4())
+    if req.id:
+        try:
+            token_id = str(uuid.UUID(req.id.strip()))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid token id")
     try:
-        row = _db_execute("""
-            INSERT INTO friends (username, public_key_hex, invite_code, display_name)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (public_key_hex) DO UPDATE
-                SET invite_code = EXCLUDED.invite_code,
-                    username = EXCLUDED.username
-            RETURNING id
-        """, (username, f"pending:{invite_code}", invite_code, username))
+        _db_execute("""
+            INSERT INTO invite_tokens (id, label, max_uses, expires_at,
+                                       welcome_message)
+            VALUES (%s, %s, %s, %s::timestamptz, %s)
+        """, (token_id, req.label.strip(), req.max_uses, req.expires_at,
+              req.welcome_message))
+    except psycopg2.errors.UniqueViolation:
+        raise HTTPException(status_code=409, detail="Token id already exists")
+    for r in rights:
+        _db_execute(
+            "INSERT INTO invite_token_rights (token_id, p2p_right)"
+            " VALUES (%s, %s) ON CONFLICT DO NOTHING", (token_id, r))
+    identity = _get_identity()
+    share = (f"{identity['invite_code']}#{token_id}"
+             if identity else token_id)
+    return {"id": token_id, "share_string": share, "rights": rights}
 
-        # Fire-and-forget: notify Worker that we accepted this invite
-        asyncio.create_task(_accept_invite_on_worker(invite_code))
 
-        return {"id": row["id"], "username": username, "invite_code": invite_code}
-    except Exception as e:
-        logger.error(f"Failed to add friend: {e}")
-        raise HTTPException(status_code=500, detail="Failed to add friend")
+@router.patch("/tokens/{token_id}")
+async def patch_token(token_id: str, req: TokenPatch) -> Dict[str, Any]:
+    """Edits affect FUTURE uses only — existing friendships keep their
+    rights snapshot."""
+    sets, params = [], []
+    if req.label is not None:
+        sets.append("label = %s")
+        params.append(req.label.strip())
+    if req.max_uses is not None:
+        sets.append("max_uses = %s")
+        params.append(req.max_uses)
+    if req.expires_at is not None:
+        sets.append("expires_at = %s::timestamptz")
+        params.append(req.expires_at or None)
+    if req.welcome_message is not None:
+        sets.append("welcome_message = %s")
+        params.append(req.welcome_message)
+    if sets:
+        row = _db_execute(
+            f"UPDATE invite_tokens SET {', '.join(sets)}"
+            " WHERE id = %s RETURNING id", params + [token_id])
+        if not row:
+            raise HTTPException(status_code=404, detail="Token not found")
+    if req.rights is not None:
+        rights = _validate_rights(req.rights)
+        _db_execute("DELETE FROM invite_token_rights WHERE token_id = %s",
+                    (token_id,))
+        for r in rights:
+            _db_execute(
+                "INSERT INTO invite_token_rights (token_id, p2p_right)"
+                " VALUES (%s, %s) ON CONFLICT DO NOTHING", (token_id, r))
+    return {"ok": True}
+
+
+@router.post("/tokens/{token_id}/revoke")
+async def revoke_token(token_id: str) -> Dict[str, Any]:
+    """No DELETE by design: the revocation record is what makes
+    grant-recovery honour a same-device revocation."""
+    row = _db_execute("""
+        UPDATE invite_tokens SET revoked_at = NOW()
+        WHERE id = %s AND revoked_at IS NULL
+        RETURNING id
+    """, (token_id,))
+    if not row:
+        raise HTTPException(status_code=404,
+                            detail="Token not found or already revoked")
+    return {"ok": True}
 
 
 async def _accept_invite_on_worker(their_invite_code: str):

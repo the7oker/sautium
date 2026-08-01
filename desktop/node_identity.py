@@ -207,6 +207,27 @@ def verify_invite_code(invite_code: str, public_key_hex: str) -> bool:
     return digest.hex().upper() == hash_part
 
 
+def parse_share_string(share: str) -> tuple[str, Optional[str]]:
+    """Parse `username#XXXX-XXXX-XXXX[#token-uuid]` into
+    (invite_code, token_id).
+
+    The 3-segment form carries an invite-token id (auto-confirm invites).
+    Every downstream consumer — parse_invite_code, verify_invite_code,
+    Worker calls, DHT keys, LAN beacons — receives the canonical 2-segment
+    invite code; the token travels separately. Mirrored in
+    backend/p2p_identity.py. Raises ValueError on any malformed segment.
+    """
+    import uuid as uuid_mod
+    parts = share.strip().split("#")
+    if len(parts) not in (2, 3):
+        raise ValueError(f"Invalid share string: {share}")
+    invite_code = f"{parts[0]}#{parts[1]}"
+    parse_invite_code(invite_code)
+    if len(parts) == 2:
+        return invite_code, None
+    return invite_code, str(uuid_mod.UUID(parts[2].strip()))
+
+
 def create_account(
     username: str,
     password: str,

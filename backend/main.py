@@ -257,39 +257,15 @@ async def lifespan(app: FastAPI):
     from routers.gear_models import start_gear_state_listener, stop_gear_state_listener
     start_gear_state_listener()
 
-    # Derive P2P identity
+    # Derive P2P identity (single resolution point, cached in p2p_identity —
+    # the same cache later serves peer-chat, receipts and /health).
     _p2p_identity = None
     if settings.p2p_enabled:
-        # Try reading pre-derived identity from node_info.json (desktop mode)
-        if settings.p2p_identity_dir:
-            import json as _json
-            from pathlib import Path as _Path
-            _info_path = _Path(settings.p2p_identity_dir) / "node_info.json"
-            if _info_path.exists():
-                try:
-                    _data = _json.loads(_info_path.read_text(encoding="utf-8"))
-                    if _data.get("username"):
-                        _p2p_identity = {
-                            "node_id": _data["node_id"],
-                            "public_key_hex": _data["public_key_hex"],
-                            "username": _data["username"],
-                            "invite_code": _data["invite_code"],
-                            "email": _data.get("email", ""),
-                        }
-                except Exception as e:
-                    logger.warning(f"Failed to read node_info.json: {e}")
-        # Fallback: derive from username+password (Docker mode)
-        if not _p2p_identity and settings.p2p_username and settings.p2p_password:
-            try:
-                from p2p_identity import derive_identity
-                _p2p_identity = await asyncio.to_thread(
-                    derive_identity,
-                    settings.p2p_username,
-                    settings.p2p_password,
-                    settings.p2p_email,
-                )
-            except Exception as e:
-                logger.warning(f"P2P identity derivation failed: {e}")
+        try:
+            from p2p_identity import resolve_identity
+            _p2p_identity = await asyncio.to_thread(resolve_identity, settings)
+        except Exception as e:
+            logger.warning(f"P2P identity derivation failed: {e}")
 
     # The peer surface: sync protocol only, on its own port (p2p_app.py).
     # Everything a peer is told about this node points here — never at the

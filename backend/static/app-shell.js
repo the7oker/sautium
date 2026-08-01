@@ -6011,16 +6011,33 @@
     return new Date(iso).toLocaleDateString();
   }
 
-  // Window for "online" presence. last_seen is bumped on incoming
-  // chat messages and on handshake (initial add + re-resolve via
-  // LAN/DHT). 15 min is a forgiving middle ground: a peer who's
-  // idle but launcher-running stays online across one missed
-  // re-handshake; a peer whose launcher actually quit drops to
-  // offline within ~15 min instead of looking stuck-online forever.
-  function isOnline(iso) {
-    if (!iso) return false;
-    const t = new Date(iso).getTime();
-    return t && (Date.now() - t) < 15 * 60 * 1000;
+  // "Online" is computed by the server (row.is_online, one shared
+  // window in routers/p2p.py) — the client renders the flag and never
+  // re-derives it, so the Friends list and the Sync screen agree.
+
+  // Paginated friends fetch: {pinned, items, next_cursor, total}.
+  async function fetchFriendsPage(cursor, q, limit) {
+    const params = new URLSearchParams();
+    params.set('limit', String(limit || 50));
+    if (q) params.set('q', q);
+    if (cursor) params.set('cursor', cursor);
+    const r = await fetch('/api/p2p/friends?' + params.toString());
+    if (!r.ok) throw new Error('friends fetch failed');
+    return r.json();
+  }
+
+  // Walk pages until a friend matches — the chat thread resolves ONE
+  // friend by pubkey-prefix or id; typical lists fit page one.
+  async function findFriend(pred) {
+    let cursor = '';
+    for (let guard = 0; guard < 50; guard++) {
+      const page = await fetchFriendsPage(cursor, '', 200);
+      const hit = [...page.pinned, ...page.items].find(pred);
+      if (hit) return hit;
+      if (!page.next_cursor) return null;
+      cursor = page.next_cursor;
+    }
+    return null;
   }
 
   // Stable URL handle — public_key_hex is the same on every device
@@ -6033,10 +6050,9 @@
       ? k.slice(0, 16) : '';
   }
 
-  function renderFriendRow(friend) {
+  function friendRowInner(friend) {
     const name = friend.display_name || friend.username || friend.invite_code || '?';
-    const online = isOnline(friend.last_seen);
-    const status = online
+    const status = friend.is_online
       ? `<div class="friend-status online"><span class="status-dot"></span>online</div>`
       : friend.last_seen
         ? `<div class="friend-status">last seen ${escapeHtml(lastSeenLabel(friend.last_seen))}</div>`
@@ -6045,19 +6061,31 @@
     const unread = Number(friend.unread_count) || 0;
     const badge = unread > 0
       ? `<span class="unread-badge">${unread > 99 ? '99+' : unread}</span>` : '';
-    const key = friendUrlKey(friend);
+    const chip = friend.source === 'master'
+      ? '<span class="support-chip">Support</span>' : '';
+    const star = friend.favorite
+      ? '<span class="friend-fav" aria-label="pinned">★</span>' : '';
     return `
-      <div class="friend-row"
-           data-friend-key="${escapeHtml(key)}">
         <div class="avatar friend-avatar" style="background: ${ph.bg};">${
           escapeHtml(ph.initials)}</div>
         <div class="friend-meta">
-          <div class="friend-name">${escapeHtml(name)}</div>
+          <div class="friend-name">${escapeHtml(name)}${chip}${star}</div>
           ${status}
         </div>
+        <button class="friend-menu-btn" type="button" data-menu
+                aria-label="friend options">⋮</button>
         <button class="chat-icon-btn" type="button" aria-label="chat">
           ${SVG_CHAT}${badge}
-        </button>
+        </button>`;
+  }
+
+  function renderFriendRow(friend) {
+    const key = friendUrlKey(friend);
+    return `
+      <div class="friend-row"
+           data-friend-key="${escapeHtml(key)}"
+           data-friend-id="${Number(friend.id) || 0}">${
+        friendRowInner(friend)}
       </div>`;
   }
 
@@ -6079,12 +6107,16 @@
           ${SVG_COPY}
         </button>
       </div>
+      <button class="manage-tokens-row" type="button"
+              data-action="manage-tokens">
+        <span>Invite links</span><span class="chev">›</span>
+      </button>
 
       <div class="group-label">Add a friend</div>
       <div class="invite-form">
         <form class="input-row" data-action="add-by-code">
           <input class="text-field code" type="text" autocomplete="off"
-                 placeholder="Paste invite code"
+                 placeholder="Paste invite code or link"
                  name="code">
           <button class="btn btn-primary" type="submit">Add</button>
         </form>
@@ -6099,9 +6131,13 @@
       </div>
 
       <div class="group-label">Friends</div>
+      <input class="text-field friends-search" type="search"
+             autocomplete="off" placeholder="Search friends" name="fsearch">
+      <div class="friends-list" id="friendsPinned" hidden></div>
       <div class="friends-list" id="friendsList">
         <div class="friends-empty">Loading…</div>
       </div>
+      <div id="friendsMore"></div>
     `;
     root.appendChild(screen);
 
@@ -6178,7 +6214,7 @@
             if (sseCtrl) { sseCtrl.abort(); sseCtrl = null; }
             return;
           }
-          refreshFriends();
+          refreshFriends(true);
         },
         () => { /* sseStream auto-reconnects; nothing to do here */ },
       );
@@ -6191,43 +6227,129 @@
     };
     window.addEventListener('hashchange', onHashChange);
 
-    // Friends list.
-    async function refreshFriends() {
+    // Friends list: pinned favorites whole + first page, further pages
+    // via Show more (the Discovery Tracks pattern — a self-growing
+    // vertical list would push everything below away forever).
+    const pinnedEl = screen.querySelector('#friendsPinned');
+    const moreEl = screen.querySelector('#friendsMore');
+    const searchEl = screen.querySelector('.friends-search');
+    const state = {q: '', cursor: null, byId: new Map()};
+
+    function rememberRows(page) {
+      [...page.pinned, ...page.items].forEach(f => state.byId.set(f.id, f));
+    }
+
+    function renderInto(el, rows) {
+      el.innerHTML = rows.map(renderFriendRow).join('');
+    }
+
+    function renderShowMore() {
+      moreEl.innerHTML = '';
+      if (!state.cursor) return;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'd-show-more';
+      btn.textContent = 'Show more';
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try {
+          const page = await fetchFriendsPage(state.cursor, state.q);
+          rememberRows(page);
+          listEl.insertAdjacentHTML(
+            'beforeend', page.items.map(renderFriendRow).join(''));
+          state.cursor = page.next_cursor;
+        } catch (_) { /* keep the button for a retry */ }
+        if (!state.cursor) btn.remove(); else btn.disabled = false;
+      });
+      moreEl.appendChild(btn);
+    }
+
+    async function refreshFriends(patch) {
       try {
-        const r = await fetch('/api/p2p/friends');
-        const friends = await r.json();
-        if (!friends || friends.length === 0) {
-          listEl.innerHTML = `<div class="friends-empty">
-            No friends yet. Share your invite code or send an email.
-          </div>`;
-          return;
+        const page = await fetchFriendsPage('', state.q);
+        rememberRows(page);
+        const knownIds = rows =>
+          rows.map(f => f.id).join(',');
+        const fresh = [...page.pinned, ...page.items];
+        if (patch) {
+          // Targeted update: same membership on screen → patch each
+          // row's innerHTML in place (status dot, unread badge, name,
+          // star) — no list rebuild, no scroll loss, no flicker
+          // (the _subscribeSyncStream precedent). Deeper Show-more
+          // pages keep their last-rendered state until re-mount.
+          const onScreen = [...screen.querySelectorAll('.friend-row')]
+            .slice(0, fresh.length);
+          const sameSet = onScreen.length &&
+            knownIds(fresh) === onScreen.map(
+              r => Number(r.dataset.friendId)).join(',');
+          if (sameSet) {
+            const byId = new Map(fresh.map(f => [f.id, f]));
+            onScreen.forEach(rowEl => {
+              const f = byId.get(Number(rowEl.dataset.friendId));
+              if (f) {
+                rowEl.dataset.friendKey = friendUrlKey(f);
+                rowEl.innerHTML = friendRowInner(f);
+              }
+            });
+            return;
+          }
         }
-        listEl.innerHTML = friends.map(renderFriendRow).join('');
-        // Whole row is the tap target — the chat icon is a visual
-        // affordance, not a separate button. A click on the icon
-        // bubbles up to the row, no separate handler needed.
-        listEl.querySelectorAll('.friend-row').forEach(row => {
-          row.addEventListener('click', () => {
-            const key = row.dataset.friendKey;
-            // Pending invites have no resolved public_key_hex yet —
-            // there's no chat thread to open until the handshake
-            // completes. Surface a hint instead of routing to a
-            // dead URL.
-            if (!key) {
-              showHint(
-                'Waiting for handshake — you can chat once both sides accept.',
-                true,
-              );
-              return;
-            }
-            navigateToEntity('chat', key);
-          });
-        });
+        pinnedEl.hidden = page.pinned.length === 0;
+        renderInto(pinnedEl, page.pinned);
+        if (fresh.length === 0) {
+          listEl.innerHTML = `<div class="friends-empty">
+            ${state.q ? 'No friends match the search.'
+                      : 'No friends yet. Share your invite code or send an email.'}
+          </div>`;
+        } else {
+          renderInto(listEl, page.items);
+        }
+        state.cursor = page.next_cursor;
+        renderShowMore();
       } catch (err) {
         listEl.innerHTML = `<div class="friends-empty">
           Could not load friends.</div>`;
       }
     }
+
+    // Whole row is the tap target; the ⋮ button opens actions. One
+    // delegated listener — rows are re-rendered freely.
+    function onRowClick(e) {
+      const menuBtn = e.target.closest('[data-menu]');
+      const row = e.target.closest('.friend-row');
+      if (!row) return;
+      const friend = state.byId.get(Number(row.dataset.friendId));
+      if (menuBtn) {
+        if (friend) openFriendActions(friend, () => refreshFriends());
+        return;
+      }
+      const key = row.dataset.friendKey;
+      // Pending invites have no resolved public_key_hex yet — there's
+      // no chat thread to open until the handshake completes.
+      if (!key) {
+        showHint(
+          'Waiting for handshake — you can chat once both sides accept.',
+          true,
+        );
+        return;
+      }
+      navigateToEntity('chat', key);
+    }
+    pinnedEl.addEventListener('click', onRowClick);
+    listEl.addEventListener('click', onRowClick);
+
+    let searchTimer = null;
+    searchEl.addEventListener('input', () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        state.q = searchEl.value.trim();
+        refreshFriends();
+      }, 250);
+    });
+
+    screen.querySelector('[data-action="manage-tokens"]')
+      .addEventListener('click', () => openInviteTokensSheet());
+
     refreshFriends();
 
     // Pull pending email-invite acceptances. The Worker holds a
@@ -6307,6 +6429,305 @@
         showHint('Network error.', true);
       }
     });
+  }
+
+  /* ---------- Friend actions + invite-token sheets ---------- */
+
+  function openFriendActions(friend, onChanged) {
+    const name = friend.display_name || friend.username || friend.invite_code;
+    const isMaster = friend.source === 'master';
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">${escapeProfileHtml(name)}</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Display name</span>
+            <input class="add-gear-input" id="frName" type="text" maxlength="128"
+                   autocomplete="off" value="${escapeProfileHtml(friend.display_name || '')}"
+                   placeholder="${escapeProfileHtml(friend.username || '')}">
+          </label>
+          <button class="profile-btn" data-act="favorite">${friend.favorite ? 'Unpin from favorites' : 'Pin to favorites'}</button>
+          <button class="profile-btn" data-act="block">${friend.is_blocked ? 'Unblock' : 'Block'}</button>
+          <button class="profile-btn primary" data-act="save">Save name</button>
+          <button class="profile-btn destructive" data-act="delete">Delete friend</button>
+          <div id="frMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    const msg = overlay.querySelector('#frMsg');
+
+    async function patch(body) {
+      const r = await fetch(`/api/p2p/friends/${friend.id}`, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || 'failed');
+      return r.json();
+    }
+
+    overlay.querySelector('[data-act="favorite"]').addEventListener('click', async () => {
+      try { await patch({favorite: !friend.favorite}); close(); onChanged && onChanged(); }
+      catch (e) { msg.style.color = 'var(--color-negative)'; msg.textContent = String(e.message || e); }
+    });
+    overlay.querySelector('[data-act="block"]').addEventListener('click', async () => {
+      try { await patch({is_blocked: !friend.is_blocked}); close(); onChanged && onChanged(); }
+      catch (e) { msg.style.color = 'var(--color-negative)'; msg.textContent = String(e.message || e); }
+    });
+    overlay.querySelector('[data-act="save"]').addEventListener('click', async () => {
+      try {
+        await patch({display_name: overlay.querySelector('#frName').value.trim()});
+        close(); onChanged && onChanged();
+      } catch (e) { msg.style.color = 'var(--color-negative)'; msg.textContent = String(e.message || e); }
+    });
+    overlay.querySelector('[data-act="delete"]').addEventListener('click', async () => {
+      close();
+      const ok = await window.confirmDestructive({
+        title: 'Delete friend?',
+        message: isMaster
+          ? 'The <b>Sautium support</b> contact will not be re-added automatically. You can bring it back any time by adding the Sautium invite code again.'
+          : `Chat history with <b>${escapeProfileHtml(name)}</b> will be deleted on this device.`,
+        confirmText: 'Delete',
+      });
+      if (!ok) return;
+      const r = await fetch(`/api/p2p/friends/${friend.id}`, {method: 'DELETE'});
+      if (r.ok && onChanged) onChanged();
+    });
+  }
+
+  const TOKEN_EXPIRY_PRESETS = [
+    {id: '', label: 'Never'},
+    {id: '24h', label: '24 hours', hours: 24},
+    {id: '7d', label: '7 days', hours: 24 * 7},
+    {id: '30d', label: '30 days', hours: 24 * 30},
+  ];
+
+  async function openInviteTokensSheet() {
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Invite links</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
+            An invite link adds a friend <b>without manual confirmation</b> —
+            share it with people you trust. Revoking a link stops future
+            joins; existing friends keep their access.
+          </p>
+          <div id="tokenList" class="token-list">Loading…</div>
+          <button class="profile-btn primary" data-new>New invite link</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    const listEl = overlay.querySelector('#tokenList');
+
+    let tokens = [];
+    async function reload() {
+      try {
+        const r = await fetch('/api/p2p/tokens');
+        tokens = await r.json();
+      } catch (_) { tokens = []; }
+      if (!tokens.length) {
+        listEl.innerHTML = `<div class="friends-empty">No invite links yet.</div>`;
+        return;
+      }
+      listEl.innerHTML = tokens.map(t => {
+        const uses = `${t.use_count}/${t.max_uses == null ? '∞' : t.max_uses}`;
+        const state = t.revoked_at ? 'revoked'
+          : (t.expires_at && new Date(t.expires_at) < new Date()) ? 'expired'
+          : 'active';
+        const meta = [
+          `uses ${uses}`,
+          t.expires_at ? `expires ${new Date(t.expires_at).toLocaleDateString()}` : null,
+          t.rights.join(', ') || 'no rights',
+        ].filter(Boolean).join(' · ');
+        return `
+          <div class="token-row${state !== 'active' ? ' is-dead' : ''}" data-id="${escapeProfileHtml(t.id)}">
+            <div class="token-meta">
+              <div class="token-label">${escapeProfileHtml(t.label || 'Untitled link')}
+                ${state !== 'active' ? `<span class="token-state">${state}</span>` : ''}</div>
+              <div class="token-sub">${escapeProfileHtml(meta)}</div>
+            </div>
+            <button class="copy-btn" type="button" data-copy aria-label="copy link">${SVG_COPY}</button>
+          </div>`;
+      }).join('');
+    }
+    await reload();
+
+    listEl.addEventListener('click', async e => {
+      const row = e.target.closest('.token-row');
+      if (!row) return;
+      const token = tokens.find(t => t.id === row.dataset.id);
+      if (!token) return;
+      if (e.target.closest('[data-copy]')) {
+        try {
+          const acct = await (await fetch('/api/p2p/account')).json();
+          await navigator.clipboard.writeText(
+            `${acct.invite_code}#${token.id}`);
+          e.target.closest('[data-copy]').classList.add('copied');
+        } catch (_) { /* clipboard denied — silent, same as invite copy */ }
+        return;
+      }
+      openTokenEditor(token, async () => { await reload(); });
+    });
+    overlay.querySelector('[data-new]').addEventListener('click', () => {
+      openTokenEditor(null, async () => { await reload(); });
+    });
+  }
+
+  function openTokenEditor(token, onSaved) {
+    const isNew = !token;
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">${isNew ? 'New invite link' : 'Edit invite link'}</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Label</span>
+            <input class="add-gear-input" id="tkLabel" type="text" maxlength="128"
+                   autocomplete="off" placeholder="e.g. Vinyl club"
+                   value="${escapeProfileHtml(token ? token.label : '')}">
+          </label>
+          <div class="token-rights">
+            <label class="token-right"><input type="checkbox" id="tkMsg"
+              ${!token || token.rights.includes('can_message') ? 'checked' : ''}>
+              <span>Can message me</span></label>
+            <label class="token-right"><input type="checkbox" id="tkSearch"
+              ${token && token.rights.includes('can_search') ? 'checked' : ''}>
+              <span>Can search my library <i>(future)</i></span></label>
+          </div>
+          <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Max uses (empty = unlimited)</span>
+            <input class="add-gear-input" id="tkUses" type="number" min="1"
+                   value="${token && token.max_uses != null ? token.max_uses : ''}">
+          </label>
+          ${isNew ? `
+          <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Expires</span>
+            <select class="add-gear-input" id="tkExpiry">
+              ${TOKEN_EXPIRY_PRESETS.map(p =>
+                `<option value="${p.id}">${p.label}</option>`).join('')}
+            </select>
+          </label>` : ''}
+          <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Welcome message (sent on join)</span>
+            <textarea class="add-gear-input" id="tkWelcome" rows="2"
+                      maxlength="2000">${escapeProfileHtml(token ? (token.welcome_message || '') : '')}</textarea>
+          </label>
+          ${isNew ? `
+          <details class="token-advanced">
+            <summary>Advanced: custom id (device transfer)</summary>
+            <input class="add-gear-input" id="tkId" type="text" autocomplete="off"
+                   spellcheck="false" placeholder="UUID from your old share string">
+          </details>` : ''}
+          <button class="profile-btn primary" data-confirm>${isNew ? 'Create' : 'Save'}</button>
+          ${!isNew && !token.revoked_at
+            ? '<button class="profile-btn destructive" data-revoke>Revoke link</button>' : ''}
+          <div id="tkShare" class="token-share" hidden>
+            <div class="code" id="tkShareCode"></div>
+            <button class="copy-btn" type="button" data-share-copy aria-label="copy">${SVG_COPY}</button>
+          </div>
+          <div id="tkMsgLine" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    const msg = overlay.querySelector('#tkMsgLine');
+
+    overlay.querySelector('[data-confirm]').addEventListener('click', async () => {
+      const rights = [];
+      if (overlay.querySelector('#tkMsg').checked) rights.push('can_message');
+      if (overlay.querySelector('#tkSearch').checked) rights.push('can_search');
+      const usesRaw = overlay.querySelector('#tkUses').value.trim();
+      const body = {
+        label: overlay.querySelector('#tkLabel').value.trim(),
+        rights,
+        max_uses: usesRaw ? Number(usesRaw) : null,
+        welcome_message: overlay.querySelector('#tkWelcome').value.trim() || null,
+      };
+      if (isNew) {
+        const preset = TOKEN_EXPIRY_PRESETS.find(
+          p => p.id === overlay.querySelector('#tkExpiry').value);
+        if (preset && preset.hours) {
+          body.expires_at = new Date(
+            Date.now() + preset.hours * 3600 * 1000).toISOString();
+        }
+        const customId = (overlay.querySelector('#tkId') || {value: ''}).value.trim();
+        if (customId) body.id = customId;
+      }
+      msg.style.color = 'var(--color-text-muted)';
+      msg.textContent = isNew ? 'Creating…' : 'Saving…';
+      try {
+        const r = await fetch(
+          isNew ? '/api/p2p/tokens' : `/api/p2p/tokens/${token.id}`, {
+            method: isNew ? 'POST' : 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+          });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          msg.style.color = 'var(--color-negative)';
+          msg.textContent = data.detail || 'Failed.';
+          return;
+        }
+        if (onSaved) onSaved();
+        if (isNew && data.share_string) {
+          // Keep the sheet open so the freshly minted link can be copied.
+          msg.style.color = 'var(--color-positive)';
+          msg.textContent = 'Link created — copy and share it:';
+          const share = overlay.querySelector('#tkShare');
+          share.hidden = false;
+          overlay.querySelector('#tkShareCode').textContent = data.share_string;
+          overlay.querySelector('[data-share-copy]').onclick = async () => {
+            try { await navigator.clipboard.writeText(data.share_string); } catch (_) {}
+          };
+          overlay.querySelector('[data-confirm]').remove();
+        } else {
+          close();
+        }
+      } catch (err) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = String(err);
+      }
+    });
+
+    const revokeBtn = overlay.querySelector('[data-revoke]');
+    if (revokeBtn) {
+      revokeBtn.addEventListener('click', async () => {
+        close();
+        const ok = await window.confirmDestructive({
+          title: 'Revoke invite link?',
+          message: 'Nobody will be able to join with this link anymore. Friends who already joined keep their access.',
+          confirmText: 'Revoke',
+        });
+        if (!ok) return;
+        await fetch(`/api/p2p/tokens/${token.id}/revoke`, {method: 'POST'});
+        if (onSaved) onSaved();
+      });
+    }
   }
 
   /* ---------- Chat thread ----------
@@ -6389,9 +6810,7 @@
     if (!key) { navigate('friends'); return; }
     let friend = null;
     try {
-      const r = await fetch('/api/p2p/friends');
-      const friends = await r.json();
-      friend = (friends || []).find(f => {
+      friend = await findFriend(f => {
         const k = f.public_key_hex || '';
         return !k.startsWith('pending:')
           && k.toLowerCase().startsWith(key);
@@ -6456,9 +6875,7 @@
     // events so status updates without a full screen rebuild.
     async function loadFriend() {
       try {
-        const r = await fetch('/api/p2p/friends');
-        const friends = await r.json();
-        friend = (friends || []).find(f => f.id === fid);
+        friend = await findFriend(f => f.id === fid) || friend;
       } catch (_) { /* keep stale friend object on error */ }
       if (!friend) {
         nameEl.textContent = 'Unknown friend';
@@ -6470,7 +6887,7 @@
       const ph = avatarPlaceholder(dn);
       avatarEl.style.background = ph.bg;
       avatarEl.textContent = ph.initials;
-      if (isOnline(friend.last_seen)) {
+      if (friend.is_online) {
         statusEl.innerHTML = `<span class="status-dot"></span>online`;
         statusEl.style.color = 'var(--color-positive)';
       } else if (friend.last_seen) {
@@ -6481,6 +6898,16 @@
         statusEl.textContent = 'offline';
         statusEl.style.color = 'var(--color-text-muted)';
       }
+      // Rights: a friendship joined via THEIR invite token carries a
+      // grant; without can_message in it the issuer's node rejects our
+      // messages — disable the composer instead of letting sends 403.
+      const g = friend.grant_rights || [];
+      const canMsg = !friend.has_grant || g.includes('can_message');
+      inputEl.disabled = !canMsg;
+      formEl.querySelector('.send-btn').disabled = !canMsg;
+      inputEl.placeholder = canMsg
+        ? 'Message…'
+        : 'Messaging is not enabled for this contact';
     }
 
     async function loadMessages() {
@@ -10006,6 +10433,14 @@
         <div class="form-row">
           <span class="form-label">Friends online</span>
           <span class="form-value mono">${fmtNum(sync.friends_online || 0)} <span style="color:var(--color-text-dim);">/ ${fmtNum(sync.friends_total || 0)}</span></span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Reachable</span>
+          <span class="form-value mono" title="${escapeProfileHtml(sync.reachability_detail || '')}">${
+            sync.reachability === 'reachable' ? 'yes'
+            : sync.reachability === 'cgnat' ? 'CGNAT'
+            : sync.reachability === 'unreachable' ? 'no'
+            : '—'}</span>
         </div>
       </div>
       <div class="btn-row single">

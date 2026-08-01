@@ -1,19 +1,23 @@
-"""The P2P sync surface — the only Sautium surface that may face the internet.
+"""The P2P peer surface — the only Sautium surface that may face the internet.
 
 Runs as a SECOND uvicorn server (see main.py `_start_p2p_server`) on its own
 port, serving nothing but the peer protocol: inventory, enrichment pulls, MB
-slices, and a `/health` peers identify the node by.
+slices, the chat/relay protocol, and a `/health` peers identify the node by.
 
 Why a separate port at all: the Web UI on 8800 inlines the API secret into
 its HTML (window.__SAUTIUM_SECRET), so forwarding that port hands an
 attacker the whole API — playback, settings, library, AI DJ. The launcher
 has had this split from the start (Web UI on 18000, sync on a random
 20000-29999 port); Docker had both on 8800, which is why a Docker master
-could never be a reachable node. Everything here is readable by any peer
-that connects, which is the P2P protocol's own model (see the
-public/friends flag discussion in docs/design/P2P-SYNC-INTEGRITY.md) — so
-this app must never gain a route that writes, configures, or reveals a
-secret.
+could never be a reachable node.
+
+Sync data is readable by any peer that connects, which is the P2P
+protocol's own model (see the public/friends flag discussion in
+docs/design/P2P-SYNC-INTEGRITY.md). This app must never gain a route that
+reveals a secret or configuration; writes are permitted ONLY to the P2P
+domain tables (friends, p2p_messages, invite-token tables) behind
+token/friendship gating with signed, timestamp-bound requests — the
+chat/relay protocol is a peer-write protocol by nature (routers/peer_chat).
 
 Rate limiting is per-IP and in-process, mirroring the launcher's aiohttp
 server: an internet-facing port meets scanners, and a peer that wants more
@@ -82,3 +86,8 @@ async def health() -> dict:
 
 app.include_router(router)
 app.include_router(mb_router)
+
+from routers.peer_chat import chat_router, relay_router  # noqa: E402
+
+app.include_router(chat_router)
+app.include_router(relay_router)

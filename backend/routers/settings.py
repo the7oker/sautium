@@ -586,16 +586,19 @@ def _ai_state() -> Dict[str, Any]:
 
 
 def _sync_state() -> Dict[str, Any]:
+    from routers.p2p import ONLINE_WINDOW_MIN
+
     friends_online = 0
     friends_total = 0
     try:
-        row = db_query_one("""
+        row = db_query_one(f"""
             SELECT
                 COUNT(*) FILTER (WHERE is_blocked = FALSE) AS total,
                 COUNT(*) FILTER (
                     WHERE is_blocked = FALSE
                       AND last_seen IS NOT NULL
-                      AND last_seen > NOW() - INTERVAL '5 minutes'
+                      AND last_seen > NOW()
+                          - make_interval(mins => {ONLINE_WINDOW_MIN})
                 ) AS online
             FROM friends
         """)
@@ -622,6 +625,9 @@ def _sync_state() -> Dict[str, Any]:
         "last_items_received":     _read("sync.last_items_received"),
         "friends_online":          friends_online,
         "friends_total":           friends_total,
+        "reachability":            _read("p2p.reachability") or "unknown",
+        "reachability_detail":     _read("p2p.reachability_detail"),
+        "reachability_checked_at": _read("p2p.reachability_checked_at"),
     }
 
 

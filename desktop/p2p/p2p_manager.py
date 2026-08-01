@@ -77,6 +77,10 @@ class P2PManager:
         self._friend_peer_cache: dict[int, list[tuple]] = {}
         # Friends whose history has been pulled this session (skip re-pull)
         self._history_synced_friends: set[int] = set()
+        self._master_wake_task: Optional[asyncio.Task] = None
+        self._reachability_task: Optional[asyncio.Task] = None
+        # unknown | reachable | cgnat | unreachable — see _reachability_loop
+        self._reachability_status = "unknown"
 
     @property
     def is_running(self) -> bool:
@@ -173,6 +177,9 @@ class P2PManager:
                 self._sync_server.set_delivery_trigger(
                     self._deliver_pending_fast
                 )
+                self._sync_server.set_inbound_cb(
+                    self._note_inbound_reachable
+                )
             except Exception as e:
                 logger.warning(f"Chat service init failed: {e}")
 
@@ -190,13 +197,20 @@ class P2PManager:
         asyncio.set_event_loop(self._loop)
         # Suppress transient Windows network errors (WinError 64, etc.)
         # that occur when a peer disconnects during TLS accept handshake.
+        # These fire inside the proactor's own connection_lost path, where
+        # there is nothing left to recover — the awaited call already saw
+        # the disconnect and handled it. Long-lived relay wake streams and
+        # probe connect-backs make abrupt closes routine, so the noise
+        # would otherwise drown the log.
         _default_handler = self._loop.get_exception_handler()
 
         def _exception_handler(loop, context):
             exc = context.get("exception")
             if isinstance(exc, OSError) and getattr(exc, "winerror", None) in (
-                64,   # network name no longer available
-                121,  # semaphore timeout
+                64,     # network name no longer available
+                121,    # semaphore timeout
+                10053,  # connection aborted by local host
+                10054,  # connection reset by peer
             ):
                 return  # suppress
             if _default_handler:
@@ -274,6 +288,15 @@ class P2PManager:
                     self._upnp_renewal_loop()
                 )
 
+            # Cheap local CGNAT tells gate the very first announces — an
+            # unreachable node's announces are dead-address DHT pollution.
+            # The probe/passive signals refine this in _reachability_loop.
+            heuristic = self._reachability_heuristic()
+            if heuristic:
+                self._dht_service.set_announces_enabled(False)
+                _progress(f"Reachability: {heuristic[0]} — "
+                          "DHT announces suppressed")
+
             # Start DHT
             if self._dht_service.is_available:
                 _progress("Starting DHT...")
@@ -328,6 +351,13 @@ class P2PManager:
             # Start chat history sync + friend resolution
             # (works via LAN even without DHT)
             if self._chat_service:
+                try:
+                    await self._ensure_master_contact()
+                except Exception as e:
+                    # A shipped-contact hiccup must never take P2P down —
+                    # everything below (chat, sync, discovery) is the real
+                    # product; the master contact is a convenience.
+                    logger.error(f"Master contact seeding failed: {e}")
                 self._pending_retry_task = asyncio.create_task(
                     self._sync_chat_histories()
                 )
@@ -340,6 +370,12 @@ class P2PManager:
                 self._pending_accepts_task = asyncio.create_task(
                     self._poll_pending_accepts()
                 )
+                self._master_wake_task = asyncio.create_task(
+                    self._master_wake_loop()
+                )
+            self._reachability_task = asyncio.create_task(
+                self._reachability_loop()
+            )
 
             # Sync triggers: NOTIFY sautium_sync_request (Web UI Force
             # sync now → backend → here) + auto-sync timer
@@ -485,7 +521,8 @@ class P2PManager:
                      self._pending_accepts_task, self._lan_discovery_task,
                      self._sync_request_listen_task, self._sync_request_task,
                      self._auto_sync_task, self._mb_slice_task,
-                     self._upnp_renewal_task):
+                     self._upnp_renewal_task, self._master_wake_task,
+                     self._reachability_task):
             if task:
                 task.cancel()
                 try:
@@ -1123,13 +1160,41 @@ class P2PManager:
 
         return None
 
+    def _note_peer_alive(self, friend_id: Optional[int],
+                         pubkey: Optional[str], ip: str, port: int) -> None:
+        """One event, two facts: this friend answered us AT this address,
+        just now.
+
+        The address goes to the head of the candidate list — a DHT hit only
+        proves someone announced an address, never that it answers, so the
+        proven one must outrank it.
+
+        `last_seen` moves too, because an answered request is presence.
+        Without this a passive peer — the master never pushes, by design —
+        goes "offline" five minutes after the handshake while its wake
+        stream is still connected and its history pulls still succeed.
+        """
+        if friend_id:
+            peer = (ip, port)
+            cached = [p for p in self._friend_peer_cache.get(friend_id, [])
+                      if p != peer]
+            self._friend_peer_cache[friend_id] = [peer] + cached
+        if pubkey and not pubkey.startswith("pending:"):
+            self._chat_service.update_friend_last_seen(pubkey)
+
     async def _find_friend_peers(
         self, friend: dict, refresh: bool = False,
     ) -> list[tuple]:
-        """Find peer addresses for a friend via cache, LAN, or DHT.
+        """Candidate addresses for a friend — the SINGLE source every path
+        uses (resolve, push, history pull, wake subscribe). Order: LAN by
+        identity, then last-known-good cache, then DHT, then every other
+        LAN peer as a final tier.
 
-        Always checks LAN first (even with cache) — LAN peers are
-        faster and more reliable than DHT/external addresses.
+        That last tier matters on a peer's own LAN: the address a node
+        announces in the DHT is its router's public IP, which answers only
+        with NAT hairpinning and usually doesn't — while the same node sits
+        one hop away on the LAN (or on 127.0.0.1 as a localhost-probed
+        Docker node).
 
         Args:
             friend: friend dict with id, invite_code, public_key_hex.
@@ -1141,35 +1206,40 @@ class P2PManager:
         invite_code = friend.get("invite_code", "")
         pubkey = friend.get("public_key_hex", "")
 
-        # Always check LAN first — instant, and overrides stale DHT cache
-        peers = []
+        peers: list[tuple] = []
+
+        def add(candidates):
+            for p in candidates:
+                if p and p not in peers:
+                    peers.append(p)
+
+        # 1. LAN by identity — instant and always right when it hits.
         if self._lan_discovery:
             lan = self._lan_discovery.find_peer_by_invite_code(invite_code)
             if not lan and pubkey and not pubkey.startswith("pending:"):
                 lan = self._lan_discovery.find_peer_by_node_id(pubkey)
-            if lan:
-                peers.append(lan)
-                if fid:
-                    self._friend_peer_cache[fid] = peers
-                return peers
+            add([lan])
 
-        # Return cached if available (and not refreshing)
-        if not refresh and fid and fid in self._friend_peer_cache:
-            return self._friend_peer_cache[fid]
+        # 2. Last known good (_note_peer_alive puts the winner first).
+        if fid and not refresh:
+            add(self._friend_peer_cache.get(fid, []))
 
-        # Then DHT (internet)
+        # 3. DHT — an announcement, not a promise of reachability.
         if self._dht_service and self._dht_service.is_available:
-            dht_peers = await self._dht_service.lookup_user(invite_code)
-            peers.extend(dht_peers)
+            add(await self._dht_service.lookup_user(invite_code))
 
-        if fid:
-            if peers:
-                # Update cache with new address
-                self._friend_peer_cache[fid] = peers
-            # If nothing found — keep old cached address (peer may
-            # come back at the same address later)
+        if fid and peers:
+            self._friend_peer_cache[fid] = list(peers)
+        elif fid:
+            add(self._friend_peer_cache.get(fid, []))
 
-        return peers or (self._friend_peer_cache.get(fid, []) if fid else [])
+        # 4. Every other live LAN peer. A handful of addresses, and the
+        # reason a same-LAN or localhost-probed node stays reachable when
+        # its DHT address is an unhairpinnable public IP.
+        if self._lan_discovery:
+            add(self._lan_discovery.peers)
+
+        return peers
 
     async def _sync_chat_history(
         self, friend: dict, peers: list[tuple],
@@ -1194,14 +1264,19 @@ class P2PManager:
         if not account:
             return {}
 
-        # Sign request to prove key ownership (prevents metadata leakage)
+        # Sign request to prove key ownership (prevents metadata leakage).
+        # Timestamp-bound (±60s server-side) so a captured signature cannot
+        # replay forever — mirrors the HMAC window.
         import uuid as _uuid
         nonce = str(_uuid.uuid4())
-        sig_bytes = sign_message(f"history_request:{nonce}".encode("utf-8"))
+        ts = int(time.time())
+        sig_bytes = sign_message(
+            f"history_request:{ts}:{nonce}".encode("utf-8"))
 
         payload = {
             "public_key_hex": account["public_key_hex"],
             "nonce": nonce,
+            "ts": ts,
             "signature": sig_bytes.hex(),
         }
 
@@ -1219,6 +1294,8 @@ class P2PManager:
                         if resp.status != 200:
                             continue
                         data = await resp.json()
+                        self._note_peer_alive(
+                            friend.get("id"), friend_pubkey, ip, port)
             except Exception as e:
                 logger.debug(f"History request to {ip}:{port} failed: {e}")
                 continue
@@ -1328,13 +1405,29 @@ class P2PManager:
             if not invite:
                 continue
 
-            # Collect candidate peers: targeted LAN/DHT + all LAN peers
-            peers = await self._find_friend_peers(friend)
+            # Token invites auto-accept: attach the token + a fresh signed
+            # timestamp (the issuer skips its mutual-add check on this
+            # path, so it demands proof of key possession). Birth cert
+            # rides along whenever we have one — the master token requires
+            # it as its anti-sybil gate.
+            per_friend = dict(handshake_data)
+            join_token = friend.get("join_token_id")
+            if join_token:
+                import time as _time
 
-            # Also try ALL LAN peers as fallback (remote may not
-            # advertise invite_code in beacon yet)
-            if not peers and self._lan_discovery:
-                peers = list(self._lan_discovery.peers)
+                from desktop.node_identity import sign_message
+                ts = int(_time.time())
+                per_friend["token_id"] = join_token
+                per_friend["ts"] = ts
+                per_friend["signature"] = sign_message(
+                    f"token_handshake:{ts}:{join_token}:{invite}"
+                    .encode("utf-8")).hex()
+                from desktop.p2p.birth_cert import load_certificate
+                cert = load_certificate()
+                if cert:
+                    per_friend["birth_cert"] = cert
+
+            peers = await self._find_friend_peers(friend)
 
             if not peers:
                 continue
@@ -1347,12 +1440,27 @@ class P2PManager:
                         connector=aiohttp.TCPConnector(ssl=False)
                     ) as session:
                         async with session.post(
-                            url, json=handshake_data,
+                            url, json=per_friend,
                             timeout=aiohttp.ClientTimeout(total=10),
                         ) as resp:
                             if resp.status == 200:
                                 result = await resp.json()
                                 if result.get("accepted"):
+                                    from desktop.p2p.master_node import (
+                                        MASTER_PUBKEY_HEX,
+                                    )
+                                    if (friend.get("source") == "master"
+                                            and result["public_key_hex"]
+                                            != MASTER_PUBKEY_HEX):
+                                        # 48-bit invite fingerprints are
+                                        # guessable; the master is pinned
+                                        # by its full key — a DHT
+                                        # impersonator stops here.
+                                        logger.warning(
+                                            "Master handshake from %s:%s "
+                                            "returned a foreign pubkey — "
+                                            "ignoring", ip, port)
+                                        continue
                                     self._chat_service.add_friend(
                                         public_key_hex=result[
                                             "public_key_hex"
@@ -1364,6 +1472,8 @@ class P2PManager:
                                             "username", ""
                                         ),
                                     )
+                                    self._store_incoming_grant(
+                                        result, account)
                                     # Mirror the recipient-side
                                     # presence bump: a 200 "accepted"
                                     # is proof the remote launcher is
@@ -1388,6 +1498,9 @@ class P2PManager:
                                             result["public_key_hex"]
                                         )
                                     )
+                                    self._note_peer_alive(
+                                        (resolved_friend or {}).get("id"),
+                                        result["public_key_hex"], ip, port)
                                     if resolved_friend:
                                         await self._sync_chat_history(
                                             resolved_friend,
@@ -1466,6 +1579,310 @@ class P2PManager:
         except Exception as e:
             logger.debug(f"Nudge to {ip}:{port} for {invite} failed: {e}")
         return False
+
+    # ------------------------------------------------------------------
+    # Master contact, relay wake stream, reachability
+    # ------------------------------------------------------------------
+
+    def _read_setting(self, key: str):
+        """One user_settings value (JSONB) via the chat DB connection."""
+        if not self._chat_service:
+            return None
+        conn = self._chat_service.db_conn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM user_settings WHERE key = %s",
+                        (key,))
+            row = cur.fetchone()
+            return row[0] if row else None
+
+    def _write_settings_blocking(self, values: dict) -> None:
+        """Upsert user_settings keys on a short-lived connection — safe to
+        call from an executor thread (the chat connection is not)."""
+        conn = psycopg2.connect(self.db_dsn)
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                for key, value in values.items():
+                    cur.execute("""
+                        INSERT INTO user_settings (key, value, updated_at)
+                        VALUES (%s, %s::jsonb, NOW())
+                        ON CONFLICT (key) DO UPDATE
+                            SET value = EXCLUDED.value, updated_at = NOW()
+                    """, (key, json.dumps(value)))
+        finally:
+            conn.close()
+
+    def _store_incoming_grant(self, result: dict, account: dict) -> None:
+        """Persist the issuer-signed grant from an accepted handshake — the
+        contact-recovery document (re-presented when the issuer's device,
+        and friends table, changes)."""
+        grant = result.get("grant")
+        if not grant:
+            return
+        from desktop.p2p import invite_tokens
+        issuer_pubkey = result.get("public_key_hex", "")
+        if not invite_tokens.verify_grant(grant, issuer_pubkey):
+            logger.warning("Grant from %s failed verification — discarded",
+                           result.get("username", "?"))
+            return
+        if (grant.get("guest_pubkey", "").lower()
+                != account["public_key_hex"].lower()):
+            return
+        friend = self._chat_service.get_friend_by_public_key(issuer_pubkey)
+        if friend:
+            invite_tokens.store_grant(self._chat_service.db_conn(),
+                                      friend["id"], grant)
+            logger.info("Friendship grant stored for %s",
+                        result.get("username", "?"))
+
+    async def _ensure_master_contact(self) -> None:
+        """Seed the shipped master contact as a pending friend — the
+        existing resolver loop does the rest (LAN/DHT lookup, token
+        handshake, welcome pull). Removal is respected forever via the
+        p2p.master_removed flag; a manual re-add clears it (backend)."""
+        from desktop.p2p.master_node import (
+            MASTER_INVITE_CODE, MASTER_PUBKEY_HEX, MASTER_TOKEN_ID,
+            MASTER_USERNAME, master_configured,
+        )
+        if not master_configured() or not self._chat_service:
+            return
+        from desktop.node_identity import get_account_info
+        account = get_account_info()
+        if not account:
+            return
+        if account["public_key_hex"] == MASTER_PUBKEY_HEX:
+            return  # the master must not add itself
+        if self._read_setting("p2p.master_removed"):
+            return
+        conn = self._chat_service.db_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM friends WHERE public_key_hex IN (%s, %s)"
+                " OR invite_code = %s",
+                (MASTER_PUBKEY_HEX, f"pending:{MASTER_INVITE_CODE}",
+                 MASTER_INVITE_CODE))
+            if cur.fetchone():
+                return
+            cur.execute("""
+                INSERT INTO friends (username, public_key_hex, invite_code,
+                                     display_name, source, join_token_id)
+                VALUES (%s, %s, %s, %s, 'master', %s)
+                ON CONFLICT (public_key_hex) DO NOTHING
+            """, (MASTER_USERNAME, f"pending:{MASTER_INVITE_CODE}",
+                  MASTER_INVITE_CODE, MASTER_USERNAME, MASTER_TOKEN_ID))
+        logger.info("Master contact seeded (%s) — resolver will connect",
+                    MASTER_INVITE_CODE)
+
+    async def _master_wake_loop(self) -> None:
+        """Hold ONE outbound SSE connection to the master's relay wake
+        stream. Outbound works from behind any NAT — this is how an
+        unreachable node learns 'you have mail' the moment the maintainer
+        replies, instead of at its next restart. Each wake (and each
+        connect) triggers the existing history pull; uuid dedup makes the
+        pull idempotent. Internally shaped as subscribe-to-one-relay so
+        Phase D can run it per peer relay."""
+        from desktop.p2p.master_node import MASTER_PUBKEY_HEX, master_configured
+        if not master_configured():
+            return
+        import random
+
+        from desktop.node_identity import get_account_info, sign_message
+        import aiohttp
+        backoff = 5.0
+        while self._running:
+            try:
+                account = get_account_info()
+                if (not account or not self._chat_service
+                        or account["public_key_hex"] == MASTER_PUBKEY_HEX
+                        or self._read_setting("p2p.master_removed")):
+                    await asyncio.sleep(60)
+                    continue
+                master = self._chat_service.get_friend_by_public_key(
+                    MASTER_PUBKEY_HEX)
+                if not master:
+                    await asyncio.sleep(30)  # not resolved yet
+                    continue
+                peers = await self._find_friend_peers(master)
+                if not peers:
+                    raise ConnectionError("no master address")
+                ip, port = peers[0]
+                ts = int(time.time())
+                sig = sign_message(
+                    f"wake_subscribe:{ts}:{MASTER_PUBKEY_HEX}:"
+                    f"{account['public_key_hex']}".encode("utf-8")).hex()
+                url = (f"https://{ip}:{port}/api/relay/wake-stream"
+                       f"?pubkey={account['public_key_hex']}"
+                       f"&ts={ts}&sig={sig}")
+                # sock_read=45 → two missed 15s keepalives = dead stream
+                async with aiohttp.ClientSession(
+                    connector=aiohttp.TCPConnector(ssl=False),
+                    timeout=aiohttp.ClientTimeout(
+                        total=None, connect=10, sock_read=45),
+                ) as session:
+                    async with session.get(url) as resp:
+                        if resp.status != 200:
+                            raise ConnectionError(
+                                f"wake subscribe: HTTP {resp.status}")
+                        logger.info(
+                            "Relay wake stream connected (%s:%s)", ip, port)
+                        self._note_peer_alive(
+                            master.get("id"),
+                            master.get("public_key_hex"), ip, port)
+                        backoff = 5.0
+                        # Connect-time catch-up covers wakes missed offline
+                        await self._sync_chat_history(master, [(ip, port)])
+                        last_bump = time.time()
+                        async for raw in resp.content:
+                            if not self._running:
+                                break
+                            line = raw.decode("utf-8", "replace").strip()
+                            if line.startswith("data:"):
+                                await self._sync_chat_history(
+                                    master, [(ip, port)])
+                            elif time.time() - last_bump >= 120:
+                                # Keepalives prove the relay is alive.
+                                # Throttled to the cadence the relay uses
+                                # for us — an UPDATE per 15s keepalive
+                                # would NOTIFY the UI into a refetch loop.
+                                last_bump = time.time()
+                                self._chat_service.update_friend_last_seen(
+                                    master["public_key_hex"])
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug(f"Master wake stream: {e}")
+            if not self._running:
+                break
+            await asyncio.sleep(backoff + random.uniform(0, backoff / 4))
+            backoff = min(backoff * 2, 300.0)
+
+    def _note_inbound_reachable(self) -> None:
+        """Passive proof from the sync server: a non-LAN peer just reached
+        us — definitive 'reachable', overrides every heuristic."""
+        if self._reachability_status == "reachable":
+            return
+        self._reachability_status = "reachable"
+        asyncio.ensure_future(self._apply_reachability(
+            "reachable", "inbound request observed"))
+
+    def _reachability_heuristic(self):
+        """Local CGNAT tells, no network calls: a private/RFC 6598 router
+        WAN address, or a router-WAN vs DHT-observed mismatch (another NAT
+        above the router). Returns (status, detail) or None."""
+        import ipaddress
+        cgnat_net = ipaddress.ip_network("100.64.0.0/10")
+        wan = self._upnp.external_ip if self._upnp else None
+        if wan:
+            try:
+                addr = ipaddress.ip_address(wan)
+                if addr.is_private or addr in cgnat_net:
+                    return ("cgnat",
+                            f"router WAN {wan} is private/carrier-grade")
+            except ValueError:
+                wan = None
+        observed = (self._dht_service.observed_external_ip
+                    if self._dht_service else None)
+        if wan and observed and wan != observed:
+            return ("cgnat", f"router WAN {wan} != observed {observed}")
+        return None
+
+    async def _apply_reachability(self, status: str, detail: str) -> None:
+        self._reachability_status = status
+        if self._dht_service:
+            self._dht_service.set_announces_enabled(
+                status not in ("cgnat", "unreachable"))
+        await asyncio.get_event_loop().run_in_executor(
+            None, self._write_settings_blocking, {
+                "p2p.reachability": status,
+                "p2p.reachability_detail": detail,
+                "p2p.reachability_checked_at":
+                    datetime.now(timezone.utc).isoformat(),
+            })
+        logger.info(f"Reachability: {status} ({detail})")
+
+    async def _probe_reachability_via_master(self):
+        """Definitive test — ask the master to connect back to our sync
+        port (BT-tracker style). None when the master is not resolved or
+        not reachable itself."""
+        from desktop.p2p.master_node import MASTER_PUBKEY_HEX, master_configured
+        if not master_configured() or not self._chat_service:
+            return None
+        from desktop.node_identity import get_account_info, sign_message
+        account = get_account_info()
+        if not account or account["public_key_hex"] == MASTER_PUBKEY_HEX:
+            return None
+        master = self._chat_service.get_friend_by_public_key(
+            MASTER_PUBKEY_HEX)
+        if not master:
+            return None
+        peers = await self._find_friend_peers(master)
+        if not peers:
+            return None
+        port = (self._upnp.get_external_port(self._http_port)
+                if self._upnp else None) or self._http_port
+        ts = int(time.time())
+        sig = sign_message(
+            f"probe_request:{ts}:{MASTER_PUBKEY_HEX}:{port}"
+            .encode("utf-8")).hex()
+        payload = {
+            "public_key_hex": account["public_key_hex"],
+            "port": port, "ts": ts, "signature": sig,
+        }
+        import aiohttp
+        for ip, mport in peers:
+            try:
+                async with aiohttp.ClientSession(
+                    connector=aiohttp.TCPConnector(ssl=False),
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as session:
+                    async with session.post(
+                            f"https://{ip}:{mport}/api/relay/probe-connect",
+                            json=payload) as resp:
+                        if resp.status == 429:
+                            return None  # cooldown — try next cycle
+                        if resp.status != 200:
+                            continue
+                        data = await resp.json()
+                        self._note_peer_alive(master.get("id"),
+                                              MASTER_PUBKEY_HEX, ip, mport)
+                        return bool(data.get("reachable"))
+            except Exception as e:
+                logger.debug(f"Probe via {ip}:{mport} failed: {e}")
+        return None
+
+    async def _reachability_loop(self) -> None:
+        """Adaptive-cadence self-check: retry every RETRY_UNKNOWN while we
+        still have no verdict — at startup the master contact is usually
+        mid-resolution, so the first probe has no target — then settle into
+        the infrastructure cadence (6 h, like REANNOUNCE). Passive inbound
+        proof overrides in between via _note_inbound_reachable."""
+        RETRY_UNKNOWN = 60
+        await asyncio.sleep(20)  # let UPnP/DHT settle after startup
+        while self._running:
+            status = "unknown"
+            try:
+                probe = await self._probe_reachability_via_master()
+                heuristic = self._reachability_heuristic()
+                if probe is True:
+                    status, detail = "reachable", "master probe connected"
+                elif probe is False:
+                    status, detail = ((heuristic[0], heuristic[1])
+                                      if heuristic else
+                                      ("unreachable", "master probe failed"))
+                elif heuristic:
+                    status, detail = heuristic
+                elif self._reachability_status == "reachable":
+                    status, detail = ("reachable",
+                                      "inbound request observed")
+                else:
+                    status, detail = "unknown", "no probe target yet"
+                await self._apply_reachability(status, detail)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug(f"Reachability check error: {e}")
+            await asyncio.sleep(RETRY_UNKNOWN if status == "unknown"
+                                else 6 * 3600)
 
     async def _poll_pending_accepts(self):
         """One-time startup check for pending accepts from the Worker.
@@ -1623,6 +2040,7 @@ class P2PManager:
                     "message_uuid": msg.get("message_uuid", ""),
                 }
 
+                delivered = False
                 for ip, port in peers:
                     url = f"https://{ip}:{port}/api/chat/message"
                     try:
@@ -1631,15 +2049,28 @@ class P2PManager:
                                 self._chat_service.mark_delivered(
                                     msg["id"]
                                 )
+                                self._note_peer_alive(
+                                    friend_id, pubkey, ip, port)
+                                delivered = True
                                 break
                             if resp.status == 403:
+                                # This address is not our friend (a
+                                # stranger on the LAN, or they haven't
+                                # added us yet) — try the next candidate.
+                                # Aborting here used to let any bystander
+                                # answering first block delivery entirely.
                                 logger.debug(
-                                    f"Push rejected (403) by "
-                                    f"{ip}:{port}, stopping"
-                                )
-                                return
+                                    f"Push rejected (403) by {ip}:{port}")
                     except Exception:
                         pass
+                if not delivered:
+                    # Every address refused or timed out. Later messages
+                    # would fare no better; the row stays undelivered and
+                    # the 60s retry loop picks it up.
+                    logger.debug(
+                        f"No route to friend {friend_id} "
+                        f"({len(peers)} candidates tried)")
+                    return
 
     async def _listen_for_db_notifications(self):
         """Listen for PostgreSQL NOTIFY on 'sautium_chat' channel.

@@ -130,6 +130,13 @@ class DHTService:
         self.listen_port = listen_port
         self.http_port = http_port
         self._announce_port = http_port  # may differ if UPnP maps to another port
+        # Reachability gate: an unreachable node's announces carry a dead
+        # address — they pollute lookups for everyone and burn traffic.
+        # Lookups and LAN discovery are unaffected by this flag.
+        self._announces_enabled = True
+        # External IP as DHT peers see us (external_ip_alert) — the
+        # router-WAN vs world-view mismatch is a CGNAT tell.
+        self.observed_external_ip: Optional[str] = None
         self._session: Optional[object] = None  # lt.session
         self._announced: set[str] = set()  # artist UUIDs currently announced
         self._user_invite_code: Optional[str] = None  # user's invite code
@@ -155,6 +162,15 @@ class DHTService:
                 f"DHT announce port changed: {self._announce_port} -> {port}"
             )
             self._announce_port = port
+
+    def set_announces_enabled(self, enabled: bool):
+        """Gate ALL announces by the reachability verdict (see __init__)."""
+        if enabled != self._announces_enabled:
+            logger.info(
+                "DHT announces %s (reachability verdict)",
+                "enabled" if enabled else "suppressed",
+            )
+            self._announces_enabled = enabled
 
     async def start(self):
         """Create libtorrent session and bootstrap DHT."""
@@ -230,6 +246,8 @@ class DHTService:
         if not self._session:
             return
         self._user_invite_code = invite_code
+        if not self._announces_enabled:
+            return
         ih = user_infohash(invite_code)
         sha1 = lt.sha1_hash(ih)
         self._session.dht_announce(sha1, self._announce_port, 0)
@@ -242,9 +260,9 @@ class DHTService:
 
     async def announce_node(self):
         """Announce this node on the discovery key — the highway a peer
-        finds us by (one lookup, then inventory). Unconditional and cheap:
-        one announce regardless of library size."""
-        if not self._session:
+        finds us by (one lookup, then inventory). Cheap: one announce
+        regardless of library size."""
+        if not self._session or not self._announces_enabled:
             return
         sha1 = lt.sha1_hash(node_infohash())
         self._session.dht_announce(sha1, self._announce_port, 0)
@@ -259,6 +277,8 @@ class DHTService:
         if not self._session:
             return
         self._capabilities.add(capability)
+        if not self._announces_enabled:
+            return
         sha1 = lt.sha1_hash(capability_infohash(capability))
         self._session.dht_announce(sha1, self._announce_port, 0)
         logger.info(f"DHT: capability announced ({capability})")
@@ -274,6 +294,8 @@ class DHTService:
         if not self._session:
             return
 
+        if not self._announces_enabled:
+            return
         new_uuids = set(artist_uuids) - self._announced
         if not new_uuids:
             logger.info("No new tail artists to announce")
@@ -380,6 +402,8 @@ class DHTService:
             await asyncio.sleep(REANNOUNCE_INTERVAL)
             if not self._running or not self._session:
                 break
+            if not self._announces_enabled:
+                continue
 
             # The discovery key first — it is what every peer looks up.
             self._session.dht_announce(
@@ -425,6 +449,9 @@ class DHTService:
 
     def _handle_alert(self, alert):
         """Handle a libtorrent alert."""
+        if isinstance(alert, lt.external_ip_alert):
+            self.observed_external_ip = str(alert.external_address)
+            return
         if isinstance(alert, lt.dht_get_peers_reply_alert):
             ih_hex = alert.info_hash.to_string().hex()
             raw_peers = alert.peers()
