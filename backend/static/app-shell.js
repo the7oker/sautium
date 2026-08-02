@@ -515,15 +515,19 @@
   function updateFabVisibility(route) {
     const fab = document.getElementById('aiFab');
     if (!fab) return;
-    const npOpen = sheet && sheet.isOpen;
-    const aiOpen = ai && ai.isOpen;
-    const drawerOpen = typeof moreDrawer !== 'undefined' && moreDrawer.isOpen;
     const r = route || currentRoute;
     const segs = parseHash().split('/').filter(Boolean);
     const inChat = segs.length >= 3 && segs[1] === 'chat';
     const aiNotReady = !(_aiProviderCount > 0);
-    fab.hidden = !!(npOpen || aiOpen || drawerOpen
-                    || FAB_HIDDEN_ROUTES.has(r) || inChat || aiNotReady);
+    // The shell's bottom clearance follows the route alone — an open
+    // overlay hides the button transiently and must not reflow the
+    // page underneath it.
+    const routeHasFab = !(FAB_HIDDEN_ROUTES.has(r) || inChat || aiNotReady);
+    document.body.classList.toggle('no-fab', !routeHasFab);
+    const npOpen = sheet && sheet.isOpen;
+    const aiOpen = ai && ai.isOpen;
+    const drawerOpen = typeof moreDrawer !== 'undefined' && moreDrawer.isOpen;
+    fab.hidden = !routeHasFab || !!(npOpen || aiOpen || drawerOpen);
   }
 
   async function refreshAiAvailability() {
