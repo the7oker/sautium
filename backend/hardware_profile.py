@@ -19,6 +19,13 @@ describe the machine, not the moment:
 A machine with <12 GB system RAM is demoted one tier: on CUDA the
 whole-track audio buffers live in system RAM, and the model set +
 Postgres + OS don't fit a full/standard working set below that.
+
+`ml_available` is the separate axis: whether torch imports at all. It is
+False on nodes where the ML wheels do not exist for the platform (Intel
+macOS — PyTorch stopped at 2.2.2 there, see backend/requirements.txt), and
+such a node is lite by tier anyway. Every ML-gated property folds it in, so
+one check keeps a torch-less install off the model paths even when
+SAUTIUM_PROFILE forces a tier the machine cannot honour.
 """
 
 import functools
@@ -51,16 +58,19 @@ class HardwareProfile:
     accel_memory_gb: float       # total VRAM / unified memory / RAM
     ram_gb: float
     cores: int
+    ml_available: bool           # torch imports — the model stack can run
 
     @property
     def prewarm_keys(self) -> tuple:
+        if not self.ml_available:
+            return ()
         return _PREWARM[self.name]
 
     @property
     def local_analysis(self) -> bool:
         """Bulk library analysis (embeddings + features) is a product on
         this machine. False on lite — analysis arrives via P2P import."""
-        return self.name != "lite"
+        return self.ml_available and self.name != "lite"
 
     @property
     def stream_enrich_mode(self) -> str:
@@ -80,7 +90,7 @@ class HardwareProfile:
         standard lazy-loads on the first non-ASCII sound query, lite never
         loads it — the sound scope degrades per query to English-only
         (HARDWARE-TIERS sound-scope policy)."""
-        return self.name != "lite"
+        return self.ml_available and self.name != "lite"
 
     @property
     def background_enrichment_default(self) -> bool:
@@ -127,6 +137,7 @@ class HardwareProfile:
                 "accel_memory_gb": round(self.accel_memory_gb, 1),
                 "ram_gb": round(self.ram_gb, 1),
                 "cores": self.cores,
+                "ml_available": self.ml_available,
                 "auto_tier": _auto_tier(self.device, self.accel_memory_gb,
                                         self.ram_gb),
             },
@@ -178,7 +189,7 @@ def _total_ram_gb() -> float:
 
 
 def _detect_hardware() -> tuple:
-    """(device, total accel memory GB, total RAM GB, cores)."""
+    """(device, total accel memory GB, total RAM GB, cores, torch present)."""
     ram_gb = _total_ram_gb()
     cores = os.cpu_count() or 4
     try:
@@ -187,14 +198,14 @@ def _detect_hardware() -> tuple:
         device = get_device()
     except Exception:
         # torch-less install — every ML feature is unavailable anyway.
-        return "cpu", ram_gb, ram_gb, cores
+        return "cpu", ram_gb, ram_gb, cores, False
     if device == "cuda":
         _free, total = torch.cuda.mem_get_info()
         accel_gb = total / 1e9
     else:
         # MPS unified memory == system RAM; CPU works out of RAM anyway.
         accel_gb = ram_gb
-    return device, accel_gb, ram_gb, cores
+    return device, accel_gb, ram_gb, cores, True
 
 
 def _auto_tier(device: str, accel_gb: float, ram_gb: float) -> str:
@@ -220,7 +231,7 @@ def _configured_profile() -> tuple:
 @functools.lru_cache(maxsize=1)
 def resolve() -> HardwareProfile:
     """Process-lifetime profile. First call logs the decision."""
-    device, accel_gb, ram_gb, cores = _detect_hardware()
+    device, accel_gb, ram_gb, cores, ml_available = _detect_hardware()
     configured, source = _configured_profile()
     if configured == "auto":
         name = _auto_tier(device, accel_gb, ram_gb)
@@ -230,12 +241,14 @@ def resolve() -> HardwareProfile:
     profile = HardwareProfile(
         name=name, source=source, device=device,
         accel_memory_gb=accel_gb, ram_gb=ram_gb, cores=cores,
+        ml_available=ml_available,
     )
     logger.info(
-        "Hardware profile: %s (%s; %s %.1fGB accel, %.1fGB RAM, %d cores) — "
-        "prewarm=%s local_analysis=%s stream=%s",
+        "Hardware profile: %s (%s; %s %.1fGB accel, %.1fGB RAM, %d cores, "
+        "ml=%s) — prewarm=%s local_analysis=%s stream=%s",
         profile.name, profile.source, profile.device, profile.accel_memory_gb,
-        profile.ram_gb, profile.cores, ",".join(profile.prewarm_keys) or "none",
+        profile.ram_gb, profile.cores, "yes" if ml_available else "no",
+        ",".join(profile.prewarm_keys) or "none",
         profile.local_analysis, profile.stream_enrich_mode,
     )
     return profile

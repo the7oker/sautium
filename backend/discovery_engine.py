@@ -905,13 +905,17 @@ def _model_ready(key: str) -> bool:
 
 def _kick_model(key: str) -> None:
     import model_cache
-    # Profile veto: on a profile that never ships the translator (lite),
-    # a kick here would drag ~3GB into RAM against the tier policy — the
-    # per-query predicate keeps the sound scope English-only instead.
-    if key == "translate":
-        from hardware_profile import resolve as _hw
-        if not _hw().translation_available:
-            return
+    from hardware_profile import resolve as _hw
+    # Profile veto. Without torch no model can ever load, so kicking would
+    # spawn a doomed loader thread per query and bury the log in ImportErrors
+    # — the model-backed sources stay skipped and the non-ML blocks serve.
+    # The translator is vetoed one tier earlier: on lite a kick would drag
+    # ~3GB into RAM against the tier policy, and the per-query predicate
+    # keeps the sound scope English-only instead.
+    if not _hw().ml_available:
+        return
+    if key == "translate" and not _hw().translation_available:
+        return
     from routers.discovery import (_clap_loader, _enrichment_loader,
                                    _lyrics_loader, _translate_loader)
     factory = {"enrichment": _enrichment_loader, "clap": _clap_loader,

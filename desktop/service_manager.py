@@ -9,6 +9,7 @@ Manages three processes:
 
 import logging
 import os
+import platform
 import shutil
 import signal
 import subprocess
@@ -209,6 +210,22 @@ class ServiceManager:
         has_nvidia = (not is_macos) and shutil.which("nvidia-smi") is not None \
             and detect_gpu()[0]
 
+        # PyTorch publishes no macOS x86_64 wheel past 2.2.2, so an Intel Mac
+        # cannot have the pinned trio at all. Such a machine has neither CUDA
+        # nor MPS, which makes it `lite` in hardware_profile — no local
+        # analysis, no pre-warm, no translation — so the ML stack has nothing
+        # to do there and the backend runs without it. requirements.txt
+        # carries the matching environment marker; skipping here keeps the
+        # launcher from reporting a failure for a package it must not install.
+        no_ml_wheels = is_macos and platform.machine() == "x86_64"
+        if no_ml_wheels:
+            logger.info(
+                "Intel macOS — no PyTorch wheels past 2.2.2; running as a "
+                "torch-less lite node (analysis arrives via P2P)"
+            )
+            if progress_cb:
+                progress_cb("CPU-only Mac — skipping PyTorch (lite node)")
+
         # A CPU-only build on an NVIDIA machine is the wrong-build failure a
         # plain `import torch` check can't see — torch.version.cuda is a build
         # property (None on +cpu wheels), so it detects it deterministically.
@@ -222,7 +239,7 @@ class ServiceManager:
             not torch_missing and has_nvidia
             and torch_check.stdout.strip() == "cpu"
         )
-        if torch_missing or torch_wrong_build:
+        if (torch_missing or torch_wrong_build) and not no_ml_wheels:
             if progress_cb:
                 progress_cb("Installing PyTorch (first run, may take a few minutes)...")
             logger.info(
@@ -559,6 +576,17 @@ class ServiceManager:
             try:
                 req = urllib.request.urlopen(url, timeout=5, context=ssl_ctx)
                 if req.status == 200:
+                    # Safety net behind the orphan sweep: a 200 from a
+                    # process that is not our child means someone else owns
+                    # the port and we would report a stale backend as ours.
+                    if self.backend_proc and self.backend_proc.poll() is not None:
+                        logger.error(
+                            "Port %d answers /health but our backend exited "
+                            "(%s) — another process owns the port: %s",
+                            port, self.backend_proc.returncode,
+                            self._read_backend_log_tail(),
+                        )
+                        return False
                     logger.info("Backend is ready")
                     return True
             except Exception as e:
@@ -798,27 +826,40 @@ class ServiceManager:
 
     @staticmethod
     def _kill_orphan_on_port(port: int) -> None:
-        """Kill any process listening on the given port (orphan from previous session)."""
-        try:
-            for conn in psutil.net_connections(kind="tcp"):
-                if conn.laddr.port == port and conn.status == "LISTEN":
-                    try:
-                        proc = psutil.Process(conn.pid)
-                        logger.warning(
-                            f"Killing orphan process on port {port}: "
-                            f"PID {conn.pid} ({proc.name()})"
-                        )
-                        proc.terminate()
-                        proc.wait(timeout=5)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-                    except psutil.TimeoutExpired:
-                        try:
-                            psutil.Process(conn.pid).kill()
-                        except psutil.NoSuchProcess:
-                            pass
-        except (psutil.AccessDenied, OSError) as e:
-            logger.debug(f"Could not check for orphan processes: {e}")
+        """Kill any process listening on the given port (orphan from previous session).
+
+        Enumerated per process rather than through psutil.net_connections():
+        that call needs root on macOS and raises AccessDenied for the WHOLE
+        system table, so the orphan sweep silently did nothing there. The new
+        backend then failed to bind while the stale one kept answering
+        /health — a "started successfully" that ran the previous session's
+        code. Per-process sockets are readable without privileges for
+        processes this user owns, which the orphan always is.
+        """
+        for proc in psutil.process_iter(["pid", "name"]):
+            try:
+                listening = any(
+                    conn.status == psutil.CONN_LISTEN and conn.laddr.port == port
+                    for conn in proc.net_connections(kind="tcp")
+                )
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            if not listening:
+                continue
+            logger.warning(
+                f"Killing orphan process on port {port}: "
+                f"PID {proc.pid} ({proc.info.get('name')})"
+            )
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except psutil.NoSuchProcess:
+                pass
+            except psutil.TimeoutExpired:
+                try:
+                    proc.kill()
+                except psutil.NoSuchProcess:
+                    pass
 
     @staticmethod
     def _load_env_file(env_path: Path, env: dict) -> None:

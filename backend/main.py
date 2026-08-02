@@ -342,8 +342,15 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"DHT startup failed: {e}")
             _dht_service = None
-    elif settings.p2p_enabled:
+    elif settings.p2p_enabled and not HAS_LIBTORRENT:
         logger.warning("P2P enabled but libtorrent not installed — DHT disabled")
+    elif settings.p2p_enabled:
+        # P2P_SYNC_PORT=0 is how the launcher says "my own sync server owns
+        # the peer surface and the DHT" — announcing a port we do not serve
+        # would publish a dead address. Not a fault; the old message blamed
+        # libtorrent for it and sent readers hunting a phantom install bug.
+        logger.info("Backend peer surface off (P2P_SYNC_PORT=0) — DHT owned "
+                    "by the launcher's sync server")
 
     # Pre-warm search models so Discovery's first query doesn't hit a
     # ~30-60s cold-load. Fired as background tasks; uvicorn reports
@@ -360,37 +367,8 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"{label} pre-warm failed: {e}")
 
-    # Eagerly import model modules in the main thread before pre-warm tasks
-    # spawn worker threads. The transformers package uses _LazyModule whose
-    # __getattr__ is not thread-safe — concurrent first-time imports from
-    # sibling pre-warm threads (CLAP + sentence_transformers + lyrics) race
-    # and one of them surfaces as `cannot import name 'ClapProcessor'`.
-    # Loading the modules here serialises their `from transformers import …`
-    # statements through the main-thread import lock.
-    import embeddings as _eager_embeddings
-    import enrichment_embeddings as _eager_enrichment
-    import lyrics_embeddings as _eager_lyrics
-    import translation as _eager_translation
-
-    def _clap_factory():
-        gen = _eager_embeddings.AudioEmbeddingGenerator()
-        gen.load_model()
-        return gen
-
-    def _enrichment_factory():
-        gen = _eager_enrichment._BaseEnrichmentGenerator()
-        gen.load_model()
-        return gen
-
-    def _lyrics_factory():
-        gen = _eager_lyrics.LyricsEmbeddingGenerator()
-        gen.load_model()
-        return gen
-
-    def _translate_factory():
-        gen = _eager_translation.QueryTranslator()
-        gen.load_model()
-        return gen
+    _prewarm_labels = {"clap": "CLAP", "enrichment": "BGE-M3",
+                       "lyrics": "Lyrics-BGE", "translate": "MADLAD"}
 
     # Sequential, search-critical first: loads serialize anyway on
     # model_cache._factory_lock (HF loading is not thread-safe across
@@ -401,17 +379,26 @@ async def lifespan(app: FastAPI):
     # standard drops MADLAD (it lazy-loads on the first Sound-scope
     # Discovery query via kick_load), lite warms nothing — every model
     # cold-loads on first use and Discovery serves its non-ML blocks
-    # meanwhile.
-    _prewarm_factories = {
-        "clap":       ("CLAP",       _clap_factory),
-        "enrichment": ("BGE-M3",     _enrichment_factory),
-        "lyrics":     ("Lyrics-BGE", _lyrics_factory),
-        "translate":  ("MADLAD",     _translate_factory),
-    }
-
+    # meanwhile. An empty set also covers the torch-less install, whose
+    # model modules do not import at all.
     async def _prewarm_all():
+        if not _profile.prewarm_keys:
+            return
+        # Eagerly import model modules in the main thread before pre-warm
+        # tasks spawn worker threads. The transformers package uses
+        # _LazyModule whose __getattr__ is not thread-safe — concurrent
+        # first-time imports from sibling pre-warm threads (CLAP +
+        # sentence_transformers + lyrics) race and one of them surfaces as
+        # `cannot import name 'ClapProcessor'`. Loading the modules here
+        # serialises their `from transformers import …` statements through
+        # the main-thread import lock.
+        import embeddings, enrichment_embeddings, lyrics_embeddings, translation  # noqa: F401
+        from routers.discovery import (_clap_loader, _enrichment_loader,
+                                       _lyrics_loader, _translate_loader)
+        factories = {"clap": _clap_loader, "enrichment": _enrichment_loader,
+                     "lyrics": _lyrics_loader, "translate": _translate_loader}
         for key in _profile.prewarm_keys:
-            label, factory = _prewarm_factories[key]
+            label, factory = _prewarm_labels[key], factories[key]
             await _prewarm(label, key, factory)
         # Model loads stage tensors through the caching allocator (HF
         # from_pretrained staging, dtype conversions); the freed blocks
@@ -421,18 +408,17 @@ async def lifespan(app: FastAPI):
         # nvidia-smi number also contains host apps (HQPlayer's CUDA DSP)
         # and WSL can't attribute per-process, so this is the only ground
         # truth for "what does Sautium itself hold".
-        if _profile.prewarm_keys:
-            from device import empty_cache
-            empty_cache()
-            if torch is not None and torch.cuda.is_available():
-                logger.info(
-                    "Pre-warm chain complete — backend VRAM: %.2f GB "
-                    "allocated, %.2f GB reserved",
-                    torch.cuda.memory_allocated() / 1e9,
-                    torch.cuda.memory_reserved() / 1e9,
-                )
-            else:
-                logger.info("Pre-warm chain complete")
+        from device import empty_cache
+        empty_cache()
+        if torch is not None and torch.cuda.is_available():
+            logger.info(
+                "Pre-warm chain complete — backend VRAM: %.2f GB "
+                "allocated, %.2f GB reserved",
+                torch.cuda.memory_allocated() / 1e9,
+                torch.cuda.memory_reserved() / 1e9,
+            )
+        else:
+            logger.info("Pre-warm chain complete")
 
     asyncio.create_task(_prewarm_all())
 

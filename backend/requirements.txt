@@ -10,7 +10,6 @@ pgvector>=0.2.4
 sqlalchemy>=2.0.25
 
 # Audio Processing
-librosa>=0.10.1
 mutagen>=1.47.0
 soundfile>=0.12.1
 audioread>=3.0.1
@@ -31,12 +30,26 @@ imagehash>=4.3.1
 # to the torch×Python stdlib pair. Unpinned `>=` previously drifted to a torch
 # whose _dynamo polyfills require stdlib symbols absent from the image's Python,
 # breaking every embedding model load. This is the verified GPU-working set.
-torch==2.12.0
-torchvision==0.27.0
-torchaudio==2.11.0
+#
+# The marker excludes Intel macOS, where the local-analysis stack cannot be
+# installed at all: PyTorch stopped publishing wheels after 2.2.2, and
+# librosa's numba/llvmlite chain has no wheel either and fails to build from
+# source. An unsatisfiable requirement fails the WHOLE `pip install -r`, so
+# leaving these unmarked left such a node without fastapi either.
+#
+# Nothing is lost by dropping them there. Those machines have neither CUDA
+# nor MPS, so hardware_profile resolves `lite` — no local analysis, no
+# pre-warm, no translation; analysis arrives over P2P. Every module that
+# imports torch or librosa sits on an analysis path gated by that profile.
+# Anything that imports either needs the same marker, or it drags the
+# unsatisfiable pin back in as a transitive dependency.
+torch==2.12.0; sys_platform != "darwin" or platform_machine != "x86_64"
+torchvision==0.27.0; sys_platform != "darwin" or platform_machine != "x86_64"
+torchaudio==2.11.0; sys_platform != "darwin" or platform_machine != "x86_64"
 transformers==4.57.6
-sentence-transformers==5.5.1
-hear21passt>=0.0.26
+sentence-transformers==5.5.1; sys_platform != "darwin" or platform_machine != "x86_64"
+hear21passt>=0.0.26; sys_platform != "darwin" or platform_machine != "x86_64"
+librosa>=0.10.1; sys_platform != "darwin" or platform_machine != "x86_64"
 # MADLAD-400 int8 CPU runtime (query translation; future chat/voice synergy)
 ctranslate2>=4.5.0
 

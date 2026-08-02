@@ -519,13 +519,40 @@ def _brew_install(binary: str, formula: str, progress_cb: Optional[Callable] = N
     logger.info("Installing %s via Homebrew...", formula)
     env = os.environ.copy()
     env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
-    try:
-        result = subprocess.run(
-            [brew, "install", formula],
-            capture_output=True, text=True, timeout=1800, env=env,
+
+    def _run() -> Optional[subprocess.CompletedProcess]:
+        try:
+            return subprocess.run(
+                [brew, "install", formula],
+                capture_output=True, text=True, timeout=1800, env=env,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error("brew install %s timed out", formula)
+            return None
+
+    result = _run()
+    # HOMEBREW_NO_AUTO_UPDATE keeps a routine launch fast, but it also means
+    # a stale Homebrew never repairs itself: a vendored-ruby or formula-index
+    # mismatch then fails every install with a Ruby `require` traceback that
+    # says nothing about the formula. `brew update` is the repair, so spend it
+    # once on failure rather than on every launch. (Observed 2026-08-02: the
+    # media step failed for all three tools while the PostgreSQL step — which
+    # does not suppress auto-update — succeeded minutes later on the same box.)
+    if result is not None and result.returncode != 0:
+        logger.warning(
+            "brew install %s failed, retrying after `brew update`: %s",
+            formula, result.stderr[-300:],
         )
-    except subprocess.TimeoutExpired:
-        logger.error("brew install %s timed out", formula)
+        if progress_cb:
+            progress_cb("Updating Homebrew...")
+        try:
+            subprocess.run([brew, "update"], capture_output=True, text=True,
+                           timeout=900)
+        except subprocess.TimeoutExpired:
+            logger.error("brew update timed out")
+        result = _run()
+
+    if result is None:
         return False
     if result.returncode != 0:
         logger.error("brew install %s failed: %s", formula, result.stderr[-500:])
