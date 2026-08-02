@@ -46,7 +46,6 @@ CATEGORIES = [
     ("artist_bios", "artist-bios", "artist"),
     ("artist_tags", "artist-tags", "artist"),
     ("similar_artists", "similar-artists", "artist"),
-    ("artist_members", "artist-members", "artist"),
     ("genre_descriptions", "genre-descriptions", "genre"),
 ]
 
@@ -303,7 +302,6 @@ class SyncClient:
             "artist_bios": ("artist_bios", "artist_id"),
             "artist_tags": ("artist_tags", "artist_id"),
             "similar_artists": ("similar_artists", "artist_id"),
-            "artist_members": ("artist_members", "compound_artist_id"),
             "genre_descriptions": ("genre_descriptions", "genre_id"),
         }
 
@@ -461,19 +459,27 @@ class SyncClient:
     }
 
     def _verify_enrichment(self, kind: str, items: list, batches: dict) -> list:
-        """Keep the records whose seal checks out, plus the unsigned ones.
+        """Keep only the records whose seal checks out.
 
-        Unsigned records are accepted deliberately — a peer that has not signed
-        yet is not a liar, and it stays identifiable by author_pubkey IS NULL.
-        A record carrying a signature that does NOT check out is a different
-        matter and gets dropped: it is either corrupt or forged, and there is
-        no version of "accept it anyway" that leaves the seal meaning anything."""
+        Unsigned records used to be accepted here on the grounds that a peer
+        which has not signed yet is not a liar. That was wrong at the network
+        level rather than the peer level: an unsigned record is one nobody can
+        be held to, and this node would go on to REDISTRIBUTE it — so an
+        unattributable claim would spread with our address on it. Enrichment
+        the network carries has to be attributable end to end, which means a
+        record with no seal is a record we do not take. Nodes sign their own
+        material on the next sign_audio run, so this costs a peer nothing but
+        a delay.
+
+        A signature that does not check out was always dropped and still is:
+        corrupt or forged, and there is no version of "accept it anyway" that
+        leaves the seal meaning anything."""
         batch_ok = self._batch_verifier(batches or {})
         key = self._ENRICHMENT_ENTITY[kind]
-        kept, dropped = [], 0
+        kept, dropped, unsigned = [], 0, 0
         for it in items:
             if not it.get("signature"):
-                kept.append(it)
+                unsigned += 1
                 continue
             try:
                 content = rs.blake2b_hex(rs.canonical_enrichment_blob(kind, it))
@@ -495,6 +501,10 @@ class SyncClient:
         if dropped:
             logger.warning("sync import: dropped %d %s record(s) — seal invalid",
                            dropped, kind)
+        if unsigned:
+            logger.warning("sync import: dropped %d unsigned %s record(s) — "
+                           "the peer has not signed this material yet",
+                           unsigned, kind)
         return kept
 
     def _insert_batches_for(self, conn, batches: dict, items: list) -> None:
@@ -572,10 +582,10 @@ class SyncClient:
     def _import_segments(self, conn, items: list[dict], batches: dict) -> int:
         """Import per-track segment bundles: verify every seal, store the
         segments seal-intact, derive the track mean locally. A bundle with ANY
-        invalid seal is dropped whole — a broken seal on TLS-protected wire is
-        evidence of tampering, not data. Unsigned segments are accepted
-        (friends topology), identifiable by author_pubkey IS NULL +
-        analysis_sources.imported. Returns the count of imported tracks."""
+        invalid OR MISSING seal is dropped whole — a broken seal on
+        TLS-protected wire is evidence of tampering, and an unsigned one is a
+        claim this node would go on to redistribute unattributably. Returns
+        the count of imported tracks."""
         batch_ok = self._batch_verifier(batches)
 
         # Decode + verify outside the write path: (item, [(idx, floats, seal)])
@@ -590,30 +600,31 @@ class SyncClient:
                 except (KeyError, ValueError, struct.error):
                     bad = f"segment {s.get('i')} undecodable"
                     break
-                seal = None
-                if s.get("signature"):
-                    try:
-                        payload = rs.segment_payload(
-                            s.get("author_pubkey") or "", item["track_uuid"],
-                            prov.get("pcm_hash") or "", prov.get("chromaprint"),
-                            prov.get("duration_seconds"),
-                            item.get("model_uuid") or "", s["i"],
-                            rs.vector_hash(raw),
-                            grid_version=prov.get("grid_version")
-                                         or rs.GRID_VERSION)
-                    except ValueError:
-                        payload = None
-                    if not (payload
-                            and rs.verify(payload, s["signature"],
-                                          s.get("author_pubkey") or "")
-                            and rs.verify_proof(rs.record_leaf(s["signature"]),
-                                                s.get("proof") or [],
-                                                s.get("batch_root") or "")
-                            and batch_ok(s.get("batch_root"))):
-                        bad = f"segment {s['i']} seal invalid"
-                        break
-                    seal = (s["author_pubkey"], s["signature"], s["batch_root"],
-                            psycopg2.extras.Json(s.get("proof") or []))
+                if not s.get("signature"):
+                    bad = f"segment {s.get('i')} unsigned"
+                    break
+                try:
+                    payload = rs.segment_payload(
+                        s.get("author_pubkey") or "", item["track_uuid"],
+                        prov.get("pcm_hash") or "", prov.get("chromaprint"),
+                        prov.get("duration_seconds"),
+                        item.get("model_uuid") or "", s["i"],
+                        rs.vector_hash(raw),
+                        grid_version=prov.get("grid_version")
+                                     or rs.GRID_VERSION)
+                except ValueError:
+                    payload = None
+                if not (payload
+                        and rs.verify(payload, s["signature"],
+                                      s.get("author_pubkey") or "")
+                        and rs.verify_proof(rs.record_leaf(s["signature"]),
+                                            s.get("proof") or [],
+                                            s.get("batch_root") or "")
+                        and batch_ok(s.get("batch_root"))):
+                    bad = f"segment {s['i']} seal invalid"
+                    break
+                seal = (s["author_pubkey"], s["signature"], s["batch_root"],
+                        psycopg2.extras.Json(s.get("proof") or []))
                 segs.append((s["i"], floats, seal))
             if bad:
                 logger.warning("sync import: dropping track %s — %s",
@@ -838,34 +849,39 @@ class SyncClient:
                                batches: dict) -> int:
         batch_ok = self._batch_verifier(batches)
 
-        # Verify-on-import: a signed row must verify end-to-end (author sig →
-        # Merkle proof → Worker timestamp over the transmitted values) or it
-        # drops. Unsigned rows pass (friends topology) and store without a
-        # seal.
+        # Verify-on-import: a row must verify end-to-end (author sig → Merkle
+        # proof → Worker timestamp over the transmitted values) or it drops.
+        # Unsigned rows drop too — see _verify_enrichment for why: we would
+        # redistribute them, and an unattributable claim must not travel with
+        # our address on it.
         verified = []
         for item in items:
-            if item.get("signature"):
-                prov = item.get("provenance") or {}
-                try:
-                    payload = rs.features_payload(
-                        item.get("author_pubkey") or "", item["track_uuid"],
-                        prov.get("pcm_hash") or "", prov.get("chromaprint"),
-                        prov.get("duration_seconds"),
-                        item.get("analysis_version", 1),
-                        rs.blake2b_hex(rs.canonical_features_blob(item)))
-                except (KeyError, ValueError):
-                    payload = None
-                if not (payload
-                        and rs.verify(payload, item["signature"],
-                                      item.get("author_pubkey") or "")
-                        and rs.verify_proof(rs.record_leaf(item["signature"]),
-                                            item.get("merkle_proof") or [],
-                                            item.get("batch_root") or "")
-                        and batch_ok(item.get("batch_root"))):
-                    logger.warning(
-                        "sync import: dropping features %s — seal invalid",
-                        item.get("track_uuid", "?")[:8])
-                    continue
+            if not item.get("signature"):
+                logger.warning(
+                    "sync import: dropping unsigned features %s",
+                    item.get("track_uuid", "?")[:8])
+                continue
+            prov = item.get("provenance") or {}
+            try:
+                payload = rs.features_payload(
+                    item.get("author_pubkey") or "", item["track_uuid"],
+                    prov.get("pcm_hash") or "", prov.get("chromaprint"),
+                    prov.get("duration_seconds"),
+                    item.get("analysis_version", 1),
+                    rs.blake2b_hex(rs.canonical_features_blob(item)))
+            except (KeyError, ValueError):
+                payload = None
+            if not (payload
+                    and rs.verify(payload, item["signature"],
+                                  item.get("author_pubkey") or "")
+                    and rs.verify_proof(rs.record_leaf(item["signature"]),
+                                        item.get("merkle_proof") or [],
+                                        item.get("batch_root") or "")
+                    and batch_ok(item.get("batch_root"))):
+                logger.warning(
+                    "sync import: dropping features %s — seal invalid",
+                    item.get("track_uuid", "?")[:8])
+                continue
             verified.append(item)
         items = verified
         if not items:
@@ -1156,67 +1172,6 @@ class SyncClient:
                    WHERE """ + _ENRICHMENT_PRECEDENCE.format(t="similar_artists"),
                 values,
                 template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)",
-                page_size=500,
-            )
-        return len(items)
-
-    def _import_artist_members(self, conn, items: list[dict]) -> int:
-        with conn.cursor() as cur:
-            # Ensure member artists exist
-            member_values = list({
-                item["member_artist_uuid"]: (
-                    item["member_artist_uuid"], item["member_artist_name"]
-                )
-                for item in items if item.get("member_artist_name")
-            }.values())
-            if member_values:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """INSERT INTO artists (id, name)
-                       VALUES %s ON CONFLICT (id) DO NOTHING""",
-                    member_values,
-                    template="(%s, %s)",
-                )
-
-            # Update compound artist metadata
-            compound_updates = list({
-                item["compound_artist_uuid"]: (
-                    item["compound_artist_uuid"],
-                    item.get("artist_type", "collaboration"),
-                    item.get("verification_status", "verified_split"),
-                )
-                for item in items
-            }.values())
-            if compound_updates:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """UPDATE artists SET
-                           artist_type = data.artist_type::artist_type,
-                           verification_status = data.verification_status::verification_status
-                       FROM (VALUES %s) AS data(id, artist_type, verification_status)
-                       WHERE artists.id = data.id::uuid""",
-                    compound_updates,
-                    template="(%s, %s, %s)",
-                )
-
-            # Upsert artist_members
-            values = [
-                (
-                    item["compound_artist_uuid"],
-                    item["member_artist_uuid"],
-                    item.get("role", "member"),
-                )
-                for item in items
-            ]
-            psycopg2.extras.execute_values(
-                cur,
-                """INSERT INTO artist_members
-                   (compound_artist_id, member_artist_id, role)
-                   VALUES %s
-                   ON CONFLICT (compound_artist_id, member_artist_id) DO UPDATE SET
-                       role = EXCLUDED.role""",
-                values,
-                template="(%s, %s, %s)",
                 page_size=500,
             )
         return len(items)

@@ -228,7 +228,6 @@ _EMPTY_INVENTORY = {
     "audio_features": [], "track_stats": [],
     "artists": [], "artist_bios": [],
     "artist_tags": [], "similar_artists": [],
-    "artist_members": [],
     "genres": [], "genre_descriptions": [],
 }
 
@@ -262,13 +261,19 @@ async def get_inventory(req: InventoryRequest) -> dict:
                               COUNT(es.id) AS segs
                        FROM embeddings e
                        LEFT JOIN embedding_segments es ON es.embedding_id = e.id
+                             AND es.signature IS NOT NULL
+                             AND es.batch_root IS NOT NULL
                        WHERE e.track_id IN (SELECT id FROM uuids)
                        GROUP BY e.track_id) x) AS embeddings,
                 (SELECT COALESCE(json_agg(json_build_array(af.track_id::text, af.analysis_version)), '[]'::json)
                  FROM audio_features af
-                 WHERE af.track_id IN (SELECT id FROM uuids)) AS audio_features,
+                 WHERE af.track_id IN (SELECT id FROM uuids)
+                   AND af.signature IS NOT NULL
+                   AND af.batch_root IS NOT NULL) AS audio_features,
                 ARRAY(SELECT DISTINCT ts.track_id::text FROM track_stats ts
-                      WHERE ts.track_id IN (SELECT id FROM uuids)) AS track_stats,
+                      WHERE ts.track_id IN (SELECT id FROM uuids)
+                        AND ts.signature IS NOT NULL
+                        AND ts.batch_root IS NOT NULL) AS track_stats,
                 ARRAY(SELECT DISTINCT ag.genre_id::text FROM album_genres ag
                       JOIN album_variants av ON av.album_id = ag.album_id
                       JOIN media_files mf ON mf.album_variant_id = av.id
@@ -277,7 +282,9 @@ async def get_inventory(req: InventoryRequest) -> dict:
                       JOIN album_genres ag ON ag.genre_id = gd.genre_id
                       JOIN album_variants av ON av.album_id = ag.album_id
                       JOIN media_files mf ON mf.album_variant_id = av.id
-                      WHERE mf.track_id IN (SELECT id FROM uuids)) AS genre_descriptions
+                      WHERE mf.track_id IN (SELECT id FROM uuids)
+                        AND gd.signature IS NOT NULL
+                        AND gd.batch_root IS NOT NULL) AS genre_descriptions
         """, {"u": uuids})
 
         # Query 2: Artist data (5 categories, 1 round-trip)
@@ -288,13 +295,17 @@ async def get_inventory(req: InventoryRequest) -> dict:
             SELECT
                 ARRAY(SELECT artist_id::text FROM rel) AS artists,
                 ARRAY(SELECT DISTINCT ab.artist_id::text FROM artist_bios ab
-                      WHERE ab.artist_id IN (SELECT artist_id FROM rel)) AS artist_bios,
+                      WHERE ab.artist_id IN (SELECT artist_id FROM rel)
+                        AND ab.signature IS NOT NULL
+                        AND ab.batch_root IS NOT NULL) AS artist_bios,
                 ARRAY(SELECT DISTINCT at2.artist_id::text FROM artist_tags at2
-                      WHERE at2.artist_id IN (SELECT artist_id FROM rel)) AS artist_tags,
+                      WHERE at2.artist_id IN (SELECT artist_id FROM rel)
+                        AND at2.signature IS NOT NULL
+                        AND at2.batch_root IS NOT NULL) AS artist_tags,
                 ARRAY(SELECT DISTINCT sa.artist_id::text FROM similar_artists sa
-                      WHERE sa.artist_id IN (SELECT artist_id FROM rel)) AS similar_artists,
-                ARRAY(SELECT DISTINCT am.compound_artist_id::text FROM artist_members am
-                      WHERE am.compound_artist_id IN (SELECT artist_id FROM rel)) AS artist_members
+                      WHERE sa.artist_id IN (SELECT artist_id FROM rel)
+                        AND sa.signature IS NOT NULL
+                        AND sa.batch_root IS NOT NULL) AS similar_artists
         """, {"u": uuids})
 
         return {
@@ -306,7 +317,6 @@ async def get_inventory(req: InventoryRequest) -> dict:
             "artist_bios": artist_row["artist_bios"],
             "artist_tags": artist_row["artist_tags"],
             "similar_artists": artist_row["similar_artists"],
-            "artist_members": artist_row["artist_members"],
             "genres": track_row["genres"],
             "genre_descriptions": track_row["genre_descriptions"],
         }
@@ -504,6 +514,7 @@ async def pull_segments(req: PullRequest) -> dict:
                 INNER JOIN embedding_segments es ON es.embedding_id = e.id
                 LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
                 WHERE e.track_id = ANY(%s::uuid[])
+                  AND es.signature IS NOT NULL AND es.batch_root IS NOT NULL
                 ORDER BY e.track_id, es.segment_index""",
             [req.uuids],
         )
@@ -603,18 +614,15 @@ async def pull_audio_features(req: PullRequest) -> dict:
                        {_PROVENANCE_COLS}
                 FROM audio_features a
                 LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
-                WHERE a.track_id = ANY(%s::uuid[])""",
+                WHERE a.track_id = ANY(%s::uuid[])
+                  AND a.signature IS NOT NULL AND a.batch_root IS NOT NULL""",
             [req.uuids],
         )
         items, roots = [], set()
         for r in rows:
             item = {k: v for k, v in r.items() if not k.startswith("p_")}
             item["provenance"] = _provenance_item(r)
-            if item.get("signature"):
-                roots.add(item["batch_root"])
-            else:
-                for c in ("author_pubkey", "signature", "batch_root", "merkle_proof"):
-                    item.pop(c, None)
+            roots.add(item["batch_root"])
             items.append(item)
         return {"category": "audio_features", "items": items,
                 "batches": _batches_map(roots)}
@@ -632,7 +640,9 @@ async def pull_track_stats(req: PullRequest) -> dict:
         """SELECT track_id::text AS track_uuid, source, listeners, playcount,
                   fetched_at, author_pubkey, signature, batch_root, merkle_proof
            FROM track_stats
-           WHERE track_id = ANY(%s::uuid[])""",
+           WHERE track_id = ANY(%s::uuid[])
+             AND signature IS NOT NULL
+             AND batch_root IS NOT NULL""",
         req.uuids,
     )
 
@@ -648,7 +658,9 @@ async def pull_artist_bios(req: PullRequest) -> dict:
                   ab.author_pubkey, ab.signature, ab.batch_root, ab.merkle_proof
            FROM artist_bios ab
            INNER JOIN artists a ON a.id = ab.artist_id
-           WHERE ab.artist_id = ANY(%s::uuid[])""",
+           WHERE ab.artist_id = ANY(%s::uuid[])
+             AND ab.signature IS NOT NULL
+             AND ab.batch_root IS NOT NULL""",
         req.uuids,
     )
 
@@ -664,7 +676,9 @@ async def pull_artist_tags(req: PullRequest) -> dict:
                   at2.author_pubkey, at2.signature, at2.batch_root, at2.merkle_proof
            FROM artist_tags at2
            INNER JOIN tags t ON t.id = at2.tag_id
-           WHERE at2.artist_id = ANY(%s::uuid[])""",
+           WHERE at2.artist_id = ANY(%s::uuid[])
+             AND at2.signature IS NOT NULL
+             AND at2.batch_root IS NOT NULL""",
         req.uuids,
     )
 
@@ -681,28 +695,12 @@ async def pull_similar_artists(req: PullRequest) -> dict:
                   sa.author_pubkey, sa.signature, sa.batch_root, sa.merkle_proof
            FROM similar_artists sa
            INNER JOIN artists a ON a.id = sa.similar_artist_id
-           WHERE sa.artist_id = ANY(%s::uuid[])""",
+           WHERE sa.artist_id = ANY(%s::uuid[])
+             AND sa.signature IS NOT NULL
+             AND sa.batch_root IS NOT NULL""",
         req.uuids,
     )
 
-
-@router.post("/pull/artist-members")
-async def pull_artist_members(req: PullRequest) -> dict:
-    """Pull artist member relationships (compound → individual artists)."""
-    return _pull_handler(
-        "artist_members",
-        """SELECT am.compound_artist_id::text AS compound_artist_uuid,
-                  c.name AS compound_artist_name,
-                  c.artist_type, c.verification_status,
-                  am.member_artist_id::text AS member_artist_uuid,
-                  m.name AS member_artist_name,
-                  am.role
-           FROM artist_members am
-           INNER JOIN artists c ON c.id = am.compound_artist_id
-           INNER JOIN artists m ON m.id = am.member_artist_id
-           WHERE am.compound_artist_id = ANY(%s::uuid[])""",
-        req.uuids,
-    )
 
 
 @router.post("/pull/genre-descriptions")
@@ -715,6 +713,8 @@ async def pull_genre_descriptions(req: PullRequest) -> dict:
                   gd.author_pubkey, gd.signature, gd.batch_root, gd.merkle_proof
            FROM genre_descriptions gd
            INNER JOIN genres g ON g.id = gd.genre_id
-           WHERE gd.genre_id = ANY(%s::uuid[])""",
+           WHERE gd.genre_id = ANY(%s::uuid[])
+             AND gd.signature IS NOT NULL
+             AND gd.batch_root IS NOT NULL""",
         req.uuids,
     )

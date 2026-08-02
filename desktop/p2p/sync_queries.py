@@ -72,7 +72,6 @@ EMPTY_INVENTORY = {
     "audio_features": [], "track_stats": [],
     "artists": [], "artist_bios": [],
     "artist_tags": [], "similar_artists": [],
-    "artist_members": [],
     "genres": [], "genre_descriptions": [],
 }
 
@@ -108,16 +107,20 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
                     MAX(e.analysis_version) AS v, COUNT(es.id) AS segs
              FROM embeddings e
              LEFT JOIN embedding_segments es ON es.embedding_id = e.id
+                   AND es.signature IS NOT NULL AND es.batch_root IS NOT NULL
              WHERE e.track_id = ANY(%s::uuid[])
              GROUP BY e.track_id""")
     ]
     audio_features = [
         [r["track_id"], r["analysis_version"]] for r in
         q("""SELECT track_id::text AS track_id, analysis_version
-             FROM audio_features WHERE track_id = ANY(%s::uuid[])""")
+             FROM audio_features WHERE track_id = ANY(%s::uuid[])
+               AND signature IS NOT NULL AND batch_root IS NOT NULL""")
     ]
     track_stats = _uuid_list(
-        q("SELECT DISTINCT track_id FROM track_stats WHERE track_id = ANY(%s::uuid[])"),
+        q("""SELECT DISTINCT track_id FROM track_stats
+             WHERE track_id = ANY(%s::uuid[])
+               AND signature IS NOT NULL AND batch_root IS NOT NULL"""),
         "track_id",
     )
 
@@ -129,29 +132,24 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
     artist_bios = _uuid_list(
         q("""SELECT DISTINCT ab.artist_id FROM artist_bios ab
              INNER JOIN track_artists ta ON ta.artist_id = ab.artist_id
-             WHERE ta.track_id = ANY(%s::uuid[])"""),
+             WHERE ta.track_id = ANY(%s::uuid[])
+               AND ab.signature IS NOT NULL AND ab.batch_root IS NOT NULL"""),
         "artist_id",
     )
     artist_tags = _uuid_list(
         q("""SELECT DISTINCT at2.artist_id FROM artist_tags at2
              INNER JOIN track_artists ta ON ta.artist_id = at2.artist_id
-             WHERE ta.track_id = ANY(%s::uuid[])"""),
+             WHERE ta.track_id = ANY(%s::uuid[])
+               AND at2.signature IS NOT NULL AND at2.batch_root IS NOT NULL"""),
         "artist_id",
     )
     similar_artists = _uuid_list(
         q("""SELECT DISTINCT sa.artist_id FROM similar_artists sa
              INNER JOIN track_artists ta ON ta.artist_id = sa.artist_id
-             WHERE ta.track_id = ANY(%s::uuid[])"""),
+             WHERE ta.track_id = ANY(%s::uuid[])
+               AND sa.signature IS NOT NULL AND sa.batch_root IS NOT NULL"""),
         "artist_id",
     )
-    artist_members = _uuid_list(
-        q("""SELECT DISTINCT am.compound_artist_id AS artist_id
-             FROM artist_members am
-             INNER JOIN track_artists ta ON ta.artist_id = am.compound_artist_id
-             WHERE ta.track_id = ANY(%s::uuid[])"""),
-        "artist_id",
-    )
-
     # -- Related genres (album-grain: genres of the albums containing these tracks).
     #    album_genres is local-only (albums don't sync), so we share only the genre
     #    entities + their descriptions, derived via the sender's own albums. --
@@ -167,7 +165,8 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
              INNER JOIN album_genres ag ON ag.genre_id = gd.genre_id
              INNER JOIN album_variants av ON av.album_id = ag.album_id
              INNER JOIN media_files mf ON mf.album_variant_id = av.id
-             WHERE mf.track_id = ANY(%s::uuid[])"""),
+             WHERE mf.track_id = ANY(%s::uuid[])
+               AND gd.signature IS NOT NULL AND gd.batch_root IS NOT NULL"""),
         "genre_id",
     )
 
@@ -180,7 +179,6 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
         "artist_bios": artist_bios,
         "artist_tags": artist_tags,
         "similar_artists": similar_artists,
-        "artist_members": artist_members,
         "genres": genres,
         "genre_descriptions": genre_descriptions,
     }
@@ -192,14 +190,35 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
 
 def _pull_simple(conn, category: str, sql: str, uuids: list[str],
                  post_process=None) -> dict:
-    """Common handler for simple pull categories."""
+    """Common handler for the sealed enrichment categories.
+
+    Every SELECT here MUST carry the four seal columns plus fetched_at, and
+    every row MUST arrive with the signing_batches rows its root names —
+    a seal the importer cannot check is a seal it has to drop, and a record
+    that arrives unsealed is a record nobody can be held to. The launcher
+    used to serve these categories payload-only, which silently stripped
+    authorship from everything a peer pulled from it.
+
+    Rows without a seal are not served at all (see _SEALED_ONLY)."""
     if not uuids:
-        return {"category": category, "items": []}
+        return {"category": category, "items": [], "batches": {}}
     rows = db_query(conn, sql, [uuids])
     items = [_serialize_row(r) for r in rows]
     if post_process:
         items = [post_process(item) for item in items]
-    return {"category": category, "items": items}
+    roots = {i["batch_root"] for i in items if i.get("batch_root")}
+    return {"category": category, "items": items,
+            "batches": _batches_map(conn, roots)}
+
+
+# Appended to every enrichment SELECT: unsigned rows never leave this node.
+# Distributing a claim nobody signed makes the network unable to attribute —
+# and the seal columns are NULLed by the seal-guard trigger the moment a
+# payload column changes, so "has a signature" also means "unmodified".
+_SEALED_ONLY = " AND {t}.signature IS NOT NULL AND {t}.batch_root IS NOT NULL"
+
+_SEAL_COLS = """{t}.fetched_at, {t}.author_pubkey, {t}.signature,
+                {t}.batch_root, {t}.merkle_proof"""
 
 
 def pull_tracks(conn, uuids: list[str]) -> dict:
@@ -321,6 +340,7 @@ def pull_segments(conn, uuids: list[str]) -> dict:
             INNER JOIN embedding_segments es ON es.embedding_id = e.id
             LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
             WHERE e.track_id = ANY(%s::uuid[])
+              AND es.signature IS NOT NULL AND es.batch_root IS NOT NULL
             ORDER BY e.track_id, es.segment_index""",
         [uuids],
     )
@@ -408,18 +428,15 @@ def pull_audio_features(conn, uuids: list[str]) -> dict:
                    {_PROVENANCE_COLS}
             FROM audio_features a
             LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
-            WHERE a.track_id = ANY(%s::uuid[])""",
+            WHERE a.track_id = ANY(%s::uuid[])
+              AND a.signature IS NOT NULL AND a.batch_root IS NOT NULL""",
         [uuids],
     )
     items, roots = [], set()
     for r in rows:
         item = {k: v for k, v in r.items() if not k.startswith("p_")}
         item["provenance"] = _provenance_item(r)
-        if item.get("signature"):
-            roots.add(item["batch_root"])
-        else:
-            for c in ("author_pubkey", "signature", "batch_root", "merkle_proof"):
-                item.pop(c, None)
+        roots.add(item["batch_root"])
         items.append(item)
     return {"category": "audio_features", "items": items,
             "batches": _batches_map(conn, roots)}
@@ -428,8 +445,12 @@ def pull_audio_features(conn, uuids: list[str]) -> dict:
 def pull_track_stats(conn, uuids: list[str]) -> dict:
     return _pull_simple(
         conn, "track_stats",
-        """SELECT track_id::text AS track_uuid, source, listeners, playcount
-           FROM track_stats WHERE track_id = ANY(%s::uuid[])""",
+        f"""SELECT ts.track_id::text AS track_uuid, ts.source,
+                   ts.listeners, ts.playcount,
+                   {_SEAL_COLS.format(t='ts')}
+            FROM track_stats ts
+            WHERE ts.track_id = ANY(%s::uuid[])
+            {_SEALED_ONLY.format(t='ts')}""",
         uuids,
     )
 
@@ -437,12 +458,14 @@ def pull_track_stats(conn, uuids: list[str]) -> dict:
 def pull_artist_bios(conn, uuids: list[str]) -> dict:
     return _pull_simple(
         conn, "artist_bios",
-        """SELECT ab.artist_id::text AS artist_uuid, a.name AS artist_name,
-                  ab.source, ab.summary, ab.content, ab.url,
-                  ab.listeners, ab.playcount
-           FROM artist_bios ab
-           INNER JOIN artists a ON a.id = ab.artist_id
-           WHERE ab.artist_id = ANY(%s::uuid[])""",
+        f"""SELECT ab.artist_id::text AS artist_uuid, a.name AS artist_name,
+                   ab.source, ab.summary, ab.content, ab.url,
+                   ab.listeners, ab.playcount,
+                   {_SEAL_COLS.format(t='ab')}
+            FROM artist_bios ab
+            INNER JOIN artists a ON a.id = ab.artist_id
+            WHERE ab.artist_id = ANY(%s::uuid[])
+            {_SEALED_ONLY.format(t='ab')}""",
         uuids,
     )
 
@@ -450,12 +473,14 @@ def pull_artist_bios(conn, uuids: list[str]) -> dict:
 def pull_artist_tags(conn, uuids: list[str]) -> dict:
     return _pull_simple(
         conn, "artist_tags",
-        """SELECT at2.artist_id::text AS artist_uuid,
-                  t.id::text AS tag_uuid, t.name AS tag_name,
-                  at2.weight, at2.source
-           FROM artist_tags at2
-           INNER JOIN tags t ON t.id = at2.tag_id
-           WHERE at2.artist_id = ANY(%s::uuid[])""",
+        f"""SELECT at2.artist_id::text AS artist_uuid,
+                   t.id::text AS tag_uuid, t.name AS tag_name,
+                   at2.weight, at2.source,
+                   {_SEAL_COLS.format(t='at2')}
+            FROM artist_tags at2
+            INNER JOIN tags t ON t.id = at2.tag_id
+            WHERE at2.artist_id = ANY(%s::uuid[])
+            {_SEALED_ONLY.format(t='at2')}""",
         uuids,
     )
 
@@ -463,30 +488,15 @@ def pull_artist_tags(conn, uuids: list[str]) -> dict:
 def pull_similar_artists(conn, uuids: list[str]) -> dict:
     return _pull_simple(
         conn, "similar_artists",
-        """SELECT sa.artist_id::text AS artist_uuid,
-                  sa.similar_artist_id::text AS similar_artist_uuid,
-                  a.name AS similar_artist_name,
-                  sa.match_score::float, sa.source
-           FROM similar_artists sa
-           INNER JOIN artists a ON a.id = sa.similar_artist_id
-           WHERE sa.artist_id = ANY(%s::uuid[])""",
-        uuids,
-    )
-
-
-def pull_artist_members(conn, uuids: list[str]) -> dict:
-    return _pull_simple(
-        conn, "artist_members",
-        """SELECT am.compound_artist_id::text AS compound_artist_uuid,
-                  c.name AS compound_artist_name,
-                  c.artist_type, c.verification_status,
-                  am.member_artist_id::text AS member_artist_uuid,
-                  m.name AS member_artist_name,
-                  am.role
-           FROM artist_members am
-           INNER JOIN artists c ON c.id = am.compound_artist_id
-           INNER JOIN artists m ON m.id = am.member_artist_id
-           WHERE am.compound_artist_id = ANY(%s::uuid[])""",
+        f"""SELECT sa.artist_id::text AS artist_uuid,
+                   sa.similar_artist_id::text AS similar_artist_uuid,
+                   a.name AS similar_artist_name,
+                   sa.match_score::float, sa.source,
+                   {_SEAL_COLS.format(t='sa')}
+            FROM similar_artists sa
+            INNER JOIN artists a ON a.id = sa.similar_artist_id
+            WHERE sa.artist_id = ANY(%s::uuid[])
+            {_SEALED_ONLY.format(t='sa')}""",
         uuids,
     )
 
@@ -494,11 +504,13 @@ def pull_artist_members(conn, uuids: list[str]) -> dict:
 def pull_genre_descriptions(conn, uuids: list[str]) -> dict:
     return _pull_simple(
         conn, "genre_descriptions",
-        """SELECT gd.genre_id::text AS genre_uuid, g.name AS genre_name,
-                  gd.source, gd.summary, gd.content, gd.url
-           FROM genre_descriptions gd
-           INNER JOIN genres g ON g.id = gd.genre_id
-           WHERE gd.genre_id = ANY(%s::uuid[])""",
+        f"""SELECT gd.genre_id::text AS genre_uuid, g.name AS genre_name,
+                   gd.source, gd.summary, gd.content, gd.url,
+                   {_SEAL_COLS.format(t='gd')}
+            FROM genre_descriptions gd
+            INNER JOIN genres g ON g.id = gd.genre_id
+            WHERE gd.genre_id = ANY(%s::uuid[])
+            {_SEALED_ONLY.format(t='gd')}""",
         uuids,
     )
 
@@ -518,8 +530,6 @@ PULL_HANDLERS = {
     "artist_tags": pull_artist_tags,
     "similar-artists": pull_similar_artists,
     "similar_artists": pull_similar_artists,
-    "artist-members": pull_artist_members,
-    "artist_members": pull_artist_members,
     "genre-descriptions": pull_genre_descriptions,
     "genre_descriptions": pull_genre_descriptions,
 }
