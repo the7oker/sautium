@@ -249,20 +249,23 @@ class SyncServer:
         try:
             body = await request.json()
             track_uuids = body.get("track_uuids", [])
+            artist_uuids = body.get("artist_uuids", [])
         except (json.JSONDecodeError, Exception):
             return self._json_response(
                 request, {"error": "invalid JSON"}, status=400
             )
 
-        if not isinstance(track_uuids, list) or len(track_uuids) > MAX_UUIDS_PER_REQUEST:
-            return self._json_response(
-                request, {"error": f"track_uuids must be a list of at most {MAX_UUIDS_PER_REQUEST} items"},
-                status=400,
-            )
+        for name, val in (("track_uuids", track_uuids),
+                          ("artist_uuids", artist_uuids)):
+            if not isinstance(val, list) or len(val) > MAX_UUIDS_PER_REQUEST:
+                return self._json_response(
+                    request, {"error": f"{name} must be a list of at most {MAX_UUIDS_PER_REQUEST} items"},
+                    status=400,
+                )
 
         try:
             result = await self._run_query(
-                sync_queries.get_inventory, track_uuids
+                sync_queries.get_inventory, track_uuids, artist_uuids
             )
             return self._json_response(request, result)
         except Exception as e:
@@ -314,6 +317,105 @@ class SyncServer:
             return self._json_response(
                 request, {"error": "internal error"}, status=500
             )
+
+    # -----------------------------------------------------------------------
+    # Push-seeding (carry): the inverse direction of the pull protocol
+    # -----------------------------------------------------------------------
+
+    def _carry_budget(self) -> int:
+        """How many foreign artists this node is willing to hold. An absent
+        row means nobody has touched the setting, not "no" — the default
+        applies, same as it does when the backend reads it."""
+        try:
+            conn = self._new_db()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT value FROM user_settings "
+                                "WHERE key = 'sync.carry_limit'")
+                    row = cur.fetchone()
+                if row is None:
+                    return sync_queries.CARRY_DEFAULT_BUDGET
+                return int(row[0]) if row[0] is not None else 0
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning("carry budget unreadable (%s) — not carrying", e)
+            return 0
+
+    async def handle_carry_offer(self, request: web.Request) -> web.Response:
+        """POST /api/sync/offer — "here is what I could give you"; we answer
+        with the subset we actually want.
+
+        The round trip exists so a pusher never ships what we already hold:
+        16 bytes per artist to ask, ~21 KB per artist to send blind."""
+        ip = request.remote or "unknown"
+        if not self._check_rate_limit(ip):
+            return self._json_response(
+                request, {"error": "rate limited"}, status=429)
+        if not self._sharing_enabled():
+            return self._json_response(
+                request, {"error": "sharing disabled"}, status=403)
+        try:
+            body = await request.json()
+            artists = body.get("artists", [])
+        except (json.JSONDecodeError, Exception):
+            return self._json_response(
+                request, {"error": "invalid JSON"}, status=400)
+        if not isinstance(artists, list):
+            return self._json_response(
+                request, {"error": "artists must be a list"}, status=400)
+
+        budget = self._carry_budget()
+        wanted = await self._run_query(
+            sync_queries.wanted_artists, artists, budget)
+        return self._json_response(request, {"wanted": wanted})
+
+    async def handle_carry_push(self, request: web.Request) -> web.Response:
+        """POST /api/sync/push/{category} — accept a pushed payload.
+
+        Body is byte-for-byte what pull/{category} returns, so the peer
+        serialises once and we verify through the ordinary import gate. A
+        push is unsolicited, which is exactly why nothing here is trusted:
+        every record must carry a seal that checks out, or the importer
+        drops it."""
+        ip = request.remote or "unknown"
+        if not self._check_rate_limit(ip):
+            return self._json_response(
+                request, {"error": "rate limited"}, status=429)
+        if not self._sharing_enabled():
+            return self._json_response(
+                request, {"error": "sharing disabled"}, status=403)
+        if self._carry_budget() <= 0:
+            return self._json_response(
+                request, {"error": "not carrying"}, status=403)
+
+        category = request.match_info.get("category", "").replace("-", "_")
+        if category not in sync_queries.CARRY_CATEGORIES:
+            return self._json_response(
+                request, {"error": f"category not carryable: {category}"},
+                status=404)
+        try:
+            body = await request.json()
+            items = body.get("items", [])
+        except (json.JSONDecodeError, Exception):
+            return self._json_response(
+                request, {"error": "invalid JSON"}, status=400)
+        if not isinstance(items, list) or len(items) > MAX_UUIDS_PER_REQUEST:
+            return self._json_response(
+                request, {"error": "items must be a bounded list"}, status=400)
+
+        from desktop.sync_client import import_pushed
+        try:
+            imported = await asyncio.get_event_loop().run_in_executor(
+                None, partial(import_pushed, self.db_dsn, category, body))
+        except Exception as e:
+            logger.error(f"Carry push {category} failed: {e}")
+            return self._json_response(
+                request, {"error": "internal error"}, status=500)
+        if imported:
+            logger.info("Carrying %d %s record(s) pushed by %s",
+                        imported, category, ip)
+        return self._json_response(request, {"imported": imported})
 
     async def handle_mb_slice(self, request: web.Request) -> web.Response:
         """POST /api/mb/slice — serve raw mb_* rows for a batch of artist names
@@ -1337,6 +1439,9 @@ class SyncServer:
         self._app.router.add_post(
             "/api/sync/pull/{category}", self.handle_pull
         )
+        self._app.router.add_post("/api/sync/offer", self.handle_carry_offer)
+        self._app.router.add_post(
+            "/api/sync/push/{category}", self.handle_carry_push)
         self._app.router.add_post("/api/mb/slice", self.handle_mb_slice)
         # Chat endpoints
         self._app.router.add_post(

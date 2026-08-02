@@ -981,11 +981,62 @@ class P2PManager:
                 None,
                 partial(sync_client.run_sync, track_uuids),
             )
-            return stats
         except Exception as e:
             logger.error(f"Sync from {peer_addr} failed: {e}")
             _progress(f"  Sync from {peer_addr} failed: {e}")
             return {}
+
+        # We just pulled from this peer, so it accepts inbound connections —
+        # which is exactly what makes it a candidate carrier. Offer it our
+        # own first-hand canon material: nobody can pull from a node behind
+        # CGNAT, so pushing is the only way its analysis ever reaches the
+        # network. Never fatal to the sync that just succeeded.
+        if ("carry" in sync_client.peer_capabilities
+                and self._sync_server and self._sync_server._sharing_enabled()):
+            try:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, partial(self._push_to_carrier, peer_api, _progress))
+            except Exception as e:
+                logger.debug(f"Carry offer to {peer_addr} failed: {e}")
+        return stats
+
+    def _push_to_carrier(self, peer_api, _progress) -> int:
+        """Offer our first-hand canon artist layer to a reachable peer and
+        push whatever it asks for. Blocking — runs in the executor."""
+        conn = psycopg2.connect(self.db_dsn)
+        try:
+            conn.autocommit = True
+            mine = sync_queries.get_pushable_artists(
+                conn, sync_queries.CARRY_MAX_ARTISTS)
+            if not mine:
+                return 0
+            answer = peer_api.carry_offer(mine) or {}
+            wanted = answer.get("wanted") or {}
+            if not any(wanted.values()):
+                return 0
+
+            pushed = 0
+            for category, uuids in wanted.items():
+                if not uuids:
+                    continue
+                handler = sync_queries.PULL_HANDLERS.get(category)
+                if handler is None:
+                    continue
+                # The payload we serve on pull IS the payload we push —
+                # same shape, same seals, same batches map.
+                payload = handler(conn, uuids)
+                if not payload.get("items"):
+                    continue
+                res = peer_api.carry_push(category.replace("_", "-"), payload)
+                took = (res or {}).get("imported") or 0
+                pushed += took
+                if took:
+                    _progress(f"  carried {took} {category} record(s) to peer")
+            if pushed:
+                logger.info("Push-seeded %d record(s) to a carrier", pushed)
+            return pushed
+        finally:
+            conn.close()
 
     # -------------------------------------------------------------------
     # Chat operations (called from launcher thread)

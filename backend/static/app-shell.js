@@ -9785,6 +9785,16 @@
     { id: 1000, label: '1000 rare artists' },
   ];
 
+  // Enrichment held for artists whose music this node does not own, so that
+  // peers who cannot accept incoming connections still reach the network
+  // (~21 KB an artist).
+  const CARRY_LIMIT_OPTIONS = [
+    { id: 0,    label: 'Off' },
+    { id: 500,  label: '500 artists' },
+    { id: 2000, label: '2000 artists' },
+    { id: 10000, label: '10000 artists' },
+  ];
+
   function fmtPathForDisplay(p) {
     // Windows paths carry a drive-letter prefix (C:, E:, …). The
     // launcher stores them with forward slashes for Docker / config
@@ -10372,6 +10382,7 @@
     const intervalLabel = (AUTO_SYNC_OPTIONS.find(o => o.id === (interval || 0)) || AUTO_SYNC_OPTIONS[0]).label;
     const limit = sync.announce_limit;
     const limitLabel = (ANNOUNCE_LIMIT_OPTIONS.find(o => o.id === (limit || 0)) || ANNOUNCE_LIMIT_OPTIONS[0]).label;
+    const carryLabel = (CARRY_LIMIT_OPTIONS.find(o => o.id === (sync.carry_limit || 0)) || CARRY_LIMIT_OPTIONS[0]).label;
     const bgEnrich = !!sync.background_enrichment;
     const bgStatusLine = _bgEnrichStatusLine(sync.background_status, bgEnrich);
 
@@ -10387,10 +10398,10 @@
           </div>
           <div class="form-row stacked">
             <div class="row-stack">
-              <span class="row-stack-label" style="color:var(--color-text-dim);">Auto-sync · Rare-artist keys</span>
+              <span class="row-stack-label" style="color:var(--color-text-dim);">Auto-sync · Rare-artist keys · Carry for others</span>
               <span></span>
             </div>
-            <div class="row-stack-sub">Turn P2P sharing on to configure sync and node-announce limits.</div>
+            <div class="row-stack-sub">Turn P2P sharing on to configure sync, node-announce and carry limits.</div>
           </div>
           <div class="form-row">
             <span class="form-label">Background enrichment</span>
@@ -10418,6 +10429,13 @@
           <span class="form-label">Rare-artist keys</span>
           <button class="select-trigger" data-action="pick-limit">
             ${escapeProfileHtml(limitLabel)}
+            <span class="chev">${SETTINGS_ICONS.chev}</span>
+          </button>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Carry for others</span>
+          <button class="select-trigger" data-action="pick-carry">
+            ${escapeProfileHtml(carryLabel)}
             <span class="chev">${SETTINGS_ICONS.chev}</span>
           </button>
         </div>
@@ -11415,6 +11433,10 @@
     onAction('[data-action="pick-limit"]', async () => {
       const id = await openSettingsPicker({ title: 'Rare-artist keys', options: ANNOUNCE_LIMIT_OPTIONS, currentId: sync.announce_limit || 0 });
       if (id != null) await putSync({ announce_limit: Number(id) });
+    });
+    onAction('[data-action="pick-carry"]', async () => {
+      const id = await openSettingsPicker({ title: 'Carry for others', options: CARRY_LIMIT_OPTIONS, currentId: sync.carry_limit || 0 });
+      if (id != null) await putSync({ carry_limit: Number(id) });
     });
     onAction('[data-action="force-sync"]', async () => {
       if (_syncInFlight) return;  // double-click guard

@@ -163,6 +163,12 @@ services:
       # single-FILE bind mount breaks on docker restart after the host file
       # is edited (WSL2 inode swap).
       - ./desktop/p2p:/app/desktop_p2p:ro
+      # The launcher tree as an importable `desktop` package — the peer
+      # surface reuses its sync_client import gate for pushed enrichment
+      # instead of mirroring the seal verification (see routers/sync.py
+      # _load_carry). Read-only: the container is a consumer of this code,
+      # never its owner.
+      - ./desktop:/app/desktop:ro
       # Mount music library as read-only
       # Windows path: E:\Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro

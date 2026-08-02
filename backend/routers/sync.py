@@ -98,6 +98,99 @@ def _load_mb_slice_queries():
 
 mb_slice_queries = _load_mb_slice_queries()
 
+
+# Push-seeding needs two things the pull side never did: the carry SQL and
+# the import gate. Both are taken from the launcher tree rather than mirrored
+# here — the gate is what verifies a seal before a stranger's row lands in
+# our DB, and a second copy of a verification gate is the copy that
+# eventually drifts open. The carry SQL comes along for the same reason in
+# miniature: if the two surfaces disagreed on what "already held" means, a
+# pusher's budget accounting would be a lie. In Docker the tree is
+# bind-mounted at /app/desktop; a native repo run finds it one level up.
+# Absent → we simply never advertise "carry".
+def _load_carry():
+    import importlib
+    import sys
+    here = Path(__file__).parent.parent
+    for root in (here, here.parent):
+        if (root / "desktop" / "sync_client.py").exists():
+            if str(root) not in sys.path:
+                sys.path.insert(0, str(root))
+            try:
+                return (importlib.import_module("desktop.p2p.sync_queries"),
+                        importlib.import_module("desktop.sync_client"))
+            except Exception as e:
+                logger.warning(f"carry unavailable: {e}")
+                break
+    return None, None
+
+
+carry_queries, carry_importer = _load_carry()
+if carry_importer is not None:
+    SYNC_CAPABILITIES.append("carry")
+
+
+def _carry_budget() -> int:
+    """How many foreign artists this node is willing to hold. 0 = don't
+    carry."""
+    try:
+        from routers.settings import _read
+        return int(_read("sync.carry_limit") or 0)
+    except Exception as e:
+        logger.warning(f"carry budget unreadable ({e}) — not carrying")
+        return 0
+
+
+class CarryOffer(BaseModel):
+    artists: list[str] = Field(default_factory=list, max_length=10000)
+
+
+@router.post("/offer")
+async def carry_offer(req: CarryOffer) -> dict:
+    """"Here is what I could give you" — we answer with the subset we want.
+
+    The round trip exists so a pusher never ships what we already hold:
+    16 bytes per artist to ask, ~21 KB per artist to send blind."""
+    _require_sharing()
+    if carry_queries is None:
+        return {"wanted": {}}
+    with get_conn() as conn:
+        wanted = carry_queries.wanted_artists(
+            conn, req.artists, _carry_budget())
+    return {"wanted": wanted}
+
+
+@router.post("/push/{category}")
+async def carry_push(category: str, payload: dict) -> dict:
+    """Accept a pushed payload — byte-for-byte what pull/{category} returns,
+    so the peer serialises once and we verify through the ordinary import
+    gate. A push is unsolicited, which is exactly why nothing here is
+    trusted: every record must carry a seal that checks out, or the importer
+    drops it."""
+    _require_sharing()
+    if carry_importer is None:
+        raise HTTPException(status_code=404, detail="carry not supported")
+    if _carry_budget() <= 0:
+        raise HTTPException(status_code=403, detail="not carrying")
+
+    category = category.replace("-", "_")
+    if category not in carry_queries.CARRY_CATEGORIES:
+        raise HTTPException(
+            status_code=404, detail=f"category not carryable: {category}")
+    items = payload.get("items")
+    if not isinstance(items, list) or len(items) > 10000:
+        raise HTTPException(status_code=400, detail="items must be a bounded list")
+
+    import asyncio
+    from functools import partial
+    imported = await asyncio.get_event_loop().run_in_executor(
+        None, partial(carry_importer.import_pushed,
+                      settings.database_url, category, payload))
+    if imported:
+        logger.info(f"Carrying {imported} {category} record(s) pushed by a peer")
+    return {"imported": imported}
+
+
 mb_router = APIRouter(prefix="/api/mb", tags=["sync"])
 
 
@@ -213,6 +306,7 @@ class InventoryRequest(BaseModel):
     # Same ceiling as the launcher sync server (MAX_UUIDS_PER_REQUEST) — the
     # client chunks its library into ≤10k slices and merges the responses.
     track_uuids: list[str] = Field(default_factory=list, max_length=10000)
+    artist_uuids: list[str] = Field(default_factory=list, max_length=10000)
 
 
 class PullRequest(BaseModel):
@@ -244,7 +338,7 @@ async def get_inventory(req: InventoryRequest) -> dict:
     Uses 3 consolidated CTE queries instead of 15 separate ones.
     """
     _require_sharing()
-    if not req.track_uuids:
+    if not req.track_uuids and not req.artist_uuids:
         return dict(_EMPTY_INVENTORY)
 
     uuids = req.track_uuids
@@ -287,26 +381,30 @@ async def get_inventory(req: InventoryRequest) -> dict:
                         AND gd.batch_root IS NOT NULL) AS genre_descriptions
         """, {"u": uuids})
 
-        # Query 2: Artist data (5 categories, 1 round-trip)
+        # Query 2: Artist data (5 categories, 1 round-trip). `asked` is the
+        # requester's own artist list — see get_inventory in sync_queries for
+        # why the track-derived set alone hides every carried record.
         artist_row = _db_query_one("""
             WITH uuids AS (SELECT unnest(%(u)s::uuid[]) AS id),
                  rel AS (SELECT DISTINCT ta.artist_id FROM track_artists ta
-                         WHERE ta.track_id IN (SELECT id FROM uuids))
+                         WHERE ta.track_id IN (SELECT id FROM uuids)),
+                 asked AS (SELECT unnest(%(a)s::uuid[]) AS artist_id
+                           UNION SELECT artist_id FROM rel)
             SELECT
                 ARRAY(SELECT artist_id::text FROM rel) AS artists,
                 ARRAY(SELECT DISTINCT ab.artist_id::text FROM artist_bios ab
-                      WHERE ab.artist_id IN (SELECT artist_id FROM rel)
+                      WHERE ab.artist_id IN (SELECT artist_id FROM asked)
                         AND ab.signature IS NOT NULL
                         AND ab.batch_root IS NOT NULL) AS artist_bios,
                 ARRAY(SELECT DISTINCT at2.artist_id::text FROM artist_tags at2
-                      WHERE at2.artist_id IN (SELECT artist_id FROM rel)
+                      WHERE at2.artist_id IN (SELECT artist_id FROM asked)
                         AND at2.signature IS NOT NULL
                         AND at2.batch_root IS NOT NULL) AS artist_tags,
                 ARRAY(SELECT DISTINCT sa.artist_id::text FROM similar_artists sa
-                      WHERE sa.artist_id IN (SELECT artist_id FROM rel)
+                      WHERE sa.artist_id IN (SELECT artist_id FROM asked)
                         AND sa.signature IS NOT NULL
                         AND sa.batch_root IS NOT NULL) AS similar_artists
-        """, {"u": uuids})
+        """, {"u": uuids, "a": req.artist_uuids})
 
         return {
             "tracks": track_row["tracks"],

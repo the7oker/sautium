@@ -31,6 +31,7 @@ import psycopg2.extras
 from desktop.api_client import BackendAPIClient
 from desktop.p2p import record_sig as rs
 from desktop.p2p.birth_cert import TRUSTED_AUTHORITIES
+from desktop.p2p.sync_queries import CARRY_CATEGORIES
 
 logger = logging.getLogger(__name__)
 
@@ -95,16 +96,22 @@ class SyncClient:
 
     def __init__(
         self,
-        api_client: BackendAPIClient,
+        api_client: Optional[BackendAPIClient],
         db_dsn: str,
         batch_size: int = DEFAULT_BATCH_SIZE,
         progress_cb: Optional[Callable[[str], None]] = None,
     ):
+        # api_client is None on the receiving side of a push: the payload
+        # arrives instead of being fetched, but it goes through the same
+        # verify-and-import gate (see import_pushed).
         self.api = api_client
         self.db_dsn = db_dsn
         self.batch_size = batch_size
         self.progress_cb = progress_cb
         self._conn: Optional[psycopg2.extensions.connection] = None
+        # Filled by run_sync's capability probe; the caller reads it to
+        # decide whether this peer can also be pushed to.
+        self.peer_capabilities: set[str] = set()
 
     def _progress(self, msg: str):
         logger.info(msg)
@@ -200,8 +207,8 @@ class SyncClient:
 
         # Step 2: Capability probe — which audio category does the peer speak?
         health = self.api.get_health() or {}
-        peer_caps = set(health.get("capabilities") or [])
-        use_segments = "segments" in peer_caps
+        self.peer_capabilities = set(health.get("capabilities") or [])
+        use_segments = "segments" in self.peer_capabilities
         if not use_segments:
             self._progress(
                 "  peer has no `segments` capability — legacy mean-vector pull")
@@ -254,13 +261,46 @@ class SyncClient:
         self._progress(f"Sync complete. Imported {total} items across {len(stats)} categories.")
         return stats
 
+    def _gap_artist_uuids(self) -> list[str]:
+        """Artists from our library missing part of the artist layer.
+
+        Sent alongside the track slices so a peer can answer for artists it
+        holds without owning: carried records live outside track_artists on
+        the carrier, so nothing derived from our tracks would ever reach
+        them. Gaps only — a peer's answer about an artist we already have in
+        full is a row we would discard anyway.
+
+        Owned music only. The phantom discovery layer outnumbers it 35× here
+        and is precisely the material the protocol refuses to trust from a
+        peer anyway (see get_pushable_artists) — asking about it would cost
+        660 KB an ask to import nothing."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT DISTINCT ta.artist_id::text FROM track_artists ta
+                     JOIN media_files mf ON mf.track_id = ta.track_id
+                    WHERE NOT EXISTS (SELECT 1 FROM artist_bios b
+                                       WHERE b.artist_id = ta.artist_id)
+                       OR NOT EXISTS (SELECT 1 FROM artist_tags t
+                                       WHERE t.artist_id = ta.artist_id)
+                       OR NOT EXISTS (SELECT 1 FROM similar_artists s
+                                       WHERE s.artist_id = ta.artist_id)""")
+            return [row[0] for row in cur.fetchall()]
+
     def _fetch_inventory(self, track_uuids: list[str]) -> Optional[dict]:
         """Inventory in ≤INVENTORY_CHUNK slices, merged. Chunks are disjoint
         track sets, so list values concatenate; artist/genre categories may
-        repeat across chunks and are consumed as sets downstream."""
+        repeat across chunks and are consumed as sets downstream. Artists ride
+        along in slices of their own — the two lists are independent, so the
+        request count is whichever needs more."""
+        artist_uuids = self._gap_artist_uuids()
+        chunks = max(-(-len(track_uuids) // INVENTORY_CHUNK),
+                     -(-len(artist_uuids) // INVENTORY_CHUNK), 1)
         merged: Optional[dict] = None
-        for i in range(0, len(track_uuids), INVENTORY_CHUNK):
-            part = self.api.sync_inventory(track_uuids[i:i + INVENTORY_CHUNK])
+        for i in range(chunks):
+            lo, hi = i * INVENTORY_CHUNK, (i + 1) * INVENTORY_CHUNK
+            part = self.api.sync_inventory(track_uuids[lo:hi],
+                                           artist_uuids[lo:hi])
             if not part or "tracks" not in part:
                 return None
             if merged is None:
@@ -1327,3 +1367,21 @@ class SyncClient:
             conn.rollback()
             logger.error(f"Vocalist classification failed: {e}")
             return 0
+
+
+def import_pushed(db_dsn: str, category: str, payload: dict) -> int:
+    """Verify and import a payload a peer PUSHED to us.
+
+    The receiving side of push-seeding deliberately reuses the pull path's
+    import gate rather than growing a second one: same seal verification,
+    same first-hand protection, same precedence rules. A pushed record gets
+    exactly the scrutiny a pulled one does — the only difference is who
+    started the conversation.
+    """
+    if category not in CARRY_CATEGORIES:
+        raise ValueError(f"category not carryable: {category}")
+    client = SyncClient(api_client=None, db_dsn=db_dsn)
+    try:
+        return client._import_items(category, payload)
+    finally:
+        client._close_conn()

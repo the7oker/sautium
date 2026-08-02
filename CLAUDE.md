@@ -214,6 +214,11 @@ See:
 - `sautium-postgres` — PostgreSQL 18 + pgvector. Credentials `musicai/supervisor`, DB `music_ai`. Persistent volume `./data/postgres/`.
 - `sautium-backend` — FastAPI on `0.0.0.0:8000`, exposed to host at `localhost:8800`. GPU access via NVIDIA runtime. Also owns **play tracking** (`listening_history` + `local_play_stats` + Last.fm scrobbling) inside its status poller — keyed source-agnostically on `track_id`, so streamed phantom plays track like owned files. There is **no separate tracker daemon** (consolidated 2026-06-30; the old `sautium-playback-tracker` was retired).
 - Music library mounted read-only: `E:\Music` → `/music:ro` inside backend.
+- Launcher tree mounted read-only: `./desktop` → `/app/desktop:ro`, so the peer
+  surface imports `desktop.sync_client.import_pushed` and
+  `desktop.p2p.sync_queries` instead of mirroring them. Anything the two
+  surfaces must agree on *exactly* — the seal-verification gate, the carry SQL,
+  the DHT announce query — lives there and is imported, not copied.
 - Model cache external: `./data/cache` → `/root/.cache`.
 - **Never bake models into the image.** Cache lives on the host, survives container deletes.
 - **Restart backend after model/prompt changes**: `docker restart sautium-backend` then check logs for "Application startup complete".

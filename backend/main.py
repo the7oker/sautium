@@ -514,34 +514,23 @@ def test_db_connection() -> bool:
 
 def _get_announce_tail_uuids() -> list[str]:
     """The rare-artist tail to announce by exact key (dht_service docstring).
-
-    OWNED and analyzed only — a phantom carries no material this node can
-    stand behind, and phantom rows outnumber owned ones tenfold. Ranked by
-    Last.fm listeners as the rarity proxy: a peer's random node sample will
-    surface anything popular anyway, so an exact key is only worth spending
-    on artists nobody else is likely to have. NULL listeners (unknown to
-    Last.fm) rank rarest.
-    """
+    Query and reasoning live in sync_queries.get_announce_tail_uuids — the
+    two surfaces must announce by the same rule or a carrier's holdings are
+    findable from one and invisible from the other."""
     from routers.settings import _read
+    from routers.sync import carry_queries
     limit = _read("sync.announce_limit")
     limit = int(limit) if limit else 0
     if limit <= 0:
+        return []
+    if carry_queries is None:
+        logger.error("desktop/ is not mounted — announcing the node key only")
         return []
     conn = psycopg2.connect(settings.database_url)
     conn.autocommit = True
     try:
         cur = conn.cursor()
-        cur.execute("""
-            SELECT ta.artist_id::text
-            FROM track_artists ta
-            JOIN media_files mf ON mf.track_id = ta.track_id
-            LEFT JOIN artist_bios ab ON ab.artist_id = ta.artist_id
-            WHERE EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = ta.track_id)
-               OR EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id)
-            GROUP BY ta.artist_id
-            ORDER BY MAX(ab.listeners) ASC NULLS FIRST
-            LIMIT %s
-        """, (limit,))
+        cur.execute(carry_queries.ANNOUNCE_TAIL_SQL, (limit,))
         return [row[0] for row in cur.fetchall()]
     finally:
         conn.close()
