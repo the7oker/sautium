@@ -64,6 +64,16 @@ body.sautium-base {
 body.has-miniplayer #app {
   padding-bottom: calc(var(--nav-h) + var(--mp-h) + var(--fab-clear) + var(--safe-bottom));
 }
+/* Routes without a FAB must not reserve its clearance: on a full-height
+   screen (chat) the unused 72 px push the document past the viewport,
+   so the page scrolls and blanks out below the pinned input row. Set
+   from updateFabVisibility() — route-level, not overlay-level. */
+body.no-fab #app {
+  padding-bottom: calc(var(--nav-h) + var(--safe-bottom));
+}
+body.no-fab.has-miniplayer #app {
+  padding-bottom: calc(var(--nav-h) + var(--mp-h) + var(--safe-bottom));
+}
 
 /* =====================================================================
  * Screen shell
@@ -3657,10 +3667,9 @@ body.has-miniplayer .ai-fab {
   display: flex;
   flex-direction: column;
   /* Fill the area #app reserves for content (everything above the
-     bottom nav + miniplayer + safe-area padding). FAB is hidden on
-     chat so we don't subtract fab-clear here — its bottom padding
-     is invisible blank space below the input row but the cost is
-     0 px on iPhone since the input lifts above the safe bottom. */
+     bottom nav + miniplayer + safe-area padding). Matches the
+     body.no-fab padding exactly — the chat route drops the FAB
+     clearance, so nothing is left over to scroll. */
   min-height: calc(100dvh - var(--nav-h) - var(--safe-bottom));
   padding: 0;
   gap: 0;
