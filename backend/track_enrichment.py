@@ -37,8 +37,12 @@ from models import (
     AudioFeature, Embedding, SimilarArtist, ArtistBio,
     TrackStats, ExternalMetadata,
 )
-from embeddings import AudioEmbeddingGenerator
-from audio_analysis import AudioAnalyzer
+# embeddings / audio_analysis are imported where they are constructed, not
+# here: both pull torch + librosa at module scope, which a torch-less node
+# does not have. A module-level import made THIS module unimportable there,
+# and the enrichment worker died on `from track_enrichment import …` before
+# it could clear its running flag — the Enrich button wedged until restart.
+# The metadata half (Last.fm, lyrics) needs neither.
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +92,17 @@ def run_parallel_enrichment(
         skip_embeddings = True
         skip_audio_analysis = True
 
+    # Same shape for the node that has no ML runtime at all: state it once and
+    # skip, rather than let every model step raise its own ImportError
+    # traceback. The metadata pipelines below are the whole run there.
+    from hardware_profile import resolve as _hw
+    ml_available = _hw().ml_available
+    if not ml_available and not (skip_embeddings and skip_audio_analysis):
+        logger.info("torch-less node — audio embeddings and analysis skipped; "
+                    "they arrive via P2P import")
+        skip_embeddings = True
+        skip_audio_analysis = True
+
     _skip_lastfm = skip_lastfm or not settings.lastfm_api_key
 
     result_parts = {}
@@ -128,6 +143,7 @@ def run_parallel_enrichment(
         combined = {}
 
         if not skip_embeddings:
+            from embeddings import AudioEmbeddingGenerator
             pipeline_progress["gpu"] = "GPU: embeddings..."
             _update_progress()
             emb_stats = AudioEmbeddingGenerator().generate_embeddings(
@@ -141,6 +157,7 @@ def run_parallel_enrichment(
             return combined
 
         if not skip_audio_analysis:
+            from audio_analysis import AudioAnalyzer
             pipeline_progress["gpu"] = "GPU: audio analysis..."
             _update_progress()
             af_stats = AudioAnalyzer().analyze_all(
@@ -300,7 +317,6 @@ def run_parallel_enrichment(
     # after Phase 1 needs it, and those machines want the memory back more
     # than they want an instant next run.
     if torch is not None:
-        from hardware_profile import resolve as _hw
         if _hw().unload_instruments_after_run:
             from device import get_device
             from instrument_tagger import release_instrument_tagger
@@ -309,6 +325,13 @@ def run_parallel_enrichment(
         empty_cache()
 
     # === Phase 2: Text embeddings (sentence-transformers, needs GPU) ===
+    # Runs on lite too — the tier turns off the audio pipeline, not the text
+    # encoders, and lite's semantic search reads exactly these vectors
+    # (HARDWARE-TIERS §4). Only a node with no ML runtime skips it.
+    if not ml_available:
+        logger.info("=== Phase 2 skipped: no ML runtime ===")
+        return result_parts
+
     logger.info("=== Phase 2: text embeddings ===")
 
     # Text embeddings
@@ -506,16 +529,18 @@ class TrackEnrichmentPipeline:
         self._audio_analyzer = None
         self._lastfm_service = None
 
-    def _get_audio_embedding_generator(self) -> AudioEmbeddingGenerator:
+    def _get_audio_embedding_generator(self) -> "AudioEmbeddingGenerator":
         """Lazy-load audio embedding generator."""
         if self._audio_embedding_generator is None:
+            from embeddings import AudioEmbeddingGenerator
             self._audio_embedding_generator = AudioEmbeddingGenerator()
             self._audio_embedding_generator.load_model()
         return self._audio_embedding_generator
 
-    def _get_audio_analyzer(self) -> AudioAnalyzer:
+    def _get_audio_analyzer(self) -> "AudioAnalyzer":
         """Lazy-load audio analyzer."""
         if self._audio_analyzer is None:
+            from audio_analysis import AudioAnalyzer
             self._audio_analyzer = AudioAnalyzer()
             if not self.skip_audio_analysis:
                 self._audio_analyzer.load_model()

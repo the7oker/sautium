@@ -1089,8 +1089,6 @@ def _notify_library_subs_safe():
 def _enrich_worker(limit: Optional[int], skip_embeddings: bool,
                    skip_lastfm: bool, skip_audio_analysis: bool):
     """Background worker that delegates to run_parallel_enrichment."""
-    from track_enrichment import run_parallel_enrichment
-
     state = _enrich_state
 
     def _progress_cb(msg):
@@ -1103,6 +1101,11 @@ def _enrich_worker(limit: Optional[int], skip_embeddings: bool,
     try:
         state["step"] = "running"
         _notify_library_subs_safe()
+        # Imported inside the try: anything raised before `finally` leaves
+        # running=True with no subscriber wake, and the UI sits on "Starting
+        # enrichment..." until the backend restarts — /enrich/start answers
+        # 409 for the rest of the process lifetime.
+        from track_enrichment import run_parallel_enrichment
         result = run_parallel_enrichment(
             limit=limit,
             skip_embeddings=skip_embeddings,
