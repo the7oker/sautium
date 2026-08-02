@@ -1097,6 +1097,47 @@ class P2PManager:
             logger.error(f"Add friend failed: {e}")
             return None
 
+    @staticmethod
+    def _accepted_pubkey(result: dict, expected_invite: str,
+                         expect_master: bool = False) -> Optional[str]:
+        """The responder's public key — or None when it does not belong to
+        the contact we set out to reach.
+
+        An invite code is SHA-256(pubkey)[:6]: it cannot produce a key, but
+        it can prove one. Only the RECEIVER of a handshake used to check
+        that binding, so an initiator accepted whatever key answered — and
+        DHT announces are unauthenticated, so anyone willing to announce a
+        contact's infohash could hand us their own key and read everything
+        addressed to that contact from then on. The mutual-add rule does
+        not help: our own key and invite ride in the handshake we just
+        sent them.
+
+        Everything downstream — E2E encryption, delivery receipts, the
+        relay's whole "cannot lie about delivery" property — is anchored
+        to this one comparison.
+        """
+        from desktop.node_identity import verify_invite_code
+        pubkey = result.get("public_key_hex", "")
+        if not pubkey:
+            return None
+        if expect_master:
+            from desktop.p2p.master_node import MASTER_PUBKEY_HEX
+            if pubkey.lower() != MASTER_PUBKEY_HEX.lower():
+                # The shipped contact is pinned by its full key: 48 bits of
+                # fingerprint are grindable, 256 are not.
+                logger.warning("Handshake answered for the master with a "
+                               "foreign key %s… — ignoring", pubkey[:16])
+                return None
+            return pubkey
+        if not verify_invite_code(expected_invite, pubkey):
+            logger.warning(
+                "Handshake for %s answered with key %s… that does not match "
+                "the invite code — ignoring (impersonation attempt or a "
+                "peer that rotated keys without notifying us)",
+                expected_invite, pubkey[:16])
+            return None
+        return pubkey
+
     async def _async_add_friend(self, invite_code: str) -> Optional[dict]:
         """Async: lookup invite code in DHT, handshake, add friend."""
         if not self._dht_service:
@@ -1132,11 +1173,17 @@ class P2PManager:
                         if resp.status == 200:
                             result = await resp.json()
                             if result.get("accepted"):
-                                # Add friend locally
+                                peer_pubkey = self._accepted_pubkey(
+                                    result, invite_code)
+                                if not peer_pubkey:
+                                    continue
+                                # Add friend locally, under the invite code
+                                # the user typed — never the one the
+                                # responder claims for itself.
                                 if self._chat_service:
                                     self._chat_service.add_friend(
-                                        public_key_hex=result["public_key_hex"],
-                                        invite_code=result["invite_code"],
+                                        public_key_hex=peer_pubkey,
+                                        invite_code=invite_code,
                                         username=result.get("username", ""),
                                     )
                                     # Receiving "accepted" means the
@@ -1145,13 +1192,13 @@ class P2PManager:
                                     # them online without waiting for a
                                     # message exchange.
                                     self._chat_service.update_friend_last_seen(
-                                        result["public_key_hex"]
+                                        peer_pubkey
                                     )
                                     # Sync chat history after handshake
                                     friend = (
                                         self._chat_service
                                         .get_friend_by_public_key(
-                                            result["public_key_hex"]
+                                            peer_pubkey
                                         )
                                     )
                                     if friend:
@@ -1450,28 +1497,15 @@ class P2PManager:
                             if resp.status == 200:
                                 result = await resp.json()
                                 if result.get("accepted"):
-                                    from desktop.p2p.master_node import (
-                                        MASTER_PUBKEY_HEX,
-                                    )
-                                    if (friend.get("source") == "master"
-                                            and result["public_key_hex"]
-                                            != MASTER_PUBKEY_HEX):
-                                        # 48-bit invite fingerprints are
-                                        # guessable; the master is pinned
-                                        # by its full key — a DHT
-                                        # impersonator stops here.
-                                        logger.warning(
-                                            "Master handshake from %s:%s "
-                                            "returned a foreign pubkey — "
-                                            "ignoring", ip, port)
+                                    peer_pubkey = self._accepted_pubkey(
+                                        result, invite,
+                                        expect_master=friend.get("source")
+                                        == "master")
+                                    if not peer_pubkey:
                                         continue
                                     self._chat_service.add_friend(
-                                        public_key_hex=result[
-                                            "public_key_hex"
-                                        ],
-                                        invite_code=result.get(
-                                            "invite_code", invite
-                                        ),
+                                        public_key_hex=peer_pubkey,
+                                        invite_code=invite,
                                         username=result.get(
                                             "username", ""
                                         ),
@@ -1487,7 +1521,7 @@ class P2PManager:
                                     # offline because only the
                                     # accept-handler bumps last_seen.
                                     self._chat_service.update_friend_last_seen(
-                                        result["public_key_hex"]
+                                        peer_pubkey
                                     )
                                     logger.info(
                                         f"Pending friend resolved via "
@@ -1499,12 +1533,12 @@ class P2PManager:
                                     resolved_friend = (
                                         self._chat_service
                                         .get_friend_by_public_key(
-                                            result["public_key_hex"]
+                                            peer_pubkey
                                         )
                                     )
                                     self._note_peer_alive(
                                         (resolved_friend or {}).get("id"),
-                                        result["public_key_hex"], ip, port)
+                                        peer_pubkey, ip, port)
                                     if resolved_friend:
                                         await self._sync_chat_history(
                                             resolved_friend,
@@ -1553,9 +1587,12 @@ class P2PManager:
                 if resp.status == 200:
                     result = await resp.json()
                     if result.get("accepted"):
+                        peer_pubkey = self._accepted_pubkey(result, invite)
+                        if not peer_pubkey:
+                            return False
                         self._chat_service.add_friend(
-                            public_key_hex=result["public_key_hex"],
-                            invite_code=result.get("invite_code", invite),
+                            public_key_hex=peer_pubkey,
+                            invite_code=invite,
                             username=result.get("username", ""),
                         )
                         # Mirror the bump in the regular handshake
@@ -1564,7 +1601,7 @@ class P2PManager:
                         # — the friend would otherwise read "offline"
                         # in the UI right after pairing.
                         self._chat_service.update_friend_last_seen(
-                            result["public_key_hex"]
+                            peer_pubkey
                         )
                         logger.info(
                             f"Pending friend resolved via nudge: "
@@ -1572,7 +1609,7 @@ class P2PManager:
                         )
                         resolved_friend = (
                             self._chat_service.get_friend_by_public_key(
-                                result["public_key_hex"]
+                                peer_pubkey
                             )
                         )
                         if resolved_friend:
