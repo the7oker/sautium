@@ -17,9 +17,12 @@ window on 8800). This router runs behind p2p_app's per-IP rate limiter.
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from typing import Optional
 
@@ -41,6 +44,13 @@ TS_WINDOW = 60                 # seconds, mirrors auth_hmac's replay window
 TOKEN_FRIENDS_PER_HOUR = 30    # soft cap on token auto-accepts
 WAKE_MAX_PER_IP = 20
 PROBE_COOLDOWN = 60            # seconds per pubkey
+# Forwarding: how long a sender's request waits for the recipient's signed
+# receipt, how many envelopes may queue for one recipient, and how many
+# forwards one sender may have in flight. The queue is the ONLY resource a
+# relay spends per client — it stores nothing.
+FORWARD_ACK_TIMEOUT = 10
+FORWARD_QUEUE_MAX = 100
+FORWARD_INFLIGHT_PER_SENDER = 10
 
 
 def _err(message: str, status: int) -> JSONResponse:
@@ -82,12 +92,15 @@ def _find_friend_for_handshake(invite_code: str, pubkey: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 class _WakeSub:
-    __slots__ = ("evt", "loop", "kinds", "closed", "ip")
+    __slots__ = ("evt", "loop", "kinds", "envelopes", "closed", "ip")
 
     def __init__(self, evt, loop, ip):
         self.evt = evt
         self.loop = loop
         self.kinds: set = set()
+        # Envelopes to push down this stream. A queue, not a set: each one
+        # is a distinct message, and order is the sender's.
+        self.envelopes: deque = deque()
         self.closed = False
         self.ip = ip
 
@@ -426,6 +439,14 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
                         break
                     with _wake_lock:
                         kinds, sub.kinds = sub.kinds, set()
+                        envelopes = list(sub.envelopes)
+                        sub.envelopes.clear()
+                    # Envelopes first: a forwarded message is the payload,
+                    # a wake is only a hint to go looking.
+                    for envelope in envelopes:
+                        yield "data: %s\n\n" % json.dumps(
+                            {"type": "deliver", "envelope": envelope},
+                            ensure_ascii=False)
                     for kind in sorted(kinds):
                         yield ('data: {"type": "wake", "kind": "%s"}\n\n'
                                % kind)
@@ -507,3 +528,136 @@ async def probe_connect(request: Request):
     if error and not reachable:
         payload["error"] = error
     return JSONResponse(payload)
+
+
+# ---------------------------------------------------------------------------
+# Relay protocol: forwarding
+#
+# The relay is a pure forwarder — it stores NOTHING. A sender that cannot
+# reach the recipient directly hands us the E2E envelope; we push it down
+# the recipient's already-open wake stream and hold the sender's request
+# until the recipient signs a receipt. No ack, no delivery: the message
+# stays queued at the sender and is retried.
+#
+# The receipt is the recipient's Ed25519 signature over the message uuid
+# and the ciphertext hash, so the SENDER verifies delivery — a relay cannot
+# forge it, and a relay that fabricates an envelope gets no receipt because
+# the forgery will not decrypt.
+# ---------------------------------------------------------------------------
+
+def delivery_payload(message_uuid: str, ciphertext_sha256: str) -> str:
+    """Canonical receipt string — mirrored in desktop/p2p/sync_server.py and
+    signed/verified by the two endpoints below. No timestamp: a receipt is a
+    permanent fact the sender must be able to re-verify from what it has."""
+    return f"sautium-delivery:v1:{message_uuid}:{ciphertext_sha256}"
+
+
+_pending_acks: dict = {}       # message_uuid -> (recipient_pubkey, Future)
+_ack_lock = threading.Lock()
+
+
+@relay_router.post("/forward")
+async def relay_forward(request: Request):
+    """Forward one envelope to a connected recipient and return their receipt."""
+    svc = get_peer_chat()
+    ident = resolve_identity(settings)
+    if svc is None or not ident:
+        return _err("relay not available", 503)
+    try:
+        body = await request.json()
+        sender = body.get("public_key_hex", "")
+        recipient = body.get("to_public_key", "")
+        envelope = body.get("envelope") or {}
+        ts = body.get("ts")
+        sig = body.get("signature", "")
+        message_uuid = envelope.get("message_uuid", "")
+        encrypted = envelope.get("encrypted", "")
+    except Exception:
+        return _err("invalid JSON", 400)
+    if not (sender and recipient and message_uuid and encrypted
+            and envelope.get("timestamp")):
+        return _err("missing fields", 400)
+    if len(encrypted) > MAX_ENCRYPTED_CHARS:
+        return _err("message too large", 413)
+    if not _ts_ok(ts):
+        return _err("stale timestamp", 403)
+    ct_hash = hashlib.sha256(encrypted.encode("utf-8")).hexdigest()
+    signed = (f"relay_forward:{int(ts)}:{ident['public_key_hex']}"
+              f":{message_uuid}:{ct_hash}")
+    if not _verify_ed25519(sender, signed, sig):
+        return _err("invalid signature", 403)
+    friend = svc.get_friend_by_public_key(sender)
+    if not friend or friend.get("is_blocked"):
+        return _err("not a friend", 403)
+    # The relay stamps the sender from the signature — a forwarded envelope
+    # must never claim an authorship the signature does not back.
+    envelope = dict(envelope, from_public_key=sender)
+
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    with _wake_lock:
+        sub = _wake_subs.get(recipient)
+        if sub is None:
+            # Tell the sender immediately rather than burning the timeout:
+            # "not connected" is an answer, and it keeps the message queued.
+            return _err("recipient not connected", 409)
+        if len(sub.envelopes) >= FORWARD_QUEUE_MAX:
+            return _err("recipient busy", 429)
+        with _ack_lock:
+            inflight = sum(1 for r, _ in _pending_acks.values() if r == sender)
+            if inflight >= FORWARD_INFLIGHT_PER_SENDER:
+                return _err("too many forwards in flight", 429)
+            _pending_acks[message_uuid] = (recipient, future)
+        sub.envelopes.append(envelope)
+        sub.loop.call_soon_threadsafe(sub.evt.set)
+
+    try:
+        ack = await asyncio.wait_for(future, timeout=FORWARD_ACK_TIMEOUT)
+    except asyncio.TimeoutError:
+        return JSONResponse({"delivered": False, "reason": "no ack"})
+    finally:
+        with _ack_lock:
+            if _pending_acks.get(message_uuid, (None, None))[1] is future:
+                del _pending_acks[message_uuid]
+
+    logger.info("Relayed %s… from %s… to %s…", message_uuid[:8],
+                sender[:8], recipient[:8])
+    return JSONResponse({"delivered": True, "ack": ack})
+
+
+@relay_router.post("/ack")
+async def relay_ack(request: Request):
+    """The recipient's signed receipt for a forwarded envelope."""
+    svc = get_peer_chat()
+    if svc is None:
+        return _err("relay not available", 503)
+    try:
+        body = await request.json()
+        pubkey = body.get("public_key_hex", "")
+        message_uuid = body.get("message_uuid", "")
+        ct_hash = body.get("ciphertext_sha256", "")
+        sig = body.get("signature", "")
+    except Exception:
+        return _err("invalid JSON", 400)
+    if not (pubkey and message_uuid and ct_hash and sig):
+        return _err("missing fields", 400)
+    if not _verify_ed25519(pubkey, delivery_payload(message_uuid, ct_hash),
+                           sig):
+        return _err("invalid signature", 403)
+    friend = svc.get_friend_by_public_key(pubkey)
+    if not friend or friend.get("is_blocked"):
+        return _err("not a friend", 403)
+
+    with _ack_lock:
+        entry = _pending_acks.get(message_uuid)
+        # The uuid must be one WE are waiting on, for THIS recipient — so a
+        # receipt cannot be planted for someone else's forward.
+        if entry is None or entry[0] != pubkey:
+            return _err("no such forward", 404)
+        future = entry[1]
+    if not future.done():
+        future.get_loop().call_soon_threadsafe(
+            future.set_result,
+            {"public_key_hex": pubkey, "message_uuid": message_uuid,
+             "ciphertext_sha256": ct_hash, "signature": sig})
+    return JSONResponse({"ok": True})

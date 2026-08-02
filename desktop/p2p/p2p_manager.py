@@ -27,7 +27,11 @@ from desktop.p2p import mb_slice_queries, sync_queries
 from desktop.p2p.chat_service import ChatService
 from desktop.p2p.dht_service import DHTService
 from desktop.p2p.lan_discovery import LANDiscovery
-from desktop.p2p.sync_server import SyncServer
+from desktop.p2p.sync_server import FORWARD_ACK_TIMEOUT, SyncServer
+
+# A relay holds our forward open until the recipient signs a receipt; give
+# it that window plus the round trip before we give up on the request.
+FORWARD_TIMEOUT = FORWARD_ACK_TIMEOUT + 10
 from desktop.p2p.upnp_service import UPnPService
 from desktop.sync_client import SyncClient
 
@@ -1737,8 +1741,8 @@ class P2PManager:
                                 break
                             line = raw.decode("utf-8", "replace").strip()
                             if line.startswith("data:"):
-                                await self._sync_chat_history(
-                                    master, [(ip, port)])
+                                await self._handle_relay_frame(
+                                    line[5:], master, ip, port)
                             elif time.time() - last_bump >= 120:
                                 # Keepalives prove the relay is alive.
                                 # Throttled to the cadence the relay uses
@@ -1755,6 +1759,89 @@ class P2PManager:
                 break
             await asyncio.sleep(backoff + random.uniform(0, backoff / 4))
             backoff = min(backoff * 2, 300.0)
+
+    async def _handle_relay_frame(self, data: str, relay: dict,
+                                  ip: str, port: int) -> None:
+        """One SSE frame from a relay.
+
+        `deliver` carries a forwarded message and is answered with a signed
+        receipt. Anything else — including a frame kind this build has never
+        heard of — falls back to the history pull: the relay and the client
+        are separately deployed binaries, so an unknown frame must degrade,
+        not break."""
+        try:
+            frame = json.loads(data)
+        except ValueError:
+            frame = {}
+        if frame.get("type") != "deliver":
+            await self._sync_chat_history(relay, [(ip, port)])
+            return
+
+        envelope = frame.get("envelope") or {}
+        result = self._chat_service.handle_incoming(
+            envelope.get("from_public_key", ""),
+            envelope.get("encrypted", ""),
+            envelope.get("timestamp", ""),
+            message_uuid=envelope.get("message_uuid") or None,
+        )
+        if result is None:
+            # Unknown sender, blocked, oversized or undecryptable — no
+            # receipt, so the sender keeps it queued and nobody is misled.
+            logger.warning("Relayed message from %s… rejected",
+                           envelope.get("from_public_key", "")[:8])
+            return
+
+        await self._send_delivery_receipt(envelope, ip, port)
+        if result.get("duplicate"):
+            return   # already had it; the receipt above is what was missing
+
+        if self._on_message_cb:
+            try:
+                self._on_message_cb(result)
+            except Exception as e:
+                logger.debug(f"Message callback error: {e}")
+        if self._sync_server:
+            await self._sync_server._wake_backend_sse()
+
+    async def _send_delivery_receipt(self, envelope: dict,
+                                     ip: str, port: int) -> None:
+        """Sign the receipt the sender verifies. Signing only AFTER
+        handle_incoming succeeded is what makes a fabricated envelope
+        unprovable: it never decrypts, so it never gets signed."""
+        import hashlib
+
+        import aiohttp
+
+        from desktop.node_identity import get_account_info, sign_message
+        from desktop.p2p.sync_server import delivery_payload
+        account = get_account_info()
+        if not account:
+            return
+        message_uuid = envelope.get("message_uuid", "")
+        ct_hash = hashlib.sha256(
+            envelope.get("encrypted", "").encode("utf-8")).hexdigest()
+        payload = {
+            "public_key_hex": account["public_key_hex"],
+            "message_uuid": message_uuid,
+            "ciphertext_sha256": ct_hash,
+            "signature": sign_message(
+                delivery_payload(message_uuid, ct_hash).encode("utf-8")).hex(),
+        }
+        try:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(ssl=False),
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as session:
+                async with session.post(
+                        f"https://{ip}:{port}/api/relay/ack",
+                        json=payload) as resp:
+                    if resp.status != 200:
+                        logger.debug("Receipt refused by relay: %s",
+                                     resp.status)
+        except Exception as e:
+            # The message IS stored; only the sender's confirmation is lost,
+            # and their retry will produce a fresh forward we dedup on.
+            logger.debug(f"Delivery receipt to {ip}:{port} failed: {e}")
 
     def _note_inbound_reachable(self) -> None:
         """Passive proof from the sync server: a non-LAN peer just reached
@@ -1981,9 +2068,11 @@ class P2PManager:
                 "public_key_hex": pubkey,
                 "username": "",
             }
+            # No `continue` on an empty peer list: an unreachable friend
+            # suppresses its own DHT announces, so "no address" is exactly
+            # the case the relay fallback exists for. _push_pending_messages
+            # degrades correctly — its inner loop just doesn't run.
             peers = await self._find_friend_peers(friend_info)
-            if not peers:
-                continue
 
             # Push first (fast) — don't block on history pull
             friend_pending = [m for m in pending if m["friend_id"] == fid]
@@ -1992,7 +2081,7 @@ class P2PManager:
             )
 
             # Schedule background history pull once per session
-            if fid not in self._history_synced_friends:
+            if peers and fid not in self._history_synced_friends:
                 self._history_synced_friends.add(fid)
                 asyncio.ensure_future(
                     self._sync_chat_history(friend_info, peers)
@@ -2005,17 +2094,20 @@ class P2PManager:
         messages: list[dict],
         peers: list[tuple],
     ):
-        """Push undelivered messages to a friend's peer.
+        """Push undelivered messages to a friend's peer, then hand whatever
+        the direct path could not deliver to a relay.
 
-        Stops immediately on 403 (peer doesn't have us as friend —
-        they will pull history when they add us).
+        `peers` may legitimately be empty: an unreachable friend suppresses
+        its own DHT announces, so "no known address" is the normal state for
+        exactly the pair the relay exists for.
         """
+        undelivered: list[dict] = []
         import aiohttp
         async with aiohttp.ClientSession(
             connector=aiohttp.TCPConnector(ssl=False),
             timeout=aiohttp.ClientTimeout(total=10),
         ) as session:
-            for msg in messages:
+            for idx, msg in enumerate(messages):
                 try:
                     encrypted = self._chat_service.encrypt_message(
                         msg["content"], pubkey
@@ -2026,17 +2118,10 @@ class P2PManager:
                     )
                     break
 
-                ts = msg["timestamp"]
-                ts_str = (
-                    ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
-                )
-                if "+" not in ts_str and not ts_str.endswith("Z"):
-                    ts_str += "+00:00"
-
                 payload = {
                     "from_public_key": self._chat_service.public_key_hex,
                     "encrypted": encrypted,
-                    "timestamp": ts_str,
+                    "timestamp": self._iso_utc(msg["timestamp"]),
                     "message_uuid": msg.get("message_uuid", ""),
                 }
 
@@ -2064,13 +2149,155 @@ class P2PManager:
                     except Exception:
                         pass
                 if not delivered:
-                    # Every address refused or timed out. Later messages
-                    # would fare no better; the row stays undelivered and
-                    # the 60s retry loop picks it up.
+                    # Every address refused, timed out, or there were none
+                    # at all. Later messages fare no better over the direct
+                    # path — hand what's left to a relay.
                     logger.debug(
                         f"No route to friend {friend_id} "
                         f"({len(peers)} candidates tried)")
+                    undelivered = messages[idx:]
+                    break
+
+        if undelivered:
+            await self._relay_forward(friend_id, pubkey, undelivered)
+
+    async def _relay_forward(self, friend_id: int, friend_pubkey: str,
+                             messages: list[dict]) -> None:
+        """Deliver via a relay: the recipient holds an outbound stream to it,
+        so a message reaches a node that accepts no inbound connections at
+        all. The relay stores nothing and cannot fake success — delivery is
+        the recipient's Ed25519 receipt, which we verify here before
+        touching `delivered`."""
+        from desktop.p2p.master_node import MASTER_PUBKEY_HEX
+        if friend_pubkey == MASTER_PUBKEY_HEX:
+            return  # the relay is the recipient; the direct path is the path
+
+        resolved = await self._resolve_relay_for(friend_pubkey)
+        if not resolved:
+            logger.debug("No relay available — %d message(s) stay queued",
+                         len(messages))
+            return
+        relay, relay_peers = resolved
+        relay_pubkey = relay["public_key_hex"]
+
+        import hashlib
+
+        import aiohttp
+
+        from desktop.node_identity import get_account_info, sign_message
+        account = get_account_info()
+        if not account:
+            return
+
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(ssl=False),
+            timeout=aiohttp.ClientTimeout(total=FORWARD_TIMEOUT),
+        ) as session:
+            for msg in messages:
+                try:
+                    encrypted = self._chat_service.encrypt_message(
+                        msg["content"], friend_pubkey)
+                except Exception as e:
+                    logger.error(f"Encrypt failed for friend {friend_id}: {e}")
                     return
+                msg_uuid = msg.get("message_uuid", "")
+                if not msg_uuid:
+                    continue  # pre-uuid row; the direct path still covers it
+                ct_hash = hashlib.sha256(
+                    encrypted.encode("utf-8")).hexdigest()
+                ts = int(time.time())
+                payload = {
+                    "public_key_hex": account["public_key_hex"],
+                    "to_public_key": friend_pubkey,
+                    "ts": ts,
+                    "signature": sign_message(
+                        f"relay_forward:{ts}:{relay_pubkey}:{msg_uuid}"
+                        f":{ct_hash}".encode("utf-8")).hex(),
+                    "envelope": {
+                        "from_public_key": account["public_key_hex"],
+                        "encrypted": encrypted,
+                        "timestamp": self._iso_utc(msg["timestamp"]),
+                        "message_uuid": msg_uuid,
+                    },
+                }
+                for ip, port in relay_peers:
+                    url = f"https://{ip}:{port}/api/relay/forward"
+                    try:
+                        async with session.post(url, json=payload) as resp:
+                            if resp.status == 409:
+                                # Recipient is not connected to this relay —
+                                # the rest of the batch fares no better.
+                                logger.debug(
+                                    "Relay %s:%s: recipient offline", ip, port)
+                                return
+                            if resp.status != 200:
+                                continue
+                            data = await resp.json()
+                            self._note_peer_alive(
+                                relay.get("id"), relay_pubkey, ip, port)
+                        if not data.get("delivered"):
+                            return  # no receipt yet; retry next cycle
+                        if self._verify_delivery_receipt(
+                                data.get("ack") or {}, friend_pubkey,
+                                msg_uuid, ct_hash):
+                            self._chat_service.mark_delivered_by_uuid(msg_uuid)
+                            logger.info("Relayed to %s… via %s:%s",
+                                        friend_pubkey[:8], ip, port)
+                        else:
+                            logger.warning(
+                                "Relay %s:%s returned an unverifiable "
+                                "delivery receipt — ignoring", ip, port)
+                        break
+                    except Exception as e:
+                        logger.debug(f"Relay forward via {ip}:{port}: {e}")
+
+    @staticmethod
+    def _verify_delivery_receipt(ack: dict, expected_pubkey: str,
+                                 message_uuid: str, ct_hash: str) -> bool:
+        """The receipt must be signed by the RECIPIENT over exactly the
+        message we sent — that is what makes a relay unable to fake
+        delivery."""
+        from desktop.node_identity import verify_signature
+        from desktop.p2p.sync_server import delivery_payload
+        if (ack.get("public_key_hex", "").lower() != expected_pubkey.lower()
+                or ack.get("message_uuid") != message_uuid
+                or ack.get("ciphertext_sha256") != ct_hash):
+            return False
+        try:
+            return verify_signature(
+                delivery_payload(message_uuid, ct_hash).encode("utf-8"),
+                bytes.fromhex(ack.get("signature", "")), expected_pubkey)
+        except (ValueError, TypeError):
+            return False
+
+    @staticmethod
+    def _iso_utc(ts) -> str:
+        """Message timestamp as a tz-aware ISO string (the wire format both
+        /api/chat/message and the relay envelope use)."""
+        out = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+        if "+" not in out and not out.endswith("Z"):
+            out += "+00:00"
+        return out
+
+    async def _resolve_relay_for(self, friend_pubkey: str):
+        """Which relay can reach this friend, and at which address.
+
+        Phase 1: the shipped master — every node is its friend and holds a
+        wake stream to it. Phase 2 resolves the friend's own relay from the
+        DHT (relays announce on behalf of their clients), and this is the
+        only seam that has to widen."""
+        from desktop.p2p.master_node import MASTER_PUBKEY_HEX, master_configured
+        if not master_configured() or not self._chat_service:
+            return None
+        from desktop.node_identity import get_account_info
+        account = get_account_info()
+        if not account or account["public_key_hex"] == MASTER_PUBKEY_HEX:
+            return None
+        relay = self._chat_service.get_friend_by_public_key(MASTER_PUBKEY_HEX)
+        if not relay:
+            return None
+        peers = await self._find_friend_peers(relay)
+        return (relay, peers) if peers else None
 
     async def _listen_for_db_notifications(self):
         """Listen for PostgreSQL NOTIFY on 'sautium_chat' channel.
@@ -2158,9 +2385,9 @@ class P2PManager:
                     "public_key_hex": pubkey,
                     "username": "",
                 }
+                # No `continue` on an empty peer list — see the same rule in
+                # _deliver_pending_fast: no address IS the relay case.
                 peers = await self._find_friend_peers(friend_info)
-                if not peers:
-                    continue
 
                 # Step 1: Push undelivered messages first (fast)
                 still_pending = [
@@ -2173,7 +2400,7 @@ class P2PManager:
                     )
 
                 # Step 2: Pull history once per session (background)
-                if fid not in self._history_synced_friends:
+                if peers and fid not in self._history_synced_friends:
                     self._history_synced_friends.add(fid)
                     await self._sync_chat_history(friend_info, peers)
                     # If messages still undelivered — refresh peer

@@ -12,10 +12,11 @@ Runs in a background asyncio event loop thread alongside the DHT service.
 
 import asyncio
 import gzip
+import hashlib
 import json
 import logging
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from functools import partial
 from typing import Callable, Optional
 
@@ -40,16 +41,30 @@ TS_WINDOW = 60
 TOKEN_FRIENDS_PER_HOUR = 30
 WAKE_MAX_PER_IP = 20
 PROBE_COOLDOWN = 60
+# Forwarding caps — mirror backend/routers/peer_chat.py, keep in step.
+FORWARD_ACK_TIMEOUT = 10
+FORWARD_QUEUE_MAX = 100
+FORWARD_INFLIGHT_PER_SENDER = 10
+
+
+def delivery_payload(message_uuid: str, ciphertext_sha256: str) -> str:
+    """Canonical delivery-receipt string — mirrored in
+    backend/routers/peer_chat.py. No timestamp: a receipt is a permanent
+    fact the sender must be able to re-verify from what it already has."""
+    return f"sautium-delivery:v1:{message_uuid}:{ciphertext_sha256}"
 
 
 class _WakeSub:
     """One live wake-stream subscription (relay protocol)."""
-    __slots__ = ("evt", "loop", "kinds", "closed", "ip")
+    __slots__ = ("evt", "loop", "kinds", "envelopes", "closed", "ip")
 
     def __init__(self, evt, loop, ip):
         self.evt = evt
         self.loop = loop
         self.kinds: set = set()
+        # Envelopes to push down this stream. A queue, not a set: each one
+        # is a distinct message, and order is the sender's.
+        self.envelopes: deque = deque()
         self.closed = False
         self.ip = ip
 
@@ -80,6 +95,10 @@ class SyncServer:
         # Relay wake registry: subscriber pubkey -> _WakeSub
         self._wake_subs: dict[str, _WakeSub] = {}
         self._probe_last: dict[str, float] = {}
+        # In-flight forwards awaiting a receipt: uuid -> (recipient, Future).
+        # The ONLY state a relay holds for a forwarded message, and only
+        # until the receipt arrives or the timeout fires.
+        self._pending_acks: dict[str, tuple] = {}
         # Reachability: called with no args on any inbound request from a
         # non-LAN, non-overlay address — definitive "we are reachable".
         self._inbound_cb: Optional[Callable] = None
@@ -924,6 +943,16 @@ class SyncServer:
                     if sub.closed:
                         break
                     kinds, sub.kinds = sub.kinds, set()
+                    envelopes = list(sub.envelopes)
+                    sub.envelopes.clear()
+                    # Envelopes first: a forwarded message is the payload,
+                    # a wake is only a hint to go looking.
+                    for envelope in envelopes:
+                        frame = json.dumps(
+                            {"type": "deliver", "envelope": envelope},
+                            ensure_ascii=False)
+                        await resp.write(
+                            b"data: %s\n\n" % frame.encode("utf-8"))
                     for kind in sorted(kinds):
                         await resp.write(
                             b'data: {"type": "wake", "kind": "%s"}\n\n'
@@ -1011,6 +1040,146 @@ class SyncServer:
         if error and not reachable:
             payload["error"] = error
         return self._json_response(request, payload)
+
+    # -----------------------------------------------------------------------
+    # Relay protocol: forwarding
+    #
+    # The relay is a pure forwarder — it stores NOTHING. A sender that cannot
+    # reach the recipient directly hands us the E2E envelope; we push it down
+    # the recipient's already-open wake stream and hold the sender's request
+    # until the recipient signs a receipt. No ack, no delivery: the message
+    # stays queued at the sender and is retried.
+    #
+    # The receipt is the recipient's Ed25519 signature over the message uuid
+    # and the ciphertext hash, so the SENDER verifies delivery — a relay
+    # cannot forge it, and a relay that fabricates an envelope gets no
+    # receipt because the forgery will not decrypt.
+    #
+    # MIRRORS backend/routers/peer_chat.py — keep the contracts in step.
+    # -----------------------------------------------------------------------
+
+    async def handle_relay_forward(self, request: web.Request) -> web.Response:
+        """POST /api/relay/forward — forward one envelope to a connected
+        recipient and return their signed receipt."""
+        ip = request.remote or "unknown"
+        if not self._check_rate_limit(ip):
+            return self._json_response(
+                request, {"error": "rate limited"}, status=429)
+        if not self.account_info or not self._chat_service:
+            return self._json_response(
+                request, {"error": "relay not available"}, status=503)
+        try:
+            body = await request.json()
+            sender = body.get("public_key_hex", "")
+            recipient = body.get("to_public_key", "")
+            envelope = body.get("envelope") or {}
+            ts = body.get("ts")
+            sig = body.get("signature", "")
+            message_uuid = envelope.get("message_uuid", "")
+            encrypted = envelope.get("encrypted", "")
+        except (json.JSONDecodeError, Exception):
+            return self._json_response(
+                request, {"error": "invalid JSON"}, status=400)
+        if not (sender and recipient and message_uuid and encrypted
+                and envelope.get("timestamp")):
+            return self._json_response(
+                request, {"error": "missing fields"}, status=400)
+
+        from desktop.p2p.chat_service import MAX_ENCRYPTED_CHARS
+        if len(encrypted) > MAX_ENCRYPTED_CHARS:
+            return self._json_response(
+                request, {"error": "message too large"}, status=413)
+        if not self._ts_ok(ts):
+            return self._json_response(
+                request, {"error": "stale timestamp"}, status=403)
+        ct_hash = hashlib.sha256(encrypted.encode("utf-8")).hexdigest()
+        own_pubkey = self.account_info.get("public_key_hex", "")
+        signed = (f"relay_forward:{int(ts)}:{own_pubkey}"
+                  f":{message_uuid}:{ct_hash}")
+        if not self._verify_peer_sig(sender, signed, sig):
+            return self._json_response(
+                request, {"error": "invalid signature"}, status=403)
+        friend = self._chat_service.get_friend_by_public_key(sender)
+        if not friend or friend.get("is_blocked"):
+            return self._json_response(
+                request, {"error": "not a friend"}, status=403)
+        # The relay stamps the sender from the signature — a forwarded
+        # envelope must never claim an authorship the signature does not back.
+        envelope = dict(envelope, from_public_key=sender)
+
+        sub = self._wake_subs.get(recipient)
+        if sub is None:
+            # Tell the sender immediately rather than burning the timeout:
+            # "not connected" is an answer, and it keeps the message queued.
+            return self._json_response(
+                request, {"error": "recipient not connected"}, status=409)
+        if len(sub.envelopes) >= FORWARD_QUEUE_MAX:
+            return self._json_response(
+                request, {"error": "recipient busy"}, status=429)
+        inflight = sum(1 for r, _ in self._pending_acks.values() if r == sender)
+        if inflight >= FORWARD_INFLIGHT_PER_SENDER:
+            return self._json_response(
+                request, {"error": "too many forwards in flight"}, status=429)
+
+        future = asyncio.get_event_loop().create_future()
+        self._pending_acks[message_uuid] = (recipient, future)
+        sub.envelopes.append(envelope)
+        sub.loop.call_soon_threadsafe(sub.evt.set)
+        try:
+            ack = await asyncio.wait_for(future, timeout=FORWARD_ACK_TIMEOUT)
+        except asyncio.TimeoutError:
+            return self._json_response(
+                request, {"delivered": False, "reason": "no ack"})
+        finally:
+            if self._pending_acks.get(message_uuid, (None, None))[1] is future:
+                del self._pending_acks[message_uuid]
+
+        logger.info("Relayed %s… from %s… to %s…", message_uuid[:8],
+                    sender[:8], recipient[:8])
+        return self._json_response(request, {"delivered": True, "ack": ack})
+
+    async def handle_relay_ack(self, request: web.Request) -> web.Response:
+        """POST /api/relay/ack — the recipient's signed receipt."""
+        ip = request.remote or "unknown"
+        if not self._check_rate_limit(ip):
+            return self._json_response(
+                request, {"error": "rate limited"}, status=429)
+        if not self._chat_service:
+            return self._json_response(
+                request, {"error": "relay not available"}, status=503)
+        try:
+            body = await request.json()
+            pubkey = body.get("public_key_hex", "")
+            message_uuid = body.get("message_uuid", "")
+            ct_hash = body.get("ciphertext_sha256", "")
+            sig = body.get("signature", "")
+        except (json.JSONDecodeError, Exception):
+            return self._json_response(
+                request, {"error": "invalid JSON"}, status=400)
+        if not (pubkey and message_uuid and ct_hash and sig):
+            return self._json_response(
+                request, {"error": "missing fields"}, status=400)
+        if not self._verify_peer_sig(
+                pubkey, delivery_payload(message_uuid, ct_hash), sig):
+            return self._json_response(
+                request, {"error": "invalid signature"}, status=403)
+        friend = self._chat_service.get_friend_by_public_key(pubkey)
+        if not friend or friend.get("is_blocked"):
+            return self._json_response(
+                request, {"error": "not a friend"}, status=403)
+
+        entry = self._pending_acks.get(message_uuid)
+        # The uuid must be one WE are waiting on, for THIS recipient — so a
+        # receipt cannot be planted for someone else's forward.
+        if entry is None or entry[0] != pubkey:
+            return self._json_response(
+                request, {"error": "no such forward"}, status=404)
+        future = entry[1]
+        if not future.done():
+            future.set_result({
+                "public_key_hex": pubkey, "message_uuid": message_uuid,
+                "ciphertext_sha256": ct_hash, "signature": sig})
+        return self._json_response(request, {"ok": True})
 
     async def _run_delivery_trigger(self):
         """Run the delivery trigger callback with error handling."""
@@ -1195,6 +1364,12 @@ class SyncServer:
         )
         self._app.router.add_post(
             "/api/relay/probe-connect", self.handle_probe_connect
+        )
+        self._app.router.add_post(
+            "/api/relay/forward", self.handle_relay_forward
+        )
+        self._app.router.add_post(
+            "/api/relay/ack", self.handle_relay_ack
         )
 
         self._runner = web.AppRunner(
