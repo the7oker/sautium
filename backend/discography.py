@@ -361,18 +361,20 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
     return len(slot_rows)
 
 
-def _reconcile_phantoms(artist_id: str, missing_rgs: List[str],
-                        spare_analyzed: bool = False) -> None:
+def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
     """Drop this artist's phantom links that no longer correspond to a
     missing release-group (ripped since the last sync, MB reclassified,
     pre-MB legacy), garbage-collect phantom albums nobody links to, and
     clear a stale external cover on albums that became owned — the
     frontend prefers `cover_url` over the local file cover.
 
-    ``spare_analyzed`` (lite prune only): keep phantom albums that carry a
-    track with an embedding — a streamed-then-enriched phantom is the
-    node's own analysis contribution, and the track cascade would delete
-    it. Normal reconcile keeps the resolve-or-discard semantics."""
+    A phantom that carries analysis is ALWAYS spared — whether the node
+    streamed-then-enriched it itself or a CGNAT peer push-seeded its
+    segments here (carry). Both are analysis someone spent GPU time on,
+    the track cascade would take analysis_sources and embeddings with
+    it, and neither can be re-derived without the audio. This guard used
+    to be opt-in (lite prune only), which left the discography hot path
+    free to delete carried rows the moment their artist got canonized."""
     # Streaming-minted phantoms are OUTSIDE the MB source-of-truth: the user
     # clicked a provider tile (explicit intent), the album has no rg MBID, and
     # this reconcile used to nuke it on the very first artist-page view.
@@ -380,7 +382,7 @@ def _reconcile_phantoms(artist_id: str, missing_rgs: List[str],
               AND NOT EXISTS (SELECT 1 FROM album_tracks at
                               JOIN embeddings e ON e.track_id = at.track_id
                               WHERE at.album_id = al.id)
-    """ if spare_analyzed else ""
+    """
     if missing_rgs:
         db_execute(f"""
             DELETE FROM album_artists aa
@@ -422,18 +424,15 @@ def _reconcile_phantoms(artist_id: str, missing_rgs: List[str],
     # Orphan phantom tracks of this artist: their album was GC'd above and
     # no file ever materialized (a ripped phantom track has media_files and
     # is protected). Enrichment rows cascade with the track — the embedding
-    # guard is the secondary net behind the album-level spare_analyzed one.
-    track_guard = """
-          AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = t.id)
-    """ if spare_analyzed else ""
-    db_execute(f"""
+    # guard is the secondary net behind the album-level analyzed one.
+    db_execute("""
         DELETE FROM tracks t
         USING track_artists ta
         WHERE ta.track_id = t.id
           AND ta.artist_id = %(id)s::uuid
           AND NOT EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
           AND NOT EXISTS (SELECT 1 FROM album_tracks at WHERE at.track_id = t.id)
-          {track_guard}
+          AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = t.id)
     """, {"id": artist_id})
 
 
@@ -458,7 +457,7 @@ def prune_phantom_layer(cancel_flag=None) -> Dict[str, int]:
     for row in artists:
         if cancel_flag and cancel_flag():
             break
-        _reconcile_phantoms(str(row["artist_id"]), [], spare_analyzed=True)
+        _reconcile_phantoms(str(row["artist_id"]), [])
         stats["artists"] += 1
     logger.info("phantom prune: reconciled %d artists", stats["artists"])
     return stats

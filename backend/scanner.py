@@ -854,11 +854,17 @@ def prune_missing_files(
 
         db.query(MediaFile).filter(MediaFile.id.in_(missing_ids)).delete(synchronize_session=False)
 
+        # Analysis-carrying tracks are spared: embeddings + analysis_sources
+        # cascade with the track, and neither the node's own streamed
+        # enrichment nor rows a CGNAT peer push-seeded here (carry) can be
+        # re-derived without the audio. The file is gone; the analysis of it
+        # is still real.
         r = db.execute(text("""
             DELETE FROM tracks WHERE id IN (
                 SELECT t.id FROM tracks t
                 LEFT JOIN media_files mf ON mf.track_id = t.id
                 WHERE mf.id IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = t.id)
             )
         """))
         stats["orphan_tracks"] = r.rowcount
