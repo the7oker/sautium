@@ -9785,14 +9785,14 @@
     { id: 1000, label: '1000 rare artists' },
   ];
 
-  // Enrichment held for artists whose music this node does not own, so that
-  // peers who cannot accept incoming connections still reach the network
-  // (~21 KB an artist).
+  // Audio analysis held for tracks this node does not own, so that peers
+  // who cannot accept incoming connections still reach the network
+  // (~46 KB a track).
   const CARRY_LIMIT_OPTIONS = [
-    { id: 0,    label: 'Off' },
-    { id: 500,  label: '500 artists' },
-    { id: 2000, label: '2000 artists' },
-    { id: 10000, label: '10000 artists' },
+    { id: 0,     label: 'Off' },
+    { id: 2000,  label: '2000 tracks (~90 MB)' },
+    { id: 10000, label: '10000 tracks (~460 MB)' },
+    { id: 50000, label: '50000 tracks (~2.3 GB)' },
   ];
 
   function fmtPathForDisplay(p) {

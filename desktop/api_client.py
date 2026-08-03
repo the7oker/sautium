@@ -217,13 +217,11 @@ class BackendAPIClient:
 
     # -- Sync API ----------------------------------------------------------
 
-    def sync_inventory(self, track_uuids: list[str],
-                       artist_uuids: list[str] = ()) -> Optional[dict]:
-        """Get available enrichment data for given track and artist UUIDs."""
+    def sync_inventory(self, track_uuids: list[str]) -> Optional[dict]:
+        """Get available enrichment data for given track UUIDs."""
         return self._post_json(
             "/api/sync/inventory",
-            body={"track_uuids": track_uuids,
-                  "artist_uuids": list(artist_uuids)},
+            body={"track_uuids": track_uuids},
             timeout=300,
         )
 
@@ -235,12 +233,13 @@ class BackendAPIClient:
             timeout=300,
         )
 
-    def carry_offer(self, artist_uuids: list[str]) -> Optional[dict]:
-        """Offer artists we could contribute; the peer answers with the
-        subset it wants (push-seeding — see sync_queries carry section)."""
+    def carry_offer(self, track_uuids: list[str]) -> Optional[dict]:
+        """Offer tracks whose analysis we could contribute; the peer answers
+        with the subset it wants (push-seeding — see sync_queries carry
+        section)."""
         return self._post_json(
             "/api/sync/offer",
-            body={"artists": artist_uuids},
+            body={"tracks": track_uuids},
             timeout=60,
         )
 

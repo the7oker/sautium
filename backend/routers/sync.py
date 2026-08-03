@@ -142,7 +142,7 @@ def _carry_budget() -> int:
 
 
 class CarryOffer(BaseModel):
-    artists: list[str] = Field(default_factory=list, max_length=10000)
+    tracks: list[str] = Field(default_factory=list, max_length=10000)
 
 
 @router.post("/offer")
@@ -150,13 +150,13 @@ async def carry_offer(req: CarryOffer) -> dict:
     """"Here is what I could give you" — we answer with the subset we want.
 
     The round trip exists so a pusher never ships what we already hold:
-    16 bytes per artist to ask, ~21 KB per artist to send blind."""
+    16 bytes per track to ask, ~46 KB per track to send blind."""
     _require_sharing()
     if carry_queries is None:
         return {"wanted": {}}
     with get_conn() as conn:
-        wanted = carry_queries.wanted_artists(
-            conn, req.artists, _carry_budget())
+        wanted = carry_queries.wanted_tracks(
+            conn, req.tracks, _carry_budget())
     return {"wanted": wanted}
 
 
@@ -306,7 +306,6 @@ class InventoryRequest(BaseModel):
     # Same ceiling as the launcher sync server (MAX_UUIDS_PER_REQUEST) — the
     # client chunks its library into ≤10k slices and merges the responses.
     track_uuids: list[str] = Field(default_factory=list, max_length=10000)
-    artist_uuids: list[str] = Field(default_factory=list, max_length=10000)
 
 
 class PullRequest(BaseModel):
@@ -338,7 +337,7 @@ async def get_inventory(req: InventoryRequest) -> dict:
     Uses 3 consolidated CTE queries instead of 15 separate ones.
     """
     _require_sharing()
-    if not req.track_uuids and not req.artist_uuids:
+    if not req.track_uuids:
         return dict(_EMPTY_INVENTORY)
 
     uuids = req.track_uuids
@@ -381,30 +380,26 @@ async def get_inventory(req: InventoryRequest) -> dict:
                         AND gd.batch_root IS NOT NULL) AS genre_descriptions
         """, {"u": uuids})
 
-        # Query 2: Artist data (5 categories, 1 round-trip). `asked` is the
-        # requester's own artist list — see get_inventory in sync_queries for
-        # why the track-derived set alone hides every carried record.
+        # Query 2: Artist data (5 categories, 1 round-trip)
         artist_row = _db_query_one("""
             WITH uuids AS (SELECT unnest(%(u)s::uuid[]) AS id),
                  rel AS (SELECT DISTINCT ta.artist_id FROM track_artists ta
-                         WHERE ta.track_id IN (SELECT id FROM uuids)),
-                 asked AS (SELECT unnest(%(a)s::uuid[]) AS artist_id
-                           UNION SELECT artist_id FROM rel)
+                         WHERE ta.track_id IN (SELECT id FROM uuids))
             SELECT
                 ARRAY(SELECT artist_id::text FROM rel) AS artists,
                 ARRAY(SELECT DISTINCT ab.artist_id::text FROM artist_bios ab
-                      WHERE ab.artist_id IN (SELECT artist_id FROM asked)
+                      WHERE ab.artist_id IN (SELECT artist_id FROM rel)
                         AND ab.signature IS NOT NULL
                         AND ab.batch_root IS NOT NULL) AS artist_bios,
                 ARRAY(SELECT DISTINCT at2.artist_id::text FROM artist_tags at2
-                      WHERE at2.artist_id IN (SELECT artist_id FROM asked)
+                      WHERE at2.artist_id IN (SELECT artist_id FROM rel)
                         AND at2.signature IS NOT NULL
                         AND at2.batch_root IS NOT NULL) AS artist_tags,
                 ARRAY(SELECT DISTINCT sa.artist_id::text FROM similar_artists sa
-                      WHERE sa.artist_id IN (SELECT artist_id FROM asked)
+                      WHERE sa.artist_id IN (SELECT artist_id FROM rel)
                         AND sa.signature IS NOT NULL
                         AND sa.batch_root IS NOT NULL) AS similar_artists
-        """, {"u": uuids, "a": req.artist_uuids})
+        """, {"u": uuids})
 
         return {
             "tracks": track_row["tracks"],

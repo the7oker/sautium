@@ -31,7 +31,8 @@ import psycopg2.extras
 from desktop.api_client import BackendAPIClient
 from desktop.p2p import record_sig as rs
 from desktop.p2p.birth_cert import TRUSTED_AUTHORITIES
-from desktop.p2p.sync_queries import CARRY_CATEGORIES
+from desktop.p2p.sync_queries import CARRY_CATEGORIES, verify_track_identity
+from desktop.p2p.sync_queries import artist_uuid as _artist_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,7 @@ _ENRICHMENT_KIND_BY_CATEGORY = {
     "artist_tags": "artist_tag",
     "similar_artists": "similar_artist",
     "genre_descriptions": "genre_description",
+    "artist_mbids": "artist_mbid",
 }
 
 DEFAULT_BATCH_SIZE = 500
@@ -261,46 +263,13 @@ class SyncClient:
         self._progress(f"Sync complete. Imported {total} items across {len(stats)} categories.")
         return stats
 
-    def _gap_artist_uuids(self) -> list[str]:
-        """Artists from our library missing part of the artist layer.
-
-        Sent alongside the track slices so a peer can answer for artists it
-        holds without owning: carried records live outside track_artists on
-        the carrier, so nothing derived from our tracks would ever reach
-        them. Gaps only — a peer's answer about an artist we already have in
-        full is a row we would discard anyway.
-
-        Owned music only. The phantom discovery layer outnumbers it 35× here
-        and is precisely the material the protocol refuses to trust from a
-        peer anyway (see get_pushable_artists) — asking about it would cost
-        660 KB an ask to import nothing."""
-        conn = self._get_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT DISTINCT ta.artist_id::text FROM track_artists ta
-                     JOIN media_files mf ON mf.track_id = ta.track_id
-                    WHERE NOT EXISTS (SELECT 1 FROM artist_bios b
-                                       WHERE b.artist_id = ta.artist_id)
-                       OR NOT EXISTS (SELECT 1 FROM artist_tags t
-                                       WHERE t.artist_id = ta.artist_id)
-                       OR NOT EXISTS (SELECT 1 FROM similar_artists s
-                                       WHERE s.artist_id = ta.artist_id)""")
-            return [row[0] for row in cur.fetchall()]
-
     def _fetch_inventory(self, track_uuids: list[str]) -> Optional[dict]:
         """Inventory in ≤INVENTORY_CHUNK slices, merged. Chunks are disjoint
         track sets, so list values concatenate; artist/genre categories may
-        repeat across chunks and are consumed as sets downstream. Artists ride
-        along in slices of their own — the two lists are independent, so the
-        request count is whichever needs more."""
-        artist_uuids = self._gap_artist_uuids()
-        chunks = max(-(-len(track_uuids) // INVENTORY_CHUNK),
-                     -(-len(artist_uuids) // INVENTORY_CHUNK), 1)
+        repeat across chunks and are consumed as sets downstream."""
         merged: Optional[dict] = None
-        for i in range(chunks):
-            lo, hi = i * INVENTORY_CHUNK, (i + 1) * INVENTORY_CHUNK
-            part = self.api.sync_inventory(track_uuids[lo:hi],
-                                           artist_uuids[lo:hi])
+        for i in range(0, len(track_uuids), INVENTORY_CHUNK):
+            part = self.api.sync_inventory(track_uuids[i:i + INVENTORY_CHUNK])
             if not part or "tracks" not in part:
                 return None
             if merged is None:
@@ -496,6 +465,7 @@ class SyncClient:
         "similar_artist": "artist_uuid",
         "track_stat": "track_uuid",
         "genre_description": "genre_uuid",
+        "artist_mbid": "artist_uuid",
     }
 
     def _verify_enrichment(self, kind: str, items: list, batches: dict) -> list:
@@ -1031,6 +1001,106 @@ class SyncClient:
                 page_size=500,
             )
         return len(items)
+
+    def _import_tracks(self, conn, items: list[dict]) -> int:
+        """Mint phantom track entities from a carry push (tracks +
+        track_artists, deliberately NO media_files — that is the
+        owned/phantom discriminator).
+
+        No seal — the identity IS the proof: track_uuid = uuid5 over
+        (primary artist, title), so an item whose claimed pair does not
+        rehash to its UUID is dropped, and the artist link that gets minted
+        is exactly the one the UUID demonstrates. Roles beyond that primary
+        do not travel at all (nothing in the key proves them), which is the
+        soft ambiguity rule: analysis hangs off track_id, so the omission
+        costs nothing. Pattern mirrors discography._persist_phantom_tracklist
+        (title clamp [:500] BEFORE hashing, so identity keys on the stored
+        value)."""
+        artist_rows, track_rows, link_rows = {}, [], []
+        dropped = 0
+        for item in items:
+            title = (item.get("title") or "").strip()[:500]
+            primaries = [a.get("name") for a in item.get("artists") or []
+                         if a.get("role") == "primary"]
+            proven = verify_track_identity(
+                item.get("track_uuid") or "", title, primaries)
+            if proven is None:
+                dropped += 1
+                continue
+            aid = str(_artist_uuid(proven))
+            artist_rows[aid] = (aid, proven)
+            track_rows.append((item["track_uuid"], title))
+            link_rows.append((item["track_uuid"], aid))
+        if dropped:
+            logger.warning(
+                "carry import: dropped %d track(s) — claimed (title, primary)"
+                " does not rehash to the wire UUID", dropped)
+        if not track_rows:
+            return 0
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                "INSERT INTO artists (id, name) VALUES %s"
+                " ON CONFLICT (id) DO NOTHING",
+                list(artist_rows.values()), template="(%s::uuid, %s)")
+            psycopg2.extras.execute_values(
+                cur,
+                "INSERT INTO tracks (id, title) VALUES %s"
+                " ON CONFLICT (id) DO NOTHING",
+                track_rows, template="(%s::uuid, %s)")
+            psycopg2.extras.execute_values(
+                cur,
+                "INSERT INTO track_artists (track_id, role, artist_id)"
+                " VALUES %s ON CONFLICT DO NOTHING",
+                link_rows, template="(%s::uuid, 'primary', %s::uuid)")
+        return len(track_rows)
+
+    def _import_artist_mbids(self, conn, items: list[dict]) -> int:
+        """Store author-attested canon marks. Seals were already verified by
+        the enrichment gate (_verify_enrichment, kind artist_mbid) before we
+        got here; what remains is the write.
+
+        ON CONFLICT (mbid) DO NOTHING: an existing binding — ours or an
+        earlier author's — outranks a pushed restatement of it, and a
+        CONFLICTING binding for the same artist under a different mbid just
+        coexists (the table is 1:N by design; disagreement between authors
+        is namesake evidence, not an error to resolve here). The artist row
+        must exist (FK) — carry pushes tracks first, and their import minted
+        the primaries; bindings for artists we know nothing about are
+        skipped, not minted from thin air: a bare (id, mbid) pair with no
+        name is not an artist."""
+        if not items:
+            return 0
+        uuids = list({item["artist_uuid"] for item in items})
+        with conn.cursor() as cur:
+            cur.execute("SELECT id::text FROM artists WHERE id = ANY(%s::uuid[])",
+                        (uuids,))
+            known = {r[0] for r in cur.fetchall()}
+            values = [
+                (item["mbid"], item["artist_uuid"], item["confidence"],
+                 item.get("fetched_at"),
+                 item.get("author_pubkey"), item.get("signature"),
+                 item.get("batch_root"),
+                 psycopg2.extras.Json(item["merkle_proof"])
+                 if item.get("merkle_proof") is not None else None)
+                for item in items if item["artist_uuid"] in known
+            ]
+            if not values:
+                return 0
+            psycopg2.extras.execute_values(
+                cur,
+                """INSERT INTO artist_mbids
+                       (mbid, artist_id, confidence, created_at,
+                        author_pubkey, signature, batch_root, merkle_proof,
+                        imported)
+                   VALUES %s
+                   ON CONFLICT (mbid) DO NOTHING""",
+                values,
+                template="(%s::uuid, %s::uuid, %s::mb_match_confidence,"
+                         " %s::timestamptz, %s, %s, %s, %s, TRUE)",
+                page_size=500,
+            )
+        return len(values)
 
     def _import_artist_bios(self, conn, items: list[dict]) -> int:
         with conn.cursor() as cur:

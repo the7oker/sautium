@@ -8,6 +8,9 @@ Used by both the aiohttp P2P sync server and the FastAPI backend.
 import base64
 import json
 import logging
+import re
+import unicodedata
+import uuid as uuid_mod
 from datetime import datetime, timezone
 
 import psycopg2.extras
@@ -15,6 +18,29 @@ import psycopg2.extras
 from desktop.p2p import record_sig
 
 logger = logging.getLogger(__name__)
+
+# -- Sautium UUID v5 identity — mirrors backend/uuid_utils.py (desktop must
+# not import the backend package; keep the three functions in step). The
+# carry import gate needs them to PROVE a pushed track's identity by
+# recomputation: track_uuid binds title + primary artist, so a claimed
+# (title, artist) pair that does not rehash to the wire UUID is a forgery
+# or a normalization mismatch, and either way it must not be minted.
+
+SAUTIUM_NAMESPACE = uuid_mod.UUID("adc1ec0b-2c81-5e26-9938-a369c6f7a5e1")
+
+
+def normalize(text: str) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFC", text.strip().lower()))
+
+
+def artist_uuid(name: str) -> uuid_mod.UUID:
+    return uuid_mod.uuid5(SAUTIUM_NAMESPACE, f"artist:{normalize(name)}")
+
+
+def track_uuid(title: str, artist_name: str) -> uuid_mod.UUID:
+    # 'song:' prefix, not 'track:' — backward compat with the initial migration.
+    return uuid_mod.uuid5(
+        SAUTIUM_NAMESPACE, f"song:{normalize(artist_name)}:{normalize(title)}")
 
 # Sync-protocol capabilities advertised on /health. Peers pick pull categories
 # by this list: "segments" = this node serves per-track segment bundles
@@ -27,15 +53,20 @@ CAPABILITIES = ["segments", "carry"]
 # segments pulls get a tighter per-request cap than plain-row categories.
 SEGMENTS_MAX_UUIDS = 500
 
-# Push-seeding ("carry"): the artist layer only, for now. Measured on the
-# reference library it costs ~21 KB per artist on the wire against ~46 KB
-# per track for segments, and unlike segments it is useful to every node
-# regardless of what it owns.
-CARRY_CATEGORIES = ("artist_bios", "artist_tags", "similar_artists")
-# Artists per offer/push request — an offer is 16 bytes each, a push is
-# ~21 KB each.
-CARRY_MAX_ARTISTS = 200
-# Foreign artists a node holds by default (~42 MB at the measured size).
+# Push-seeding ("carry"): audio analysis, because it is the one layer with
+# no external source — GPU work dies with an unreachable node unless someone
+# carries it. The artist layer was carried at first and dropped 2026-08-03:
+# every bio/tag/similar is a Last.fm fetch by name, reproducible on any node
+# for two API calls, and importing similars minted stub artists straight
+# into the carrier's phantom-canon feed. artist_mbids rides along because
+# the carry gate ("canon only") rests on it and a carrier can never
+# re-derive it (no owned music); the rows are author-sealed so the mark
+# stays attributable in transit.
+CARRY_CATEGORIES = ("tracks", "segments", "audio_features", "artist_mbids")
+# Tracks per offer request — an offer is 16 bytes per track against ~46 KB
+# to push one blind.
+CARRY_MAX_TRACKS = 500
+# Foreign tracks a node holds by default (~92 MB at the measured size).
 # Mirrors "sync.carry_limit" in backend/routers/settings.py _DEFAULTS — used
 # when the row has never been written, so a node that nobody configured still
 # carries. Push-seeding that were opt-in would simply never happen.
@@ -90,8 +121,7 @@ EMPTY_INVENTORY = {
 }
 
 
-def get_inventory(conn, track_uuids: list[str],
-                  artist_uuids: list[str] | None = None) -> dict:
+def get_inventory(conn, track_uuids: list[str]) -> dict:
     """
     Check what enrichment data is available for the given track UUIDs.
 
@@ -102,38 +132,15 @@ def get_inventory(conn, track_uuids: list[str],
     alone never delivers upgrades. segment_count lets a peer see how dense
     this node's grid is (densification / "deepen analysis" planning).
 
-    `artist_uuids` names artists the requester wants the artist layer for,
-    independent of any track. Deriving artists from the requested tracks (as
-    this did alone) only ever finds artists WE own music by — which makes
-    every carried record invisible, since carrying means holding an artist's
-    data without owning a note of it. Artist UUIDs are v5 over the name, so
-    the requester can name them without us sharing a single track. Absent →
-    track-derived only, which is what an older peer sends.
-
     Lyrics are deliberately NOT part of the protocol (2026-07-11): the one
     category that is verbatim copyrighted text — every node fetches its own
     from the public sources.
     """
-    if not track_uuids and not artist_uuids:
+    if not track_uuids:
         return dict(EMPTY_INVENTORY)
 
     uuids = track_uuids
-    artists_asked = artist_uuids or []
     q = lambda sql: db_query(conn, sql, [uuids])
-
-    def artist_layer(table: str, alias: str) -> list[str]:
-        rows = db_query(
-            conn,
-            f"""SELECT DISTINCT {alias}.artist_id FROM {table} {alias}
-                 WHERE {alias}.signature IS NOT NULL
-                   AND {alias}.batch_root IS NOT NULL
-                   AND ({alias}.artist_id = ANY(%s::uuid[])
-                        OR EXISTS (SELECT 1 FROM track_artists ta
-                                    WHERE ta.artist_id = {alias}.artist_id
-                                      AND ta.track_id = ANY(%s::uuid[])))""",
-            [artists_asked, uuids],
-        )
-        return _uuid_list(rows, "artist_id")
 
     # -- Track-level data --
     tracks = _uuid_list(
@@ -167,9 +174,27 @@ def get_inventory(conn, track_uuids: list[str],
         q("SELECT DISTINCT artist_id FROM track_artists WHERE track_id = ANY(%s::uuid[])"),
         "artist_id",
     )
-    artist_bios = artist_layer("artist_bios", "ab")
-    artist_tags = artist_layer("artist_tags", "at2")
-    similar_artists = artist_layer("similar_artists", "sa")
+    artist_bios = _uuid_list(
+        q("""SELECT DISTINCT ab.artist_id FROM artist_bios ab
+             INNER JOIN track_artists ta ON ta.artist_id = ab.artist_id
+             WHERE ta.track_id = ANY(%s::uuid[])
+               AND ab.signature IS NOT NULL AND ab.batch_root IS NOT NULL"""),
+        "artist_id",
+    )
+    artist_tags = _uuid_list(
+        q("""SELECT DISTINCT at2.artist_id FROM artist_tags at2
+             INNER JOIN track_artists ta ON ta.artist_id = at2.artist_id
+             WHERE ta.track_id = ANY(%s::uuid[])
+               AND at2.signature IS NOT NULL AND at2.batch_root IS NOT NULL"""),
+        "artist_id",
+    )
+    similar_artists = _uuid_list(
+        q("""SELECT DISTINCT sa.artist_id FROM similar_artists sa
+             INNER JOIN track_artists ta ON ta.artist_id = sa.artist_id
+             WHERE ta.track_id = ANY(%s::uuid[])
+               AND sa.signature IS NOT NULL AND sa.batch_root IS NOT NULL"""),
+        "artist_id",
+    )
     # -- Related genres (album-grain: genres of the albums containing these tracks).
     #    album_genres is local-only (albums don't sync), so we share only the genre
     #    entities + their descriptions, derived via the sender's own albums. --
@@ -535,6 +560,25 @@ def pull_genre_descriptions(conn, uuids: list[str]) -> dict:
     )
 
 
+def pull_artist_mbids(conn, artist_uuids: list[str]) -> dict:
+    """The portable canon mark (carry): author-sealed artist↔MBID bindings.
+
+    No `source` column exists — the kind signs with source = "" on both
+    ends, and created_at fills the fetched_at slot of the payload. Keyed by
+    ARTIST uuids (the carry pusher derives them from the tracks it pushed)."""
+    return _pull_simple(
+        conn, "artist_mbids",
+        f"""SELECT am.artist_id::text AS artist_uuid, am.mbid::text AS mbid,
+                   am.confidence::text AS confidence,
+                   am.created_at AS fetched_at, am.author_pubkey,
+                   am.signature, am.batch_root, am.merkle_proof
+            FROM artist_mbids am
+            WHERE am.artist_id = ANY(%s::uuid[])
+            {_SEALED_ONLY.format(t='am')}""",
+        artist_uuids,
+    )
+
+
 # Map category name -> pull function
 PULL_HANDLERS = {
     "tracks": pull_tracks,
@@ -552,6 +596,8 @@ PULL_HANDLERS = {
     "similar_artists": pull_similar_artists,
     "genre-descriptions": pull_genre_descriptions,
     "genre_descriptions": pull_genre_descriptions,
+    "artist-mbids": pull_artist_mbids,
+    "artist_mbids": pull_artist_mbids,
 }
 
 
@@ -588,100 +634,150 @@ def get_enriched_artist_uuids(conn) -> list[str]:
 # record).
 # ---------------------------------------------------------------------------
 
-def get_pushable_artists(conn, limit: int) -> list[str]:
-    """Artists whose FIRST-HAND, sealed artist-layer data this node can
-    contribute, rarest first.
+def get_pushable_tracks(conn, limit: int) -> list[dict]:
+    """Tracks whose FIRST-HAND, sealed audio analysis this node can
+    contribute, rarest first. Returns dicts with track_uuid, title and the
+    primary artist names — the caller re-derives the UUID from them
+    (identity proof) and builds the tracks payload without a second query.
 
     Three conditions, each load-bearing:
-      * sealed — unsigned material must not travel at all;
-      * NOT imported — first-hand only. Re-pushing what we pulled from
-        someone else spreads nothing new and burns a carrier's budget;
-      * canon — an MB anchor that is not phantom-confidence. Phantom rows
-        are name+genre guesses for artists with no owned tracks to verify
-        against, and the schema says so outright: re-verify before trusting
-        over P2P. Pushing residue is how carriers would multiply noise.
+      * sealed segments — unsigned material must not travel at all;
+      * first-hand source (analysis_sources NOT imported) — re-pushing what
+        we pulled from someone else spreads nothing new and burns a
+        carrier's budget;
+      * canon primary — the track's primary artist has a non-phantom MB
+        anchor. A phantom anchor is a name guess with no owned tracks to
+        verify against; pushing residue is how carriers would multiply
+        noise, and an unsplit "A feat. B" mess has no anchor at all.
 
-    Rarest first (Last.fm listeners, unknown counts rarest) for the same
-    reason the DHT tail is: anything popular reaches the network anyway.
-    """
+    On top of the SQL, the caller MUST apply verify_track_identity(): the
+    identity proof carries only what uuid5 covers, and a track whose UUID
+    matches none of its primary names (multi-primary collaborations keyed
+    on a combined display name) does not travel.
+
+    Rarest first (Last.fm listeners of the primary artist, unknown counts
+    rarest) for the same reason the DHT tail is: anything popular reaches
+    the network anyway."""
     if limit <= 0:
         return []
     rows = db_query(
         conn,
         """WITH mine AS (
-               SELECT artist_id FROM artist_bios
-                WHERE signature IS NOT NULL AND NOT imported
-               UNION
-               SELECT artist_id FROM artist_tags
-                WHERE signature IS NOT NULL AND NOT imported
-               UNION
-               SELECT artist_id FROM similar_artists
-                WHERE signature IS NOT NULL AND NOT imported
+               SELECT e.track_id
+                 FROM embeddings e
+                 JOIN analysis_sources s ON s.id = e.analysis_source_id
+                WHERE NOT s.imported
+                  AND EXISTS (SELECT 1 FROM embedding_segments es
+                               WHERE es.embedding_id = e.id
+                                 AND es.signature IS NOT NULL
+                                 AND es.batch_root IS NOT NULL)
            )
-           SELECT m.artist_id::text AS artist_uuid
+           SELECT t.id::text AS track_uuid, t.title,
+                  array_agg(a.name ORDER BY a.name) AS primary_names,
+                  MAX(ab.listeners) AS listeners
              FROM mine m
-             LEFT JOIN artist_bios ab ON ab.artist_id = m.artist_id
+             JOIN tracks t        ON t.id = m.track_id
+             JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+             JOIN artists a       ON a.id = ta.artist_id
+             LEFT JOIN artist_bios ab ON ab.artist_id = ta.artist_id
             WHERE EXISTS (SELECT 1 FROM artist_mbids am
-                           WHERE am.artist_id = m.artist_id
+                           WHERE am.artist_id = ta.artist_id
                              AND am.confidence <> 'phantom')
-            GROUP BY m.artist_id
+            GROUP BY t.id, t.title
             ORDER BY MAX(ab.listeners) ASC NULLS FIRST
             LIMIT %s""",
         [limit],
     )
-    return [r["artist_uuid"] for r in rows]
+    return [dict(r) for r in rows]
 
 
-def count_carried_artists(conn) -> int:
-    """How many artists this node holds enrichment for while owning none of
-    their music — the honest meter for "disk spent on someone else's
-    behalf". Material about artists we DO own is not carrying, it is our own
-    library, however it arrived."""
+def verify_track_identity(track_uuid_str: str, title: str,
+                          primary_names: list[str]):
+    """The uuid5 identity proof: return the primary name the track UUID was
+    keyed on, or None if none of the claimed primaries rehashes to it.
+
+    Title is clamped [:500] BEFORE hashing — mirrors
+    discography._persist_phantom_tracklist, which clamps before minting so
+    identity keys on the stored value. Sender and carrier run the same
+    check: the sender to not offer what would be dropped, the carrier
+    because an unverified (title, artist) pair must not be minted."""
+    clamped = (title or "").strip()[:500]
+    if not clamped:
+        return None
+    for name in primary_names or []:
+        if name and str(track_uuid(clamped, name)) == track_uuid_str:
+            return name
+    return None
+
+
+def count_carried_tracks(conn) -> int:
+    """How many tracks this node holds imported analysis for while owning
+    no file — the honest meter for "disk spent on someone else's behalf".
+    Analysis of tracks we DO own is not carrying, it is our own library,
+    however it arrived."""
     rows = db_query(
         conn,
-        """WITH held AS (
-               SELECT artist_id FROM artist_bios WHERE imported
-               UNION SELECT artist_id FROM artist_tags WHERE imported
-               UNION SELECT artist_id FROM similar_artists WHERE imported
-           )
-           SELECT count(*) AS n FROM held h
-            WHERE NOT EXISTS (
-                SELECT 1 FROM track_artists ta
-                  JOIN media_files mf ON mf.track_id = ta.track_id
-                 WHERE ta.artist_id = h.artist_id)""",
+        """SELECT count(DISTINCT e.track_id) AS n
+             FROM embeddings e
+             JOIN analysis_sources s ON s.id = e.analysis_source_id
+            WHERE s.imported
+              AND NOT EXISTS (SELECT 1 FROM media_files mf
+                               WHERE mf.track_id = e.track_id)""",
     )
     return int(rows[0]["n"]) if rows else 0
 
 
-def wanted_artists(conn, artist_uuids: list[str], budget: int) -> dict:
-    """Answer an offer: per category, which of these artists we hold nothing
-    for — capped by whatever is left of the carry budget.
+def wanted_tracks(conn, track_uuids: list[str], budget: int) -> dict:
+    """Answer an offer: per audio category, which of these tracks we hold
+    nothing for — capped by whatever is left of the carry budget.
 
     "Nothing for" rather than "nothing fresher": a freshness upgrade is what
-    the ordinary pull is for, and asking for one here would mean shipping
-    fetched_at in the offer to no purpose."""
+    the ordinary pull is for. `tracks` doubles as the mint list — the
+    pusher sends the track entities first because the analysis importers
+    require the rows to exist (FK)."""
     empty = {c: [] for c in CARRY_CATEGORIES}
-    if not artist_uuids or budget <= 0:
+    if not track_uuids or budget <= 0:
         return empty
-    room = budget - count_carried_artists(conn)
+    room = budget - count_carried_tracks(conn)
     if room <= 0:
         return empty
 
-    uuids = artist_uuids[:CARRY_MAX_ARTISTS]
-    out = {}
-    for category, table in (("artist_bios", "artist_bios"),
-                            ("artist_tags", "artist_tags"),
-                            ("similar_artists", "similar_artists")):
-        rows = db_query(
-            conn,
-            f"""SELECT u.id::text AS artist_uuid
-                  FROM unnest(%s::uuid[]) AS u(id)
-                 WHERE NOT EXISTS (SELECT 1 FROM {table} t
-                                    WHERE t.artist_id = u.id)
-                 LIMIT %s""",
-            [uuids, room],
-        )
-        out[category] = [r["artist_uuid"] for r in rows]
+    uuids = track_uuids[:CARRY_MAX_TRACKS]
+    missing_tracks = db_query(
+        conn,
+        """SELECT u.id::text AS track_uuid
+             FROM unnest(%s::uuid[]) AS u(id)
+            WHERE NOT EXISTS (SELECT 1 FROM tracks t WHERE t.id = u.id)
+            LIMIT %s""",
+        [uuids, room],
+    )
+    no_segments = db_query(
+        conn,
+        """SELECT u.id::text AS track_uuid
+             FROM unnest(%s::uuid[]) AS u(id)
+            WHERE NOT EXISTS (
+                SELECT 1 FROM embeddings e
+                  JOIN embedding_segments es ON es.embedding_id = e.id
+                 WHERE e.track_id = u.id)
+            LIMIT %s""",
+        [uuids, room],
+    )
+    no_features = db_query(
+        conn,
+        """SELECT u.id::text AS track_uuid
+             FROM unnest(%s::uuid[]) AS u(id)
+            WHERE NOT EXISTS (SELECT 1 FROM audio_features af
+                               WHERE af.track_id = u.id)
+            LIMIT %s""",
+        [uuids, room],
+    )
+    out = dict(empty)
+    out["tracks"] = [r["track_uuid"] for r in missing_tracks]
+    out["segments"] = [r["track_uuid"] for r in no_segments]
+    out["audio_features"] = [r["track_uuid"] for r in no_features]
+    # artist_mbids stays empty here: the carrier cannot know the primary
+    # artists before the tracks arrive, so the pusher sends the bindings
+    # for the primaries of whatever it pushed and the importer dedups.
     return out
 
 
@@ -693,11 +789,11 @@ ANNOUNCE_TAIL_SQL = """
          WHERE EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = ta.track_id)
             OR EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id)
         UNION
-        SELECT artist_id FROM artist_bios      WHERE imported
-        UNION
-        SELECT artist_id FROM artist_tags      WHERE imported
-        UNION
-        SELECT artist_id FROM similar_artists  WHERE imported
+        SELECT ta.artist_id
+          FROM track_artists ta
+         WHERE EXISTS (SELECT 1 FROM embeddings e
+                         JOIN analysis_sources s ON s.id = e.analysis_source_id
+                        WHERE e.track_id = ta.track_id AND s.imported)
     )
     SELECT x.artist_id::text AS artist_uuid
       FROM announceable x
@@ -711,15 +807,17 @@ ANNOUNCE_TAIL_SQL = """
 def get_announce_tail_uuids(conn, limit: int) -> list[str]:
     """The rare-artist tail to announce by exact key (see dht_service).
 
-    Two things get announced. Artists whose OWNED music this node has
-    analyzed — first-hand material nobody else may hold. And artists whose
-    layer arrived from a peer, because whoever authored it may be unable to
-    announce at all: a node behind CGNAT suppresses its own announces, so
-    for anything it push-seeded the carrier is the only address in the DHT.
-    An unannounced carry is disk spent on data no one can find.
+    Two branches. Artists whose OWNED music this node has analyzed —
+    first-hand material nobody else may hold. And artists with IMPORTED
+    analysis on their tracks — carried material, because whoever authored
+    it may be unable to announce at all: a node behind CGNAT suppresses its
+    own announces, so for anything it push-seeded the carrier is the only
+    address in the DHT. An unannounced carry is disk spent on data no one
+    can find. (Gap-fill imports on owned tracks land in both branches; the
+    UNION dedups.)
 
-    Phantoms never enter either set — an owned track or an imported record
-    is the whole test, and neither is something a name-guess produces.
+    Phantoms never enter either set — an owned analyzed track or an
+    imported analysis row is the test, and a name-guess produces neither.
 
     Ranked by Last.fm listeners as the rarity proxy: a peer's random node
     sample will surface anything popular anyway, so an exact key is only

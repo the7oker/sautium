@@ -249,23 +249,20 @@ class SyncServer:
         try:
             body = await request.json()
             track_uuids = body.get("track_uuids", [])
-            artist_uuids = body.get("artist_uuids", [])
         except (json.JSONDecodeError, Exception):
             return self._json_response(
                 request, {"error": "invalid JSON"}, status=400
             )
 
-        for name, val in (("track_uuids", track_uuids),
-                          ("artist_uuids", artist_uuids)):
-            if not isinstance(val, list) or len(val) > MAX_UUIDS_PER_REQUEST:
-                return self._json_response(
-                    request, {"error": f"{name} must be a list of at most {MAX_UUIDS_PER_REQUEST} items"},
-                    status=400,
-                )
+        if not isinstance(track_uuids, list) or len(track_uuids) > MAX_UUIDS_PER_REQUEST:
+            return self._json_response(
+                request, {"error": f"track_uuids must be a list of at most {MAX_UUIDS_PER_REQUEST} items"},
+                status=400,
+            )
 
         try:
             result = await self._run_query(
-                sync_queries.get_inventory, track_uuids, artist_uuids
+                sync_queries.get_inventory, track_uuids
             )
             return self._json_response(request, result)
         except Exception as e:
@@ -347,7 +344,7 @@ class SyncServer:
         with the subset we actually want.
 
         The round trip exists so a pusher never ships what we already hold:
-        16 bytes per artist to ask, ~21 KB per artist to send blind."""
+        16 bytes per track to ask, ~46 KB per track to send blind."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
             return self._json_response(
@@ -357,17 +354,17 @@ class SyncServer:
                 request, {"error": "sharing disabled"}, status=403)
         try:
             body = await request.json()
-            artists = body.get("artists", [])
+            tracks = body.get("tracks", [])
         except (json.JSONDecodeError, Exception):
             return self._json_response(
                 request, {"error": "invalid JSON"}, status=400)
-        if not isinstance(artists, list):
+        if not isinstance(tracks, list):
             return self._json_response(
-                request, {"error": "artists must be a list"}, status=400)
+                request, {"error": "tracks must be a list"}, status=400)
 
         budget = self._carry_budget()
         wanted = await self._run_query(
-            sync_queries.wanted_artists, artists, budget)
+            sync_queries.wanted_tracks, tracks, budget)
         return self._json_response(request, {"wanted": wanted})
 
     async def handle_carry_push(self, request: web.Request) -> web.Response:

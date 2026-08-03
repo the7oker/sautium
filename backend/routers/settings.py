@@ -229,12 +229,13 @@ _DEFAULTS: Dict[str, Any] = {
     "sync.auto_interval_min":    30,
     # Size of the rare-artist DHT announce tail (0/null = node key only).
     "sync.announce_limit":       300,
-    # Foreign artists this node will hold on other peers' behalf
-    # (push-seeding). A node behind CGNAT cannot be pulled FROM, so its own
-    # analysis only reaches the network if somebody carries it. ~21 KB per
-    # artist measured; 0/null = don't carry. Mirrored by
-    # sync_queries.CARRY_DEFAULT_BUDGET (the launcher's sync server reads
-    # user_settings directly and needs the same fallback) — keep in step.
+    # Foreign TRACKS whose audio analysis this node will hold on other
+    # peers' behalf (push-seeding). A node behind CGNAT cannot be pulled
+    # FROM, so its own analysis only reaches the network if somebody
+    # carries it. ~46 KB per track measured; 0/null = don't carry.
+    # Mirrored by sync_queries.CARRY_DEFAULT_BUDGET (the launcher's sync
+    # server reads user_settings directly and needs the same fallback) —
+    # keep in step.
     "sync.carry_limit":          2000,
     "enrichment.background_enabled": True,
     # Provider/model default to None so the first-run UI shows

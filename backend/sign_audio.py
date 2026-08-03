@@ -123,7 +123,22 @@ _ENRICHMENT_SOURCES = {
                gd.summary, gd.content, gd.url
         FROM genre_descriptions gd
         WHERE gd.signature IS NULL AND NOT gd.imported""", "genre_descriptions"),
+    # The canon mark, made portable (carry). confidence <> 'phantom' on top of
+    # the usual gates: a phantom row is a name+genre guess with no owned
+    # tracks behind it, and signing it would attest a guess as canon.
+    # `source` is not a column here — the kind signs with source = "".
+    "artist_mbid": ("""
+        SELECT am.mbid AS id, am.artist_id::text AS entity, '' AS source,
+               am.created_at AS fetched_at,
+               am.mbid::text AS mbid, am.confidence::text AS confidence
+        FROM artist_mbids am
+        WHERE am.signature IS NULL AND NOT am.imported
+          AND am.confidence <> 'phantom'""", "artist_mbids"),
 }
+
+# UPDATE-phase PK column and cast per table; everything not listed uses the
+# SERIAL `id`. artist_mbids is keyed by the MBID itself.
+_TABLE_PK = {"artist_mbids": ("mbid", "uuid")}
 
 
 def _collect_enrichment(cur, author, key, pending, chunk=20000) -> int:
@@ -247,15 +262,16 @@ def run(limit=None, dry_run=False):
         by_table.setdefault(table, []).append(
             (pk, author, sig, root, json.dumps(proof)))
     for table, rows in by_table.items():
+        pk_col, pk_cast = _TABLE_PK.get(table, ("id", "int"))
         psycopg2.extras.execute_values(
             cur,
             f"""UPDATE {table} AS t
                 SET author_pubkey = v.author, signature = v.sig,
                     batch_root = v.root, merkle_proof = v.proof::jsonb
-                FROM (VALUES %s) AS v(id, author, sig, root, proof)
-                WHERE t.id = v.id""",
+                FROM (VALUES %s) AS v(pk, author, sig, root, proof)
+                WHERE t.{pk_col} = v.pk""",
             rows,
-            template="(%s::int, %s, %s, %s, %s)",
+            template=f"(%s::{pk_cast}, %s, %s, %s, %s)",
             page_size=500,
         )
         logger.info("sealed %d rows in %s", len(rows), table)
