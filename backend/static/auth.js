@@ -345,15 +345,38 @@
 
   // -- SSE replacement -------------------------------------------------------
 
+  // Every backend SSE generator emits at least a keepalive comment every
+  // 15-20s (asyncio.wait_for timeouts in the routers). Silence past two
+  // full cadences therefore means the socket died without a FIN — the
+  // phone slept, the AP roamed, NAT rebound — and the pending read()
+  // would otherwise hang for however long the OS takes to notice, with
+  // the UI frozen on stale data the whole time. A frozen tab freezes
+  // this timer too; on resume it fires immediately, which is exactly
+  // the moment to declare the pre-sleep socket dead.
+  const SSE_IDLE_MS = 45000;
+
   // Reads the SSE wire format from a ReadableStream reader and yields
   // raw `data:` payloads (joined with newlines if multi-line). Comment
   // lines (": ...") and `event:` / `id:` / `retry:` fields are
   // ignored — the backend never sets those for us right now.
-  async function* parseSSE(reader) {
+  async function* parseSSE(reader, path) {
     const decoder = new TextDecoder();
     let buf = "";
     while (true) {
-      const { value, done } = await reader.read();
+      let idleTimer;
+      const idle = new Promise(r => { idleTimer = setTimeout(() => r("idle"), SSE_IDLE_MS); });
+      const read = await Promise.race([reader.read(), idle]);
+      clearTimeout(idleTimer);
+      if (read === "idle") {
+        console.warn("SSE idle >" + SSE_IDLE_MS / 1000 + "s, reconnecting:", path);
+        // Resolves the pending read() with done:true — the stream ends
+        // cleanly and sseStream's loop reconnects after its usual beat.
+        // A rejection here is the already-dead body objecting; nothing
+        // to act on.
+        reader.cancel().catch(() => {});
+        return;
+      }
+      const { value, done } = read;
       if (done) return;
       buf += decoder.decode(value, { stream: true });
       let idx;
@@ -395,7 +418,7 @@
           }
           backoff = 1000;
           const reader = resp.body.getReader();
-          for await (const data of parseSSE(reader)) {
+          for await (const data of parseSSE(reader, path)) {
             try {
               onMessage({ data });
             } catch (e) {

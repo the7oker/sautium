@@ -31,6 +31,18 @@
   let lastPlaylistVersion = null;
   let _sseSource = null;
 
+  // How long the status stream may be down before the UI admits it.
+  // A transport error here says nothing about playback — the music keeps
+  // playing on the renderer; only our window into it dropped. Painting
+  // "disconnected" on the first hiccup made every Wi-Fi blip and phone
+  // wake hide the mini-player and the queue/album highlight for a beat
+  // (mp.update treats the state as "nothing playing"). sseStream
+  // reconnects on its own and the server pushes current status on every
+  // connect, so a healthy recovery repaints within ~1-3s; 10s covers
+  // three escalating attempts before we concede the link is really down.
+  const DISCONNECT_GRACE_MS = 10000;
+  let _disconnectPaint = null;
+
   // Exposed for legacy reads in some code paths (the shell prefers the
   // detail on np-update; this is a fallback for synchronous callers).
   window.currentPlaylist = [];
@@ -54,13 +66,21 @@
         handleStatusEvent(data);
       },
       () => {
-        // Transport-level disconnect — sseStream will reconnect. Flip
-        // the shared state and let subscribers paint the "disconnected"
-        // affordance until the next message arrives.
-        currentState = 'disconnected';
-        document.dispatchEvent(new CustomEvent('np-update', {
-          detail: { state: 'disconnected' },
-        }));
+        // Transport-level disconnect — sseStream will reconnect. Keep
+        // showing the last known state for the grace window; repeated
+        // errors during backoff keep the original deadline so the paint
+        // lands at the earliest honest moment, not backoff-times later.
+        if (_disconnectPaint) return;
+        console.debug('status stream down; painting disconnected in',
+          DISCONNECT_GRACE_MS / 1000 + 's');
+        _disconnectPaint = setTimeout(() => {
+          _disconnectPaint = null;
+          console.debug('status stream still down; painting disconnected');
+          currentState = 'disconnected';
+          document.dispatchEvent(new CustomEvent('np-update', {
+            detail: { state: 'disconnected' },
+          }));
+        }, DISCONNECT_GRACE_MS);
       }
     );
   }
@@ -86,6 +106,9 @@
   // playlist-aware step stays strictly serial.
   let _sseChain = Promise.resolve();
   function handleStatusEvent(data) {
+    // A real message means the stream is back — the pending
+    // "disconnected" paint is no longer true.
+    if (_disconnectPaint) { clearTimeout(_disconnectPaint); _disconnectPaint = null; }
     _sseChain = _sseChain
       .then(() => processStatusEvent(data))
       .catch((e) => console.error('SSE handler error:', e));

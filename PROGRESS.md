@@ -153,6 +153,19 @@ The short version of the hard-learned lessons:
 
 ## Known Gotchas
 
+- **A dead SSE socket is silent, and painting its death is a UI lie.** Two
+  distinct failure modes, both hit by phones: (1) a socket that dies without
+  a FIN leaves `reader.read()` pending forever — every backend generator
+  keepalives at 15-20s, so `sseStream` (auth.js) cancels the reader after
+  45s of byte-level silence and reconnects; a frozen tab freezes that timer
+  too, so on wake it fires immediately, which is exactly right. (2) A
+  transport error says nothing about playback — the music keeps playing on
+  the renderer — so player.js holds the last known state for a 10s grace
+  before dispatching `disconnected` (mp.update treats that state as
+  "nothing playing" and hides the bar). A successful reconnect always
+  delivers a status message (the stream pushes current status on connect),
+  which cancels the pending paint — so the paint fires only when the link
+  has genuinely been down the whole window.
 - **libtorrent 2.1+ `peers()`** returns `(ip, port)` tuples, not objects with
   `.address()/.port()`. Compat handling in `dht_service.py`.
 - **libtorrent DHT alerts** require `alert_mask += dht_operation_notification`
