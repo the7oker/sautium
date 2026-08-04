@@ -1773,6 +1773,36 @@
      picks). Provider/model selection lives in Settings — here we use
      whatever the backend's `default_provider` returns. */
 
+  // Reconnect schedule for a dropped chat stream. `navigator.onLine`
+  // stays true through most real drops (Wi-Fi/LTE handoff, NAT
+  // timeout, a router blip), so there is no event to wait on — retries
+  // have to escalate on their own or all of them burn in the
+  // milliseconds before the network is back. Budget ≈33s, after which
+  // the reply is still safe in the DB and reopening the chat shows it.
+  const STREAM_RECONNECT_DELAYS_MS = [1000, 3000, 9000, 20000];
+
+  // The chat stream emits a keepalive comment every 15s (chat.py's
+  // KEEPALIVE_INTERVAL_SEC). Silence three keepalives long means the
+  // socket died without the reader ever erroring — the classic phone
+  // sleep / NAT timeout, where the reader would otherwise hang on
+  // typing dots forever. Only ever checked when the tab comes back.
+  const STREAM_SILENCE_MS = 45000;
+
+  // Wait out one reconnect delay, cut short the moment the browser
+  // says connectivity is back — so a phone that knows it went offline
+  // resumes immediately instead of sitting out the whole backoff.
+  function awaitReconnectWindow(ms) {
+    return new Promise(resolve => {
+      const done = () => {
+        clearTimeout(timer);
+        window.removeEventListener('online', done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      window.addEventListener('online', done);
+    });
+  }
+
   const ai = {
     el: null, thread: null, input: null, form: null, sendBtn: null,
     viewChat: null, viewList: null,
@@ -1785,6 +1815,8 @@
     view: 'chat',            // 'chat' | 'list'
     activeSessionId: null,
     sending: false,
+    _streamCtx: null,        // render state of the reply being streamed
+    _streamAbort: null,      // aborts the reader when the socket is stale
 
     init() {
       this.el = document.getElementById('aiSheet');
@@ -1816,6 +1848,17 @@
 
       const fab = document.getElementById('aiFab');
       if (fab) fab.addEventListener('click', () => this.show());
+
+      // A sleeping phone can drop the chat socket without either side
+      // sending a FIN: the reader then never resolves and the thread
+      // sits on typing dots forever, input locked. When the tab comes
+      // back, silence longer than the server's keepalive means exactly
+      // that — abort so consumeStream takes its reconnect path.
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden || !this._streamCtx || !this._streamAbort) return;
+        if (Date.now() - this._streamCtx.lastEventAt < STREAM_SILENCE_MS) return;
+        this._streamAbort.abort();
+      });
 
       document.addEventListener('keydown', e => {
         if (e.key !== 'Escape' || !this.isOpen) return;
@@ -2170,6 +2213,7 @@
       this.scrollToBottom();
 
       try {
+        this._streamAbort = new AbortController();
         const resp = await fetch(
           '/api/chat/sessions/' + this.activeSessionId + '/messages',
           {
@@ -2179,6 +2223,7 @@
               'Accept': 'text/event-stream',
             },
             body: JSON.stringify({ message: text }),
+            signal: this._streamAbort.signal,
           });
         if (!resp.ok) {
           // Pre-stream validation failure (no provider, missing
@@ -2209,11 +2254,123 @@
     },
 
     // Shared SSE consumer for the send() stream and the reattach
-    // stream: builds the assistant bubble lazily, renders deltas /
-    // blocks / tool pips, handles done + error events, refreshes
-    // session metadata at the end. `typing` is the indicator row the
-    // caller already appended; it's removed on the first content.
+    // stream. Rendering lives in _newStreamCtx + _pumpStream; this
+    // layer owns the recovery policy.
+    //
+    // A dead socket must never turn a finished answer into "Network
+    // error". The generation outlives the connection that started it
+    // — `_LiveRun` on the backend keeps producing and replays its
+    // whole history to any later subscriber — so we reattach to
+    // /stream and let the replay repaint the same bubble. Only the
+    // backend speaking is fatal: a `provider_error` on `done`, or an
+    // explicit `error` event.
     async consumeStream(resp, typing) {
+      const sessionId = this.activeSessionId;
+      const ctx = this._newStreamCtx(typing);
+      this._streamCtx = ctx;
+      let stream = resp;
+      let reconnects = 0;
+
+      try {
+        while (true) {
+          if (stream) {
+            try {
+              await this._pumpStream(stream, ctx);
+              ctx.finish();
+              // Refresh sessions metadata so list-view picks up the new
+              // preview / last_model. Title is already up-to-date from
+              // the 'done' SSE event so we don't overwrite the title bar
+              // here — re-loading would briefly flash the stale value.
+              await this.loadSessions();
+              this.scrollToBottom();
+              return;
+            } catch (err) {
+              if (err && err.fatal) { ctx.fail(err); return; }
+              console.warn('chat stream dropped:', err);
+              stream = null;
+            }
+          }
+
+          if (this.activeSessionId !== sessionId) return;
+          if (reconnects >= STREAM_RECONNECT_DELAYS_MS.length) {
+            ctx.fail(new Error('Connection lost. Reopen this chat to see the reply.'));
+            return;
+          }
+          ctx.showPip('reconnecting…');
+          await awaitReconnectWindow(STREAM_RECONNECT_DELAYS_MS[reconnects++]);
+          if (this.activeSessionId !== sessionId) return;
+
+          ctx.reset();
+          const next = await this._openReattach(sessionId);
+          if (next === 'gone') {
+            await this._finishFromDb(sessionId, ctx);
+            return;
+          }
+          if (next) stream = next;
+        }
+      } finally {
+        if (this._streamCtx === ctx) this._streamCtx = null;
+      }
+    },
+
+    // GET the live-generation stream for a reconnect. 'gone' means the
+    // run finished while we were disconnected (404) and its reply is
+    // already persisted; null means the request itself failed.
+    async _openReattach(sessionId) {
+      const url = '/api/chat/sessions/' + sessionId + '/stream';
+      const opts = { headers: { 'Accept': 'text/event-stream' } };
+      try {
+        this._streamAbort = new AbortController();
+        let resp = await fetch(url, { ...opts, signal: this._streamAbort.signal });
+        // A tab frozen between signing and sending replays a stale
+        // HMAC timestamp (auth_hmac's window is 60s) and gets 401 on
+        // its first request after waking. Re-signing fixes it.
+        if (resp.status === 401) {
+          this._streamAbort = new AbortController();
+          resp = await fetch(url, { ...opts, signal: this._streamAbort.signal });
+        }
+        if (resp.status === 404) return 'gone';
+        if (!resp.ok) return null;
+        return resp;
+      } catch (err) {
+        console.warn('chat reattach failed:', err);
+        return null;
+      }
+    },
+
+    // The run ended while we were disconnected, so its reply is in the
+    // DB. Paint it into the bubble we already have rather than
+    // re-rendering the thread — a full reload would flash "Loading…"
+    // over valid DOM.
+    async _finishFromDb(sessionId, ctx) {
+      try {
+        const resp = await fetch('/api/chat/sessions/' + sessionId + '/messages');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        const msgs = data.messages || [];
+        const last = msgs[msgs.length - 1];
+        // The user row is persisted before generation starts, so an
+        // assistant row after it is the reply we were streaming. Its
+        // absence means the run died without writing one.
+        if (!last || last.role !== 'assistant') {
+          ctx.fail(new Error('The reply was lost. Send the message again.'));
+          return;
+        }
+        if (this.activeSessionId !== sessionId) return;
+        ctx.renderPersisted(last);
+        await this.loadSessions();
+        this.scrollToBottom();
+      } catch (err) {
+        console.warn('chat finish-from-db failed:', err);
+        ctx.fail(new Error('Reply finished — reopen this chat to read it.'));
+      }
+    },
+
+    // Rendering state for one assistant reply: the bubble, its prose,
+    // blocks, model tag and tool pip. It outlives a reconnect, so the
+    // replayed stream repaints the same nodes instead of stacking a
+    // second bubble under the first.
+    _newStreamCtx(typing) {
       let aiRow = null, aiBody = null, proseDiv = null, blocksDiv = null;
       let modelTag = null, proseText = '';
       let pendingModelLabel = '';   // remembered between meta and bubble creation
@@ -2249,8 +2406,9 @@
       // while it runs SQL / library searches, and with the typing
       // indicator already gone that silence used to read as "hung"
       // (users refreshed mid-generation). The pip sits at the bottom
-      // of the bubble until the next text delta replaces it.
-      const showToolPip = (name) => {
+      // of the bubble until the next text delta replaces it. The
+      // reconnect path reuses it for its own status line.
+      const showPip = (label) => {
         ensureAiRow();
         if (!toolPip) {
           toolPip = document.createElement('div');
@@ -2263,8 +2421,7 @@
             '<span class="ai-tool-pip-label"></span>';
           aiBody.appendChild(toolPip);
         }
-        toolPip.querySelector('.ai-tool-pip-label').textContent =
-          toolPipLabel(name);
+        toolPip.querySelector('.ai-tool-pip-label').textContent = label;
         this.scrollToBottom();
       };
 
@@ -2323,106 +2480,139 @@
         if (aiRow) applyModelLabel();
       };
 
-      try {
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
+      return {
+        // Stamped on every chunk read; the visibility hook compares it
+        // against the server's keepalive cadence to spot a socket that
+        // died without the reader ever noticing.
+        lastEventAt: Date.now(),
 
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          // SSE messages are separated by a blank line (\n\n).
-          let sep;
-          while ((sep = buffer.indexOf('\n\n')) >= 0) {
-            const raw = buffer.slice(0, sep);
-            buffer = buffer.slice(sep + 2);
-            const evt = parseSseMessage(raw);
-            if (!evt) continue;
+        onModel, onDelta, onBlocks, showPip,
 
-            if (evt.event === 'meta') {
-              const modelStr = evt.data.provider
-                ? `${evt.data.provider}:${evt.data.model || ''}`
-                : (evt.data.model || '');
-              if (modelStr) onModel(modelStr);
-            } else if (evt.event === 'delta') {
-              onDelta(evt.data.text || '');
-            } else if (evt.event === 'blocks') {
-              onBlocks(evt.data.blocks || []);
-            } else if (evt.event === 'tool') {
-              showToolPip(evt.data.name || '');
-            } else if (evt.event === 'done') {
-              // Authoritative model name from the provider — overrides
-              // the optimistic one we set on `meta`. Both usually agree
-              // but `done` is canonical (matches what's persisted).
-              const modelStr = evt.data.provider
-                ? `${evt.data.provider}:${evt.data.model || ''}`
-                : (evt.data.model || '');
-              onModel(modelStr);
-              // Backend just refined the truncated-message fallback
-              // title via Haiku for the first exchange in this
-              // session. Update both the chat-view title bar and
-              // the cached sessions[] entry so list-view picks it
-              // up without an extra round-trip.
-              if (evt.data.title) {
-                this.chatTitle.textContent = evt.data.title;
-                const cached = this.sessions.find(
-                  s => s.id === this.activeSessionId);
-                if (cached) cached.title = evt.data.title;
-              }
-              // Provider-side failure (Anthropic 402 / quota / rate
-              // limit / OpenAI invalid_api_key…). The stream finished
-              // cleanly but the assistant has nothing to say. Surface
-              // the message instead of leaving the bubble empty —
-              // attach the SDK-derived action link when we have one
-              // so the user can fix it in one click.
-              if (evt.data.provider_error) {
-                const err = new Error(evt.data.provider_error);
-                if (evt.data.provider_error_action) {
-                  err.action = evt.data.provider_error_action;
-                }
-                throw err;
-              }
-            } else if (evt.event === 'error') {
-              throw new Error(evt.data.message || 'AI error');
+        // A reattached stream replays its whole history, so the prose
+        // has to rebuild from zero. The DOM stays untouched — the
+        // replay lands in one chunk and repaints it before the browser
+        // gets a frame in edgewise.
+        reset() { proseText = ''; this.lastEventAt = Date.now(); },
+
+        finish() {
+          if (typing.parentNode) typing.remove();
+          hideToolPip();
+        },
+
+        fail(err) {
+          if (typing.parentNode) typing.remove();
+          hideToolPip();
+          console.warn('stream failed:', err);
+          const action = err && err.action && err.action.url && err.action.label
+            ? err.action
+            : null;
+          const actionHtml = action
+            ? ` <a href="${escapeHtml(action.url)}" target="_blank" rel="noopener" style="color:var(--color-amber);text-decoration:underline;">${escapeHtml(action.label)} →</a>`
+            : '';
+          if (aiRow && proseDiv) {
+            // Stream started before failure — append the error inline
+            // so partial output stays visible.
+            const errP = document.createElement('p');
+            errP.style.color = 'var(--color-text-muted)';
+            errP.innerHTML = '— ' + escapeHtml(String(err.message || err)) + actionHtml;
+            proseDiv.appendChild(errP);
+          } else {
+            const errRow = document.createElement('div');
+            errRow.className = 'ai-msg-row';
+            errRow.innerHTML =
+              '<div class="ai-msg-ai" style="color:var(--color-text-muted);">' +
+              escapeHtml(String(err.message || err)) + actionHtml + '</div>';
+            ai.thread.appendChild(errRow);
+          }
+          ai.scrollToBottom();
+        },
+
+        // The generation already closed and persisted its reply — fill
+        // the live bubble from the DB row so the reconnect ends the way
+        // a healthy stream would have.
+        renderPersisted(m) {
+          ensureAiRow();
+          if (typing.parentNode) typing.remove();
+          hideToolPip();
+          if (m.model) { pendingModelLabel = m.model; applyModelLabel(); }
+          proseText = m.content || '';
+          proseDiv.innerHTML = mdToHtml(proseText);
+          onBlocks(aiBlocksFromMessage(m));
+        },
+      };
+    },
+
+    // Reads one SSE connection into `ctx` until the server closes it.
+    // Throws on transport failure (caller reconnects) and on backend
+    // failure marked `fatal` (caller surfaces it).
+    async _pumpStream(resp, ctx) {
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        ctx.lastEventAt = Date.now();
+        buffer += decoder.decode(value, { stream: true });
+        // SSE messages are separated by a blank line (\n\n).
+        let sep;
+        while ((sep = buffer.indexOf('\n\n')) >= 0) {
+          const raw = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          const evt = parseSseMessage(raw);
+          if (!evt) continue;
+
+          if (evt.event === 'meta') {
+            const modelStr = evt.data.provider
+              ? `${evt.data.provider}:${evt.data.model || ''}`
+              : (evt.data.model || '');
+            if (modelStr) ctx.onModel(modelStr);
+          } else if (evt.event === 'delta') {
+            ctx.onDelta(evt.data.text || '');
+          } else if (evt.event === 'blocks') {
+            ctx.onBlocks(evt.data.blocks || []);
+          } else if (evt.event === 'tool') {
+            ctx.showPip(toolPipLabel(evt.data.name || ''));
+          } else if (evt.event === 'done') {
+            // Authoritative model name from the provider — overrides
+            // the optimistic one we set on `meta`. Both usually agree
+            // but `done` is canonical (matches what's persisted).
+            const modelStr = evt.data.provider
+              ? `${evt.data.provider}:${evt.data.model || ''}`
+              : (evt.data.model || '');
+            ctx.onModel(modelStr);
+            // Backend just refined the truncated-message fallback
+            // title via Haiku for the first exchange in this
+            // session. Update both the chat-view title bar and
+            // the cached sessions[] entry so list-view picks it
+            // up without an extra round-trip.
+            if (evt.data.title) {
+              this.chatTitle.textContent = evt.data.title;
+              const cached = this.sessions.find(
+                s => s.id === this.activeSessionId);
+              if (cached) cached.title = evt.data.title;
             }
+            // Provider-side failure (Anthropic 402 / quota / rate
+            // limit / OpenAI invalid_api_key…). The stream finished
+            // cleanly but the assistant has nothing to say. Surface
+            // the message instead of leaving the bubble empty —
+            // attach the SDK-derived action link when we have one
+            // so the user can fix it in one click.
+            if (evt.data.provider_error) {
+              const err = new Error(evt.data.provider_error);
+              err.fatal = true;
+              if (evt.data.provider_error_action) {
+                err.action = evt.data.provider_error_action;
+              }
+              throw err;
+            }
+          } else if (evt.event === 'error') {
+            const err = new Error(evt.data.message || 'AI error');
+            err.fatal = true;
+            throw err;
           }
         }
-
-        if (typing.parentNode) typing.remove();
-        hideToolPip();
-        // Refresh sessions metadata so list-view picks up the new
-        // preview / last_model. Title is already up-to-date from
-        // the 'done' SSE event so we don't overwrite the title bar
-        // here — re-loading would briefly flash the stale value.
-        await this.loadSessions();
-        this.scrollToBottom();
-      } catch (err) {
-        if (typing.parentNode) typing.remove();
-        hideToolPip();
-        console.warn('stream failed:', err);
-        const action = err && err.action && err.action.url && err.action.label
-          ? err.action
-          : null;
-        const actionHtml = action
-          ? ` <a href="${escapeHtml(action.url)}" target="_blank" rel="noopener" style="color:var(--color-amber);text-decoration:underline;">${escapeHtml(action.label)} →</a>`
-          : '';
-        if (aiRow && proseDiv) {
-          // Stream started before failure — append the error inline
-          // so partial output stays visible.
-          const errP = document.createElement('p');
-          errP.style.color = 'var(--color-text-muted)';
-          errP.innerHTML = '— ' + escapeHtml(String(err.message || err)) + actionHtml;
-          proseDiv.appendChild(errP);
-        } else {
-          const errRow = document.createElement('div');
-          errRow.className = 'ai-msg-row';
-          errRow.innerHTML =
-            '<div class="ai-msg-ai" style="color:var(--color-text-muted);">' +
-            escapeHtml(String(err.message || err)) + actionHtml + '</div>';
-          this.thread.appendChild(errRow);
-        }
-        this.scrollToBottom();
       }
     },
 
@@ -2440,15 +2630,13 @@
       this.thread.appendChild(typing);
       this.scrollToBottom();
       try {
-        const resp = await fetch(
-          '/api/chat/sessions/' + sessionId + '/stream',
-          { headers: { 'Accept': 'text/event-stream' } });
-        if (resp.status === 404) {
+        const resp = await this._openReattach(sessionId);
+        if (resp === 'gone') {
           if (typing.parentNode) typing.remove();
           await this.switchToSession(sessionId);
           return;
         }
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        if (!resp) throw new Error('could not reach the stream');
         await this.consumeStream(resp, typing);
       } catch (err) {
         if (typing.parentNode) typing.remove();

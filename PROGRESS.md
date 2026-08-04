@@ -93,6 +93,19 @@ implementation details live in the code, DB and git history.
   destroys proper names and grammatical cases ("від шульца" = genitive). Haiku
   adds ~$0.001 and ~0.3s per Cyrillic query; non-Cyrillic queries bypass
   translation entirely.
+- **The chat stream reconnects; it never reports a dead socket as a failure.**
+  A phone that sleeps mid-generation loses the TLS connection, and the reader
+  surfaces that as `TypeError: network error` — which used to be printed in
+  the thread while the finished reply sat in the DB unseen. Server-side
+  keepalives don't help: they keep proxies from timing the connection out,
+  but a client whose socket died silently never learns anything. The fix
+  leans on `_LiveRun`, which already outlives its HTTP connection and replays
+  its full history to any later subscriber: a transport drop now reattaches
+  to `/stream` and repaints the same bubble (404 → the run finished, load the
+  row from the DB). Only the backend speaking — `provider_error` or an
+  `error` event — is fatal. Reconnects escalate (1/3/9/20s) because
+  `navigator.onLine` stays true through most real drops, so there is no
+  event to wait on and same-tick retries all burn before the network returns.
 
 ### HQPlayer integration
 
