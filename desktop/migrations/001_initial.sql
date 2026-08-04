@@ -2406,11 +2406,10 @@ CREATE TRIGGER trg_seal_guard_genre_descriptions BEFORE UPDATE ON genre_descript
     FOR EACH ROW EXECUTE FUNCTION seal_guard_genre_descriptions();
 
 
--- -- Carry v2: the canon mark travels (mirrored in 003_carry_v2.sql — keep
--- -- in step). artist_mbids is a sealed category: the author signs "this
--- -- name-derived artist is this MB entity" so the property the carry gate
--- -- rests on ("canon only") survives transit — a carrier owns none of the
--- -- music and can never re-derive it locally.
+-- -- Carry v2: the canon mark travels. artist_mbids is a sealed category:
+-- -- the author signs "this name-derived artist is this MB entity" so the
+-- -- property the carry gate rests on ("canon only") survives transit — a
+-- -- carrier owns none of the music and can never re-derive it locally.
 
 ALTER TABLE artist_mbids
     ADD COLUMN IF NOT EXISTS author_pubkey CHAR(64),
