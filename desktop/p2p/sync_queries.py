@@ -42,6 +42,24 @@ def track_uuid(title: str, artist_name: str) -> uuid_mod.UUID:
     return uuid_mod.uuid5(
         SAUTIUM_NAMESPACE, f"song:{normalize(artist_name)}:{normalize(title)}")
 
+
+def album_uuid(title: str, artist_name: str) -> uuid_mod.UUID:
+    return uuid_mod.uuid5(
+        SAUTIUM_NAMESPACE, f"album:{normalize(artist_name)}:{normalize(title)}")
+
+
+def verify_album_identity(album_uuid_str: str, title: str,
+                          primary_names: list[str]):
+    """uuid5 identity proof for an album — mirror of verify_track_identity:
+    return the primary name the album UUID was keyed on, or None."""
+    clamped = (title or "").strip()[:500]
+    if not clamped:
+        return None
+    for name in primary_names or []:
+        if name and str(album_uuid(clamped, name)) == album_uuid_str:
+            return name
+    return None
+
 # Sync-protocol capabilities advertised on /health. Peers pick pull categories
 # by this list: "segments" = this node serves per-track segment bundles
 # (pull category `segments`, seals on the wire) and the legacy mean-vector
@@ -62,7 +80,8 @@ SEGMENTS_MAX_UUIDS = 500
 # the carry gate ("canon only") rests on it and a carrier can never
 # re-derive it (no owned music); the rows are author-sealed so the mark
 # stays attributable in transit.
-CARRY_CATEGORIES = ("tracks", "segments", "audio_features", "artist_mbids")
+CARRY_CATEGORIES = ("albums", "tracks", "album_tracks", "segments",
+                    "audio_features", "track_mbids", "artist_mbids")
 # Tracks per offer request — an offer is 16 bytes per track against ~46 KB
 # to push one blind.
 CARRY_MAX_TRACKS = 500
@@ -579,6 +598,77 @@ def pull_artist_mbids(conn, artist_uuids: list[str]) -> dict:
     )
 
 
+def pull_albums(conn, album_uuids: list[str]) -> dict:
+    """Album rows of the canonized snapshot (carry v3), with the primary
+    artist names the importer needs to prove album_uuid by recomputation
+    (uuid5 over artist+title — same identity discipline as tracks)."""
+    def attach_artists(item):
+        return item
+    payload = _pull_simple(
+        conn, "albums",
+        f"""SELECT al.id::text AS album_uuid, al.title,
+                   al.release_year, al.cover_url,
+                   al.musicbrainz_id::text AS rg_mbid,
+                   al.mb_match_confidence::text AS confidence,
+                   al.created_at AS fetched_at, al.author_pubkey,
+                   al.signature, al.batch_root, al.merkle_proof
+            FROM albums al
+            WHERE al.id = ANY(%s::uuid[])
+            {_SEALED_ONLY.format(t='al')}""",
+        album_uuids,
+    )
+    if payload["items"]:
+        rows = db_query(
+            conn,
+            """SELECT aa.album_id::text AS album_uuid, a.name
+                 FROM album_artists aa
+                 JOIN artists a ON a.id = aa.artist_id
+                WHERE aa.album_id = ANY(%s::uuid[])
+                  AND aa.role = 'primary'""",
+            [[i["album_uuid"] for i in payload["items"]]],
+        )
+        by_album: dict[str, list] = {}
+        for r in rows:
+            by_album.setdefault(r["album_uuid"], []).append(r["name"])
+        for item in payload["items"]:
+            item["primary_names"] = by_album.get(item["album_uuid"], [])
+    return payload
+
+
+def pull_album_tracks(conn, track_uuids: list[str]) -> dict:
+    """Sealed tracklist rows (carry v3) — position, disc, length_ms and the
+    recording binding, keyed by TRACK uuids like the analysis categories."""
+    return _pull_simple(
+        conn, "album_tracks",
+        f"""SELECT at2.album_id::text AS album_uuid,
+                   at2.track_id::text AS track_uuid,
+                   at2.disc, at2.position, at2.length_ms,
+                   at2.recording_mbid::text AS recording_mbid,
+                   at2.created_at AS fetched_at, at2.author_pubkey,
+                   at2.signature, at2.batch_root, at2.merkle_proof
+            FROM album_tracks at2
+            WHERE at2.track_id = ANY(%s::uuid[])
+            {_SEALED_ONLY.format(t='at2')}""",
+        track_uuids,
+    )
+
+
+def pull_track_mbids(conn, track_uuids: list[str]) -> dict:
+    """Sealed track↔recording bindings (carry v3)."""
+    return _pull_simple(
+        conn, "track_mbids",
+        f"""SELECT tm.track_id::text AS track_uuid,
+                   tm.recording_mbid::text AS recording_mbid,
+                   tm.confidence::text AS confidence,
+                   tm.created_at AS fetched_at, tm.author_pubkey,
+                   tm.signature, tm.batch_root, tm.merkle_proof
+            FROM track_mbids tm
+            WHERE tm.track_id = ANY(%s::uuid[])
+            {_SEALED_ONLY.format(t='tm')}""",
+        track_uuids,
+    )
+
+
 # Map category name -> pull function
 PULL_HANDLERS = {
     "tracks": pull_tracks,
@@ -598,6 +688,11 @@ PULL_HANDLERS = {
     "genre_descriptions": pull_genre_descriptions,
     "artist-mbids": pull_artist_mbids,
     "artist_mbids": pull_artist_mbids,
+    "albums": pull_albums,
+    "album-tracks": pull_album_tracks,
+    "album_tracks": pull_album_tracks,
+    "track-mbids": pull_track_mbids,
+    "track_mbids": pull_track_mbids,
 }
 
 
@@ -640,7 +735,7 @@ def get_pushable_tracks(conn, limit: int) -> list[dict]:
     primary artist names — the caller re-derives the UUID from them
     (identity proof) and builds the tracks payload without a second query.
 
-    Three conditions, each load-bearing:
+    Full-snapshot gate (v3) — every condition load-bearing:
       * sealed segments — unsigned material must not travel at all;
       * first-hand source (analysis_sources NOT imported) — re-pushing what
         we pulled from someone else spreads nothing new and burns a
@@ -648,7 +743,18 @@ def get_pushable_tracks(conn, limit: int) -> list[dict]:
       * canon primary — the track's primary artist has a non-phantom MB
         anchor. A phantom anchor is a name guess with no owned tracks to
         verify against; pushing residue is how carriers would multiply
-        noise, and an unsplit "A feat. B" mess has no anchor at all.
+        noise, and an unsplit "A feat. B" mess has no anchor at all;
+      * canonized track — a sealed track_mbids binding exists. A canonized
+        title is MB-agreed, so the carrier's later MB-driven work joins on
+        the mbid, never on string luck;
+      * canonized album — a sealed tracklist row links the track to an
+        album whose RG anchor is sealed too. Without it the carried track
+        is an orphan: no Now Playing album/cover, no length_ms for stream
+        matching, and the radio pool's (media_files OR album_tracks)
+        condition rejects it. Everything that travels works as a full
+        phantom, or it does not travel (measured: 79% of sealed first-hand
+        tracks pass; the rest are compilations and residue whose canon has
+        not matured — they ride a later push).
 
     On top of the SQL, the caller MUST apply verify_track_identity(): the
     identity proof carries only what uuid5 covers, and a track whose UUID
@@ -674,6 +780,12 @@ def get_pushable_tracks(conn, limit: int) -> list[dict]:
            )
            SELECT t.id::text AS track_uuid, t.title,
                   array_agg(a.name ORDER BY a.name) AS primary_names,
+                  (SELECT at2.album_id::text FROM album_tracks at2
+                     JOIN albums al ON al.id = at2.album_id
+                    WHERE at2.track_id = t.id
+                      AND at2.signature IS NOT NULL
+                      AND al.signature IS NOT NULL
+                    ORDER BY at2.album_id LIMIT 1) AS album_uuid,
                   MAX(ab.listeners) AS listeners
              FROM mine m
              JOIN tracks t        ON t.id = m.track_id
@@ -683,6 +795,14 @@ def get_pushable_tracks(conn, limit: int) -> list[dict]:
             WHERE EXISTS (SELECT 1 FROM artist_mbids am
                            WHERE am.artist_id = ta.artist_id
                              AND am.confidence <> 'phantom')
+              AND EXISTS (SELECT 1 FROM track_mbids tm
+                           WHERE tm.track_id = t.id
+                             AND tm.signature IS NOT NULL)
+              AND EXISTS (SELECT 1 FROM album_tracks at2
+                            JOIN albums al ON al.id = at2.album_id
+                           WHERE at2.track_id = t.id
+                             AND at2.signature IS NOT NULL
+                             AND al.signature IS NOT NULL)
             GROUP BY t.id, t.title
             ORDER BY MAX(ab.listeners) ASC NULLS FIRST
             LIMIT %s""",
@@ -771,13 +891,33 @@ def wanted_tracks(conn, track_uuids: list[str], budget: int) -> dict:
             LIMIT %s""",
         [uuids, room],
     )
+    no_tracklist = db_query(
+        conn,
+        """SELECT u.id::text AS track_uuid
+             FROM unnest(%s::uuid[]) AS u(id)
+            WHERE NOT EXISTS (SELECT 1 FROM album_tracks at2
+                               WHERE at2.track_id = u.id)
+            LIMIT %s""",
+        [uuids, room],
+    )
+    no_recording = db_query(
+        conn,
+        """SELECT u.id::text AS track_uuid
+             FROM unnest(%s::uuid[]) AS u(id)
+            WHERE NOT EXISTS (SELECT 1 FROM track_mbids tm
+                               WHERE tm.track_id = u.id)
+            LIMIT %s""",
+        [uuids, room],
+    )
     out = dict(empty)
     out["tracks"] = [r["track_uuid"] for r in missing_tracks]
     out["segments"] = [r["track_uuid"] for r in no_segments]
     out["audio_features"] = [r["track_uuid"] for r in no_features]
-    # artist_mbids stays empty here: the carrier cannot know the primary
-    # artists before the tracks arrive, so the pusher sends the bindings
-    # for the primaries of whatever it pushed and the importer dedups.
+    out["album_tracks"] = [r["track_uuid"] for r in no_tracklist]
+    out["track_mbids"] = [r["track_uuid"] for r in no_recording]
+    # albums / artist_mbids stay empty here: the carrier cannot know the
+    # albums or primary artists before the tracks arrive, so the pusher
+    # sends those for whatever it pushed and the importers dedup.
     return out
 
 

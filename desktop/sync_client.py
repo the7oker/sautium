@@ -31,7 +31,9 @@ import psycopg2.extras
 from desktop.api_client import BackendAPIClient
 from desktop.p2p import record_sig as rs
 from desktop.p2p.birth_cert import TRUSTED_AUTHORITIES
-from desktop.p2p.sync_queries import CARRY_CATEGORIES, verify_track_identity
+from desktop.p2p.sync_queries import (
+    CARRY_CATEGORIES, verify_album_identity, verify_track_identity,
+)
 from desktop.p2p.sync_queries import artist_uuid as _artist_uuid
 
 logger = logging.getLogger(__name__)
@@ -82,6 +84,9 @@ _ENRICHMENT_KIND_BY_CATEGORY = {
     "similar_artists": "similar_artist",
     "genre_descriptions": "genre_description",
     "artist_mbids": "artist_mbid",
+    "albums": "album",
+    "album_tracks": "album_track",
+    "track_mbids": "track_mbid",
 }
 
 DEFAULT_BATCH_SIZE = 500
@@ -466,6 +471,9 @@ class SyncClient:
         "track_stat": "track_uuid",
         "genre_description": "genre_uuid",
         "artist_mbid": "artist_uuid",
+        "album": "album_uuid",
+        "album_track": "track_uuid",
+        "track_mbid": "track_uuid",
     }
 
     def _verify_enrichment(self, kind: str, items: list, batches: dict) -> list:
@@ -1054,6 +1062,149 @@ class SyncClient:
                 " VALUES %s ON CONFLICT DO NOTHING",
                 link_rows, template="(%s::uuid, 'primary', %s::uuid)")
         return len(track_rows)
+
+    def _import_albums(self, conn, items: list[dict]) -> int:
+        """Mint phantom album entities from a carry push (albums +
+        album_artists, no variants — variants mean files).
+
+        Same two-lock discipline as tracks: the seal was verified by the
+        enrichment gate before we got here, and the identity is proven by
+        recomputation — album_uuid = uuid5 over (primary artist, title), so
+        the artist link minted is exactly the one the UUID demonstrates.
+        ON CONFLICT (id) DO NOTHING: an album this node already has — owned
+        or previously carried — keeps its row.
+
+        cover_url is deliberately outside the seal (see record_sig): the
+        sender's owned albums usually have none (their cover lives in the
+        files), so a blank one is filled with the CAA front image — the
+        same deterministic rg_mbid derivative the phantom minter writes."""
+        artist_rows, album_rows, link_rows = {}, [], []
+        dropped = 0
+        for item in items:
+            title = (item.get("title") or "").strip()[:500]
+            proven = verify_album_identity(
+                item.get("album_uuid") or "", title,
+                item.get("primary_names") or [])
+            if proven is None:
+                dropped += 1
+                continue
+            cover = item.get("cover_url")
+            if not cover and item.get("rg_mbid"):
+                cover = ("https://coverartarchive.org/release-group/"
+                         f"{item['rg_mbid']}/front-500")
+            aid = str(_artist_uuid(proven))
+            artist_rows[aid] = (aid, proven)
+            # created_at IS the payload's fetched_at slot — the seal binds
+            # it, so re-serving with a local timestamp would break every
+            # downstream verification.
+            album_rows.append((
+                item["album_uuid"], title, item.get("release_year"),
+                cover, item.get("rg_mbid"), item.get("confidence"),
+                item.get("fetched_at"), *self._seal_values(item)[1:],
+            ))
+            link_rows.append((item["album_uuid"], aid))
+        if dropped:
+            logger.warning(
+                "carry import: dropped %d album(s) — claimed (title, primary)"
+                " does not rehash to the wire UUID", dropped)
+        if not album_rows:
+            return 0
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                "INSERT INTO artists (id, name) VALUES %s"
+                " ON CONFLICT (id) DO NOTHING",
+                list(artist_rows.values()), template="(%s::uuid, %s)")
+            psycopg2.extras.execute_values(
+                cur,
+                """INSERT INTO albums
+                       (id, title, release_year, cover_url, musicbrainz_id,
+                        mb_match_confidence, created_at, author_pubkey,
+                        signature, batch_root, merkle_proof, imported)
+                   VALUES %s ON CONFLICT (id) DO NOTHING""",
+                album_rows,
+                template="(%s::uuid, %s, %s, %s, %s::uuid,"
+                         " %s::mb_match_confidence, %s::timestamptz,"
+                         " %s, %s, %s, %s, TRUE)")
+            psycopg2.extras.execute_values(
+                cur,
+                "INSERT INTO album_artists (album_id, role, artist_id)"
+                " VALUES %s ON CONFLICT DO NOTHING",
+                link_rows, template="(%s::uuid, 'primary', %s::uuid)")
+        return len(album_rows)
+
+    def _import_album_tracks(self, conn, items: list[dict]) -> int:
+        """Sealed tracklist rows. Both FK ends must already exist — carry
+        pushes albums and tracks first; a row naming an entity we never
+        accepted is skipped, not conjured. ON CONFLICT on the position PK:
+        whatever row already claims the slot (an MB-minted tracklist, an
+        earlier carry) outranks a restatement."""
+        if not items:
+            return 0
+        albums = list({i["album_uuid"] for i in items})
+        tracks = list({i["track_uuid"] for i in items})
+        with conn.cursor() as cur:
+            cur.execute("SELECT id::text FROM albums WHERE id = ANY(%s::uuid[])",
+                        (albums,))
+            known_albums = {r[0] for r in cur.fetchall()}
+            cur.execute("SELECT id::text FROM tracks WHERE id = ANY(%s::uuid[])",
+                        (tracks,))
+            known_tracks = {r[0] for r in cur.fetchall()}
+            values = [
+                (i["album_uuid"], i["track_uuid"], i.get("disc") or 1,
+                 i["position"], i.get("recording_mbid"), i.get("length_ms"),
+                 i.get("fetched_at"), *self._seal_values(i)[1:])
+                for i in items
+                if i["album_uuid"] in known_albums
+                and i["track_uuid"] in known_tracks
+                and i.get("position") is not None
+            ]
+            if not values:
+                return 0
+            # created_at carries the sealed fetched_at — see _import_albums.
+            psycopg2.extras.execute_values(
+                cur,
+                """INSERT INTO album_tracks
+                       (album_id, track_id, disc, position, recording_mbid,
+                        length_ms, created_at, author_pubkey, signature,
+                        batch_root, merkle_proof, imported)
+                   VALUES %s
+                   ON CONFLICT (album_id, disc, position) DO NOTHING""",
+                values,
+                template="(%s::uuid, %s::uuid, %s, %s, %s::uuid, %s,"
+                         " %s::timestamptz, %s, %s, %s, %s, TRUE)")
+        return len(values)
+
+    def _import_track_mbids(self, conn, items: list[dict]) -> int:
+        """Sealed track↔recording bindings — same shape as artist_mbids:
+        the track must exist, an existing binding outranks a restatement."""
+        if not items:
+            return 0
+        uuids = list({item["track_uuid"] for item in items})
+        with conn.cursor() as cur:
+            cur.execute("SELECT id::text FROM tracks WHERE id = ANY(%s::uuid[])",
+                        (uuids,))
+            known = {r[0] for r in cur.fetchall()}
+            values = [
+                (item["recording_mbid"], item["track_uuid"],
+                 item.get("confidence"), item.get("fetched_at"),
+                 *self._seal_values(item)[1:])
+                for item in items if item["track_uuid"] in known
+            ]
+            if not values:
+                return 0
+            psycopg2.extras.execute_values(
+                cur,
+                """INSERT INTO track_mbids
+                       (recording_mbid, track_id, confidence, created_at,
+                        author_pubkey, signature, batch_root, merkle_proof,
+                        imported)
+                   VALUES %s
+                   ON CONFLICT (recording_mbid) DO NOTHING""",
+                values,
+                template="(%s::uuid, %s::uuid, %s::mb_match_confidence,"
+                         " %s::timestamptz, %s, %s, %s, %s, TRUE)")
+        return len(values)
 
     def _import_artist_mbids(self, conn, items: list[dict]) -> int:
         """Store author-attested canon marks. Seals were already verified by

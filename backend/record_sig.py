@@ -198,7 +198,8 @@ def canonical_features_blob(row: dict) -> bytes:
 # relay ever introduced.
 
 ENRICHMENT_KINDS = ("artist_bio", "artist_tag", "similar_artist",
-                    "track_stat", "genre_description", "artist_mbid")
+                    "track_stat", "genre_description", "artist_mbid",
+                    "album", "album_track", "track_mbid")
 
 
 def _fmt_fetched_at(fetched_at) -> str:
@@ -264,6 +265,18 @@ ENRICHMENT_ORDER = {
     # the author's judgment tier, and an unsigned tier could be inflated in
     # transit. `source` is unused ("" on both ends); fetched_at = created_at.
     "artist_mbid":       ["mbid", "confidence"],
+    # Carry v3 — the album layer of the snapshot, same portability logic:
+    # a carrier owns none of the music and can re-derive none of this.
+    # entity: album → album_uuid; album_track / track_mbid → track_uuid.
+    # `source` is "" and fetched_at = created_at for all three.
+    # cover_url travels but is NOT sealed: a CAA front-image URL is a
+    # deterministic derivative of rg_mbid (re-derivable by anyone), and an
+    # owned album's cover lives in its files anyway — sealing it would
+    # forbid the importer from filling the blank with the CAA form.
+    "album":             ["rg_mbid", "title", "release_year", "confidence"],
+    "album_track":       ["album_uuid", "disc", "position", "length_ms",
+                          "recording_mbid"],
+    "track_mbid":        ["recording_mbid", "confidence"],
 }
 
 

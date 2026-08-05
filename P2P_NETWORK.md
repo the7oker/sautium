@@ -411,11 +411,38 @@ A (за CGNAT) --POST /api/sync/offer   {tracks:[…]}---> C
 протилежність: GPU-робота без жодного зовнішнього джерела. `track_stats` і
 `genre_descriptions` теж Last.fm → не їдуть.
 
-**Що виштовхується.** `get_pushable_tracks`: запечатані сегменти **І**
-first-hand джерело (`analysis_sources NOT imported`) **І** канонічний primary
-(не-`phantom` MB-якір), рідкісні першими. Виміряно: 36 426 із 37 904 first-hand
-sealed треків проходять (95% — аудіо-аналіз за побудовою покриває власну
-музику; в артист-шарі v1 канон-гейт відсікав 88% — фантомний discovery-шар).
+**Що виштовхується — повний канонізований зліпок (v3, 2026-08-05).**
+`get_pushable_tracks`: запечатані сегменти **І** first-hand джерело
+(`analysis_sources NOT imported`) **І** канонічний primary (не-`phantom`
+MB-якір) **І** запечатана recording-прив'язка (`track_mbids`) **І** запечатаний
+tracklist-рядок з RG-якірним альбомом. Виміряно: 28 023 з 38 202 first-hand
+sealed треків (73%) — решта — компіляції й резидуй, чий канон ще не дозрів;
+вони їдуть пізнішим пушем. Усе, що приїхало, працює як повний фантом, або не
+їде: v2 возив лише трек+аналіз, і перенесене було сиротами — без альбому
+радіо-пул відкидав їх умовою `(media_files OR album_tracks)`, Now Playing не
+мав ні альбому, ні обкладинки, ні `length_ms` для стрім-матчингу, а
+канонізація майбутніх власників — ні структури, ні тривалостей.
+
+Категорії v3 у FK-порядку: `albums → tracks → album_tracks → segments →
+audio_features → track_mbids → artist_mbids`. Три нові запечатані kinds:
+`album` (`rg_mbid:title:year:confidence`; **cover_url поза печаткою** — 
+CAA-URL є детермінованою похідною rg_mbid, тож імпортер вільний заповнити
+порожнє `coverartarchive.org/release-group/{rg}/front-500`, як робить
+фантомний мінт), `album_track` (album:disc:position:**length_ms**:recording),
+`track_mbid` (recording:confidence). Ідентичність альбому — тим самим
+перерахунком: `album_uuid = uuid5(album:primary:title)`.
+
+Owned-шар живе в `album_variants`, тож tracklist-рядків для власних треків не
+існувало — `sign_audio` перед кожним підписанням **матеріалізує** їх із тегів
+файлів (`_materialize_owned_tracklists`: диск, позиція, тривалість, recording
+— першоджерельне спостереження цієї ноди, інкрементно, MB-мінтований рядок
+на позиції виграє). Підписуються лише рядки owned analysis-source треків —
+~3M MB-мінтованих фантомних tracklist-рядків залишаються непідписаними
+(атестувати їх означало б підписати копію MusicBrainz).
+
+Пастка, спіймана re-serve-перевіркою: `created_at` — це fetched_at-слот
+printь-payload, тож імпортери ЗБЕРІГАЮТЬ авторський `created_at`; локальний
+`DEFAULT now()` зламав би верифікацію у кожного наступного отримувача.
 
 **Ідентичність доводиться перерахунком, не підписом.**
 `track_uuid = uuid5("song:"+primary+":"+title)` — носій перераховує хеш із

@@ -2442,3 +2442,101 @@ DROP TRIGGER IF EXISTS trg_artist_mbids_seal_guard ON artist_mbids;
 CREATE TRIGGER trg_artist_mbids_seal_guard
 BEFORE UPDATE ON artist_mbids
 FOR EACH ROW EXECUTE FUNCTION seal_guard_artist_mbids();
+
+
+-- -- Carry v3: the full canonized snapshot travels — albums, tracklist
+-- -- rows and recording bindings are sealed categories alongside
+-- -- artist_mbids, so a carrier receives working phantoms (album, cover,
+-- -- durations, radio eligibility), not orphan tracks.
+
+-- sign_audio's UPDATE phase keys on a single scalar PK; album_tracks has a
+-- composite one, so it gains a surrogate identity column.
+ALTER TABLE album_tracks ADD COLUMN IF NOT EXISTS id BIGINT
+    GENERATED ALWAYS AS IDENTITY;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_album_tracks_id ON album_tracks (id);
+
+ALTER TABLE albums
+    ADD COLUMN IF NOT EXISTS author_pubkey CHAR(64),
+    ADD COLUMN IF NOT EXISTS signature     CHAR(128),
+    ADD COLUMN IF NOT EXISTS batch_root    CHAR(64) REFERENCES signing_batches(batch_root),
+    ADD COLUMN IF NOT EXISTS merkle_proof  JSONB,
+    ADD COLUMN IF NOT EXISTS imported      BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE album_tracks
+    ADD COLUMN IF NOT EXISTS author_pubkey CHAR(64),
+    ADD COLUMN IF NOT EXISTS signature     CHAR(128),
+    ADD COLUMN IF NOT EXISTS batch_root    CHAR(64) REFERENCES signing_batches(batch_root),
+    ADD COLUMN IF NOT EXISTS merkle_proof  JSONB,
+    ADD COLUMN IF NOT EXISTS imported      BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE track_mbids
+    ADD COLUMN IF NOT EXISTS author_pubkey CHAR(64),
+    ADD COLUMN IF NOT EXISTS signature     CHAR(128),
+    ADD COLUMN IF NOT EXISTS batch_root    CHAR(64) REFERENCES signing_batches(batch_root),
+    ADD COLUMN IF NOT EXISTS merkle_proof  JSONB,
+    ADD COLUMN IF NOT EXISTS imported      BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Partial: the signer's candidate scans (signature IS NULL AND the owned
+-- gate) must not walk the ~3M MB-minted phantom tracklist rows.
+CREATE INDEX IF NOT EXISTS idx_albums_unsigned
+    ON albums (id) WHERE signature IS NULL;
+CREATE INDEX IF NOT EXISTS idx_album_tracks_unsigned
+    ON album_tracks (track_id) WHERE signature IS NULL;
+CREATE INDEX IF NOT EXISTS idx_track_mbids_unsigned
+    ON track_mbids (track_id) WHERE signature IS NULL;
+
+-- Payload columns per kind — an UPDATE that changes any without presenting
+-- a new signature sheds the seal (same invariant as every sealed table).
+CREATE OR REPLACE FUNCTION seal_guard_albums() RETURNS trigger AS $$
+BEGIN
+    IF (NEW.musicbrainz_id IS DISTINCT FROM OLD.musicbrainz_id
+        OR NEW.mb_match_confidence IS DISTINCT FROM OLD.mb_match_confidence
+        OR NEW.title IS DISTINCT FROM OLD.title
+        OR NEW.release_year IS DISTINCT FROM OLD.release_year)
+       AND NEW.signature IS NOT DISTINCT FROM OLD.signature THEN
+        NEW.author_pubkey := NULL; NEW.signature := NULL;
+        NEW.batch_root := NULL;    NEW.merkle_proof := NULL;
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_albums_seal_guard ON albums;
+CREATE TRIGGER trg_albums_seal_guard
+BEFORE UPDATE ON albums
+FOR EACH ROW EXECUTE FUNCTION seal_guard_albums();
+
+CREATE OR REPLACE FUNCTION seal_guard_album_tracks() RETURNS trigger AS $$
+BEGIN
+    IF (NEW.album_id IS DISTINCT FROM OLD.album_id
+        OR NEW.track_id IS DISTINCT FROM OLD.track_id
+        OR NEW.disc IS DISTINCT FROM OLD.disc
+        OR NEW.position IS DISTINCT FROM OLD.position
+        OR NEW.length_ms IS DISTINCT FROM OLD.length_ms
+        OR NEW.recording_mbid IS DISTINCT FROM OLD.recording_mbid)
+       AND NEW.signature IS NOT DISTINCT FROM OLD.signature THEN
+        NEW.author_pubkey := NULL; NEW.signature := NULL;
+        NEW.batch_root := NULL;    NEW.merkle_proof := NULL;
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_album_tracks_seal_guard ON album_tracks;
+CREATE TRIGGER trg_album_tracks_seal_guard
+BEFORE UPDATE ON album_tracks
+FOR EACH ROW EXECUTE FUNCTION seal_guard_album_tracks();
+
+CREATE OR REPLACE FUNCTION seal_guard_track_mbids() RETURNS trigger AS $$
+BEGIN
+    IF (NEW.track_id IS DISTINCT FROM OLD.track_id
+        OR NEW.confidence IS DISTINCT FROM OLD.confidence)
+       AND NEW.signature IS NOT DISTINCT FROM OLD.signature THEN
+        NEW.author_pubkey := NULL; NEW.signature := NULL;
+        NEW.batch_root := NULL;    NEW.merkle_proof := NULL;
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_track_mbids_seal_guard ON track_mbids;
+CREATE TRIGGER trg_track_mbids_seal_guard
+BEFORE UPDATE ON track_mbids
+FOR EACH ROW EXECUTE FUNCTION seal_guard_track_mbids();

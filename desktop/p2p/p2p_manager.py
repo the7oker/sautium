@@ -1034,15 +1034,32 @@ class P2PManager:
                 return (res or {}).get("imported") or 0
 
             # The payload we serve on pull IS the payload we push — same
-            # shape, same seals, same batches map.
+            # shape, same seals, same batches map. FK order: albums before
+            # tracks' tracklist rows, tracks before analysis. The album set
+            # covers every track a tracklist row will be pushed for — a
+            # carrier holding v2-era tracks asks for their tracklist rows
+            # without re-asking for the tracks, and those albums must land
+            # too or the rows would fail the importer's FK gate.
+            albums = set()
+            for key in ("tracks", "album_tracks"):
+                for u in wanted.get(key) or []:
+                    if u in proven and proven[u].get("album_uuid"):
+                        albums.add(proven[u]["album_uuid"])
+            took = push("albums", sync_queries.pull_albums(conn, list(albums)))
+            pushed += took
+            if took:
+                _progress(f"  carried {took} album(s) to peer")
+
             mint = [u for u in wanted.get("tracks") or [] if u in proven]
             took = push("tracks", sync_queries.pull_tracks(conn, mint))
             pushed += took
             if took:
                 _progress(f"  carried {took} track entit(ies) to peer")
 
-            for category, batch in (("segments", SEGMENT_PULL_BATCH),
-                                    ("audio_features", 500)):
+            for category, batch in (("album_tracks", 500),
+                                    ("segments", SEGMENT_PULL_BATCH),
+                                    ("audio_features", 500),
+                                    ("track_mbids", 500)):
                 uuids = [u for u in wanted.get(category) or [] if u in proven]
                 handler = sync_queries.PULL_HANDLERS[category]
                 for i in range(0, len(uuids), batch):

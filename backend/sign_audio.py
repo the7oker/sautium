@@ -134,11 +134,78 @@ _ENRICHMENT_SOURCES = {
         FROM artist_mbids am
         WHERE am.signature IS NULL AND NOT am.imported
           AND am.confidence <> 'phantom'""", "artist_mbids"),
+    # Carry v3 — the album layer. Only what stands on OWNED analysis-source
+    # material signs: the ~3M MB-minted phantom tracklist rows are derived
+    # from the dump, not observed, and attesting them would sign a copy of
+    # MusicBrainz. RG-anchored albums only — an unanchored album is exactly
+    # the non-canon residue the snapshot must not carry.
+    "album": ("""
+        SELECT al.id, al.id::text AS entity, '' AS source,
+               al.created_at AS fetched_at,
+               al.musicbrainz_id::text AS rg_mbid, al.title,
+               al.release_year,
+               al.mb_match_confidence::text AS confidence
+        FROM albums al
+        WHERE al.signature IS NULL AND NOT al.imported
+          AND al.musicbrainz_id IS NOT NULL
+          AND EXISTS (SELECT 1 FROM album_variants av
+                        JOIN media_files mf ON mf.album_variant_id = av.id
+                       WHERE av.album_id = al.id AND mf.is_analysis_source)""",
+        "albums"),
+    "album_track": ("""
+        SELECT at2.id, at2.track_id::text AS entity, '' AS source,
+               at2.created_at AS fetched_at,
+               at2.album_id::text AS album_uuid, at2.disc, at2.position,
+               at2.length_ms, at2.recording_mbid::text AS recording_mbid
+        FROM album_tracks at2
+        WHERE at2.signature IS NULL AND NOT at2.imported
+          AND EXISTS (SELECT 1 FROM media_files mf
+                       WHERE mf.track_id = at2.track_id
+                         AND mf.is_analysis_source)""", "album_tracks"),
+    "track_mbid": ("""
+        SELECT tm.recording_mbid AS id, tm.track_id::text AS entity,
+               '' AS source, tm.created_at AS fetched_at,
+               tm.recording_mbid::text AS recording_mbid,
+               tm.confidence::text AS confidence
+        FROM track_mbids tm
+        WHERE tm.signature IS NULL AND NOT tm.imported""", "track_mbids"),
 }
 
 # UPDATE-phase PK column and cast per table; everything not listed uses the
-# SERIAL `id`. artist_mbids is keyed by the MBID itself.
-_TABLE_PK = {"artist_mbids": ("mbid", "uuid")}
+# SERIAL `id`. artist_mbids / track_mbids are keyed by the MBID itself.
+_TABLE_PK = {"artist_mbids": ("mbid", "uuid"),
+             "track_mbids": ("recording_mbid", "uuid"),
+             "albums": ("id", "uuid"),
+             "album_tracks": ("id", "bigint")}
+
+
+def _materialize_owned_tracklists(cur) -> int:
+    """album_tracks rows for owned analysis-source tracks.
+
+    The owned layer lives in albums → album_variants → media_files, so most
+    owned tracks have no album_tracks row at all — that junction was built
+    for PHANTOM tracklists. The carry snapshot needs one sealed tracklist
+    shape for both, and the file's own tags (disc, track number, duration,
+    recording mbid) are this node's first-hand observation of it. Idempotent
+    and incremental: ON CONFLICT keeps whatever row already claims the slot
+    (an MB-minted one outranks a re-derivation). Tracks with no tag number
+    are skipped, not invented — a made-up position is not an observation.
+    Runs before every signing pass, so a fresh scan's rows are sealed by the
+    same run that notices them."""
+    cur.execute("""
+        INSERT INTO album_tracks
+            (album_id, track_id, disc, position, recording_mbid, length_ms)
+        SELECT av.album_id, mf.track_id, COALESCE(mf.disc_number, 1),
+               mf.track_number, mf.recording_mbid,
+               (mf.duration_seconds * 1000)::int
+        FROM media_files mf
+        JOIN album_variants av ON av.id = mf.album_variant_id
+        WHERE mf.is_analysis_source AND mf.track_number IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM album_tracks at2
+                           WHERE at2.album_id = av.album_id
+                             AND at2.track_id = mf.track_id)
+        ON CONFLICT (album_id, disc, position) DO NOTHING""")
+    return cur.rowcount
 
 
 def _collect_enrichment(cur, author, key, pending, chunk=20000) -> int:
@@ -173,6 +240,10 @@ def run(limit=None, dry_run=False):
     conn = psycopg2.connect(settings.database_url)
     conn.cursor_factory = psycopg2.extras.RealDictCursor
     cur = conn.cursor()
+
+    minted = _materialize_owned_tracklists(cur)
+    if minted:
+        logger.info("materialized %d owned tracklist row(s)", minted)
 
     track_ids = sorted(_signable_tracks(cur))
     if limit:
