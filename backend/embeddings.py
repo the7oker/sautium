@@ -26,6 +26,13 @@ from database import get_db_context
 from models import Embedding, EmbeddingModel, Track, MediaFile
 from uuid_utils import embedding_model_uuid
 
+
+def _reanalyze_imported() -> bool:
+    """Whether owned tracks whose analysis arrived over P2P re-enter the GPU
+    queue (Settings toggle; audio_analysis.py reads the same flag)."""
+    from routers.settings import _read
+    return bool(_read("enrichment.reanalyze_imported"))
+
 logger = logging.getLogger(__name__)
 
 
@@ -330,6 +337,12 @@ class AudioEmbeddingGenerator:
             # and failed fingerprints — re-analysis links them), OR linked to
             # material other than the current analysis source (source moved to
             # a better rip, or a stream preview awaiting its owned upgrade).
+            # Analysis that arrived over P2P (asrc.imported) also matches that
+            # third arm — its source has no media_file — but re-deriving it
+            # from the owned file is a POLICY, not a repair: first-hand
+            # matches this node's actual rip and is the network's poison
+            # detector, yet it re-spends GPU on tracks that already work.
+            # enrichment.reanalyze_imported picks the policy; default off.
             # Driven from media_files (is_analysis_source) — the OWNED set.
             # tracks now holds millions of trackless phantom rows; driving from
             # tracks would scan them all to find owned ones needing an embedding.
@@ -344,22 +357,28 @@ class AudioEmbeddingGenerator:
                 LEFT JOIN analysis_sources asrc ON asrc.id = e.analysis_source_id
                 WHERE mf.is_analysis_source = true
             """
+            params = {}
             if not force:
                 query_sql += """
                   AND (e.id IS NULL
                        OR e.analysis_source_id IS NULL
-                       OR asrc.media_file_id IS DISTINCT FROM mf.id)
+                       OR (asrc.media_file_id IS DISTINCT FROM mf.id
+                           AND (:reanalyze OR NOT asrc.imported)))
             """
-            params = {}
+                params["reanalyze"] = _reanalyze_imported()
 
             if track_ids is not None:
                 query_sql += " AND t.id = ANY(:track_ids)"
                 params["track_ids"] = track_ids
 
+            # Gaps first: a track with no embedding at all beats an upgrade
+            # (stream→owned, better rip, imported→first-hand) — coverage
+            # before recomputation.
             if order_by_date:
-                query_sql += " ORDER BY mf.file_modified_at DESC NULLS LAST"
+                query_sql += (" ORDER BY (e.id IS NOT NULL),"
+                              " mf.file_modified_at DESC NULLS LAST")
             else:
-                query_sql += " ORDER BY t.id"
+                query_sql += " ORDER BY (e.id IS NOT NULL), t.id"
 
             if limit:
                 query_sql += f" LIMIT {limit}"

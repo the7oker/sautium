@@ -478,6 +478,9 @@ class AudioAnalyzer:
                 # rows and failed fingerprints), OR linked to material other
                 # than the current analysis source (source moved to a better
                 # rip, or a stream preview awaiting its owned upgrade).
+                # P2P-imported analysis re-enters only when the
+                # enrichment.reanalyze_imported toggle says so — see the
+                # policy comment in embeddings.py, which owns the flag.
                 query_sql = """
                     SELECT t.id as track_id, mf.id as media_file_id,
                            mf.file_path, mf.bit_depth,
@@ -490,19 +493,26 @@ class AudioAnalyzer:
                     WHERE mf.is_analysis_source = true
                       AND (af.id IS NULL
                            OR af.analysis_source_id IS NULL
-                           OR asrc.media_file_id IS DISTINCT FROM mf.id)
+                           OR (asrc.media_file_id IS DISTINCT FROM mf.id
+                               AND (:reanalyze OR NOT asrc.imported)))
                 """
 
             params = {}
+            if not force:
+                from embeddings import _reanalyze_imported
+                params["reanalyze"] = _reanalyze_imported()
 
             if track_ids is not None:
                 query_sql += " AND t.id = ANY(:track_ids)"
                 params["track_ids"] = track_ids
 
+            # Gaps first — coverage before recomputation (mirrors embeddings)
+            gap_first = "" if force else "(af.id IS NOT NULL), "
             if order_by_date:
-                query_sql += " ORDER BY mf.file_modified_at DESC NULLS LAST"
+                query_sql += (f" ORDER BY {gap_first}"
+                              "mf.file_modified_at DESC NULLS LAST")
             else:
-                query_sql += " ORDER BY t.id"
+                query_sql += f" ORDER BY {gap_first}t.id"
 
             if limit:
                 query_sql += f" LIMIT {limit}"

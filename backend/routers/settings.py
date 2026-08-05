@@ -238,6 +238,13 @@ _DEFAULTS: Dict[str, Any] = {
     # keep in step.
     "sync.carry_limit":          2000,
     "enrichment.background_enabled": True,
+    # Owned tracks whose analysis arrived over P2P: False = keep the
+    # imported copy (no GPU re-spend on tracks that already work), True =
+    # re-derive first-hand from the local file (matches this rip exactly,
+    # makes the node an author for those tracks, and is the network's
+    # poison detector). Read by embeddings.py / audio_analysis.py pending
+    # queries.
+    "enrichment.reanalyze_imported": False,
     # Provider/model default to None so the first-run UI shows
     # "Not selected" instead of pretending Claude is picked when the
     # wizard offered an explicit "no AI" option.
@@ -629,6 +636,7 @@ def _sync_state() -> Dict[str, Any]:
         "announce_limit":          _read("sync.announce_limit"),
         "carry_limit":             _read("sync.carry_limit"),
         "background_enrichment":   bool(_read("enrichment.background_enabled")),
+        "reanalyze_imported":      bool(_read("enrichment.reanalyze_imported")),
         "background_status":       bg_status,
         "last_sync_at":            _read("sync.last_at"),
         "last_items_received":     _read("sync.last_items_received"),
@@ -1306,8 +1314,9 @@ class SyncPrefs(BaseModel):
     p2p_enabled:             Optional[bool] = None
     auto_interval_min:       Optional[int]  = None  # null disables
     announce_limit:          Optional[int]  = None  # rare-artist tail size
-    carry_limit:             Optional[int]  = None  # foreign artists carried
+    carry_limit:             Optional[int]  = None  # foreign tracks carried
     background_enrichment:   Optional[bool] = None
+    reanalyze_imported:      Optional[bool] = None
 
 
 @router.put("/sync")
@@ -1326,6 +1335,8 @@ def put_sync_prefs(req: SyncPrefs) -> Dict[str, Any]:
     if req.carry_limit is not None:
         _write("sync.carry_limit",
                int(req.carry_limit) if req.carry_limit > 0 else None)
+    if req.reanalyze_imported is not None:
+        _write("enrichment.reanalyze_imported", bool(req.reanalyze_imported))
     if req.background_enrichment is not None:
         want = bool(req.background_enrichment)
         _write("enrichment.background_enabled", want)
