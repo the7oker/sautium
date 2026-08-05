@@ -782,23 +782,16 @@ def wanted_tracks(conn, track_uuids: list[str], budget: int) -> dict:
 
 
 ANNOUNCE_TAIL_SQL = """
-    WITH announceable AS (
-        SELECT ta.artist_id
-          FROM track_artists ta
-          JOIN media_files mf ON mf.track_id = ta.track_id
-         WHERE EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = ta.track_id)
-            OR EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id)
+    WITH analyzed AS (
+        SELECT track_id FROM embeddings
         UNION
-        SELECT ta.artist_id
-          FROM track_artists ta
-         WHERE EXISTS (SELECT 1 FROM embeddings e
-                         JOIN analysis_sources s ON s.id = e.analysis_source_id
-                        WHERE e.track_id = ta.track_id AND s.imported)
+        SELECT track_id FROM audio_features
     )
-    SELECT x.artist_id::text AS artist_uuid
-      FROM announceable x
-      LEFT JOIN artist_bios ab ON ab.artist_id = x.artist_id
-     GROUP BY x.artist_id
+    SELECT ta.artist_id::text AS artist_uuid
+      FROM analyzed x
+      JOIN track_artists ta ON ta.track_id = x.track_id
+      LEFT JOIN artist_bios ab ON ab.artist_id = ta.artist_id
+     GROUP BY ta.artist_id
      ORDER BY MAX(ab.listeners) ASC NULLS FIRST
      LIMIT %s
 """
@@ -807,17 +800,20 @@ ANNOUNCE_TAIL_SQL = """
 def get_announce_tail_uuids(conn, limit: int) -> list[str]:
     """The rare-artist tail to announce by exact key (see dht_service).
 
-    Two branches. Artists whose OWNED music this node has analyzed —
-    first-hand material nobody else may hold. And artists with IMPORTED
-    analysis on their tracks — carried material, because whoever authored
-    it may be unable to announce at all: a node behind CGNAT suppresses its
-    own announces, so for anything it push-seeded the carrier is the only
-    address in the DHT. An unannounced carry is disk spent on data no one
-    can find. (Gap-fill imports on owned tracks land in both branches; the
-    UNION dedups.)
+    One test: does this node HOLD analysis for the artist's tracks.
+    Analysis is what a peer can actually pull, so the announce mirrors
+    serveability, not file ownership — the announce used to require
+    media_files, which silently dropped everything servable-but-fileless:
+    carried rows (whose author suppresses its own announces, making the
+    carrier their only DHT address), stream-derived analysis, and
+    first-hand analysis orphaned by a prune (file deleted, embeddings
+    deliberately kept). Meanwhile an owned-but-unanalyzed file advertises
+    nothing a peer wants. "Has analysis" covers all of it exactly.
 
-    Phantoms never enter either set — an owned analyzed track or an
-    imported analysis row is the test, and a name-guess produces neither.
+    The MB-minted phantom tracklist layer never enters: millions of
+    track_artists rows, none with an embeddings row — which is also why
+    the query drives FROM the analyzed set (tens of thousands) instead of
+    filtering track_artists.
 
     Ranked by Last.fm listeners as the rarity proxy: a peer's random node
     sample will surface anything popular anyway, so an exact key is only
