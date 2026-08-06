@@ -1906,11 +1906,19 @@ class P2PManager:
         """Find relay-capable nodes and subscribe until K are held.
         Previously used relays (p2p.relay_pubkeys) are tried first so our
         DHT announces stay on stable addresses across restarts."""
+        import random
+
         import aiohttp
         known = self._read_setting("p2p.relay_pubkeys") or []
         candidates = await self._dht_service.lookup_capability("relay")
         if not candidates:
             return
+        # Every client sees the SAME candidate order from the DHT — without
+        # a shuffle they all pile onto the first relay in the list and the
+        # cap does the load spreading the hard way (429s). Known relays
+        # still win afterwards via the sort key.
+        candidates = list(candidates)
+        random.shuffle(candidates)
         own = account["public_key_hex"]
         scored: list[tuple[int, str, int, str]] = []
         async with aiohttp.ClientSession(
@@ -1932,7 +1940,9 @@ class P2PManager:
                     continue
                 scored.append(
                     (0 if node_id in known else 1, ip, port, node_id))
-        scored.sort()
+        # Stable sort on the known-flag alone: known relays first, the
+        # shuffled order preserved inside each group.
+        scored.sort(key=lambda t: t[0])
         for _, ip, port, node_id in scored:
             if len(self._peer_relay_subs) >= self.PEER_RELAY_K:
                 break
@@ -1970,6 +1980,7 @@ class P2PManager:
         from desktop.node_identity import get_account_info, sign_message
         import aiohttp
         backoff = 5.0
+        relay_denied_until = 0.0
         while self._running:
             try:
                 account = get_account_info()
@@ -1987,7 +1998,20 @@ class P2PManager:
                     .encode("utf-8")).hex()
                 url = (f"https://{ip}:{port}/api/relay/wake-stream"
                        f"?pubkey={own}&ts={ts}&sig={sig}")
-                if not is_master:
+                # A voucher rides along whenever this node needs relaying —
+                # peer relays always (that is their whole point), the master
+                # too while we are unreachable: it then announces us and
+                # COUNTS US AGAINST ITS CAP like any other relay, which is
+                # what makes the load spread instead of pooling on one
+                # laptop. A friend's bare subscription (reachable node, the
+                # phase-A wake channel) carries none and costs no cap slot.
+                # A 429 (relay full) backs off to the bare channel for an
+                # hour rather than losing the wake stream — the peer relays
+                # this node also holds are the ones meant to carry it then.
+                wants_relay = (not is_master
+                               or self._reachability_status
+                               in ("cgnat", "unreachable"))
+                if wants_relay and time.time() >= relay_denied_until:
                     until = int(time.time()) + VOUCHER_TTL
                     v_sig = sign_message(voucher_payload(
                         own, relay_pubkey, until).encode("utf-8")).hex()
@@ -2001,6 +2025,12 @@ class P2PManager:
                         total=None, connect=10, sock_read=45),
                 ) as session:
                     async with session.get(url) as resp:
+                        if (resp.status == 429 and is_master
+                                and "voucher_sig" in url):
+                            relay_denied_until = time.time() + 3600
+                            raise ConnectionError(
+                                "master relay full — falling back to the "
+                                "bare wake channel")
                         if resp.status != 200:
                             raise ConnectionError(
                                 f"wake subscribe: HTTP {resp.status}")
