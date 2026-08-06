@@ -10635,6 +10635,14 @@
           <span class="form-label">Re-analyze synced audio</span>
           <button class="toggle ${sync.reanalyze_imported ? 'on' : ''}" data-action="toggle-reanalyze"><span class="knob"></span></button>
         </div>
+        <div class="form-row">
+          <span class="form-label">Relay for others</span>
+          <button class="toggle ${sync.relay_enabled ? 'on' : ''}" data-action="toggle-relay"><span class="knob"></span></button>
+        </div>
+        ${sync.relay_enabled && sync.relay_clients ? `<div class="form-row">
+          <span class="form-label">Relaying for</span>
+          <span class="form-value mono">${fmtNum(sync.relay_clients)} node${sync.relay_clients === 1 ? '' : 's'}</span>
+        </div>` : ''}
         <div class="form-row stacked">
           <div class="row-stack">
             <span class="row-stack-label">Last sync</span>
@@ -11619,6 +11627,7 @@
     onAction('[data-action="toggle-p2p"]',       () => putSync({ p2p_enabled: !sync.p2p_enabled }));
     onAction('[data-action="toggle-bg-enrich"]', () => putSync({ background_enrichment: !sync.background_enrichment }));
     onAction('[data-action="toggle-reanalyze"]', () => putSync({ reanalyze_imported: !sync.reanalyze_imported }));
+    onAction('[data-action="toggle-relay"]', () => putSync({ relay_enabled: !sync.relay_enabled }));
     onAction('[data-action="pick-interval"]', async () => {
       const id = await openSettingsPicker({ title: 'Auto-sync interval', options: AUTO_SYNC_OPTIONS, currentId: sync.auto_interval_min || 0 });
       if (id != null) await putSync({ auto_interval_min: Number(id) });

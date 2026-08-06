@@ -636,6 +636,16 @@ def _sync_state() -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"background_enrichment status read failed: {e}")
 
+    def _relay_client_count() -> int:
+        # Docker mode: the relay registry lives in this process. Launcher
+        # mode: the count lives in the launcher's sync server, which this
+        # backend cannot see — 0 is honest there ("none via this surface").
+        try:
+            from routers.peer_chat import relay_client_count
+            return relay_client_count()
+        except Exception:
+            return 0
+
     return {
         "p2p_enabled":             bool(_read("sync.p2p_enabled")),
         "auto_interval_min":       _read("sync.auto_interval_min"),
@@ -643,6 +653,8 @@ def _sync_state() -> Dict[str, Any]:
         "carry_limit":             _read("sync.carry_limit"),
         "background_enrichment":   bool(_read("enrichment.background_enabled")),
         "reanalyze_imported":      bool(_read("enrichment.reanalyze_imported")),
+        "relay_enabled":           bool(_read("p2p.relay_enabled")),
+        "relay_clients":           _relay_client_count(),
         "background_status":       bg_status,
         "last_sync_at":            _read("sync.last_at"),
         "last_items_received":     _read("sync.last_items_received"),
@@ -1323,6 +1335,7 @@ class SyncPrefs(BaseModel):
     carry_limit:             Optional[int]  = None  # foreign tracks carried
     background_enrichment:   Optional[bool] = None
     reanalyze_imported:      Optional[bool] = None
+    relay_enabled:           Optional[bool] = None
 
 
 @router.put("/sync")
@@ -1343,6 +1356,8 @@ def put_sync_prefs(req: SyncPrefs) -> Dict[str, Any]:
                int(req.carry_limit) if req.carry_limit > 0 else None)
     if req.reanalyze_imported is not None:
         _write("enrichment.reanalyze_imported", bool(req.reanalyze_imported))
+    if req.relay_enabled is not None:
+        _write("p2p.relay_enabled", bool(req.relay_enabled))
     if req.background_enrichment is not None:
         want = bool(req.background_enrichment)
         _write("enrichment.background_enabled", want)
