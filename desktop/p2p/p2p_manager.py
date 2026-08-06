@@ -27,7 +27,9 @@ from desktop.p2p import mb_slice_queries, sync_queries
 from desktop.p2p.chat_service import ChatService
 from desktop.p2p.dht_service import DHTService
 from desktop.p2p.lan_discovery import LANDiscovery
-from desktop.p2p.sync_server import FORWARD_ACK_TIMEOUT, SyncServer
+from desktop.p2p.sync_server import (
+    FORWARD_ACK_TIMEOUT, VOUCHER_TTL, SyncServer, voucher_payload,
+)
 
 # A relay holds our forward open until the recipient signs a receipt; give
 # it that window plus the round trip before we give up on the request.
@@ -82,6 +84,9 @@ class P2PManager:
         # Friends whose history has been pulled this session (skip re-pull)
         self._history_synced_friends: set[int] = set()
         self._master_wake_task: Optional[asyncio.Task] = None
+        self._peer_relay_task: Optional[asyncio.Task] = None
+        # Live peer-relay subscriptions: relay_pubkey -> asyncio.Task
+        self._peer_relay_subs: dict[str, asyncio.Task] = {}
         self._reachability_task: Optional[asyncio.Task] = None
         # unknown | reachable | cgnat | unreachable — see _reachability_loop
         self._reachability_status = "unknown"
@@ -377,6 +382,9 @@ class P2PManager:
                 self._master_wake_task = asyncio.create_task(
                     self._master_wake_loop()
                 )
+                self._peer_relay_task = asyncio.create_task(
+                    self._peer_relay_manager()
+                )
             self._reachability_task = asyncio.create_task(
                 self._reachability_loop()
             )
@@ -526,6 +534,8 @@ class P2PManager:
                      self._sync_request_listen_task, self._sync_request_task,
                      self._auto_sync_task, self._mb_slice_task,
                      self._upnp_renewal_task, self._master_wake_task,
+                     self._peer_relay_task,
+                     *self._peer_relay_subs.values(),
                      self._reachability_task):
             if task:
                 task.cancel()
@@ -1818,16 +1828,143 @@ class P2PManager:
                     MASTER_INVITE_CODE)
 
     async def _master_wake_loop(self) -> None:
-        """Hold ONE outbound SSE connection to the master's relay wake
-        stream. Outbound works from behind any NAT — this is how an
-        unreachable node learns 'you have mail' the moment the maintainer
-        replies, instead of at its next restart. Each wake (and each
-        connect) triggers the existing history pull; uuid dedup makes the
-        pull idempotent. Internally shaped as subscribe-to-one-relay so
-        Phase D can run it per peer relay."""
+        """The master-relay subscription (relay #0): a friend-path wake
+        stream with connect-time history catch-up. Peer relays run the same
+        machinery through _peer_relay_loop with a voucher instead of the
+        friendship."""
         from desktop.p2p.master_node import MASTER_PUBKEY_HEX, master_configured
         if not master_configured():
             return
+        from desktop.node_identity import get_account_info
+        while self._running:
+            account = get_account_info()
+            if (not account or not self._chat_service
+                    or account["public_key_hex"] == MASTER_PUBKEY_HEX
+                    or self._read_setting("p2p.master_removed")):
+                await asyncio.sleep(60)
+                continue
+            master = self._chat_service.get_friend_by_public_key(
+                MASTER_PUBKEY_HEX)
+            if not master:
+                await asyncio.sleep(30)  # not resolved yet
+                continue
+            break
+        if not self._running:
+            return
+
+        async def resolve():
+            master_row = self._chat_service.get_friend_by_public_key(
+                MASTER_PUBKEY_HEX)
+            if not master_row or self._read_setting("p2p.master_removed"):
+                return None
+            peers = await self._find_friend_peers(master_row)
+            return (master_row, peers[0]) if peers else None
+
+        await self._relay_subscription_loop(
+            MASTER_PUBKEY_HEX, resolve, is_master=True)
+
+    PEER_RELAY_K = 2          # peer relays held on top of the master
+    RELAY_SCAN_INTERVAL = 10 * 60
+
+    async def _peer_relay_manager(self) -> None:
+        """Keep K peer-relay subscriptions alive while this node cannot
+        accept inbound connections (Phase D). Hot standby, not failover:
+        every held relay announces our invite in parallel, so the death of
+        one leaves senders a live candidate instead of a decaying ghost.
+        When the node becomes reachable the subscriptions close — being
+        findable directly is strictly better than through anyone."""
+        from desktop.node_identity import get_account_info
+        from desktop.p2p.master_node import MASTER_PUBKEY_HEX
+        await asyncio.sleep(90)   # let DHT bootstrap + reachability settle
+        while self._running:
+            try:
+                # Reap finished subscription tasks
+                for pk, task in list(self._peer_relay_subs.items()):
+                    if task.done():
+                        del self._peer_relay_subs[pk]
+
+                account = get_account_info()
+                need = (self._reachability_status
+                        in ("cgnat", "unreachable")
+                        and account and self._chat_service
+                        and self._dht_service)
+                if not need:
+                    for task in self._peer_relay_subs.values():
+                        task.cancel()
+                    self._peer_relay_subs.clear()
+                elif len(self._peer_relay_subs) < self.PEER_RELAY_K:
+                    await self._recruit_peer_relays(
+                        account, MASTER_PUBKEY_HEX)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug(f"peer relay manager: {e}")
+            await asyncio.sleep(self.RELAY_SCAN_INTERVAL)
+
+    async def _recruit_peer_relays(self, account: dict,
+                                   master_pubkey: str) -> None:
+        """Find relay-capable nodes and subscribe until K are held.
+        Previously used relays (p2p.relay_pubkeys) are tried first so our
+        DHT announces stay on stable addresses across restarts."""
+        import aiohttp
+        known = self._read_setting("p2p.relay_pubkeys") or []
+        candidates = await self._dht_service.lookup_capability("relay")
+        if not candidates:
+            return
+        own = account["public_key_hex"]
+        scored: list[tuple[int, str, int, str]] = []
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(ssl=False),
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as session:
+            for ip, port in candidates[:10]:
+                if len(scored) >= self.PEER_RELAY_K * 3:
+                    break
+                try:
+                    async with session.get(
+                            f"https://{ip}:{port}/health") as r:
+                        node_id = (await r.json()).get("node_id", "")
+                except Exception:
+                    continue
+                if (not node_id or node_id == own
+                        or node_id == master_pubkey
+                        or node_id in self._peer_relay_subs):
+                    continue
+                scored.append(
+                    (0 if node_id in known else 1, ip, port, node_id))
+        scored.sort()
+        for _, ip, port, node_id in scored:
+            if len(self._peer_relay_subs) >= self.PEER_RELAY_K:
+                break
+            addr = (ip, port)
+
+            async def resolve(a=addr):
+                return (None, a)
+
+            task = asyncio.create_task(self._relay_subscription_loop(
+                node_id, resolve, is_master=False))
+            self._peer_relay_subs[node_id] = task
+            logger.info("Recruited peer relay %s… at %s:%s",
+                        node_id[:8], ip, port)
+        if self._peer_relay_subs:
+            await asyncio.get_event_loop().run_in_executor(
+                None, partial(self._write_settings_blocking, {
+                    "p2p.relay_pubkeys":
+                        list(self._peer_relay_subs.keys())}))
+
+    async def _relay_subscription_loop(self, relay_pubkey: str, resolve,
+                                       is_master: bool) -> None:
+        """Hold ONE outbound SSE connection to a relay's wake stream.
+        Outbound works from behind any NAT — this is how an unreachable
+        node learns 'you have mail' the moment someone writes, instead of
+        at its next restart.
+
+        `resolve` is an async callable returning (friend_row_or_None,
+        (ip, port)) — the master path resolves through the friends table,
+        peer paths through relay discovery. For a peer relay the friend row
+        is None: the subscription carries a VOUCHER (query params), there
+        is no history to sync with the relay itself, and unknown frames
+        degrade to no-ops instead of a history pull."""
         import random
 
         from desktop.node_identity import get_account_info, sign_message
@@ -1836,27 +1973,27 @@ class P2PManager:
         while self._running:
             try:
                 account = get_account_info()
-                if (not account or not self._chat_service
-                        or account["public_key_hex"] == MASTER_PUBKEY_HEX
-                        or self._read_setting("p2p.master_removed")):
+                if not account or not self._chat_service:
                     await asyncio.sleep(60)
                     continue
-                master = self._chat_service.get_friend_by_public_key(
-                    MASTER_PUBKEY_HEX)
-                if not master:
-                    await asyncio.sleep(30)  # not resolved yet
-                    continue
-                peers = await self._find_friend_peers(master)
-                if not peers:
-                    raise ConnectionError("no master address")
-                ip, port = peers[0]
+                resolved = await resolve()
+                if not resolved:
+                    raise ConnectionError("no relay address")
+                relay_row, (ip, port) = resolved
+                own = account["public_key_hex"]
                 ts = int(time.time())
                 sig = sign_message(
-                    f"wake_subscribe:{ts}:{MASTER_PUBKEY_HEX}:"
-                    f"{account['public_key_hex']}".encode("utf-8")).hex()
+                    f"wake_subscribe:{ts}:{relay_pubkey}:{own}"
+                    .encode("utf-8")).hex()
                 url = (f"https://{ip}:{port}/api/relay/wake-stream"
-                       f"?pubkey={account['public_key_hex']}"
-                       f"&ts={ts}&sig={sig}")
+                       f"?pubkey={own}&ts={ts}&sig={sig}")
+                if not is_master:
+                    until = int(time.time()) + VOUCHER_TTL
+                    v_sig = sign_message(voucher_payload(
+                        own, relay_pubkey, until).encode("utf-8")).hex()
+                    from urllib.parse import quote
+                    url += (f"&invite={quote(account['invite_code'])}"
+                            f"&voucher_until={until}&voucher_sig={v_sig}")
                 # sock_read=45 → two missed 15s keepalives = dead stream
                 async with aiohttp.ClientSession(
                     connector=aiohttp.TCPConnector(ssl=False),
@@ -1868,13 +2005,18 @@ class P2PManager:
                             raise ConnectionError(
                                 f"wake subscribe: HTTP {resp.status}")
                         logger.info(
-                            "Relay wake stream connected (%s:%s)", ip, port)
-                        self._note_peer_alive(
-                            master.get("id"),
-                            master.get("public_key_hex"), ip, port)
+                            "Relay wake stream connected (%s:%s)%s", ip, port,
+                            "" if is_master else " [peer relay]")
+                        if relay_row:
+                            self._note_peer_alive(
+                                relay_row.get("id"),
+                                relay_row.get("public_key_hex"), ip, port)
                         backoff = 5.0
-                        # Connect-time catch-up covers wakes missed offline
-                        await self._sync_chat_history(master, [(ip, port)])
+                        if is_master and relay_row:
+                            # Connect-time catch-up covers wakes missed
+                            # offline — only meaningful with a friend.
+                            await self._sync_chat_history(
+                                relay_row, [(ip, port)])
                         last_bump = time.time()
                         async for raw in resp.content:
                             if not self._running:
@@ -1882,19 +2024,21 @@ class P2PManager:
                             line = raw.decode("utf-8", "replace").strip()
                             if line.startswith("data:"):
                                 await self._handle_relay_frame(
-                                    line[5:], master, ip, port)
-                            elif time.time() - last_bump >= 120:
+                                    line[5:], relay_row, ip, port)
+                            elif (relay_row
+                                    and time.time() - last_bump >= 120):
                                 # Keepalives prove the relay is alive.
                                 # Throttled to the cadence the relay uses
                                 # for us — an UPDATE per 15s keepalive
                                 # would NOTIFY the UI into a refetch loop.
                                 last_bump = time.time()
                                 self._chat_service.update_friend_last_seen(
-                                    master["public_key_hex"])
+                                    relay_row["public_key_hex"])
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.debug(f"Master wake stream: {e}")
+                logger.debug(f"Relay wake stream (%s…): %s",
+                             relay_pubkey[:8], e)
             if not self._running:
                 break
             await asyncio.sleep(backoff + random.uniform(0, backoff / 4))
@@ -1906,15 +2050,17 @@ class P2PManager:
 
         `deliver` carries a forwarded message and is answered with a signed
         receipt. Anything else — including a frame kind this build has never
-        heard of — falls back to the history pull: the relay and the client
-        are separately deployed binaries, so an unknown frame must degrade,
-        not break."""
+        heard of — falls back to the history pull when the relay is a FRIEND
+        (the master): the two are separately deployed binaries, so an
+        unknown frame must degrade, not break. A peer relay is not a friend
+        and holds no history — there the degradation is a no-op."""
         try:
             frame = json.loads(data)
         except ValueError:
             frame = {}
         if frame.get("type") != "deliver":
-            await self._sync_chat_history(relay, [(ip, port)])
+            if relay:
+                await self._sync_chat_history(relay, [(ip, port)])
             return
 
         envelope = frame.get("envelope") or {}
@@ -2018,6 +2164,7 @@ class P2PManager:
         if self._dht_service:
             self._dht_service.set_announces_enabled(
                 status not in ("cgnat", "unreachable"))
+        await self._apply_relay_role(status)
         await asyncio.get_event_loop().run_in_executor(
             None, self._write_settings_blocking, {
                 "p2p.reachability": status,
@@ -2026,6 +2173,34 @@ class P2PManager:
                     datetime.now(timezone.utc).isoformat(),
             })
         logger.info(f"Reachability: {status} ({detail})")
+
+    async def _apply_relay_role(self, status: str) -> None:
+        """Relay role (Phase D): reachable + non-lite + enabled → announce
+        Sautium-cap:relay and serve strangers; anything else → withdraw and
+        close foreign subscriptions (their clients re-register elsewhere —
+        graceful degradation, no global reputation)."""
+        if not self._dht_service or not self._sync_server:
+            return
+        # No hardware-profile gate here: the profile lives in the backend
+        # process and relaying is byte-shuffling (SSE + small forwards), not
+        # ML work — a torch-less node relays fine. The plan's "non-lite"
+        # condition is about capability the role does not actually need.
+        want = (status == "reachable"
+                and self._read_setting("p2p.relay_enabled") is not False)
+        if want:
+            self._sync_server.set_client_announce_cbs(
+                lambda code: asyncio.get_event_loop().create_task(
+                    self._dht_service.announce_user_for(code)),
+                self._dht_service.withdraw_user_for)
+            if self._sync_server.relay_has_room():
+                await self._dht_service.announce_capability("relay")
+        else:
+            self._dht_service.withdraw_capability("relay")
+            for pk, rec in list(self._sync_server._relay_clients.items()):
+                sub = self._sync_server._wake_subs.get(pk)
+                if sub:
+                    sub.closed = True
+                    sub.loop.call_soon_threadsafe(sub.evt.set)
 
     async def _probe_reachability_via_master(self):
         """Definitive test — ask the master to connect back to our sync
@@ -2312,13 +2487,11 @@ class P2PManager:
         if friend_pubkey == MASTER_PUBKEY_HEX:
             return  # the relay is the recipient; the direct path is the path
 
-        resolved = await self._resolve_relay_for(friend_pubkey)
-        if not resolved:
+        relays = await self._resolve_relay_for(friend_pubkey)
+        if not relays:
             logger.debug("No relay available — %d message(s) stay queued",
                          len(messages))
             return
-        relay, relay_peers = resolved
-        relay_pubkey = relay["public_key_hex"]
 
         import hashlib
 
@@ -2333,63 +2506,86 @@ class P2PManager:
             connector=aiohttp.TCPConnector(ssl=False),
             timeout=aiohttp.ClientTimeout(total=FORWARD_TIMEOUT),
         ) as session:
-            for msg in messages:
-                try:
-                    encrypted = self._chat_service.encrypt_message(
-                        msg["content"], friend_pubkey)
-                except Exception as e:
-                    logger.error(f"Encrypt failed for friend {friend_id}: {e}")
+            for relay_pubkey, relay_peers, relay_row in relays:
+                delivered_any = await self._forward_via_relay(
+                    session, relay_pubkey, relay_peers, relay_row,
+                    friend_id, friend_pubkey, messages, account,
+                    sign_message, hashlib)
+                if delivered_any:
                     return
-                msg_uuid = msg.get("message_uuid", "")
-                if not msg_uuid:
-                    continue  # pre-uuid row; the direct path still covers it
-                ct_hash = hashlib.sha256(
-                    encrypted.encode("utf-8")).hexdigest()
-                ts = int(time.time())
-                payload = {
-                    "public_key_hex": account["public_key_hex"],
-                    "to_public_key": friend_pubkey,
-                    "ts": ts,
-                    "signature": sign_message(
-                        f"relay_forward:{ts}:{relay_pubkey}:{msg_uuid}"
-                        f":{ct_hash}".encode("utf-8")).hex(),
-                    "envelope": {
-                        "from_public_key": account["public_key_hex"],
-                        "encrypted": encrypted,
-                        "timestamp": self._iso_utc(msg["timestamp"]),
-                        "message_uuid": msg_uuid,
-                    },
-                }
-                for ip, port in relay_peers:
-                    url = f"https://{ip}:{port}/api/relay/forward"
-                    try:
-                        async with session.post(url, json=payload) as resp:
-                            if resp.status == 409:
-                                # Recipient is not connected to this relay —
-                                # the rest of the batch fares no better.
-                                logger.debug(
-                                    "Relay %s:%s: recipient offline", ip, port)
-                                return
-                            if resp.status != 200:
-                                continue
-                            data = await resp.json()
+                # 409 / no receipt from THIS relay — the friend may hold a
+                # live stream to the next one (K relays announce it in
+                # parallel), so a dead candidate is a reason to move on,
+                # not to give up the batch.
+
+    async def _forward_via_relay(self, session, relay_pubkey: str,
+                                 relay_peers: list, relay_row,
+                                 friend_id: int, friend_pubkey: str,
+                                 messages: list, account: dict,
+                                 sign_message, hashlib) -> bool:
+        """Push the batch through one relay. True when at least one message
+        got a verified receipt (the batch is 'placed' — remaining failures
+        retry next cycle through the same resolution)."""
+        delivered_any = False
+        for msg in messages:
+            try:
+                encrypted = self._chat_service.encrypt_message(
+                    msg["content"], friend_pubkey)
+            except Exception as e:
+                logger.error(f"Encrypt failed for friend {friend_id}: {e}")
+                return delivered_any
+            msg_uuid = msg.get("message_uuid", "")
+            if not msg_uuid:
+                continue  # pre-uuid row; the direct path still covers it
+            ct_hash = hashlib.sha256(encrypted.encode("utf-8")).hexdigest()
+            ts = int(time.time())
+            payload = {
+                "public_key_hex": account["public_key_hex"],
+                "to_public_key": friend_pubkey,
+                "ts": ts,
+                "signature": sign_message(
+                    f"relay_forward:{ts}:{relay_pubkey}:{msg_uuid}"
+                    f":{ct_hash}".encode("utf-8")).hex(),
+                "envelope": {
+                    "from_public_key": account["public_key_hex"],
+                    "encrypted": encrypted,
+                    "timestamp": self._iso_utc(msg["timestamp"]),
+                    "message_uuid": msg_uuid,
+                },
+            }
+            for ip, port in relay_peers:
+                url = f"https://{ip}:{port}/api/relay/forward"
+                try:
+                    async with session.post(url, json=payload) as resp:
+                        if resp.status == 409:
+                            # Recipient holds no stream to THIS relay — the
+                            # rest of the batch fares no better here.
+                            logger.debug(
+                                "Relay %s:%s: recipient offline", ip, port)
+                            return delivered_any
+                        if resp.status != 200:
+                            continue
+                        data = await resp.json()
+                        if relay_row:
                             self._note_peer_alive(
-                                relay.get("id"), relay_pubkey, ip, port)
-                        if not data.get("delivered"):
-                            return  # no receipt yet; retry next cycle
-                        if self._verify_delivery_receipt(
-                                data.get("ack") or {}, friend_pubkey,
-                                msg_uuid, ct_hash):
-                            self._chat_service.mark_delivered_by_uuid(msg_uuid)
-                            logger.info("Relayed to %s… via %s:%s",
-                                        friend_pubkey[:8], ip, port)
-                        else:
-                            logger.warning(
-                                "Relay %s:%s returned an unverifiable "
-                                "delivery receipt — ignoring", ip, port)
-                        break
-                    except Exception as e:
-                        logger.debug(f"Relay forward via {ip}:{port}: {e}")
+                                relay_row.get("id"), relay_pubkey, ip, port)
+                    if not data.get("delivered"):
+                        return delivered_any  # no receipt; retry next cycle
+                    if self._verify_delivery_receipt(
+                            data.get("ack") or {}, friend_pubkey,
+                            msg_uuid, ct_hash):
+                        self._chat_service.mark_delivered_by_uuid(msg_uuid)
+                        delivered_any = True
+                        logger.info("Relayed to %s… via %s:%s",
+                                    friend_pubkey[:8], ip, port)
+                    else:
+                        logger.warning(
+                            "Relay %s:%s returned an unverifiable "
+                            "delivery receipt — ignoring", ip, port)
+                    break
+                except Exception as e:
+                    logger.debug(f"Relay forward via {ip}:{port}: {e}")
+        return delivered_any
 
     @staticmethod
     def _verify_delivery_receipt(ack: dict, expected_pubkey: str,
@@ -2419,25 +2615,81 @@ class P2PManager:
             out += "+00:00"
         return out
 
-    async def _resolve_relay_for(self, friend_pubkey: str):
-        """Which relay can reach this friend, and at which address.
+    async def _resolve_relay_for(self, friend_pubkey: str) -> list:
+        """Every relay that can reach this friend, best first. Returns
+        [(relay_pubkey, [(ip, port), ...], friend_row_or_None), ...].
 
-        Phase 1: the shipped master — every node is its friend and holds a
-        wake stream to it. Phase 2 resolves the friend's own relay from the
-        DHT (relays announce on behalf of their clients), and this is the
-        only seam that has to widen."""
+        Phase D: the friend's own peer relays come from the SAME
+        lookup_user candidates the direct path already fetched — a relay
+        announces its client's invite, so a candidate whose /health
+        identity is NOT the friend is a potential relay, proven by the
+        VOUCHER: the friend's signature over {friend, relay, until}, which
+        an impostor announcing someone else's invite cannot produce. The
+        master closes the list as relay #0 — every node is its friend."""
+        candidates: list = []
+        friend = self._chat_service.get_friend_by_public_key(friend_pubkey) \
+            if self._chat_service else None
+        invite = (friend or {}).get("invite_code") or ""
+        if friend and invite and self._dht_service:
+            try:
+                hits = await self._dht_service.lookup_user(invite)
+            except Exception:
+                hits = []
+            import aiohttp
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(ssl=False),
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as session:
+                for ip, port in hits[:6]:
+                    relay_pk = await self._voucher_checks_out(
+                        session, ip, port, invite, friend_pubkey)
+                    if relay_pk:
+                        candidates.append((relay_pk, [(ip, port)], None))
+
         from desktop.p2p.master_node import MASTER_PUBKEY_HEX, master_configured
-        if not master_configured() or not self._chat_service:
-            return None
         from desktop.node_identity import get_account_info
         account = get_account_info()
-        if not account or account["public_key_hex"] == MASTER_PUBKEY_HEX:
+        if (master_configured() and self._chat_service and account
+                and account["public_key_hex"] != MASTER_PUBKEY_HEX
+                and friend_pubkey != MASTER_PUBKEY_HEX):
+            master = self._chat_service.get_friend_by_public_key(
+                MASTER_PUBKEY_HEX)
+            if master:
+                peers = await self._find_friend_peers(master)
+                if peers:
+                    candidates.append((MASTER_PUBKEY_HEX, peers, master))
+        return candidates
+
+    async def _voucher_checks_out(self, session, ip: str, port: int,
+                                  invite: str, friend_pubkey: str):
+        """Full voucher verification against one relay candidate. Returns
+        the relay's pubkey, or None when anything fails — a black-hole
+        impostor dies here."""
+        from desktop.node_identity import verify_signature
+        try:
+            async with session.get(f"https://{ip}:{port}/health") as r:
+                node_id = (await r.json()).get("node_id", "")
+            if not node_id or node_id.lower() == friend_pubkey.lower():
+                return None      # the friend itself — direct path territory
+            from urllib.parse import quote
+            async with session.get(
+                    f"https://{ip}:{port}/api/relay/voucher"
+                    f"?invite={quote(invite)}") as r:
+                if r.status != 200:
+                    return None
+                v = await r.json()
+            if (v.get("client_pubkey", "").lower() != friend_pubkey.lower()
+                    or v.get("relay_pubkey", "").lower() != node_id.lower()
+                    or int(v.get("until") or 0) <= int(time.time())):
+                return None
+            if not verify_signature(
+                    voucher_payload(friend_pubkey, node_id,
+                                    int(v["until"])).encode("utf-8"),
+                    bytes.fromhex(v.get("signature") or ""), friend_pubkey):
+                return None
+            return node_id
+        except Exception:
             return None
-        relay = self._chat_service.get_friend_by_public_key(MASTER_PUBKEY_HEX)
-        if not relay:
-            return None
-        peers = await self._find_friend_peers(relay)
-        return (relay, peers) if peers else None
 
     async def _listen_for_db_notifications(self):
         """Listen for PostgreSQL NOTIFY on 'sautium_chat' channel.
