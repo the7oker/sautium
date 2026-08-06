@@ -476,20 +476,23 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
     if not _verify_ed25519(pubkey, signed, sig):
         return _err("invalid signature", 403)
 
-    # Two admission paths (Phase D): friends as before; a stranger presents
-    # a VOUCHER — its signature both authorizes the subscription and is the
-    # material this relay hands to senders as proof of announce authority.
+    # Admission (Phase D). A presented voucher is ALWAYS processed —
+    # friendship only waives its NECESSITY (master-path legacy): a
+    # friend-client that wants to be announced still sends one. Gating on
+    # friendship first silently dropped exactly that — two friendly
+    # launchers could never relay for each other. Mirror of
+    # desktop/p2p/sync_server.py.
     friend = svc.get_friend_by_public_key(pubkey)
-    voucher = None
     if friend and friend.get("is_blocked"):
         return _err("not a friend", 403)
-    if not friend:
+    voucher = None
+    if invite and voucher_sig:
         from p2p_identity import verify_invite_code
         try:
             v_until = int(voucher_until)
         except ValueError:
             v_until = 0
-        if not invite or not voucher_sig or v_until <= int(time.time()):
+        if v_until <= int(time.time()):
             return _err("voucher required", 403)
         if not verify_invite_code(invite, pubkey):
             return _err("invite does not match key", 403)
@@ -502,12 +505,15 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
             return _err("relay full", 429)
         voucher = {"invite_code": invite, "until": v_until,
                    "signature": voucher_sig}
+    elif not friend:
+        return _err("voucher required", 403)
 
     ip = request.client.host if request.client else "unknown"
     sub = _register_wake(pubkey, ip)
     if sub is None:
         return _err("too many subscriptions", 429)
     is_client = voucher is not None
+    bump_presence = friend is not None
     if is_client:
         with _wake_lock:
             _relay_clients[pubkey] = voucher
@@ -520,7 +526,7 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
     async def gen():
         try:
             yield ": connected\n\n"
-            if not is_client:
+            if bump_presence:
                 svc.update_friend_last_seen(pubkey)
             cycles = 0
             while not sub.closed:
@@ -546,7 +552,7 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
                     yield ": keepalive\n\n"
                 cycles += 1
                 if cycles >= 8:          # ~2 min — passive presence bump
-                    if not is_client:
+                    if bump_presence:
                         svc.update_friend_last_seen(pubkey)
                     cycles = 0
         finally:

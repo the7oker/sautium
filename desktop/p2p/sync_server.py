@@ -1076,30 +1076,29 @@ class SyncServer:
             return self._json_response(
                 request, {"error": "invalid signature"}, status=403)
 
-        # Two admission paths. Friends subscribe as before (the master
-        # relationship). A stranger subscribes by presenting a VOUCHER —
-        # its signature both authorizes the subscription and is the
-        # material this relay will hand to senders as proof of authority
-        # to announce on the client's behalf (Phase D).
+        # Admission (Phase D). A presented voucher is ALWAYS processed —
+        # its signature authorizes the subscription and is the material
+        # this relay hands to senders as proof of announce authority.
+        # Friendship only waives the voucher's NECESSITY (the master-path
+        # legacy): a friend-client that wants to be announced still sends
+        # one. Gating on friendship first silently dropped exactly that —
+        # two friendly launchers could never relay for each other.
         friend = self._chat_service.get_friend_by_public_key(pubkey)
-        voucher = None
-        if friend and not friend.get("is_blocked"):
-            pass                                   # friend path, no voucher
-        elif friend and friend.get("is_blocked"):
+        if friend and friend.get("is_blocked"):
             return self._json_response(
                 request, {"error": "not a friend"}, status=403)
-        else:
-            invite = request.query.get("invite", "")
-            v_until = request.query.get("voucher_until", "")
-            v_sig = request.query.get("voucher_sig", "")
+        voucher = None
+        invite = request.query.get("invite", "")
+        v_sig = request.query.get("voucher_sig", "")
+        if invite and v_sig:
             try:
-                v_until = int(v_until)
+                v_until = int(request.query.get("voucher_until", ""))
             except ValueError:
                 v_until = 0
-            if not invite or not v_sig or v_until <= int(time.time()):
+            from desktop.node_identity import verify_invite_code
+            if v_until <= int(time.time()):
                 return self._json_response(
                     request, {"error": "voucher required"}, status=403)
-            from desktop.node_identity import verify_invite_code
             if not verify_invite_code(invite, pubkey):
                 return self._json_response(
                     request, {"error": "invite does not match key"},
@@ -1117,6 +1116,9 @@ class SyncServer:
                     request, {"error": "relay full"}, status=429)
             voucher = {"invite_code": invite, "until": v_until,
                        "signature": v_sig}
+        elif not friend:
+            return self._json_response(
+                request, {"error": "voucher required"}, status=403)
 
         ip_count = sum(1 for s in self._wake_subs.values() if s.ip == ip)
         old = self._wake_subs.get(pubkey)
@@ -1142,10 +1144,13 @@ class SyncServer:
             "X-Accel-Buffering": "no",
         })
         is_client = voucher is not None
+        # Presence bumps follow the FRIEND row, not the client flag — a
+        # friend that also sent a voucher is still a friend in the UI.
+        bump_presence = friend is not None
         await resp.prepare(request)
         try:
             await resp.write(b": connected\n\n")
-            if not is_client:
+            if bump_presence:
                 self._chat_service.update_friend_last_seen(pubkey)
             cycles = 0
             while not sub.closed:
@@ -1173,7 +1178,7 @@ class SyncServer:
                     await resp.write(b": keepalive\n\n")
                 cycles += 1
                 if cycles >= 8:          # ~2 min — passive presence bump
-                    if not is_client:
+                    if bump_presence:
                         self._chat_service.update_friend_last_seen(pubkey)
                     cycles = 0
         except (ConnectionResetError, ConnectionError):
