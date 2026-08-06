@@ -45,6 +45,19 @@ PROBE_COOLDOWN = 60
 FORWARD_ACK_TIMEOUT = 10
 FORWARD_QUEUE_MAX = 100
 FORWARD_INFLIGHT_PER_SENDER = 10
+# Peer-relay caps (Phase D) — mirror backend/routers/peer_chat.py.
+# The cap counts FOREIGN clients (voucher-registered, not friends); it is
+# adaptive: a full relay stops announcing Sautium-cap:relay, and if it then
+# sees no OTHER relays in the DHT it grows the cap instead of letting the
+# network starve (the check runs on the re-announce cadence, the signal is
+# binary and the reaction one-sided — no oscillation).
+RELAY_CAP_BASE = 20
+RELAY_CAP_MAX = 100
+RELAY_CAP_STEP = 20
+# Voucher lifetime: the client re-issues on every (re)subscribe, so this
+# only bounds how long a sender may trust a voucher from a relay whose
+# client silently vanished mid-window.
+VOUCHER_TTL = 24 * 3600
 
 
 def delivery_payload(message_uuid: str, ciphertext_sha256: str) -> str:
@@ -52,6 +65,15 @@ def delivery_payload(message_uuid: str, ciphertext_sha256: str) -> str:
     backend/routers/peer_chat.py. No timestamp: a receipt is a permanent
     fact the sender must be able to re-verify from what it already has."""
     return f"sautium-delivery:v1:{message_uuid}:{ciphertext_sha256}"
+
+
+def voucher_payload(client_pubkey: str, relay_pubkey: str, until: int) -> str:
+    """Canonical relay-voucher string the CLIENT signs — mirrored in
+    backend/routers/peer_chat.py. The relay pubkey inside the payload means
+    a voucher issued to one relay cannot be presented by another; `until`
+    bounds how long the authority lives without re-issue."""
+    return (f"sautium-relay-voucher:v1:{client_pubkey.lower()}"
+            f":{relay_pubkey.lower()}:{int(until)}")
 
 
 class _WakeSub:
@@ -94,6 +116,16 @@ class SyncServer:
         self._sharing_checked = 0.0
         # Relay wake registry: subscriber pubkey -> _WakeSub
         self._wake_subs: dict[str, _WakeSub] = {}
+        # Peer-relay clients (Phase D): pubkey -> voucher record
+        # {invite_code, until, signature}. In-memory on purpose — a relay
+        # restart drops the registry and every client re-issues on
+        # reconnect (their SSE died with us).
+        self._relay_clients: dict[str, dict] = {}
+        self._relay_cap = RELAY_CAP_BASE
+        # Called with the invite code when a foreign client (un)subscribes —
+        # p2p_manager wires these to DHT announce_user_for / withdraw.
+        self._client_announce_cb: Optional[Callable] = None
+        self._client_withdraw_cb: Optional[Callable] = None
         self._probe_last: dict[str, float] = {}
         # In-flight forwards awaiting a receipt: uuid -> (recipient, Future).
         # The ONLY state a relay holds for a forwarded message, and only
@@ -106,6 +138,40 @@ class SyncServer:
     def set_inbound_cb(self, cb: Callable):
         """Attach the passive-reachability callback (p2p_manager)."""
         self._inbound_cb = cb
+
+    def set_client_announce_cbs(self, announce: Callable, withdraw: Callable):
+        """Attach DHT announce-on-behalf hooks (p2p_manager wires these to
+        dht_service.announce_user_for / withdraw_user_for)."""
+        self._client_announce_cb = announce
+        self._client_withdraw_cb = withdraw
+
+    def relay_client_count(self) -> int:
+        """Foreign (voucher-registered) clients currently subscribed."""
+        return sum(1 for k in self._wake_subs if k in self._relay_clients)
+
+    def relay_has_room(self) -> bool:
+        return self.relay_client_count() < self._relay_cap
+
+    def adapt_relay_cap(self, other_relays_visible: bool) -> bool:
+        """One adaptive-cap step (Валерій's design): a full relay that sees
+        no OTHER relay in the DHT grows its cap instead of letting the
+        network starve; a relay with room again, in a network that has
+        relays, decays back toward the base. Existing clients are never
+        shed by a cap change. Returns True when the cap changed."""
+        clients = self.relay_client_count()
+        if clients >= self._relay_cap and not other_relays_visible \
+                and self._relay_cap < RELAY_CAP_MAX:
+            self._relay_cap = min(self._relay_cap + RELAY_CAP_STEP,
+                                  RELAY_CAP_MAX)
+            logger.info("relay cap raised to %d (no other relays visible)",
+                        self._relay_cap)
+            return True
+        if clients < RELAY_CAP_BASE and other_relays_visible \
+                and self._relay_cap > RELAY_CAP_BASE:
+            self._relay_cap = max(RELAY_CAP_BASE, clients)
+            logger.info("relay cap decayed to %d", self._relay_cap)
+            return True
+        return False
 
     def _note_inbound(self, ip: Optional[str]) -> None:
         if not self._inbound_cb or not ip:
@@ -1009,10 +1075,48 @@ class SyncServer:
         if not self._verify_peer_sig(pubkey, signed, sig):
             return self._json_response(
                 request, {"error": "invalid signature"}, status=403)
+
+        # Two admission paths. Friends subscribe as before (the master
+        # relationship). A stranger subscribes by presenting a VOUCHER —
+        # its signature both authorizes the subscription and is the
+        # material this relay will hand to senders as proof of authority
+        # to announce on the client's behalf (Phase D).
         friend = self._chat_service.get_friend_by_public_key(pubkey)
-        if not friend or friend.get("is_blocked"):
+        voucher = None
+        if friend and not friend.get("is_blocked"):
+            pass                                   # friend path, no voucher
+        elif friend and friend.get("is_blocked"):
             return self._json_response(
                 request, {"error": "not a friend"}, status=403)
+        else:
+            invite = request.query.get("invite", "")
+            v_until = request.query.get("voucher_until", "")
+            v_sig = request.query.get("voucher_sig", "")
+            try:
+                v_until = int(v_until)
+            except ValueError:
+                v_until = 0
+            if not invite or not v_sig or v_until <= int(time.time()):
+                return self._json_response(
+                    request, {"error": "voucher required"}, status=403)
+            from desktop.node_identity import verify_invite_code
+            if not verify_invite_code(invite, pubkey):
+                return self._json_response(
+                    request, {"error": "invite does not match key"},
+                    status=403)
+            if not self._verify_peer_sig(
+                    pubkey, voucher_payload(pubkey, own_pubkey, v_until),
+                    v_sig):
+                return self._json_response(
+                    request, {"error": "invalid voucher"}, status=403)
+            foreign = sum(1 for k in self._wake_subs
+                          if k in self._relay_clients)
+            if pubkey not in self._relay_clients \
+                    and foreign >= self._relay_cap:
+                return self._json_response(
+                    request, {"error": "relay full"}, status=429)
+            voucher = {"invite_code": invite, "until": v_until,
+                       "signature": v_sig}
 
         ip_count = sum(1 for s in self._wake_subs.values() if s.ip == ip)
         old = self._wake_subs.get(pubkey)
@@ -1024,16 +1128,25 @@ class SyncServer:
             old.loop.call_soon_threadsafe(old.evt.set)
         sub = _WakeSub(asyncio.Event(), asyncio.get_event_loop(), ip)
         self._wake_subs[pubkey] = sub
+        if voucher is not None:
+            self._relay_clients[pubkey] = voucher
+            if self._client_announce_cb:
+                try:
+                    self._client_announce_cb(voucher["invite_code"])
+                except Exception as e:
+                    logger.warning("client announce failed: %s", e)
 
         resp = web.StreamResponse(headers={
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         })
+        is_client = voucher is not None
         await resp.prepare(request)
         try:
             await resp.write(b": connected\n\n")
-            self._chat_service.update_friend_last_seen(pubkey)
+            if not is_client:
+                self._chat_service.update_friend_last_seen(pubkey)
             cycles = 0
             while not sub.closed:
                 try:
@@ -1060,13 +1173,25 @@ class SyncServer:
                     await resp.write(b": keepalive\n\n")
                 cycles += 1
                 if cycles >= 8:          # ~2 min — passive presence bump
-                    self._chat_service.update_friend_last_seen(pubkey)
+                    if not is_client:
+                        self._chat_service.update_friend_last_seen(pubkey)
                     cycles = 0
         except (ConnectionResetError, ConnectionError):
             pass  # subscriber went away — normal churn, not an error
         finally:
             if self._wake_subs.get(pubkey) is sub:
                 del self._wake_subs[pubkey]
+                # The announce lives exactly as long as the subscription:
+                # a client we can no longer reach must not stay findable
+                # through us. Only when THIS sub is the registered one — a
+                # re-subscribe supersession must not withdraw the new life.
+                if is_client:
+                    rec = self._relay_clients.pop(pubkey, None)
+                    if rec and self._client_withdraw_cb:
+                        try:
+                            self._client_withdraw_cb(rec["invite_code"])
+                        except Exception as e:
+                            logger.warning("client withdraw failed: %s", e)
         return resp
 
     async def handle_probe_connect(self, request: web.Request) -> web.Response:
@@ -1198,8 +1323,16 @@ class SyncServer:
         if not self._verify_peer_sig(sender, signed, sig):
             return self._json_response(
                 request, {"error": "invalid signature"}, status=403)
+        # Admission (Phase D): a friend may forward to anyone subscribed
+        # here; a STRANGER may forward only to a voucher-registered client —
+        # that is the whole point of being someone's relay, and the client's
+        # E2E decrypt is what actually rejects mail from non-friends. A
+        # blocked friend stays blocked on both paths.
         friend = self._chat_service.get_friend_by_public_key(sender)
-        if not friend or friend.get("is_blocked"):
+        if friend and friend.get("is_blocked"):
+            return self._json_response(
+                request, {"error": "not a friend"}, status=403)
+        if not friend and recipient not in self._relay_clients:
             return self._json_response(
                 request, {"error": "not a friend"}, status=403)
         # The relay stamps the sender from the signature — a forwarded
@@ -1237,6 +1370,30 @@ class SyncServer:
                     sender[:8], recipient[:8])
         return self._json_response(request, {"delivered": True, "ack": ack})
 
+    async def handle_relay_voucher(self, request: web.Request) -> web.Response:
+        """GET /api/relay/voucher?invite= — prove our authority to relay for
+        a client. The sender verifies the CLIENT's signature over
+        {client_pubkey, our_pubkey, until}; we cannot forge it, so a
+        black-hole impostor announcing someone else's invite has nothing to
+        answer with here — and the sender drops the candidate."""
+        ip = request.remote or "unknown"
+        if not self._check_rate_limit(ip):
+            return self._json_response(
+                request, {"error": "rate limited"}, status=429)
+        invite = request.query.get("invite", "")
+        for pubkey, rec in self._relay_clients.items():
+            if rec["invite_code"] == invite:
+                return self._json_response(request, {
+                    "client_pubkey": pubkey,
+                    "invite_code": rec["invite_code"],
+                    "relay_pubkey":
+                        (self.account_info or {}).get("public_key_hex", ""),
+                    "until": rec["until"],
+                    "signature": rec["signature"],
+                })
+        return self._json_response(
+            request, {"error": "no such client"}, status=404)
+
     async def handle_relay_ack(self, request: web.Request) -> web.Response:
         """POST /api/relay/ack — the recipient's signed receipt."""
         ip = request.remote or "unknown"
@@ -1262,8 +1419,14 @@ class SyncServer:
                 pubkey, delivery_payload(message_uuid, ct_hash), sig):
             return self._json_response(
                 request, {"error": "invalid signature"}, status=403)
+        # A receipt may come from a friend OR a voucher-registered client
+        # (Phase D) — the real gate is below: the uuid must match a pending
+        # forward addressed to exactly this pubkey.
         friend = self._chat_service.get_friend_by_public_key(pubkey)
-        if not friend or friend.get("is_blocked"):
+        if friend and friend.get("is_blocked"):
+            return self._json_response(
+                request, {"error": "not a friend"}, status=403)
+        if not friend and pubkey not in self._relay_clients:
             return self._json_response(
                 request, {"error": "not a friend"}, status=403)
 
@@ -1472,6 +1635,9 @@ class SyncServer:
         )
         self._app.router.add_post(
             "/api/relay/ack", self.handle_relay_ack
+        )
+        self._app.router.add_get(
+            "/api/relay/voucher", self.handle_relay_voucher
         )
 
         self._runner = web.AppRunner(

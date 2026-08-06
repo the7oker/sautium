@@ -141,6 +141,13 @@ class DHTService:
         self._announced: set[str] = set()  # artist UUIDs currently announced
         self._user_invite_code: Optional[str] = None  # user's invite code
         self._capabilities: set[str] = set()  # announced node capabilities
+        # Invite codes announced ON BEHALF of relay clients (Phase D). BT DHT
+        # does not verify infohash ownership — that is the feature: a CGNAT
+        # node cannot announce itself, so its relay does, and a sender's
+        # ordinary lookup_user() finds the relay's address. Withdrawn the
+        # moment the client's wake subscription closes; the voucher (held by
+        # the sync server) is what makes the claim provable to senders.
+        self._client_invites: set[str] = set()
         self._peer_cache: dict[str, list[tuple[str, int, float]]] = {}
         self._running = False
         self._alert_task: Optional[asyncio.Task] = None
@@ -258,6 +265,25 @@ class DHTService:
         return await self._lookup(user_infohash(invite_code),
                                   f"user:{invite_code}")
 
+    async def announce_user_for(self, invite_code: str):
+        """Announce a relay CLIENT's invite code from this node (Phase D).
+        Idempotent; joins the periodic re-announce cycle until withdrawn."""
+        if invite_code in self._client_invites:
+            return
+        self._client_invites.add(invite_code)
+        if not self._session or not self._announces_enabled:
+            return
+        sha1 = lt.sha1_hash(user_infohash(invite_code))
+        self._session.dht_announce(sha1, self._announce_port, 0)
+        logger.info(f"DHT: client announced on behalf ({invite_code})")
+
+    def withdraw_user_for(self, invite_code: str):
+        """Stop re-announcing a client. The already-published DHT entry ages
+        out on its own (15-30 min) — that decay window is the same one every
+        dead announce has, and senders survive it by trying the next
+        candidate."""
+        self._client_invites.discard(invite_code)
+
     async def announce_node(self):
         """Announce this node on the discovery key — the highway a peer
         finds us by (one lookup, then inventory). Cheap: one announce
@@ -282,6 +308,11 @@ class DHTService:
         sha1 = lt.sha1_hash(capability_infohash(capability))
         self._session.dht_announce(sha1, self._announce_port, 0)
         logger.info(f"DHT: capability announced ({capability})")
+
+    def withdraw_capability(self, capability: str):
+        """Drop a capability from the re-announce cycle (e.g. a full relay
+        stops advertising). The published entry ages out on its own."""
+        self._capabilities.discard(capability)
 
     async def lookup_capability(self, capability: str) -> list[tuple[str, int]]:
         """Find nodes announcing a capability. Returns list of (ip, port)."""
@@ -413,6 +444,12 @@ class DHTService:
             if self._user_invite_code:
                 ih = user_infohash(self._user_invite_code)
                 sha1 = lt.sha1_hash(ih)
+                self._session.dht_announce(sha1, self._announce_port, 0)
+
+            # Re-announce relay clients (announce-on-behalf, Phase D) —
+            # bounded by the relay cap, so at most a few dozen keys.
+            for code in list(self._client_invites):
+                sha1 = lt.sha1_hash(user_infohash(code))
                 self._session.dht_announce(sha1, self._announce_port, 0)
 
             # Re-announce capabilities

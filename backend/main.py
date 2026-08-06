@@ -70,6 +70,37 @@ _dht_reannounce_task: asyncio.Task | None = None
 _p2p_server_task: asyncio.Task | None = None
 
 
+async def _relay_cap_loop() -> None:
+    """Adaptive relay cap (Phase D, Валерій's design): a full relay stops
+    advertising Sautium-cap:relay so newcomers don't knock in vain; if it
+    then sees NO other relay in the DHT it grows the cap instead of letting
+    the network starve. Binary signal, one-sided reaction on the re-announce
+    cadence — no oscillation. The Docker surface has no observed external
+    IP to subtract itself from the lookup, so "others visible" is the crude
+    but safe `more than one announcer` (we are one of them while we
+    announce; miscounts only delay a cap step by one cycle)."""
+    from dht_service import REANNOUNCE_INTERVAL
+    from routers.peer_chat import adapt_relay_cap, relay_has_room
+    from routers.settings import _read
+    while True:
+        await asyncio.sleep(REANNOUNCE_INTERVAL)
+        if _dht_service is None:
+            continue
+        try:
+            if not _read("p2p.relay_enabled"):
+                _dht_service.withdraw_capability("relay")
+                continue
+            peers = await _dht_service.lookup_capability("relay")
+            others = len({(ip, port) for ip, port in peers}) > 1
+            adapt_relay_cap(others)
+            if relay_has_room():
+                await _dht_service.announce_capability("relay")
+            else:
+                _dht_service.withdraw_capability("relay")
+        except Exception as e:
+            logger.debug(f"relay cap loop: {e}")
+
+
 async def _serve_p2p(port: int) -> None:
     """Serve the peer surface (p2p_app) on its own port, HTTPS with the same
     self-signed cert as the Web UI. A second uvicorn in this process rather
@@ -321,6 +352,24 @@ async def lifespan(app: FastAPI):
                     await _dht_service.announce_capability("mbdump")
             except Exception as e:
                 logger.warning(f"MB dump capability announce failed: {e}")
+
+            # Relay role (Phase D). A Docker peer surface is reachable by
+            # deployment definition (its port was forwarded by hand), so the
+            # only gate is the setting. The announce is what CGNAT clients
+            # discover relays by; the wake/forward/ack contract is already
+            # served on the peer port either way.
+            try:
+                from routers.peer_chat import set_client_announce_cbs
+                set_client_announce_cbs(
+                    lambda code: asyncio.get_running_loop().create_task(
+                        _dht_service.announce_user_for(code)),
+                    _dht_service.withdraw_user_for)
+                from routers.settings import _read
+                if _read("p2p.relay_enabled"):
+                    await _dht_service.announce_capability("relay")
+                    asyncio.create_task(_relay_cap_loop())
+            except Exception as e:
+                logger.warning(f"relay role init failed: {e}")
 
             # Rare-artist tail. Paced (dht_service.ANNOUNCE_CHUNK), so it
             # runs as a background task; awaiting it here would hold the

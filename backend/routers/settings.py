@@ -238,6 +238,12 @@ _DEFAULTS: Dict[str, Any] = {
     # keep in step.
     "sync.carry_limit":          2000,
     "enrichment.background_enabled": True,
+    # Relay for others (Phase D): a reachable non-lite node announces
+    # Sautium-cap:relay and carries wake subscriptions + live forwards for
+    # CGNAT-bound strangers (voucher-authorized). Traffic is chat frames —
+    # tiny; the default is on because a relay layer that nobody opts into
+    # never cold-starts.
+    "p2p.relay_enabled": True,
     # Owned tracks whose analysis arrived over P2P: False = keep the
     # imported copy (no GPU re-spend on tracks that already work), True =
     # re-derive first-hand from the local file (matches this rip exactly,

@@ -51,6 +51,20 @@ PROBE_COOLDOWN = 60            # seconds per pubkey
 FORWARD_ACK_TIMEOUT = 10
 FORWARD_QUEUE_MAX = 100
 FORWARD_INFLIGHT_PER_SENDER = 10
+# Peer-relay caps (Phase D) — mirror desktop/p2p/sync_server.py, where the
+# adaptive-cap rationale lives.
+RELAY_CAP_BASE = 20
+RELAY_CAP_MAX = 100
+RELAY_CAP_STEP = 20
+VOUCHER_TTL = 24 * 3600
+
+
+def voucher_payload(client_pubkey: str, relay_pubkey: str, until: int) -> str:
+    """Canonical relay-voucher string the CLIENT signs — mirrored in
+    desktop/p2p/sync_server.py. The relay pubkey inside the payload means a
+    voucher issued to one relay cannot be presented by another."""
+    return (f"sautium-relay-voucher:v1:{client_pubkey.lower()}"
+            f":{relay_pubkey.lower()}:{int(until)}")
 
 
 def _err(message: str, status: int) -> JSONResponse:
@@ -107,6 +121,49 @@ class _WakeSub:
 
 _wake_subs: dict = {}          # subscriber pubkey -> _WakeSub
 _wake_lock = threading.Lock()
+
+# Peer-relay clients (Phase D): pubkey -> {invite_code, until, signature}.
+# In-memory on purpose — a relay restart drops the registry and every
+# client re-issues its voucher on reconnect. The announce hooks are wired
+# by main.py to DHTService.announce_user_for / withdraw_user_for.
+_relay_clients: dict = {}
+_relay_cap = RELAY_CAP_BASE
+_client_announce_cb = None
+_client_withdraw_cb = None
+
+
+def set_client_announce_cbs(announce, withdraw) -> None:
+    global _client_announce_cb, _client_withdraw_cb
+    _client_announce_cb = announce
+    _client_withdraw_cb = withdraw
+
+
+def relay_client_count() -> int:
+    with _wake_lock:
+        return sum(1 for k in _wake_subs if k in _relay_clients)
+
+
+def relay_has_room() -> bool:
+    return relay_client_count() < _relay_cap
+
+
+def adapt_relay_cap(other_relays_visible: bool) -> bool:
+    """One adaptive-cap step — mirror of SyncServer.adapt_relay_cap, see the
+    rationale there. Returns True when the cap changed."""
+    global _relay_cap
+    clients = relay_client_count()
+    if clients >= _relay_cap and not other_relays_visible \
+            and _relay_cap < RELAY_CAP_MAX:
+        _relay_cap = min(_relay_cap + RELAY_CAP_STEP, RELAY_CAP_MAX)
+        logger.info("relay cap raised to %d (no other relays visible)",
+                    _relay_cap)
+        return True
+    if clients < RELAY_CAP_BASE and other_relays_visible \
+            and _relay_cap > RELAY_CAP_BASE:
+        _relay_cap = max(RELAY_CAP_BASE, clients)
+        logger.info("relay cap decayed to %d", _relay_cap)
+        return True
+    return False
 
 
 def ping_wake(pubkey: str, kind: str = "message") -> None:
@@ -407,7 +464,8 @@ async def chat_history(request: Request):
 
 @relay_router.get("/wake-stream")
 async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
-                      sig: str = ""):
+                      sig: str = "", invite: str = "",
+                      voucher_until: str = "", voucher_sig: str = ""):
     svc = get_peer_chat()
     ident = resolve_identity(settings)
     if svc is None or not ident:
@@ -417,19 +475,53 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
     signed = f"wake_subscribe:{int(ts)}:{ident['public_key_hex']}:{pubkey}"
     if not _verify_ed25519(pubkey, signed, sig):
         return _err("invalid signature", 403)
+
+    # Two admission paths (Phase D): friends as before; a stranger presents
+    # a VOUCHER — its signature both authorizes the subscription and is the
+    # material this relay hands to senders as proof of announce authority.
     friend = svc.get_friend_by_public_key(pubkey)
-    if not friend or friend.get("is_blocked"):
+    voucher = None
+    if friend and friend.get("is_blocked"):
         return _err("not a friend", 403)
+    if not friend:
+        from p2p_identity import verify_invite_code
+        try:
+            v_until = int(voucher_until)
+        except ValueError:
+            v_until = 0
+        if not invite or not voucher_sig or v_until <= int(time.time()):
+            return _err("voucher required", 403)
+        if not verify_invite_code(invite, pubkey):
+            return _err("invite does not match key", 403)
+        if not _verify_ed25519(
+                pubkey,
+                voucher_payload(pubkey, ident["public_key_hex"], v_until),
+                voucher_sig):
+            return _err("invalid voucher", 403)
+        if pubkey not in _relay_clients and not relay_has_room():
+            return _err("relay full", 429)
+        voucher = {"invite_code": invite, "until": v_until,
+                   "signature": voucher_sig}
 
     ip = request.client.host if request.client else "unknown"
     sub = _register_wake(pubkey, ip)
     if sub is None:
         return _err("too many subscriptions", 429)
+    is_client = voucher is not None
+    if is_client:
+        with _wake_lock:
+            _relay_clients[pubkey] = voucher
+        if _client_announce_cb:
+            try:
+                _client_announce_cb(voucher["invite_code"])
+            except Exception as e:
+                logger.warning("client announce failed: %s", e)
 
     async def gen():
         try:
             yield ": connected\n\n"
-            svc.update_friend_last_seen(pubkey)
+            if not is_client:
+                svc.update_friend_last_seen(pubkey)
             cycles = 0
             while not sub.closed:
                 try:
@@ -454,16 +546,49 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
                     yield ": keepalive\n\n"
                 cycles += 1
                 if cycles >= 8:          # ~2 min — passive presence bump
-                    svc.update_friend_last_seen(pubkey)
+                    if not is_client:
+                        svc.update_friend_last_seen(pubkey)
                     cycles = 0
         finally:
+            with _wake_lock:
+                still_ours = _wake_subs.get(pubkey) is sub
             _unregister_wake(pubkey, sub)
+            # Announce lives exactly as long as the subscription; only when
+            # THIS sub is the registered one — a re-subscribe supersession
+            # must not withdraw the successor's announce.
+            if is_client and still_ours:
+                with _wake_lock:
+                    rec = _relay_clients.pop(pubkey, None)
+                if rec and _client_withdraw_cb:
+                    try:
+                        _client_withdraw_cb(rec["invite_code"])
+                    except Exception as e:
+                        logger.warning("client withdraw failed: %s", e)
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers={
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
     })
+
+
+@relay_router.get("/voucher")
+async def relay_voucher(invite: str = ""):
+    """Prove our authority to relay for a client — mirrors
+    desktop/p2p/sync_server.handle_relay_voucher. A black-hole impostor
+    announcing someone else's invite has nothing to answer with here."""
+    ident = resolve_identity(settings)
+    with _wake_lock:
+        for pubkey, rec in _relay_clients.items():
+            if rec["invite_code"] == invite:
+                return {
+                    "client_pubkey": pubkey,
+                    "invite_code": rec["invite_code"],
+                    "relay_pubkey": (ident or {}).get("public_key_hex", ""),
+                    "until": rec["until"],
+                    "signature": rec["signature"],
+                }
+    return _err("no such client", 404)
 
 
 _probe_last: dict = {}         # pubkey -> monotonic seconds
@@ -586,9 +711,18 @@ async def relay_forward(request: Request):
               f":{message_uuid}:{ct_hash}")
     if not _verify_ed25519(sender, signed, sig):
         return _err("invalid signature", 403)
+    # Admission (Phase D): a friend may forward to anyone subscribed here;
+    # a STRANGER may forward only to a voucher-registered client — that is
+    # the point of being someone's relay, and the client's E2E decrypt is
+    # what actually rejects mail from non-friends.
     friend = svc.get_friend_by_public_key(sender)
-    if not friend or friend.get("is_blocked"):
+    if friend and friend.get("is_blocked"):
         return _err("not a friend", 403)
+    if not friend:
+        with _wake_lock:
+            registered = recipient in _relay_clients
+        if not registered:
+            return _err("not a friend", 403)
     # The relay stamps the sender from the signature — a forwarded envelope
     # must never claim an authorship the signature does not back.
     envelope = dict(envelope, from_public_key=sender)
@@ -644,9 +778,17 @@ async def relay_ack(request: Request):
     if not _verify_ed25519(pubkey, delivery_payload(message_uuid, ct_hash),
                            sig):
         return _err("invalid signature", 403)
+    # A receipt may come from a friend OR a voucher-registered client
+    # (Phase D) — the real gate is below: the uuid must match a pending
+    # forward addressed to exactly this pubkey.
     friend = svc.get_friend_by_public_key(pubkey)
-    if not friend or friend.get("is_blocked"):
+    if friend and friend.get("is_blocked"):
         return _err("not a friend", 403)
+    if not friend:
+        with _wake_lock:
+            registered = pubkey in _relay_clients
+        if not registered:
+            return _err("not a friend", 403)
 
     with _ack_lock:
         entry = _pending_acks.get(message_uuid)
