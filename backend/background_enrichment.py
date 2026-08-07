@@ -568,6 +568,17 @@ def _loop() -> None:
             _set(last_batch=batch, last_run_at=now, next_run_at=next_at,
                  current_step="idle")
 
+            # A batch that minted artists (similars, streaming stubs) just
+            # created canon work that a dump-less node can only do with
+            # peer slices. Tell the launcher now instead of letting the
+            # freshly minted names sit out its 6-hour timer.
+            if (batch.get("artists") or {}).get("success"):
+                try:
+                    from db_pool import db_execute
+                    db_execute("NOTIFY sautium_enrich_done")
+                except Exception as e:
+                    logger.debug(f"enrich-done notify failed: {e}")
+
             # Sleep in 1s slices so cancel doesn't have to wait for
             # the full interval. Plain time.sleep would block stop()
             # for up to half an hour, which is rude.

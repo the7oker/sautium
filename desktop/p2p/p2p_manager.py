@@ -2818,6 +2818,11 @@ class P2PManager:
                 )
                 with conn.cursor() as cur:
                     cur.execute("LISTEN sautium_sync_request")
+                    # Enrichment is what MINTS phantom similars, and it runs
+                    # in the backend — without this the freshly minted names
+                    # wait out the 6-hour slice timer even with a dump peer
+                    # online right now.
+                    cur.execute("LISTEN sautium_enrich_done")
 
                 while self._running:
                     ready = await asyncio.get_event_loop().run_in_executor(
@@ -2826,10 +2831,15 @@ class P2PManager:
                     )
                     if ready[0]:
                         conn.poll()
+                        channels = set()
                         while conn.notifies:
-                            conn.notifies.pop(0)
-                        if self._sync_request_notify:
+                            channels.add(conn.notifies.pop(0).channel)
+                        if ("sautium_sync_request" in channels
+                                and self._sync_request_notify):
                             self._sync_request_notify.set()
+                        if "sautium_enrich_done" in channels:
+                            asyncio.create_task(
+                                self._request_mb_slices_safe())
             except Exception as e:
                 logger.debug(f"sync_request LISTEN error: {e}")
                 await asyncio.sleep(5)

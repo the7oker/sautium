@@ -356,6 +356,25 @@ class SyncClient:
             existing = self._get_existing_uuids(table, uuid_col)
             missing = available - existing
 
+            # Similars are OWNED-ONLY, mirroring the local enrichment rule
+            # (lastfm.enrich_artist): importing an artist's similars mints a
+            # stub row for every target, those stubs get canonized, their
+            # discographies mint phantom tracks — and the next sync would
+            # then ask for THEIR similars. Each hop multiplies by the ~50
+            # entries of a Last.fm list, so an ungated pull is a breadth-
+            # first walk of all recorded music through this node's disk.
+            # Enrichment learned this the hard way; sync inherited the same
+            # shape without the guard (measured here: 20630 artists asked
+            # about against 3173 owned).
+            if cat_key == "similar_artists" and missing:
+                owned = self._owned_artist_uuids(missing)
+                skipped = len(missing) - len(owned)
+                missing = owned
+                if skipped:
+                    self._progress(
+                        f"  similar_artists: {skipped} skipped "
+                        f"(no owned music — blowup guard)")
+
             if missing:
                 needed[cat_key] = list(missing)
                 self._progress(
@@ -363,6 +382,18 @@ class SyncClient:
                 )
 
         return needed
+
+    def _owned_artist_uuids(self, artist_uuids) -> set:
+        """Of these artists, the ones this node owns a file by."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT DISTINCT ta.artist_id::text
+                     FROM track_artists ta
+                     JOIN media_files mf ON mf.track_id = ta.track_id
+                    WHERE ta.artist_id = ANY(%s::uuid[])""",
+                [list(artist_uuids)])
+            return {row[0] for row in cur.fetchall()}
 
     def _pull_and_import_category(
         self, cat_key: str, pull_endpoint: str, uuids: list[str]

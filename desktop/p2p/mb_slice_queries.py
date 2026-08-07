@@ -443,23 +443,47 @@ def get_slice_one(conn, name: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def pending_slice_names(conn, limit: int = 200) -> list:
-    """Artist names the local canon pipeline is waiting on: owned artists past
-    their last_mb_sync watermark (canonicalize_pending's feed) plus phantom
-    stubs without an artist_mbids row (phantom canon's feed), minus names
-    already answered by a peer (mb_slice_fetches — zero-match included, the
-    slice is a closed world per name)."""
+    """Artist names the local canon pipeline is waiting on, IN PRIORITY
+    ORDER: owned artists past their last_mb_sync watermark
+    (canonicalize_pending's feed) first, then phantom stubs without an
+    artist_mbids row (phantom canon's feed), minus names already answered
+    by a peer (mb_slice_fetches — zero-match included, the slice is a
+    closed world per name).
+
+    Ordering is the point. The queue drains ~200 names per cycle against
+    thousands of similar-derived phantoms (4033 measured on the reference
+    library), so alphabetical order — what this used to do — parked a
+    Z-named OWNED artist behind four thousand discovery stubs for days.
+    Owned canon is not a nicety: album canon, editions, discographies and
+    carry pushability all gate on it. Within the phantom layer the tiers
+    mirror discography.stale_canonized_artists — listened-to first, then
+    artists similar to those, then the rest — so the part of the
+    discovery graph you actually touch resolves first."""
     with conn.cursor() as cur:
         cur.execute("""
-            WITH pending AS (
-                SELECT ar.name
+            WITH listened AS (
+                SELECT DISTINCT ta.artist_id
+                FROM track_artists ta
+                JOIN listening_history lh ON lh.track_id = ta.track_id
+                WHERE ta.role = 'primary'
+                  AND lh.started_at > now() - interval '6 months'
+            ),
+            pending AS (
+                SELECT ar.name, 0 AS tier
                 FROM artists ar
                 WHERE EXISTS (
                     SELECT 1 FROM track_artists ta
                     JOIN media_files mf ON mf.track_id = ta.track_id
                     WHERE ta.artist_id = ar.id AND ta.role = 'primary'
                       AND (ar.last_mb_sync IS NULL OR mf.created_at > ar.last_mb_sync))
-                UNION
-                SELECT a.name
+                UNION ALL
+                SELECT a.name,
+                       CASE WHEN EXISTS (SELECT 1 FROM streaming_mints sm
+                                          WHERE sm.artist_id = a.id) THEN 1
+                            WHEN EXISTS (SELECT 1 FROM similar_artists sa
+                                          JOIN listened l ON l.artist_id = sa.artist_id
+                                         WHERE sa.similar_artist_id = a.id) THEN 2
+                            ELSE 3 END AS tier
                 FROM artists a
                 WHERE ((EXISTS (SELECT 1 FROM similar_artists sa
                                 WHERE sa.similar_artist_id = a.id)
@@ -470,11 +494,12 @@ def pending_slice_names(conn, limit: int = 200) -> list:
                   AND NOT EXISTS (SELECT 1 FROM artist_mbids am
                                   WHERE am.artist_id = a.id)
             )
-            SELECT DISTINCT p.name FROM pending p
+            SELECT p.name FROM pending p
             WHERE p.name IS NOT NULL AND btrim(p.name) <> ''
               AND NOT EXISTS (SELECT 1 FROM mb_slice_fetches f
                               WHERE f.name_key = lower(btrim(p.name)))
-            ORDER BY p.name
+            GROUP BY p.name
+            ORDER BY MIN(p.tier), p.name
             LIMIT %(lim)s
         """, {"lim": limit})
         return [r[0] for r in cur.fetchall()]
