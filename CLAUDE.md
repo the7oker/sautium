@@ -5,10 +5,11 @@ content analysis, semantic search, recommendations, HQPlayer integration,
 serverless P2P network for sharing analytics between collectors.
 
 Phases 1–3 (MVP + enrichment + audio analysis + HQPlayer + Web UI + launcher)
-and P2P phases P0–P4 (sync, NAT, account system, E2E chat) are **done**.
-Currently iterating on chat maturity, quality-of-life fixes and artist metadata
-enrichment. Voice interface (Whisper + TTS) and file sharing over libtorrent
-remain on the roadmap.
+and P2P phases P0–P4 (sync, NAT, account system, E2E chat) are **done**, as is
+the 2026-08 network run: relay forwarding, carry (push-seeding of sealed audio
+analysis), peer-relays, and MB-slice replication. Currently iterating on
+quality-of-life fixes and artist metadata enrichment. Voice interface
+(Whisper + TTS) and file sharing over libtorrent remain on the roadmap.
 
 See:
 - `PROGRESS.md` — design decisions and lessons learned (non-P2P).
@@ -165,8 +166,11 @@ See:
 ## Migration & DB Workflow
 
 - **Schema lives in `desktop/migrations/001_initial.sql`.** It's the single
-  source of truth for a fresh install. All shared columns/indexes/types must
-  end up there.
+  source of truth for a fresh install, and the ONLY migration file: while the
+  product is pre-release, the Docker DB is the one live instance that gets
+  ALTERed by hand, and every other install is dropped and recreated on schema
+  change — so numbered follow-ups carry no value. Fold the change into 001 and
+  apply the equivalent DDL to Docker.
 - **Temporary migrations go to `/tmp/*.sql`**, never into the repo.
   Use `docker exec -i sautium-postgres psql -U musicai -d music_ai < /tmp/foo.sql`
   to apply, then delete the tmp file and stage the equivalent change in
@@ -206,6 +210,18 @@ See:
 - **Post-import hooks.** After importing data from a peer (sync_client),
   re-run derived classifiers like `_update_artist_gender` and
   `_update_artist_is_vocalist` on the freshly-imported rows only.
+- **Anything that fans out per artist must be gated on OWNED music**
+  (`track_artists JOIN media_files`), never on `track_artists` alone —
+  phantom tracklists made that column meaningless as "in catalog". This is
+  why Last.fm similars, the DHT announce tail and the sync's similars pull
+  all carry the same join. Without it every hop multiplies by ~50 Last.fm
+  entries and the pipeline walks all recorded music.
+- **P2P-facing settings** (all in `user_settings`, defaults in
+  `backend/routers/settings.py` `_DEFAULTS`): `sync.announce_limit` (rare
+  artist DHT tail), `sync.carry_limit` (foreign TRACKS carried, ~46 KB
+  each), `p2p.relay_enabled` (relay role), `enrichment.reanalyze_imported`
+  (re-derive first-hand analysis over P2P-imported — default off: the
+  sync's whole point is not doing the work twice).
 
 ---
 
@@ -381,15 +397,42 @@ a contact in every install: `master_node.py` (mirrored
 public support-token UUID; `P2PManager._ensure_master_contact` seeds
 it as a pending friend at start (silently — deleting it sets
 `p2p.master_removed` and it never comes back on its own). Nodes that
-cannot accept inbound connections (CGNAT) hold ONE outbound SSE
-subscription to the master's `/api/relay/wake-stream` and pull chat
-history when pinged, and they **suppress their own DHT announces**
+cannot accept inbound connections (CGNAT) hold an outbound SSE
+subscription to `/api/relay/wake-stream` and pull chat history when
+pinged, and they **suppress their own DHT announces**
 (`DHTService.set_announces_enabled`) — a dead address in the DHT
 helps nobody. The reachability verdict lives in `user_settings`
 (`p2p.reachability`) and comes from the router WAN address, the
-DHT-observed external IP, `/api/relay/probe-connect` (the master
+DHT-observed external IP, `/api/relay/probe-connect` (the relay
 connects back to the request's source address, BT-tracker style) and
 passive inbound traffic.
+
+**Any reachable node is a relay** (phase D, 2026-08-06) — the master
+is only relay #0, and it carries clients **under the same cap as
+everyone else**. A CGNAT client registers with K=2 peer relays on top
+of the master by presenting a **voucher** (its own signature over
+`sautium-relay-voucher:v1:{client}:{relay}:{until}`); the relay then
+announces `Sautium-user:{invite}` on its behalf (BT DHT does not
+verify infohash ownership — that is the feature) and serves the same
+voucher at `GET /api/relay/voucher` as proof, so a sender verifies
+authority before forwarding a byte. Announce lifetime = subscription
+lifetime. A friend's bare subscription carries no voucher, costs no
+cap slot and produces no announce — that is the phase-A wake channel,
+a different thing living on the same endpoint. Details and the
+adaptive-cap rule: `P2P_NETWORK.md` § "D: Peer-relays".
+
+**Carry and MB slices are the two push/replicate paths** (see
+`P2P_NETWORK.md`). Carry pushes SEALED audio analysis to a reachable
+carrier; the offer round speaks recording MBIDs and the carrier
+answers with its OWN existing track uuids, so its phantom catalogue
+acts as the taste filter and nothing is minted remotely. MB slices are
+signed **per artist** (`mb_slice_blobs` keeps verified blobs verbatim
+with the ORIGINAL dump node's signature), so any node can re-serve
+names it holds — replicas are asked before dump nodes. Two rules that
+look like details and are not: **a name closes only on a signed
+zero-match**, and **similars are pulled for OWNED artists only** —
+without that gate each hop multiplies by a Last.fm list and the sync
+becomes a breadth-first walk of all recorded music.
 
 **Before any public release, multi-user deployment, or remote-access
 feature** (Tailscale exposure, "headless mode", reverse proxy), the
@@ -636,10 +679,12 @@ responsibility).
 | `backend/dht_service.py` | Docker backend libtorrent DHT integration |
 | `desktop/launcher.py` | Windows launcher (CustomTkinter) |
 | `desktop/node_identity.py` | Ed25519 identity + account system (Argon2id) |
-| `desktop/sync_client.py` | Sync client (import from remote + post-import classifiers) |
-| `desktop/p2p/sync_queries.py` | Shared SQL logic (extracted from backend router) |
-| `desktop/p2p/sync_server.py` | aiohttp HTTPS sync server + chat + watchdog |
-| `desktop/p2p/dht_service.py` | libtorrent DHT (per-artist + per-user announces) |
+| `desktop/sync_client.py` | Sync client + the seal-verifying import gate (`import_pushed` for carry); post-import classifiers |
+| `desktop/p2p/sync_queries.py` | Shared SQL logic (pull handlers, carry offer/wanted, DHT announce tail) |
+| `desktop/p2p/sync_server.py` | aiohttp HTTPS sync server + chat + relay (voucher/wake/forward) + watchdog |
+| `desktop/p2p/mb_slice_queries.py` | MB slice protocol: per-artist signed blobs, `mb_slice_blobs` cache/replica inventory, pending-name priority |
+| `desktop/mb_slice_client.py` | Slice requester — per-name verification against the ORIGINAL dump node's key |
+| `desktop/p2p/dht_service.py` | libtorrent DHT (per-artist + per-user announces, announce-on-behalf for relay clients) |
 | `desktop/p2p/p2p_manager.py` | Orchestration (asyncio in background thread) |
 | `desktop/p2p/chat_service.py` | NaCl Box encryption, friend CRUD |
 | `desktop/p2p/email_verify.py` | Signed email verification + invite delivery |
