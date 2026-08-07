@@ -7,16 +7,16 @@ implementation details live in the code (`desktop/p2p/`, `backend/dht_service.py
 
 ## Vision
 
-Перетворити Sautium з локального плеєра на **безсерверну P2P мережу**, де люди
-з великими офлайновими FLAC бібліотеками можуть ділитись метаданими, audio
-embeddings, features, знаходити однодумців і спілкуватись — без центрального
-сервера (тільки публічні bootstrap ресурси).
+Turn Sautium from a local player into a **serverless P2P network** where people
+with large offline FLAC libraries can share metadata, audio embeddings and
+features, find kindred listeners and talk to each other — with no central
+server (public bootstrap resources only).
 
-**Що шариться**: metadata, CLAP embeddings, audio features, bios/tags, chat
-(P4), lyrics (P4+), audio files (P5, лише легальний контент).
+**Shared**: metadata, CLAP embeddings, audio features, bios/tags, chat (P4),
+lyrics (P4+), audio files (P5, legal content only).
 
-**Що НЕ шариться**: локальні шляхи, стан плеєра, приватні нотатки, історія
-прослуховування (якщо користувач не обрав ділитись).
+**Never shared**: local paths, player state, private notes, listening history
+(unless the user opts in).
 
 ---
 
@@ -32,8 +32,8 @@ Sautium Node
 └── UI layer:     Connect/Disconnect, peers list, Friends/Chat, cross-library search
 ```
 
-Node A (Kyiv) ↔ Node B (Berlin) ↔ Node C (Tokyo) — прямі UDP/TCP з'єднання
-через NAT (UPnP + STUN-подібний hole punching), bootstrap через публічну
+Node A (Kyiv) ↔ Node B (Berlin) ↔ Node C (Tokyo) — direct UDP/TCP connections
+through NAT (UPnP + STUN-style hole punching), bootstrapped off the public
 BitTorrent DHT.
 
 ---
@@ -42,38 +42,39 @@ BitTorrent DHT.
 
 | Component | Library | Why |
 |-----------|---------|-----|
-| DHT + file transfer | **libtorrent** (C++ with Python bindings) | Доступ до публічної BT DHT, вбудований файлообмін, pip-installable |
-| NAT traversal | **miniupnpc** (UPnP) + STUN | UPnP для роутера, STUN для визначення зовнішнього IP |
-| Transport | **HTTP + JSON + gzip** | Той самий протокол sync що вже працює; без кастомного бінарного формату |
-| Identity | **cryptography** (Ed25519) + **argon2-cffi** | Стандарт, компактні 32-byte ключі; Argon2id для deterministic identity |
-| Chat encryption | **PyNaCl** (NaCl Box) | Curve25519 + XSalsa20-Poly1305, проста API |
-| TLS | Self-signed ECDSA P-256 | Node ID в CN, HTTPS для всіх P2P з'єднань |
-| Async networking | **asyncio** + **aiohttp** | Вже використовується в проєкті |
+| DHT + file transfer | **libtorrent** (C++ with Python bindings) | Access to the public BT DHT, file exchange built in, pip-installable |
+| NAT traversal | **miniupnpc** (UPnP) + STUN | UPnP for the router, STUN to learn the external IP |
+| Transport | **HTTP + JSON + gzip** | The same protocol sync already speaks; no custom binary format |
+| Identity | **cryptography** (Ed25519) + **argon2-cffi** | Standard, compact 32-byte keys; Argon2id for deterministic identity |
+| Chat encryption | **PyNaCl** (NaCl Box) | Curve25519 + XSalsa20-Poly1305, simple API |
+| TLS | Self-signed ECDSA P-256 | Node ID in the CN, HTTPS for every P2P connection |
+| Async networking | **asyncio** + **aiohttp** | Already used across the project |
 
-### Чому libtorrent, а НЕ `kademlia` (pure Python) — **критичне рішення**
+### Why libtorrent and NOT `kademlia` (pure Python) — a **critical decision**
 
-> Бібліотека `kademlia` (bmuller) **несумісна** з BitTorrent DHT:
-> - MsgPack serialization (BT DHT використовує Bencode)
-> - Різні RPC операції (STORE/FIND_VALUE vs get_peers/announce_peer)
-> - Неможливо підключитись до `router.bittorrent.com`
-> - Фактично створює **окрему приватну мережу** яку треба будувати з нуля
+> The `kademlia` library (bmuller) is **incompatible** with the BitTorrent DHT:
+> - MsgPack serialization (BT DHT uses Bencode)
+> - Different RPC operations (STORE/FIND_VALUE vs get_peers/announce_peer)
+> - Cannot connect to `router.bittorrent.com`
+> - Effectively creates a **separate private network** that has to be grown
+>   from zero
 
-libtorrent дає доступ до мільйонів існуючих нод + вбудований файлообмін для
-майбутньої Phase P5, pip-installable на Windows/Linux/Mac.
+libtorrent gives access to millions of existing nodes plus built-in file
+exchange for the future Phase P5, and is pip-installable on Windows/Linux/Mac.
 
-### "Безсерверність"
+### "Serverless"
 
-Безкоштовні публічні ресурси (не потрібно орендувати сервер):
+Free public resources (no server to rent):
 - **DHT bootstrap**: `router.bittorrent.com:6881`, `dht.transmissionbt.com:6881`
 - **STUN**: `stun.l.google.com:19302`, `stun.cloudflare.com:3478`
-- **Relay fallback**: Oracle Cloud Free Tier або relay через інших пірів
+- **Relay fallback**: Oracle Cloud Free Tier, or relaying through other peers
 
 ---
 
 ## Content-Addressable IDs (Deterministic UUID v5)
 
-Для P2P обміну однакові дані мусять мати однаковий ID на всіх нодах. Namespace
-`adc1ec0b-2c81-5e26-9938-a369c6f7a5e1` (в `backend/uuid_utils.py`).
+For P2P exchange the same data must carry the same ID on every node. Namespace
+`adc1ec0b-2c81-5e26-9938-a369c6f7a5e1` (in `backend/uuid_utils.py`).
 
 | Entity | Formula |
 |--------|---------|
@@ -84,30 +85,34 @@ libtorrent дає доступ до мільйонів існуючих нод +
 | Tag | `uuid5(NS, "tag:{normalize(name)}")` |
 | EmbeddingModel | `uuid5(NS, "embedding_model:{normalize(name)}")` |
 
-Embeddings ідентифікуються через `(track_uuid, model_uuid)` — обидва
-детерміновані. Сам embedding PK може залишитись SERIAL (не шариться — шариться
-вектор, прив'язаний до `track_uuid`).
+Embeddings are identified by `(track_uuid, model_uuid)` — both deterministic.
+The embedding PK itself can stay SERIAL (it is not shared; what travels is the
+vector, bound to `track_uuid`).
 
 ---
 
 ## DHT Discovery Strategy
 
-### Принцип: announce **по артистах**, не по ноді
+### Principle: announce **per artist**, not per node
 
-Launcher не анонсує себе як єдину ноду. Замість цього — анонсує **кожного
-артиста**, на якого має enrichment (embedding або audio_features хоча б для 1
-треку):
+The launcher does not announce itself as a single node. It announces **every
+artist** it holds enrichment for (an embedding or audio_features for at least
+one track):
 
 ```python
 artist_infohash = SHA1("Sautium-artist:" + artist_uuid)
 session.dht_announce(artist_infohash, port=sync_port, flags=0)
 ```
 
-**Переваги:**
-- Точний пошук: "хто має Pink Floyd?" → прямий DHT lookup
-- Без broadcast/flood: шукаємо тільки потрібних артистів
-- Природне масштабування: більше учасників → більше артистів
-- ~2550 announces кожні 15 хв = ~3/sec — мізер для libtorrent
+**Advantages:**
+- Precise lookup: "who has Pink Floyd?" → a direct DHT lookup
+- No broadcast/flood: only the artists actually wanted are searched for
+- Natural scaling: more participants → more artists
+- ~2550 announces every 15 min ≈ 3/sec — nothing for libtorrent
+
+> Superseded in part: the tail is now capped and ranked (see the announce-storm
+> lesson in Open Questions #4) and reflects "I hold analysis", not file
+> ownership.
 
 ### Layered sync flow (P3)
 
@@ -115,111 +120,114 @@ session.dht_announce(artist_infohash, port=sync_port, flags=0)
 Sync trigger
      │
      ▼
-LAN Discovery (UDP broadcast на 19002 + localhost Docker probe)
+LAN Discovery (UDP broadcast on 19002 + localhost Docker probe)
      │
-     ├── Peers found → direct HTTP (швидко, надійно)
-     └── None → DHT lookup для одного артиста → знайти seed
+     ├── Peers found → direct HTTP (fast, reliable)
+     └── None → DHT lookup for one artist → find a seed
                         │
                         ▼
-                  Inventory call до seed про ВСІ unenriched артисти
+                  Inventory call to the seed about ALL unenriched artists
                         │
                         ▼
                   Batch pull (gzip JSON) → import
 ```
 
-**Smart seed reuse**: 1 DHT lookup + 1 inventory call замість N lookups для N
-артистів.
+**Smart seed reuse**: 1 DHT lookup + 1 inventory call instead of N lookups for
+N artists.
 
 ### Account Identity + Chat Discovery
 
-Для Phase P4 крім per-artist announces додано **per-user announces**:
+Phase P4 added **per-user announces** on top of the per-artist ones:
 ```python
 user_infohash = SHA1("Sautium-user:" + invite_code)
 session.dht_announce(user_infohash, port=sync_port, flags=0)
 ```
 
-Друг з `invite_code` робить DHT lookup → отримує IP:port → встановлює HTTPS
-з'єднання для handshake/chat. Offline queue: недоставлені повідомлення
-зберігаються, retry кожну хвилину через повторний DHT lookup.
+A friend holding the `invite_code` does a DHT lookup → gets IP:port →
+establishes an HTTPS connection for handshake/chat. Offline queue: undelivered
+messages are kept and retried every minute through a fresh DHT lookup.
 
 ---
 
 ## Account System (Phase P4)
 
-Deterministic identity: однаковий username+password на будь-якому пристрої =
-та сама ідентичність (ті ж ключі, той же invite code).
+Deterministic identity: the same username+password on any device yields the
+same identity (same keys, same invite code).
 
 ```
 username + password → Argon2id KDF (256MB, 4 iter) → 32-byte seed → Ed25519 keypair
 ```
 
-**Invite Code**: `username#XXXX-XXXX-XXXX` де XXXX — `SHA-256(public_key)[:6]` у
-hex. Людино-читабельний, але hash частина захищає від підробки (інший "bob42"
-матиме інший hash).
+**Invite Code**: `username#XXXX-XXXX-XXXX` where XXXX is `SHA-256(public_key)[:6]`
+in hex. Human-readable, and the hash part defends against forgery (a different
+"bob42" gets a different hash).
 
-**Key rotation** (зміна пароля):
-1. Нова пара ключів (з нового пароля)
-2. Повідомлення `{new_public_key}` підписується **старим** приватним ключем
-3. Розсилається друзям через `/api/chat/key-rotation`
-4. Друг перевіряє підпис старим ключем → оновлює record
+**Key rotation** (password change):
+1. New keypair (from the new password)
+2. A `{new_public_key}` message is signed with the **old** private key
+3. Broadcast to friends over `/api/chat/key-rotation`
+4. The friend verifies the signature with the old key → updates the record
 
 ### Email verification (optional)
 
 Cloudflare Worker (`sautium-verify.sautium.workers.dev`) + Resend:
-- Signed requests (Ed25519) — модифікований клієнт не може підробити запит
-- KV store маппить `invite_code → verified_email`
-- Invite emails показують ✅ Verified / ⚠️ Unverified badge
-- Auto-reciprocate: якщо обидва акаунти verified через Worker KV
+- Signed requests (Ed25519) — a modified client cannot forge one
+- KV store maps `invite_code → verified_email`
+- Invite emails show a ✅ Verified / ⚠️ Unverified badge
+- Auto-reciprocate when both accounts are verified through the Worker KV
 
 ### Mutual invite exchange (anti-impersonation)
 
-Витік invite code не створює friendship автоматично — **обидва** мусять додати
-invite code один одного. Handshake завершується успішно тільки коли seen_by_both.
-Без цього — витік одного коду давав би fake friendship.
+A leaked invite code does not create a friendship on its own — **both** sides
+must add each other's invite code. The handshake only completes on
+seen_by_both. Without it, one leaked code would produce a fake friendship.
 
 ### Invite tokens (auto-confirm) — SHIPPED 2026-07-31
 
-Share-рядок отримує третій сегмент: `username#XXXX-XXXX-XXXX#<token-uuid>`.
-Токен (`invite_tokens`) мінтить будь-яка нода зі своїми параметрами: права
-(`p2p_right`: `can_message`, `can_search`), ліміт використань, expiry,
-revocation, welcome-повідомлення, `require_birth_cert`. Пред'явлення живого
-токена в handshake **обходить mutual-add**: токен АВТОРИЗУЄ дружбу, а
-`verify_invite_code` (код↔ключ) далі ІДЕНТИФІКУЄ гостя — тож викрадений
-share-рядок нікого не видає за іншого. Оскільки цей шлях обходить згоду,
-гість обов'язково підписує `token_handshake:{ts}:{token}:{issuer_invite}`
-(вікно ±60 с).
+The share string gains a third segment: `username#XXXX-XXXX-XXXX#<token-uuid>`.
+Any node mints tokens (`invite_tokens`) with its own parameters: rights
+(`p2p_right`: `can_message`, `can_search`), use limit, expiry, revocation,
+welcome message, `require_birth_cert`. Presenting a live token in the handshake
+**bypasses mutual-add**: the token AUTHORIZES the friendship, while
+`verify_invite_code` (code↔key) still IDENTIFIES the guest — so a stolen share
+string impersonates nobody. Because this path bypasses consent, the guest must
+sign `token_handshake:{ts}:{token}:{issuer_invite}` (±60 s window).
 
-Кожен accept мінтить **grant**, підписаний ключем емітента:
+Every accept mints a **grant** signed by the issuer's key:
 `sautium-grant:v1:{token}:{rights}:{guest_pubkey}:{issued_at}:{expires}`.
-Гість зберігає його (`friend_grants`) і пред'являє, коли емітент переїхав на
-новий пристрій: таблиця friends там порожня, але детермінована ідентичність
-усе ще верифікує власний старий підпис — grant заміняє втрачений рядок БД.
-Права фіксуються знімком на момент accept (`friend_rights`): редагування чи
-revoke токена діє лише на майбутні входи.
+The guest stores it (`friend_grants`) and presents it when the issuer has moved
+to a new device: the friends table there is empty, but the deterministic
+identity still verifies its own old signature — the grant stands in for the
+lost DB row. Rights are snapshotted at accept time (`friend_rights`): editing
+or revoking a token only affects later admissions.
 
 ### Master node + relay protocol — SHIPPED 2026-07-31
 
-Мастер-нода (Docker мейнтейнера) вшита константами в `master_node.py`
-(дзеркала `desktop/p2p/` ↔ `backend/`): invite code, ПОВНИЙ pubkey (48-бітний
-фінгерпринт коду сам по собі вгадуваний) і UUID публічного support-токена з
-`require_birth_cert=TRUE` — атакер мусить пройти Worker-ліміт на видачу
-birth-сертифікатів, щоб масово генерувати ідентичності. `_ensure_master_contact`
-сіє її pending-другом при старті P2P; існуючий резолвер (LAN → кеш → DHT
-`lookup_user`) робить token-handshake, зберігає grant і підтягує welcome
-звичайним history-pull. Видалення контакту ставить `p2p.master_removed` —
-авто-адд більше не воскресає (ручне повторне додавання коду знімає прапор).
+The master node (the maintainer's Docker instance) is pinned by constants in
+`master_node.py` (mirrored `desktop/p2p/` ↔ `backend/`): invite code, FULL
+pubkey (the 48-bit fingerprint in the code is guessable on its own) and the
+UUID of a public support token with `require_birth_cert=TRUE` — an attacker
+must pass the Worker's birth-certificate rate limit to mass-produce
+identities. `_ensure_master_contact` seeds it as a pending friend when P2P
+starts; the existing resolver (LAN → cache → DHT `lookup_user`) performs the
+token handshake, stores the grant and pulls the welcome message through the
+ordinary history sync. Deleting the contact sets `p2p.master_removed` — the
+auto-add never resurrects it (re-adding the code by hand clears the flag).
 
-`/api/relay/*` — свідомо **proxy-агностичний** контракт (обидві поверхні):
-- `GET /api/relay/wake-stream?pubkey&ts&sig` — SSE-канал "тобі пошта".
-  Нода за CGNAT тримає ОДНЕ вихідне з'єднання (вихідні працюють з-за будь-якого
-  NAT) і тягне історію на кожен пінг: так відповідь мейнтейнера долітає за
-  ~0.2 с замість "до наступного рестарту". Реєстр підписок = живий presence.
-- `POST /api/relay/probe-connect` — relay стукає НАЗАД на адресу-джерело
-  запиту (ніколи на IP із тіла — інакше це рефлектор/сканер портів) і звіряє
-  `node_id` у `/health`. Так торент-трекери виводять прапорець connectable.
+`/api/relay/*` is a deliberately **proxy-agnostic** contract (both surfaces):
+- `GET /api/relay/wake-stream?pubkey&ts&sig` — the "you have mail" SSE channel.
+  A CGNAT node holds ONE outbound connection (outbound works from behind any
+  NAT) and pulls history on every ping: the maintainer's reply lands in ~0.2 s
+  instead of "at the next restart". The subscription registry doubles as live
+  presence.
+- `POST /api/relay/probe-connect` — the relay knocks BACK on the request's
+  source address (never on an IP from the body — that would be a
+  reflector/port scanner) and checks `node_id` in `/health`. This is how
+  torrent trackers derive the connectable flag.
 
-Недосяжна нода **глушить власні DHT-анонси** (`set_announces_enabled`):
-мертва адреса в DHT засмічує лукапи всім. Лукапи та LAN-beacon працюють далі.
+An unreachable node **suppresses its own DHT announces**
+(`set_announces_enabled`): a dead address in the DHT pollutes everyone's
+lookups. Lookups and the LAN beacon keep working.
 
 ---
 
@@ -262,7 +270,7 @@ Phase 1: Catalog sync
 Phase 2 & 3: Embeddings + features (lazy, on demand, gzip)
 ```
 
-**Compression**: 30k tracks metadata ≈ 15MB JSON → ~3MB gzip. Embeddings
+**Compression**: 30k tracks of metadata ≈ 15MB JSON → ~3MB gzip. Embeddings
 (512 floats × 30k) ≈ 60MB → ~25MB gzip.
 
 ---
@@ -271,21 +279,21 @@ Phase 2 & 3: Embeddings + features (lazy, on demand, gzip)
 
 ### Phase 1–3 (MVP + sync)
 - Ed25519 identity (portable, deterministic)
-- Connect/Disconnect kill switch (повний контроль користувача)
-- Тільки metadata шариться (ніяких файлових шляхів)
-- Rate limiting на вхідні запити від пірів
-- Self-signed ECDSA P-256 TLS для всього P2P трафіку
+- Connect/Disconnect kill switch (the user stays in full control)
+- Metadata only (never file paths)
+- Rate limiting on inbound peer requests
+- Self-signed ECDSA P-256 TLS for all P2P traffic
 
 ### Phase P4 (Chat)
-- E2E encryption NaCl Box — пароль/ключі ніколи не передаються по мережі
-- Mutual invite exchange — витік invite code не дає friendship
-- Email verification опціональна — Worker діє як CA, не як relay
-- Friend blocklist — blocked friends не можуть надсилати повідомлення
+- E2E encryption with NaCl Box — passwords/keys never cross the network
+- Mutual invite exchange — a leaked invite code grants no friendship
+- Email verification is optional — the Worker acts as a CA, not as a relay
+- Friend blocklist — blocked friends cannot send messages
 
 ### Future
-- Selective sharing (вибір які артисти/альбоми видимі)
+- Selective sharing (choose which artists/albums are visible)
 - Bandwidth limiting
-- IP reputation (авто-бан flood/spam)
+- IP reputation (auto-ban flood/spam)
 
 ---
 
@@ -293,389 +301,363 @@ Phase 2 & 3: Embeddings + features (lazy, on demand, gzip)
 
 | Decision | Rationale |
 |----------|-----------|
-| **libtorrent over pure-python kademlia** | kademlia несумісна з BT DHT, створила б приватну мережу з нуля |
-| **HTTP+JSON+gzip over custom binary** | Той самий протокол що sync; дебажиться curl'ом |
-| **Per-artist DHT announces** | Точний пошук без broadcast, природне масштабування |
-| **Deterministic identity (Argon2id)** | Однаковий username+password = та сама нода на будь-якому пристрої |
-| **Mutual invite exchange** | Витік invite code не дає friendship — обидві сторони мусять підтвердити |
-| **Email as convenience, not trust root** | Worker доставляє і флагує verified badge, але mutual exchange все одно P2P |
-| **Smart seed reuse** | 1 DHT lookup + 1 inventory call замість N lookups для N артистів |
-| **Random P2P port 20000–29999** | Уникає конфліктів кількох інстансів на одній машині; зберігається в конфігу |
-| **Event-driven chat delivery (SSE + direct HTTP)** | Polling коштував ~8s latency; SSE + direct push — миттєвий |
-| **Persistent DB connections in long-lived services** | ChatService з per-call connection коштував 2s/повідомлення |
-| **alert_mask += dht_operation_notification** | Без цього `dht_get_peers_alert` мовчки не генерується (libtorrent gotcha) |
-| **libtorrent 2.1+ `peers()` compat** | Повертає `(ip, port)` tuples замість об'єктів — треба handle обидва |
-| **Idempotent enrichment** | Кожен enrichment task мусить бути безпечний для re-run — це correctness, не оптимізація |
+| **libtorrent over pure-python kademlia** | kademlia is incompatible with the BT DHT; it would mean growing a private network from zero |
+| **HTTP+JSON+gzip over custom binary** | Same protocol as sync; debuggable with curl |
+| **Per-artist DHT announces** | Precise lookup without broadcast, natural scaling |
+| **Deterministic identity (Argon2id)** | Same username+password = the same node on any device |
+| **Mutual invite exchange** | A leaked invite code grants no friendship — both sides must confirm |
+| **Email as convenience, not trust root** | The Worker delivers and flags a verified badge, but the mutual exchange stays P2P |
+| **Smart seed reuse** | 1 DHT lookup + 1 inventory call instead of N lookups for N artists |
+| **Random P2P port 20000–29999** | Avoids collisions between instances on one machine; persisted in config |
+| **Event-driven chat delivery (SSE + direct HTTP)** | Polling cost ~8s of latency; SSE + direct push is instant |
+| **Persistent DB connections in long-lived services** | ChatService with a per-call connection cost 2s per message |
+| **alert_mask += dht_operation_notification** | Without it `dht_get_peers_alert` is silently never emitted (libtorrent gotcha) |
+| **libtorrent 2.1+ `peers()` compat** | Returns `(ip, port)` tuples instead of objects — handle both |
+| **Idempotent enrichment** | Every enrichment task must be safe to re-run — a correctness property, not an optimization |
 
 ---
 
 ## Open Questions
 
-1. **Embedding quantization**: чи варто квантизувати 512 floats для передачі
-   (float16, int8)? Економія bandwidth vs втрата точності.
-2. **Conflict resolution**: якщо 2 піри мають різні Last.fm теги для одного
-   артиста — хто "правий"?
-3. **PyInstaller + libtorrent**: чи добре працює bundling C++ extension (.pyd)
-   в .exe? Треба протестувати.
-4. ~~**DHT announce rate limits**~~ — ВІДПОВІДЬ ОТРИМАНА (announce storm,
-   2026-07): 25 анонсів/с давали таймаут-сплески наприкінці пейсингового
-   вікна й ще ~хвилину після нього. Чинний режим — 5 анонсів + 1 с пауза,
-   хвіст ~300 ключів займає ~60 с із 15-хвилинного циклу. Анонс-он-біхаф
-   (фаза D) додає ≤ кап клієнтів, тобто десятки ключів — у цей бюджет
-   вписується.
-5. **Слайс-реплікація й свіжість**: репліка тримає блоб версії дампу, під
-   якою його підписали. Коли дамп-нода оновиться, у мережі співіснують
-   два покоління блобів одного імені. Зараз перемагає той, хто відповів
-   першим (репліки — перші), і це самовиправляється лише через
-   перезакриття імені. Чи потрібен вибір за `dump_version` — відкрито.
+1. **Embedding quantization**: is quantizing the 512 floats for transfer
+   (float16, int8) worth it? Bandwidth saved vs precision lost.
+2. **Conflict resolution**: when two peers hold different Last.fm tags for the
+   same artist — who is "right"?
+3. **PyInstaller + libtorrent**: does bundling the C++ extension (.pyd) into
+   the .exe work well? Needs testing.
+4. ~~**DHT announce rate limits**~~ — ANSWERED (announce storm, 2026-07):
+   25 announces/s produced timeout bursts near the END of the paced window and
+   for ~a minute past it. The current regime is 5 announces + a 1 s pause; a
+   ~300-key tail takes ~60 s out of the 15-minute cycle. Announce-on-behalf
+   (phase D) adds at most the client cap — tens of keys — which fits that
+   budget.
+5. **Slice replication and freshness**: a replica holds the blob of the dump
+   version it was signed under. Once a dump node updates, two generations of
+   one name's blob coexist in the network. Today whoever answers first wins
+   (replicas are asked first), and it only self-corrects when the name is
+   re-opened. Whether selection should consider `dump_version` is open.
 
 ---
 
 ## Future Phases
 
-- **P3b: Cross-library search** — "хто з мережі має щось схоже на цей трек?"
-  через embedding similarity. Distributed query паралельно до знайдених пірів,
-  5s timeout.
-- **P4b: Music recommendations** — broadcast "рекомендую альбом" до друзів,
-  shared playlists (список track metadata, не файли).
-- **P5: File sharing** — libtorrent BitTorrent для легального контенту
-  (indie artists, Creative Commons, self-released). Opt-in, система тегів
-  ліцензій (CC-BY, CC-SA, Public Domain, Self-Released).
+- **P3b: Cross-library search** — "who on the network has something like this
+  track?" through embedding similarity. Distributed query fanned out to the
+  peers found, 5s timeout.
+- **P4b: Music recommendations** — broadcast "I recommend this album" to
+  friends, shared playlists (track metadata lists, not files).
+- **P5: File sharing** — libtorrent BitTorrent for legal content (indie
+  artists, Creative Commons, self-released). Opt-in, with a licence tag system
+  (CC-BY, CC-SA, Public Domain, Self-Released).
 
-Відкладене з відвантажених фаз (не роадмап, а свідомі паузи):
-uptime-ratio й пасивний вимір аплінка як критерії відбору релеїв (нема
-джерела даних); смаковий профіль для пошуку нод зі схожими смаками (для
-carry виявився непотрібним — фантомний каталог його матеріалізує);
-wake-канал фази A, що росте лінійно з мережею («живе, поки активний
-support-тред»); mbid-міст для класу «recording збігся, uuid ні» (ціна —
-v3-формат печаток і перепідписання корпусу).
+Deferred out of the shipped phases (deliberate pauses, not roadmap):
+uptime-ratio and passive uplink measurement as relay-selection criteria (no
+data source); the taste profile for finding nodes with similar taste (carry
+turned out not to need it — the phantom catalogue materializes it); the
+phase-A wake channel that grows linearly with the network ("alive only while a
+support thread is"); the mbid bridge for the "recording matches, uuid does not"
+class (price: a v3 seal format and re-signing the corpus).
 
 ---
+## Shipped network phases (2026-08)
 
-## Відвантажені фази мережі (2026-08)
-
-Хронологія й аргументація нижче. Кожна фаза розширює ТОЙ САМИЙ
-`/api/relay/*` та sync-контракт — нових транспортів не з'являлось.
+Chronology and reasoning below. Every phase extends THE SAME `/api/relay/*`
+and sync contracts — no new transport was introduced.
 
 ### Relay forwarding — SHIPPED 2026-08-02
 
-Пара, де ОБИДВА за CGNAT, не мала каналу взагалі: повідомлення існувало лише
-у відправника, досяжного дублера немає (у торентах цей випадок маскує
-реплікація — тут маскувати нічим), тож ретрай ходив по колу вічно, і жодна
-сторона цього не бачила.
+A pair where BOTH sides sit behind CGNAT had no channel at all: the message
+existed only at the sender, there is no reachable stand-in (in torrents that
+case is masked by replication — here there is nothing to mask it with), so the
+retry looped forever and neither side could see it.
 
-Закрито **пересиланням**, не сховищем. Релей — чистий пересилач:
+Closed by **forwarding**, not storage. The relay is a pure forwarder:
 
 ```
 A --POST /api/relay/forward--> R
-                               R --SSE {type:"deliver", envelope}--> Б
-                               R <--POST /api/relay/ack------------- Б
-A <--{delivered, ack}--------- R      A перевіряє підпис Б
+                               R --SSE {type:"deliver", envelope}--> B
+                               R <--POST /api/relay/ack------------- B
+A <--{delivered, ack}--------- R      A verifies B's signature
 ```
 
-Обидві дії вихідні, тож працюють з-за будь-якого NAT; релею потрібен лише
-той, хто ПРИЙМАЄ — відправнику не потрібен ніхто. Конверт — байт-у-байт тіло
-`/api/chat/message`, тож у отримувача це дослівний реплей через
-`handle_incoming` (та сама дешифровка, той самий дедуп за `message_uuid`).
+Both actions are outbound, so they work from behind any NAT; the relay is
+needed only by the side that RECEIVES — the sender needs nobody. The envelope
+is byte-for-byte the body of `/api/chat/message`, so at the recipient it is a
+literal replay through `handle_incoming` (same decryption, same `message_uuid`
+dedup).
 
-**Підтвердження — кінець-у-кінець.** Ack = підпис отримувача над
-`sautium-delivery:v1:{message_uuid}:{sha256(ciphertext)}`. Релей не може ні
-збрехати про доставку (немає приватного ключа), ні підсунути свій конверт
-(підробка не розшифрується, тож підпису не буде). `delivered` перемикається
-лише за перевіреним підписом.
+**The receipt is end-to-end.** The ack is the recipient's signature over
+`sautium-delivery:v1:{message_uuid}:{sha256(ciphertext)}`. The relay can
+neither lie about delivery (it has no private key) nor slip in its own
+envelope (a forgery will not decrypt, so no signature appears). `delivered`
+flips only on a verified signature.
 
-**Релей не зберігає нічого** — ані рядка, ані таблиці. Єдиний його стан:
-in-memory future на час очікування квитанції (`FORWARD_ACK_TIMEOUT = 10 с`) і
-черга конвертів на підписку (`FORWARD_QUEUE_MAX = 100`). Немає TTL, пруна,
-квот на диск, reconciliation. Адресат не підключений → 409 миттєво, а не
-таймаут: відправник має одразу знати, що чекати марно.
+**The relay stores nothing** — not a row, not a table. Its only state: an
+in-memory future while it waits for the receipt (`FORWARD_ACK_TIMEOUT = 10 s`)
+and a queue of envelopes per subscription (`FORWARD_QUEUE_MAX = 100`). No TTL,
+no prune, no disk quotas, no reconciliation. Recipient not connected → 409
+immediately rather than a timeout: the sender should know at once that waiting
+is pointless.
 
-Дзеркала: `backend/routers/peer_chat.py` і `desktop/p2p/sync_server.py` —
-будь-який досяжний лаунчер стає релеєм без змін протоколу.
+Mirrors: `backend/routers/peer_chat.py` and `desktop/p2p/sync_server.py` — any
+reachable launcher becomes a relay with no protocol change.
 
-**Deposit/collect (поштова скринька) — СКАСОВАНО.** Причини, зафіксовані
-2026-08-02: (1) мастер — це ноутбук мейнтейнера, а не інфраструктура, і
-мережа, де гарантована доставка тримається на одній машині, — клієнт-сервер
-із P2P-фасадом; (2) щоб ПЕРЕДАТИ повідомлення, зберігати його не треба —
-скринька вирішувала дві різні задачі (транспорт і персистентність) і тягла за
-собою всю машинерію заради другої; (3) у світі багатьох релеїв вона породжує
-rendezvous ("де лежить моя пошта"), випадок "релей Б offline поки Б online" і
-хибні сподівання на доставку.
+**Deposit/collect (a mailbox) — CANCELLED.** The reasons, recorded 2026-08-02:
+(1) the master is the maintainer's laptop, not infrastructure, and a network
+whose guaranteed delivery rests on one machine is client-server with a P2P
+façade; (2) to DELIVER a message you do not need to store it — the mailbox
+solved two different problems (transport and persistence) and dragged in all
+its machinery for the second; (3) in a multi-relay world it creates rendezvous
+("where is my mail"), the "relay B offline while B is online" case, and false
+expectations of delivery.
 
-Якщо store-and-forward колись знадобиться — робити його **не** як скриньку
-адресата, а як **вихідний проксі відправника** ("мій релей дотискає мої
-відправлення за мене"): свій релей нода знає завжди, чужий довелося б шукати,
-тож rendezvous зникає. Але й це поки зайве: черга відправника ВЖЕ є
-offline-буфером (`delivered=FALSE` + вічний ретрай), а `import_history`
-домальовує втрачене з обох боків при першому контакті. Реальна діра — лише
-"A і Б ніколи не бувають онлайн одночасно".
-### Carry — push-seeding аудіо-аналізу — SHIPPED 2026-08-02, v2 2026-08-03
+If store-and-forward is ever needed, build it **not** as the recipient's
+mailbox but as the sender's **outbound proxy** ("my relay keeps pushing my
+outbox for me"): a node always knows its own relay, whereas someone else's
+would have to be found — so rendezvous disappears. Even that is unnecessary
+today: the sender's queue IS an offline buffer (`delivered=FALSE` + endless
+retry), and `import_history` fills in what was missed on both sides at first
+contact. The only real hole is "A and B are never online at the same time".
 
-Синк — **тільки pull**. Отже нода, яка не приймає вхідних, бере від мережі, але
-не дає їй нічого: до неї нема кому підключитися. Її власний аналіз рідкісного
-хвоста — саме те, чого нема більше ні в кого, — вмирає разом із нею.
+### Carry — push-seeding audio analysis — SHIPPED 2026-08-02, v4 2026-08-07
 
-Виправляється напрямок, не довіра. Підписаний запис самоавтентифікований, тож
-роздавати його може будь-хто; носій усе одно жене його через **звичайні ворота
-імпорту** (`sync_client.import_pushed`), де непідписане відкидається — умови
-"тільки від друга" немає й не потрібно.
+Sync is **pull-only**. So a node that accepts no inbound connections takes from
+the network and gives it nothing: there is nobody to connect to it. Its own
+analysis of the rare tail — precisely what nobody else holds — dies with it.
 
-```
-A (за CGNAT) --POST /api/sync/offer   {tracks:[…]}---> C
-             <--{wanted:{tracks:[…], segments:[…], …}} C
-             --POST /api/sync/push/{category} ───────> C   (тіло = відповідь pull)
-```
+What is fixed is the direction, not the trust. A signed record is
+self-authenticating, so anyone may serve it; the carrier still runs it through
+the **ordinary import gate** (`sync_client.import_pushed`), where unsigned
+material is dropped — there is no "friends only" condition and none is needed.
 
-Порядок push несучий: **tracks → segments → audio_features → artist_mbids** —
-імпортери аналізу вимагають наявного tracks-рядка (FK).
+**Only audio analysis travels.** v1 carried the artist layer and was replaced
+within a day: every bio/tag/similar is a Last.fm fetch by name, reproducible on
+any node for two API calls, and importing similars minted stub artists straight
+into the carrier's phantom-canon feed (unsolicited canonization plus slice
+fetches). Audio analysis is the opposite: GPU work with no external source.
+`track_stats` and `genre_descriptions` are Last.fm too → they do not travel.
 
-**Що їде — тільки аудіо-аналіз.** v1 носив артист-шар і був замінений за один
-день: кожне біо/тег/similar — це запит до Last.fm по імені, відтворюваний на
-будь-якій ноді за два API-виклики, а імпорт similars мінтив артистів-заглушок
-прямо у phantom-canon фід носія (зайва канонізація + MB-слайси). Аудіо-аналіз —
-протилежність: GPU-робота без жодного зовнішнього джерела. `track_stats` і
-`genre_descriptions` теж Last.fm → не їдуть.
+**What is offered — the full canonized snapshot.** `get_pushable_tracks`:
+sealed segments **AND** a first-hand source (`analysis_sources NOT imported`)
+**AND** a canon primary artist (non-`phantom` MB anchor) **AND** a sealed
+recording binding (`track_mbids`) **AND** a sealed tracklist row under an
+RG-anchored album. Measured: 28023 of 38202 first-hand sealed tracks (73%) —
+the rest are compilations and residue whose canon has not matured; they ride a
+later push. v2 carried only track + analysis and the carried rows were
+orphans: without an album the radio pool rejected them on its
+`(media_files OR album_tracks)` condition, Now Playing had no album, no cover
+and no `length_ms` for stream matching, and a future owner's canonization got
+neither structure nor durations.
 
-**Що виштовхується — повний канонізований зліпок (v3, 2026-08-05).**
-`get_pushable_tracks`: запечатані сегменти **І** first-hand джерело
-(`analysis_sources NOT imported`) **І** канонічний primary (не-`phantom`
-MB-якір) **І** запечатана recording-прив'язка (`track_mbids`) **І** запечатаний
-tracklist-рядок з RG-якірним альбомом. Виміряно: 28 023 з 38 202 first-hand
-sealed треків (73%) — решта — компіляції й резидуй, чий канон ще не дозрів;
-вони їдуть пізнішим пушем. Усе, що приїхало, працює як повний фантом, або не
-їде: v2 возив лише трек+аналіз, і перенесене було сиротами — без альбому
-радіо-пул відкидав їх умовою `(media_files OR album_tracks)`, Now Playing не
-мав ні альбому, ні обкладинки, ні `length_ms` для стрім-матчингу, а
-канонізація майбутніх власників — ні структури, ні тривалостей.
+Seals that support that gate: `album` (`rg_mbid:title:year:confidence`;
+**cover_url deliberately outside the seal** — a CAA URL is a deterministic
+derivative of rg_mbid, so the importer may fill a blank one with
+`coverartarchive.org/release-group/{rg}/front-500`, exactly what the phantom
+minter writes), `album_track` (album:disc:position:**length_ms**:recording),
+`track_mbid` (recording:confidence).
 
-Категорії v3 у FK-порядку: `albums → tracks → album_tracks → segments →
-audio_features → track_mbids → artist_mbids`. Три нові запечатані kinds:
-`album` (`rg_mbid:title:year:confidence`; **cover_url поза печаткою** — 
-CAA-URL є детермінованою похідною rg_mbid, тож імпортер вільний заповнити
-порожнє `coverartarchive.org/release-group/{rg}/front-500`, як робить
-фантомний мінт), `album_track` (album:disc:position:**length_ms**:recording),
-`track_mbid` (recording:confidence). Ідентичність альбому — тим самим
-перерахунком: `album_uuid = uuid5(album:primary:title)`.
+The owned layer lives in `album_variants`, so tracklist rows for owned tracks
+did not exist — `sign_audio` **materializes** them from file tags before every
+signing pass (`_materialize_owned_tracklists`: disc, position, duration,
+recording — this node's first-hand observation, incremental, an MB-minted row
+keeps its slot). Only rows of owned analysis-source tracks are signed; the ~3M
+MB-minted phantom tracklist rows stay unsigned (attesting them would mean
+signing a copy of MusicBrainz).
 
-Owned-шар живе в `album_variants`, тож tracklist-рядків для власних треків не
-існувало — `sign_audio` перед кожним підписанням **матеріалізує** їх із тегів
-файлів (`_materialize_owned_tracklists`: диск, позиція, тривалість, recording
-— першоджерельне спостереження цієї ноди, інкрементно, MB-мінтований рядок
-на позиції виграє). Підписуються лише рядки owned analysis-source треків —
-~3M MB-мінтованих фантомних tracklist-рядків залишаються непідписаними
-(атестувати їх означало б підписати копію MusicBrainz).
+A trap caught by the re-serve check: `created_at` IS the seal's fetched_at
+slot, so importers PRESERVE the author's `created_at`; a local `DEFAULT now()`
+would break verification for every subsequent recipient.
 
-Пастка, спіймана re-serve-перевіркою: `created_at` — це fetched_at-слот
-printь-payload, тож імпортери ЗБЕРІГАЮТЬ авторський `created_at`; локальний
-`DEFAULT now()` зламав би верифікацію у кожного наступного отримувача.
+**v4 (2026-08-07): the offer speaks recording MBIDs, the transfer speaks track
+UUIDs, and the carrier answers ONLY with uuids it already has.** The carrier's
+phantom catalogue (~20× owned, grown from its own discovery graph) IS the taste
+profile — no separate mechanism needed: a recording it has no row for is a
+recording it never cared about, and nothing is minted to hold it. The double
+key buys both guarantees at once: an MBID exists only for canonized material
+(canonicity), and a uuid match means the author's seal (which binds track_uuid)
+survives re-serve (integrity). Both mismatch classes die quietly on the right
+side: "same name, different recording" is cut by the MBID join;
+"same recording, different name" never leaves the pusher, which holds no such
+uuid.
 
-**Ідентичність доводиться перерахунком, не підписом.**
-`track_uuid = uuid5("song:"+primary+":"+title)` — носій перераховує хеш із
-заявлених (title, primary) і відкидає невідповідність; мінтиться ЛИШЕ доведений
-primary-зв'язок. Ролі поза primary (feat/vs) не їдуть: ключ їх не доводить, а
-аналіз висить на track_id — м'яке правило неоднозначностей. На носії трек стає
-**фантомом** (tracks + track_artists без media_files) — рівно той шейп, що вже
-живе в phantom discovery, тож звичайний track-join inventory знаходить
-перенесене без розширень протоколу, а канон-фіди носія його не бачать взагалі
-(owned-фід вимагає media_files, phantom-фід — відсутності track_artists):
-нуль нав'язаної канон-роботи, перевірено (`pending_slice_names` = 0).
+The v3 structural transport (albums/tracks/album_tracks/artist_mbids
+categories, the identity-recompute functions, their importers) was DELETED —
+git history holds it; the carrier's skeleton already has structure, covers and
+canonized artists from the MB mint, and they are more canonical than the
+pusher's. The album/album_track SEALS remain — the pusher's full-snapshot gate
+reads them; the artist_mbids seal layer (a v2 legacy: columns, trigger, kind,
+2596 signatures) went with its transport — the canon gate reads confidence, not
+a signature. Analysis lands in a ready socket — the same "best case" measured
+earlier (15/15 radio-eligible with zero canon work). The pusher serves the
+wanted uuids through the ordinary pull handlers, which naturally return only
+what it holds. An empty carrier (a fresh node before discovery) takes nothing —
+honestly so; its profile will grow. A lite node without phantom_minting is not
+a carrier. The master with its dump (2.9M phantoms) is a de-facto broad
+carrier, the network's safety anchor.
 
-**Канон-мітка їде підписаною.** Гейт carry («тільки канонічне») спирається на
-`artist_mbids`, який інакше лишається в базі відправника: носій не володіє
-музикою і не канонізує НІКОЛИ, тож без мітки майбутній multi-hop ре-пуш не мав
-би на що спертись (недосяжний носій пушити МОЖЕ — push вихідний), а
-тезки-конфлікти було б не детектувати. Тому `artist_mbids` — запечатана
-категорія: kind `artist_mbid`, payload зв'язує `artist_uuid:mbid:confidence` +
-`created_at`; **confidence всередині підпису** — завищення тиру в транзиті
-валить печатку (перевірено). Носій зберігає з `imported=true` й авторським
-confidence; ON CONFLICT (mbid) DO NOTHING — конфліктна прив'язка того ж імені
-під іншим mbid співіснує (таблиця 1:N), розбіжність авторів — це евіденс для
-namesake-проєкту, не помилка. Механізм ре-пушу в v2 НЕ будується: пушиться
-лише first-hand; перевозиться властивість, не рішення.
+**The "don't send what they already have" filter** is the offer/answer round:
+16 bytes per recording to ask against ~46 KB to send blind. **Budget** is
+`sync.carry_limit` (2000 tracks ≈ 92 MB by default), counted honestly — only
+tracks with imported analysis and no file. It is now the second belt; the first
+is the phantom intersection itself. **Provenance is never erased**:
+`_drop_protected` keeps segments off tracks that already have a grid or a
+first-hand source (verified by pushing a node's own rows back to it — 0
+imported). **The announce tail means "I hold analysis"** (`ANNOUNCE_TAIL_SQL`):
+the announce mirrors what a node can actually serve rather than file ownership
+— it covers carried rows (the author suppresses its own announces, so the
+carrier is its only DHT address), stream-derived analysis, and first-hand
+analysis orphaned by a prune; a file with no analysis advertises nothing a peer
+could take. **Carried rows cannot be deleted by accident**: both phantom-track
+deleters (`_reconcile_phantoms`, `prune_missing_files`) unconditionally spare a
+track that carries embeddings.
 
-**v4 (2026-08-07, дизайн Валерія): offer говорить recording-MBID-ами,
-передача — track-uuid-ами, і носій відповідає ЛИШЕ наявними в себе uuid.**
-Фантомний каталог носія (~20× owned, вирощений з його власного
-discovery-графа) і Є смаковий профіль — окремої механіки не потрібно:
-recording, для якого в носія нема рядка, — це recording, який його ніколи
-не цікавив, і під нього нічого не мінтиться. Подвійний ключ дає обидві
-гарантії разом: MBID існує лише в канонізованого (канонізованість), а
-uuid-збіг означає, що авторська печатка (вона в'яже track_uuid) виживе
-re-serve (цілісність). Обидва mismatch-класи вмирають тихо на правильному
-боці: «та сама назва, інший запис» ріжеться MBID-джойном; «той самий
-запис, інша назва» не покидає пушера — він не має такого uuid.
-Структурний транспорт v3 (категорії albums/tracks/album_tracks/
-artist_mbids, identity-перерахунки, їхні імпортери) ВИДАЛЕНО — git
-history його тримає; скелет носія вже має структуру, обкладинки й
-канон-мітки артистів з MB-мінту, і вони канонічніші за пушерські.
-ПЕЧАТКИ album/album_track живуть далі — їх читає full-snapshot гейт
-пушера; printь-шар artist_mbids (v2-спадок: колонки, тригер, kind,
-2 596 підписів) видалено разом із транспортом — канон-гейт читає
-confidence, не підпис. Аудіо-аналіз лягає в готове гніздо —
-той самий «найкращий кейс», що мірявся раніше (15/15 радіо-придатних
-без жодної канон-роботи). Пушер віддає wanted-uuid звичайними
-pull-хендлерами — вони природно повертають лише наявне в нього.
-Порожній носій (свіжа нода до discovery) не бере нічого — чесно, його
-профіль виросте; lite без phantom_minting — не носій; мастер із дампом
-(2.9M фантомів) — де-факто широкий носій, рятівний якір мережі.
+A side effect accepted deliberately: the carrier's background Last.fm
+enrichment will fetch bios/tags for carried artists on its own (it gates on
+`track_artists`, not `media_files`; similars are owned-gated, so there is no
+blowup). This is "a relay accumulates data it can use itself": a carried artist
+becomes visible in the carrier's search, and carried phantom tracks with
+segments are material for its discovery.
 
-**Фільтр «не слати те, що вже є»** — offer/answer: 16 байтів на recording
-спитати проти ~46 КБ послати наосліп. **Бюджет** — `sync.carry_limit`
-(типово 2000 треків ≈ 92 МБ), лічильник чесний: рахуються лише треки з
-імпортованим аналізом без файлу — тепер він другий пояс, перший — сам
-фантомний перетин. **Провенанс не витирається**: `_drop_protected` не пускає сегменти
-на треки з наявною сіткою або first-hand джерелом (перевірено push-ем власних
-рядків назад автору — 0 імпортовано). **Announce-хвіст = «маю аналіз»**
-(`ANNOUNCE_TAIL_SQL`): анонс віддзеркалює те, що нода реально може віддати, а
-не володіння файлами — покриває перенесене (автор глушить власні анонси, тож у
-DHT носій — єдина його адреса), стрім-аналіз і first-hand аналіз, осиротілий
-після prune; файл без аналізу не рекламує нічого, що пір міг би забрати.
-**Перенесене неможливо стерти ненавмисно**: обидва делітери фантомних треків
-(`_reconcile_phantoms`, `prune_missing_files`) безумовно щадять трек з
-embeddings.
-
-Побічний ефект, прийнятий свідомо: фонове Last.fm-збагачення носія саме
-довантажить біо/теги перенесених артистів (гейтиться `track_artists`, не
-`media_files`; similars гейтяться owned — блоупу нема). Це «relay акумулює
-дані, якими зможе користуватись сам»: перенесений артист видимий у пошуку
-носія, а перенесені фантомні треки з сегментами — матеріал для його discovery.
-
-Дзеркала: `desktop/p2p/sync_server.py` і `backend/routers/sync.py`. Docker
-монтує `./desktop:/app/desktop:ro` і використовує **ту саму**
-`sync_client.import_pushed`, а не власну копію — друга копія воріт перевірки
-підписів це та копія, яка з часом розійдеться й почне пропускати. UUID-формули
-дзеркаляться в `desktop/p2p/sync_queries.py` (desktop не імпортує backend).
+Mirrors: `desktop/p2p/sync_server.py` and `backend/routers/sync.py`. Docker
+mounts `./desktop:/app/desktop:ro` and uses **the same**
+`sync_client.import_pushed` rather than a copy of its own — a second copy of a
+signature-verification gate is the copy that eventually drifts open.
 
 ### D: Peer-relays — SHIPPED 2026-08-06
 
-Мастер перестав бути особливим: релеєм тепер є будь-яка досяжна нода, і
-доставка більше не тримається на одному ноутбуці. Протокол пересилання не
-змінився — розширились ролі навколо нього.
+The master stopped being special: any reachable node is a relay now, and
+delivery no longer rests on one laptop. The forwarding protocol did not change
+— the roles around it did.
 
-**Довіра — voucher-only** (жодних нових таблиць і прав). Клієнт за CGNAT при
-підписці на чужий wake-stream дає **voucher** — власний підпис над
-`sautium-relay-voucher:v1:{client}:{relay}:{until}`. Один підпис робить дві
-роботи: авторизує підписку (замість дружби, якої з чужим релеєм нема) і є
-доказом, який релей віддає відправникам на `GET /api/relay/voucher` —
-чорнодірний самозванець, що анонсить чужий invite, не має чим відповісти.
-relay_pubkey всередині payload — воучер для одного релея не пред'явиш від
-імені іншого; `verify_invite_code` в'яже invite до ключа клієнта; until
-(24h, переоформлення при кожному реконекті) обмежує життя повноваження.
-Реєстр воучерів in-memory: рестарт релея = клієнти переоформляться самі.
+**Trust is voucher-only** (no new tables, no new rights). A CGNAT client
+subscribing to a stranger's wake stream presents a **voucher** — its own
+signature over `sautium-relay-voucher:v1:{client}:{relay}:{until}`. One
+signature does two jobs: it authorizes the subscription (in place of the
+friendship that does not exist with a stranger) and it is the proof the relay
+hands to senders at `GET /api/relay/voucher` — a black-hole impostor announcing
+someone else's invite has nothing to answer with. The relay_pubkey inside the
+payload means a voucher issued to one relay cannot be presented by another;
+`verify_invite_code` binds the invite to the client's key; `until` (24 h,
+re-issued on every reconnect) bounds the authority's lifetime. The voucher
+registry is in-memory: a relay restart simply has clients re-issue.
 
-**Анонс-он-біхаф.** BT DHT не перевіряє власника інфохеша — це фіча: релей
-анонсить `Sautium-user:{invite}` кожного зареєстрованого клієнта
-(`_client_invites` в обох DHT-сервісах, той самий пейсинг циклу) і знімає
-анонс у мить закриття SSE — присутність у DHT стає справжньою, а не
-15–30-хвилинним привидом. Відправник знаходить клієнта НЕЗМІННИМ
-`lookup_user`: `_lookup` завжди мерджив усіх анонсерів одного ключа, тож K
-релеїв повертаються як N кандидатів безкоштовно.
+**Announce-on-behalf.** The BT DHT does not verify infohash ownership — that is
+the feature: the relay announces `Sautium-user:{invite}` for every registered
+client (`_client_invites` in both DHT services, on the same paced cycle) and
+withdraws the announce the moment the SSE closes — presence in the DHT becomes
+real rather than a 15–30-minute ghost. The sender finds the client through the
+UNCHANGED `lookup_user`: `_lookup` has always merged every announcer of one
+key, so K relays come back as N candidates for free.
 
-**Відправник** розширює рівно той шов, який дизайн і резервував:
-`_resolve_relay_for` тепер повертає ВСІ релеї друга — кандидати lookup_user,
-чий `/health` node_id не є другом, проходять повну воучер-верифікацію
-(binding invite↔ключ, підпис друга, until, relay_pubkey==node_id) до
-першого байта форварду; мастер закриває список як relay #0. 409 від одного
-релея — привід перейти до наступного, а не здатись (друг тримає живий
-стрім до K релеїв паралельно).
+**The sender** widens exactly the seam the design reserved:
+`_resolve_relay_for` now returns ALL of a friend's relays — lookup_user
+candidates whose `/health` node_id is not the friend go through full voucher
+verification (invite↔key binding, the friend's signature, `until`,
+relay_pubkey == node_id) before a single byte is forwarded; the master closes
+the list as relay #0. A 409 from one relay is a reason to move to the next, not
+to give up (the friend holds live streams to K relays in parallel).
 
-**Клієнт** тримає K=2 peer-релеїв понад мастера — гаряче резервування:
-смерть одного лишає відправникам живого кандидата замість загниваючого
-анонса. `_master_wake_loop` стиснувся до дескриптора над спільною
-`_relay_subscription_loop` (мастер = friend-шлях + history catch-up;
-peer = воучер у query, без history, невідомий кадр = no-op). Колишні релеї
-(`p2p.relay_pubkeys`) пробуються першими — анонси стабільні між
-рестартами. Ставши досяжною, нода закриває підписки: бути знайденим
-напряму краще, ніж через будь-кого.
+**The client** holds K=2 peer relays on top of the master — hot standby: one
+relay's death leaves senders a live candidate instead of a decaying announce.
+`_master_wake_loop` shrank to a descriptor over the shared
+`_relay_subscription_loop` (master = friend path + history catch-up; peer =
+voucher in the query, no history, unknown frame = no-op). Previously used
+relays (`p2p.relay_pubkeys`) are tried first, so announces stay stable across
+restarts. Once the node becomes reachable it closes the subscriptions: being
+found directly beats being found through anyone.
 
-**Роль** вмикається сама: reachable + `p2p.relay_enabled` (дефолт on —
-релей-шар, у який ніхто не opt-in-иться, ніколи не холодний-стартне) →
-анонс `Sautium-cap:relay`; втрата досяжності знімає анонс і закриває чужі
-підписки (клієнти перереєструються деінде — graceful degradation замість
-глобальної репутації). Hardware-гейта нема: релеїння — це байти, не ML.
+**The role turns itself on**: reachable + `p2p.relay_enabled` (default on — a
+relay layer nobody opts into never cold-starts) → announce
+`Sautium-cap:relay`; losing reachability withdraws the announce and closes
+foreign subscriptions (clients re-register elsewhere — graceful degradation
+instead of global reputation). There is no hardware gate: relaying is bytes,
+not ML.
 
-**Мастер під тим самим капом** (виправлено 2026-08-06 після зауваження
-Валерія про розподіл навантаження): недосяжна нода шле воучер і в
-мастер-петлі, тож мастер реєструє її, анонсить її invite і РАХУЄ ПРОТИ
-СВОГО КАПУ, як будь-який релей — надлишок клієнтури сам розтікається по
-peer-релеях, замість збиратись на одному ноутбуці. 429 від повного мастера
-не вбиває wake-канал: клієнт відступає до голої friend-підписки на годину
-(support-чат живий, релеюють його peer-релеї). Дружня підписка БЕЗ воучера
-— це не «дружній релей», а wake-канал фази A (пінги «пулльни історію» від
-пасивного Docker-мастера): вона не займає кап-слот і не породжує анонсу.
-Кандидати рекрутингу перемішуються (shuffle) — інакше всі клієнти
-товпляться на першому релеї зі списку DHT і кап розподіляє їх дорогим
-шляхом (через 429). Відомий скейлінг-борг фази A, свідомо не чіпаємо:
-вічний wake-SSE усіх нод до мастера заради support-чату — колись стане
-«живе лише поки тред активний».
+**The master carries under the same cap** (fixed 2026-08-06 after the
+load-distribution objection): an unreachable node sends its voucher on the
+master path too, so the master registers it, announces its invite and COUNTS IT
+AGAINST ITS OWN CAP like any relay — surplus clientele spreads across peer
+relays instead of pooling on one laptop. A 429 from a full master does not kill
+the wake channel: the client falls back to the bare friend subscription for an
+hour (support chat stays alive; peer relays do the relaying). A friend's
+subscription WITHOUT a voucher is not a "friendly relay" but the phase-A wake
+channel (pings to "pull the history" from a passive Docker master): it takes no
+cap slot and produces no announce. Recruit candidates are shuffled — otherwise
+every client piles onto the first relay in the DHT list and the cap distributes
+them the expensive way (through 429s). A known phase-A scaling debt, left alone
+deliberately: the permanent wake SSE from every node to the master for support
+chat — one day it becomes "alive only while a thread is".
 
-**Адаптивний cap** (ідея Валерія): база 20 чужих клієнтів; повний релей
-знімає свій cap-анонс (нові не стукають марно) і слухає чужі — якщо інших
-релеїв у DHT нема, піднімає cap на 20 (до 100) замість голодування мережі;
-з вільним місцем у релей-багатій мережі cap спадає до бази. Сигнал
-бінарний, реакція одностороння на каденції реанонсу — без осциляцій.
-Наявні клієнти капом не скидаються ніколи.
+**Adaptive cap**: a base of 20 foreign clients; a full relay withdraws its cap
+announce (newcomers stop knocking in vain) and listens for others — if no other
+relay is visible in the DHT it raises the cap by 20 (up to 100) instead of
+letting the network starve; with room again in a relay-rich network the cap
+decays back to base. The signal is binary and the reaction one-sided on the
+re-announce cadence — no oscillation. Existing clients are never shed by a cap
+change.
 
-Живий тест на 8801: без воучера → 403; воучер-реєстрація → 200 + анонс
-invite у DHT; GET /voucher верифікується ключем клієнта; форвард від
-чужого → deliver-кадр → ack → delivered:true з перевіреною квитанцією;
-форвард на НЕзареєстрованого чужого → 403. (Тест зловив ворота, що
-лишились з фази A: ack вимагав дружби — delivered:true був недосяжний
-рівно для тих клієнтів, заради яких фаза існує.)
+Live test on 8801: no voucher → 403; voucher registration → 200 plus the
+invite announced in the DHT; GET /voucher verifies against the client's key; a
+stranger's forward → deliver frame → ack → delivered:true with a verified
+receipt; a forward to an UNregistered stranger → 403. (The test caught a gate
+left over from phase A: ack demanded friendship — delivered:true was
+unreachable for exactly the clients the phase exists for.)
 
-Відкладено з D: uptime-ratio і пасивний вимір аплінка як критерії відбору
-релеїв (нема джерела даних; це уточнення відбору, не механіка).
+Deferred out of D: uptime-ratio and passive uplink measurement as
+relay-selection criteria (no data source; a refinement of selection, not of the
+mechanism).
 
-### E: MB-слайси — реплікація замість проксі — SHIPPED 2026-08-07
+### E: MB slices — replication instead of a proxy — SHIPPED 2026-08-07
 
-**Стару E (relay-проксі) скасовано.** Вона лікувала неіснуючу хворобу:
-слайси тягне requester ВИХІДНИМ запитом, а вихідні працюють з-за
-будь-якого NAT — проксі знадобився б лише дамп-ноді за CGNAT (рідкість,
-не варта другого ешелону) і додавав хоп до найдорожчого шляху. Справжня
-проблема інша: **дамп-нод мало, і весь в'їзний рахунок нових нод платять
-вони**. Виміряно на живій дамп-ноді: рідкісні артисти ~30 мс / 14 КБ,
-середні ~80 мс / 34 КБ, а плідні (Бах, Ділан, Майлз) — **~8 с і ~9 МБ
-кожен**. Тобто хвіст безкоштовний, зірки жахливі, і кожна нова нода
-питає саме зірок.
+**The old E (a relay proxy) was cancelled.** It treated a disease that does not
+exist: slices are pulled by the requester over an OUTBOUND request, and
+outbound works from behind any NAT — a proxy would only help a dump node behind
+CGNAT (a rarity, not worth a second echelon) and would add a hop to the most
+expensive path in the system. The real problem is different: **dump nodes are
+few, and they pay the entry bill of every new node**. Measured on a live dump
+node: rare artists ~30 ms / 14 KB, mid-tier ~80 ms / 34 KB, and prolific ones
+(Bach, Dylan, Miles) **~8 s and ~9 MB each**. The tail is free, the stars are
+brutal, and every new node asks for the stars.
 
-**Підпис став per-artist** (дизайн Валерія — ключове, що все розблокувало).
-v1 підписував відповідь-батч, тобто приварював підпис до одного
-транспортного обміну: репліка не могла ре-сервити одне ім'я, не
-відтворивши весь оригінальний батч байт-у-байт. Зерно підпису тепер
-збігається з зерном даних (`pending_slice_names`, `mb_slice_fetches`,
-closed-world — усі вже per name), тож **оригінальний підпис дамп-ноди
-подорожує з кожним іменем через будь-яку кількість хопів**, і кожен
-перевіряє незалежно. `name_key` і `dump_version` всередині підписаних
-байтів: блоб одного імені не видати за інше, слайс старої версії — за
-свіжий. Рядки в блобі сортуються за своєю JSON-формою — порядок рядків
-Postgres не має протікати в підпис.
+**Signatures became per-artist** — the change that unlocked everything else.
+v1 signed the batch response, welding the signature to one transport exchange:
+a replica could not re-serve a single name without replaying the whole original
+batch byte-for-byte. The signing grain now matches the data grain
+(`pending_slice_names`, `mb_slice_fetches` and the closed-world rule are all
+per name already), so **the original dump node's signature travels with each
+name through any number of hops**, verified independently by each. `name_key`
+and `dump_version` live inside the signed bytes: one name's blob cannot be
+passed off as another's, nor an old dump version as a fresh one. Rows inside a
+blob are sorted by their JSON form — Postgres row order must not leak into a
+signature.
 
-**Блоб зберігається verbatim (gzip)** — і це прибирає найкрихкішу частину
-задачі: ре-серв віддає ТІ САМІ байти, тож жодного контракту
-ре-серіалізації з БД не існує. Одна таблиця `mb_slice_blobs` грає три
-ролі: гарячий кеш дамп-ноди (Бах рахується раз на версію дампу —
-**26.6 с → 103 мс, 257×**), інвентар репліки для ре-серву, і сам
-payload на дроті. Репліки не тримають блоби > 2 МБ: дорогі імена і так
-віддаються дамп-нодами з кешу за копійки, а от тіло розподілу (десятки
-КБ) розповзається — і найпопулярніші імена реплікуються найшвидше.
+**Blobs are stored verbatim (gzip)** — which removes the most brittle part of
+the job: re-serving hands back THE SAME bytes, so no re-serialization contract
+with the database exists at all. The single `mb_slice_blobs` table plays three
+roles: a dump node's hot cache (Bach is computed once per dump version —
+**26.6 s → 103 ms, 257×**), a replica's re-serve inventory, and the wire
+payload itself. Replicas do not keep blobs over 2 MB: the expensive names are
+already served from dump-node caches for pennies, while the body of the
+distribution (tens of KB) spreads — and the most popular names replicate
+fastest.
 
-**Хто відповідає.** `/health` віддає `mb_slices` (розмір інвентаря);
-`_find_dump_peers` ставить **репліки ПЕРЕД дамп-нодами**, а промахи
-(`missing` у відповіді) переносяться до наступного кандидата. Дамп-нода
-404 більше не віддає: частково корисне — корисне. Closed-world
-семантика збережена точно: ім'я закривається лише **підписаним** нуль-
-матчем автора, а не транспортною тишею.
+**Who answers.** `/health` reports `mb_slices` (inventory size);
+`_find_dump_peers` puts **replicas BEFORE dump nodes**, and misses (`missing`
+in the response) carry over to the next candidate. A dump node no longer 404s:
+partially useful is useful. Closed-world semantics are preserved exactly: a
+name closes only on the author's **signed** zero-match, never on transport
+silence.
 
-**Wizard-крок «Music catalogue»** з передвибраною галочкою, коли на диску
-є 3× розміру дампу (~21 ГБ): продающий текст (дискографії поза
-бібліотекою → стрімінг і рекомендації; точна ідентичність → пошук,
-радіо, дублікати; канонізація → те, чим піри взагалі можуть обмінюватись
-аналізом), явна вартість, і **Settings → Delete catalogue** як зворотна
-дія — саме вона робить сміливий дефолт чесним. Скачування стартує один
-раз після першого запуску (прапорець гаситься одразу — рестарт ніколи не
-повторить багатогігабайтне завантаження).
+**A "Music catalogue" wizard step** with the box pre-ticked when the disk has
+3× the dump size (~21 GB): the case stated plainly (discographies beyond the
+shelf → streaming and recommendations; exact identity → search, radio,
+duplicates; canonization → what peers can exchange analysis about at all), the
+cost shown explicitly, and **Settings → Delete catalogue** as the reverse
+action — that is what makes a bold default fair. The download starts once after
+the first launch (the flag clears immediately, so a restart never repeats a
+multi-GB transfer).
 
-E2E: дамп → клієнт (2 matched, 12 277 рядків, zero-match закрито) →
-репліка без дампу ре-сервить перевірений блоб → другий хоп верифікує
-**підписом дамп-ноди**; підроблений байт і блоб під чужим ім'ям —
-відкинуті.
+E2E: dump → client (2 matched, 12277 rows, zero-match closed) → a dump-less
+replica re-serves a verified blob → a second hop verifies it **against the dump
+node's key**; a flipped byte and a blob served under another name are both
+rejected.

@@ -1,136 +1,138 @@
 # HQPlayer DSP Controls - Summary
 
-## ✅ Повністю реалізовано управління налаштуваннями!
+## ✅ Setting control is fully implemented
 
-### Доступні налаштування:
+### Available settings
 
 #### 1. **Output Mode** (PCM/DSD)
 ```python
 modes = hqp.get_modes()
-# Результат: [{"index": 0, "name": "[source]"}, {"index": 1, "name": "PCM"}, {"index": 2, "name": "SDM (DSD)"}]
+# Result: [{"index": 0, "name": "[source]"}, {"index": 1, "name": "PCM"}, {"index": 2, "name": "SDM (DSD)"}]
 
-hqp.set_mode(1)  # Встановити PCM
-hqp.set_mode(2)  # Встановити DSD
+hqp.set_mode(1)  # PCM
+hqp.set_mode(2)  # DSD
 ```
 
-**Доступні режими:**
-- `[source]` - як у джерелі (без upsampling)
-- `PCM` - PCM режим
-- `SDM (DSD)` - DSD режим
+**Modes:**
+- `[source]` — as in the source (no upsampling)
+- `PCM` — PCM mode
+- `SDM (DSD)` — DSD mode
 
 ---
 
-#### 2. **Фільтри** (PCM та SDM/DSD)
+#### 2. **Filters** (PCM and SDM/DSD)
 ```python
 filters = hqp.get_filters()
-# Результат: 77 фільтрів!
+# Result: 77 filters
 
-# Приклади фільтрів:
+# Examples:
 # PCM: poly-sinc-ext2, poly-sinc-gauss-xla, sinc-L, sinc-M, etc.
 # DSD: DSD7 512+fs, DSD9 512+fs, etc.
 
-hqp.set_filter(6)  # Встановити poly-sinc-lp
-hqp.set_filter(10, 8)  # PCM: фільтр для upsampling + 1x filter
+hqp.set_filter(6)      # poly-sinc-lp
+hqp.set_filter(10, 8)  # PCM: upsampling filter + 1x filter
 ```
 
-**Типи фільтрів:**
-- **IIR** - Infinite Impulse Response
-- **FIR** - Finite Impulse Response (linear phase, minimum phase, asymmetric)
-- **poly-sinc** - Polynomial interpolated sinc (різні варіанти: lp, mp, short, gauss, ext, xla)
-- **sinc** - Sinc function filters (L, M, S варіанти)
-- **closed-form** - Closed-form filters
+**Filter families:**
+- **IIR** — Infinite Impulse Response
+- **FIR** — Finite Impulse Response (linear phase, minimum phase, asymmetric)
+- **poly-sinc** — polynomial-interpolated sinc (variants: lp, mp, short, gauss,
+  ext, xla)
+- **sinc** — sinc-function filters (L, M, S variants)
+- **closed-form** — closed-form filters
 
-**Всього:** 77 фільтрів
+**Total:** 77 filters
 
 ---
 
-#### 3. **Noise Shapers** (Dither/DSD modulators)
+#### 3. **Noise Shapers** (dither / DSD modulators)
 ```python
 shapers = hqp.get_shapers()
-# Результат: 36 shapers!
+# Result: 36 shapers
 
-# Приклади:
+# Examples:
 # DSD5, DSD5v2, DSD5EC
 # ASDM5, ASDM5EC, ASDM5EC-ul
 # ASDM7, ASDM7EC, ASDM7EC-super
 
-hqp.set_shaping(15)  # Встановити ASDM7EC-super 512+fs
+hqp.set_shaping(15)  # ASDM7EC-super 512+fs
 ```
 
-**Типи shapers:**
-- **DSD5** series - 5th order DSD modulators
-- **ASDM5** series - Advanced Sigma-Delta Modulators 5th order
-- **ASDM7** series - 7th order (higher quality)
-- Варіанти: EC (error correction), ul (ultra-light), super, light
+**Shaper families:**
+- **DSD5** series — 5th-order DSD modulators
+- **ASDM5** series — Advanced Sigma-Delta Modulators, 5th order
+- **ASDM7** series — 7th order (higher quality)
+- Variants: EC (error correction), ul (ultra-light), super, light
 
-**Всього:** 36 noise shapers
+**Total:** 36 noise shapers
 
 ---
 
-#### 4. **Sample Rates** (Output)
+#### 4. **Sample Rates** (output)
 ```python
 rates = hqp.get_rates()
-# Результат: 20 sample rates
+# Result: 20 sample rates
 
-# Приклади:
+# Examples:
 # PCM: 2.048, 3.072, 4.096, 6.144, 8.192, 12.288 MHz
 # DSD: 2.8224 (DSD64), 5.6448 (DSD128), 11.2896 (DSD256), 22.5792 (DSD512), 45.1584 (DSD1024), 90.3168 (DSD2048)
 
-hqp.set_rate(8)  # 11.2896 MHz (DSD256)
+hqp.set_rate(8)   # 11.2896 MHz (DSD256)
 hqp.set_rate(12)  # 22.5792 MHz (DSD512)
 ```
 
-**Доступні sample rates:**
+**Available rates:**
 - **DSD64**: 2.8224 MHz
 - **DSD128**: 5.6448 MHz
 - **DSD256**: 11.2896 MHz
 - **DSD512**: 22.5792 MHz
 - **DSD1024**: 45.1584 MHz
 - **DSD2048**: 90.3168 MHz
-- **PCM rates**: 2.048, 3.072, 4.096, 6.144, 8.192, 12.288, 16.384, 24.576, 32.768, 49.152, 98.304 MHz
+- **PCM rates**: 2.048, 3.072, 4.096, 6.144, 8.192, 12.288, 16.384, 24.576,
+  32.768, 49.152, 98.304 MHz
 
-**Всього:** 20 rates
+**Total:** 20 rates
 
 ---
 
 #### 5. **Input Devices**
 ```python
 inputs = hqp.get_inputs()
-# Результат: ["cd:"]
+# Result: ["cd:"]
 
-# Note: Input devices list залежить від налаштувань HQPlayer
+# Note: the input device list depends on HQPlayer's own configuration
 ```
 
 ---
 
-## Практичні приклади:
+## Practical examples
 
-### Приклад 1: Встановити PCM режим з high-quality фільтром
+### Example 1: PCM mode with a high-quality filter
 ```python
 from hqplayer_client import HQPlayerConnection
 
 with HQPlayerConnection(host="172.26.80.1") as hqp:
-    # Отримати доступні опції
+    # Read the available options
     modes = hqp.get_modes()
     filters = hqp.get_filters()
 
-    # Знайти PCM режим
+    # Find PCM mode
     pcm = next(m for m in modes if m['name'] == 'PCM')
 
-    # Знайти poly-sinc-ext2 фільтр
+    # Find the poly-sinc-ext2 filter
     poly_sinc_ext2 = next(f for f in filters if 'poly-sinc-ext2' in f['name'])
 
-    # Встановити
+    # Apply
     hqp.set_mode(pcm['index'])
     hqp.set_filter(poly_sinc_ext2['index'])
 
-    print("✅ Встановлено PCM режим з poly-sinc-ext2 фільтром")
+    print("✅ PCM mode with the poly-sinc-ext2 filter")
 ```
 
-### Приклад 2: Встановити DSD512 з ASDM7EC-super
+### Example 2: DSD512 with ASDM7EC-super
 ```python
 with HQPlayerConnection(host="172.26.80.1") as hqp:
-    # DSD режим
+    # DSD mode
     modes = hqp.get_modes()
     dsd_mode = next(m for m in modes if 'DSD' in m['name'])
 
@@ -142,21 +144,21 @@ with HQPlayerConnection(host="172.26.80.1") as hqp:
     shapers = hqp.get_shapers()
     asdm7 = next(s for s in shapers if 'ASDM7EC-super' in s['name'])
 
-    # Встановити
+    # Apply
     hqp.set_mode(dsd_mode['index'])
     hqp.set_rate(dsd512['index'])
     hqp.set_shaping(asdm7['index'])
 
-    print("✅ Встановлено DSD512 з ASDM7EC-super")
+    print("✅ DSD512 with ASDM7EC-super")
 ```
 
-### Приклад 3: Автоматичний вибір налаштувань для треку
+### Example 3: choosing settings for a track automatically
 ```python
 def auto_configure_for_track(hqp, track):
-    """AI DJ: Автоматично налаштувати HQPlayer для треку"""
+    """AI DJ: configure HQPlayer for a track."""
 
     if track.sample_rate >= 96000:
-        # Hi-res FLAC → PCM з upsampling до DSD256
+        # Hi-res FLAC → PCM upsampled to DSD256
         print("🎵 Hi-res track → PCM + upsample to DSD256")
 
         modes = hqp.get_modes()
@@ -173,7 +175,7 @@ def auto_configure_for_track(hqp, track):
         hqp.set_rate(dsd256['index'])
 
     else:
-        # Standard quality → PCM з standard filter
+        # Standard quality → PCM with a standard filter
         print("🎵 Standard track → PCM + poly-sinc")
 
         modes = hqp.get_modes()
@@ -188,59 +190,59 @@ def auto_configure_for_track(hqp, track):
 
 ---
 
-## Що НЕ доступно через API:
+## What the API does NOT expose
 
-❌ **Output Device Selection**
-- Вибір DAC/output device потрібно робити вручну в GUI HQPlayer
-- API не надає методів для керування output devices
+❌ **Output device selection**
+- The DAC / output device has to be chosen by hand in the HQPlayer GUI
+- The API offers no methods for output devices
 
 ---
 
-## Тестування:
+## Testing
 
 ```bash
-# Автоматичний тест всіх DSP налаштувань
+# Automated test of every DSP setting
 cd /mnt/d/ai/djai/backend
 python3 test_hqplayer_settings.py
 
-# Приклади використання
+# Usage examples
 python3 examples_hqplayer_dsp.py
 ```
 
 ---
 
-## Підсумок:
+## Summary
 
-✅ **Повне управління DSP налаштуваннями HQPlayer:**
+✅ **Full control over HQPlayer's DSP settings:**
 - ✅ 3 output modes (source, PCM, DSD)
 - ✅ 77 filters (IIR, FIR, poly-sinc, sinc, closed-form)
 - ✅ 36 noise shapers (DSD5, ASDM5, ASDM7 series)
-- ✅ 20 sample rates (до DSD2048 / 90.3168 MHz!)
+- ✅ 20 sample rates (up to DSD2048 / 90.3168 MHz)
 - ✅ Input devices
 
-❌ **Недоступно:**
-- Output device selection (потрібно налаштовувати в GUI)
+❌ **Not available:**
+- Output device selection (configure it in the GUI)
 
 ---
 
-## Інтеграція з Sautium:
+## Integration with Sautium
 
-Можливості:
-1. **Автоматичний вибір режиму** на основі якості треку
-2. **Оптимізація фільтрів** для різних жанрів
-3. **Голосове керування** DSP налаштуваннями (Phase 4)
-4. **Профілі** для різних типів музики (джаз, класика, рок)
+Possibilities:
+1. **Automatic mode selection** based on track quality
+2. **Filter optimization** per genre
+3. **Voice control** of DSP settings (Phase 4)
+4. **Profiles** per kind of music (jazz, classical, rock)
 
-Приклад голосового керування:
+Voice-control sketch:
 ```
-User: "Claude, встанови найкращу якість для цього треку"
-AI:   "Встановлюю DSD256 з ASDM7EC-super шейпером для максимальної якості"
+User: "Claude, set the best quality for this track"
+AI:   "Setting DSD256 with the ASDM7EC-super shaper for maximum quality"
 
-User: "Переключи на PCM режим"
-AI:   "Переключаю на PCM з poly-sinc-ext2 фільтром"
+User: "Switch to PCM mode"
+AI:   "Switching to PCM with the poly-sinc-ext2 filter"
 ```
 
 ---
 
-**Статус**: ✅ **Готово до використання**
-**Протестовано**: HQPlayer Desktop 5.16.3 (Engine 5.34.14)
+**Status**: ✅ **Ready to use**
+**Tested with**: HQPlayer Desktop 5.16.3 (Engine 5.34.14)

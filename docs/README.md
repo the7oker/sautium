@@ -1,90 +1,94 @@
-# Sautium - Документація
+# Sautium — Documentation
 
-## Структура документації
+## Layout
 
-### 📘 Основна документація
+### 📘 Core documents
 
-- **[HQPLAYER_INTEGRATION.md](HQPLAYER_INTEGRATION.md)** - Технічна документація інтеграції з HQPlayer
+- **[HQPLAYER_INTEGRATION.md](HQPLAYER_INTEGRATION.md)** — technical
+  documentation of the HQPlayer integration
   - API reference
-  - Приклади використання
+  - Usage examples
   - Troubleshooting
-  - ~60 KB повної інформації
+  - ~60 KB, the complete picture
 
-- **[HQPLAYER_KNOWLEDGE_BASE.md](HQPLAYER_KNOWLEDGE_BASE.md)** - База знань для AI агента
-  - Витяг з офіційного мануалу
-  - Опис всіх DSP налаштувань
-  - Рекомендації для різних сценаріїв
-  - Алгоритми автоматичного вибору налаштувань
-  - ~18 KB структурованої інформації
+- **[HQPLAYER_KNOWLEDGE_BASE.md](HQPLAYER_KNOWLEDGE_BASE.md)** — knowledge base
+  for the AI agent
+  - Distilled from the official manual
+  - Every DSP setting explained
+  - Recommendations per scenario
+  - Algorithms for choosing settings automatically
+  - ~18 KB of structured information
 
-### 📖 Оригінальний мануал
+### 📖 Original manual
 
-- **[hqplayer5desktop-manual.pdf](hqplayer5desktop-manual.pdf)** - Офіційний мануал HQPlayer 5 Desktop v5.16.0
-  - 63 сторінки повної документації
-  - Детальні описи всіх функцій
-  - Технічні специфікації
+- **[hqplayer5desktop-manual.pdf](hqplayer5desktop-manual.pdf)** — the official
+  HQPlayer 5 Desktop v5.16.0 manual
+  - 63 pages of complete documentation
+  - Detailed descriptions of every function
+  - Technical specifications
 
-### 🚀 Quick Start гайди
+### 🚀 Quick-start guides
 
-- **[../HQPLAYER_QUICKSTART.md](../HQPLAYER_QUICKSTART.md)** - Швидкий старт
-  - Базові інструкції
-  - Перші кроки
-  - Швидке тестування
+- **[../HQPLAYER_QUICKSTART.md](../HQPLAYER_QUICKSTART.md)** — quick start
+  - Basic instructions
+  - First steps
+  - Fast smoke test
 
-- **[../DSP_CONTROLS_SUMMARY.md](../DSP_CONTROLS_SUMMARY.md)** - Підсумок DSP контролю
-  - Практичні приклади
-  - Всі доступні налаштування
-  - Код snippets
+- **[../DSP_CONTROLS_SUMMARY.md](../DSP_CONTROLS_SUMMARY.md)** — DSP control
+  summary
+  - Practical examples
+  - Every available setting
+  - Code snippets
 
-## Використання для AI агента
+## Use by the AI agent
 
-### Контекст для розуміння HQPlayer
+### Context for understanding HQPlayer
 
-AI агент має доступ до:
+The agent has access to:
 
-1. **Технічних специфікацій** (HQPLAYER_INTEGRATION.md)
-   - Як підключитися
-   - Які команди доступні
-   - Як тестувати
+1. **Technical specifications** (HQPLAYER_INTEGRATION.md)
+   - How to connect
+   - Which commands exist
+   - How to test
 
-2. **Знань про аудіо обробку** (HQPLAYER_KNOWLEDGE_BASE.md)
-   - Що таке PCM/DSD
-   - Які фільтри для чого
-   - Як вибирати налаштування
+2. **Audio-processing knowledge** (HQPLAYER_KNOWLEDGE_BASE.md)
+   - What PCM/DSD are
+   - Which filter serves which purpose
+   - How to choose settings
 
-3. **Оригінальної документації** (PDF manual)
-   - Детальні технічні описи
-   - Специфікації алгоритмів
+3. **The original documentation** (PDF manual)
+   - Detailed technical descriptions
+   - Algorithm specifications
 
-### Рекомендований порядок вивчення
+### Recommended reading order
 
-1. **Спочатку**: HQPLAYER_QUICKSTART.md (швидке розуміння)
-2. **Потім**: HQPLAYER_KNOWLEDGE_BASE.md (детальні знання)
-3. **Якщо потрібно**: HQPLAYER_INTEGRATION.md (технічна імплементація)
-4. **Для референсу**: hqplayer5desktop-manual.pdf (повна документація)
+1. **First**: HQPLAYER_QUICKSTART.md (quick orientation)
+2. **Then**: HQPLAYER_KNOWLEDGE_BASE.md (detailed knowledge)
+3. **If needed**: HQPLAYER_INTEGRATION.md (technical implementation)
+4. **For reference**: hqplayer5desktop-manual.pdf (the full documentation)
 
-## Ключові концепції
+## Key concepts
 
-### Режими роботи
-- **[source]** - Без обробки
-- **PCM** - Upsampling до високих PCM частот
-- **SDM (DSD)** - Конвертація в DSD формат
+### Operating modes
+- **[source]** — no processing
+- **PCM** — upsampling to high PCM rates
+- **SDM (DSD)** — conversion to DSD
 
-### DSP Pipeline
+### DSP pipeline
 ```
 Source → Filter → Modulator/Shaper → Output
          (upsampling)  (noise shaping)
 ```
 
-### Автоматичний вибір налаштувань
+### Automatic setting selection
 
-AI агент може автоматично вибирати оптимальні налаштування на основі:
-- Якості джерела (sample rate, bit depth)
-- Типу DAC (якщо відомо)
-- Жанру музики
-- Потужності CPU
+The agent can pick optimal settings from:
+- Source quality (sample rate, bit depth)
+- DAC type (when known)
+- Musical genre
+- CPU headroom
 
-**Приклад:**
+**Example:**
 ```
 Hi-res FLAC (192 kHz/24-bit) + R2R DAC
 → PCM mode
@@ -93,35 +97,35 @@ Hi-res FLAC (192 kHz/24-bit) + R2R DAC
 → LNS15 noise shaping
 ```
 
-## Практичне застосування
+## Practical use
 
-### Сценарії використання
+### Scenarios
 
-1. **Базове відтворення**
-   - Додати трек в плейлист
-   - Відтворити
-   - Контроль гучності
+1. **Basic playback**
+   - Add a track to the playlist
+   - Play
+   - Volume control
 
-2. **Оптимізація якості**
-   - Визначити тип джерела
-   - Вибрати оптимальний режим
-   - Налаштувати фільтри
+2. **Quality optimization**
+   - Identify the source type
+   - Pick the right mode
+   - Configure filters
 
-3. **Голосове керування** (майбутнє)
-   - "Встанови найкращу якість"
-   - "Переключи на DSD режим"
-   - "Адаптуй під цей трек"
+3. **Voice control** (future)
+   - "Set the best quality"
+   - "Switch to DSD mode"
+   - "Adapt to this track"
 
-## Інтеграція з Sautium
+## Integration with Sautium
 
-### Можливості
+### Capabilities
 
-- ✅ Автоматичний вибір налаштувань на основі треку
-- ✅ Профілі для різних жанрів
-- ✅ Оптимізація під конкретний DAC
-- ✅ Голосове керування (Phase 4)
+- ✅ Automatic setting selection based on the track
+- ✅ Profiles per genre
+- ✅ Optimization for a specific DAC
+- ✅ Voice control (Phase 4)
 
-### Приклад інтеграції
+### Integration example
 
 ```python
 from hqplayer_client import HQPlayerConnection
@@ -129,44 +133,42 @@ from database import get_db_context
 from models import Track
 
 def play_track_optimized(track_id: int):
-    """
-    Відтворити трек з автоматичною оптимізацією HQPlayer
-    """
+    """Play a track with automatic HQPlayer optimization."""
     with get_db_context() as db:
         track = db.query(Track).get(track_id)
 
-        # Визначити оптимальні налаштування
+        # Work out the optimal settings
         settings = auto_select_hqplayer_settings(track)
 
         with HQPlayerConnection() as hqp:
-            # Налаштувати HQPlayer
+            # Configure HQPlayer
             hqp.set_mode(settings['mode'])
             hqp.set_filter(settings['filter'])
             hqp.set_rate(settings['rate'])
 
-            # Відтворити
+            # Play
             hqp.playlist_add(track.file_path, clear=True)
             hqp.play()
 ```
 
-## Оновлення документації
+## Keeping the documentation current
 
-При появі нових версій HQPlayer:
-1. Оновити hqplayer5desktop-manual.pdf
-2. Переглянути HQPLAYER_KNOWLEDGE_BASE.md
-3. Додати нові функції в HQPLAYER_INTEGRATION.md
-4. Оновити приклади коду
+When a new HQPlayer version appears:
+1. Update hqplayer5desktop-manual.pdf
+2. Review HQPLAYER_KNOWLEDGE_BASE.md
+3. Add new functions to HQPLAYER_INTEGRATION.md
+4. Refresh the code examples
 
-## Контрибуція
+## Contributing
 
-При додаванні нової інформації:
-- Підтримувати структуру
-- Додавати приклади
-- Перевіряти актуальність
-- Оновлювати версії
+When adding information:
+- Keep the structure
+- Add examples
+- Check that it is still accurate
+- Update version numbers
 
 ---
 
-**Статус документації:** ✅ Актуально
-**Версія HQPlayer:** 5.16.3 (Engine 5.34.14)
-**Останнє оновлення:** 2026-02-12
+**Documentation status:** ✅ Current
+**HQPlayer version:** 5.16.3 (Engine 5.34.14)
+**Last updated:** 2026-02-12

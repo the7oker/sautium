@@ -1,22 +1,22 @@
 # HQPlayer Integration - Quick Start
 
-## ✅ Готово до використання!
+## ✅ Ready to use
 
-Базова інтеграція з HQPlayer Desktop 5 успішно реалізована і протестована.
+The basic HQPlayer Desktop 5 integration is implemented and tested.
 
-## Швидке тестування
+## Quick test
 
-### 1. Переконайтеся що HQPlayer запущений на Windows
-- Запустіть HQPlayer Desktop 5
-- Переконайтеся що він працює (порт 4321 відкритий)
+### 1. Make sure HQPlayer is running on Windows
+- Start HQPlayer Desktop 5
+- Confirm it is up (port 4321 open)
 
-### 2. Запустіть автоматичний тест з WSL
+### 2. Run the automated test from WSL
 ```bash
 cd /mnt/d/ai/djai/backend
 python3 test_hqplayer_auto.py
 ```
 
-Очікуваний результат:
+Expected output:
 ```
 ✅ All tests completed successfully!
 
@@ -26,94 +26,94 @@ python3 test_hqplayer_auto.py
    • Control API working correctly
 ```
 
-### 3. Використання в коді
+### 3. Using it from code
 
 ```python
 from hqplayer_client import HQPlayerConnection, file_path_to_uri
 from config import settings
 
-# Підключення до HQPlayer
+# Connect to HQPlayer
 with HQPlayerConnection(host=settings.hqplayer_host) as hqp:
-    # Отримати статус
+    # Read the status
     status = hqp.get_status()
     print(f"State: {status.state.name}")
 
-    # Додати трек
+    # Add a track
     uri = file_path_to_uri("E:\\Music\\Artist\\Album\\Track.flac")
     hqp.playlist_add(uri, clear=True)
 
-    # Відтворити
+    # Play
     hqp.play()
 
-    # Керування гучністю
+    # Volume control
     hqp.volume_up()
 ```
 
-## Конфігурація
+## Configuration
 
-### .env файл
+### .env file
 ```env
-HQPLAYER_HOST=172.26.80.1  # Windows host IP від WSL
+HQPLAYER_HOST=172.26.80.1  # Windows host IP as seen from WSL
 HQPLAYER_PORT=4321
 HQPLAYER_ENABLED=true
 ```
 
-### Для Docker
-У `.env` встановіть:
+### For Docker
+Set in `.env`:
 ```env
 HQPLAYER_HOST=host.docker.internal
 ```
 
-## Основні можливості
+## Capabilities
 
-✅ **Управління відтворенням**
+✅ **Playback control**
 - play, pause, stop
 - next, previous
 - seek, forward, backward
 
-✅ **Плейлист**
+✅ **Playlist**
 - playlist_add
 - playlist_clear
 - playlist_remove
 
-✅ **Статус**
-- get_status (трек, позиція, метадані)
-- get_info (версія HQPlayer)
+✅ **Status**
+- get_status (track, position, metadata)
+- get_info (HQPlayer version)
 
-✅ **Гучність**
+✅ **Volume**
 - set_volume
 - volume_up, volume_down
 - volume_mute
 
-## Файли
+## Files
 
 ```
 backend/
-  ├── hqplayer_client.py          # Основний клієнт
-  ├── test_hqplayer_auto.py       # Автоматичний тест
-  └── test_hqplayer.py            # Інтерактивний тест
+  ├── hqplayer_client.py          # The client
+  ├── test_hqplayer_auto.py       # Automated test
+  └── test_hqplayer.py            # Interactive test
 
 docs/
-  └── HQPLAYER_INTEGRATION.md     # Повна документація
+  └── HQPLAYER_INTEGRATION.md     # Full documentation
 
 sdk/
   └── hqp-control-5292-src/       # HQPlayer SDK (C++)
 ```
 
-## Перевірка підключення
+## Checking connectivity
 
-### З WSL
+### From WSL
 ```bash
-# Знайти IP хоста Windows
+# Find the Windows host IP
 ip route show | grep default
 # Output: default via 172.26.80.1 ...
 
-# Перевірити доступність порту
+# Check the port is reachable
 nc -zv 172.26.80.1 4321
 # Output: Connection to 172.26.80.1 4321 port [tcp/*] succeeded!
 ```
 
-### З Docker (після запуску контейнера)
+### From Docker (once the container is running)
 ```bash
 docker exec sautium-backend nc -zv host.docker.internal 4321
 ```
@@ -121,28 +121,28 @@ docker exec sautium-backend nc -zv host.docker.internal 4321
 ## Troubleshooting
 
 ### Connection refused
-1. Переконайтеся що HQPlayer запущений
-2. Перевірте Windows Firewall (порт 4321)
-3. Перевірте IP хоста: `ip route show | grep default`
+1. Make sure HQPlayer is running
+2. Check Windows Firewall (port 4321)
+3. Check the host IP: `ip route show | grep default`
 
-### З Docker не підключається
-1. Додайте `extra_hosts` в docker-compose.yml (вже додано)
-2. Використовуйте `host.docker.internal` в HQPLAYER_HOST
-3. Або вкажіть конкретний IP: `172.26.80.1`
+### No connection from Docker
+1. Add `extra_hosts` to docker-compose.yml (already there)
+2. Use `host.docker.internal` for HQPLAYER_HOST
+3. Or pin the address: `172.26.80.1`
 
-## Наступні кроки
+## Next steps
 
-1. ✅ Базова інтеграція - **ГОТОВО**
-2. ⏳ Інтеграція з AI DJ (рекомендації → HQPlayer)
-3. ⏳ Голосове керування (Phase 4.3)
-4. ⏳ Додаткові функції (metering, DSP settings)
+1. ✅ Basic integration — **DONE**
+2. ⏳ AI DJ integration (recommendations → HQPlayer)
+3. ⏳ Voice control (Phase 4.3)
+4. ⏳ Extra features (metering, DSP settings)
 
-## Повна документація
+## Full documentation
 
-Детальна документація: [docs/HQPLAYER_INTEGRATION.md](docs/HQPLAYER_INTEGRATION.md)
+Detailed docs: [docs/HQPLAYER_INTEGRATION.md](docs/HQPLAYER_INTEGRATION.md)
 
 ---
 
-**Статус**: ✅ Готово до використання
-**Тестовано**: HQPlayer Desktop 5.16.3 (Engine 5.34.14)
-**Платформа**: Windows (доступ з WSL2 та Docker)
+**Status**: ✅ Ready to use
+**Tested with**: HQPlayer Desktop 5.16.3 (Engine 5.34.14)
+**Platform**: Windows (reachable from WSL2 and Docker)
