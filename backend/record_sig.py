@@ -198,7 +198,7 @@ def canonical_features_blob(row: dict) -> bytes:
 # relay ever introduced.
 
 ENRICHMENT_KINDS = ("artist_bio", "artist_tag", "similar_artist",
-                    "track_stat", "genre_description", "artist_mbid",
+                    "track_stat", "genre_description",
                     "album", "album_track", "track_mbid")
 
 
@@ -260,15 +260,12 @@ ENRICHMENT_ORDER = {
     "similar_artist":    ["similar_artist_uuid", "match_score"],
     "track_stat":        ["listeners", "playcount"],
     "genre_description": ["summary", "content", "url"],
-    # The canon mark, made portable (carry): the author attests "this
-    # name-derived artist is this MB entity". confidence is signed — it is
-    # the author's judgment tier, and an unsigned tier could be inflated in
-    # transit. `source` is unused ("" on both ends); fetched_at = created_at.
-    "artist_mbid":       ["mbid", "confidence"],
-    # Carry v3 — the album layer of the snapshot, same portability logic:
-    # a carrier owns none of the music and can re-derive none of this.
-    # entity: album → album_uuid; album_track / track_mbid → track_uuid.
-    # `source` is "" and fetched_at = created_at for all three.
+    # Carry — the sealed canon layer around pushed analysis. entity:
+    # album → album_uuid; album_track / track_mbid → track_uuid. `source`
+    # is "" and fetched_at = created_at for all three. album/album_track
+    # seals feed the pusher's full-snapshot gate; track_mbid also travels
+    # (v4). confidence is inside the signed bytes — an unsigned tier could
+    # be inflated in transit.
     # cover_url travels but is NOT sealed: a CAA front-image URL is a
     # deterministic derivative of rg_mbid (re-derivable by anyone), and an
     # owned album's cover lives in its files anyway — sealing it would

@@ -46,8 +46,10 @@ SEGMENTS_MAX_UUIDS = 500
 # the pusher (it holds no such uuid). The v3 structural transport
 # (albums / tracks / album_tracks / artist_mbids categories, the
 # identity-recompute functions, their importers) is DELETED, not dormant
-# — git history has it. The album/album_track/artist_mbid SEALS stay:
-# they are signed data and the pusher's full-snapshot gate reads them.
+# — git history has it. The album/album_track seals stay (the pusher's
+# full-snapshot gate reads them); the artist_mbids seal layer is gone
+# with its transport — the canon-primary gate reads confidence, not a
+# signature.
 CARRY_CATEGORIES = ("segments", "audio_features", "track_mbids")
 # Recordings per offer request — an offer is 16 bytes per recording
 # against ~46 KB to push one track blind.

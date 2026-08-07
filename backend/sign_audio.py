@@ -123,17 +123,6 @@ _ENRICHMENT_SOURCES = {
                gd.summary, gd.content, gd.url
         FROM genre_descriptions gd
         WHERE gd.signature IS NULL AND NOT gd.imported""", "genre_descriptions"),
-    # The canon mark, made portable (carry). confidence <> 'phantom' on top of
-    # the usual gates: a phantom row is a name+genre guess with no owned
-    # tracks behind it, and signing it would attest a guess as canon.
-    # `source` is not a column here — the kind signs with source = "".
-    "artist_mbid": ("""
-        SELECT am.mbid AS id, am.artist_id::text AS entity, '' AS source,
-               am.created_at AS fetched_at,
-               am.mbid::text AS mbid, am.confidence::text AS confidence
-        FROM artist_mbids am
-        WHERE am.signature IS NULL AND NOT am.imported
-          AND am.confidence <> 'phantom'""", "artist_mbids"),
     # Carry v3 — the album layer. Only what stands on OWNED analysis-source
     # material signs: the ~3M MB-minted phantom tracklist rows are derived
     # from the dump, not observed, and attesting them would sign a copy of
@@ -172,9 +161,8 @@ _ENRICHMENT_SOURCES = {
 }
 
 # UPDATE-phase PK column and cast per table; everything not listed uses the
-# SERIAL `id`. artist_mbids / track_mbids are keyed by the MBID itself.
-_TABLE_PK = {"artist_mbids": ("mbid", "uuid"),
-             "track_mbids": ("recording_mbid", "uuid"),
+# SERIAL `id`. track_mbids is keyed by the MBID itself.
+_TABLE_PK = {"track_mbids": ("recording_mbid", "uuid"),
              "albums": ("id", "uuid"),
              "album_tracks": ("id", "bigint")}
 
