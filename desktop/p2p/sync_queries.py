@@ -73,17 +73,28 @@ SEGMENTS_MAX_UUIDS = 500
 
 # Push-seeding ("carry"): audio analysis, because it is the one layer with
 # no external source — GPU work dies with an unreachable node unless someone
-# carries it. The artist layer was carried at first and dropped 2026-08-03:
-# every bio/tag/similar is a Last.fm fetch by name, reproducible on any node
-# for two API calls, and importing similars minted stub artists straight
-# into the carrier's phantom-canon feed. artist_mbids rides along because
-# the carry gate ("canon only") rests on it and a carrier can never
-# re-derive it (no owned music); the rows are author-sealed so the mark
-# stays attributable in transit.
+# carries it. The artist layer was carried at first and dropped 2026-08-03
+# (reproducible from Last.fm by name, and importing similars minted stub
+# artists straight into the carrier's phantom-canon feed).
+#
+# v4 (2026-08-07, Валерій's design): the offer round speaks RECORDING
+# MBIDs, the transfer speaks track UUIDs, and the carrier answers only
+# with uuids that ALREADY EXIST in its base — its phantom catalogue (~20×
+# owned, grown organically from its own discovery graph) IS the taste
+# profile, so nothing lands that the carrier would never care about. The
+# double key buys both guarantees at once: an MBID exists only for
+# canonized material, and a uuid match means the author's seal (which
+# binds the track uuid) survives re-serve intact. The two mismatch
+# classes die silently on the right side: same-name-different-recording
+# is cut by the MBID round; same-recording-different-name never leaves
+# the pusher (it holds no such uuid). Structural categories (albums /
+# tracks / album_tracks / artist_mbids) are DORMANT under v4 — the
+# carrier's phantom skeleton already has structure, covers and canon
+# marks; the importers stay as the full-mode insurance.
 CARRY_CATEGORIES = ("albums", "tracks", "album_tracks", "segments",
                     "audio_features", "track_mbids", "artist_mbids")
-# Tracks per offer request — an offer is 16 bytes per track against ~46 KB
-# to push one blind.
+# Recordings per offer request — an offer is 16 bytes per recording
+# against ~46 KB to push one track blind.
 CARRY_MAX_TRACKS = 500
 # Foreign tracks a node holds by default (~92 MB at the measured size).
 # Mirrors "sync.carry_limit" in backend/routers/settings.py _DEFAULTS — used
@@ -756,10 +767,8 @@ def get_pushable_tracks(conn, limit: int) -> list[dict]:
         tracks pass; the rest are compilations and residue whose canon has
         not matured — they ride a later push).
 
-    On top of the SQL, the caller MUST apply verify_track_identity(): the
-    identity proof carries only what uuid5 covers, and a track whose UUID
-    matches none of its primary names (multi-primary collaborations keyed
-    on a combined display name) does not travel.
+    v4: each row also carries `recordings` — every sealed MBID binding of
+    the track — because the offer round speaks recordings, not uuids.
 
     Rarest first (Last.fm listeners of the primary artist, unknown counts
     rarest) for the same reason the DHT tail is: anything popular reaches
@@ -779,7 +788,11 @@ def get_pushable_tracks(conn, limit: int) -> list[dict]:
                                  AND es.batch_root IS NOT NULL)
            )
            SELECT t.id::text AS track_uuid, t.title,
-                  array_agg(a.name ORDER BY a.name) AS primary_names,
+                  array_agg(DISTINCT a.name) AS primary_names,
+                  (SELECT array_agg(tm.recording_mbid::text)
+                     FROM track_mbids tm
+                    WHERE tm.track_id = t.id
+                      AND tm.signature IS NOT NULL) AS recordings,
                   (SELECT at2.album_id::text FROM album_tracks at2
                      JOIN albums al ON al.id = at2.album_id
                     WHERE at2.track_id = t.id
@@ -847,30 +860,44 @@ def count_carried_tracks(conn) -> int:
     return int(rows[0]["n"]) if rows else 0
 
 
-def wanted_tracks(conn, track_uuids: list[str], budget: int) -> dict:
-    """Answer an offer: per audio category, which of these tracks we hold
-    nothing for — capped by whatever is left of the carry budget.
+def wanted_tracks(conn, recording_mbids: list[str], budget: int) -> dict:
+    """Answer an offer (v4): the offer speaks recording MBIDs, the answer
+    speaks OUR track uuids — and only uuids that already exist here.
 
-    "Nothing for" rather than "nothing fresher": a freshness upgrade is what
-    the ordinary pull is for. `tracks` doubles as the mint list — the
-    pusher sends the track entities first because the analysis importers
-    require the rows to exist (FK)."""
+    The existence rule is the whole taste filter: this node's phantom
+    catalogue grew from its own discovery graph, so a recording it has no
+    row for is a recording it never cared about, and nothing gets minted
+    to hold it. The uuid answer is the integrity gate: the pusher can only
+    serve uuids it also holds, which is exactly the set where the author's
+    track-uuid-bound seals survive re-serve. Same-name-different-recording
+    dies in the MBID join; same-recording-different-name dies because the
+    pusher holds no such uuid. Owned tracks with analysis gaps match too —
+    that is ordinary gap-fill through the same door.
+
+    Structural categories are never asked for (the skeleton is already
+    here, MB-canonical); track_mbids ARE — a phantom's recording binding
+    lives in album_tracks, not track_mbids, and the sealed marks are
+    cheap."""
     empty = {c: [] for c in CARRY_CATEGORIES}
-    if not track_uuids or budget <= 0:
+    if not recording_mbids or budget <= 0:
         return empty
     room = budget - count_carried_tracks(conn)
     if room <= 0:
         return empty
 
-    uuids = track_uuids[:CARRY_MAX_TRACKS]
-    missing_tracks = db_query(
+    mbids = recording_mbids[:CARRY_MAX_TRACKS]
+    matched = db_query(
         conn,
-        """SELECT u.id::text AS track_uuid
-             FROM unnest(%s::uuid[]) AS u(id)
-            WHERE NOT EXISTS (SELECT 1 FROM tracks t WHERE t.id = u.id)
+        """SELECT DISTINCT at2.track_id::text AS track_uuid
+             FROM unnest(%s::uuid[]) AS o(mbid)
+             JOIN album_tracks at2 ON at2.recording_mbid = o.mbid
             LIMIT %s""",
-        [uuids, room],
+        [mbids, room],
     )
+    uuids = [r["track_uuid"] for r in matched]
+    if not uuids:
+        return empty
+
     no_segments = db_query(
         conn,
         """SELECT u.id::text AS track_uuid
@@ -878,46 +905,29 @@ def wanted_tracks(conn, track_uuids: list[str], budget: int) -> dict:
             WHERE NOT EXISTS (
                 SELECT 1 FROM embeddings e
                   JOIN embedding_segments es ON es.embedding_id = e.id
-                 WHERE e.track_id = u.id)
-            LIMIT %s""",
-        [uuids, room],
+                 WHERE e.track_id = u.id)""",
+        [uuids],
     )
     no_features = db_query(
         conn,
         """SELECT u.id::text AS track_uuid
              FROM unnest(%s::uuid[]) AS u(id)
             WHERE NOT EXISTS (SELECT 1 FROM audio_features af
-                               WHERE af.track_id = u.id)
-            LIMIT %s""",
-        [uuids, room],
-    )
-    no_tracklist = db_query(
-        conn,
-        """SELECT u.id::text AS track_uuid
-             FROM unnest(%s::uuid[]) AS u(id)
-            WHERE NOT EXISTS (SELECT 1 FROM album_tracks at2
-                               WHERE at2.track_id = u.id)
-            LIMIT %s""",
-        [uuids, room],
+                               WHERE af.track_id = u.id)""",
+        [uuids],
     )
     no_recording = db_query(
         conn,
         """SELECT u.id::text AS track_uuid
              FROM unnest(%s::uuid[]) AS u(id)
             WHERE NOT EXISTS (SELECT 1 FROM track_mbids tm
-                               WHERE tm.track_id = u.id)
-            LIMIT %s""",
-        [uuids, room],
+                               WHERE tm.track_id = u.id)""",
+        [uuids],
     )
     out = dict(empty)
-    out["tracks"] = [r["track_uuid"] for r in missing_tracks]
     out["segments"] = [r["track_uuid"] for r in no_segments]
     out["audio_features"] = [r["track_uuid"] for r in no_features]
-    out["album_tracks"] = [r["track_uuid"] for r in no_tracklist]
     out["track_mbids"] = [r["track_uuid"] for r in no_recording]
-    # albums / artist_mbids stay empty here: the carrier cannot know the
-    # albums or primary artists before the tracks arrive, so the pusher
-    # sends those for whatever it pushed and the importers dedup.
     return out
 
 

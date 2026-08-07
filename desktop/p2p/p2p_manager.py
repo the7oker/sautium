@@ -1014,23 +1014,25 @@ class P2PManager:
         """Offer our first-hand canon audio analysis to a reachable peer and
         push whatever it asks for. Blocking — runs in the executor.
 
-        Order inside is load-bearing: tracks must land before segments and
-        features (the analysis importers require the rows to exist — an FK
-        miss kills a whole batch), and artist_mbids goes last because only
-        after choosing what to push do we know which primaries it names."""
+        v4: the offer speaks recording MBIDs, the answer speaks the
+        CARRIER's track uuids — existing rows only, so its phantom
+        catalogue acts as the taste filter and nothing is minted remotely.
+        We serve only the wanted uuids we also hold (the pull handlers do
+        that naturally), which is exactly the set where the seals'
+        track-uuid binding survives re-serve."""
         conn = psycopg2.connect(self.db_dsn)
         try:
             conn.autocommit = True
             candidates = sync_queries.get_pushable_tracks(
                 conn, sync_queries.CARRY_MAX_TRACKS)
-            proven = {
-                c["track_uuid"]: c for c in candidates
-                if sync_queries.verify_track_identity(
-                    c["track_uuid"], c["title"], c["primary_names"])
-            }
-            if not proven:
+            recordings = sorted({
+                mbid
+                for c in candidates
+                for mbid in (c.get("recordings") or [])
+            })
+            if not recordings:
                 return 0
-            answer = peer_api.carry_offer(list(proven)) or {}
+            answer = peer_api.carry_offer(recordings) or {}
             wanted = answer.get("wanted") or {}
             if not any(wanted.values()):
                 return 0
@@ -1043,34 +1045,10 @@ class P2PManager:
                 res = peer_api.carry_push(category.replace("_", "-"), payload)
                 return (res or {}).get("imported") or 0
 
-            # The payload we serve on pull IS the payload we push — same
-            # shape, same seals, same batches map. FK order: albums before
-            # tracks' tracklist rows, tracks before analysis. The album set
-            # covers every track a tracklist row will be pushed for — a
-            # carrier holding v2-era tracks asks for their tracklist rows
-            # without re-asking for the tracks, and those albums must land
-            # too or the rows would fail the importer's FK gate.
-            albums = set()
-            for key in ("tracks", "album_tracks"):
-                for u in wanted.get(key) or []:
-                    if u in proven and proven[u].get("album_uuid"):
-                        albums.add(proven[u]["album_uuid"])
-            took = push("albums", sync_queries.pull_albums(conn, list(albums)))
-            pushed += took
-            if took:
-                _progress(f"  carried {took} album(s) to peer")
-
-            mint = [u for u in wanted.get("tracks") or [] if u in proven]
-            took = push("tracks", sync_queries.pull_tracks(conn, mint))
-            pushed += took
-            if took:
-                _progress(f"  carried {took} track entit(ies) to peer")
-
-            for category, batch in (("album_tracks", 500),
-                                    ("segments", SEGMENT_PULL_BATCH),
+            for category, batch in (("segments", SEGMENT_PULL_BATCH),
                                     ("audio_features", 500),
                                     ("track_mbids", 500)):
-                uuids = [u for u in wanted.get(category) or [] if u in proven]
+                uuids = wanted.get(category) or []
                 handler = sync_queries.PULL_HANDLERS[category]
                 for i in range(0, len(uuids), batch):
                     took = push(category, handler(conn, uuids[i:i + batch]))
@@ -1078,21 +1056,6 @@ class P2PManager:
                     if took:
                         _progress(
                             f"  carried {took} {category} record(s) to peer")
-
-            # Canon marks for the primaries of everything offered: the
-            # carrier could not have asked (it learns the primaries only as
-            # tracks arrive), so this is unconditional and its importer
-            # dedups on mbid.
-            primaries = {
-                str(sync_queries.artist_uuid(name))
-                for c in proven.values()
-                for name in (c["primary_names"] or []) if name
-            }
-            took = push("artist_mbids",
-                        sync_queries.pull_artist_mbids(conn, list(primaries)))
-            pushed += took
-            if took:
-                _progress(f"  carried {took} canon mark(s) to peer")
 
             if pushed:
                 logger.info("Push-seeded %d record(s) to a carrier", pushed)

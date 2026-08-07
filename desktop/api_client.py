@@ -233,13 +233,13 @@ class BackendAPIClient:
             timeout=300,
         )
 
-    def carry_offer(self, track_uuids: list[str]) -> Optional[dict]:
-        """Offer tracks whose analysis we could contribute; the peer answers
-        with the subset it wants (push-seeding — see sync_queries carry
-        section)."""
+    def carry_offer(self, recording_mbids: list[str]) -> Optional[dict]:
+        """Offer recordings whose analysis we could contribute; the peer
+        answers with its own EXISTING track uuids per category (carry v4 —
+        see sync_queries carry section)."""
         return self._post_json(
             "/api/sync/offer",
-            body={"tracks": track_uuids},
+            body={"recordings": recording_mbids},
             timeout=60,
         )
 

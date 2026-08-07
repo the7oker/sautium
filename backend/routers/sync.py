@@ -142,21 +142,23 @@ def _carry_budget() -> int:
 
 
 class CarryOffer(BaseModel):
-    tracks: list[str] = Field(default_factory=list, max_length=10000)
+    recordings: list[str] = Field(default_factory=list, max_length=10000)
 
 
 @router.post("/offer")
 async def carry_offer(req: CarryOffer) -> dict:
-    """"Here is what I could give you" — we answer with the subset we want.
+    """"Here are the recordings I could give you" — we answer with OUR
+    track uuids we actually want (carry v4).
 
-    The round trip exists so a pusher never ships what we already hold:
-    16 bytes per track to ask, ~46 KB per track to send blind."""
+    The round trip exists so a pusher never ships what we already hold or
+    never cared about: 16 bytes per recording to ask, ~46 KB per track to
+    send blind."""
     _require_sharing()
     if carry_queries is None:
         return {"wanted": {}}
     with get_conn() as conn:
         wanted = carry_queries.wanted_tracks(
-            conn, req.tracks, _carry_budget())
+            conn, req.recordings, _carry_budget())
     return {"wanted": wanted}
 
 

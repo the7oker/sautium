@@ -2480,6 +2480,10 @@ ALTER TABLE track_mbids
 -- gate) must not walk the ~3M MB-minted phantom tracklist rows.
 CREATE INDEX IF NOT EXISTS idx_albums_unsigned
     ON albums (id) WHERE signature IS NULL;
+-- Carry v4: the offer round speaks recording MBIDs — the carrier matches
+-- them against its phantom tracklist layer (3.5M rows) per offer.
+CREATE INDEX IF NOT EXISTS idx_album_tracks_recording
+    ON album_tracks (recording_mbid) WHERE recording_mbid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_album_tracks_unsigned
     ON album_tracks (track_id) WHERE signature IS NULL;
 CREATE INDEX IF NOT EXISTS idx_track_mbids_unsigned

@@ -406,11 +406,12 @@ class SyncServer:
             return 0
 
     async def handle_carry_offer(self, request: web.Request) -> web.Response:
-        """POST /api/sync/offer — "here is what I could give you"; we answer
-        with the subset we actually want.
+        """POST /api/sync/offer — "here are the recordings I could give
+        you"; we answer with OUR track uuids we actually want (carry v4).
 
-        The round trip exists so a pusher never ships what we already hold:
-        16 bytes per track to ask, ~46 KB per track to send blind."""
+        The round trip exists so a pusher never ships what we already hold
+        or never cared about: 16 bytes per recording to ask, ~46 KB per
+        track to send blind."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
             return self._json_response(
@@ -420,17 +421,17 @@ class SyncServer:
                 request, {"error": "sharing disabled"}, status=403)
         try:
             body = await request.json()
-            tracks = body.get("tracks", [])
+            recordings = body.get("recordings", [])
         except (json.JSONDecodeError, Exception):
             return self._json_response(
                 request, {"error": "invalid JSON"}, status=400)
-        if not isinstance(tracks, list):
+        if not isinstance(recordings, list):
             return self._json_response(
-                request, {"error": "tracks must be a list"}, status=400)
+                request, {"error": "recordings must be a list"}, status=400)
 
         budget = self._carry_budget()
         wanted = await self._run_query(
-            sync_queries.wanted_tracks, tracks, budget)
+            sync_queries.wanted_tracks, recordings, budget)
         return self._json_response(request, {"wanted": wanted})
 
     async def handle_carry_push(self, request: web.Request) -> web.Response:
