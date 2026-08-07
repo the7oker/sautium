@@ -83,8 +83,9 @@ Sautium is two halves that share one foundation.
 
 ## Tone & Vibe
 
-Three anchor words: **затишок · комфорт · сучасні технології**
-(coziness · comfort · modern technology).
+Three anchor words: **coziness · comfort · modern technology**
+(originally articulated in Ukrainian as *затишок · комфорт · сучасні
+технології*).
 
 Expanded:
 
