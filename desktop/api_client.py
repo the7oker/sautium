@@ -193,6 +193,11 @@ class BackendAPIClient:
         """Cancel running enrichment."""
         return self._post_json("/enrich/cancel", timeout=5)
 
+    def mb_dump_start(self) -> Optional[dict]:
+        """Start the MusicBrainz catalogue download+load in the background
+        (the wizard's opt-in, fired once after first start)."""
+        return self._post_json("/api/settings/musicbrainz/update", timeout=30)
+
     def refresh_gear_registries(self) -> Optional[dict]:
         """Refresh measurement registries (spinorama fetched by the
         backend itself; AutoEq reimported from its mount). Import

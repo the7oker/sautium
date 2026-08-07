@@ -75,11 +75,21 @@ async def rate_limit(request: Request, call_next):
 async def health() -> dict:
     """Peer-facing identity. Same contract as the launcher's sync server —
     node_id + mb_dump + capabilities are what a peer picks sources by."""
+    mb_slices = 0
+    try:
+        from db_pool import get_conn
+        from routers.sync import mb_slice_queries
+        if mb_slice_queries is not None:
+            with get_conn() as conn:
+                mb_slices = mb_slice_queries.count_slice_blobs(conn)
+    except Exception:
+        pass   # table absent until the first slice lands — 0 is the truth
     return {
         "status": "ok",
         "type": "sautium-peer",
         "node_id": node_pubkey_hex(),
         "mb_dump": mb_dump_version(),
+        "mb_slices": mb_slices,
         "capabilities": SYNC_CAPABILITIES,
     }
 

@@ -262,18 +262,6 @@ def node_pubkey_hex() -> Optional[str]:
         return None
 
 
-def _attach_slice_receipt(result: dict) -> None:
-    """Authorship receipt: one Ed25519 signature over the canonical payload
-    hash. Mirrors desktop/p2p/sync_server._attach_slice_receipt."""
-    try:
-        key = node_signing_key()
-        result["author_pubkey"] = node_pubkey_hex()
-        result["receipt"] = key.sign(
-            mb_slice_queries.receipt_message(result)).hex()
-    except Exception as e:
-        logger.warning(f"MB slice receipt signing failed: {e}")
-        result.pop("author_pubkey", None)
-        result.pop("receipt", None)
 
 
 class MBSliceRequest(BaseModel):
@@ -282,17 +270,24 @@ class MBSliceRequest(BaseModel):
 
 @mb_router.post("/slice")
 def mb_slice(req: MBSliceRequest) -> dict:
-    """Serve raw mb_* subtrees for a batch of artist names — the P2P
-    canonicalization source for dump-less peers. Mirrors
-    desktop/p2p/sync_server.handle_mb_slice."""
+    """Per-name signed blobs (v2) — mirrors
+    desktop/p2p/sync_server.handle_mb_slice. Dump holders compute+sign+
+    cache misses; a replica answers what it holds, misses land in
+    `missing`. Blobs carry the ORIGINAL author's signature either way."""
     _require_sharing()
-    if not mb_dump_version():
-        raise HTTPException(status_code=404, detail="no MB dump on this node")
+    sign_fn, author = None, ""
+    if mb_dump_version():
+        try:
+            key = node_signing_key()
+            author = node_pubkey_hex() or ""
+            sign_fn = key.sign
+        except Exception as e:
+            logger.warning(f"MB slice signing unavailable: {e}")
     try:
         with get_conn() as conn:
-            result = mb_slice_queries.get_slice(conn, req.names)
-        _attach_slice_receipt(result)
-        return result
+            mb_slice_queries.ensure_blob_table(conn)
+            return mb_slice_queries.serve_slices(
+                conn, req.names, sign_fn, author)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except mb_slice_queries.DumpBusy:

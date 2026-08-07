@@ -1386,6 +1386,26 @@ def put_mb_prefs(req: MbPrefs) -> Dict[str, Any]:
     return _mb_section()
 
 
+@router.post("/musicbrainz/delete")
+def mb_delete() -> Dict[str, Any]:
+    """Remove the local MusicBrainz dump. The wizard pre-ticks the download
+    when the disk allows it; this is the other half of that bargain."""
+    with _mb_lock:
+        if _mb_state["running"]:
+            raise HTTPException(status_code=409,
+                                detail="MusicBrainz update running")
+    try:
+        import mb_dump_load
+        result = mb_dump_load.delete_dump()
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        logger.error(f"MB dump delete failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    notify_library_subscribers()
+    return {"success": True, **result}
+
+
 @router.post("/musicbrainz/update")
 def mb_update(force: bool = False) -> Dict[str, Any]:
     """Download (if newer) + stream-load the MusicBrainz dump in the background."""

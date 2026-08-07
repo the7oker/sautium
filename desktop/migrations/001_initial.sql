@@ -2442,6 +2442,20 @@ ALTER TABLE track_mbids
 -- gate) must not walk the ~3M MB-minted phantom tracklist rows.
 CREATE INDEX IF NOT EXISTS idx_albums_unsigned
     ON albums (id) WHERE signature IS NULL;
+-- MB slice replication (phase-E replacement): verified per-name blobs kept
+-- verbatim with the ORIGINAL dump node's signature. One table, three roles:
+-- a dump node's hot cache (a prolific artist is computed and signed once
+-- per dump version), a replica's re-serve inventory, and the wire payload
+-- itself (the gzip bytes travel as-is, so byte-exactness is structural).
+CREATE TABLE IF NOT EXISTS mb_slice_blobs (
+    name_key      TEXT PRIMARY KEY,
+    dump_version  TEXT NOT NULL,
+    author_pubkey CHAR(64) NOT NULL,
+    sig           CHAR(128) NOT NULL,
+    blob_gz       BYTEA NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Carry v4: the offer round speaks recording MBIDs — the carrier matches
 -- them against its phantom tracklist layer (3.5M rows) per offer.
 CREATE INDEX IF NOT EXISTS idx_album_tracks_recording

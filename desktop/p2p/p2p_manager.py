@@ -3060,14 +3060,19 @@ class P2PManager:
             return set(), set()
 
     async def _find_dump_peers(self) -> list[tuple[BackendAPIClient, str]]:
-        """Reachable peers advertising the MB dump: manual peers and LAN
-        first (cheap, likely friends), then a DHT capability lookup.
-        Locally-banned nodes are skipped before connecting (by address) and
-        after health (by pubkey)."""
+        """Reachable slice sources, REPLICAS FIRST: manual peers and LAN
+        (cheap, likely friends), then a DHT capability lookup for full
+        dump holders. A dump-less peer with mb_slices > 0 re-serves the
+        blobs it verified — asking those first is what spreads the
+        entry-load off the few dump nodes; misses fall through to a dump
+        holder because serve order tries every source until a batch closes.
+        Locally-banned nodes are skipped before connecting (by address)
+        and after health (by pubkey)."""
         loop = asyncio.get_event_loop()
         banned_keys, banned_addrs = await loop.run_in_executor(
             None, self._load_p2p_bans)
-        found: list[tuple[BackendAPIClient, str]] = []
+        replicas: list[tuple[BackendAPIClient, str]] = []
+        dumps: list[tuple[BackendAPIClient, str]] = []
         seen_addrs: set[str] = set()
 
         candidates: list[str] = list(
@@ -3092,15 +3097,18 @@ class P2PManager:
             if not api:
                 continue
             health = await loop.run_in_executor(None, api.get_health)
-            if not health or not health.get("mb_dump"):
+            if not health:
                 continue
             node_id = health.get("node_id", "")
             if node_id and node_id in banned_keys:
                 logger.info(f"MB slice: skipping banned node "
                             f"{node_id[:16]}… at {addr}")
                 continue
-            found.append((api, node_id))
-        return found
+            if health.get("mb_dump"):
+                dumps.append((api, node_id))
+            elif health.get("mb_slices"):
+                replicas.append((api, node_id))
+        return replicas + dumps
 
     async def _request_mb_slices(self) -> dict:
         """Fetch MB slices for every canon-pending artist name and hand the
@@ -3127,51 +3135,56 @@ class P2PManager:
 
             peers = await self._find_dump_peers()
             if not peers:
-                logger.info("MB slice: no dump-holding peers reachable")
+                logger.info("MB slice: no slice sources reachable")
                 return {}
 
             batch_size = max(1, min(int(cfg.get("batch_size", 20)),
                                     mb_slice_queries.MAX_NAMES_PER_REQUEST))
-            batches = [names[i:i + batch_size]
-                       for i in range(0, len(names), batch_size)]
             logger.info(f"MB slice: {len(names)} pending names, "
-                        f"{len(batches)} batches, {len(peers)} dump peers")
+                        f"{len(peers)} source(s) (replicas first)")
 
             backend_api = self._local_backend_api()
-            peer_iter = iter(peers)
-            api, node = next(peer_iter)
-            client = MBSliceClient(api, db_dsn=self.db_dsn, source_node=node,
-                                   backend_api=backend_api)
             total = {"names": 0, "matched": 0, "rows_inserted": 0}
             imported_any = False
-            i = 0
-            while i < len(batches):
-                stats = await loop.run_in_executor(None, client.run, batches[i])
-                if "error" in stats:
-                    # Provenance is written per successful batch, so retrying
-                    # this batch against the next peer is idempotent.
-                    nxt = next(peer_iter, None)
-                    if nxt is None:
-                        logger.warning("MB slice: all dump peers failed — "
-                                       "remaining names retry next cycle")
-                        break
+            last_client = None
+            remaining = list(names)
+            # Source by source: each takes what it can, the leftovers
+            # (a replica's `missing` plus outright failures) carry to the
+            # next candidate. Provenance is written per verified name, so
+            # re-asking is idempotent.
+            for api, node in peers:
+                if not remaining:
+                    break
+                client = MBSliceClient(api, db_dsn=self.db_dsn,
+                                       source_node=node,
+                                       backend_api=backend_api)
+                leftovers: list[str] = []
+                for i in range(0, len(remaining), batch_size):
+                    batch = remaining[i:i + batch_size]
+                    stats = await loop.run_in_executor(
+                        None, client.run, batch)
+                    if "error" in stats:
+                        leftovers.extend(batch)
+                        continue
+                    imported_any = True
+                    for k in total:
+                        total[k] += stats.get(k, 0)
+                    leftovers.extend(stats.get("missing") or [])
+                if imported_any and last_client is not client:
+                    if last_client is not None:
+                        last_client.close()
+                    last_client = client
+                else:
                     client.close()
-                    api, node = nxt
-                    client = MBSliceClient(api, db_dsn=self.db_dsn,
-                                           source_node=node,
-                                           backend_api=backend_api)
-                    continue
-                imported_any = True
-                for k in total:
-                    total[k] += stats.get(k, 0)
-                i += 1
+                remaining = leftovers
+            if remaining:
+                logger.info(f"MB slice: {len(remaining)} name(s) not served "
+                            f"this cycle — they stay pending")
 
-            if imported_any:
+            if imported_any and last_client is not None:
                 # ANALYZE + backend POST /canonicalize — once per run
-                await loop.run_in_executor(None, client.finalize)
+                await loop.run_in_executor(None, last_client.finalize)
                 logger.info(f"MB slice run done: {total}")
-            else:
-                client.close()
             return total
 
     def _write_sync_status(self, started: datetime, items: int) -> None:

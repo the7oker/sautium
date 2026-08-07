@@ -60,6 +60,7 @@ class SetupWizard(ctk.CTkToplevel):
             self._step_account,
             self._step_provider,
             self._step_lastfm,
+            self._step_catalog,
             self._step_summary,
         ]
 
@@ -1022,6 +1023,97 @@ class SetupWizard(ctk.CTkToplevel):
             justify="center",
         ).pack(pady=5)
 
+    # The MusicBrainz dump: ~7 GB compressed, and the loaded tables plus
+    # their indexes take roughly twice that again — 3× is the honest
+    # headroom test, checked against the drive the data dir lives on.
+    _MB_DUMP_GB = 7
+    _MB_DUMP_HEADROOM = 3
+
+    def _free_gb(self) -> float:
+        try:
+            from desktop.config_manager import get_data_dir
+            target = str(get_data_dir())
+        except Exception:
+            target = os.path.expanduser("~")
+        while target and not os.path.isdir(target):
+            parent = os.path.dirname(target)
+            if parent == target:
+                break
+            target = parent
+        try:
+            return shutil.disk_usage(target).free / 1e9
+        except Exception:
+            return 0.0
+
+    def _step_catalog(self):
+        """The music-catalogue (MusicBrainz dump) opt-in.
+
+        Pre-ticked when the disk can take it, because the dump is what makes
+        the phantom layer — streaming and recommendations beyond the shelf —
+        work at all, and a network where nobody holds it starves. Never
+        silent: the checkbox is visible, the cost is stated, and Settings
+        keeps a Delete button, which is what makes a bold default fair."""
+        free = self._free_gb()
+        needed = self._MB_DUMP_GB * self._MB_DUMP_HEADROOM
+        enough = free >= needed
+
+        ctk.CTkLabel(
+            self.content_frame,
+            text="Music catalogue",
+            font=ctk.CTkFont(size=22, weight="bold"),
+        ).pack(pady=(20, 6))
+
+        ctk.CTkLabel(
+            self.content_frame,
+            text=(
+                "Sautium can download the open MusicBrainz catalogue — the\n"
+                "same database Picard uses — and keep it on this machine."
+            ),
+            justify="left", text_color="gray",
+        ).pack(pady=(0, 12))
+
+        for line in (
+            "• Discovery beyond your shelf — every album an artist made, not"
+            " only the ones you own, ready to stream and recommend.",
+            "• Precise identity — releases, editions and recordings matched"
+            " exactly, so search, radio and duplicates behave.",
+            "• Better P2P coverage — canonized music is what peers can"
+            " actually exchange analysis about; yours becomes shareable too.",
+        ):
+            ctk.CTkLabel(self.content_frame, text=line, justify="left",
+                         wraplength=470, anchor="w").pack(
+                             fill="x", padx=28, pady=2)
+
+        self._mb_dump_var = ctk.BooleanVar(value=enough)
+        chk = ctk.CTkCheckBox(
+            self.content_frame,
+            text=f"Download the catalogue after setup (~{self._MB_DUMP_GB} GB)",
+            variable=self._mb_dump_var,
+        )
+        chk.pack(pady=(16, 6))
+        if not enough:
+            chk.configure(state="disabled")
+
+        ctk.CTkLabel(
+            self.content_frame,
+            text=(
+                f"Free space: {free:.0f} GB — enough (needs ~{needed} GB "
+                f"with room to load)."
+                if enough else
+                f"Free space: {free:.0f} GB — not enough (needs ~{needed} GB). "
+                f"You can enable this later in Settings."
+            ),
+            text_color="gray" if enough else "#C86450",
+            wraplength=470, justify="left",
+        ).pack(pady=(0, 4))
+
+        ctk.CTkLabel(
+            self.content_frame,
+            text=("Runs in the background after start, and can be removed at "
+                  "any time from Settings → Library → Delete catalogue."),
+            text_color="gray", wraplength=470, justify="left",
+        ).pack(pady=(6, 0))
+
     def _step_summary(self):
         ctk.CTkLabel(
             self.content_frame,
@@ -1055,6 +1147,10 @@ class SetupWizard(ctk.CTkToplevel):
                 else "Disabled",
             ),
             ("Accelerator", self._gpu_name if self._gpu_available else "CPU mode"),
+            ("Music catalogue",
+             f"Download after start (~{self._MB_DUMP_GB} GB)"
+             if getattr(self, "_mb_dump_var", None)
+             and self._mb_dump_var.get() else "Skip for now"),
         ]
 
         for label, value in items:
@@ -1234,6 +1330,10 @@ class SetupWizard(ctk.CTkToplevel):
 
         # Create account before saving config (don't persist password)
         account_data = self.config.pop("_account", None)
+
+        if getattr(self, "_mb_dump_var", None) is not None:
+            self.config.setdefault("mb_slice", {})["download_dump"] = \
+                bool(self._mb_dump_var.get())
 
         self.config["first_run_complete"] = True
         save_config(self.config)

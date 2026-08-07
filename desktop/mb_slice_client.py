@@ -20,10 +20,10 @@ import psycopg2
 import psycopg2.extras
 
 from desktop.api_client import BackendAPIClient
-from desktop.node_identity import verify_signature
 from desktop.p2p.mb_slice_queries import (MB_LOAD_LOCK_KEY, SLICE_TABLES,
-                                          addr_uuid, payload_hash,
-                                          receipt_message)
+                                          addr_uuid, name_key as lower_key,
+                                          store_slice_blob,
+                                          verify_slice_entry)
 
 logger = logging.getLogger(__name__)
 
@@ -71,51 +71,51 @@ class MBSliceClient:
             self._conn = None
 
     def run(self, names: list[str]) -> dict:
-        """Fetch + import one batch of names. Returns per-batch stats; a dict
-        with an 'error' key means the batch failed and may be retried against
-        another peer (nothing was recorded in mb_slice_fetches)."""
+        """Fetch + import one batch of names (v2: per-name signed blobs).
+
+        Each name verifies INDEPENDENTLY against the ORIGINAL dump node's
+        signature — the peer we asked may be a replica re-serving someone
+        else's blobs, and that is the design. Verified names are imported
+        and closed (mb_slice_fetches); names the peer does not hold come
+        back in `missing` and stay pending for the next candidate — only a
+        SIGNED empty slice closes a name as a zero-match (closed world is
+        an author's statement, not a transport hiccup). Returns per-batch
+        stats; an 'error' dict means the whole exchange failed."""
+        import hashlib as _hashlib
+        import json as _json
+
         resp = self.peer_api.mb_slice(names)
         if not resp or "error" in resp or "detail" in resp:
             err = (resp or {}).get("error") or (resp or {}).get("detail") or "no response"
             logger.warning(f"MB slice fetch failed ({self.source_node}): {err}")
             return {"error": err}
+        if resp.get("v") != 2:
+            logger.warning(f"MB slice from {self.source_node}: incompatible "
+                           f"protocol (no v2) — rejected")
+            return {"error": "incompatible slice protocol"}
 
-        tables = resp.get("tables", {})
-        for t, cols in resp.get("columns", {}).items():
-            # Identifiers never come from the wire: unknown table or reordered
-            # columns = version skew — refuse the whole batch.
-            if t not in SLICE_TABLES or cols != SLICE_TABLES[t]:
-                logger.warning(f"MB slice column mismatch for {t!r} — peer "
-                               f"{self.source_node} runs an incompatible version")
-                return {"error": f"column mismatch: {t}"}
+        slices = resp.get("slices") or {}
+        verified: dict[str, tuple] = {}
+        dropped = 0
+        for name in names:
+            entry = slices.get(name)
+            if entry is None:
+                continue                      # missing at this peer
+            out = verify_slice_entry(name, entry)
+            if out is None:
+                dropped += 1
+                logger.warning(f"MB slice for {name!r}: signature/identity "
+                               f"check failed — dropped")
+                continue
+            verified[name] = (out[0], out[1], entry)
+        if dropped and not verified:
+            return {"error": "all slices failed verification"}
 
-        # Authorship receipt — strict: an unsigned or mis-signed response is
-        # unattributable, and attribution is the whole trust model here
-        # (content is public MB data, verified by spot-checks against
-        # musicbrainz.org; the receipt pins WHO answered).
-        pubkey = resp.get("author_pubkey")
-        receipt = resp.get("receipt")
-        if not pubkey or not receipt:
-            logger.warning(f"MB slice from {self.source_node}: unsigned "
-                           f"response — rejected")
-            return {"error": "unsigned response"}
-        try:
-            valid = verify_signature(receipt_message(resp),
-                                     bytes.fromhex(receipt), pubkey)
-        except Exception as e:
-            logger.warning(f"MB slice receipt malformed: {e}")
-            return {"error": "malformed receipt"}
-        if not valid:
-            logger.warning(f"MB slice from {self.source_node}: receipt does "
-                           f"not verify against {pubkey[:16]}… — rejected")
-            return {"error": "receipt verification failed"}
-
-        matched = resp.get("artists_matched", {})
-        stats = {"names": len(names),
-                 "matched": sum(len(v) for v in matched.values()),
-                 "rows_received": sum(len(r) for r in tables.values()),
-                 "rows_inserted": 0,
-                 "truncated": resp.get("truncated", [])}
+        stats = {"names": len(names), "matched": 0, "rows_received": 0,
+                 "rows_inserted": 0, "truncated": [],
+                 "missing": [n for n in names
+                             if n not in verified and n in (resp.get("missing") or [])
+                             or (n not in slices and n not in verified)]}
 
         conn = self._get_conn()
         with conn.cursor() as cur:
@@ -124,20 +124,32 @@ class MBSliceClient:
             cur.execute("SELECT pg_advisory_lock(%s)", (MB_LOAD_LOCK_KEY,))
         try:
             with conn.cursor() as cur:
-                for t, cols in SLICE_TABLES.items():
-                    rows = tables.get(t)
-                    if not rows:
-                        continue
-                    inserted = psycopg2.extras.execute_values(
-                        cur,
-                        f"INSERT INTO {t} ({', '.join(cols)}) VALUES %s "
-                        f"ON CONFLICT DO NOTHING RETURNING 1",
-                        rows, page_size=1000, fetch=True,
-                    )
-                    stats["rows_inserted"] += len(inserted)
+                for name, (core, blob_gz, entry) in verified.items():
+                    matched = core.get("artists_matched") or {}
+                    n_matched = sum(len(v) for v in matched.values())
+                    stats["matched"] += n_matched
+                    for t in core.get("truncated") or []:
+                        if t not in stats["truncated"]:
+                            stats["truncated"].append(t)
+                    # Rows travel as canonical JSON strings inside the
+                    # signed blob (deterministic sort) — decode here, and
+                    # identifiers still never come from the wire: only
+                    # SLICE_TABLES names/columns are used for SQL.
+                    for t, cols in SLICE_TABLES.items():
+                        raw = (core.get("tables") or {}).get(t)
+                        if not raw:
+                            continue
+                        rows = [_json.loads(r) for r in raw]
+                        stats["rows_received"] += len(rows)
+                        inserted = psycopg2.extras.execute_values(
+                            cur,
+                            f"INSERT INTO {t} ({', '.join(cols)}) VALUES %s "
+                            f"ON CONFLICT DO NOTHING RETURNING 1",
+                            rows, page_size=1000, fetch=True,
+                        )
+                        stats["rows_inserted"] += len(inserted)
 
-                sha_hex = payload_hash(resp).hex()
-                for name in names:
+                    author = entry["author_pubkey"]
                     cur.execute("""
                         INSERT INTO mb_slice_fetches
                             (name_key, source_node, dump_version, matched_ids,
@@ -153,11 +165,19 @@ class MBSliceClient:
                             payload_sha256 = EXCLUDED.payload_sha256,
                             source_addr = EXCLUDED.source_addr,
                             fetched_at = now()
-                    """, (name, self.source_node or pubkey,
-                          resp.get("dump_version"),
-                          len(matched.get(name, [])),
-                          pubkey, receipt, sha_hex,
+                    """, (name, self.source_node or author,
+                          core.get("dump_version"), n_matched,
+                          author, entry["sig"],
+                          _hashlib.sha256(blob_gz).hexdigest(),
                           self.source_addr))
+                    # Replica inventory: keep the verified blob verbatim so
+                    # this node can re-serve it with the author's signature.
+                    # Oversized blobs are skipped (cap) — dump nodes serve
+                    # those from their own cache.
+                    store_slice_blob(
+                        cur.connection, lower_key(name),
+                        core.get("dump_version") or "", author,
+                        entry["sig"], blob_gz, cap=True)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -173,7 +193,9 @@ class MBSliceClient:
                            f"for oversized artists will be partial")
         self._progress(f"MB slice: {stats['names']} names, "
                        f"{stats['matched']} matches, "
-                       f"+{stats['rows_inserted']} rows")
+                       f"+{stats['rows_inserted']} rows"
+                       + (f", {len(stats['missing'])} missing here"
+                          if stats["missing"] else ""))
         return stats
 
     def finalize(self):

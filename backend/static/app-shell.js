@@ -11122,8 +11122,9 @@
       <div class="enrich-bar${pct == null ? ' indeterminate' : ''}" data-mb-bar><div class="fill"${pct == null ? '' : ` style="width:${pct}%;"`}></div></div>
     ` : `
       ${err ? `<div class="action-progress mb-error">${escapeProfileHtml('Failed: ' + err)}</div>` : ''}
-      <div class="btn-row single">
+      <div class="btn-row${mb.loaded ? '' : ' single'}">
         <button class="btn ${mb.loaded ? 'btn-secondary' : 'btn-primary'}" data-action="mb-update">${mb.loaded ? 'Update' : 'Download'}</button>
+        ${mb.loaded ? `<button class="btn btn-secondary" data-action="mb-delete">Delete catalogue</button>` : ''}
       </div>`;
     return `
       <div class="profile-group-label">MusicBrainz database</div>
@@ -11165,6 +11166,24 @@
       const wrap = root.querySelector('[data-mb-actions]');
       if (wrap) wrap.innerHTML = `<div class="action-progress" data-progress-for="mb">Starting…</div><div class="enrich-bar indeterminate" data-mb-bar><div class="fill"></div></div>`;
       await fetch('/api/settings/musicbrainz/update', { method: 'POST' });
+    });
+    onA('[data-action="mb-delete"]', async () => {
+      const ok = await window.confirmDestructive({
+        title: 'Delete the catalogue?',
+        message: 'Removes the MusicBrainz tables and the downloaded archives. '
+               + 'Phantom albums and canonization stop updating until you '
+               + 'download it again — nothing in your own library is touched.',
+        confirmText: 'Delete',
+      });
+      if (!ok) return;
+      const r = await fetch('/api/settings/musicbrainz/delete', { method: 'POST' });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        await window.notifyDialog({ title: 'Could not delete', kind: 'error',
+          message: escapeProfileHtml(d.detail || 'Unknown error') });
+        return;
+      }
+      render();
     });
     onA('[data-action="mb-auto"]', async (e) => {
       const btn = e.currentTarget;

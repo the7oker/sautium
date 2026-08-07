@@ -291,14 +291,34 @@ class SyncServer:
     # -----------------------------------------------------------------------
 
     async def handle_health(self, request: web.Request) -> web.Response:
-        """Health check endpoint."""
+        """Health check endpoint. `mb_slices` is the replica inventory size —
+        a dump-less node with verified blobs is a partial slice source, and
+        requesters try those BEFORE dump nodes to spread the load."""
         return self._json_response(request, {
             "status": "ok",
             "node_id": self.node_id,
             "type": "sautium-peer",
             "mb_dump": self.mb_dump_version,
+            "mb_slices": self._slice_blob_total(),
             "capabilities": sync_queries.CAPABILITIES,
         })
+
+    def _slice_blob_total(self) -> int:
+        """Replica inventory size, cached 60 s — /health is probed often and
+        the number only needs to say "worth asking"."""
+        now = time.time()
+        if now - getattr(self, "_slice_count_at", 0) > 60:
+            try:
+                conn = self._new_db()
+                try:
+                    self._slice_count = \
+                        mb_slice_queries.count_slice_blobs(conn)
+                finally:
+                    conn.close()
+            except Exception:
+                self._slice_count = 0
+            self._slice_count_at = now
+        return getattr(self, "_slice_count", 0)
 
     async def handle_inventory(self, request: web.Request) -> web.Response:
         """POST /api/sync/inventory — check available enrichment data."""
@@ -482,8 +502,13 @@ class SyncServer:
         return self._json_response(request, {"imported": imported})
 
     async def handle_mb_slice(self, request: web.Request) -> web.Response:
-        """POST /api/mb/slice — serve raw mb_* rows for a batch of artist names
-        (dump holders only; see mb_slice_queries.get_slice)."""
+        """POST /api/mb/slice — per-name signed blobs (v2).
+
+        A dump holder computes+signs+caches misses; a REPLICA (no dump,
+        mb_slice_blobs only) answers what it holds and lists the rest in
+        `missing` — no 404: partially useful is useful, and the requester
+        takes misses to the next candidate. Blobs carry the ORIGINAL
+        author's signature either way."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
             return self._json_response(
@@ -494,11 +519,6 @@ class SyncServer:
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
 
-        if not self.mb_dump_version:
-            return self._json_response(
-                request, {"error": "no MB dump on this node"}, status=404
-            )
-
         try:
             body = await request.json()
             names = body.get("names", [])
@@ -507,9 +527,18 @@ class SyncServer:
                 request, {"error": "invalid JSON"}, status=400
             )
 
+        sign_fn, author = None, ""
+        if self.mb_dump_version:
+            from desktop.node_identity import get_node_id, sign_message
+            try:
+                author = get_node_id()
+                sign_fn = sign_message
+            except Exception as e:
+                logger.warning(f"MB slice signing unavailable: {e}")
+
         try:
-            result = await self._run_query(mb_slice_queries.get_slice, names)
-            self._attach_slice_receipt(result)
+            result = await self._run_query(
+                mb_slice_queries.serve_slices, names, sign_fn, author)
             return self._json_response(request, result)
         except ValueError as e:
             return self._json_response(request, {"error": str(e)}, status=400)
@@ -522,23 +551,6 @@ class SyncServer:
             return self._json_response(
                 request, {"error": "internal error"}, status=500
             )
-
-    @staticmethod
-    def _attach_slice_receipt(result: dict) -> None:
-        """Sign the response with the node's Ed25519 identity — the authorship
-        receipt. Content stays unsigned (it's public MB data); one signature
-        binds "this node produced this answer for this dump". Requesters
-        reject unsigned responses, so a signing failure just makes this node
-        useless as a slice source rather than silently unattributable."""
-        from desktop.node_identity import get_node_id, sign_message
-        try:
-            result["author_pubkey"] = get_node_id()
-            result["receipt"] = sign_message(
-                mb_slice_queries.receipt_message(result)).hex()
-        except Exception as e:
-            logger.warning(f"MB slice receipt signing failed: {e}")
-            result.pop("author_pubkey", None)
-            result.pop("receipt", None)
 
     # -----------------------------------------------------------------------
     # Chat handlers
@@ -1599,6 +1611,19 @@ class SyncServer:
 
     async def start(self):
         """Build aiohttp app, bind to port, start serving."""
+        # Replica inventory table (idempotent DDL) — a node updated in
+        # place gains it without a manual migration.
+        try:
+            def _prep():
+                conn = self._new_db()
+                try:
+                    mb_slice_queries.ensure_blob_table(conn)
+                    conn.commit()
+                finally:
+                    conn.close()
+            await asyncio.get_event_loop().run_in_executor(None, _prep)
+        except Exception as e:
+            logger.warning(f"slice blob table init failed: {e}")
         self._app = web.Application(middlewares=[self._inbound_middleware])
         self._app.router.add_get("/health", self.handle_health)
         self._app.router.add_post("/api/sync/inventory", self.handle_inventory)

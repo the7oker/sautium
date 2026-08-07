@@ -508,3 +508,42 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def delete_dump() -> Dict:
+    """Remove the local dump: TRUNCATE the mb_* tables, drop the VERSION
+    marker and the downloaded archives. The reverse of the wizard's opt-in —
+    what makes a pre-ticked default fair.
+
+    Sliced facts imported from peers live in the same tables and go with
+    them; mb_slice_fetches is cleared too, so those names re-open for
+    fetching instead of staying closed against data that is gone. Held
+    under the loader's advisory lock — never mid-load."""
+    import shutil
+
+    from db_pool import get_conn
+    freed = stats().get("size_bytes", 0)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (MB_LOAD_LOCK_KEY,))
+            if not cur.fetchone()[0]:
+                raise RuntimeError("a dump load is running")
+            try:
+                cur.execute("TRUNCATE " + ", ".join(t for t, _ in TABLES))
+                cur.execute("DELETE FROM mb_slice_fetches")
+                cur.execute("DELETE FROM mb_slice_blobs")
+            finally:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (MB_LOAD_LOCK_KEY,))
+    for path in (VERSION_PATH,):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+    for name in os.listdir(_DATA) if os.path.isdir(_DATA) else []:
+        if name.endswith(".tar.bz2"):
+            try:
+                os.remove(os.path.join(_DATA, name))
+            except OSError:
+                pass
+    logger.info("MB dump deleted (~%.1f GB of tables freed)", freed / 1e9)
+    return {"deleted": True, "freed_bytes": freed}

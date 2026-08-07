@@ -347,6 +347,23 @@ class LauncherApp(ctk.CTk):
         # Auto-trigger Last.fm auth if pending from wizard
         self._check_lastfm_pending_auth()
 
+        # Catalogue download the wizard asked for. One-shot: the flag is
+        # cleared as soon as the job starts, so a later restart never
+        # re-triggers a multi-GB download behind the user's back.
+        self._check_mb_dump_pending()
+
+    def _check_mb_dump_pending(self):
+        if not self.config.get("mb_slice", {}).get("download_dump"):
+            return
+        self.config.setdefault("mb_slice", {})["download_dump"] = False
+        save_config(self.config)
+        result = self.api_client.mb_dump_start()
+        if result and result.get("success"):
+            self._progress_text.configure(
+                text="Downloading the music catalogue in the background…")
+        else:
+            logger.warning("MB dump auto-start failed: %s", result)
+
     def _start_event_streams(self):
         """Subscribe to the backend's wake channels — once per process, not
         once per backend start: the reader reconnects on its own, which is

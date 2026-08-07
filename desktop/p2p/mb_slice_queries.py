@@ -124,37 +124,61 @@ class DumpBusy(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Authorship receipt
+# Authorship receipt — PER ARTIST (v2, Валерій's design)
 # ---------------------------------------------------------------------------
 # The slice content is public MB data — it is NOT signed per row. What IS
-# signed is the whole response: one Ed25519 signature by the serving node
-# over the canonical payload hash. That binds authorship cryptographically
-# ("node with key K produced answer H for dump V") without any per-row keys,
-# timestamps or Worker involvement. The requester verifies before importing
-# and stores (pubkey, receipt, hash) in mb_slice_fetches as durable evidence.
+# signed is one artist's whole subtree: an Ed25519 signature by the DUMP
+# node over the canonical per-name blob. v1 signed the whole batch
+# response, which welded the signature to one transport exchange — a
+# replica could not re-serve a single name without replaying the entire
+# original batch byte-for-byte. Per-name signatures align the signing
+# grain with the data grain (pending_slice_names, mb_slice_fetches and
+# the closed-world rule are all per name already), so the ORIGINAL
+# author's signature travels with each name through any number of
+# replicas, verified independently by every hop. dump_version and the
+# name key live inside the signed bytes — a slice of one dump version
+# cannot impersonate another, and a blob signed for one name cannot be
+# served under a different one.
 
-# Domain-separation prefix — a receipt signature can never be replayed as a
-# chat/sync/birth signature and vice versa.
-RECEIPT_CONTEXT = b"sautium-mb-slice-v1:"
-
-_SIGNED_FIELDS = ("dump_version", "artists_matched", "columns", "tables",
-                  "truncated")
-
-
-def payload_hash(resp: dict) -> bytes:
-    """Deterministic sha256 over the signable core of a slice response.
-    The server computes it from the dict it built, the requester from the
-    parsed JSON — canonical serialization (sorted keys, compact separators,
-    ensure_ascii=False) makes both byte-identical."""
-    core = {k: resp.get(k) for k in _SIGNED_FIELDS}
-    blob = json.dumps(core, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False)
-    return hashlib.sha256(blob.encode("utf-8")).digest()
+# Domain-separation prefix — a receipt signature can never be replayed as
+# a chat/sync/birth signature and vice versa. v2 = per-name grain.
+RECEIPT_CONTEXT = b"sautium-mb-slice-v2:"
 
 
-def receipt_message(resp: dict) -> bytes:
-    """The exact bytes the serving node signs / the requester verifies."""
-    return RECEIPT_CONTEXT + payload_hash(resp)
+def name_key(name: str) -> str:
+    """The per-name identity key — mirrors the mb_slice_fetches key."""
+    return (name or "").strip().lower()
+
+
+def name_blob(name: str, slice_one: dict) -> bytes:
+    """Canonical bytes of ONE artist's slice — what the dump node signs
+    and every recipient hashes to verify.
+
+    Rows are sorted by their JSON form inside each table: _fetch carries
+    no ORDER BY, and Postgres row order is an implementation detail that
+    must never leak into a signature. Stored VERBATIM (gzipped) by
+    recipients — re-serving hands back these exact bytes, so no
+    re-serialization contract with the database is ever needed."""
+    core = {
+        "name_key": name_key(name),
+        "dump_version": slice_one.get("dump_version"),
+        "artists_matched": slice_one.get("artists_matched"),
+        "truncated": sorted(slice_one.get("truncated") or []),
+        "tables": {
+            t: sorted(
+                (json.dumps(r, sort_keys=True, separators=(",", ":"),
+                            ensure_ascii=False) for r in rows),
+            )
+            for t, rows in (slice_one.get("tables") or {}).items()
+        },
+    }
+    return json.dumps(core, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False).encode("utf-8")
+
+
+def receipt_message_for(blob: bytes) -> bytes:
+    """The exact bytes the dump node signs / every recipient verifies."""
+    return RECEIPT_CONTEXT + hashlib.sha256(blob).digest()
 
 
 # Sautium UUID v5 namespace — mirrors backend/uuid_utils.py (desktop must not
@@ -289,12 +313,13 @@ def _fetch(cur, table: str, where_sql: str, params, truncated: list):
     return [[_ser(v) for v in row] for row in rows]
 
 
-def get_slice(conn, names: list) -> dict:
-    """The /api/mb/slice payload for a batch of artist names."""
-    if not isinstance(names, list) or not names or len(names) > MAX_NAMES_PER_REQUEST:
-        raise ValueError(f"names must be a list of 1..{MAX_NAMES_PER_REQUEST}")
-    if not all(isinstance(n, str) and n.strip() for n in names):
-        raise ValueError("names must be non-empty strings")
+def get_slice_one(conn, name: str) -> dict:
+    """ONE artist's slice subtree — the v2 signing unit. Batch requests are
+    served as a loop of these on the server (with the blob cache in
+    between), never as a merged payload: a merged payload cannot carry
+    per-name signatures."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("name must be a non-empty string")
 
     with conn.cursor() as cur:
         # The loader holds this lock for its whole TRUNCATE+COPY pass — serving
@@ -304,11 +329,8 @@ def get_slice(conn, names: list) -> dict:
             raise DumpBusy()
         cur.execute("SELECT pg_advisory_unlock(%s)", (MB_LOAD_LOCK_KEY,))
 
-        matched, all_ids = {}, set()
-        for name in names:
-            ids = _match_artist_ids(cur, name.strip())
-            matched[name] = ids
-            all_ids.update(ids)
+        all_ids = set(_match_artist_ids(cur, name.strip()))
+        matched = {name: sorted(all_ids)}
 
         version = dump_version_file()
         if not all_ids:
@@ -456,3 +478,147 @@ def pending_slice_names(conn, limit: int = 200) -> list:
             LIMIT %(lim)s
         """, {"lim": limit})
         return [r[0] for r in cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# v2 blob cache + replication (the phase-E replacement)
+# ---------------------------------------------------------------------------
+# One table serves three roles at once. On a DUMP node it is the hot cache:
+# a prolific artist (Bach: ~30 MB raw, ~8 s of query time) is computed and
+# signed once per dump version, then served as stored bytes. On a REPLICA it
+# is the re-serve inventory: verified blobs are kept verbatim with the
+# ORIGINAL author's signature, so any number of hops can verify
+# independently and no re-serialization contract with the database exists.
+# On the wire it is the payload itself — gzip bytes, base64 in JSON.
+#
+# Replicas skip blobs above RESERVE_BLOB_MAX_GZ: the expensive names are
+# exactly the ones every dump node already serves from cache for free, and
+# replicating them would bloat every fan's DB with the same megabytes. The
+# body of the distribution (tens of KB) is what spreads.
+
+RESERVE_BLOB_MAX_GZ = 2 * 1024 * 1024
+
+
+def ensure_blob_table(conn) -> None:
+    """Idempotent DDL — mirrored in 001_initial.sql; called by both servers
+    at startup so a node updated in place gains the table without a manual
+    migration."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS mb_slice_blobs (
+                name_key      TEXT PRIMARY KEY,
+                dump_version  TEXT NOT NULL,
+                author_pubkey CHAR(64) NOT NULL,
+                sig           CHAR(128) NOT NULL,
+                blob_gz       BYTEA NOT NULL,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+            )""")
+
+
+def cached_slice(conn, nk: str):
+    with conn.cursor() as cur:
+        cur.execute("SELECT dump_version, author_pubkey, sig, blob_gz"
+                    "  FROM mb_slice_blobs WHERE name_key = %s", (nk,))
+        row = cur.fetchone()
+    if not row:
+        return None
+    return {"dump_version": row[0], "author_pubkey": row[1].strip(),
+            "sig": row[2].strip(), "blob_gz": bytes(row[3])}
+
+
+def store_slice_blob(conn, nk: str, dump_version: str, author_pubkey: str,
+                     sig: str, blob_gz: bytes, cap: bool = True) -> bool:
+    """Upsert one verified blob. `cap=True` is the replica posture (skip
+    oversized); a dump node stores its own regardless — that is the cache."""
+    if cap and len(blob_gz) > RESERVE_BLOB_MAX_GZ:
+        return False
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO mb_slice_blobs
+                   (name_key, dump_version, author_pubkey, sig, blob_gz)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (name_key) DO UPDATE SET
+                dump_version = EXCLUDED.dump_version,
+                author_pubkey = EXCLUDED.author_pubkey,
+                sig = EXCLUDED.sig,
+                blob_gz = EXCLUDED.blob_gz,
+                created_at = now()""",
+            (nk, dump_version, author_pubkey, sig, blob_gz))
+    return True
+
+
+def count_slice_blobs(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM mb_slice_blobs")
+        return int(cur.fetchone()[0])
+
+
+def serve_slices(conn, names: list, sign_fn=None,
+                 author_pubkey: str = "") -> dict:
+    """The shared v2 server body for both surfaces.
+
+    Per name: cached blob wins (dump node's cache and replica's inventory
+    are the same table); a dump node computes+signs+caches on a miss
+    (`sign_fn` present AND a local dump exists); everything else lands in
+    `missing` — the requester takes misses to the next candidate. The
+    response entry carries the ORIGINAL author's pubkey+sig, which on a
+    replica is not this node's identity — and that is the point."""
+    import base64
+    import gzip as _gzip
+
+    if not isinstance(names, list) or not names \
+            or len(names) > MAX_NAMES_PER_REQUEST:
+        raise ValueError(f"names must be a list of 1..{MAX_NAMES_PER_REQUEST}")
+    if not all(isinstance(n, str) and n.strip() for n in names):
+        raise ValueError("names must be non-empty strings")
+
+    can_build = sign_fn is not None and local_dump_available(conn)
+    slices, missing = {}, []
+    for name in names:
+        nk = name_key(name)
+        entry = cached_slice(conn, nk)
+        if entry is None and can_build:
+            one = get_slice_one(conn, name)          # may raise DumpBusy
+            blob = name_blob(name, one)
+            sig = sign_fn(receipt_message_for(blob)).hex()
+            blob_gz = _gzip.compress(blob)
+            store_slice_blob(conn, nk, one.get("dump_version") or "",
+                             author_pubkey, sig, blob_gz, cap=False)
+            entry = {"dump_version": one.get("dump_version") or "",
+                     "author_pubkey": author_pubkey, "sig": sig,
+                     "blob_gz": blob_gz}
+        if entry is None:
+            missing.append(name)
+            continue
+        slices[name] = {
+            "dump_version": entry["dump_version"],
+            "author_pubkey": entry["author_pubkey"],
+            "sig": entry["sig"],
+            "blob_gz": base64.b64encode(entry["blob_gz"]).decode("ascii"),
+        }
+    return {"v": 2, "slices": slices, "missing": missing}
+
+
+def verify_slice_entry(name: str, entry: dict):
+    """Full per-name verification on the receiving side: gunzip → hash →
+    author signature → the blob's own name_key matches the asked name.
+    Returns (core_dict, blob_gz_bytes) or None. Every hop runs exactly
+    this, against the ORIGINAL author's key."""
+    import base64
+    import gzip as _gzip
+
+    from desktop.node_identity import verify_signature
+    try:
+        blob_gz = base64.b64decode(entry.get("blob_gz") or "")
+        blob = _gzip.decompress(blob_gz)
+        author = entry.get("author_pubkey") or ""
+        sig = entry.get("sig") or ""
+        if not verify_signature(receipt_message_for(blob),
+                                bytes.fromhex(sig), author):
+            return None
+        core = json.loads(blob)
+        if core.get("name_key") != name_key(name):
+            return None
+        return core, blob_gz
+    except Exception:
+        return None
