@@ -8,9 +8,6 @@ Used by both the aiohttp P2P sync server and the FastAPI backend.
 import base64
 import json
 import logging
-import re
-import unicodedata
-import uuid as uuid_mod
 from datetime import datetime, timezone
 
 import psycopg2.extras
@@ -18,47 +15,6 @@ import psycopg2.extras
 from desktop.p2p import record_sig
 
 logger = logging.getLogger(__name__)
-
-# -- Sautium UUID v5 identity — mirrors backend/uuid_utils.py (desktop must
-# not import the backend package; keep the three functions in step). The
-# carry import gate needs them to PROVE a pushed track's identity by
-# recomputation: track_uuid binds title + primary artist, so a claimed
-# (title, artist) pair that does not rehash to the wire UUID is a forgery
-# or a normalization mismatch, and either way it must not be minted.
-
-SAUTIUM_NAMESPACE = uuid_mod.UUID("adc1ec0b-2c81-5e26-9938-a369c6f7a5e1")
-
-
-def normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", unicodedata.normalize("NFC", text.strip().lower()))
-
-
-def artist_uuid(name: str) -> uuid_mod.UUID:
-    return uuid_mod.uuid5(SAUTIUM_NAMESPACE, f"artist:{normalize(name)}")
-
-
-def track_uuid(title: str, artist_name: str) -> uuid_mod.UUID:
-    # 'song:' prefix, not 'track:' — backward compat with the initial migration.
-    return uuid_mod.uuid5(
-        SAUTIUM_NAMESPACE, f"song:{normalize(artist_name)}:{normalize(title)}")
-
-
-def album_uuid(title: str, artist_name: str) -> uuid_mod.UUID:
-    return uuid_mod.uuid5(
-        SAUTIUM_NAMESPACE, f"album:{normalize(artist_name)}:{normalize(title)}")
-
-
-def verify_album_identity(album_uuid_str: str, title: str,
-                          primary_names: list[str]):
-    """uuid5 identity proof for an album — mirror of verify_track_identity:
-    return the primary name the album UUID was keyed on, or None."""
-    clamped = (title or "").strip()[:500]
-    if not clamped:
-        return None
-    for name in primary_names or []:
-        if name and str(album_uuid(clamped, name)) == album_uuid_str:
-            return name
-    return None
 
 # Sync-protocol capabilities advertised on /health. Peers pick pull categories
 # by this list: "segments" = this node serves per-track segment bundles
@@ -87,12 +43,12 @@ SEGMENTS_MAX_UUIDS = 500
 # binds the track uuid) survives re-serve intact. The two mismatch
 # classes die silently on the right side: same-name-different-recording
 # is cut by the MBID round; same-recording-different-name never leaves
-# the pusher (it holds no such uuid). Structural categories (albums /
-# tracks / album_tracks / artist_mbids) are DORMANT under v4 — the
-# carrier's phantom skeleton already has structure, covers and canon
-# marks; the importers stay as the full-mode insurance.
-CARRY_CATEGORIES = ("albums", "tracks", "album_tracks", "segments",
-                    "audio_features", "track_mbids", "artist_mbids")
+# the pusher (it holds no such uuid). The v3 structural transport
+# (albums / tracks / album_tracks / artist_mbids categories, the
+# identity-recompute functions, their importers) is DELETED, not dormant
+# — git history has it. The album/album_track/artist_mbid SEALS stay:
+# they are signed data and the pusher's full-snapshot gate reads them.
+CARRY_CATEGORIES = ("segments", "audio_features", "track_mbids")
 # Recordings per offer request — an offer is 16 bytes per recording
 # against ~46 KB to push one track blind.
 CARRY_MAX_TRACKS = 500
@@ -590,80 +546,6 @@ def pull_genre_descriptions(conn, uuids: list[str]) -> dict:
     )
 
 
-def pull_artist_mbids(conn, artist_uuids: list[str]) -> dict:
-    """The portable canon mark (carry): author-sealed artist↔MBID bindings.
-
-    No `source` column exists — the kind signs with source = "" on both
-    ends, and created_at fills the fetched_at slot of the payload. Keyed by
-    ARTIST uuids (the carry pusher derives them from the tracks it pushed)."""
-    return _pull_simple(
-        conn, "artist_mbids",
-        f"""SELECT am.artist_id::text AS artist_uuid, am.mbid::text AS mbid,
-                   am.confidence::text AS confidence,
-                   am.created_at AS fetched_at, am.author_pubkey,
-                   am.signature, am.batch_root, am.merkle_proof
-            FROM artist_mbids am
-            WHERE am.artist_id = ANY(%s::uuid[])
-            {_SEALED_ONLY.format(t='am')}""",
-        artist_uuids,
-    )
-
-
-def pull_albums(conn, album_uuids: list[str]) -> dict:
-    """Album rows of the canonized snapshot (carry v3), with the primary
-    artist names the importer needs to prove album_uuid by recomputation
-    (uuid5 over artist+title — same identity discipline as tracks)."""
-    def attach_artists(item):
-        return item
-    payload = _pull_simple(
-        conn, "albums",
-        f"""SELECT al.id::text AS album_uuid, al.title,
-                   al.release_year, al.cover_url,
-                   al.musicbrainz_id::text AS rg_mbid,
-                   al.mb_match_confidence::text AS confidence,
-                   al.created_at AS fetched_at, al.author_pubkey,
-                   al.signature, al.batch_root, al.merkle_proof
-            FROM albums al
-            WHERE al.id = ANY(%s::uuid[])
-            {_SEALED_ONLY.format(t='al')}""",
-        album_uuids,
-    )
-    if payload["items"]:
-        rows = db_query(
-            conn,
-            """SELECT aa.album_id::text AS album_uuid, a.name
-                 FROM album_artists aa
-                 JOIN artists a ON a.id = aa.artist_id
-                WHERE aa.album_id = ANY(%s::uuid[])
-                  AND aa.role = 'primary'""",
-            [[i["album_uuid"] for i in payload["items"]]],
-        )
-        by_album: dict[str, list] = {}
-        for r in rows:
-            by_album.setdefault(r["album_uuid"], []).append(r["name"])
-        for item in payload["items"]:
-            item["primary_names"] = by_album.get(item["album_uuid"], [])
-    return payload
-
-
-def pull_album_tracks(conn, track_uuids: list[str]) -> dict:
-    """Sealed tracklist rows (carry v3) — position, disc, length_ms and the
-    recording binding, keyed by TRACK uuids like the analysis categories."""
-    return _pull_simple(
-        conn, "album_tracks",
-        f"""SELECT at2.album_id::text AS album_uuid,
-                   at2.track_id::text AS track_uuid,
-                   at2.disc, at2.position, at2.length_ms,
-                   at2.recording_mbid::text AS recording_mbid,
-                   at2.created_at AS fetched_at, at2.author_pubkey,
-                   at2.signature, at2.batch_root, at2.merkle_proof
-            FROM album_tracks at2
-            WHERE at2.track_id = ANY(%s::uuid[])
-            {_SEALED_ONLY.format(t='at2')}""",
-        track_uuids,
-    )
-
-
 def pull_track_mbids(conn, track_uuids: list[str]) -> dict:
     """Sealed track↔recording bindings (carry v3)."""
     return _pull_simple(
@@ -697,11 +579,6 @@ PULL_HANDLERS = {
     "similar_artists": pull_similar_artists,
     "genre-descriptions": pull_genre_descriptions,
     "genre_descriptions": pull_genre_descriptions,
-    "artist-mbids": pull_artist_mbids,
-    "artist_mbids": pull_artist_mbids,
-    "albums": pull_albums,
-    "album-tracks": pull_album_tracks,
-    "album_tracks": pull_album_tracks,
     "track-mbids": pull_track_mbids,
     "track_mbids": pull_track_mbids,
 }
@@ -742,33 +619,24 @@ def get_enriched_artist_uuids(conn) -> list[str]:
 
 def get_pushable_tracks(conn, limit: int) -> list[dict]:
     """Tracks whose FIRST-HAND, sealed audio analysis this node can
-    contribute, rarest first. Returns dicts with track_uuid, title and the
-    primary artist names — the caller re-derives the UUID from them
-    (identity proof) and builds the tracks payload without a second query.
+    contribute, rarest first — {track_uuid, recordings} rows; the offer
+    round speaks the recordings (v4).
 
-    Full-snapshot gate (v3) — every condition load-bearing:
+    Full-snapshot gate — every condition load-bearing:
       * sealed segments — unsigned material must not travel at all;
       * first-hand source (analysis_sources NOT imported) — re-pushing what
         we pulled from someone else spreads nothing new and burns a
         carrier's budget;
       * canon primary — the track's primary artist has a non-phantom MB
-        anchor. A phantom anchor is a name guess with no owned tracks to
-        verify against; pushing residue is how carriers would multiply
-        noise, and an unsplit "A feat. B" mess has no anchor at all;
-      * canonized track — a sealed track_mbids binding exists. A canonized
-        title is MB-agreed, so the carrier's later MB-driven work joins on
-        the mbid, never on string luck;
-      * canonized album — a sealed tracklist row links the track to an
-        album whose RG anchor is sealed too. Without it the carried track
-        is an orphan: no Now Playing album/cover, no length_ms for stream
-        matching, and the radio pool's (media_files OR album_tracks)
-        condition rejects it. Everything that travels works as a full
-        phantom, or it does not travel (measured: 79% of sealed first-hand
-        tracks pass; the rest are compilations and residue whose canon has
-        not matured — they ride a later push).
-
-    v4: each row also carries `recordings` — every sealed MBID binding of
-    the track — because the offer round speaks recordings, not uuids.
+        anchor: a phantom anchor is a name guess, and an unsplit
+        "A feat. B" mess has no anchor at all;
+      * canonized track — a sealed track_mbids binding exists: without a
+        recording MBID the offer round cannot even name the track;
+      * canonized album — a sealed tracklist row under a sealed RG-anchored
+        album: the full-snapshot proof that this node's canon matured
+        around the track, not just its analysis (measured: ~73% of sealed
+        first-hand tracks pass; the rest are compilations and residue whose
+        canon has not matured — they ride a later push).
 
     Rarest first (Last.fm listeners of the primary artist, unknown counts
     rarest) for the same reason the DHT tail is: anything popular reaches
@@ -787,23 +655,14 @@ def get_pushable_tracks(conn, limit: int) -> list[dict]:
                                  AND es.signature IS NOT NULL
                                  AND es.batch_root IS NOT NULL)
            )
-           SELECT t.id::text AS track_uuid, t.title,
-                  array_agg(DISTINCT a.name) AS primary_names,
+           SELECT t.id::text AS track_uuid,
                   (SELECT array_agg(tm.recording_mbid::text)
                      FROM track_mbids tm
                     WHERE tm.track_id = t.id
-                      AND tm.signature IS NOT NULL) AS recordings,
-                  (SELECT at2.album_id::text FROM album_tracks at2
-                     JOIN albums al ON al.id = at2.album_id
-                    WHERE at2.track_id = t.id
-                      AND at2.signature IS NOT NULL
-                      AND al.signature IS NOT NULL
-                    ORDER BY at2.album_id LIMIT 1) AS album_uuid,
-                  MAX(ab.listeners) AS listeners
+                      AND tm.signature IS NOT NULL) AS recordings
              FROM mine m
              JOIN tracks t        ON t.id = m.track_id
              JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
-             JOIN artists a       ON a.id = ta.artist_id
              LEFT JOIN artist_bios ab ON ab.artist_id = ta.artist_id
             WHERE EXISTS (SELECT 1 FROM artist_mbids am
                            WHERE am.artist_id = ta.artist_id
@@ -816,31 +675,12 @@ def get_pushable_tracks(conn, limit: int) -> list[dict]:
                            WHERE at2.track_id = t.id
                              AND at2.signature IS NOT NULL
                              AND al.signature IS NOT NULL)
-            GROUP BY t.id, t.title
+            GROUP BY t.id
             ORDER BY MAX(ab.listeners) ASC NULLS FIRST
             LIMIT %s""",
         [limit],
     )
     return [dict(r) for r in rows]
-
-
-def verify_track_identity(track_uuid_str: str, title: str,
-                          primary_names: list[str]):
-    """The uuid5 identity proof: return the primary name the track UUID was
-    keyed on, or None if none of the claimed primaries rehashes to it.
-
-    Title is clamped [:500] BEFORE hashing — mirrors
-    discography._persist_phantom_tracklist, which clamps before minting so
-    identity keys on the stored value. Sender and carrier run the same
-    check: the sender to not offer what would be dropped, the carrier
-    because an unverified (title, artist) pair must not be minted."""
-    clamped = (title or "").strip()[:500]
-    if not clamped:
-        return None
-    for name in primary_names or []:
-        if name and str(track_uuid(clamped, name)) == track_uuid_str:
-            return name
-    return None
 
 
 def count_carried_tracks(conn) -> int:
