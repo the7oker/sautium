@@ -856,6 +856,11 @@ class SetupWizard(ctk.CTkToplevel):
             instr_frame,
             text="4. Authorize in the browser tab that opens",
             font=ctk.CTkFont(size=12),
+        ).pack(anchor="w", padx=20)
+        ctk.CTkLabel(
+            instr_frame,
+            text="5. Done — close the terminal window",
+            font=ctk.CTkFont(size=12),
         ).pack(anchor="w", padx=20, pady=(0, 6))
 
         ctk.CTkLabel(

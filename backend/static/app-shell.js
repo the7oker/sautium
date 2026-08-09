@@ -10506,6 +10506,7 @@
               <li>Type <code style="font-family:var(--font-mono);color:var(--color-blue);">/login</code></li>
               <li>Choose <i>Claude account with subscription</i></li>
               <li>Authorize in the browser tab</li>
+              <li>Done — close the terminal window</li>
             </ol>
             Sautium detects the sign-in automatically.
           </div>
