@@ -91,6 +91,15 @@ class CanonicalQueue:
                 return self._items[index_1b - 1]
             return None
 
+    def index_of(self, item: QueueItem) -> Optional[int]:
+        """1-based slot of THIS item object — identity, not equality: the same
+        track can legitimately sit in the queue twice. None once it is gone."""
+        with self._lock:
+            for i, it in enumerate(self._items):
+                if it is item:
+                    return i + 1
+            return None
+
     # -- mutations (serialized by the manager's mutate lock) ----------------
 
     def replace(self, items: list[QueueItem]) -> int:

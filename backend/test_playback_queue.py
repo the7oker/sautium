@@ -49,7 +49,7 @@ def test_reorder_with_duplicates_keeps_relative_order():
     q = CanonicalQueue()
     a1, b, a2 = _item(1, "t1", "first"), _item(2, "t2"), _item(1, "t1", "second")
     q.replace([a1, b, a2])
-    q.reorder_by_media_ids([2, 1, 1])
+    q.reorder_by_track_ids(["t2", "t1", "t1"])
     snap = q.snapshot()
     assert [it.media_file_id for it in snap] == [2, 1, 1]
     assert snap[1] is a1 and snap[2] is a2   # duplicate ids keep their order
@@ -87,6 +87,16 @@ def test_payload_shapes():
     foreign = rows[2]
     assert foreign["id"] is None and "album" not in foreign
     assert "preview" not in foreign and "track_id" not in foreign
+
+
+def test_index_of_is_identity_based():
+    q = CanonicalQueue()
+    a1, b, a2 = _item(1, "t1", "first"), _item(2, "t2"), _item(1, "t1", "second")
+    q.replace([a1, b, a2])
+    assert q.index_of(a1) == 1 and q.index_of(a2) == 3   # same track, both slots
+    q.remove(1)
+    assert q.index_of(a1) is None
+    assert q.index_of(a2) == 2
 
 
 def test_item_at_bounds():

@@ -342,6 +342,18 @@ class PlaybackManager:
             logger.info("preview budget: freed %.0f MiB beyond slots %d..%d",
                         freed / 1048576, lo, hi)
 
+    def _retire_previews(self, generation: int) -> None:
+        """Tell the media proxy which queue generation is live. Streamed tracks
+        still being fetched for a superseded one have lost their consumer (the
+        filler's generation guard will refuse them), so their downloads are
+        cancelled at the source rather than run to completion and be thrown
+        away — this is the same reconciliation as _maintain_preview_window,
+        driven by the mutation instead of the playhead."""
+        from streaming import service as streaming_service
+        proxy = streaming_service.get_proxy()
+        if proxy is not None:
+            proxy.retire_generation(generation)
+
     def _on_backend_status(self, s: PlaybackStatus) -> None:
         """One status tick from the active backend → SSE payload (exact
         legacy shape + `output`), play tracking, end-of-queue archival,
@@ -452,6 +464,7 @@ class PlaybackManager:
                                           probe_first=probe_first)
             if added:
                 gen = self.queue.replace(items[:added])
+                self._retire_previews(gen)
                 self._last_slot = 0   # fresh queue — no resume slot in it
                 backend.queue_changed("replace", play=play)
                 self._schedule_persist()
@@ -460,11 +473,18 @@ class PlaybackManager:
             return added, gen
 
     def append(self, items: list[QueueItem], position: str = "end",
-               generation: Optional[int] = None) -> Optional[int]:
+               generation: Optional[int] = None,
+               after: Optional[QueueItem] = None) -> Optional[int]:
         """Append/insert into the CANONICAL queue. Returns the count applied,
         or None when `generation` is stale (the queue was replaced — the
         filler must stop). 'next' inserts after the playing slot; with
         nothing playing it appends at the end.
+
+        `after` is an item a previous call already inserted, and this call
+        EXTENDS that run: a streamed 'play next' album lands track by track as
+        each one buffers, and each must follow the one before it rather than
+        jump ahead of it. The playhead still wins when it has already passed
+        that item — inserting behind it would drop the tracks into the past.
 
         The queue is authoritative and independent of the output: building it
         needs no live device. A None/absent backend just skips the mirror —
@@ -478,6 +498,9 @@ class PlaybackManager:
                 anchor = self._latest_status.get("track_index")
                 anchor = anchor if (isinstance(anchor, int)
                                     and 1 <= anchor <= len(self.queue)) else None
+                run = self.queue.index_of(after) if after is not None else None
+                if run is not None:
+                    anchor = run if anchor is None else max(anchor, run)
             else:
                 anchor = None
             if position == "next" and anchor is not None:
@@ -575,6 +598,7 @@ class PlaybackManager:
             backend = self.backend()
             backend.queue_clear_after_current()
             gen = self.queue.clear_for_radio(self._latest_status.get("track_index"))
+            self._retire_previews(gen)
             backend.queue_changed("clear")
             self._schedule_persist()
             return gen

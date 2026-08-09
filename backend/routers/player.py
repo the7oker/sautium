@@ -1282,7 +1282,8 @@ def jump(req: JumpRequest):
         raise HTTPException(status_code=503, detail=str(e))
 
 
-def _filler_append(item, gen: int) -> Optional[bool]:
+def _filler_append(item, gen: int, *, position: str = "end",
+                   after=None) -> Optional[bool]:
     """Append one filler item, retrying through control-link blips — a DHT
     announce window can drop a single add while the audio stream itself rides
     on, and silently losing an already-fetched track leaves a "buffering"
@@ -1291,7 +1292,7 @@ def _filler_append(item, gen: int) -> Optional[bool]:
     for attempt in range(4):
         if attempt:
             time.sleep(5)
-        added = manager.append([item], generation=gen)
+        added = manager.append([item], position, generation=gen, after=after)
         if added is None:
             return None
         if added:
@@ -1505,8 +1506,8 @@ def _phantom_filler(proxy, tokens: list, start_index: int, gen: int) -> None:
     "not fetched yet" is not an error (a per-track timeout here silently
     dropped every track whose turn hadn't come, so a queued album arrived
     as just its last few tracks). A track is skipped only when its fetch
-    actually failed; a replaced session wakes every waiter (superseded)
-    and the generation guard stops the filler."""
+    actually failed; moving to another queue retires these tokens, which
+    wakes every waiter and stops the filler at once."""
     for j in range(start_index, len(tokens)):
         try:
             e = proxy.wait_ready(tokens[j], timeout=None)
@@ -1522,24 +1523,31 @@ def _phantom_filler(proxy, tokens: list, start_index: int, gen: int) -> None:
 
 
 def _phantom_insert_next(proxy, tokens: list, gen: int) -> None:
-    """Wait for EVERY queued token (unbounded, same rationale as the filler),
-    then seamless-insert the whole block after the playing slot — 'next'
-    needs the block in hand, and on a backlogged channel readiness is far
-    away, so this runs off the request thread. The generation guard inside
-    append() discards the block if the queue was replaced meanwhile."""
-    ready_items = []
-    for tok in tokens:
+    """Roll a 'play next' block in as it buffers, in its own order. Waits are
+    unbounded (same rationale as the filler), and each pass inserts everything
+    that has landed so far — a slow mirror therefore coalesces bigger blocks on
+    its own, with no timer guessing at the rate. Each chunk goes after the
+    previous one: inserting every chunk after the PLAYING slot would play the
+    album backwards, and holding the whole block until its last track arrived
+    made 'next' land minutes later, wherever the playhead had drifted to."""
+    cursor = None      # last item inserted — the run each new chunk extends
+    i = 0
+    while i < len(tokens):
         try:
-            e = proxy.wait_ready(tok, timeout=None)
+            proxy.wait_ready(tokens[i], timeout=None)
         except KeyError:
-            return   # set dropped: a new session replaced these tokens
-        if e.audio is None:
-            continue
-        item = queue_mod.item_for_proxy_token(tok)
-        if item is not None:
-            ready_items.append(item)
-    if ready_items:
-        manager.append(ready_items, "next", generation=gen)
+            return   # set dropped: the queue moved on, or a new session
+        playable, _secs, used = proxy.ready_run(tokens[i:])
+        i += used
+        for tok in playable:
+            item = queue_mod.item_for_proxy_token(tok)
+            if item is None:
+                continue
+            placed = _filler_append(item, gen, position="next", after=cursor)
+            if placed is None:
+                return   # user moved to another queue → stop inserting
+            if placed:
+                cursor = item   # a track the mirror dropped can't anchor the run
 
 
 def _parallel_resolve(provider, queries: list) -> list:
@@ -1847,6 +1855,9 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
                     if it is not None]
     try:
         added, gen = manager.replace_queue(prefix_items, play=True)
+        # The session belongs to this queue now — moving to another one cancels
+        # whatever of it is still downloading.
+        proxy.bind(tokens, gen)
         _exit_radio_mode()
 
         if not added:
@@ -1916,7 +1927,8 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
 
     try:
         item = queue_mod.item_for_proxy_token(tokens[0])
-        added, _gen = manager.replace_queue([item] if item else [], play=True)
+        added, gen = manager.replace_queue([item] if item else [], play=True)
+        proxy.bind(tokens, gen)
         _exit_radio_mode()
         if not added:
             raise HTTPException(
@@ -1950,8 +1962,9 @@ def queue_phantom_track(req: PlayPhantomTrackRequest):
                 "missing": [{"track_id": req.track_id, "title": q.title}]}
 
     proxy = streaming_service.get_proxy()
-    tokens = proxy.add_tracks([(q, chain)])
+    tokens = proxy.add_tracks([(q, chain)], front=(req.position == "next"))
     gen = manager.queue.generation
+    proxy.bind(tokens, gen)
     if req.position == "next":
         threading.Thread(target=_phantom_insert_next, args=(proxy, list(tokens), gen),
                          daemon=True, name="phantom-queue-next").start()
@@ -1986,15 +1999,19 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
                 "requested": len(queries), "missing": missing_payload}
 
     avail_q = [q for q, _ch in items]
-    # Both positions roll in from a background worker — fetching is sequential
-    # and possibly backlogged behind earlier albums, so readiness can be far
-    # away. The canonical queue is authoritative and independent of the
-    # output, so queueing works with no active/reachable device — the user
-    # plays once it's back (that press attaches/probes it).
-    tokens = proxy.add_tracks(items)
-    # A queue-append doesn't start a new session, so capture the CURRENT
-    # generation; the workers abort if the user replaces the queue meanwhile.
+    # Both positions roll in from a background worker: fetching is sequential,
+    # so at the END of the queue readiness can be far away (behind whatever is
+    # already pending), while a 'next' block jumps the fetch queue because it
+    # is wanted before the current track ends. The canonical queue is
+    # authoritative and independent of the output, so queueing works with no
+    # active/reachable device — the user plays once it's back (that press
+    # attaches/probes it).
+    tokens = proxy.add_tracks(items, front=(req.position == "next"))
+    # A queue-append doesn't start a new session, so bind to the CURRENT
+    # generation: replacing the queue then cancels these fetches at the source
+    # and the worker below stops on its generation guard.
     gen = manager.queue.generation
+    proxy.bind(tokens, gen)
     if req.position == "next":
         threading.Thread(target=_phantom_insert_next, args=(proxy, list(tokens), gen),
                          daemon=True, name="phantom-queue-next").start()
@@ -2249,7 +2266,7 @@ def _radio_interleave(owned: list, phantom: list, prev_artist: Optional[str]) ->
     return batch
 
 
-def _radio_build_batch(seed_uuid: str) -> list:
+def _radio_build_batch(seed_uuid: str, gen: int) -> list:
     """Pick a mixed batch from the seed, cap + space out the phantoms (owned tracks
     between them buffer the next stream), resolve the phantom chains and submit them
     to the proxy. Returns ordered items for the rolling appender (owned: file fields,
@@ -2282,6 +2299,8 @@ def _radio_build_batch(seed_uuid: str) -> list:
     avail = [(q, ch) for q, ch in zip(p_queries, chains) if ch]
     avail_pos = [pos for pos, ch in zip(p_positions, chains) if ch]
     tokens = proxy.add_tracks(avail) if avail else []
+    if tokens:
+        proxy.bind(tokens, gen)  # leaving radio cancels what it was still fetching
     pos_token = dict(zip(avail_pos, tokens))
 
     batch = []
@@ -2336,7 +2355,7 @@ def _radio_fill(seed_uuid: str, gen: int) -> None:
     global _radio_refilling
     try:
         if manager.radio_mode and manager.queue.generation == gen:
-            batch = _radio_build_batch(seed_uuid)
+            batch = _radio_build_batch(seed_uuid, gen)
             if batch:
                 _radio_append_batch(batch, gen)
     except Exception:

@@ -8,6 +8,9 @@ Design points proven during bring-up:
   owned tracks) — so a preview track is just one more playlist URI.
 - A provider fetch takes seconds (search + download + transcode), so we PREFETCH
   the next track off the request path; HQPlayer's GET then hits a ready buffer.
+- Queued work is BOUND to the canonical-queue generation that will hold it, so
+  moving to another queue cancels the pending fetches at the source instead of
+  downloading an album nobody will hear (`bind` / `retire_generation`).
 - HQPlayer probe-then-streams (HEAD → Range GET, sometimes resets) — we support
   HEAD + Range(206) and swallow client resets.
 
@@ -61,6 +64,10 @@ class _Entry:
     fetch_seconds: Optional[float] = None   # wall time of the provider fetch
     _claimed: bool = False          # a worker is (or has) prepared this entry
     evicted: bool = False           # audio dropped by the RAM budget; refetches on demand
+    # Canonical-queue generation whose filler will place this track. None = the
+    # request that made it still owns it (a start_session still pre-buffering, an
+    # owned m4a transcode); a bound entry dies with its generation.
+    generation: Optional[int] = None
 
 
 class MediaProxy:
@@ -83,6 +90,9 @@ class MediaProxy:
         self._fetch_worker = False
         self._entries: dict[str, _Entry] = {}
         self._session: list[str] = []   # ordered tokens of the current preview
+        # The canonical-queue generation currently being played, as last reported
+        # by the manager. Work bound to any other generation has no consumer left.
+        self._live_generation: Optional[int] = None
         self._files: dict[str, _FileEntry] = {}          # /file/{token} registry
         self._file_tokens_by_path: dict[str, str] = {}   # idempotent re-registration
         self._blobs: dict[str, tuple[bytes, str]] = {}   # /art/{token} → (data, mime)
@@ -223,21 +233,41 @@ class MediaProxy:
         for tok in reversed(toks):
             self._prefetch(tok, front=True)
 
+    # ---- entry minting ---------------------------------------------------
+
+    def _ram_index(self) -> dict:
+        """track_id → entry for every track already fetched and still in RAM.
+        Re-downloading what we hold is pure waste, and repeated identical pulls
+        read as scraping to the providers. Caller holds _lock."""
+        return {e.query.track_id: e for e in self._entries.values()
+                if e.ready.is_set() and e.audio is not None and e.query.track_id}
+
+    def _mint(self, token: str, query: TrackQuery, index: int, chain: list,
+              in_ram: dict) -> _Entry:
+        """A fresh entry, adopting `in_ram` audio when the same track is already
+        in hand (a re-streamed or re-queued album downloads nothing). Caller
+        holds _lock."""
+        prior = in_ram.get(query.track_id)
+        if prior is None or prior.audio is None:
+            return _Entry(token, query, index, chain=chain,
+                          provider=chain[0][0] if chain else None)
+        e = _Entry(token, query, index, chain=chain, provider=prior.provider)
+        e.audio = prior.audio
+        e.fetch_seconds = prior.fetch_seconds
+        e._claimed = True
+        e.ready.set()                    # already in hand — waiters return at once
+        return e
+
     # ---- session API (called by the player endpoint) --------------------
     def start_session(self, items: list) -> list[str]:
         """Replace the current preview with an ordered track list. Each item is a
         ``(query, chain)`` pair where chain is the lossless-first fallback list of
         ``(provider, source_id)`` (see _Entry). Returns the per-track tokens; build
-        URLs with ``url_for``."""
+        URLs with ``url_for``. The tokens start UNBOUND — the caller binds them to
+        the queue generation it goes on to build (see ``bind``)."""
         reused = 0
         with self._lock:
-            # Carry already-fetched audio into the new session: a repeat of
-            # the same album (double [Stream all], re-open) must NOT
-            # re-download what's still in RAM — wasteful, and repeated
-            # identical pulls read as scraping to the providers. Keyed by the
-            # phantom track UUID.
-            in_ram = {e.query.track_id: e for e in self._entries.values()
-                      if e.ready.is_set() and e.audio is not None and e.query.track_id}
+            in_ram = self._ram_index()
             for e in self._entries.values():
                 if not e.ready.is_set():
                     # Wake every waiter on the dropped set (fillers block
@@ -249,17 +279,9 @@ class MediaProxy:
             self._session = []
             for i, (q, chain) in enumerate(items):
                 tok = secrets.token_urlsafe(12)
-                prior = in_ram.get(q.track_id)
-                if prior is not None and prior.audio is not None:
-                    e = _Entry(tok, q, i, chain=chain, provider=prior.provider)
-                    e.audio = prior.audio
-                    e.fetch_seconds = prior.fetch_seconds
-                    e._claimed = True
-                    e.ready.set()        # already in hand — waiters return at once
+                e = self._mint(tok, q, i, chain, in_ram)
+                if e.ready.is_set():
                     reused += 1
-                else:
-                    e = _Entry(tok, q, i, chain=chain,
-                               provider=chain[0][0] if chain else None)
                 self._entries[tok] = e
                 self._session.append(tok)
         # Priority start: fetch ONLY track 0 now (full bandwidth → fastest first
@@ -283,25 +305,77 @@ class MediaProxy:
         for tok in tail:
             self._prefetch(tok)
 
-    def add_tracks(self, items: list) -> list:
+    def add_tracks(self, items: list, *, front: bool = False) -> list:
         """Add tracks to the served pool WITHOUT replacing the current album
         session — for queue-appends, so the album and the queued tracks are
         served at once. Each item is a ``(query, chain)`` pair (see start_session).
-        Returns the new tokens (prefetched);
-        the caller waits and appends them to HQPlayer. They are NOT part of the
-        rolling-append `_session`; the next start_session (a replace-queue play)
-        clears them together with the album, in step with HQPlayer's queue clear."""
+        Returns the new tokens (prefetched); the caller waits and places them.
+        They are NOT part of the rolling-append `_session`; the next
+        start_session (a replace-queue play) clears them together with the album,
+        and ``bind`` ties them to the queue generation that will hold them.
+
+        ``front`` fetches them AHEAD of everything already pending: a 'play next'
+        block is wanted before the current track ends, so it cannot sit behind an
+        album that was merely queued at the end (the whole point of 'next')."""
         toks = []
         with self._lock:
+            in_ram = self._ram_index()
             for i, (q, chain) in enumerate(items):
                 tok = secrets.token_urlsafe(12)
-                self._entries[tok] = _Entry(tok, q, i, chain=chain,
-                                            provider=chain[0][0] if chain else None)
+                self._entries[tok] = self._mint(tok, q, i, chain, in_ram)
                 toks.append(tok)
-        for tok in toks:
-            self._prefetch(tok)
+        # Reversed for `front`, so head-inserting each one leaves the block in
+        # its own order at the head of the fetch queue.
+        for tok in (reversed(toks) if front else toks):
+            self._prefetch(tok, front=front)
         preview_events.ping()   # queued tracks now buffering → re-fetch
         return toks
+
+    # ---- generation binding (cancellation at the source) -----------------
+
+    def bind(self, tokens: list, generation: int) -> None:
+        """Attach tokens to the canonical-queue generation whose filler will
+        place them, so retiring that generation cancels them. Binding to an
+        ALREADY superseded generation retires immediately — that closes the
+        window between submitting tracks and reading the generation they were
+        submitted for."""
+        with self._lock:
+            for tok in tokens:
+                e = self._entries.get(tok)
+                if e is not None:
+                    e.generation = generation
+            live = self._live_generation
+        if live is not None and generation != live:
+            self.retire_generation(live)
+
+    def retire_generation(self, live_generation: int) -> int:
+        """Cancel work bound to a superseded queue generation: the user moved to
+        another queue, so nothing will ever place these tracks. Their fetches
+        leave the queue and their waiters are woken, so a filler blocked on
+        `wait_ready` stops at once instead of downloading an album nobody will
+        hear (and hammering the provider for it). Entries already holding audio
+        stay as RAM-reuse candidates — the budget owns their memory. UNBOUND
+        entries belong to the request that made them and are never touched.
+        Returns the number of fetches cancelled."""
+        with self._lock:
+            self._live_generation = live_generation
+            cancelled = 0
+            for tok, e in list(self._entries.items()):
+                if e.generation is None or e.generation == live_generation:
+                    continue
+                if e.ready.is_set() and e.audio is not None:
+                    continue
+                if tok in self._fetch_q:
+                    self._fetch_q.remove(tok)
+                del self._entries[tok]
+                e.error = "superseded: the queue moved on"
+                e.ready.set()
+                cancelled += 1
+        if cancelled:
+            logger.info("preview: cancelled %d pending fetch(es) — the queue "
+                        "moved to generation %d", cancelled, live_generation)
+            preview_events.ping()   # those rows stopped buffering → re-fetch
+        return cancelled
 
     def fetch_rtf(self, token: str) -> Optional[float]:
         """Real-time factor of a fetched track: wall seconds spent fetching per
@@ -314,25 +388,33 @@ class MediaProxy:
             return None
         return e.fetch_seconds / e.query.duration
 
-    def ready_lead(self, from_index: int) -> tuple[list[str], float, int]:
-        """The contiguous run of already-fetched tracks from `from_index`: the
-        playable tokens (failed fetches skipped), their total audio-seconds, and
-        the next index to resume at (the first not-yet-fetched track — the buffer
-        boundary). This is what is safe to hand HQPlayer right now."""
+    def ready_run(self, tokens: list) -> tuple[list, float, int]:
+        """The leading run of already-fetched tokens, without blocking: the
+        playable ones (failed fetches skipped), their total audio-seconds, and
+        how many tokens the run consumed — the first not-yet-fetched token is
+        the buffer boundary. This is what is safe to hand a player right now."""
         with self._lock:
-            playable: list[str] = []
+            playable: list = []
             secs = 0.0
-            idx = from_index
-            for j in range(from_index, len(self._session)):
-                e = self._entries.get(self._session[j])
+            used = 0
+            for tok in tokens:
+                e = self._entries.get(tok)
                 if e is None or not e.ready.is_set():
                     break                       # first un-fetched track = boundary
-                idx = j + 1
+                used += 1
                 if e.audio is None:
                     continue                    # fetched-but-failed → skip, scan on
-                playable.append(self._session[j])
+                playable.append(tok)
                 secs += e.query.duration or 0.0
-            return playable, secs, idx
+            return playable, secs, used
+
+    def ready_lead(self, from_index: int) -> tuple[list[str], float, int]:
+        """`ready_run` over the rolling album session, returning the session
+        index to resume filling at."""
+        with self._lock:
+            tail = self._session[from_index:]
+        playable, secs, used = self.ready_run(tail)
+        return playable, secs, from_index + used
 
     def is_buffering(self, track_id: str) -> bool:
         """True if a track with this id is still in-flight in the served pool (an
