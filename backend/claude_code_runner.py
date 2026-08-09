@@ -485,6 +485,35 @@ def call_claude_code_stream(
             if t == "system":
                 if evt.get("session_id"):
                     claude_sid = evt["session_id"]
+                if evt.get("subtype") == "init":
+                    servers = evt.get("mcp_servers") or []
+                    status = ", ".join(f"{s.get('name')}={s.get('status')}"
+                                       for s in servers) or "none"
+                    logger.info(
+                        f"Claude Code init: model={evt.get('model')}; "
+                        f"mcp: {status}; {len(evt.get('tools') or [])} tools")
+                    bad = [s for s in servers if s.get("status") != "connected"]
+                    if bad:
+                        # A dead tool server produces exactly the hedged,
+                        # tool-less answers this chat exists to avoid ("if
+                        # the catalog is even supported on your system…") —
+                        # the model sees tools described in its prompt that
+                        # it cannot call. Abort loudly instead of letting it
+                        # improvise around them; no legitimate state has a
+                        # configured server down.
+                        names = ", ".join(f"{s.get('name')} ({s.get('status')})"
+                                          for s in bad)
+                        error_msg = (
+                            f"AI tool server failed to start: {names}. "
+                            "Aborting instead of answering without "
+                            "search/playback tools — check the backend log "
+                            "for the MCP spawn error (launcher: does "
+                            "mcp-windows.json point at the venv python and "
+                            "mcp/assistant_server.py?)."
+                        )
+                        logger.error(error_msg)
+                        proc.terminate()
+                        break
 
             elif t == "stream_event":
                 inner = evt.get("event") or {}
