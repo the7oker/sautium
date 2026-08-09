@@ -373,6 +373,13 @@ def _mb_progress(update: Dict) -> None:
 def _mb_worker(force: bool) -> None:
     try:
         import mb_dump_load
+        # Re-checked here (not only in the endpoint) because maybe_auto_update
+        # starts the worker directly — a full disk must fail before the
+        # download, not 6 GB into it.
+        budget = mb_dump_load.disk_budget()
+        if not budget["can_fit"]:
+            raise RuntimeError(f"insufficient disk: needs ~{budget['required_gb']} GB, "
+                               f"{budget['free_gb']} GB free")
         result = mb_dump_load.download_and_load(_mb_progress, force=force)
         from datetime import datetime, timezone
         _write("musicbrainz.last_update_at", datetime.now(timezone.utc).isoformat())
@@ -1406,9 +1413,30 @@ def mb_delete() -> Dict[str, Any]:
     return {"success": True, **result}
 
 
+@router.get("/musicbrainz/status")
+def mb_status() -> Dict[str, Any]:
+    """Dump state + disk budget in one read — what the DJ agent's
+    mb_dump_status tool quotes before offering (or declining) a download."""
+    import mb_dump_load
+    return {**_mb_section(), "disk": mb_dump_load.disk_budget()}
+
+
 @router.post("/musicbrainz/update")
 def mb_update(force: bool = False) -> Dict[str, Any]:
     """Download (if newer) + stream-load the MusicBrainz dump in the background."""
+    import mb_dump_load
+    budget = mb_dump_load.disk_budget()
+    if not budget["can_fit"]:
+        # Synchronous refusal (the DJ agent must not report "started"), and
+        # surfaced in _mb_state so the Settings screen's fire-and-forget POST
+        # shows the reason instead of silently doing nothing.
+        msg = (f"insufficient disk: needs ~{budget['required_gb']} GB, "
+               f"{budget['free_gb']} GB free")
+        with _mb_lock:
+            if not _mb_state["running"]:
+                _mb_state.update(phase="error", progress=f"Failed: {msg}", error=msg)
+        notify_library_subscribers()
+        raise HTTPException(status_code=507, detail=msg)
     with _mb_lock:
         if _mb_state["running"]:
             raise HTTPException(status_code=409, detail="MusicBrainz update already running")

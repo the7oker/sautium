@@ -33,6 +33,15 @@ _DATA = os.environ.get("MB_DUMP_DIR") or os.path.normpath(os.path.join(_HERE, ".
 DUMP_PATH = os.path.join(_DATA, "mbdump.tar.bz2")
 VERSION_PATH = os.path.join(_DATA, "VERSION")
 
+# Runtime disk gate (agent quote + update precondition). Measured 2026-08:
+# core archive ~7 GB compressed, loaded mb_* tables ~21 GB — in both shipped
+# layouts (Docker ./data/*, launcher data_dir/*) they live on ONE volume and
+# coexist at stream-load peak. Nominal constants, not a mirror HEAD: the
+# budget must answer in milliseconds on the mb_resolve no-dump path.
+ARCHIVE_GB = 7.5
+TABLES_GB = 21.0
+MARGIN_GB = 2.0
+
 _MIRROR = "https://data.metabrainz.org/pub/musicbrainz/data/fullexport"
 _MB_WS = "https://musicbrainz.org/ws/2"   # genre vocabulary — not in the dump archives
 _MB_UA = "Sautium/1.0 ( https://sautium.net )"
@@ -489,6 +498,39 @@ def stats() -> Dict:
         "total_records": loaded,
         "size_bytes": size,
         "tables": len(by),
+    }
+
+
+def disk_budget() -> Dict:
+    """Can this volume take the dump? Free space is measured at the archive
+    dir, which shares the volume with the Postgres datadir in every shipped
+    layout — the two big consumers.
+
+    Fresh install peak = archive + loaded tables coexisting through
+    stream-load. With a dump already loaded the tables TRUNCATE-then-COPY
+    into space they already occupy, so only the (re)download must fit; bytes
+    already on disk count toward the download (resume)."""
+    try:
+        free_gb = shutil.disk_usage(_DATA if os.path.isdir(_DATA)
+                                    else os.path.dirname(_DATA)).free / 1e9
+    except OSError:
+        free_gb = 0.0
+    have_archive = 0.0
+    if os.path.isdir(_DATA):
+        for name in os.listdir(_DATA):
+            if name.endswith(".tar.bz2"):
+                try:
+                    have_archive += os.path.getsize(os.path.join(_DATA, name)) / 1e9
+                except OSError:
+                    pass
+    download_gb = max(0.0, ARCHIVE_GB - have_archive)
+    tables_gb = 0.0 if stats().get("loaded") else TABLES_GB
+    required_gb = download_gb + tables_gb + MARGIN_GB
+    return {
+        "download_gb": round(download_gb, 1),
+        "required_gb": round(required_gb, 1),
+        "free_gb": round(free_gb, 1),
+        "can_fit": free_gb >= required_gb,
     }
 
 

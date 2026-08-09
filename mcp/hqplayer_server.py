@@ -15,6 +15,7 @@ All logging goes to stderr (stdout is reserved for STDIO MCP transport).
 
 import hashlib
 import hmac
+import json
 import logging
 import os
 import sys
@@ -83,14 +84,13 @@ def _backend_get(path: str, params: dict) -> dict:
         return resp.json()
 
 
-def _backend_post(path: str, body: dict) -> dict:
+def _backend_post(path: str, body: dict, timeout: float = 30.0) -> dict:
     """Signed POST to the FastAPI backend (JSON body covered by the signature)."""
-    import json as _json
-    payload = _json.dumps(body).encode("utf-8")
+    payload = json.dumps(body).encode("utf-8")
     ts = str(int(time.time()))
     canonical = f"POST\n{path}\n{ts}\n{hashlib.sha256(payload).hexdigest()}"
     sig = hmac.new(_api_secret(), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
-    with httpx.Client(base_url=BACKEND_URL, timeout=30.0, verify=False) as client:
+    with httpx.Client(base_url=BACKEND_URL, timeout=timeout, verify=False) as client:
         resp = client.post(path, content=payload,
                            headers={"x-sautium-ts": ts, "x-sautium-sig": sig,
                                     "content-type": "application/json"})
@@ -685,6 +685,130 @@ def search_genres(query: str, limit: int = 10) -> str:
         return "Error: Cannot connect to backend."
     except Exception as e:
         return f"Error in genre search: {e}"
+
+
+# -- MusicBrainz dump (beyond-library resolution) ------------------------------
+
+@mcp.tool()
+def mb_resolve(artist_name: str, album_title: str = "") -> str:
+    """Resolve an artist that is NOT in the library (neither owned nor phantom)
+    against the full MusicBrainz catalog and materialize them as streamable
+    phantom entities. Returns JSON:
+      status "ok"       -> artist_id (+ album_id when album_title matched) —
+                           real UUIDs for your DJ_BLOCKS artist/album cards.
+      status "not_found"-> the name is not in the catalog; do not tile it.
+      status "no_dump"  -> the optional MusicBrainz dump is not installed;
+                           payload carries download_gb/required_gb/free_gb/
+                           can_fit for quoting the user before any download.
+
+    Costs seconds per artist (mints the whole discography) — call it for at
+    most ~3 artists per reply, only after library SQL found nothing.
+
+    Args:
+        artist_name: Artist to resolve (any script; fuzzy, alias-aware)
+        album_title: Optionally pin one specific album of that artist
+    """
+    q = (artist_name or "").strip()
+    if not q:
+        return json.dumps({"status": "error", "detail": "artist_name required"})
+    try:
+        data = _backend_get("/api/discovery/mb-search", {"q": q, "limit": 5})
+        if not data.get("available"):
+            st = _backend_get("/api/settings/musicbrainz/status", {})
+            disk = st.get("disk", {})
+            upd = st.get("update", {})
+            return json.dumps({
+                "status": "no_dump",
+                "dump_running": bool(upd.get("running")),
+                "dump_progress": upd.get("progress") if upd.get("running") else None,
+                **{k: disk.get(k) for k in
+                   ("download_gb", "required_gb", "free_gb", "can_fit")},
+            })
+        artists = data.get("artists") or []
+        if not artists:
+            return json.dumps({"status": "not_found", "query": q})
+        best = artists[0]
+        out = {
+            "status": "ok",
+            "artist": {"name": best["name"], "comment": best.get("comment"),
+                       "release_groups": best.get("rg_count")},
+            # Namesake guard: MB disambiguation lines of the runners-up, so a
+            # wrong-artist match is visible to the agent before it tiles.
+            "alternatives": [{"name": a["name"], "comment": a.get("comment")}
+                             for a in artists[1:4]],
+        }
+        rg_gid = None
+        if album_title.strip():
+            alb = _backend_get("/api/discovery/mb-search",
+                               {"q": album_title.strip(), "limit": 10})
+            match = next((r for r in alb.get("albums") or []
+                          if r.get("artist_gid") == best["gid"]), None)
+            if match:
+                rg_gid = match["gid"]
+                out["album"] = {"title": match["title"], "year": match.get("year")}
+            else:
+                out["album_status"] = "album_not_found"
+        # Big discographies stream tracklists for every release group — give
+        # the mint far more than the default 30s.
+        minted = _backend_post("/api/discovery/mb-mint",
+                               {"artist_gid": best["gid"], "rg_gid": rg_gid},
+                               timeout=180.0)
+        out["artist_id"] = minted.get("artist_id")
+        if rg_gid:
+            # None here = canon declined the group; fall back to the artist card.
+            out["album_id"] = minted.get("album_id")
+        return json.dumps(out, ensure_ascii=False)
+    except httpx.ConnectError:
+        return "Error: Cannot connect to backend."
+    except Exception as e:
+        return f"Error resolving against MusicBrainz: {e}"
+
+
+@mcp.tool()
+def mb_dump_status() -> str:
+    """MusicBrainz dump state: loaded/version, live download+load progress
+    (phase, pct) and the disk budget (download_gb/required_gb/free_gb/can_fit).
+    Use for "how is the download going?" follow-ups and to re-check the budget
+    before offering mb_dump_download."""
+    try:
+        st = _backend_get("/api/settings/musicbrainz/status", {})
+        return json.dumps({
+            "loaded": st.get("loaded"),
+            "version": st.get("version"),
+            "update": st.get("update"),
+            "disk": st.get("disk"),
+        }, ensure_ascii=False)
+    except httpx.ConnectError:
+        return "Error: Cannot connect to backend."
+    except Exception as e:
+        return f"Error reading dump status: {e}"
+
+
+@mcp.tool()
+def mb_dump_download(confirm: bool = False) -> str:
+    """Start the background MusicBrainz dump download+load (~7 GB download,
+    ~30 GB disk total, tens of minutes). Fire-and-forget: returns immediately —
+    NEVER wait for completion in the same reply; progress lives in Settings →
+    MusicBrainz or mb_dump_status. Call ONLY with confirm=true, ONLY after the
+    user explicitly agreed in this conversation to the quoted size, and never
+    when the disk budget said can_fit=false (the backend refuses then anyway).
+
+    Args:
+        confirm: Must be true; the explicit-user-consent latch.
+    """
+    if not confirm:
+        return json.dumps({"status": "refused",
+                           "detail": "requires confirm=true after explicit user consent"})
+    try:
+        _backend_post("/api/settings/musicbrainz/update", {})
+    except httpx.ConnectError:
+        return "Error: Cannot connect to backend."
+    except RuntimeError as e:
+        # 409 already-running / 507 insufficient-disk, with the backend's reason.
+        return json.dumps({"status": "error", "detail": str(e)}, ensure_ascii=False)
+    return json.dumps({"status": "started",
+                       "note": "background job; check later via mb_dump_status "
+                               "or Settings → MusicBrainz"})
 
 
 @mcp.tool()
