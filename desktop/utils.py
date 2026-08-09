@@ -180,6 +180,50 @@ def claude_authenticated() -> bool:
         return False
 
 
+def claude_auth_verified(timeout: float = 90.0) -> bool:
+    """Live end-to-end auth check: one minimal `-p` turn.
+
+    `claude_authenticated()` only proves a credentials file EXISTS — stored
+    tokens can be expired beyond refresh, revoked, or belong to a lapsed
+    subscription, and the wizard used to treat that as signed-in, so the
+    first chat died with "OAuth session expired and could not be refreshed".
+    A short-expired access token is NOT such a case (the CLI refreshes
+    lazily on use), so static inspection of expiresAt cannot distinguish
+    working from dead credentials — only actually running the CLI can.
+
+    Slow (seconds; up to `timeout` on a stalled network) — call from a
+    worker thread."""
+    claude = get_claude_executable()
+    if claude is None:
+        return False
+    env = os.environ.copy()
+    # The DJ runner drops ANTHROPIC_API_KEY so the CLI bills the OAuth
+    # subscription — the probe must test the same path, not a stray key.
+    env.pop("ANTHROPIC_API_KEY", None)
+    kwargs = {
+        "capture_output": True, "text": True,
+        "encoding": "utf-8", "errors": "replace",
+        "timeout": timeout, "env": env,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        result = subprocess.run(
+            [str(claude), "-p", "ok", "--output-format", "json"], **kwargs)
+    except Exception as e:
+        logger.debug(f"Claude auth probe failed to run: {e}")
+        return False
+    if result.returncode != 0:
+        logger.info(f"Claude auth probe rc={result.returncode}: "
+                    f"{(result.stderr or result.stdout or '').strip()[:200]}")
+        return False
+    try:
+        out = json.loads(result.stdout.strip().splitlines()[-1])
+        return not out.get("is_error", False)
+    except (json.JSONDecodeError, IndexError):
+        return True  # rc 0 with unparsable output — older CLI, trust the rc
+
+
 def install_claude_runtime(progress_cb=None) -> Tuple[bool, str]:
     """`npm install --prefix <claude_prefix> @anthropic-ai/claude-code`.
 

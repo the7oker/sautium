@@ -24,6 +24,7 @@ import customtkinter as ctk
 
 from desktop.config_manager import get_data_dir, load_config, save_config
 from desktop.utils import (
+    claude_auth_verified,
     claude_authenticated,
     detect_claude_cli,
     detect_git,
@@ -72,6 +73,11 @@ class SetupWizard(ctk.CTkToplevel):
         self._claude_install_thread: Optional[threading.Thread] = None
         self._claude_poll_after_id: Optional[str] = None
         self._claude_poll_deadline: float = 0.0
+        # Live-probe verdict over stored credentials: None = not checked yet,
+        # False = file exists but auth is dead (expired beyond refresh /
+        # revoked). Presence of .credentials.json alone proves nothing.
+        self._claude_verified: Optional[bool] = None
+        self._claude_verify_thread: Optional[threading.Thread] = None
 
         # Main container
         self.container = ctk.CTkFrame(self, fg_color="transparent")
@@ -298,9 +304,12 @@ class SetupWizard(ctk.CTkToplevel):
                     return False
                 self.config["api_keys"]["openai"] = key
             elif provider == "claude_code":
-                if self._claude_state() != "ready":
+                if self._claude_state() != "ready" or self._claude_verified is not True:
                     self._provider_error.configure(
-                        text="Finish Claude setup above (or pick another provider).",
+                        text=("Verifying Claude sign-in — give it a few seconds."
+                              if self._claude_state() == "ready"
+                              and self._claude_verified is None
+                              else "Finish Claude setup above (or pick another provider)."),
                     )
                     return False
                 self.config["claude_code_available"] = True
@@ -700,19 +709,38 @@ class SetupWizard(ctk.CTkToplevel):
 
         state = self._claude_state()
 
+        # Stored credentials are only trusted after a live probe: the file
+        # can hold tokens that are expired beyond refresh or revoked, and
+        # shipping "ready" on file presence alone let a fresh install skip
+        # sign-in and die on the first chat with "OAuth session expired".
+        stale_signin = False
         if state == "ready":
-            ctk.CTkLabel(
-                self._provider_fields_frame,
-                text="✓ Claude Code is ready",
-                text_color="#4CAF50",
-                font=ctk.CTkFont(size=14, weight="bold"),
-            ).pack(anchor="w")
-            ctk.CTkLabel(
-                self._provider_fields_frame,
-                text="Signed in via subscription. No API key needed.",
-                text_color="gray",
-            ).pack(anchor="w", pady=(2, 0))
-            return
+            if self._claude_verified is True:
+                ctk.CTkLabel(
+                    self._provider_fields_frame,
+                    text="✓ Claude Code is ready",
+                    text_color="#4CAF50",
+                    font=ctk.CTkFont(size=14, weight="bold"),
+                ).pack(anchor="w")
+                ctk.CTkLabel(
+                    self._provider_fields_frame,
+                    text="Signed in via subscription. No API key needed.",
+                    text_color="gray",
+                ).pack(anchor="w", pady=(2, 0))
+                return
+            if self._claude_verified is None:
+                ctk.CTkLabel(
+                    self._provider_fields_frame,
+                    text="Verifying stored sign-in…",
+                    text_color="gray",
+                    font=ctk.CTkFont(size=13),
+                ).pack(anchor="w")
+                self._start_claude_verify()
+                return
+            # Probe said the stored sign-in is dead — walk the user through
+            # a fresh /login using the same UI as a first sign-in.
+            stale_signin = True
+            state = "not_authed"
 
         if state == "node_missing":
             ctk.CTkLabel(
@@ -747,7 +775,7 @@ class SetupWizard(ctk.CTkToplevel):
                 self._provider_fields_frame,
                 text="Refresh",
                 width=120,
-                command=self._render_claude_state_ui,
+                command=self._refresh_claude_state,
             ).pack(anchor="w")
             return
 
@@ -783,8 +811,9 @@ class SetupWizard(ctk.CTkToplevel):
         # state == "not_authed"
         ctk.CTkLabel(
             self._provider_fields_frame,
-            text="Claude Code installed.",
-            text_color="gray",
+            text=("Stored sign-in is expired or revoked — sign in again."
+                  if stale_signin else "Claude Code installed."),
+            text_color="orange" if stale_signin else "gray",
             font=ctk.CTkFont(size=13),
         ).pack(anchor="w")
 
@@ -855,7 +884,7 @@ class SetupWizard(ctk.CTkToplevel):
             btn_frame,
             text="Refresh",
             width=100,
-            command=self._render_claude_state_ui,
+            command=self._refresh_claude_state,
             fg_color="transparent", border_width=1,
         ).pack(side="left")
 
@@ -962,11 +991,44 @@ class SetupWizard(ctk.CTkToplevel):
         self._claude_poll_deadline = time.monotonic() + 300
         self._poll_claude_auth()
 
+    def _start_claude_verify(self):
+        """Probe stored credentials with a live CLI turn (worker thread)."""
+        if self._claude_verify_thread and self._claude_verify_thread.is_alive():
+            return
+
+        def _worker():
+            ok = claude_auth_verified()
+            self.after(0, lambda: self._on_claude_verify_done(ok))
+
+        self._claude_verify_thread = threading.Thread(target=_worker, daemon=True)
+        self._claude_verify_thread.start()
+
+    def _on_claude_verify_done(self, ok: bool):
+        self._claude_verified = ok
+        # The probe takes seconds — the user may have navigated to another
+        # step, destroying the provider frame this render would touch. The
+        # verdict is cached either way; coming back re-renders from it.
+        try:
+            alive = bool(self._provider_fields_frame.winfo_exists())
+        except Exception:
+            alive = False
+        if alive:
+            self._render_claude_state_ui()
+
+    def _refresh_claude_state(self):
+        """Refresh button: drop the cached probe verdict so a sign-in done
+        outside our console (user's own terminal) gets re-checked."""
+        self._claude_verified = None
+        self._render_claude_state_ui()
+
     def _poll_claude_auth(self):
         """Self-rescheduling timer that checks for credentials."""
         if claude_authenticated():
             self._claude_poll_after_id = None
-            self._render_claude_state_ui()  # transitions to ready UI
+            # Fresh credentials just landed — re-probe them instead of
+            # trusting a pre-login verdict.
+            self._claude_verified = None
+            self._render_claude_state_ui()  # transitions to verifying → ready
             return
         if time.monotonic() >= self._claude_poll_deadline:
             self._claude_poll_after_id = None

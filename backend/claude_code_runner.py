@@ -76,6 +76,24 @@ DISALLOWED_TOOLS_RESEARCH = _FILESYSTEM_AND_SHELL
 # 57s of UI silence, 2026-07-22). 1024 keeps short planning steps.
 _MAX_THINKING_TOKENS = "1024"
 
+# The CLI's auth failures arrive in several shapes — "API Error: 401
+# Invalid authentication credentials" carries api_error_status=401, but
+# "Failed to authenticate: OAuth session expired and could not be
+# refreshed" does NOT (observed on a fresh launcher install with stale
+# host credentials, 2026-08-09) — so the mapping must also match text.
+# Only consulted inside is_error paths, where an authentication mention
+# IS the failure.
+OAUTH_EXPIRED_MSG = (
+    "Claude Code sign-in expired or revoked. Run `claude /login` in a "
+    "terminal on the host machine — the new token is picked up "
+    "automatically (no restart needed)."
+)
+
+
+def _oauth_error(text: Optional[str]) -> bool:
+    t = (text or "").lower()
+    return "oauth" in t or "authenticat" in t
+
 
 def _claude_env() -> dict:
     """Env for the Claude Code subprocess.
@@ -256,13 +274,10 @@ def call_claude_code(
         raw_answer = output.get("result", "")
         claude_sid = output.get("session_id")
 
-        if output.get("is_error") and output.get("api_error_status") == 401:
-            raw_answer = (
-                "Claude Code OAuth token expired. "
-                "Run `claude /login` on the host to refresh — "
-                "the container will pick up the new token automatically "
-                "(no restart needed)."
-            )
+        if output.get("is_error") and (
+            output.get("api_error_status") == 401 or _oauth_error(raw_answer)
+        ):
+            raw_answer = OAUTH_EXPIRED_MSG
 
         logger.info(
             f"Claude Code response: {len(raw_answer)} chars, session={claude_sid}"
@@ -511,24 +526,13 @@ def call_claude_code_stream(
                     # human-readable text on normal API errors.
                     errs = evt.get("errors") or []
                     api_status = evt.get("api_error_status")
-                    if api_status == 401:
-                        # OAuth token expired or revoked. The CLI's raw
-                        # message ("Failed to authenticate. API Error:
-                        # 401 Invalid authentication credentials") tells
-                        # the user nothing actionable — replace it with
-                        # a recovery instruction.
-                        error_msg = (
-                            "Claude Code OAuth token expired. "
-                            "Run `claude /login` on the host to refresh — "
-                            "the container will pick up the new token "
-                            "automatically (no restart needed)."
-                        )
+                    raw = evt.get("result") or (errs[0] if errs else None)
+                    if api_status == 401 or _oauth_error(raw):
+                        # The CLI's raw message tells the user nothing
+                        # actionable — replace with a recovery instruction.
+                        error_msg = OAUTH_EXPIRED_MSG
                     else:
-                        error_msg = (
-                            evt.get("result")
-                            or (errs[0] if errs else None)
-                            or "Claude Code error"
-                        )
+                        error_msg = raw or "Claude Code error"
 
             # 'user' (tool_result) events are internal — ignore.
 
@@ -536,7 +540,10 @@ def call_claude_code_stream(
         if rc != 0 and not error_msg:
             stderr_thread.join(timeout=2)
             stderr = "".join(stderr_chunks).strip()
-            error_msg = stderr or f"Claude Code exited with code {rc}"
+            if _oauth_error(stderr):
+                error_msg = OAUTH_EXPIRED_MSG
+            else:
+                error_msg = stderr or f"Claude Code exited with code {rc}"
             logger.error(f"Claude Code stream failed (rc={rc}): {error_msg}")
 
     except subprocess.TimeoutExpired:
