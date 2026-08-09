@@ -22,7 +22,7 @@ from typing import Optional
 
 import customtkinter as ctk
 
-from desktop.config_manager import load_config, save_config
+from desktop.config_manager import get_data_dir, load_config, save_config
 from desktop.utils import (
     claude_authenticated,
     detect_claude_cli,
@@ -1031,18 +1031,8 @@ class SetupWizard(ctk.CTkToplevel):
 
     def _free_gb(self) -> float:
         try:
-            from desktop.config_manager import get_data_dir
-            target = str(get_data_dir())
-        except Exception:
-            target = os.path.expanduser("~")
-        while target and not os.path.isdir(target):
-            parent = os.path.dirname(target)
-            if parent == target:
-                break
-            target = parent
-        try:
-            return shutil.disk_usage(target).free / 1e9
-        except Exception:
+            return shutil.disk_usage(get_data_dir()).free / 1e9
+        except OSError:
             return 0.0
 
     def _step_catalog(self):
