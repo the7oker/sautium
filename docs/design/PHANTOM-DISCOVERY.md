@@ -149,7 +149,7 @@ load. (See `reference_artist_photos.md`; do not remove that throttle.)
 ### D4. Phantom preview: stream Spotify → HQPlayer (not a deep-link)
 
 The current playback path is `file:// URI → HQPlayer playlist`
-(`mcp/hqplayer_server.py:772,779` via `file_path_to_uri`). A phantom
+(`mcp/assistant_server.py:772,779` via `file_path_to_uri`). A phantom
 track has no file path, so it **cannot** enter the Sautium queue.
 
 Instead of a passive "Listen on Spotify" deep-link, route a preview
@@ -496,7 +496,7 @@ canonical artist identity*. Two things break that:
 - UUID formulas: `backend/uuid_utils.py:27-54`.
 - Sync inventory joins: `desktop/p2p/sync_queries.py:117`,
   `backend/routers/sync.py:97-109`.
-- Playback path (local-file only): `mcp/hqplayer_server.py:751-1005`
+- Playback path (local-file only): `mcp/assistant_server.py:751-1005`
   (`file_path_to_uri` → `playlist_add`).
 - Deezer integration + throttle: `backend/routers/covers.py`,
   `reference_artist_photos.md`.

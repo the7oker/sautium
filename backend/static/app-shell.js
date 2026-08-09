@@ -140,7 +140,7 @@
   }
 
   /* ---------- Lightweight markdown ----------
-     Line-oriented parser sized for the prose the AI DJ emits in
+     Line-oriented parser sized for the prose the AI assistant emits in
      practice: headings, horizontal rules, bullet/numbered lists,
      pipe tables, inline code, **bold**, *italic*. No external
      library; escapeHtml runs first so angle brackets in the input

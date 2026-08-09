@@ -284,7 +284,7 @@ def generate_mcp_config(config: dict, output_path: Path) -> None:
     # exist on a fresh machine or lacks the deps, and the server died on
     # spawn SILENTLY: Claude Code just proceeds without that server's tools,
     # so the agent saw prompt descriptions of search/playback/MB tools it
-    # did not have. Same class of bug for the script path: hqplayer_server.py
+    # did not have. Same class of bug for the script path: assistant_server.py
     # lives in <project_root>/mcp/, not <backend>/mcp/.
     from desktop.python_env import get_backend_python
     backend_dir = output_path.parent          # the runner reads the file from backend/
@@ -304,9 +304,9 @@ def generate_mcp_config(config: dict, output_path: Path) -> None:
                     "DB_SSL": "false",
                 },
             },
-            "hqplayer": {
+            "assistant": {
                 "command": get_backend_python(),
-                "args": [str(project_root / "mcp" / "hqplayer_server.py")],
+                "args": [str(project_root / "mcp" / "assistant_server.py")],
                 "env": {
                     "DB_HOST": "localhost",
                     "DB_PORT": str(ports.get("postgres", 5432)),

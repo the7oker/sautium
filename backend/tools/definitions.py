@@ -1,6 +1,6 @@
 """Register all tools in the global REGISTRY.
 
-Handler functions mirror the MCP server logic (mcp/hqplayer_server.py),
+Handler functions mirror the MCP server logic (mcp/assistant_server.py),
 but run in-process inside the FastAPI backend.
 """
 

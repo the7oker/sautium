@@ -7,7 +7,7 @@
 > cross-script search. All four assumptions are wrong now — see below.
 > **Scope:** this engine **replaces the entire search layer** — the five
 > `discovery.py` endpoints, the `search.py` functions, **and** the MCP search
-> tools (`mcp/hqplayer_server.py`: `search_semantic/similar/artists/albums/`
+> tools (`mcp/assistant_server.py`: `search_semantic/similar/artists/albums/`
 > `tracks/genres/lyrics`, `play_similar`). One search core; Discovery UI and
 > the AI agents are both clients of it.
 
@@ -324,7 +324,7 @@ natural start.)*
 - `backend/routers/discovery.py` — 5 endpoints + `_filter_clauses` (dies).
 - `backend/search.py` — `search_by_text/lyrics/...`, `_similar_by_track_embedding`,
   `_apply_filters` (dies).
-- `mcp/hqplayer_server.py` — the `search_*` / `play_similar` MCP tools.
+- `mcp/assistant_server.py` — the `search_*` / `play_similar` MCP tools.
 - `backend/static/app-shell.js` — `wireDiscoveryFilters`, `appendFilterParams`,
   `runUnifiedSearch`, `runFilterOnlyBrowse` (frontend filter UI).
 - `backend/text_embeddings.py` — builder for the currently-unread

@@ -44,7 +44,7 @@ See:
   monetization and its Cyrillic-only trigger silently skipped
   French/German/CJK queries; torch bf16 GPU serving (5.5 GB VRAM) replaced
   by ct2 int8 2026-07-21
-- **anthropic SDK** for Claude API; Claude Code + MCP tools for the AI DJ
+- **anthropic SDK** for Claude API; Claude Code + MCP tools for the AI assistant (chat)
 - **libtorrent** for DHT (NOT pure-python `kademlia` — incompatible with BT DHT)
 - **CustomTkinter + PyInstaller** for the Windows desktop launcher
 - **aiohttp + PyNaCl + miniupnpc** for the P2P layer
@@ -689,7 +689,7 @@ responsibility).
 | `desktop/p2p/chat_service.py` | NaCl Box encryption, friend CRUD |
 | `desktop/p2p/email_verify.py` | Signed email verification + invite delivery |
 | `desktop/migrations/001_initial.sql` | Canonical schema (all types, tables, indexes, triggers) |
-| `mcp/hqplayer_server.py` | MCP server exposing 22 tools to Claude Code |
+| `mcp/assistant_server.py` | MCP server exposing 37 tools to Claude Code (search, playback, MB catalog, HQP device) |
 | `worker/verify.js` | Cloudflare Worker (email CA, signed invites) |
 
 ---

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-MCP Server for HQPlayer control and music library search.
+MCP Server for the Sautium AI assistant: library search + playback.
 
-Exposes HQPlayer playback controls and music library search as MCP tools
-that Claude can call directly via natural language.
+Exposes library search (metadata, semantic, lyrics), playback on whichever
+output the user selected (HQPlayer, DLNA, local device, browser), the
+MusicBrainz-catalog tools, and — while HQPlayer is the selected output —
+that device's own transport/DSP controls (the hqplayer_* tools).
 
 Architecture:
-  - HQPlayer Client: TCP XML → Windows host
+  - HQPlayer Client: TCP XML → Windows host (device tools only, lazy)
   - PostgreSQL: psycopg2 direct → localhost (Docker port-forwarded)
   - FastAPI Backend: httpx → localhost:8000 (ML-heavy semantic search)
 
@@ -117,8 +119,9 @@ TRACKER_URL = os.getenv("TRACKER_URL", "http://localhost:8765")  # playback trac
 
 # -- MCP Server ---------------------------------------------------------------
 mcp = FastMCP(
-    "HQPlayer DJ",
-    instructions="Control HQPlayer playback and search the music library.",
+    "Sautium Assistant",
+    instructions="Search the music library and control playback on the "
+                 "user's selected output.",
 )
 
 # -- Lazy singletons ----------------------------------------------------------

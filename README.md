@@ -179,7 +179,7 @@ sautium/
 │   ├── installer/                  # Inno Setup installer
 │   └── p2p/                        # sync server, DHT, chat, NAT traversal
 ├── mcp/
-│   └── hqplayer_server.py          # MCP server (22 tools for Claude Code)
+│   └── assistant_server.py         # MCP server (37 tools for Claude Code)
 ├── worker/
 │   └── verify.js                   # Cloudflare Worker (email CA, signed invites)
 ├── docs/
