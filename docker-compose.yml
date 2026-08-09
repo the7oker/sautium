@@ -104,7 +104,7 @@ services:
       # Phantom streaming preview (Deezer/YouTube → in-memory proxy → player).
       # Parity with docker-compose.wsl.yml — this block was missing here, so a
       # container recreated from this file silently lost streaming (2026-07-10).
-      STREAMING_PREVIEW_ENABLED: ${STREAMING_PREVIEW_ENABLED:-false}
+      STREAMING_PREVIEW_ENABLED: ${STREAMING_PREVIEW_ENABLED:-true}
       MEDIA_PROXY_PORT: ${MEDIA_PROXY_PORT:-8830}
       # Stated explicitly even though config.py defaults to 8831. It used to
       # be load-bearing: the launcher wrote its own config into backend/.env,

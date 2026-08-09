@@ -99,6 +99,12 @@ RUN pip install --no-cache-dir libtorrent || echo "WARNING: libtorrent not avail
 # stack). Standalone late layer so it never busts the pip-install cache.
 RUN pip install --no-cache-dir pynacl
 
+# yt-dlp — the core YouTube streaming-preview provider shells out to it
+# (streaming/youtube.py). Pip puts the `yt-dlp` entry point on PATH; the
+# launcher counterpart bootstraps it as a media tool (desktop/db_init.py).
+# Late standalone layer: a version bump must not re-run the pip install above.
+RUN pip install --no-cache-dir yt-dlp
+
 # Parallel bzip2 — fast MusicBrainz dump decompression (mb_dump_load). Kept in a
 # late, standalone layer so it never busts the expensive pip-install cache above.
 RUN apt-get update && apt-get install -y lbzip2 \

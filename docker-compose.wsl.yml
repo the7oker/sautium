@@ -87,7 +87,7 @@ services:
       # Phantom-album streaming preview (media proxy on a separate plain-http port;
       # advertised_host is what HQPlayer puts in the URL — 127.0.0.1 = the published
       # port on this host).
-      STREAMING_PREVIEW_ENABLED: ${STREAMING_PREVIEW_ENABLED:-false}
+      STREAMING_PREVIEW_ENABLED: ${STREAMING_PREVIEW_ENABLED:-true}
       MEDIA_PROXY_PORT: ${MEDIA_PROXY_PORT:-8830}
       # Explicit for the same reason as MEDIA_PROXY_PORT. Historically the
       # launcher's backend/.env leaked into the container and won for anything

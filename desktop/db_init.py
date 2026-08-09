@@ -440,10 +440,11 @@ def _link_pgvector_to_pg(brew: str) -> None:
 # ================================================================
 # The audio pipeline shells out to external binaries: ffmpeg (+ ffprobe) for
 # the shared 48kHz decode path (embeddings + analysis), fpcalc (Chromaprint)
-# for the content-address fingerprint, and flac for stream->FLAC transcode.
-# A fresh node missing any fails those steps silently (ffmpeg: 0 embeddings;
-# fpcalc: no fingerprint provenance). The launcher installs them all at first
-# run so the app is self-contained.
+# for the content-address fingerprint, flac for stream->FLAC transcode, and
+# yt-dlp for the core YouTube streaming-preview provider. A fresh node missing
+# any fails those steps silently (ffmpeg: 0 embeddings; fpcalc: no fingerprint
+# provenance; yt-dlp: no phantom streaming). The launcher installs them all at
+# first run so the app is self-contained.
 
 # (binary, macOS brew formula, Windows static-build zip URL). The ffmpeg zip
 # also carries ffprobe; the Windows extractor copies every .exe beside it.
@@ -455,6 +456,8 @@ _MEDIA_TOOLS = [
      "chromaprint-fpcalc-1.5.1-windows-x86_64.zip"),
     ("flac", "flac",
      "https://ftp.osuosl.org/pub/xiph/releases/flac/flac-1.4.3-win.zip"),
+    ("yt-dlp", "yt-dlp",
+     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_win.zip"),
 ]
 
 # brew installs into these on macOS; a GUI-launched .app has a minimal PATH
@@ -489,7 +492,7 @@ def _which_tool(binary: str) -> Optional[str]:
 
 
 def ensure_media_tools(progress_cb: Optional[Callable] = None) -> dict:
-    """Ensure every media CLI binary (ffmpeg, fpcalc, flac) is present.
+    """Ensure every media CLI binary (ffmpeg, fpcalc, flac, yt-dlp) is present.
     Idempotent per tool. Non-fatal — a failure leaves that one step degraded,
     never blocks setup. Returns {binary: present?}."""
     result = {}

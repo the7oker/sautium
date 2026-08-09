@@ -5379,6 +5379,20 @@
     if (!detail && body === undefined) {
       try { if (resp) detail = (await resp.json()).detail || ''; } catch (_) {}
     }
+    // Structured 503 from the streaming subsystem (reason: 'streaming') —
+    // the audio output is fine, so the output-picker dialog would misdirect.
+    if (detail && typeof detail === 'object') {
+      const msg = detail.message || '';
+      if (detail.reason === 'streaming') {
+        await notifyDialog({
+          title: 'Streaming unavailable',
+          message: escapeProfileHtml(msg || 'Streaming is not available on this node.'),
+          kind: 'error',
+        });
+        return false;
+      }
+      detail = msg;
+    }
     if (resp && resp.status === 503) {
       await reportOutputUnavailable(detail);
       return false;

@@ -1768,6 +1768,26 @@ def _ensure_output_ready() -> None:
         raise HTTPException(status_code=503, detail=str(e))
 
 
+def _streaming_503(msg: str) -> HTTPException:
+    """Streaming-subsystem failure. The structured detail (`reason`) lets the
+    UI route it to a plain error dialog — the audio output is fine, so the
+    output-picker dialog the other 503s get would misdirect the user."""
+    return HTTPException(status_code=503,
+                         detail={"message": msg, "reason": "streaming"})
+
+
+def _ensure_streaming_ready() -> None:
+    """Pre-flight for the phantom endpoints: the subsystem is up AND at least
+    one provider is registered (a missing yt-dlp leaves the registry empty —
+    one honest 503 beats every track greyed out as provider-missing)."""
+    from streaming import service as streaming_service
+    if not streaming_service.is_enabled():
+        raise _streaming_503("Streaming preview is disabled on this node")
+    if not streaming_service.providers_preferred():
+        raise _streaming_503("No streaming provider is available right now — "
+                             "see the backend log")
+
+
 @router.post("/play-phantom-album")
 def play_phantom_album(req: PlayPhantomAlbumRequest):
     """Stream a phantom (not-in-library) album onto HQPlayer.
@@ -1781,8 +1801,7 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
     provider-sourced metadata is wired into the status poller (next step)."""
     from streaming import service as streaming_service
 
-    if not streaming_service.is_enabled():
-        raise HTTPException(status_code=503, detail="Streaming preview is disabled")
+    _ensure_streaming_ready()
     _ensure_output_ready()
 
     queries = _phantom_album_queries(req.album_id)
@@ -1790,8 +1809,6 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
         raise HTTPException(status_code=404, detail="Phantom album not found or has no tracklist")
 
     proxy = streaming_service.get_proxy()
-    if proxy is None:
-        raise HTTPException(status_code=503, detail="No streaming provider available")
 
     # Per-track resolve waterfall → a lossless-first fallback CHAIN per track
     # (Deezer FLAC, then YouTube). The UI greys out only tracks NO provider can
@@ -1899,8 +1916,7 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
     provider has no match (the UI greys the row)."""
     from streaming import service as streaming_service
 
-    if not streaming_service.is_enabled():
-        raise HTTPException(status_code=503, detail="Streaming preview is disabled")
+    _ensure_streaming_ready()
     _ensure_output_ready()
 
     q = _phantom_track_query(req.track_id)
@@ -1950,8 +1966,7 @@ def queue_phantom_track(req: PlayPhantomTrackRequest):
     backlogged) fetch turn completes — an in-request wait here timed out and
     502'd whenever other albums were still fetching ahead of it."""
     from streaming import service as streaming_service
-    if not streaming_service.is_enabled():
-        raise HTTPException(status_code=503, detail="Streaming preview is disabled")
+    _ensure_streaming_ready()
 
     q = _phantom_track_query(req.track_id)
     if q is None:
@@ -1979,16 +1994,13 @@ def queue_phantom_track(req: PlayPhantomTrackRequest):
 def queue_phantom_album(req: PlayPhantomAlbumRequest):
     """Append a phantom album to the HQPlayer queue (streamed, rolling-append)."""
     from streaming import service as streaming_service
-    if not streaming_service.is_enabled():
-        raise HTTPException(status_code=503, detail="Streaming preview is disabled")
+    _ensure_streaming_ready()
 
     queries = _phantom_album_queries(req.album_id)
     if not queries:
         raise HTTPException(status_code=404, detail="Phantom album not found or has no tracklist")
 
     proxy = streaming_service.get_proxy()
-    if proxy is None:
-        raise HTTPException(status_code=503, detail="No streaming provider available")
 
     chains = _resolve_waterfall(queries)      # Deezer lossless first, YouTube fallback
     items = [(q, ch) for q, ch in zip(queries, chains) if ch]

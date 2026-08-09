@@ -1,12 +1,14 @@
 """Process-wide streaming-preview service: the media proxy + provider registry,
 created once at app startup (``main.lifespan``) and shared by the player router.
 
-Disabled by default — ``init`` is a no-op unless ``streaming_preview_enabled``,
-so a backend that never previews phantoms pays nothing (no proxy thread, no
-yt-dlp/ffmpeg requirement)."""
+On by default — YouTube ships with the distribution (Docker image installs
+yt-dlp; the launcher bootstraps it as a media tool), so a fresh node streams
+phantoms out of the box. ``streaming_preview_enabled=false`` is an explicit
+opt-out for nodes that never preview."""
 from __future__ import annotations
 
 import logging
+import shutil
 from typing import Optional
 
 import api_cooldown
@@ -31,10 +33,19 @@ def init(settings) -> bool:
         return False
 
     _registry = ProviderRegistry()
-    _registry.register(YouTubeProvider(
-        ytdlp_path=settings.ytdlp_path,
-        ffmpeg_location=settings.ffmpeg_location,
-    ))
+    # yt-dlp is distributed with the app (Docker: pip-installed in the image;
+    # launcher: bootstrapped next to ffmpeg/fpcalc and put on the backend's
+    # PATH). If it is still missing, skip the provider with a loud warning —
+    # registering it anyway would just fail every resolve one track at a time.
+    if shutil.which(settings.ytdlp_path):
+        _registry.register(YouTubeProvider(
+            ytdlp_path=settings.ytdlp_path,
+            ffmpeg_location=settings.ffmpeg_location,
+        ))
+    else:
+        logger.warning(
+            "yt-dlp not found (%s) — YouTube streaming is unavailable until "
+            "it is installed and the backend restarted", settings.ytdlp_path)
 
     # Bring-your-own providers (e.g. a lossless Deezer bridge) drop into the
     # local providers directory — NOT bundled here (§1201). Core has no
