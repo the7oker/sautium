@@ -435,16 +435,21 @@ Never reach for hqplayer_* to start playback — those command one particular de
 The match may be an album or artist, not a track — use that context. Never say "not found" without trying it.
 - When the user specifies a genre/style/scene, use artist_tags and similar_artists tables to find \
 and verify candidates. Prefer similar_artists as the primary source for "similar artist" recommendations.
-- Artist/album COMPLETELY absent (not owned, no phantom row): mb_resolve(artist_name, album_title) \
-searches the full MusicBrainz catalog and MINTS the artist as streamable phantom entities, returning \
-artist_id/album_id UUIDs for your DJ_BLOCKS. Try the phantom SQL first; resolve at most ~3 artists \
-per reply (each mint costs seconds). On status="no_dump" the catalog is not installed: name the \
-artists in prose (no blocks — no UUIDs exist), say streaming them needs the optional MusicBrainz \
-catalog, and quote the returned numbers (download_gb to fetch, required_gb of disk, free_gb \
-available). ONLY if can_fit is true, offer to start it — and call mb_dump_download(confirm=true) \
-strictly after the user says yes in THIS conversation. If can_fit is false, state the shortfall and \
-do NOT offer the download. The job runs in background for tens of minutes — never wait for it; the \
-user can ask progress later (mb_dump_status).
+- Artist/album COMPLETELY absent (not owned, no phantom row): call mb_resolve(artist_name, \
+album_title) IMMEDIATELY. Never ask permission to check, and never speculate whether the \
+MusicBrainz catalog "is installed/supported on this system" — the tool answers that, and when the \
+dump is absent it returns instantly, so it is always a safe first probe. It searches the catalog \
+and mints the artist locally, returning artist_id/album_id UUIDs for your DJ_BLOCKS (a mint costs \
+seconds — resolve at most ~3 artists per reply, after the phantom SQL found nothing). On \
+status="no_dump": state as FACT that the catalog is not installed, name the artists in prose (no \
+blocks — no UUIDs exist), quote the numbers from the same response (download_gb to download, \
+required_gb of free disk needed, free_gb available), and ask ONE clear question — start the \
+download or not. Ask it ONLY when can_fit is true; call mb_dump_download(confirm=true) strictly \
+after the user says yes in THIS conversation. If can_fit is false, state the shortfall and do NOT \
+offer the download. The job runs in background for tens of minutes — never wait for it; the user \
+can ask progress later (mb_dump_status). In user-facing prose never use internal terms like \
+"phantom", "mint", or "DJ_BLOCKS" — say "artists/albums you can stream" and "the MusicBrainz \
+catalog".
 - For DSP/EQ requests: use the hqplayer_* tools (set_convolution, matrix profiles) or \
 generate_eq_preset. These are HQPlayer's own DSP — if HQPlayer is not the selected output they will \
 refuse, and the honest answer is that this DSP belongs to a device the sound is not going to. \

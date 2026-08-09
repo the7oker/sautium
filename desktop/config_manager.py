@@ -277,6 +277,19 @@ def generate_mcp_config(config: dict, output_path: Path) -> None:
     ports = config.get("ports", {})
     hqp = config.get("hqplayer", {})
 
+    # The DJ subprocess spawns the hqplayer server itself, so the command
+    # must be a Python that actually has the backend deps (mcp, httpx,
+    # psycopg2) — the launcher-provisioned interpreter, the same one uvicorn
+    # runs on. A bare "python" from PATH (the original value) either doesn't
+    # exist on a fresh machine or lacks the deps, and the server died on
+    # spawn SILENTLY: Claude Code just proceeds without that server's tools,
+    # so the agent saw prompt descriptions of search/playback/MB tools it
+    # did not have. Same class of bug for the script path: hqplayer_server.py
+    # lives in <project_root>/mcp/, not <backend>/mcp/.
+    from desktop.python_env import get_backend_python
+    backend_dir = output_path.parent          # the runner reads the file from backend/
+    project_root = backend_dir.parent
+
     mcp_config = {
         "mcpServers": {
             "postgres": {
@@ -292,8 +305,8 @@ def generate_mcp_config(config: dict, output_path: Path) -> None:
                 },
             },
             "hqplayer": {
-                "command": "python",
-                "args": [str(output_path.parent / "mcp" / "hqplayer_server.py")],
+                "command": get_backend_python(),
+                "args": [str(project_root / "mcp" / "hqplayer_server.py")],
                 "env": {
                     "DB_HOST": "localhost",
                     "DB_PORT": str(ports.get("postgres", 5432)),
@@ -303,7 +316,10 @@ def generate_mcp_config(config: dict, output_path: Path) -> None:
                     "HQPLAYER_HOST": hqp.get("host", "localhost"),
                     "HQPLAYER_PORT": str(hqp.get("port", 4321)),
                     "BACKEND_URL": f"https://localhost:{ports.get('web', 8000)}",
-                    "TRACKER_URL": f"http://localhost:{ports.get('tracker', 8765)}",
+                    # Where the server finds shared backend code and
+                    # data/.api_secret for signing backend requests — explicit,
+                    # not derived from the script's own location.
+                    "BACKEND_PATH": str(backend_dir),
                 },
             },
         }

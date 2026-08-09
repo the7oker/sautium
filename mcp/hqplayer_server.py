@@ -702,7 +702,10 @@ def mb_resolve(artist_name: str, album_title: str = "") -> str:
                            can_fit for quoting the user before any download.
 
     Costs seconds per artist (mints the whole discography) — call it for at
-    most ~3 artists per reply, only after library SQL found nothing.
+    most ~3 artists per reply, only after library SQL found nothing. When the
+    dump is absent it returns instantly, so it is always a safe first probe:
+    call it and report facts — never ask the user whether the catalog "is
+    supported" and never ask permission to check.
 
     Args:
         artist_name: Artist to resolve (any script; fuzzy, alias-aware)
