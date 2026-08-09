@@ -216,7 +216,12 @@ def call_claude_code(
         "--dangerously-skip-permissions",
     ]
     if mcp:
-        cmd[3:3] = ["--mcp-config", MCP_CONFIG_PATH]
+        # strict: ONLY our servers. Without it the subprocess inherits the
+        # host user's personal user-scope MCP connectors (claude.ai Gmail/
+        # Drive/Calendar were observed in init on the launcher node) — a
+        # privacy leak if any of them is authed, and noise in the init
+        # status gate either way.
+        cmd[3:3] = ["--mcp-config", MCP_CONFIG_PATH, "--strict-mcp-config"]
     if max_turns:
         cmd.extend(["--max-turns", str(max_turns)])
 
@@ -377,7 +382,8 @@ def call_claude_code_stream(
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",  # required for stream-json
-        "--mcp-config", MCP_CONFIG_PATH,
+        # strict: only our servers — see the run() spawn for why.
+        "--mcp-config", MCP_CONFIG_PATH, "--strict-mcp-config",
         "--model", use_model,
         "--system-prompt", system_prompt,
         "--disallowed-tools", DISALLOWED_TOOLS_MCP,
