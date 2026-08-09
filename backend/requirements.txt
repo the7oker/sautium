@@ -56,7 +56,9 @@ ctranslate2>=4.5.0
 # AI/LLM
 anthropic>=0.79.0
 openai>=1.0.0
-mcp>=1.0.0
+# SDK 2.0 removed mcp.server.fastmcp (FastMCP left the SDK) — the assistant
+# MCP server targets the 1.x API; unpinned installs silently broke its spawn.
+mcp>=1.2,<2
 
 # External APIs
 pylast>=5.2.0
