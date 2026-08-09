@@ -3398,7 +3398,7 @@
                 title: 'MusicBrainz search', kind: 'info',
                 message: 'Searching the whole MusicBrainz catalog needs the '
                   + 'optional local dump. Download it in '
-                  + '<b>More → Settings → MusicBrainz</b>.',
+                  + '<b>More → Library → MusicBrainz database</b>.',
               });
             }
             return;

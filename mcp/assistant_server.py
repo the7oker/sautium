@@ -794,8 +794,9 @@ def mb_dump_status() -> str:
 def mb_dump_download(confirm: bool = False) -> str:
     """Start the background MusicBrainz dump download+load (~7 GB download,
     ~30 GB disk total, tens of minutes). Fire-and-forget: returns immediately —
-    NEVER wait for completion in the same reply; progress lives in Settings →
-    MusicBrainz or mb_dump_status. Call ONLY with confirm=true, ONLY after the
+    NEVER wait for completion in the same reply; progress lives in More →
+    Library → MusicBrainz database, or via mb_dump_status. Call ONLY with
+    confirm=true, ONLY after the
     user explicitly agreed in this conversation to the quoted size, and never
     when the disk budget said can_fit=false (the backend refuses then anyway).
 
@@ -814,7 +815,7 @@ def mb_dump_download(confirm: bool = False) -> str:
         return json.dumps({"status": "error", "detail": str(e)}, ensure_ascii=False)
     return json.dumps({"status": "started",
                        "note": "background job; check later via mb_dump_status "
-                               "or Settings → MusicBrainz"})
+                               "or in More → Library → MusicBrainz database"})
 
 
 @mcp.tool()
