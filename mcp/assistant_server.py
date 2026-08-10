@@ -721,12 +721,26 @@ def mb_resolve(artist_name: str, album_title: str = "") -> str:
         data = _backend_get("/api/discovery/mb-search", {"q": q, "limit": 5})
         if not data.get("available"):
             st = _backend_get("/api/settings/musicbrainz/status", {})
-            disk = st.get("disk", {})
             upd = st.get("update", {})
+            if upd.get("running"):
+                # Mid-operation the disk budget is decision-data for a
+                # decision already made — and misleading (a fully-downloaded
+                # archive reads as "0.1 GB left", which one model turned
+                # into "small, should be quick"). Report progress only.
+                return json.dumps({
+                    "status": "no_dump",
+                    "dump_running": True,
+                    "dump_progress": upd.get("progress"),
+                    "pct": upd.get("pct"),
+                    "note": ("download+load already in progress; the "
+                             "database-load phase after the download alone "
+                             "takes tens of minutes — report the progress, "
+                             "NEVER promise it will finish quickly"),
+                }, ensure_ascii=False)
+            disk = st.get("disk", {})
             return json.dumps({
                 "status": "no_dump",
-                "dump_running": bool(upd.get("running")),
-                "dump_progress": upd.get("progress") if upd.get("running") else None,
+                "dump_running": False,
                 **{k: disk.get(k) for k in
                    ("download_gb", "required_gb", "free_gb", "can_fit")},
             })
@@ -773,17 +787,28 @@ def mb_resolve(artist_name: str, album_title: str = "") -> str:
 @mcp.tool()
 def mb_dump_status() -> str:
     """MusicBrainz dump state: loaded/version, live download+load progress
-    (phase, pct) and the disk budget (download_gb/required_gb/free_gb/can_fit).
-    Use for "how is the download going?" follow-ups and to re-check the budget
-    before offering mb_dump_download."""
+    (phase, pct), and — only while NO operation is running — the disk budget
+    (download_gb/required_gb/free_gb/can_fit) for offering mb_dump_download.
+    Use for "how is the download going?" follow-ups. Duration discipline:
+    the database-load phase after the download takes tens of minutes; NEVER
+    estimate remaining time from download numbers — report phase + pct."""
     try:
         st = _backend_get("/api/settings/musicbrainz/status", {})
-        return json.dumps({
+        upd = st.get("update") or {}
+        out = {
             "loaded": st.get("loaded"),
             "version": st.get("version"),
-            "update": st.get("update"),
-            "disk": st.get("disk"),
-        }, ensure_ascii=False)
+            "update": upd,
+        }
+        if upd.get("running"):
+            # The budget is decision-data for an offer that's already been
+            # accepted — mid-operation it misleads (see mb_resolve).
+            out["note"] = ("operation in progress; the load phase takes tens "
+                           "of minutes — report progress, never promise "
+                           "quick completion")
+        else:
+            out["disk"] = st.get("disk")
+        return json.dumps(out, ensure_ascii=False)
     except httpx.ConnectError:
         return "Error: Cannot connect to backend."
     except Exception as e:

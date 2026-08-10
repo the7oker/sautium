@@ -524,6 +524,10 @@ def disk_budget() -> Dict:
                 except OSError:
                     pass
     download_gb = max(0.0, ARCHIVE_GB - have_archive)
+    if download_gb < 0.3:
+        # ARCHIVE_GB is nominal; a fully-downloaded archive (~7.4 real vs
+        # 7.5 nominal) must read as "nothing left", not "0.1 GB left".
+        download_gb = 0.0
     tables_gb = 0.0 if stats().get("loaded") else TABLES_GB
     required_gb = download_gb + tables_gb + MARGIN_GB
     return {
