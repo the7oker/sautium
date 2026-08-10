@@ -3153,6 +3153,13 @@ class P2PManager:
             return {}
 
         async with self._mb_slice_lock:
+            # Peer discovery runs BEFORE the pending-names early return: it
+            # also persists mb.search_sources for the backend's remote MB
+            # search, which a dump-less node needs even when canon has no
+            # work — gating it on pending names left the Discovery MB chip
+            # dead on idle nodes (observed 2026-08-10).
+            peers = await self._find_dump_peers()
+
             names = await loop.run_in_executor(
                 None, self._pending_slice_names_sync)
             if not names:
@@ -3160,7 +3167,6 @@ class P2PManager:
                             "already fetched")
                 return {}
 
-            peers = await self._find_dump_peers()
             if not peers:
                 logger.info("MB slice: no slice sources reachable")
                 return {}
