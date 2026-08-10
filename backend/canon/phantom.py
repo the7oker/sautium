@@ -5,9 +5,13 @@ to verify against. Resolve by exact name against MusicBrainz instead:
 
   * 0 exact-name namesakes  -> leave it (not in MB by exact name; a tile, no shelf)
   * 1 namesake              -> take that MBID
-  * >=2 namesakes           -> pick the one whose MB genres overlap the phantom's
-                              library seeds (the artists it is "similar to"); a
-                              unique non-zero winner wins, otherwise leave it.
+  * >=2 namesakes           -> disambiguate deterministically: first by the
+                              phantom's own linked album titles (a streaming
+                              mint carries the album the user clicked, which
+                              belongs to exactly one namesake's discography),
+                              then by MB-genre overlap with the phantom's
+                              library seeds (the artists it is "similar to").
+                              A unique non-zero winner wins, otherwise leave it.
 
 Writes artist_mbids with confidence='phantom' (name+genre derived, NOT content-
 verified -> re-verify before trusting over P2P) plus an `about` disambiguation
@@ -34,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 
 def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False) -> dict:
-    stats = {"phantoms": 0, "not_in_mb": 0, "unambiguous": 0,
+    stats = {"phantoms": 0, "not_in_mb": 0, "unambiguous": 0, "album_matched": 0,
              "disambiguated": 0, "inconclusive": 0, "canonized": 0, "discarded": 0}
 
     # Candidates: classic similar-artist stubs (track-less by construction) PLUS
@@ -102,6 +106,49 @@ def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False
 
     amb_ids = [i for i in ph_ids if len(name_gids.get(lname(i), [])) >= 2]
 
+    # Channel 1 — linked-album titles. A streaming mint has no similar_artists
+    # edge (so the genre channel below never fires for it), but it carries a
+    # stronger signal: the album the user actually clicked. Its release_match_key
+    # against each namesake's release-group/release titles picks the namesake
+    # whose discography contains that album. Only phantoms that HAVE linked
+    # albums pay for the title fetch — similar-artist stubs have none.
+    album_keys = defaultdict(set)           # ph_id -> linked-album match keys
+    rg_keys = defaultdict(set)              # gid -> namesake's release title keys
+    if amb_ids:
+        from discography import release_match_key
+        for r in db_query("""
+            SELECT aa.artist_id::text AS ph_id, al.title
+            FROM album_artists aa
+            JOIN albums al ON al.id = aa.album_id
+            WHERE aa.artist_id = ANY(%(ids)s::uuid[])
+        """, {"ids": amb_ids}):
+            k = release_match_key(r["title"])
+            if k:
+                album_keys[r["ph_id"]].add(k)
+        titled_gids = list({g for i in amb_ids if album_keys.get(i)
+                            for g in name_gids[lname(i)]})
+        if titled_gids:
+            # Release titles too, not just RG names — a mint's provider title
+            # often matches a regional/alternate release, the same channel the
+            # discography own-check goes through.
+            for r in db_query("""
+                SELECT a.gid::text AS gid, rg.name AS title
+                FROM mb_artist a
+                JOIN mb_artist_credit_name acn ON acn.artist = a.id
+                JOIN mb_release_group rg ON rg.artist_credit = acn.artist_credit
+                WHERE a.gid = ANY(%(g)s::uuid[])
+                UNION
+                SELECT a.gid::text, rel.name
+                FROM mb_artist a
+                JOIN mb_artist_credit_name acn ON acn.artist = a.id
+                JOIN mb_release rel ON rel.artist_credit = acn.artist_credit
+                WHERE a.gid = ANY(%(g)s::uuid[])
+            """, {"g": titled_gids}):
+                k = release_match_key(r["title"])
+                if k:
+                    rg_keys[r["gid"]].add(k)
+
+    # Channel 2 — seed-genre overlap (similar-artist stubs).
     seed_genres = defaultdict(set)
     nm_genres = defaultdict(set)
     if amb_ids:
@@ -148,17 +195,27 @@ def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False
             chosen[i] = gids[0]
             stats["unambiguous"] += 1
             continue
-        sg = seed_genres.get(i, set())
-        if not sg:
+        # Channels in strength order; each needs a unique non-zero winner,
+        # a tie or all-zero falls through to the next.
+        winner = None
+        for channel, have, per_gid in (
+                ("album_matched", album_keys.get(i, set()), rg_keys),
+                ("disambiguated", seed_genres.get(i, set()), nm_genres)):
+            if not have:
+                continue
+            scored = sorted(((len(have & per_gid.get(g, set())), g)
+                             for g in gids), reverse=True)
+            top = scored[0][0]
+            if top == 0 or (len(scored) > 1 and scored[1][0] == top):
+                continue
+            winner = (channel, scored)
+            break
+        if winner is None:
             stats["inconclusive"] += 1
             continue
-        scored = sorted(((len(sg & nm_genres.get(g, set())), g) for g in gids), reverse=True)
-        top = scored[0][0]
-        if top == 0 or (len(scored) > 1 and scored[1][0] == top):
-            stats["inconclusive"] += 1
-            continue
+        channel, scored = winner
         chosen[i] = scored[0][1]
-        stats["disambiguated"] += 1
+        stats[channel] += 1
         if dry_run and len(examples) < 15:
             examples.append((ph_name[i], len(gids), [s for s, _ in scored[:4]]))
 
