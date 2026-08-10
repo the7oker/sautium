@@ -40,10 +40,17 @@ RATE_LIMIT_WINDOW = 60  # seconds
 # serves more than this many searches a minute; the per-IP bucket stays as
 # a secondary anti-scraper heuristic, SEPARATE from the main bucket so
 # interactive search can never poison the sync protocol's budget. A 429
-# just rotates the requester to the next node. If the network outgrows
-# this, the escalation is per-node-identity limits (Ed25519-signed,
-# birth-cert-anchored), not tighter IP math.
-SEARCH_RATE_PER_IP = 20
+# just rotates the requester to the next node.
+#
+# Golden-age posture (Valerii, 2026-08-10): the per-IP cap sits HIGH — a
+# CGNAT crowd of good actors must never feel it (per-IP throttling one
+# node is simultaneously an attack on everyone sharing that IP); it only
+# exists to stop one runaway scraper from eating the whole global window.
+# The planned escalation once the network grows: per-node-identity limits
+# where identity is made SCARCE at birth — a memory-hard task (Argon2id is
+# already in the stack) for anonymous nodes, birth certificates for
+# verified ones — never tighter IP math.
+SEARCH_RATE_PER_IP = 60
 SEARCH_RATE_GLOBAL = 120
 
 # Max UUIDs per request (prevents memory/DB DoS)

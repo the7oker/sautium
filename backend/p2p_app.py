@@ -42,11 +42,11 @@ RATE_LIMIT_PER_MINUTE = 60
 RATE_LIMIT_WINDOW = 60
 
 # MB search budgets — mirrors desktop/p2p/sync_server.py SEARCH_RATE_*
-# rationale: the GLOBAL window is the node's hard spend ceiling (one IP can
-# be a whole CGNAT of people, so IP math is neither fair nor strong); the
-# per-IP bucket is a secondary anti-scraper heuristic, kept separate so
-# interactive search never poisons the sync protocol's shared budget.
-SEARCH_RATE_PER_IP = 20
+# rationale (incl. the golden-age posture: per-IP sits high so a CGNAT
+# crowd never feels it; the GLOBAL window is the node's real ceiling; the
+# escalation is identity-scarcity at birth — memory-hard task / birth
+# cert — never tighter IP math).
+SEARCH_RATE_PER_IP = 60
 SEARCH_RATE_GLOBAL = 120
 
 
