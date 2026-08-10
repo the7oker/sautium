@@ -49,6 +49,21 @@ REMOTE_COOLDOWN_S = 10.0
 _remote_lock = threading.Lock()
 _remote_last: dict = {}          # url -> monotonic ts of last request
 _remote_rr = 0                   # round-robin cursor
+_remote_client = None            # pooled httpx.Client — TLS handshake per
+                                 # search cost a measured ~0.2s otherwise
+
+
+def _client():
+    global _remote_client
+    if _remote_client is None:
+        import httpx
+        _remote_client = httpx.Client(
+            verify=False,
+            # A stale source must cost a beat, not five seconds — connect
+            # is where dead peers hang; live LAN/localhost peers connect
+            # in milliseconds.
+            timeout=httpx.Timeout(5.0, connect=1.5))
+    return _remote_client
 
 SOURCES_KEY = "mb.search_sources"
 
@@ -81,8 +96,6 @@ def remote_search(q: str, limit: int = 10) -> dict:
     in cooldown, take the first that answers; 429 or transport errors move
     to the next node."""
     global _remote_rr
-    import httpx
-
     dumps = [s.get("url") for s in remote_sources("dump") if s.get("url")]
     if not dumps:
         return {"status": "no_peers"}
@@ -102,8 +115,7 @@ def remote_search(q: str, limit: int = 10) -> dict:
         with _remote_lock:
             _remote_last[url] = time.monotonic()
         try:
-            r = httpx.get(f"{url}/api/mb/search", params={"q": q},
-                          verify=False, timeout=5.0)
+            r = _client().get(f"{url}/api/mb/search", params={"q": q})
             if r.status_code == 429:
                 continue
             r.raise_for_status()

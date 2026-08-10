@@ -2112,6 +2112,12 @@ CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_artist   ON mb_artist_alias(artis
 CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_name_trgm ON mb_artist_alias USING gin (lower(name) gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_mb_artist_name_lower      ON mb_artist(lower(name));
 CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_name_lower ON mb_artist_alias(lower(name));
+-- P2P search prefix arm: trigram GIN cannot serve LIKE 'xy%' (no complete
+-- trigram in a 2-char pattern -> seqscan, measured ~1.4s), and the plain
+-- lower() btree can't do LIKE under a non-C collation. text_pattern_ops
+-- makes any-length prefixes an index range scan.
+CREATE INDEX IF NOT EXISTS idx_mb_artist_name_prefix      ON mb_artist(lower(name) text_pattern_ops);
+CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_name_prefix ON mb_artist_alias(lower(name) text_pattern_ops);
 CREATE INDEX IF NOT EXISTS idx_mb_artist_unaccent        ON mb_artist(f_unaccent(name));
 CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_unaccent  ON mb_artist_alias(f_unaccent(name));
 CREATE INDEX IF NOT EXISTS idx_mb_artist_sortname_lower  ON mb_artist(lower(sort_name));
