@@ -32,6 +32,20 @@ logger = logging.getLogger(__name__)
 RATE_LIMIT_PER_MINUTE = 60
 RATE_LIMIT_WINDOW = 60  # seconds
 
+# MB search is limited RESOURCE-first, not identity-first: one IP can be a
+# whole CGNAT of different people, so per-IP alone is both too coarse (it
+# collectively throttles innocents — and pins them to the shared bucket,
+# starving their SYNC) and too weak (an attacker has many IPs). The node's
+# actual guarantee is the GLOBAL window — whoever asks, the node never
+# serves more than this many searches a minute; the per-IP bucket stays as
+# a secondary anti-scraper heuristic, SEPARATE from the main bucket so
+# interactive search can never poison the sync protocol's budget. A 429
+# just rotates the requester to the next node. If the network outgrows
+# this, the escalation is per-node-identity limits (Ed25519-signed,
+# birth-cert-anchored), not tighter IP math.
+SEARCH_RATE_PER_IP = 20
+SEARCH_RATE_GLOBAL = 120
+
 # Max UUIDs per request (prevents memory/DB DoS)
 MAX_UUIDS_PER_REQUEST = 10_000
 
@@ -241,6 +255,31 @@ class SyncServer:
             logger.warning("sharing flag unreadable (%s) — refusing to serve", e)
             self._sharing = False
         return self._sharing
+
+    def _check_search_limit(self, ip: str) -> bool:
+        """MB-search budget: global window first (the node's hard spend
+        ceiling), then a per-IP bucket separate from the main one."""
+        now = time.time()
+        glob = [t for t in getattr(self, "_search_global", [])
+                if now - t < RATE_LIMIT_WINDOW]
+        if len(glob) >= SEARCH_RATE_GLOBAL:
+            self._search_global = glob
+            return False
+        per_ip = getattr(self, "_search_counts", {})
+        stamps = [t for t in per_ip.get(ip, []) if now - t < RATE_LIMIT_WINDOW]
+        if len(stamps) >= SEARCH_RATE_PER_IP:
+            per_ip[ip] = stamps
+            self._search_counts = per_ip
+            self._search_global = glob
+            return False
+        glob.append(now)
+        stamps.append(now)
+        per_ip[ip] = stamps
+        if not stamps:
+            per_ip.pop(ip, None)
+        self._search_counts = per_ip
+        self._search_global = glob
+        return True
 
     def _check_rate_limit(self, ip: str) -> bool:
         """Return True if the request is allowed, False if rate-limited."""
@@ -508,9 +547,10 @@ class SyncServer:
         for already-fetched names, and searching that partial world would
         answer "not found" for names it simply never saw. Indexed-only
         matching (see mb_slice_queries.search_artists) keeps one query per
-        human search cheap for the volunteer node."""
+        human search cheap for the volunteer node. Budgeted separately
+        from the main per-IP bucket — see SEARCH_RATE_* rationale."""
         ip = request.remote or "unknown"
-        if not self._check_rate_limit(ip):
+        if not self._check_search_limit(ip):
             return self._json_response(
                 request, {"error": "rate limited"}, status=429
             )

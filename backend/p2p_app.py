@@ -41,6 +41,14 @@ logger = logging.getLogger(__name__)
 RATE_LIMIT_PER_MINUTE = 60
 RATE_LIMIT_WINDOW = 60
 
+# MB search budgets — mirrors desktop/p2p/sync_server.py SEARCH_RATE_*
+# rationale: the GLOBAL window is the node's hard spend ceiling (one IP can
+# be a whole CGNAT of people, so IP math is neither fair nor strong); the
+# per-IP bucket is a secondary anti-scraper heuristic, kept separate so
+# interactive search never poisons the sync protocol's shared budget.
+SEARCH_RATE_PER_IP = 20
+SEARCH_RATE_GLOBAL = 120
+
 
 app = FastAPI(
     title="Sautium P2P",
@@ -53,12 +61,33 @@ app = FastAPI(
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 _hits: dict[str, list[float]] = defaultdict(list)
+_search_hits: dict[str, list[float]] = defaultdict(list)
+_search_global: list[float] = []
+
+
+def _search_allowed(ip: str, now: float) -> bool:
+    global _search_global
+    _search_global = [t for t in _search_global if now - t < RATE_LIMIT_WINDOW]
+    if len(_search_global) >= SEARCH_RATE_GLOBAL:
+        return False
+    recent = [t for t in _search_hits.get(ip, ()) if now - t < RATE_LIMIT_WINDOW]
+    if len(recent) >= SEARCH_RATE_PER_IP:
+        _search_hits[ip] = recent
+        return False
+    recent.append(now)
+    _search_hits[ip] = recent
+    _search_global.append(now)
+    return True
 
 
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
     ip = request.client.host if request.client else "unknown"
     now = time.time()
+    if request.url.path == "/api/mb/search":
+        if not _search_allowed(ip, now):
+            return JSONResponse({"error": "rate limited"}, status_code=429)
+        return await call_next(request)
     recent = [t for t in _hits.get(ip, ()) if now - t < RATE_LIMIT_WINDOW]
     if len(recent) >= RATE_LIMIT_PER_MINUTE:
         _hits[ip] = recent
@@ -68,6 +97,8 @@ async def rate_limit(request: Request, call_next):
     if len(_hits) > 10_000:                    # bound the table under a flood
         for k in [k for k, v in _hits.items() if not v or now - v[-1] > RATE_LIMIT_WINDOW]:
             _hits.pop(k, None)
+        for k in [k for k, v in _search_hits.items() if not v or now - v[-1] > RATE_LIMIT_WINDOW]:
+            _search_hits.pop(k, None)
     return await call_next(request)
 
 
