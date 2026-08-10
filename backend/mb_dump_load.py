@@ -11,6 +11,12 @@ disk is just the archive; peak memory is one COPY buffer. Works in-process in
 both the Docker backend and the desktop launcher (both reach Postgres over the
 network), and as a CLI. Idempotent: ``TRUNCATE`` + reload per table.
 
+FAST load path: indexes + PK/UNIQUE constraints are dropped before each
+table's COPY and rebuilt right after (see the index drop/rebuild section), and
+TRUNCATE+COPY share one transaction so ``wal_level=minimal`` skips WAL for the
+bulk write. A DDL snapshot persisted next to the archive makes a crash at any
+point recoverable: the next run merges it with the live catalogs and rebuilds.
+
 Column order in the headerless dump TSV == MB ``CreateTables.sql`` order; the
 ``mb_*`` definitions (001_initial.sql) mirror it, so a default ``COPY`` round-
 trips it and a schema drift fails loudly on field count.
@@ -18,6 +24,7 @@ trips it and a schema drift fails loudly on field count.
 
 import argparse
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -286,11 +293,86 @@ def _ensure_schema(cur, tables) -> None:
             raise RuntimeError(f"table {table} missing — apply mb_* DDL from 001_initial.sql")
 
 
+# ── index drop/rebuild around COPY ───────────────────────────────────────────
+# COPY into indexed tables maintains every index row-by-row — on this dump
+# that is ~7 GB of btree+GIN (mb_track alone: 3.2 GB across 4 indexes, and the
+# trigram GINs on mb_artist/mb_release_group are the worst per-row cost).
+# Dropping indexes + PK/UNIQUE constraints first and rebuilding after the COPY
+# replaces incremental maintenance with sorted bottom-up builds (parallel on
+# PG18, GIN included) — several times faster end-to-end and yields compact
+# indexes. Readers seq-scan meanwhile; the advisory lock already serializes
+# every mb_* writer (slice imports block on it, reconcile skips).
+
+# Fraction of a table's progress weight spent in COPY; the rest is the rebuild.
+_COPY_FRAC = 0.75
+
+
+def _saved_ddl_path(archive: str) -> str:
+    return os.path.join(_DATA, f"indexes_{archive}.json")
+
+
+def _collect_index_ddl(conn, archive: str, tables) -> Dict[str, Dict[str, str]]:
+    """{table: {name: DDL}} for every index and PK/UNIQUE constraint, from the
+    live catalogs (the source of truth — 001 drift included). Merged with the
+    crash-file from an interrupted run, where the live set is already partial;
+    live definitions win on name collisions. The merged snapshot is persisted
+    BEFORE anything is dropped, so a crash anywhere in the load can always
+    rebuild the full original set on the next run."""
+    saved: Dict[str, Dict[str, str]] = {}
+    path = _saved_ddl_path(archive)
+    if os.path.exists(path):
+        with open(path) as f:
+            saved = json.load(f)
+        logger.warning("resuming with saved index DDL from %s", path)
+    ddl: Dict[str, Dict[str, str]] = {}
+    with conn.cursor() as cur:
+        for table, _ in tables:
+            merged = dict(saved.get(table, {}))
+            cur.execute(
+                "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid = %s::regclass AND contype IN ('p', 'u')", (table,))
+            for name, condef in cur.fetchall():
+                merged[name] = f"ALTER TABLE {table} ADD CONSTRAINT {name} {condef}"
+            cur.execute(
+                "SELECT indexname, indexdef FROM pg_indexes "
+                "WHERE schemaname = 'public' AND tablename = %s", (table,))
+            for name, idxdef in cur.fetchall():
+                # constraint-owned indexes (pkey) keep the ALTER form from above
+                merged.setdefault(name, idxdef)
+            ddl[table] = merged
+    with open(path, "w") as f:
+        json.dump(ddl, f, indent=1)
+    return ddl
+
+
+def _drop_indexes(cur, table: str, ddl: Dict[str, str]) -> None:
+    for name, stmt in ddl.items():
+        if stmt.startswith("ALTER TABLE"):
+            cur.execute(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name}")
+        else:
+            cur.execute(f"DROP INDEX IF EXISTS {name}")
+
+
+def _rebuild_indexes(conn, ddl: Dict[str, str],
+                     on_index: Callable[[int, int], None]) -> None:
+    """Each build in its own transaction: SET LOCAL scopes the memory/parallel
+    bump to the statement, and a write-free transaction is what allows the
+    parallel (leader+workers) build path at all."""
+    for i, stmt in enumerate(ddl.values()):
+        on_index(i, len(ddl))
+        with conn.cursor() as cur:
+            cur.execute("BEGIN")
+            cur.execute("SET LOCAL maintenance_work_mem = '1GB'")
+            cur.execute("SET LOCAL max_parallel_maintenance_workers = 4")
+            cur.execute(stmt)
+            cur.execute("COMMIT")
+
+
 def stream_load(archive: str = _DEFAULT_ARCHIVE,
                 progress_cb: ProgressCb = _noop) -> Dict[str, int]:
     """Decompress ``{archive}.tar.bz2`` once and pipe each member belonging to
-    that archive straight into ``COPY`` — no extracted files. Returns
-    ``{table: rowcount_estimate}``."""
+    that archive straight into ``COPY`` — no extracted files, indexes dropped
+    for the COPY and rebuilt per table. Returns ``{table: load_order}``."""
     from db_pool import get_conn
     path = _dump_path(archive)
     if not os.path.exists(path):
@@ -319,6 +401,7 @@ def stream_load(archive: str = _DEFAULT_ARCHIVE,
                 # released explicitly (finally below), not on conn close.
                 cur.execute("SELECT pg_advisory_lock(%s)", (MB_LOAD_LOCK_KEY,))
             try:
+                ddl = _collect_index_ddl(conn, archive, tables)
                 cum_w = 0.0  # byte-weighted progress accumulated over completed tables
                 for member in tar:
                     table = member_table.get(member.name)
@@ -333,11 +416,22 @@ def stream_load(archive: str = _DEFAULT_ARCHIVE,
                     def _on_bytes(read_bytes, _w=w, _c=cum_w, _s=size, _t=table):
                         frac = (read_bytes / _s) if _s else 0.0
                         progress_cb({"phase": "loading", "table": _t,
-                                     "pct": min(99, round((_c + _w * frac) * 100))})
+                                     "pct": min(99, round((_c + _w * _COPY_FRAC * frac) * 100))})
                     reader = _ProgressReader(fh, _on_bytes)
                     with conn.cursor() as cur:
+                        _drop_indexes(cur, table, ddl[table])
+                        # One transaction for TRUNCATE+COPY: under
+                        # wal_level=minimal the COPY then skips WAL entirely,
+                        # and readers never see a half-loaded table.
+                        cur.execute("BEGIN")
                         cur.execute(f"TRUNCATE {table}")
                         cur.copy_expert(f"COPY {table} FROM STDIN", reader)
+                        cur.execute("COMMIT")
+                    def _on_index(i, n, _w=w, _c=cum_w, _t=table):
+                        frac = _COPY_FRAC + (1 - _COPY_FRAC) * (i / max(n, 1))
+                        progress_cb({"phase": "indexing", "table": _t,
+                                     "pct": min(99, round((_c + _w * frac) * 100))})
+                    _rebuild_indexes(conn, ddl[table], _on_index)
                     cum_w += w
                     counts[table] = len(counts) + 1
                     progress_cb({"phase": "loading", "table": table,
@@ -346,6 +440,12 @@ def stream_load(archive: str = _DEFAULT_ARCHIVE,
                     if len(counts) == expected:
                         break  # everything in this archive is in — skip the tail
             finally:
+                # A failed COPY leaves the explicit transaction aborted on this
+                # pooled connection — clear it or the unlock itself would fail.
+                from psycopg2.extensions import TRANSACTION_STATUS_IDLE
+                if conn.info.transaction_status != TRANSACTION_STATUS_IDLE:
+                    with conn.cursor() as cur:
+                        cur.execute("ROLLBACK")
                 with conn.cursor() as cur:
                     cur.execute("SELECT pg_advisory_unlock_all()")
     finally:
@@ -367,6 +467,12 @@ def stream_load(archive: str = _DEFAULT_ARCHIVE,
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute("ANALYZE " + ", ".join(t for t, _ in tables))
+    # Every table is loaded and re-indexed — the crash-file has served its
+    # purpose (a future load re-snapshots the live catalogs).
+    try:
+        os.remove(_saved_ddl_path(archive))
+    except FileNotFoundError:
+        pass
     logger.info("stream_load %s done in %.0fs", archive, time.monotonic() - t0)
     return counts
 

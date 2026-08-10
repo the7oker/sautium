@@ -176,6 +176,14 @@ The short version of the hard-learned lessons:
   PyPI package auto-installed at launcher startup.
 - **`regexp_count`** needs double-escaped word boundaries in Python strings
   (`\\yword\\y`) but single-escape in raw SQL files (`\yword\y`).
+- **Bulk COPY into indexed tables is the slow path.** The MB dump loader
+  drops every index + PK/UNIQUE constraint before each table's COPY and
+  rebuilds after (sorted build ≫ per-row maintenance; the trigram GINs are
+  the worst offenders). TRUNCATE+COPY share one transaction so
+  `wal_level=minimal` (set in docker-compose + launcher db_init) skips WAL
+  for the bulk write; a DDL snapshot next to the archive makes a crash
+  recoverable. Rebuild sets `maintenance_work_mem=1GB` +
+  `max_parallel_maintenance_workers=4` per statement via SET LOCAL.
 - **PostgreSQL ENUM type changes** require drop default → drop constraint →
   `ALTER TYPE USING col::new_type` → set default. Straight `ALTER TYPE` fails.
 

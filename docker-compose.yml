@@ -14,11 +14,19 @@ services:
     # pool on a 30GB+ database. Defaults target the recommended 16GB+ Docker
     # host (HARDWARE-TIERS §6.13); weaker hosts override via .env, e.g.
     # PG_SHARED_BUFFERS=128MB PG_EFFECTIVE_CACHE_SIZE=2GB.
+    # wal_level=minimal: single-node appliance, no replication/PITR consumers —
+    # lets the MB-dump loader's TRUNCATE+COPY-in-one-txn skip WAL entirely.
+    # max_wal_size=4GB: at the stock 1GB a 21GB dump load (or an embeddings
+    # backfill) checkpoints every ~1GB written — constant dirty-page flushing
+    # and re-inflated full_page_writes.
     command: postgres
       -c shared_buffers=${PG_SHARED_BUFFERS:-1GB}
       -c effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-6GB}
       -c maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-512MB}
       -c work_mem=${PG_WORK_MEM:-16MB}
+      -c wal_level=minimal
+      -c max_wal_senders=0
+      -c max_wal_size=${PG_MAX_WAL_SIZE:-4GB}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-music_ai}
       POSTGRES_USER: ${POSTGRES_USER:-musicai}

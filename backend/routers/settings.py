@@ -359,6 +359,9 @@ def _mb_progress(update: Dict) -> None:
     elif phase == "loading":
         pct = update.get("pct", 0)  # byte-weighted, smooth (loader-computed)
         _mb_state["progress"] = f"Loading database… {pct}%"
+    elif phase == "indexing":
+        pct = update.get("pct", 0)  # same weighted scale as loading
+        _mb_state["progress"] = f"Building indexes… {pct}%"
     elif phase == "analyzing":
         _mb_state["progress"] = "Analyzing…"
     elif phase == "done":

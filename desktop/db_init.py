@@ -791,6 +791,12 @@ timezone = 'UTC'
 shared_preload_libraries = ''
 log_destination = 'stderr'
 logging_collector = off
+# Single-node appliance, no replication/PITR: minimal WAL lets the MB-dump
+# loader's TRUNCATE+COPY-in-one-txn skip WAL; 4GB keeps a 21GB dump load from
+# checkpointing every ~1GB written (mirrors docker-compose.yml).
+wal_level = minimal
+max_wal_senders = 0
+max_wal_size = '4GB'
 {_pg_memory_tier()}"""
     conf_path.write_text(existing + additions)
 
