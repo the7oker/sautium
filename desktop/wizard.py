@@ -1158,7 +1158,7 @@ class SetupWizard(ctk.CTkToplevel):
                 f"with room to load)."
                 if enough else
                 f"Free space: {free:.0f} GB — not enough (needs ~{needed} GB). "
-                f"You can enable this later in Settings."
+                f"You can enable this later in More → Library."
             ),
             text_color="gray" if enough else "#C86450",
             wraplength=470, justify="left",
@@ -1167,7 +1167,7 @@ class SetupWizard(ctk.CTkToplevel):
         ctk.CTkLabel(
             self.content_frame,
             text=("Runs in the background after start, and can be removed at "
-                  "any time from Settings → Library → Delete catalogue."),
+                  "any time from More → Library → MusicBrainz database."),
             text_color="gray", wraplength=470, justify="left",
         ).pack(pady=(6, 0))
 
