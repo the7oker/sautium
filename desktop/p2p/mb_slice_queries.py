@@ -297,6 +297,65 @@ def _match_artist_ids(cur, name: str) -> list:
     return [r[0] for r in cur.fetchall()]
 
 
+SEARCH_LIMIT_MAX = 10
+
+
+def search_artists(conn, q: str, limit: int = SEARCH_LIMIT_MAX) -> list:
+    """P2P search serve path: artist candidates for one interactive query.
+
+    Indexed arms only — the slice matcher's lower/f_unaccent EXACT probes
+    (incl. aliases, via the same deterministic variants) plus a lower()
+    PREFIX arm riding the trigram GIN indexes. No similarity scan: the
+    volunteer-cost rule of the slice path applies to search too, so remote
+    search trades typo tolerance for a guaranteed-cheap probe. Namesakes
+    all surface; disambiguation is the requester's UI job (comment and
+    rg_count travel along, same fields the local scope renders)."""
+    q = (q or "").strip()
+    if len(q) < 2:
+        return []
+    limit = max(1, min(int(limit), SEARCH_LIMIT_MAX))
+    with conn.cursor() as cur:
+        cur.execute("""
+            WITH vars AS (
+                SELECT lower(x) AS l, f_unaccent(x) AS f
+                FROM unnest(%(vs)s::text[]) x
+            ),
+            exact_ids AS (
+                SELECT a.id FROM mb_artist a JOIN vars v ON lower(a.name) = v.l
+                UNION
+                SELECT al.artist FROM mb_artist_alias al JOIN vars v ON lower(al.name) = v.l
+                UNION
+                SELECT a.id FROM mb_artist a JOIN vars v ON f_unaccent(a.name) = v.f
+                UNION
+                SELECT al.artist FROM mb_artist_alias al JOIN vars v ON f_unaccent(al.name) = v.f
+            ),
+            prefix_ids AS (
+                (SELECT a.id FROM mb_artist a
+                 WHERE lower(a.name) LIKE lower(%(q)s) || '%%' LIMIT 100)
+                UNION
+                (SELECT al.artist FROM mb_artist_alias al
+                 WHERE lower(al.name) LIKE lower(%(q)s) || '%%' LIMIT 100)
+            ),
+            best AS (
+                SELECT id, MIN(rank) AS rank FROM (
+                    SELECT id, 0 AS rank FROM exact_ids
+                    UNION ALL
+                    SELECT id, 1 FROM prefix_ids
+                ) c GROUP BY id
+            )
+            SELECT a.gid::text, a.name, a.comment,
+                   (SELECT COUNT(DISTINCT rg.id)
+                    FROM mb_artist_credit_name acn
+                    JOIN mb_release_group rg ON rg.artist_credit = acn.artist_credit
+                    WHERE acn.artist = a.id) AS rg_count
+            FROM best b JOIN mb_artist a ON a.id = b.id
+            ORDER BY b.rank, rg_count DESC, a.name
+            LIMIT %(limit)s
+        """, {"vs": _name_variants(q), "q": q, "limit": limit})
+        return [{"gid": r[0], "name": r[1], "comment": r[2],
+                 "rg_count": int(r[3] or 0)} for r in cur.fetchall()]
+
+
 def _fetch(cur, table: str, where_sql: str, params, truncated: list):
     """Rows of `table` (SLICE_TABLES column order) matching `where_sql`.
     Applies the per-table row cap and records overflow in `truncated`."""

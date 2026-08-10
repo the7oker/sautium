@@ -3880,15 +3880,22 @@
         searching.hidden = true;
         const artists = data.artists || [];
         const albums = data.albums || [];
-        renderMbBlock(screen, 'artists', 'Artists · MusicBrainz',
+        const artistTitle = data.remote
+          ? 'Artists · MusicBrainz (via network)' : 'Artists · MusicBrainz';
+        renderMbBlock(screen, 'artists', artistTitle,
                       renderMbArtistRow(artists), artists.length);
         renderMbBlock(screen, 'albums', 'Albums · MusicBrainz',
                       renderMbAlbumRow(albums), albums.length);
         if (!artists.length && !albums.length) {
           const emptyP = empty.querySelector('p');
-          if (emptyP) emptyP.textContent = data.available === false
-            ? 'MusicBrainz dump is not loaded on this device.'
-            : 'No matches in MusicBrainz.';
+          if (emptyP) emptyP.textContent = data.cooldown
+            // Network search is a shared volunteer resource — the client
+            // rate-limits itself; the wait message doubles as the pitch
+            // for the unlimited local option.
+            ? `Network search is rate-limited (shared volunteer nodes) — retry in ~${data.cooldown}s, or download the catalog in More → Library for unlimited local search.`
+            : data.available === false
+              ? 'MusicBrainz dump is not loaded on this device, and no catalog nodes are reachable.'
+              : 'No matches in MusicBrainz.';
           empty.hidden = false;
         }
       })
@@ -3922,6 +3929,7 @@
         return `
           <button class="d-artist-tile is-phantom" type="button"
                   data-mb-artist-gid="${escapeHtml(a.gid)}"
+                  data-mb-artist-name="${escapeHtml(a.name || '')}"
                   data-local-artist-id="${escapeHtml(a.local_artist_id || '')}">
             <div class="d-artist-avatar" style="background: ${ph.bg};">
               <span class="d-artist-initials">${escapeHtml(ph.initials)}</span></div>
@@ -3943,6 +3951,7 @@
         return `
           <button class="mosaic-tile is-phantom" type="button"
                   data-mb-artist-gid="${escapeHtml(a.artist_gid || '')}"
+                  data-mb-artist-name="${escapeHtml(a.artist || '')}"
                   data-mb-rg-gid="${escapeHtml(a.gid)}"
                   data-local-album-id="${escapeHtml(a.local_album_id || '')}">
             <div class="mosaic-cover"
@@ -3963,11 +3972,15 @@
     const artistGid = el.getAttribute('data-mb-artist-gid');
     if (!artistGid || el.classList.contains('is-minting')) return;
     el.classList.add('is-minting');
+    // artist_name is the P2P slice key: on a dump-less node the backend
+    // fetches this artist's signed slice by NAME before minting.
+    const body = { artist_gid: artistGid,
+                   artist_name: el.getAttribute('data-mb-artist-name') || '' };
+    if (rgGid) body.rg_gid = rgGid;
     fetch('/api/discovery/mb-mint', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(rgGid ? { artist_gid: artistGid, rg_gid: rgGid }
-                                 : { artist_gid: artistGid }),
+      body: JSON.stringify(body),
     })
       .then(r => r.ok ? r.json() : Promise.reject(r.status))
       .then(out => {

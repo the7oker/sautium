@@ -501,6 +501,41 @@ class SyncServer:
                         imported, category, ip)
         return self._json_response(request, {"imported": imported})
 
+    async def handle_mb_search(self, request: web.Request) -> web.Response:
+        """GET /api/mb/search?q= — artist candidates from the FULL local dump.
+
+        Serve capability is full-dump only: a replica holds mb_* rows just
+        for already-fetched names, and searching that partial world would
+        answer "not found" for names it simply never saw. Indexed-only
+        matching (see mb_slice_queries.search_artists) keeps one query per
+        human search cheap for the volunteer node."""
+        ip = request.remote or "unknown"
+        if not self._check_rate_limit(ip):
+            return self._json_response(
+                request, {"error": "rate limited"}, status=429
+            )
+        if not self._sharing_enabled():
+            return self._json_response(
+                request, {"error": "sharing disabled"}, status=403)
+        if not self.mb_dump_version:
+            return self._json_response(
+                request, {"error": "no full dump"}, status=404)
+
+        q = (request.query.get("q") or "").strip()
+        if len(q) < 2 or len(q) > 255:
+            return self._json_response(
+                request, {"error": "q must be 2..255 chars"}, status=400)
+
+        try:
+            artists = await self._run_query(
+                mb_slice_queries.search_artists, q)
+            return self._json_response(request, {"artists": artists})
+        except Exception as e:
+            logger.error(f"MB search failed: {e}")
+            return self._json_response(
+                request, {"error": "internal error"}, status=500
+            )
+
     async def handle_mb_slice(self, request: web.Request) -> web.Response:
         """POST /api/mb/slice — per-name signed blobs (v2).
 
@@ -1634,6 +1669,7 @@ class SyncServer:
         self._app.router.add_post(
             "/api/sync/push/{category}", self.handle_carry_push)
         self._app.router.add_post("/api/mb/slice", self.handle_mb_slice)
+        self._app.router.add_get("/api/mb/search", self.handle_mb_search)
         # Chat endpoints
         self._app.router.add_post(
             "/api/chat/handshake", self.handle_chat_handshake

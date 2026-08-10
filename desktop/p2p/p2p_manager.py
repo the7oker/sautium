@@ -3118,6 +3118,23 @@ class P2PManager:
                 dumps.append((api, node_id))
             elif health.get("mb_slices"):
                 replicas.append((api, node_id))
+
+        # Persist the source map for the backend's request-time consumers
+        # (remote MB search + click-to-mint slice fetch, mb_discovery):
+        # peer discovery needs the P2P stack living in THIS process, so the
+        # backend reads this cache instead. Refreshed on every slice run; a
+        # stale entry costs one failed probe and a rotation step.
+        try:
+            await asyncio.get_event_loop().run_in_executor(
+                None, self._write_settings_blocking, {
+                    "mb.search_sources":
+                        [{"url": api.base_url, "kind": "replica"}
+                         for api, _ in replicas]
+                        + [{"url": api.base_url, "kind": "dump"}
+                           for api, _ in dumps],
+                })
+        except Exception as e:
+            logger.debug(f"MB slice: source persist failed: {e}")
         return replicas + dumps
 
     async def _request_mb_slices(self) -> dict:

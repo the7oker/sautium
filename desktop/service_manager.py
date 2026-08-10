@@ -370,7 +370,12 @@ class ServiceManager:
         generate_mcp_config(self.config, self._backend_dir / "mcp-windows.json")
 
         env = os.environ.copy()
-        env["PYTHONPATH"] = str(self._backend_dir)
+        # backend_dir for the backend's own flat imports; project root so
+        # `import desktop.*` works like it does under Docker (/app holds
+        # both) — mb_discovery pulls desktop.mb_slice_client for the
+        # click-to-mint slice fetch on dump-less nodes.
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(self._backend_dir), str(self._project_root)])
         # Ensure the media binaries (ffmpeg/fpcalc/flac) resolve for the
         # backend even when the launcher was started as a GUI .app (minimal
         # PATH without Homebrew/bundled bins). The audio pipeline shells out

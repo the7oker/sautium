@@ -22,17 +22,97 @@ Release groups are pre-filtered to what the canon pipeline will actually
 materialize (_ALLOWED_PRIMARY minus _DISQUALIFYING_SECONDARY) so search
 never shows a click-dead compilation/live row it would then refuse to mint.
 
-P2P slice search for dump-less nodes was considered and DEFERRED (possible
-Pro feature): serving strangers' searches would load dump nodes and remove
-the incentive to download the dump.
+P2P search for dump-less nodes was originally DEFERRED over dump-node load
+and download-incentive concerns; REVERSED 2026-08-10 (Valerii) with the
+load shaped out of it: artist-name-only, indexed-only matching on the serve
+path (no trigram — mb_slice_queries.search_artists), requester-side node
+ROTATION (spreads load, adds failover, and no single dump node sees the
+full search stream) and a per-node COOLDOWN so unlimited search remains a
+reason to download the dump. Click-to-mint fetches the artist's slice via
+the existing signed slice protocol, after which the unchanged canon/mint
+pipeline runs — remote is a thin acquisition layer, not a parallel one.
 """
 
 import logging
+import threading
+import time
 from typing import Optional
 
 from db_pool import db_execute, db_query, db_query_one
 
 logger = logging.getLogger(__name__)
+
+# Requester-side politeness for remote search: minimum seconds between
+# requests to the SAME dump node. Combined with rotation a human burns
+# through N nodes before feeling a wall; a script feels it immediately.
+REMOTE_COOLDOWN_S = 10.0
+_remote_lock = threading.Lock()
+_remote_last: dict = {}          # url -> monotonic ts of last request
+_remote_rr = 0                   # round-robin cursor
+
+SOURCES_KEY = "mb.search_sources"
+
+
+def remote_sources(kind: Optional[str] = None) -> list:
+    """Peer slice/search sources persisted by the launcher's P2PManager
+    (manual + LAN + DHT "mbdump" capability walk) on every slice run.
+    Backend-side we only ever read the cache: peer discovery needs the
+    P2P stack (DHT, LAN) that lives in the launcher process. Stale
+    entries cost one failed probe and a rotation step. kind: "dump"
+    (full dump, can search) or "replica" (blobs only, slice re-serve)."""
+    row = db_query_one(
+        "SELECT value FROM user_settings WHERE key = %(k)s", {"k": SOURCES_KEY})
+    sources = (row or {}).get("value") or []
+    if kind:
+        sources = [s for s in sources if s.get("kind") == kind]
+    return sources
+
+
+def remote_available() -> bool:
+    return bool(remote_sources("dump"))
+
+
+def remote_search(q: str, limit: int = 10) -> dict:
+    """Search artist candidates on remote dump nodes, rotating across them.
+
+    Returns {"status": "ok", "artists": [...], "node": url} |
+    {"status": "no_peers"} | {"status": "cooldown", "retry_in": seconds}.
+    Rotation + failover: start at the round-robin cursor, skip nodes still
+    in cooldown, take the first that answers; 429 or transport errors move
+    to the next node."""
+    global _remote_rr
+    import httpx
+
+    dumps = [s.get("url") for s in remote_sources("dump") if s.get("url")]
+    if not dumps:
+        return {"status": "no_peers"}
+
+    now = time.monotonic()
+    with _remote_lock:
+        order = [dumps[(_remote_rr + i) % len(dumps)] for i in range(len(dumps))]
+        _remote_rr = (_remote_rr + 1) % len(dumps)
+        ready = [u for u in order
+                 if now - _remote_last.get(u, 0.0) >= REMOTE_COOLDOWN_S]
+        if not ready:
+            soonest = min(REMOTE_COOLDOWN_S - (now - _remote_last.get(u, 0.0))
+                          for u in order)
+            return {"status": "cooldown", "retry_in": round(max(soonest, 1.0))}
+
+    for url in ready:
+        with _remote_lock:
+            _remote_last[url] = time.monotonic()
+        try:
+            r = httpx.get(f"{url}/api/mb/search", params={"q": q},
+                          verify=False, timeout=5.0)
+            if r.status_code == 429:
+                continue
+            r.raise_for_status()
+            artists = (r.json() or {}).get("artists") or []
+            return {"status": "ok", "artists": artists[:limit], "node": url}
+        except Exception as e:
+            logger.info(f"MB remote search via {url} failed: {e}")
+            continue
+    return {"status": "no_peers"}
 
 _CAA_FRONT_URL = "https://coverartarchive.org/release-group/{rg}/front-500"
 
@@ -140,7 +220,49 @@ def search(q: str, limit: int = 20) -> dict:
     }
 
 
-def mint(artist_gid: str, rg_gid: Optional[str] = None) -> dict:
+def _fetch_remote_slice(artist_name: str) -> bool:
+    """Pull one name's signed slice from peer sources and import it locally.
+
+    Replicas first — the slice serve-order philosophy (spreads entry-load
+    off the few dump nodes; a miss falls through to a full holder). After a
+    successful import mb_backend.refresh() flips LOCAL_DUMP so the regular
+    mint/discography path reads the freshly-landed rows."""
+    try:
+        from desktop.api_client import BackendAPIClient
+        from desktop.mb_slice_client import MBSliceClient
+    except ImportError as e:
+        logger.warning(f"MB slice client unavailable in this runtime: {e}")
+        return False
+    from config import settings as app_settings
+
+    sources = remote_sources()
+    ordered = ([s["url"] for s in sources if s.get("kind") == "replica"]
+               + [s["url"] for s in sources if s.get("kind") == "dump"])
+    for url in ordered:
+        client = MBSliceClient(BackendAPIClient(url),
+                               db_dsn=app_settings.database_url,
+                               source_node=url)
+        try:
+            stats = client.run([artist_name])
+            if stats.get("error") or artist_name in (stats.get("missing") or []):
+                continue
+            client.finalize()          # ANALYZE the hot canon tables
+            import mb_backend as mb
+            mb.refresh()
+            logger.info(f"MB remote mint: slice for {artist_name!r} via {url}")
+            return True
+        except Exception as e:
+            logger.info(f"MB slice fetch via {url} failed: {e}")
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+    return False
+
+
+def mint(artist_gid: str, rg_gid: Optional[str] = None,
+         artist_name: Optional[str] = None) -> dict:
     """Materialize an MB artist as phantom entities and return local ids
     for navigation.
 
@@ -149,9 +271,19 @@ def mint(artist_gid: str, rg_gid: Optional[str] = None) -> dict:
     and album_artists.mbid attributes each album to its namesake. The
     'user' confidence marks an explicit user pick — ground truth, above
     every automatic tier. Idempotent end to end (ON CONFLICT + the
-    discography sync's own skip logic)."""
+    discography sync's own skip logic).
+
+    On a dump-less node the clicked artist's rows are acquired first via
+    the P2P slice protocol (artist_name is the slice key — the protocol
+    speaks names, and its closed-world answer delivers every namesake, so
+    the clicked gid lands with them)."""
     row = db_query_one(
         "SELECT name FROM mb_artist WHERE gid = %(g)s::uuid", {"g": artist_gid})
+    if not row and artist_name and remote_sources():
+        if _fetch_remote_slice(artist_name):
+            row = db_query_one(
+                "SELECT name FROM mb_artist WHERE gid = %(g)s::uuid",
+                {"g": artist_gid})
     if not row:
         return {"status": "unknown_artist"}
     name = row["name"]

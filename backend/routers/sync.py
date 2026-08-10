@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 import record_sig
@@ -266,6 +266,20 @@ def node_pubkey_hex() -> Optional[str]:
 
 class MBSliceRequest(BaseModel):
     names: list[str] = Field(default_factory=list, max_length=50)
+
+
+@mb_router.get("/search")
+def mb_search(q: str = Query(..., min_length=2, max_length=255)) -> dict:
+    """Artist candidates from the FULL local dump — mirrors
+    desktop/p2p/sync_server.handle_mb_search. Full-dump only: a replica's
+    partial mb_* world would answer "not found" for names it never saw.
+    Indexed-only matching keeps the volunteer cost of one human search
+    at a few index probes."""
+    _require_sharing()
+    if not mb_dump_version():
+        raise HTTPException(status_code=404, detail="no full dump")
+    with get_conn() as conn:
+        return {"artists": mb_slice_queries.search_artists(conn, q)}
 
 
 @mb_router.post("/slice")

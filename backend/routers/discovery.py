@@ -257,23 +257,33 @@ def streaming_mint(body: dict = Body(...)):
 
 @router.get("/mb-status")
 def mb_status():
-    """Whether the MusicBrainz scope can serve — the optional local dump is
-    loaded. The UI renders the Search-in chip disabled (with a download
-    hint) when false."""
+    """Whether the MusicBrainz scope can serve — the optional local dump,
+    or (dump-less) reachable P2P dump nodes. The UI renders the Search-in
+    chip disabled (with a download hint) only when neither exists."""
     import mb_discovery
-    return {"available": mb_discovery.available()}
+    local = mb_discovery.available()
+    return {"available": local or mb_discovery.remote_available(),
+            "remote": not local and mb_discovery.remote_available()}
 
 
 @router.get("/mb-search")
 def mb_search(q: str = Query(..., min_length=2, max_length=255),
               limit: int = Query(20, ge=1, le=30)):
     """MusicBrainz-scope search: artists + release groups from the local
-    dump (see mb_discovery). No engine involvement — filters don't apply
-    to dump rows, so the UI disables them in this scope."""
+    dump, or — dump-less — artist candidates from a remote dump node
+    (rotated; artist-only by design, so albums stay empty). No engine
+    involvement — filters don't apply to dump rows."""
     import mb_discovery
-    if not mb_discovery.available():
-        return {"available": False, "artists": [], "albums": []}
-    return {"available": True, **mb_discovery.search(q.strip(), limit=limit)}
+    if mb_discovery.available():
+        return {"available": True, **mb_discovery.search(q.strip(), limit=limit)}
+    res = mb_discovery.remote_search(q.strip(), limit=limit)
+    if res["status"] == "ok":
+        return {"available": True, "remote": True,
+                "artists": res["artists"], "albums": []}
+    if res["status"] == "cooldown":
+        return {"available": True, "remote": True, "cooldown": res["retry_in"],
+                "artists": [], "albums": []}
+    return {"available": False, "artists": [], "albums": []}
 
 
 @router.post("/mb-mint")
@@ -281,14 +291,17 @@ def mb_mint(body: dict = Body(...)):
     """Mint a clicked MB entity: the artist's whole slice materializes as
     phantom entities (canon pipeline), the response carries local ids to
     navigate to — album_id when an album row was clicked and survived
-    canon's type policy, artist_id always."""
+    canon's type policy, artist_id always. Dump-less nodes acquire the
+    artist's rows first via the P2P slice protocol (artist_name is the
+    slice key), then run the same pipeline."""
     import mb_discovery
-    if not mb_discovery.available():
+    if not (mb_discovery.available() or mb_discovery.remote_available()):
         raise HTTPException(status_code=503, detail="MusicBrainz dump not loaded")
     artist_gid = str(body.get("artist_gid") or "")
     if not artist_gid:
         raise HTTPException(status_code=422, detail="artist_gid required")
-    out = mb_discovery.mint(artist_gid, body.get("rg_gid"))
+    out = mb_discovery.mint(artist_gid, body.get("rg_gid"),
+                            artist_name=str(body.get("artist_name") or "") or None)
     if out["status"] == "unknown_artist":
         raise HTTPException(status_code=404, detail="artist not in the dump")
     return out
