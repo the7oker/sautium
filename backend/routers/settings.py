@@ -358,12 +358,14 @@ def _mb_progress(update: Dict) -> None:
                                  f"({update.get('downloaded_mb', 0)}/{update.get('total_mb', 0)} MB)")
     elif phase == "loading":
         pct = update.get("pct", 0)  # byte-weighted, smooth (loader-computed)
-        _mb_state["progress"] = f"Loading database… {pct}%"
+        tbl = update.get("table")
+        _mb_state["progress"] = f"Loading database… {pct}%" + (f" ({tbl})" if tbl else "")
     elif phase == "indexing":
         pct = update.get("pct", 0)  # same weighted scale as loading
-        _mb_state["progress"] = f"Building indexes… {pct}%"
+        _mb_state["progress"] = f"Building indexes… {pct}% ({update.get('table')})"
     elif phase == "analyzing":
-        _mb_state["progress"] = "Analyzing…"
+        pct = update.get("pct")
+        _mb_state["progress"] = "Analyzing…" if pct is None else f"Analyzing… {pct}%"
     elif phase == "done":
         pct = 100
         _mb_state["progress"] = "Up to date"

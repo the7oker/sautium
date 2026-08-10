@@ -30,6 +30,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import threading
 import time
 from typing import Callable, Dict, Optional
 
@@ -353,19 +354,62 @@ def _drop_indexes(cur, table: str, ddl: Dict[str, str]) -> None:
             cur.execute(f"DROP INDEX IF EXISTS {name}")
 
 
+def _watch_index_build(pid: int, i: int, n: int,
+                       on_frac: Callable[[float], None],
+                       stop: threading.Event) -> None:
+    """Report intra-index progress from ``pg_stat_progress_create_index``
+    while the loader connection is blocked inside CREATE INDEX. A 1s poll on
+    a second pooled connection is the only source PG offers for utility-
+    command progress (no push channel exists). Watcher failure must never
+    fail the load — the bar just falls back to one step per index."""
+    from db_pool import get_conn
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                while not stop.wait(1.0):
+                    cur.execute(
+                        "SELECT blocks_done, blocks_total, tuples_done, tuples_total "
+                        "FROM pg_stat_progress_create_index WHERE pid = %s", (pid,))
+                    row = cur.fetchone()
+                    if not row:
+                        continue
+                    bd, bt, td, tt = row
+                    intra = (bd / bt) if bt else ((td / tt) if tt else 0.0)
+                    on_frac((i + min(intra, 1.0)) / n)
+    except Exception as e:
+        logger.warning("index-build progress watcher stopped: %s", e)
+
+
 def _rebuild_indexes(conn, ddl: Dict[str, str],
-                     on_index: Callable[[int, int], None]) -> None:
+                     on_frac: Callable[[float], None]) -> None:
     """Each build in its own transaction: SET LOCAL scopes the memory/parallel
     bump to the statement, and a write-free transaction is what allows the
-    parallel (leader+workers) build path at all."""
+    parallel (leader+workers) build path at all. ``on_frac`` gets the
+    table-rebuild fraction [0..1], fed between indexes AND (via the watcher)
+    inside each multi-minute build."""
+    n = len(ddl)
+    if not n:
+        return
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_backend_pid()")
+        pid = cur.fetchone()[0]
     for i, stmt in enumerate(ddl.values()):
-        on_index(i, len(ddl))
-        with conn.cursor() as cur:
-            cur.execute("BEGIN")
-            cur.execute("SET LOCAL maintenance_work_mem = '1GB'")
-            cur.execute("SET LOCAL max_parallel_maintenance_workers = 4")
-            cur.execute(stmt)
-            cur.execute("COMMIT")
+        on_frac(i / n)
+        stop = threading.Event()
+        watcher = threading.Thread(target=_watch_index_build,
+                                   args=(pid, i, n, on_frac, stop), daemon=True)
+        watcher.start()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("BEGIN")
+                cur.execute("SET LOCAL maintenance_work_mem = '1GB'")
+                cur.execute("SET LOCAL max_parallel_maintenance_workers = 4")
+                cur.execute(stmt)
+                cur.execute("COMMIT")
+        finally:
+            stop.set()
+            watcher.join()
+    on_frac(1.0)
 
 
 def stream_load(archive: str = _DEFAULT_ARCHIVE,
@@ -427,11 +471,11 @@ def stream_load(archive: str = _DEFAULT_ARCHIVE,
                         cur.execute(f"TRUNCATE {table}")
                         cur.copy_expert(f"COPY {table} FROM STDIN", reader)
                         cur.execute("COMMIT")
-                    def _on_index(i, n, _w=w, _c=cum_w, _t=table):
-                        frac = _COPY_FRAC + (1 - _COPY_FRAC) * (i / max(n, 1))
+                    def _on_frac(frac, _w=w, _c=cum_w, _t=table):
+                        part = _COPY_FRAC + (1 - _COPY_FRAC) * min(frac, 1.0)
                         progress_cb({"phase": "indexing", "table": _t,
-                                     "pct": min(99, round((_c + _w * frac) * 100))})
-                    _rebuild_indexes(conn, ddl[table], _on_index)
+                                     "pct": min(99, round((_c + _w * part) * 100))})
+                    _rebuild_indexes(conn, ddl[table], _on_frac)
                     cum_w += w
                     counts[table] = len(counts) + 1
                     progress_cb({"phase": "loading", "table": table,
@@ -466,7 +510,12 @@ def stream_load(archive: str = _DEFAULT_ARCHIVE,
     with get_conn() as conn:
         conn.autocommit = True
         with conn.cursor() as cur:
-            cur.execute("ANALYZE " + ", ".join(t for t, _ in tables))
+            # Per table (not one statement) so multi-minute ANALYZE over 21 GB
+            # moves the bar instead of freezing at the loading pct.
+            for i, (t, _) in enumerate(tables):
+                progress_cb({"phase": "analyzing", "table": t,
+                             "pct": round(i / len(tables) * 100)})
+                cur.execute(f"ANALYZE {t}")
     # Every table is loaded and re-indexed — the crash-file has served its
     # purpose (a future load re-snapshots the live catalogs).
     try:
