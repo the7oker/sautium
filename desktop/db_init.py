@@ -456,8 +456,11 @@ _MEDIA_TOOLS = [
      "chromaprint-fpcalc-1.5.1-windows-x86_64.zip"),
     ("flac", "flac",
      "https://ftp.osuosl.org/pub/xiph/releases/flac/flac-1.4.3-win.zip"),
+    # Standalone onefile build — yt-dlp_win.zip is a PyInstaller ONEDIR
+    # (yt-dlp.exe + _internal/ DLLs); copying just the .exe out of it
+    # yields a binary that dies with "Failed to load Python DLL".
     ("yt-dlp", "yt-dlp",
-     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_win.zip"),
+     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"),
 ]
 
 # brew installs into these on macOS; a GUI-launched .app has a minimal PATH
@@ -571,6 +574,20 @@ def _download_win_tool(binary: str, url: str, progress_cb: Optional[Callable] = 
     exe = binary + ".exe"
     if (bin_dir / exe).exists():
         return True
+    if url.endswith(".exe"):
+        # Standalone single-binary tool (yt-dlp) — no archive to unpack.
+        try:
+            if progress_cb:
+                progress_cb(f"Downloading {binary}...")
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            urllib.request.urlretrieve(url, str(bin_dir / exe))
+            logger.info("%s installed to %s", binary, bin_dir)
+            return True
+        except Exception as e:
+            logger.error("Failed to download %s: %s", binary, e)
+            if progress_cb:
+                progress_cb(f"{binary} download failed: {e}")
+            return False
     zip_path = get_project_root() / f"_{binary}_download.zip"
     try:
         if progress_cb:
