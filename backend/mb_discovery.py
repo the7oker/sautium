@@ -42,12 +42,17 @@ from db_pool import db_execute, db_query, db_query_one
 
 logger = logging.getLogger(__name__)
 
-# Requester-side politeness for remote search: minimum seconds between
-# requests to the SAME dump node. Combined with rotation a human burns
-# through N nodes before feeling a wall; a script feels it immediately.
-REMOTE_COOLDOWN_S = 10.0
+# Requester-side politeness for remote search, shaped for the human
+# "type → look → refine" pattern: a BURST of requests per node is free, the
+# SUSTAINED rate matches the old fixed 10s interval. A fixed interval was
+# wrong here — with a single reachable dump node (the common early-network
+# topology) the second refinement inside 10s hit the cooldown wall. A
+# script still feels the wall immediately: burst exhausts in seconds and
+# refills at one request per 10s.
+REMOTE_BURST = 3
+REMOTE_BURST_WINDOW_S = 30.0
 _remote_lock = threading.Lock()
-_remote_last: dict = {}          # url -> monotonic ts of last request
+_remote_hits: dict = {}          # url -> [monotonic ts of recent requests]
 _remote_rr = 0                   # round-robin cursor
 _remote_client = None            # pooled httpx.Client — TLS handshake per
                                  # search cost a measured ~0.2s otherwise
@@ -92,9 +97,10 @@ def remote_search(q: str, limit: int = 10) -> dict:
 
     Returns {"status": "ok", "artists": [...], "node": url} |
     {"status": "no_peers"} | {"status": "cooldown", "retry_in": seconds}.
-    Rotation + failover: start at the round-robin cursor, skip nodes still
-    in cooldown, take the first that answers; 429 or transport errors move
-    to the next node."""
+    Rotation + failover: start at the round-robin cursor, skip nodes whose
+    burst is exhausted, take the first that answers; 429 or transport
+    errors move to the next node. Failed attempts count as spend — a dead
+    node must not be free to hammer."""
     global _remote_rr
     dumps = [s.get("url") for s in remote_sources("dump") if s.get("url")]
     if not dumps:
@@ -104,16 +110,21 @@ def remote_search(q: str, limit: int = 10) -> dict:
     with _remote_lock:
         order = [dumps[(_remote_rr + i) % len(dumps)] for i in range(len(dumps))]
         _remote_rr = (_remote_rr + 1) % len(dumps)
-        ready = [u for u in order
-                 if now - _remote_last.get(u, 0.0) >= REMOTE_COOLDOWN_S]
+        ready = []
+        for u in order:
+            stamps = [t for t in _remote_hits.get(u, [])
+                      if now - t < REMOTE_BURST_WINDOW_S]
+            _remote_hits[u] = stamps
+            if len(stamps) < REMOTE_BURST:
+                ready.append(u)
         if not ready:
-            soonest = min(REMOTE_COOLDOWN_S - (now - _remote_last.get(u, 0.0))
-                          for u in order)
+            soonest = min(REMOTE_BURST_WINDOW_S - (now - min(_remote_hits[u]))
+                          for u in order if _remote_hits.get(u))
             return {"status": "cooldown", "retry_in": round(max(soonest, 1.0))}
 
     for url in ready:
         with _remote_lock:
-            _remote_last[url] = time.monotonic()
+            _remote_hits.setdefault(url, []).append(time.monotonic())
         try:
             r = _client().get(f"{url}/api/mb/search", params={"q": q})
             if r.status_code == 429:
