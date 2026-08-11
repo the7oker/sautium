@@ -795,7 +795,13 @@ def get_playlist():
 
 @router.get("/status/stream")
 async def status_stream():
-    """SSE endpoint: pushes status updates in real-time."""
+    """SSE endpoint: pushes status updates in real-time.
+
+    MIGRATION BRIDGE — the current frontend holds ONE stream, /api/events;
+    this endpoint stays because a stale SPA tab (pre-/api/events build)
+    reconnects here, receives the frontend build stamp in the status
+    payload and reloads itself onto the new frontend. Remove once no
+    long-lived tabs predate 2026-08-11."""
     loop = asyncio.get_event_loop()
     evt = asyncio.Event()
 
@@ -836,32 +842,79 @@ async def status_stream():
     )
 
 
-@router.get("/preview-events")
-async def preview_events_stream():
-    """SSE: bare 'refresh' pings whenever phantom-preview state changes (a track
-    starts/finishes buffering, or enrichment commits key·bpm). No payload — the
-    open album page already knows its own id and re-fetches /api/albums/{id} for
-    a single consistent snapshot (features + buffering), so there's no split
-    source to race. Coalesced server-side; the client debounces its re-fetch."""
+events_router = APIRouter(prefix="/api", tags=["events"])
+
+
+@events_router.get("/events")
+async def events_stream():
+    """The ONE SSE connection a web-UI tab holds.
+
+    Multiplexes every push channel — player status, phantom-preview pings,
+    gear-research transitions — as typed JSON messages {"t": kind, "d":
+    payload}. Browsers cap an HTTP/1.1 origin at 6 connections for the
+    WHOLE browser; three parallel streams per tab meant two tabs starved
+    every other fetch into (pending) forever (observed 2026-08-11). New
+    event kinds ride this channel for free — never add another standalone
+    SSE endpoint for the web UI. Preview/research events are payload-free
+    pings by design: the open screen re-fetches its own snapshot, so
+    there is no split source to race."""
+    from routers.gear_models import (research_sse_register,
+                                     research_sse_unregister)
     from streaming.events import preview_events
 
+    loop = asyncio.get_event_loop()
+    status_evt = asyncio.Event()
+    research_evt = asyncio.Event()
+
     async def event_generator():
-        q = preview_events.subscribe()
+        last_version = -1
+        preview_q = preview_events.subscribe()
+        manager.sse_register(status_evt, loop)
+        research_sse_register(research_evt, loop)
         try:
+            yield ("data: "
+                   + json.dumps({"t": "status", "d": manager.latest_status})
+                   + "\n\n")
+            last_version = manager.status_version
             while True:
-                try:
-                    await asyncio.wait_for(q.get(), timeout=15.0)
-                except asyncio.TimeoutError:
+                waiters = {
+                    asyncio.create_task(status_evt.wait()): "status",
+                    asyncio.create_task(research_evt.wait()): "research",
+                    asyncio.create_task(preview_q.get()): "preview",
+                }
+                done, pending = await asyncio.wait(
+                    waiters, timeout=15.0,
+                    return_when=asyncio.FIRST_COMPLETED)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                if not done:
                     yield ": keepalive\n\n"
                     continue
-                # Drain any coalesced pings so one re-fetch covers the burst.
-                while not q.empty():
-                    q.get_nowait()
-                yield "data: refresh\n\n"
+                kinds = {waiters[task] for task in done}
+                if "status" in kinds:
+                    status_evt.clear()
+                    if manager.status_version != last_version:
+                        last_version = manager.status_version
+                        yield ("data: "
+                               + json.dumps({"t": "status",
+                                             "d": manager.latest_status})
+                               + "\n\n")
+                if "preview" in kinds:
+                    # Drain coalesced pings so one re-fetch covers the burst.
+                    while not preview_q.empty():
+                        preview_q.get_nowait()
+                    yield 'data: {"t": "preview"}\n\n'
+                if "research" in kinds:
+                    research_evt.clear()
+                    yield 'data: {"t": "research"}\n\n'
         except asyncio.CancelledError:
             pass
         finally:
-            preview_events.unsubscribe(q)
+            manager.sse_unregister(status_evt)
+            research_sse_unregister(research_evt, loop)
+            preview_events.unsubscribe(preview_q)
 
     return StreamingResponse(
         event_generator(),

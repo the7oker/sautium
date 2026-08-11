@@ -11815,17 +11815,18 @@
     document.addEventListener('playlist-loaded', updatePlayingHighlight);
     window.addEventListener('hashchange', render);
 
-    // Research-state SSE: worker transitions (queued → researching →
-    // cached/failed) repaint gear surfaces live — no manual reload.
-    if (typeof window.sseStream === 'function') {
-      window.sseStream('/api/gear-models/research/stream', () => {
-        const h = parseHash();
-        if (h.startsWith('more/profile'))           refreshProfileGearLive();
-        else if (h.startsWith('more/gear-system'))  refreshGearScreenLive(renderGearSystem, 'more/gear-system');
-        else if (h.startsWith('more/gear-advisor')) refreshGearScreenLive(renderGearAdvisor, 'more/gear-advisor');
-        else if (h.startsWith('more/gear/'))        refreshGearScreenLive(app => renderGearDetail(app, h.split('/')[2]), 'more/gear/');
-      }, () => { /* sseStream auto-reconnects */ });
-    }
+    // Research-state transitions (queued → researching → cached/failed)
+    // repaint gear surfaces live. Delivered over the single /api/events
+    // stream (player.js) as a 'sautium:research-changed' DOM event — no
+    // standalone SSE: three parallel streams per tab starved the
+    // browser's 6-per-origin connection budget.
+    window.addEventListener('sautium:research-changed', () => {
+      const h = parseHash();
+      if (h.startsWith('more/profile'))           refreshProfileGearLive();
+      else if (h.startsWith('more/gear-system'))  refreshGearScreenLive(renderGearSystem, 'more/gear-system');
+      else if (h.startsWith('more/gear-advisor')) refreshGearScreenLive(renderGearAdvisor, 'more/gear-advisor');
+      else if (h.startsWith('more/gear/'))        refreshGearScreenLive(app => renderGearDetail(app, h.split('/')[2]), 'more/gear/');
+    });
 
     if (!location.hash) {
       // Setting hash to #home won't fire hashchange when current is empty,

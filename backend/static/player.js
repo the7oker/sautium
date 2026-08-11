@@ -3,7 +3,7 @@
  * Slim replacement for the legacy app.js. Owns the four bits the new
  * shell (app-shell.js) actually consumes from the player domain:
  *
- *   * SSE subscription to /api/player/status/stream
+ *   * SSE subscription to /api/events (single multiplexed stream)
  *     → dispatches `np-update` CustomEvents that the mini-player,
  *       Now Playing sheet, queue and chat track-highlight all listen
  *       for.
@@ -55,15 +55,32 @@
   window.currentStatus = null;
 
   // --- SSE -------------------------------------------------------------
-  function connectStatusSSE() {
+  // ONE stream per tab. /api/events multiplexes every push channel as
+  // typed messages {t, d}: 'status' (player state), 'preview' (phantom
+  // preview changed — the open screen re-fetches its own snapshot),
+  // 'research' (gear research transition). Browsers cap an HTTP/1.1
+  // origin at 6 connections for the whole browser; the previous three
+  // parallel streams per tab meant two tabs starved every other fetch
+  // into (pending) forever. Never open another standalone SSE here —
+  // new event kinds ride this channel.
+  function connectEventsSSE() {
     if (_sseSource) _sseSource.abort();
     _sseSource = window.sseStream(
-      '/api/player/status/stream',
+      '/api/events',
       (event) => {
-        let data;
-        try { data = JSON.parse(event.data); }
+        let msg;
+        try { msg = JSON.parse(event.data); }
         catch (e) { console.error('SSE parse error:', e); return; }
-        handleStatusEvent(data);
+        if (msg.t === 'status') {
+          handleStatusEvent(msg.d);
+        } else if (msg.t === 'preview') {
+          // Payload-free ping — the open album page re-fetches its OWN
+          // /api/albums/{id} for one consistent snapshot, so there's no
+          // second source to keep in sync here.
+          window.dispatchEvent(new CustomEvent('sautium:preview-changed'));
+        } else if (msg.t === 'research') {
+          window.dispatchEvent(new CustomEvent('sautium:research-changed'));
+        }
       },
       () => {
         // Transport-level disconnect — sseStream will reconnect. Keep
@@ -71,32 +88,17 @@
         // errors during backoff keep the original deadline so the paint
         // lands at the earliest honest moment, not backoff-times later.
         if (_disconnectPaint) return;
-        console.debug('status stream down; painting disconnected in',
+        console.debug('events stream down; painting disconnected in',
           DISCONNECT_GRACE_MS / 1000 + 's');
         _disconnectPaint = setTimeout(() => {
           _disconnectPaint = null;
-          console.debug('status stream still down; painting disconnected');
+          console.debug('events stream still down; painting disconnected');
           currentState = 'disconnected';
           document.dispatchEvent(new CustomEvent('np-update', {
             detail: { state: 'disconnected' },
           }));
         }, DISCONNECT_GRACE_MS);
       }
-    );
-  }
-
-  // Phantom-preview change pings. A bare SSE: each message just means "preview
-  // state changed" (a track started/finished buffering, or enrichment landed).
-  // Re-broadcast as a DOM event; the open album page (app-shell.js) re-fetches
-  // its OWN /api/albums/{id} for one consistent snapshot (features + buffering),
-  // so there's no payload to keep in sync here — the page owns the re-read.
-  let _previewSSE = null;
-  function connectPreviewSSE() {
-    if (_previewSSE) _previewSSE.abort();
-    _previewSSE = window.sseStream(
-      '/api/player/preview-events',
-      () => window.dispatchEvent(new CustomEvent('sautium:preview-changed')),
-      () => { /* sseStream auto-reconnects; nothing to repaint here */ }
     );
   }
 
@@ -739,8 +741,7 @@
 
   // --- Boot ------------------------------------------------------------
   function init() {
-    connectStatusSSE();
-    connectPreviewSSE();
+    connectEventsSSE();
     fetchPlaylist();
   }
   if (document.readyState === 'loading') {

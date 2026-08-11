@@ -1424,11 +1424,13 @@ async def lastfm_auth_complete() -> Dict[str, Any]:
 
 # -- Routers & Static Files ---------------------------------------------------
 
+from routers.player import events_router
 from routers.player import router as player_router
 from routers.chat import router as chat_router
 from routers.media import router as media_router
 
 app.include_router(player_router)
+app.include_router(events_router)
 app.include_router(chat_router)
 app.include_router(media_router)
 

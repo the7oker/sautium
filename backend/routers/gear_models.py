@@ -298,30 +298,17 @@ def stop_gear_state_listener():
         _state_listener_thread.join(timeout=3)
 
 
-@router.get("/research/stream")
-async def research_state_stream():
-    """One event per research-state transition; payload-free — the
-    client refetches whatever screen it is on."""
-    evt = asyncio.Event()
-    loop = asyncio.get_running_loop()
+def research_sse_register(evt: asyncio.Event, loop) -> None:
+    """Research-state wakeups for the multiplexed /api/events channel —
+    the standalone /research/stream endpoint is gone (three parallel SSE
+    per tab starved the browser's 6-per-origin connection budget)."""
     with _state_sse_lock:
         _state_sse_clients.append((evt, loop))
 
-    async def gen():
-        try:
-            while True:
-                try:
-                    await asyncio.wait_for(evt.wait(), timeout=15)
-                    evt.clear()
-                    yield "event: changed\ndata: {}\n\n"
-                except asyncio.TimeoutError:
-                    yield ": ping\n\n"
-        finally:
-            with _state_sse_lock:
-                try:
-                    _state_sse_clients.remove((evt, loop))
-                except ValueError:
-                    pass
 
-    return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache"})
+def research_sse_unregister(evt: asyncio.Event, loop) -> None:
+    with _state_sse_lock:
+        try:
+            _state_sse_clients.remove((evt, loop))
+        except ValueError:
+            pass
