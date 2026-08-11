@@ -574,6 +574,16 @@ def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> D
     db_execute("UPDATE artists SET last_album_sync = NULL")
     with open(VERSION_PATH, "w") as f:
         f.write(version)
+    # Completion marker IN THE DB — the per-DSN truth that a FULL load
+    # finished here. The VERSION file alone can't carry that: it is shared
+    # between runtimes on a dev host, and slice imports populate mb_artist
+    # on dump-less nodes (see mb_slice_queries.DB_VERSION_KEY).
+    import json as _json
+    db_execute(
+        "INSERT INTO user_settings (key, value) VALUES "
+        "('musicbrainz.db_version', %s::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        (_json.dumps(version),))
     progress_cb({"phase": "done", "version": version})
     return {"version": version, "loaded": True, "up_to_date": False}
 
@@ -733,6 +743,8 @@ def delete_dump() -> Dict:
                 cur.execute("TRUNCATE " + ", ".join(t for t, _ in TABLES))
                 cur.execute("DELETE FROM mb_slice_fetches")
                 cur.execute("DELETE FROM mb_slice_blobs")
+                cur.execute("DELETE FROM user_settings "
+                            "WHERE key = 'musicbrainz.db_version'")
             finally:
                 cur.execute("SELECT pg_advisory_unlock(%s)", (MB_LOAD_LOCK_KEY,))
     for path in (VERSION_PATH,):

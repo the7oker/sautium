@@ -223,15 +223,29 @@ def dump_version_file():
         return None
 
 
+# Full-load completion marker, written by the loader INTO THE DATABASE.
+# Neither the VERSION file nor mb_artist rows alone prove a full dump on
+# this DSN: the file is filesystem-local and SHARED between runtimes on a
+# dev host (Docker stamps it through the repo bind-mount while the
+# launcher's PG stays empty), and P2P slice imports populate mb_artist on
+# dump-less nodes. Either alone let a slice-partial world advertise itself
+# as a full dump and answer interactive search with "not found" for every
+# name it never saw (observed live: 'sade' on a slice-holding node).
+DB_VERSION_KEY = "musicbrainz.db_version"
+
+
 def local_dump_available(conn):
-    """Dump version string if this node can serve slices, else None. Requires
-    BOTH the VERSION marker (full load completed) AND mb_artist rows on the
-    serve DSN — the marker is filesystem-local while the DB is per-DSN, and
-    the two can diverge (e.g. dump loaded into a different database)."""
-    version = dump_version_file()
-    if not version:
-        return None
+    """Dump version string if this node holds a COMPLETED full load on this
+    DSN (serve-slices / serve-search / search-locally authority), else
+    None. The in-DB marker is the per-DSN truth; mb_artist rows are the
+    sanity check that the data was not dropped underneath it."""
     with conn.cursor() as cur:
+        cur.execute("SELECT value FROM user_settings WHERE key = %s",
+                    (DB_VERSION_KEY,))
+        row = cur.fetchone()
+        version = row[0] if row else None
+        if not version:
+            return None
         cur.execute("SELECT 1 FROM mb_artist LIMIT 1")
         if cur.fetchone() is None:
             return None

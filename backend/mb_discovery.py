@@ -207,8 +207,16 @@ LIMIT %(limit)s
 
 
 def available() -> bool:
-    import mb_backend as mb
-    return mb.LOCAL_DUMP
+    """FULL local dump — the search/browse/mint-locally authority.
+
+    Deliberately NOT mb_backend.LOCAL_DUMP: that flag flips True after the
+    first imported P2P slice (canon runs on partial data by design), and
+    interactive search over a slice-partial world answers "not found" for
+    every name it never saw — observed live ('sade' on a slice-holding
+    dump-less node searched locally instead of asking a dump peer). The
+    predicate is the loader's in-DB completion marker."""
+    from routers.sync import mb_dump_version
+    return bool(mb_dump_version())
 
 
 def search(q: str, limit: int = 20) -> dict:
