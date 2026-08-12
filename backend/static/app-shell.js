@@ -3341,7 +3341,7 @@
           <!-- First-run discoverability: the MB scope hides in Advanced
                filters, so a library miss offers the jump right where the
                user is looking. Hidden unless the MB chip is usable. -->
-          <button class="btn" id="dEmptyMbBtn" type="button" hidden
+          <button class="btn btn-secondary" id="dEmptyMbBtn" type="button" hidden
                   style="margin: 0 var(--space-4) var(--space-4);">
             Search the MusicBrainz catalog</button>
         </div>
