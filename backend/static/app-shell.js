@@ -3338,6 +3338,12 @@
         `).join('')}
         <div class="d-empty" id="dEmpty" hidden>
           <p class="placeholder-body" style="padding: var(--space-4);">No matches.</p>
+          <!-- First-run discoverability: the MB scope hides in Advanced
+               filters, so a library miss offers the jump right where the
+               user is looking. Hidden unless the MB chip is usable. -->
+          <button class="btn" id="dEmptyMbBtn" type="button" hidden
+                  style="margin: 0 var(--space-4) var(--space-4);">
+            Search the MusicBrainz catalog</button>
         </div>
       </section>
     `;
@@ -3730,6 +3736,17 @@
       screen._debounceTimer = setTimeout(() =>
         triggerDiscoverySearch(screen), DISCOVERY_DEBOUNCE_MS);
     });
+
+    // "No matches" → one tap into the MusicBrainz scope with the same
+    // query: flips the scope chip (its own handler updates the filter +
+    // scope UI) and re-runs the search.
+    const mbJump = screen.querySelector('#dEmptyMbBtn');
+    if (mbJump) mbJump.addEventListener('click', () => {
+      const chip = screen.querySelector('#discoveryMbChip');
+      if (!chip || chip.classList.contains('is-disabled')) return;
+      chip.click();
+      triggerDiscoverySearch(screen);
+    });
   }
 
   // Single entry point for "do a search now" — invoked by the
@@ -3863,6 +3880,15 @@
                 : completion.warming
                   ? 'AI model is warming up — search again in a minute.'
                   : 'No matches.';
+              // Library miss + usable MB scope → offer the catalog jump
+              // right here (first-timers don't know the scope exists).
+              const mbBtn = empty.querySelector('#dEmptyMbBtn');
+              if (mbBtn) {
+                const chip = screen.querySelector('#discoveryMbChip');
+                mbBtn.hidden = !(query && chip
+                  && !chip.classList.contains('is-disabled')
+                  && (filters.scope || 'names') !== 'mb');
+              }
               empty.hidden = false;
             }
             // Streaming supplement: names-scope searches also ask the provider
@@ -3902,6 +3928,10 @@
         renderMbBlock(screen, 'albums', 'Albums · MusicBrainz',
                       renderMbAlbumRow(albums), albums.length);
         if (!artists.length && !albums.length) {
+          // Already in the MB scope — the "search MusicBrainz" jump from a
+          // prior library miss must not linger here.
+          const mbBtn = empty.querySelector('#dEmptyMbBtn');
+          if (mbBtn) mbBtn.hidden = true;
           const emptyP = empty.querySelector('p');
           if (emptyP) emptyP.textContent = data.cooldown
             // Network search is a shared volunteer resource — the client
