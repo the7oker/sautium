@@ -584,6 +584,9 @@ def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> D
         "('musicbrainz.db_version', %s::jsonb) "
         "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
         (_json.dumps(version),))
+    # Wake the mb-capability listener: the Discovery chip flips to the
+    # enabled 'local' state the moment the full load lands.
+    db_execute("NOTIFY sautium_mb_sources")
     progress_cb({"phase": "done", "version": version})
     return {"version": version, "loaded": True, "up_to_date": False}
 

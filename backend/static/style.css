@@ -3102,6 +3102,10 @@ body.has-miniplayer .ai-fab {
 
 /* MusicBrainz scope */
 .f-chip.is-disabled { opacity: 0.4; }
+/* MB source probe in flight — breathe between the disabled and enabled
+   looks so "still working" reads without a label. */
+.f-chip.is-searching { animation: mb-chip-pulse 1.4s var(--ease-inout, ease-in-out) infinite alternate; }
+@keyframes mb-chip-pulse { from { opacity: 0.4; } to { opacity: 1; } }
 /* Every filter below Search-in goes inert in MB scope — visibly, so a
    forgotten chip can't silently gut the results. The actions row stays
    live: Reset is the escape hatch back to library scopes. */

@@ -263,6 +263,7 @@ class P2PManager:
         self._sync_request_notify = asyncio.Event()
         self._sync_lock = asyncio.Lock()
         self._mb_slice_lock = asyncio.Lock()
+        self._mb_probe_lock = asyncio.Lock()
 
         def _progress(msg):
             logger.info(msg)
@@ -1712,6 +1713,16 @@ class P2PManager:
             row = cur.fetchone()
             return row[0] if row else None
 
+    def _notify_blocking(self, channel: str) -> None:
+        """Fire one NOTIFY on a short-lived connection (executor-safe)."""
+        conn = psycopg2.connect(self.db_dsn)
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(f"NOTIFY {channel}")
+        finally:
+            conn.close()
+
     def _write_settings_blocking(self, values: dict) -> None:
         """Upsert user_settings keys on a short-lived connection — safe to
         call from an executor thread (the chat connection is not)."""
@@ -2823,6 +2834,10 @@ class P2PManager:
                     # wait out the 6-hour slice timer even with a dump peer
                     # online right now.
                     cur.execute("LISTEN sautium_enrich_done")
+                    # Backend fires this when a remote MB search exhausted
+                    # every known source — re-probe now instead of waiting
+                    # out the slice timer, so the chip flips honestly.
+                    cur.execute("LISTEN sautium_mb_sources_request")
 
                 while self._running:
                     ready = await asyncio.get_event_loop().run_in_executor(
@@ -2840,6 +2855,9 @@ class P2PManager:
                         if "sautium_enrich_done" in channels:
                             asyncio.create_task(
                                 self._request_mb_slices_safe())
+                        if "sautium_mb_sources_request" in channels:
+                            asyncio.create_task(
+                                self._refresh_mb_sources())
             except Exception as e:
                 logger.debug(f"sync_request LISTEN error: {e}")
                 await asyncio.sleep(5)
@@ -2959,6 +2977,22 @@ class P2PManager:
             await self._request_mb_slices()
         except Exception:
             logger.exception("post-sync MB slice fetch failed")
+
+    async def _refresh_mb_sources(self):
+        """On-demand source re-probe (backend NOTIFYs when a remote search
+        exhausted every known source — the 'dump node disappeared' moment).
+        _find_dump_peers persists the fresh verdict and NOTIFYs it back to
+        open tabs; a full-dump node has nothing to probe."""
+        if self._mb_probe_lock.locked():
+            return
+        async with self._mb_probe_lock:
+            try:
+                if await asyncio.get_event_loop().run_in_executor(
+                        None, self._local_dump_available_sync):
+                    return
+                await self._find_dump_peers()
+            except Exception as e:
+                logger.debug(f"MB source re-probe failed: {e}")
 
     # -------------------------------------------------------------------
     # MB dump slices (P2P canonicalization for dump-less nodes)
@@ -3125,7 +3159,8 @@ class P2PManager:
         # backend reads this cache instead. Refreshed on every slice run; a
         # stale entry costs one failed probe and a rotation step.
         try:
-            await asyncio.get_event_loop().run_in_executor(
+            loop_ = asyncio.get_event_loop()
+            await loop_.run_in_executor(
                 None, self._write_settings_blocking, {
                     "mb.search_sources":
                         [{"url": api.base_url, "kind": "replica"}
@@ -3133,6 +3168,10 @@ class P2PManager:
                         + [{"url": api.base_url, "kind": "dump"}
                            for api, _ in dumps],
                 })
+            # Wake the backend's mb-sources listener → {"t": "mb"} event →
+            # the Discovery chip flips live (searching → online/disabled).
+            await loop_.run_in_executor(
+                None, self._notify_blocking, "sautium_mb_sources")
         except Exception as e:
             logger.debug(f"MB slice: source persist failed: {e}")
         return replicas + dumps

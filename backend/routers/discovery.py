@@ -17,16 +17,100 @@ tells the client the semantic channels weren't all live yet.
 
 import logging
 import random
+import select
+import threading
+import time
 from typing import Any, Optional
+
+import psycopg2
 from fastapi import APIRouter, Body, HTTPException, Query
 from sqlalchemy import text
 
 import model_cache
+from config import settings
 from database import get_db_context
 from db_pool import db_query
 from discovery_engine import RETRIEVE_K
 
 logger = logging.getLogger(__name__)
+
+# ── MB-capability wakeups for /api/events ────────────────────────────────
+# The launcher's P2PManager NOTIFYs sautium_mb_sources whenever it rewrites
+# mb.search_sources (and the dump loader on full-load completion); this
+# listener wakes the multiplexed event stream so the Discovery MB chip
+# flips live — the one-shot render-time fetch left it dead until a page
+# reload (observed on a fresh node, 2026-08-11). Mirrors the gear research
+# listener pattern.
+
+_mb_sse_clients: list = []
+_mb_sse_lock = threading.Lock()
+_mb_listener_thread: Optional[threading.Thread] = None
+_mb_listener_running = False
+
+
+def mb_sse_register(evt, loop) -> None:
+    with _mb_sse_lock:
+        _mb_sse_clients.append((evt, loop))
+
+
+def mb_sse_unregister(evt, loop) -> None:
+    with _mb_sse_lock:
+        try:
+            _mb_sse_clients.remove((evt, loop))
+        except ValueError:
+            pass
+
+
+def _wake_mb_clients() -> None:
+    with _mb_sse_lock:
+        clients = list(_mb_sse_clients)
+    for evt, loop in clients:
+        loop.call_soon_threadsafe(evt.set)
+
+
+def _mb_db_listener() -> None:
+    while _mb_listener_running:
+        conn = None
+        try:
+            conn = psycopg2.connect(settings.database_url)
+            conn.set_isolation_level(
+                psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+            with conn.cursor() as cur:
+                cur.execute("LISTEN sautium_mb_sources")
+            while _mb_listener_running:
+                ready = select.select([conn], [], [], 1)
+                if ready[0]:
+                    conn.poll()
+                    if conn.notifies:
+                        conn.notifies.clear()
+                        _wake_mb_clients()
+        except Exception as e:
+            logger.debug(f"mb sources listener error: {e}")
+            if _mb_listener_running:
+                time.sleep(1)
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+
+def start_mb_sources_listener() -> None:
+    global _mb_listener_thread, _mb_listener_running
+    if _mb_listener_thread and _mb_listener_thread.is_alive():
+        return
+    _mb_listener_running = True
+    _mb_listener_thread = threading.Thread(
+        target=_mb_db_listener, daemon=True, name="mb-sources-sse")
+    _mb_listener_thread.start()
+
+
+def stop_mb_sources_listener() -> None:
+    global _mb_listener_running
+    _mb_listener_running = False
+    if _mb_listener_thread:
+        _mb_listener_thread.join(timeout=3)
 
 
 router = APIRouter(prefix="/api/discovery", tags=["discovery"])
@@ -257,13 +341,11 @@ def streaming_mint(body: dict = Body(...)):
 
 @router.get("/mb-status")
 def mb_status():
-    """Whether the MusicBrainz scope can serve — the optional local dump,
-    or (dump-less) reachable P2P dump nodes. The UI renders the Search-in
-    chip disabled (with a download hint) only when neither exists."""
+    """Live MB-scope capability: 'local' | 'remote' | 'searching' | 'none'
+    (see mb_discovery.state). The UI chip renders enabled / pulsing /
+    disabled from it and stays current via {"t": "mb"} events."""
     import mb_discovery
-    local = mb_discovery.available()
-    return {"available": local or mb_discovery.remote_available(),
-            "remote": not local and mb_discovery.remote_available()}
+    return mb_discovery.state()
 
 
 @router.get("/mb-search")

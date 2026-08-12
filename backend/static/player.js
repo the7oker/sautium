@@ -80,6 +80,11 @@
           window.dispatchEvent(new CustomEvent('sautium:preview-changed'));
         } else if (msg.t === 'research') {
           window.dispatchEvent(new CustomEvent('sautium:research-changed'));
+        } else if (msg.t === 'mb') {
+          // MB-scope capability changed (dump loaded, dump peers
+          // found/lost) — payload carries the fresh mb-status shape.
+          window.dispatchEvent(new CustomEvent('sautium:mb-changed',
+            { detail: msg.d }));
         }
       },
       () => {

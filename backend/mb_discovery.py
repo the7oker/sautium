@@ -92,6 +92,30 @@ def remote_available() -> bool:
     return bool(remote_sources("dump"))
 
 
+def state() -> dict:
+    """Live MB-scope capability for the UI chip: 'local' (full dump),
+    'remote' (dump peers known), 'searching' (P2P is up but no source
+    probe round has completed yet — the key is absent), 'none' (probed
+    and found nothing, or P2P is off). Rides /api/events as {"t": "mb"}
+    so the chip updates without a page reload."""
+    if available():
+        return {"available": True, "remote": False, "state": "local"}
+    row = db_query_one(
+        "SELECT value FROM user_settings WHERE key = %(k)s",
+        {"k": SOURCES_KEY})
+    if row is not None:
+        dumps = [s for s in (row.get("value") or [])
+                 if s.get("kind") == "dump"]
+        if dumps:
+            return {"available": True, "remote": True, "state": "remote"}
+        return {"available": False, "remote": False, "state": "none"}
+    p2p = db_query_one(
+        "SELECT value FROM user_settings WHERE key = 'sync.p2p_enabled'")
+    if p2p is not None and not p2p.get("value"):
+        return {"available": False, "remote": False, "state": "none"}
+    return {"available": False, "remote": False, "state": "searching"}
+
+
 def remote_search(q: str, limit: int = 10) -> dict:
     """Search artist candidates on remote dump nodes, rotating across them.
 
@@ -135,6 +159,14 @@ def remote_search(q: str, limit: int = 10) -> dict:
         except Exception as e:
             logger.info(f"MB remote search via {url} failed: {e}")
             continue
+    # Every known source failed — the "dump node disappeared" moment.
+    # Ask the launcher's P2P layer to re-probe; it persists the fresh
+    # verdict (likely []) and NOTIFYs sautium_mb_sources, which pushes an
+    # {"t": "mb"} event to open tabs and flips the chip to disabled.
+    try:
+        db_execute("NOTIFY sautium_mb_sources_request")
+    except Exception as e:
+        logger.debug(f"mb sources re-probe notify failed: {e}")
     return {"status": "no_peers"}
 
 _CAA_FRONT_URL = "https://coverartarchive.org/release-group/{rg}/front-500"

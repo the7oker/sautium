@@ -3347,16 +3347,26 @@
     wireDiscoverySearch(screen);
     wireDiscoveryFilters(screen);
 
-    // MB scope availability — chip disabled (with a download hint on tap)
-    // until the optional dump is loaded.
+    // MB scope availability — live three-state chip: 'local'/'remote' =
+    // enabled, 'searching' = pulsing (P2P source probe in flight), 'none'
+    // = disabled with a download hint on tap. Kept current via the
+    // /api/events stream ('sautium:mb-changed') — the old one-shot fetch
+    // left a fresh node's chip dead until a page reload.
     fetch('/api/discovery/mb-status')
-      .then(r => r.ok ? r.json() : { available: false })
+      .then(r => r.ok ? r.json() : { available: false, state: 'none' })
       .then(s => {
-        screen._mbAvailable = !!s.available;
         const chip = screen.querySelector('#discoveryMbChip');
-        if (chip) chip.classList.toggle('is-disabled', !s.available);
+        if (chip) applyMbChipState(chip, s);
       })
       .catch(() => {});
+  }
+
+  function applyMbChipState(chip, s) {
+    chip.dataset.mbState = s.state || (s.available ? 'local' : 'none');
+    // 'searching' keeps is-disabled so the scope cannot be activated
+    // mid-probe — the pulse says "working on it", the tap explains.
+    chip.classList.toggle('is-disabled', !s.available);
+    chip.classList.toggle('is-searching', s.state === 'searching');
   }
 
   // Minimum query length before fanning out the target-block search.
@@ -3394,11 +3404,16 @@
             // Only the MB scope chip disables (no dump) — tapping it must
             // say why instead of dying silently.
             if (chip.id === 'discoveryMbChip') {
+              const searching = chip.dataset.mbState === 'searching';
               window.notifyDialog({
                 title: 'MusicBrainz search', kind: 'info',
-                message: 'Searching the whole MusicBrainz catalog needs the '
-                  + 'optional local dump. Download it in '
-                  + '<b>More → Library → MusicBrainz database</b>.',
+                message: searching
+                  ? 'Looking for MusicBrainz catalog nodes on the network — '
+                    + 'give it a minute. Or download the catalog yourself in '
+                    + '<b>More → Library → MusicBrainz database</b>.'
+                  : 'No MusicBrainz catalog nodes are reachable, and the '
+                    + 'optional local dump is not loaded. Download it in '
+                    + '<b>More → Library → MusicBrainz database</b>.',
               });
             }
             return;
@@ -11826,6 +11841,13 @@
       else if (h.startsWith('more/gear-system'))  refreshGearScreenLive(renderGearSystem, 'more/gear-system');
       else if (h.startsWith('more/gear-advisor')) refreshGearScreenLive(renderGearAdvisor, 'more/gear-advisor');
       else if (h.startsWith('more/gear/'))        refreshGearScreenLive(app => renderGearDetail(app, h.split('/')[2]), 'more/gear/');
+    });
+
+    // MB-scope capability changes (dump loaded, dump peers found/lost)
+    // flip the Discovery chip live — the payload is the mb-status shape.
+    window.addEventListener('sautium:mb-changed', (e) => {
+      const chip = document.getElementById('discoveryMbChip');
+      if (chip) applyMbChipState(chip, e.detail || {});
     });
 
     if (!location.hash) {

@@ -858,6 +858,8 @@ async def events_stream():
     SSE endpoint for the web UI. Preview/research events are payload-free
     pings by design: the open screen re-fetches its own snapshot, so
     there is no split source to race."""
+    import mb_discovery
+    from routers.discovery import mb_sse_register, mb_sse_unregister
     from routers.gear_models import (research_sse_register,
                                      research_sse_unregister)
     from streaming.events import preview_events
@@ -865,12 +867,14 @@ async def events_stream():
     loop = asyncio.get_event_loop()
     status_evt = asyncio.Event()
     research_evt = asyncio.Event()
+    mb_evt = asyncio.Event()
 
     async def event_generator():
         last_version = -1
         preview_q = preview_events.subscribe()
         manager.sse_register(status_evt, loop)
         research_sse_register(research_evt, loop)
+        mb_sse_register(mb_evt, loop)
         try:
             yield ("data: "
                    + json.dumps({"t": "status", "d": manager.latest_status})
@@ -880,6 +884,7 @@ async def events_stream():
                 waiters = {
                     asyncio.create_task(status_evt.wait()): "status",
                     asyncio.create_task(research_evt.wait()): "research",
+                    asyncio.create_task(mb_evt.wait()): "mb",
                     asyncio.create_task(preview_q.get()): "preview",
                 }
                 done, pending = await asyncio.wait(
@@ -909,11 +914,17 @@ async def events_stream():
                 if "research" in kinds:
                     research_evt.clear()
                     yield 'data: {"t": "research"}\n\n'
+                if "mb" in kinds:
+                    mb_evt.clear()
+                    yield ("data: "
+                           + json.dumps({"t": "mb", "d": mb_discovery.state()})
+                           + "\n\n")
         except asyncio.CancelledError:
             pass
         finally:
             manager.sse_unregister(status_evt)
             research_sse_unregister(research_evt, loop)
+            mb_sse_unregister(mb_evt, loop)
             preview_events.unsubscribe(preview_q)
 
     return StreamingResponse(
