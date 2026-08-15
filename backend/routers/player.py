@@ -173,19 +173,16 @@ def get_outputs(rescan: bool = False):
     })
     outputs.append({"type": "browser", "available": True})
 
-    backend = manager.active
     return {
         "active": {
             # Configured output, not just the attached one: with lazy
             # (re)attach the connection may not exist between sessions,
             # but the user's selection must stay visible in the picker.
-            "type": backend.id if backend else _read("output.type"),
-            "label": backend.label if backend else None,
-            "attached": backend is not None,
+            # Same dict the status payload carries — one source of truth.
+            **manager.output_info,
             "device_id": _read("output.local_device"),
             "exclusive": bool(_read("output.local_exclusive")),
             "renderer_udn": (persisted_renderer or {}).get("udn"),
-            "renderer_attached": getattr(backend, "renderer_attached", None),
             "stream_quality": _read("output.stream_quality") or "lossless",
         },
         "outputs": outputs,

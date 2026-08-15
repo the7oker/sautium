@@ -241,6 +241,11 @@ class PlaybackManager:
                 logger.info("output=hqplayer but no endpoint configured — idle")
         else:
             logger.info("No playback output configured — idle")
+        if self._active is None:
+            # Nothing attached (unconfigured endpoint, absent renderer, failed
+            # start): publish the selection anyway so the UI can name the
+            # output it is waiting on instead of seeing no output at all.
+            self._push_status({"state": "disconnected"})
 
     # -- SSE plumbing ----------------------------------------------------------
 
@@ -266,15 +271,26 @@ class PlaybackManager:
             for evt, loop in self._sse_clients:
                 loop.call_soon_threadsafe(evt.set)
 
-    @staticmethod
-    def _output_info(backend: Optional[PlayerBackend]) -> dict:
-        info = {"type": backend.id if backend else None,
-                "label": backend.label if backend else None}
-        attached = getattr(backend, "renderer_attached", None)
-        if attached is not None:
+    @property
+    def output_info(self) -> dict:
+        """The SELECTED output — a preference, not a live connection. A
+        backend that never attached (HQPlayer closed, renderer asleep) leaves
+        the user's choice standing, so the persisted type is the fallback and
+        `attached` carries the liveness. Every surface that asks "which output
+        is this node on?" — the status payload, the Output picker, the AI
+        prompt — reads it from here, or they disagree the moment a backend
+        drops."""
+        backend = self._active
+        if backend is None:
+            from routers.settings import _read
+            return {"type": _read("output.type"), "label": None,
+                    "attached": False}
+        info = {"type": backend.id, "label": backend.label, "attached": True}
+        renderer_attached = getattr(backend, "renderer_attached", None)
+        if renderer_attached is not None:
             # Browser output only: distinguishes "another device is playing"
             # (remote-control mode) from "nobody renders" in the UI.
-            info["renderer_attached"] = attached
+            info["renderer_attached"] = renderer_attached
         return info
 
     def subscribe_status(self, fn: Callable) -> None:
@@ -283,6 +299,13 @@ class PlaybackManager:
         self._observers.append(fn)
 
     def _push_status(self, new_data: dict) -> None:
+        # Invariant: every payload names the selected output. The bare
+        # "disconnected" pushes used to omit it, and the UI reads that field
+        # as "which output is this node on?" — so a stalled HQPlayer poll or
+        # a failed attach made the whole output vanish from the status while
+        # the picker still showed it selected.
+        if "output" not in new_data:
+            new_data["output"] = self.output_info
         if new_data != self._latest_status:
             self._latest_status = new_data
             self._status_version += 1
@@ -406,7 +429,7 @@ class PlaybackManager:
             "preview": preview,
             "provider": item.provider if preview else None,
             "preview_track_id": item.track_id if preview else None,
-            "output": self._output_info(backend),
+            "output": self.output_info,
             # Stale-tab detection: tabs compare this against the build they
             # loaded with and reload themselves on mismatch (player.js).
             "ui_build": ui_build(),
@@ -565,7 +588,7 @@ class PlaybackManager:
             "radio_mode": self.radio_mode,
             "preview": bool(first.preview),
             "provider": first.provider if first.preview else None,
-            "output": self._output_info(self._active),
+            "output": self.output_info,
             "ui_build": ui_build(),
         })
 

@@ -54,8 +54,6 @@ def _get_player_context() -> Optional[str]:
     try:
         from routers.player import get_status, get_playlist
 
-        from routers.settings import _read
-
         status = get_status()
         parts = []
 
@@ -64,23 +62,28 @@ def _get_player_context() -> Optional[str]:
         # the sound is going elsewhere. Without this the agent has to guess,
         # and it guesses HQPlayer.
         #
-        # Read from settings when the status carries none — nothing is attached
-        # while a renderer is asleep or a browser tab is closed, and "which
-        # output did the user pick" still has an answer. This used to return
-        # nothing at all in that case, leaving the agent blind precisely when
-        # it most needed to explain why playback would not start.
+        # The status payload always names the selected output, attached or not
+        # (PlaybackManager.output_info) — a sleeping renderer or a stalled
+        # HQPlayer poll still has an answer to "which output did the user
+        # pick", and the agent needs it precisely then, to explain why
+        # playback will not start.
         out = status.get("output") or {}
-        otype = out.get("type") or _read("output.type") or "none"
+        otype = out.get("type") or "none"
         label = out.get("label")
-        attached = status.get("state") not in ("disconnected", None)
+        live = status.get("state") not in ("disconnected", None)
+        if not out.get("attached", live):
+            note = " — not currently attached"
+        elif not live:
+            note = " — attached but reporting no status"
+        else:
+            note = ""
         parts.append(
-            f"Active audio output: {otype}{f' ({label})' if label else ''}"
-            f"{'' if attached else ' — not currently attached'}. "
+            f"Active audio output: {otype}{f' ({label})' if label else ''}{note}. "
             + ("HQPlayer transport/DSP tools are available."
                if otype == "hqplayer" else
                "hqplayer_* tools will refuse — use play_track / play_album / "
                "play_similar / add_to_queue, which follow this output."))
-        if not attached:
+        if not live:
             return "\n".join(parts)
 
         # Now playing

@@ -7297,6 +7297,11 @@
       overlay.querySelectorAll('.more-row[disabled]').forEach(btn => {
         btn.addEventListener('click', e => e.preventDefault());
       });
+      // Output-dependent rows follow the status stream, so a drawer opened
+      // before the first tick (or while an output switch is in flight) is
+      // corrected by the event instead of by a re-open.
+      document.addEventListener('np-update', () => this._syncOutputRows());
+      this._syncOutputRows();
     },
     open() {
       if (!this.el) this.init();
@@ -7311,12 +7316,6 @@
       });
       updateFabVisibility(currentRoute);
       this._refreshHqpStatus();
-      // Active-output hint straight off the last SSE status — no fetch.
-      const outputHint = this.el.querySelector('#outputHint');
-      if (outputHint) {
-        const out = (window.currentStatus || {}).output;
-        outputHint.textContent = (out && out.label) || '';
-      }
     },
     close() {
       if (!this.el) return;
@@ -7327,20 +7326,25 @@
       updateFabVisibility(currentRoute);
     },
     toggle() { this.isOpen ? this.close() : this.open(); },
+    // Rows that only make sense for the SELECTED output. `output.type` is the
+    // user's choice, not the live connection: a stalled HQPlayer poll reports
+    // `disconnected` while HQPlayer is still the output, and hiding its
+    // settings screen then strands the one place where the endpoint is fixed.
+    _syncOutputRows() {
+      if (!this.el) return;
+      const out = (window.currentStatus || {}).output;
+      if (!out) return;   // no tick yet — the np-update listener settles it
+      const hqpRow = this.el.querySelector('#hqpHint').closest('.more-row');
+      hqpRow.hidden = out.type !== 'hqplayer';
+      this.el.querySelector('#outputHint').textContent = out.label || '';
+    },
     async _refreshHqpStatus() {
       const hint = this.el && this.el.querySelector('#hqpHint');
       if (!hint) return;
       // The HQPlayer screen is about operating HQPlayer — filters, shapers,
-      // matrix profiles. It only means something while HQPlayer is the output,
-      // and listing it otherwise offers a whole settings screen for a device
-      // the sound is not going to. The row is hidden then; the route stays
-      // reachable, which is how the Output picker sends people here to
-      // configure an endpoint in the first place.
-      const row = hint.closest('.more-row');
-      const out = window.currentStatus && window.currentStatus.output;
-      const isHqp = out ? out.type === 'hqplayer' : false;
-      if (row) row.hidden = !isHqp;
-      if (!isHqp) return;
+      // matrix profiles. Its hint is a live connection check, so it only runs
+      // while the row is on screen.
+      if (hint.closest('.more-row').hidden) return;
       hint.className = 'more-hint';
       hint.textContent = '…';
       try {

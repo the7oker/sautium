@@ -145,7 +145,10 @@
     // Browser-output renderer lifecycle: THIS tab renders audio only while
     // it holds the sessionStorage claim AND the backend output is browser.
     // Reloads re-attach (same tab claim); switching outputs detaches.
-    const outType = data.output && data.output.type;
+    // `output.type` names the SELECTED output even with nothing attached —
+    // rendering follows the live backend, so an unattached one renders nothing.
+    const out = data.output || {};
+    const outType = out.attached === false ? null : out.type;
     if (sessionStorage.getItem('sautiumBrowserRenderer') === '1') {
       if (outType === 'browser' && !browserRenderer.active) {
         browserRenderer.attach();
