@@ -138,13 +138,16 @@ def ensure_identity_proof(
     mem_available_kib: Callable[[], Optional[int]] = identity_pow.mem_available_kib,
     mem_guard_kib: int = MEM_GUARD_KIB,
     battery: Callable[[], bool] = on_battery,
+    hold: Callable[[], Optional[str]] = lambda: None,
     pause_seconds: float = PAUSE_SECONDS,
 ) -> Optional[dict]:
     """Bring this node's proof for `cert` to a ready state (see module doc).
     Runs in the caller's thread until ready or `stop`; returns the proof, or
     None when nothing is needed (email) or the worker was stopped.
     `on_state(state)` receives every state change plus one update per
-    mining attempt — the caller publishes it (user_settings + NOTIFY)."""
+    mining attempt — the caller publishes it (user_settings + NOTIFY).
+    `hold()` is an external pause reason (the load meter's "playback"),
+    checked by the same per-attempt gate as memory and battery."""
     _lower_thread_priority()
     started = _now_iso()
     state = {"method": cert["method"], "difficulty": cert["difficulty"],
@@ -187,10 +190,13 @@ def ensure_identity_proof(
         reason = None
         while not stop.is_set():
             avail = mem_available_kib()
+            external = hold()
             if avail is not None and avail < mem_guard_kib:
                 new_reason = "memory"
             elif battery():
                 new_reason = "battery"
+            elif external:
+                new_reason = external
             else:
                 break
             if new_reason != reason:

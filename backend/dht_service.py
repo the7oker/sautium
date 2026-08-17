@@ -159,6 +159,7 @@ class DHTService:
         # injected by main.py after startup — returns True while the node
         # has foreground activity; None = never busy (announce freely).
         self._activity_probe: Optional[callable] = None
+        self._pace = lambda: 1.0     # load_meter.announce_pace when installed
         self._deferred_s = 0.0
         self._trickle_allowance = 0
         # Serialize sweeps: the startup announce and the 15-min cycle must
@@ -167,6 +168,12 @@ class DHTService:
 
     def set_activity_probe(self, probe: callable) -> None:
         self._activity_probe = probe
+
+    def set_pace_provider(self, fn) -> None:
+        """Multiplier for the announce chunk pause (desktop/p2p/load_meter.py:
+        1× when the node is idle, up to 8× as CPU headroom vanishes) — the
+        activity probe above yields to playback, this one yields to load."""
+        self._pace = fn
 
     def _is_busy(self) -> bool:
         if self._activity_probe is None:
@@ -368,7 +375,7 @@ class DHTService:
                 self._session.dht_announce(sha1, self.http_port, 0)
                 self._announced.add(uuid)
                 if (i + 1) % ANNOUNCE_CHUNK == 0:
-                    await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE)
+                    await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE * self._pace())
                     if not self._running or not self._session:
                         return
 
@@ -492,7 +499,7 @@ class DHTService:
                     sha1 = lt.sha1_hash(ih)
                     self._session.dht_announce(sha1, self.http_port, 0)
                     if (i + 1) % ANNOUNCE_CHUNK == 0:
-                        await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE)
+                        await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE * self._pace())
                         if not self._running or not self._session:
                             return
             logger.info("DHT re-announce complete")

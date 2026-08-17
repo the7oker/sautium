@@ -272,6 +272,7 @@ _DEFAULTS: Dict[str, Any] = {
     "sync.last_at":              None,
     "sync.last_items_received":  None,
     "p2p.identity":              None,   # {status, detail, method, attempts, difficulty, p_done, …}
+    "p2p.load":                  None,   # {profile, ceiling, cpu_frac, headroom, dormant, playback, pace, …}
     # MusicBrainz local dump — optional auxiliary layer for artist
     # canonicalization. version/last-update written by the loader.
     "musicbrainz.auto_update":   False,
@@ -678,6 +679,7 @@ def _sync_state() -> Dict[str, Any]:
         "reachability_detail":     _read("p2p.reachability_detail"),
         "reachability_checked_at": _read("p2p.reachability_checked_at"),
         "identity":                _read("p2p.identity"),
+        "load":                    _read("p2p.load"),
     }
 
 

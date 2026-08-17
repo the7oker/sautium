@@ -950,8 +950,11 @@ async def identity_proof_task(stop: threading.Event) -> None:
         if path is None:
             logger.warning("p2p_identity_dir unset — identity proof cannot be stored")
             return
+        from desktop.p2p import load_meter
+        meter = load_meter.current()
         await asyncio.to_thread(identity_proof.ensure_identity_proof, cert, path,
-                                stop=stop, on_state=publish)
+                                stop=stop, on_state=publish,
+                                hold=meter.mining_hold if meter else (lambda: None))
         return
 
 

@@ -134,6 +134,7 @@ class DHTService:
         # address — they pollute lookups for everyone and burn traffic.
         # Lookups and LAN discovery are unaffected by this flag.
         self._announces_enabled = True
+        self._pace = lambda: 1.0     # load_meter.announce_pace when installed
         # External IP as DHT peers see us (external_ip_alert) — the
         # router-WAN vs world-view mismatch is a CGNAT tell.
         self.observed_external_ip: Optional[str] = None
@@ -169,6 +170,12 @@ class DHTService:
                 f"DHT announce port changed: {self._announce_port} -> {port}"
             )
             self._announce_port = port
+
+    def set_pace_provider(self, fn) -> None:
+        """Multiplier for the announce chunk pause (desktop/p2p/load_meter.py:
+        1× when the node is idle, up to 8× under load or playback) — the
+        playback-aware throttling of the announce sweep."""
+        self._pace = fn
 
     def set_announces_enabled(self, enabled: bool):
         """Gate ALL announces by the reachability verdict (see __init__)."""
@@ -342,7 +349,7 @@ class DHTService:
             self._session.dht_announce(sha1, self._announce_port, 0)
             self._announced.add(uuid)
             if (i + 1) % ANNOUNCE_CHUNK == 0:
-                await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE)
+                await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE * self._pace())
                 if not self._running or not self._session:
                     return
 
@@ -467,7 +474,7 @@ class DHTService:
                 sha1 = lt.sha1_hash(ih)
                 self._session.dht_announce(sha1, self._announce_port, 0)
                 if (i + 1) % ANNOUNCE_CHUNK == 0:
-                    await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE)
+                    await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE * self._pace())
                     if not self._running or not self._session:
                         return
             logger.info("DHT re-announce complete")

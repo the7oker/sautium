@@ -56,6 +56,7 @@ class P2PManager:
         self._thread: Optional[threading.Thread] = None
         self._proof_thread: Optional[threading.Thread] = None
         self._proof_stop: Optional[threading.Event] = None
+        self._load_meter = None
         self._sync_server: Optional[SyncServer] = None
         self._dht_service: Optional[DHTService] = None
         self._lan_discovery: Optional[LANDiscovery] = None
@@ -131,6 +132,21 @@ class P2PManager:
         # certificate then needs its proof: minutes of memory-hard work in a
         # below-normal-priority thread, gated on free memory / mains power,
         # published to user_settings for the Web UI (desktop/p2p/identity_proof.py).
+        # Load meter: this process tree's CPU against the profile ceiling —
+        # headroom/dormancy for the miner (hold), the DHT announce sweep
+        # (pace) and later the gate; published to user_settings['p2p.load'].
+        from desktop.p2p import load_meter
+        self._load_meter = load_meter.install(load_meter.LoadMeter())
+
+        def _publish_load(snap: dict) -> None:
+            try:
+                self._write_settings_blocking({"p2p.load": snap})
+                self._notify_blocking("sautium_identity")
+            except Exception as e:
+                logger.debug("load publish failed: %s", e)
+        self._load_meter.subscribe(_publish_load)
+        self._load_meter.start()
+
         if account_info:
             from desktop.p2p.birth_cert import ensure_certificate
             cert = ensure_certificate()
@@ -164,6 +180,8 @@ class P2PManager:
             listen_port=dht_port,
             http_port=http_port,
         )
+        if self._load_meter is not None:
+            self._dht_service.set_pace_provider(self._load_meter.announce_pace)
         docker_ports = p2p_cfg.get("docker_ports", [])
         invite_code = account_info.get("invite_code", "") if account_info else ""
         self._lan_discovery = LANDiscovery(
@@ -575,11 +593,12 @@ class P2PManager:
             except Exception as e:
                 logger.debug("identity state publish failed: %s", e)
 
+        hold = self._load_meter.mining_hold if self._load_meter else (lambda: None)
         self._proof_stop = threading.Event()
         self._proof_thread = threading.Thread(
             target=identity_proof.ensure_identity_proof,
             args=(cert, birth_cert.proof_path()),
-            kwargs={"stop": self._proof_stop, "on_state": publish},
+            kwargs={"stop": self._proof_stop, "on_state": publish, "hold": hold},
             daemon=True, name="identity-proof")
         self._proof_thread.start()
 
@@ -600,6 +619,8 @@ class P2PManager:
         # The proof worker exits between attempts (one ~2 GiB call at most).
         if self._proof_stop is not None:
             self._proof_stop.set()
+        if self._load_meter is not None:
+            self._load_meter.stop()
 
         # Break out of DHT bootstrap wait (sync flag, safe from any thread)
         if self._dht_service:

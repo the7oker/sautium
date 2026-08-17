@@ -10745,6 +10745,10 @@
           <span class="form-label">Identity</span>
           <span class="form-value mono" title="${escapeProfileHtml(identityDetail(sync.identity))}">${escapeProfileHtml(identityLabel(sync.identity))}</span>
         </div>
+        <div class="form-row">
+          <span class="form-label">Headroom</span>
+          <span class="form-value mono" title="${escapeProfileHtml(loadDetail(sync.load))}">${escapeProfileHtml(loadLabel(sync.load))}</span>
+        </div>
       </div>
       <div class="btn-row single">
         <button class="btn btn-secondary" data-action="force-sync"${_syncInFlight ? ' disabled' : ''}>${_syncInFlight ? 'Syncing…' : 'Force sync now'}</button>
@@ -10774,6 +10778,22 @@
     if (st.difficulty) parts.push(`E = ${st.difficulty} attempts expected`);
     if (st.proof_mined_at) parts.push(`proof mined ${st.proof_mined_at}`);
     if (st.started_at && st.status !== 'ready') parts.push(`since ${st.started_at}`);
+    return parts.join(' · ');
+  }
+
+  // Node load (user_settings 'p2p.load', desktop/p2p/load_meter.py): CPU
+  // headroom against the profile ceiling; dormant = the market machinery
+  // sleeps; playback halves the headroom by design.
+  function loadLabel(ld) {
+    if (!ld || ld.headroom == null) return '—';
+    const pct = Math.round(ld.headroom * 100);
+    return `${pct}%${ld.playback ? ' · playing' : ''}${ld.dormant ? ' · dormant' : ' · active'}`;
+  }
+  function loadDetail(ld) {
+    if (!ld || ld.headroom == null) return '';
+    const parts = [`profile ${ld.profile}`, `ceiling ${Math.round((ld.ceiling || 0) * 100)}% CPU`,
+                   `using ${(100 * (ld.cpu_frac || 0)).toFixed(1)}%`, `announce pace ×${ld.pace}`];
+    if (ld.mem_available_mib != null) parts.push(`${ld.mem_available_mib} MiB free`);
     return parts.join(' · ');
   }
 

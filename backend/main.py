@@ -70,6 +70,7 @@ _dht_reannounce_task: asyncio.Task | None = None
 _p2p_server_task: asyncio.Task | None = None
 _identity_task: asyncio.Task | None = None
 _identity_stop: threading.Event | None = None
+_load_meter = None
 
 
 async def _relay_cap_loop() -> None:
@@ -319,6 +320,34 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"identity registry schema init failed: {e}")
 
+    # Load meter: this process tree's CPU against the profile ceiling +
+    # playback as a priority signal — headroom/dormancy for everything
+    # discretionary (miner hold, DHT pacing, later the gate). Published to
+    # user_settings['p2p.load'] on band changes for the Web UI.
+    global _load_meter
+    try:
+        from desktop.p2p import load_meter as _lm
+        import hardware_profile as _hp
+
+        def _playing() -> bool:
+            from playback.manager import manager as _pm
+            return _pm.latest_status.get("state") in ("playing", "loading")
+
+        _load_meter = _lm.install(_lm.LoadMeter(_hp.resolve().name, playback_probe=_playing))
+
+        def _publish_load(snap: dict) -> None:
+            try:
+                from routers.settings import _write
+                from db_pool import db_execute as _dbx
+                _write("p2p.load", snap)
+                _dbx("NOTIFY sautium_identity")
+            except Exception as e:
+                logger.debug(f"load publish failed: {e}")
+        _load_meter.subscribe(_publish_load)
+        _load_meter.start()
+    except Exception as e:
+        logger.warning(f"load meter unavailable: {e}")
+
     # Identity certificate + proof: cache/fetch the certificate, mine the
     # proof for a pow identity in the background (routers/p2p.identity_proof_task).
     global _identity_task, _identity_stop
@@ -363,6 +392,8 @@ async def lifespan(app: FastAPI):
                 return seconds_since_ui_activity() < ACTIVITY_WINDOW
 
             _dht_service.set_activity_probe(_node_busy)
+            if _load_meter is not None:
+                _dht_service.set_pace_provider(_load_meter.announce_pace)
 
             # The discovery key — how peers find this node at all.
             await _dht_service.announce_node()
@@ -522,6 +553,8 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    if _load_meter is not None:
+        _load_meter.stop()
     if _identity_stop:
         _identity_stop.set()
     if _identity_task:
