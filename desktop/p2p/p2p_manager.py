@@ -54,6 +54,8 @@ class P2PManager:
         self.config = config
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
+        self._proof_thread: Optional[threading.Thread] = None
+        self._proof_stop: Optional[threading.Event] = None
         self._sync_server: Optional[SyncServer] = None
         self._dht_service: Optional[DHTService] = None
         self._lan_discovery: Optional[LANDiscovery] = None
@@ -123,12 +125,17 @@ class P2PManager:
         from desktop.node_identity import get_account_info
         account_info = get_account_info()
 
-        # Birth certificate: silent fetch when missing (idempotent issuance —
+        # Identity certificate: silent fetch when missing (idempotent issuance —
         # a re-fetch after moving devices returns the original birth date;
-        # network failures degrade to None and are logged inside).
+        # network failures degrade to None and are logged inside). A pow
+        # certificate then needs its proof: minutes of memory-hard work in a
+        # below-normal-priority thread, gated on free memory / mains power,
+        # published to user_settings for the Web UI (desktop/p2p/identity_proof.py).
         if account_info:
             from desktop.p2p.birth_cert import ensure_certificate
-            ensure_certificate()
+            cert = ensure_certificate()
+            if cert is not None:
+                self._start_identity_proof_worker(cert)
 
         backend_port = self.config.get("ports", {}).get("web", 0)
         # MB dump capability: serve slices only with a completed FULL dump
@@ -556,6 +563,26 @@ class P2PManager:
         if self._sync_server:
             await self._sync_server.stop()
 
+    def _start_identity_proof_worker(self, cert: dict) -> None:
+        if self._proof_thread is not None and self._proof_thread.is_alive():
+            return
+        from desktop.p2p import birth_cert, identity_proof
+
+        def publish(state: dict) -> None:
+            try:
+                self._write_settings_blocking({"p2p.identity": state})
+                self._notify_blocking("sautium_identity")
+            except Exception as e:
+                logger.debug("identity state publish failed: %s", e)
+
+        self._proof_stop = threading.Event()
+        self._proof_thread = threading.Thread(
+            target=identity_proof.ensure_identity_proof,
+            args=(cert, birth_cert.proof_path()),
+            kwargs={"stop": self._proof_stop, "on_state": publish},
+            daemon=True, name="identity-proof")
+        self._proof_thread.start()
+
     def stop(self):
         """Stop all P2P services.
 
@@ -569,6 +596,10 @@ class P2PManager:
             return
 
         logger.info("Stopping P2P manager...")
+
+        # The proof worker exits between attempts (one ~2 GiB call at most).
+        if self._proof_stop is not None:
+            self._proof_stop.set()
 
         # Break out of DHT bootstrap wait (sync flag, safe from any thread)
         if self._dht_service:
@@ -600,6 +631,10 @@ class P2PManager:
                     "P2P loop thread did not exit within 15s — "
                     "sync server socket may leak"
                 )
+
+        if self._proof_thread is not None:
+            self._proof_thread.join(timeout=10)
+            self._proof_thread = None
 
         self._running = False
         self._loop = None

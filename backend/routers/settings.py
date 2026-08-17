@@ -179,6 +179,7 @@ def _sync_db_listener() -> None:
             )
             with conn.cursor() as cur:
                 cur.execute("LISTEN sautium_sync_done")
+                cur.execute("LISTEN sautium_identity")     # identity proof progress
 
             while _sync_listener_running:
                 ready = select.select([conn], [], [], 5)
@@ -270,6 +271,7 @@ _DEFAULTS: Dict[str, Any] = {
     # completes; surfaced in the "Last sync · N new items" row.
     "sync.last_at":              None,
     "sync.last_items_received":  None,
+    "p2p.identity":              None,   # {status, detail, method, attempts, difficulty, p_done, …}
     # MusicBrainz local dump — optional auxiliary layer for artist
     # canonicalization. version/last-update written by the loader.
     "musicbrainz.auto_update":   False,
@@ -675,6 +677,7 @@ def _sync_state() -> Dict[str, Any]:
         "reachability":            _read("p2p.reachability") or "unknown",
         "reachability_detail":     _read("p2p.reachability_detail"),
         "reachability_checked_at": _read("p2p.reachability_checked_at"),
+        "identity":                _read("p2p.identity"),
     }
 
 

@@ -10741,11 +10741,40 @@
             : sync.reachability === 'unreachable' ? 'no'
             : '—'}</span>
         </div>
+        <div class="form-row">
+          <span class="form-label">Identity</span>
+          <span class="form-value mono" title="${escapeProfileHtml(identityDetail(sync.identity))}">${escapeProfileHtml(identityLabel(sync.identity))}</span>
+        </div>
       </div>
       <div class="btn-row single">
         <button class="btn btn-secondary" data-action="force-sync"${_syncInFlight ? ' disabled' : ''}>${_syncInFlight ? 'Syncing…' : 'Force sync now'}</button>
       </div>
     `;
+  }
+
+  // Identity certificate + proof state published by the node's proof worker
+  // (user_settings 'p2p.identity', desktop/p2p/identity_proof.py). The proof
+  // is a background lottery, so progress is the odds so far, not a percent
+  // of work done.
+  function identityLabel(st) {
+    if (!st || !st.status) return '—';
+    if (st.status === 'ready') return st.detail === 'email' ? 'email-verified' : 'proof ready';
+    if (st.status === 'checking') return 'checking proof…';
+    if (st.status === 'mining') {
+      const odds = Math.round((st.p_done || 0) * 100);
+      return `securing… ${fmtNum(st.attempts || 0)} tries · ${odds}% odds`;
+    }
+    if (st.status === 'paused') return `paused · ${st.detail === 'battery' ? 'on battery' : 'low memory'}`;
+    return st.status;
+  }
+  function identityDetail(st) {
+    if (!st || !st.status) return '';
+    const parts = [];
+    if (st.method) parts.push(`method: ${st.method}`);
+    if (st.difficulty) parts.push(`E = ${st.difficulty} attempts expected`);
+    if (st.proof_mined_at) parts.push(`proof mined ${st.proof_mined_at}`);
+    if (st.started_at && st.status !== 'ready') parts.push(`since ${st.started_at}`);
+    return parts.join(' · ');
   }
 
   // Module-scope state for the async Force sync flow. _syncInFlight

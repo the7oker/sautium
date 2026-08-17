@@ -850,15 +850,23 @@ async def pending_accepts() -> Dict[str, Any]:
 
 # -- Email verification -------------------------------------------------------
 
-async def _get_own_birth_cert() -> Optional[dict]:
-    """This node's birth certificate from the Worker: public read first,
-    self-signed issuance when not yet issued. Verified before use."""
+async def _get_own_birth_cert(refresh: bool = False) -> Optional[dict]:
+    """This node's identity certificate: the disk cache first (verified on
+    load), else the Worker — public read, then self-signed issuance when not
+    yet issued — persisted for next time. `refresh` skips the cache (after
+    an email upgrade the Worker holds a newer certificate)."""
     from birth_authority import verify_certificate
+    import p2p_identity
 
     identity = _get_identity()
     if not identity:
         return None
     pubkey = identity["public_key_hex"].lower()
+
+    if not refresh:
+        cached = p2p_identity.load_certificate(settings)
+        if cached is not None:
+            return cached
 
     cert = await _worker_get("/birth-certificate", {"pubkey": pubkey})
     if not cert:
@@ -870,8 +878,81 @@ async def _get_own_birth_cert() -> Optional[dict]:
             "signature": signature,
         })
     if cert and cert.get("pubkey") == pubkey and verify_certificate(cert):
+        p2p_identity.save_certificate(settings, cert)
         return cert
     return None
+
+
+async def _worker_check_email(identity: dict) -> Optional[dict]:
+    """GET /check-email for this identity's configured email: {verified,
+    birth_cert?}. A returned certificate is the method:email upgrade — the
+    Worker issues it once the verified record is bound to this pubkey."""
+    import p2p_identity
+
+    email = identity.get("email")
+    if not email:
+        return None
+    message = f"check-email:{identity['invite_code']}:{email}"
+    signature = _sign_message(message)
+    if not signature:
+        return None
+    result = await _worker_get("/check-email", {
+        "invite_code": identity["invite_code"],
+        "email": email,
+        "public_key_hex": identity["public_key_hex"],
+        "signature": signature,
+    })
+    if result and result.get("birth_cert"):
+        p2p_identity.save_certificate(settings, result["birth_cert"])
+    return result
+
+
+async def identity_proof_task(stop: threading.Event) -> None:
+    """Startup task: make sure this node holds its identity certificate and,
+    for method:pow, a verified proof (desktop/p2p/identity_proof.py — the
+    same policy the launcher runs). Progress is published to
+    user_settings['p2p.identity'] + NOTIFY sautium_identity for the Web UI.
+    A node whose email is verified but whose certificate predates v2 gets
+    the method:email certificate from /check-email here — no work needed."""
+    from desktop.p2p import identity_proof
+    import p2p_identity
+
+    def publish(state: dict) -> None:
+        try:
+            from routers.settings import _write
+            _write("p2p.identity", state)
+            _db_execute("NOTIFY sautium_identity")
+        except Exception as e:
+            logger.debug(f"identity state publish failed: {e}")
+
+    backoff = 300
+    while not stop.is_set():
+        cert = await _get_own_birth_cert()
+        if cert is not None and cert["method"] == "pow":
+            # Portable identity: the email upgrade may have happened on
+            # another device holding the same key — one Worker read before
+            # committing minutes of mining to a possibly superseded cert.
+            cert = await _get_own_birth_cert(refresh=True) or cert
+        if cert is None:
+            # Worker unreachable / not configured: retry with backoff — the
+            # certificate is a network fact, nothing local can replace it.
+            logger.warning(f"identity certificate unavailable — retry in {backoff}s")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 3600)
+            continue
+        if cert["method"] != "email":
+            row = _db_query_one("SELECT email_verified FROM user_profile WHERE id = 1")
+            if row and row.get("email_verified"):
+                result = await _worker_check_email(_get_identity() or {})
+                if result and result.get("birth_cert"):
+                    cert = result["birth_cert"]
+        path = p2p_identity.proof_path(settings)
+        if path is None:
+            logger.warning("p2p_identity_dir unset — identity proof cannot be stored")
+            return
+        await asyncio.to_thread(identity_proof.ensure_identity_proof, cert, path,
+                                stop=stop, on_state=publish)
+        return
 
 
 @router.get("/email/status")
@@ -892,21 +973,7 @@ async def email_status() -> Dict[str, Any]:
     if row and row.get("email_verified"):
         return {"email": email, "verified": True}
 
-    invite_code = identity["invite_code"]
-    public_key_hex = identity["public_key_hex"]
-
-    message = f"check-email:{invite_code}:{email}"
-    signature = _sign_message(message)
-    if not signature:
-        return {"email": email, "verified": False}
-
-    result = await _worker_get("/check-email", {
-        "invite_code": invite_code,
-        "email": email,
-        "public_key_hex": public_key_hex,
-        "signature": signature,
-    })
-
+    result = await _worker_check_email(identity)
     verified = bool(result and result.get("verified"))
     if verified:
         _db_execute(
@@ -975,6 +1042,10 @@ async def email_verify_code(req: VerifyCodeRequest) -> Dict[str, Any]:
 
     if not result or result.get("status") != "registered":
         return {"verified": False, "error": "Invalid or expired code"}
+
+    if result.get("birth_cert"):
+        import p2p_identity
+        p2p_identity.save_certificate(settings, result["birth_cert"])
 
     # Persist so future /email/status checks return verified without a
     # Worker round-trip. Email-change and password-change flows (when

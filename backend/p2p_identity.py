@@ -200,3 +200,65 @@ def resolve_identity(settings) -> Optional[dict]:
         _identity_cache = derive_identity(
             settings.p2p_username, settings.p2p_password, settings.p2p_email)
     return _identity_cache
+
+
+# ---------------------------------------------------------------------------
+# Identity documents on disk: certificate + proof
+# ---------------------------------------------------------------------------
+# The Docker node derives its KEY in memory, but the certificate (a Worker
+# fact) and the proof (minutes of mining) are worth keeping: p2p_identity_dir
+# is a bind mount (./data/node_identity), so both survive container
+# recreation and the node never re-mines. Same file names as the launcher —
+# the export/import bundle moves between the two unchanged.
+
+CERT_FILENAME = "birth_certificate.json"
+
+
+def identity_dir(settings):
+    from pathlib import Path
+    if not settings.p2p_identity_dir:
+        return None
+    d = Path(settings.p2p_identity_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def load_certificate(settings) -> Optional[dict]:
+    """The cached certificate for THIS identity, verified on every load so a
+    tampered or foreign file degrades to 'no certificate'."""
+    import json
+    from birth_authority import verify_certificate
+
+    d = identity_dir(settings)
+    identity = resolve_identity(settings)
+    if d is None or not identity:
+        return None
+    try:
+        cert = json.loads((d / CERT_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if verify_certificate(cert) and cert["pubkey"] == identity["public_key_hex"].lower():
+        return cert
+    return None
+
+
+def save_certificate(settings, cert: dict) -> bool:
+    import json
+    from birth_authority import verify_certificate
+
+    d = identity_dir(settings)
+    identity = resolve_identity(settings)
+    if d is None or not identity or not verify_certificate(cert):
+        return False
+    if cert["pubkey"] != identity["public_key_hex"].lower():
+        return False
+    (d / CERT_FILENAME).write_text(json.dumps(cert, indent=2), encoding="utf-8")
+    logger.info("identity cert stored (issued_at=%s method=%s)",
+                cert["issued_at"], cert["method"])
+    return True
+
+
+def proof_path(settings):
+    from desktop.p2p.identity_proof import PROOF_FILENAME
+    d = identity_dir(settings)
+    return None if d is None else d / PROOF_FILENAME

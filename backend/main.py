@@ -68,6 +68,8 @@ logger = logging.getLogger(__name__)
 _dht_service: DHTService | None = None
 _dht_reannounce_task: asyncio.Task | None = None
 _p2p_server_task: asyncio.Task | None = None
+_identity_task: asyncio.Task | None = None
+_identity_stop: threading.Event | None = None
 
 
 async def _relay_cap_loop() -> None:
@@ -301,6 +303,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"P2P identity derivation failed: {e}")
 
+    # Identity certificate + proof: cache/fetch the certificate, mine the
+    # proof for a pow identity in the background (routers/p2p.identity_proof_task).
+    global _identity_task, _identity_stop
+    if _p2p_identity:
+        from routers.p2p import identity_proof_task
+        _identity_stop = threading.Event()
+        _identity_task = asyncio.create_task(identity_proof_task(_identity_stop))
+
     # The peer surface: sync protocol only, on its own port (p2p_app.py).
     # Everything a peer is told about this node points here — never at the
     # Web UI port, whose page carries the API secret.
@@ -496,6 +506,14 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    if _identity_stop:
+        _identity_stop.set()
+    if _identity_task:
+        _identity_task.cancel()
+        try:
+            await _identity_task
+        except asyncio.CancelledError:
+            pass
     if _p2p_server_task:
         _p2p_server_task.cancel()
         try:

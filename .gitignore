@@ -44,6 +44,7 @@ data/cache/*
 # TLS cert + key — generated per-host on first backend start
 data/tls/
 data/authority/
+data/node_identity/
 # Claude Code session storage — bind-mounted so chat history survives rebuilds
 data/claude_sessions/
 # MusicBrainz dump (~7GB tarball + extracted TSVs) — re-downloadable, loaded into pg

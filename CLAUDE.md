@@ -236,6 +236,11 @@ See:
   surfaces must agree on *exactly* — the seal-verification gate, the carry SQL,
   the DHT announce query — lives there and is imported, not copied.
 - Model cache external: `./data/cache` → `/root/.cache`.
+- Identity documents: `./data/node_identity` → `/app/data/node_identity`
+  (`birth_certificate.json` + `identity_proof.json` — the Docker node derives
+  its KEY in memory, but the Worker-issued certificate and the mined
+  proof-of-work must survive container recreation; same file names as the
+  launcher so the export/import bundle moves between the two).
 - **Never bake models into the image.** Cache lives on the host, survives container deletes.
 - **Restart backend after model/prompt changes**: `docker restart sautium-backend` then check logs for "Application startup complete".
 
