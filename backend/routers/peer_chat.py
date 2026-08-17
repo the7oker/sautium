@@ -71,6 +71,22 @@ def _err(message: str, status: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status)
 
 
+_gate = None
+
+
+def _identity_gate():
+    """Lazy: the asyncio semaphore inside is born on the serving loop.
+    Note: behind the Docker bridge every peer shares one client address, so
+    the per-address failure backstop acts as a global one here — bounded
+    verifier spend on forged proofs, at the price of a shared bucket."""
+    global _gate
+    if _gate is None:
+        import birth_authority
+        from desktop.p2p import identity_registry
+        _gate = identity_registry.IdentityGate(get_conn, birth_authority.verify_certificate)
+    return _gate
+
+
 def _ts_ok(ts) -> bool:
     try:
         return abs(time.time() - int(ts)) <= TS_WINDOW
@@ -287,15 +303,27 @@ async def chat_handshake(request: Request):
 
     if token_id:
         with get_conn() as conn:
+            requires_cert = invite_tokens.token_requires_cert(conn, token_id)
+        if requires_cert is None:
+            return _err("token invalid", 403)
+        if requires_cert:
+            # Identity gate BEFORE the use is burned (mirror of sync_server):
+            # certificate v2 + the mined proof for method:pow, verified once
+            # and cached in p2p_identities; "busy" → 503 with Retry-After.
+            admission = await _identity_gate().admit(
+                peer_pubkey, body.get("birth_cert") or {},
+                body.get("identity_proof"),
+                request.client.host if request.client else None)
+            if admission.status != "verified":
+                headers = ({"Retry-After": str(admission.retry_after)}
+                           if admission.retry_after else None)
+                return JSONResponse({"error": admission.detail},
+                                    status_code=admission.http_status,
+                                    headers=headers)
+        with get_conn() as conn:
             tok = invite_tokens.consume_token(conn, token_id)
         if tok is None:
             return _err("token invalid", 403)
-        if tok["require_birth_cert"]:
-            import birth_authority
-            cert = body.get("birth_cert") or {}
-            if not (birth_authority.verify_certificate(cert)
-                    and cert.get("pubkey", "").lower() == peer_pubkey.lower()):
-                return _err("birth certificate required", 403)
         recent = db_query_one(
             "SELECT count(*) AS c FROM friends"
             " WHERE source = 'token' AND added_at > NOW() - INTERVAL '1 hour'")

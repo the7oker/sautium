@@ -1585,10 +1585,16 @@ class P2PManager:
                 per_friend["signature"] = sign_message(
                     f"token_handshake:{ts}:{join_token}:{invite}"
                     .encode("utf-8")).hex()
-                from desktop.p2p.birth_cert import load_certificate
+                from desktop.p2p.birth_cert import load_certificate, load_proof
                 cert = load_certificate()
                 if cert:
                     per_friend["birth_cert"] = cert
+                    # A pow identity also proves its work; while the proof is
+                    # still being mined the issuer answers "proof required"
+                    # and this loop simply comes back in 15 s.
+                    proof = load_proof()
+                    if proof:
+                        per_friend["identity_proof"] = proof
 
             peers = await self._find_friend_peers(friend)
 
@@ -1660,8 +1666,25 @@ class P2PManager:
 
                             # Handshake rejected — try nudge (auto-reciprocate
                             # via Worker). Peer checks their pending accepts
-                            # and adds us if found.
+                            # and adds us if found. Identity-gate answers
+                            # (proof pending / verifier busy) are retried by
+                            # this loop as they are — a nudge cannot help.
+                            if resp.status in (429, 503):
+                                logger.debug(
+                                    f"Handshake for {invite} deferred by "
+                                    f"{ip}:{port}: HTTP {resp.status}")
+                                continue
                             if resp.status == 403:
+                                err = ""
+                                try:
+                                    err = (await resp.json()).get("error", "")
+                                except Exception:
+                                    pass
+                                if err.startswith("identity"):
+                                    logger.info(
+                                        f"Handshake for {invite} refused by "
+                                        f"{ip}:{port}: {err}")
+                                    continue
                                 resolved = await self._try_nudge(
                                     ip, port, invite, handshake_data,
                                     session,

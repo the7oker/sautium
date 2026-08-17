@@ -2187,6 +2187,50 @@ CREATE TABLE IF NOT EXISTS p2p_node_bans (
     CHECK (pubkey IS NOT NULL OR addr IS NOT NULL)
 );
 
+-- Identity registry: every CERTIFIED peer identity this node has met
+-- (identity certificate v2 fields, the witnessed-age anchor first_seen_at,
+-- the proof-of-work verification status). Local, never shared. Verification
+-- is lazy — the one-time ~2 GiB Argon2id check runs when the identity first
+-- claims something identity-gated (token accept today); a forged proof marks
+-- the row failed AND inserts a p2p_node_bans row (deterministic evidence).
+-- Registry rules live in desktop/p2p/identity_registry.py (issued_at anchor
+-- must match, method only pow -> email, first_seen_at/verified survive).
+DO $$ BEGIN
+    CREATE TYPE p2p_cert_method AS ENUM ('pow', 'email');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    CREATE TYPE p2p_email_class AS ENUM ('major', 'other', 'disposable');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    CREATE TYPE p2p_identity_status AS ENUM ('unverified', 'verified', 'failed');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS p2p_identities (
+    pubkey          TEXT PRIMARY KEY,               -- hex Ed25519
+    cert_v          SMALLINT NOT NULL,
+    method          p2p_cert_method NOT NULL,
+    issued_at       TIMESTAMPTZ NOT NULL,           -- authority anchor (first issuance)
+    difficulty      BIGINT NOT NULL,                -- expected PoW attempts pinned in the cert
+    params_version  SMALLINT NOT NULL,
+    email_token     TEXT,                           -- HMAC under the Worker pepper; equality = same mailbox
+    email_class     p2p_email_class,
+    issuer          TEXT NOT NULL,
+    cert_sig        TEXT NOT NULL,                  -- the PoW challenge
+    proof_nonce     TEXT,
+    status          p2p_identity_status NOT NULL DEFAULT 'unverified',
+    fail_reason     TEXT,
+    first_seen_at   TIMESTAMPTZ NOT NULL DEFAULT now(),   -- WITNESSED age anchor, never issued_at
+    verified_at     TIMESTAMPTZ,
+    last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    contacts        BIGINT NOT NULL DEFAULT 1,
+    first_addr      UUID,                           -- uuid5(NS, 'node_addr:{host}')
+    last_addr       UUID
+);
+CREATE INDEX IF NOT EXISTS idx_p2p_identities_email_token
+    ON p2p_identities (email_token) WHERE email_token IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_p2p_identities_last_seen ON p2p_identities (last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_p2p_identities_issued ON p2p_identities (issued_at);
+
 -- ============================================================
 -- Streaming-minted phantoms
 -- ============================================================

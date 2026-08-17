@@ -122,6 +122,23 @@ def consume_token(conn, token_id: str) -> Optional[dict]:
         }
 
 
+def token_requires_cert(conn, token_id: str) -> Optional[bool]:
+    """Peek at a live token WITHOUT burning a use: whether it demands an
+    identity certificate (+ proof). None for a dead/unknown token. The
+    identity gate runs BEFORE consume_token so a "verifier busy, retry"
+    answer never costs the guest a use."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT require_birth_cert FROM invite_tokens
+             WHERE id = %s
+               AND revoked_at IS NULL
+               AND (expires_at IS NULL OR expires_at > NOW())
+               AND (max_uses IS NULL OR use_count < max_uses)
+        """, (token_id,))
+        row = cur.fetchone()
+    return None if not row else bool(row[0])
+
+
 def token_rights(conn, token_id: str) -> list:
     """Current rights of a token WITHOUT burning a use — the retry path of
     an interrupted accept heals the snapshot from here (the use was already

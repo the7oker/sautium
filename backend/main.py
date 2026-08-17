@@ -303,6 +303,20 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"P2P identity derivation failed: {e}")
 
+    # Identity registry schema (idempotent) — the peer surface's identity gate
+    # writes p2p_identities / p2p_node_bans; a node updated in place gains
+    # the table without a manual migration.
+    try:
+        from desktop.p2p import identity_registry
+        from db_pool import get_conn as _get_conn
+
+        def _registry_schema():
+            with _get_conn() as conn:
+                identity_registry.ensure_schema(conn)
+        await asyncio.to_thread(_registry_schema)
+    except Exception as e:
+        logger.warning(f"identity registry schema init failed: {e}")
+
     # Identity certificate + proof: cache/fetch the certificate, mine the
     # proof for a pow identity in the background (routers/p2p.identity_proof_task).
     global _identity_task, _identity_stop

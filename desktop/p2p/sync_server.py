@@ -135,6 +135,7 @@ class SyncServer:
         self._request_counts: dict[str, list[float]] = defaultdict(list)
         self._sharing = True
         self._sharing_checked = 0.0
+        self._gate = None          # identity_registry.IdentityGate, lazy
         # Relay wake registry: subscriber pubkey -> _WakeSub
         self._wake_subs: dict[str, _WakeSub] = {}
         # Peer-relay clients (Phase D): pubkey -> voucher record
@@ -229,6 +230,17 @@ class SyncServer:
         """Set callback to trigger immediate P2P message delivery."""
         self._delivery_trigger_cb = cb
 
+    def _identity_gate(self):
+        """Lazy: the asyncio semaphore inside must be born on the serving loop."""
+        if self._gate is None:
+            from functools import partial
+            from desktop.p2p import identity_registry
+            from desktop.p2p.birth_cert import verify_certificate
+            self._gate = identity_registry.IdentityGate(
+                partial(identity_registry.psycopg2_conn_factory, self.db_dsn),
+                verify_certificate)
+        return self._gate
+
     def _new_db(self) -> psycopg2.extensions.connection:
         """Create a new DB connection (caller must close it)."""
         conn = psycopg2.connect(self.db_dsn)
@@ -307,10 +319,11 @@ class SyncServer:
         return True
 
     def _json_response(self, request: web.Request, data: dict,
-                       status: int = 200) -> web.Response:
+                       status: int = 200,
+                       headers: Optional[dict] = None) -> web.Response:
         """Create a JSON response, with gzip if client accepts it."""
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", **(headers or {})}
 
         accept_enc = request.headers.get("Accept-Encoding", "")
         if "gzip" in accept_enc and len(body) > 1024:
@@ -771,19 +784,28 @@ class SyncServer:
             return _accept(self._mint_grant(tid, rights, peer_pubkey))
 
         if token_id:
+            requires_cert = invite_tokens.token_requires_cert(conn, token_id)
+            if requires_cert is None:
+                return self._json_response(
+                    request, {"error": "token invalid"}, status=403)
+            if requires_cert:
+                # Identity gate BEFORE the use is burned: certificate v2 +
+                # (for method:pow) the mined proof, verified once and cached
+                # in p2p_identities. "busy" is a 503 the guest's 15 s retry
+                # loop absorbs; a forged proof bans the key.
+                admission = await self._identity_gate().admit(
+                    peer_pubkey, body.get("birth_cert") or {},
+                    body.get("identity_proof"), request.remote)
+                if admission.status != "verified":
+                    headers = ({"Retry-After": str(admission.retry_after)}
+                               if admission.retry_after else None)
+                    return self._json_response(
+                        request, {"error": admission.detail},
+                        status=admission.http_status, headers=headers)
             tok = invite_tokens.consume_token(conn, token_id)
             if tok is None:
                 return self._json_response(
                     request, {"error": "token invalid"}, status=403)
-            if tok["require_birth_cert"]:
-                from desktop.p2p.birth_cert import verify_certificate
-                cert = body.get("birth_cert") or {}
-                if not (verify_certificate(cert)
-                        and cert.get("pubkey", "").lower()
-                        == peer_pubkey.lower()):
-                    return self._json_response(
-                        request, {"error": "birth certificate required"},
-                        status=403)
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT count(*) FROM friends WHERE source = 'token'"
@@ -1700,6 +1722,8 @@ class SyncServer:
                 conn = self._new_db()
                 try:
                     mb_slice_queries.ensure_blob_table(conn)
+                    from desktop.p2p import identity_registry
+                    identity_registry.ensure_schema(conn)
                     conn.commit()
                 finally:
                     conn.close()

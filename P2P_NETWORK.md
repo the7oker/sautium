@@ -210,9 +210,9 @@ UUID of a public support token with `require_birth_cert=TRUE` — an attacker
 must pass the Worker's birth-certificate rate limit to mass-produce
 identities (since certificate v2, 2026-08-17, the certificate also pins the
 identity proof-of-work policy — `method`, `difficulty`, `params_version` —
-and the token gate will additionally demand the mined proof once the
-identity registry lands; see P2P-SYNC-INTEGRITY.md § "Proof-of-work
-certificates"). `_ensure_master_contact` seeds it as a pending friend when P2P
+and the token gate demands the mined proof for `method: pow`, verified once
+per identity by `desktop/p2p/identity_registry.py` BEFORE the token use is
+burned; see P2P-SYNC-INTEGRITY.md § "Proof-of-work certificates"). `_ensure_master_contact` seeds it as a pending friend when P2P
 starts; the existing resolver (LAN → cache → DHT `lookup_user`) performs the
 token handshake, stores the grant and pulls the welcome message through the
 ordinary history sync. Deleting the contact sets `p2p.master_removed` — the
