@@ -1,0 +1,73 @@
+{
+  "_comment": "Peer wire format v1 \u2014 contract for desktop/p2p (both surfaces). Keys are fixed test seeds (0x01.., 0x02.., 0x03..); never use in production.",
+  "client_seed": "0101010101010101010101010101010101010101010101010101010101010101",
+  "client_pubkey": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+  "server_seed": "0202020202020202020202020202020202020202020202020202020202020202",
+  "server_pubkey": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+  "authority_seed": "0303030303030303030303030303030303030303030303030303030303030303",
+  "authority_pubkey": "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1",
+  "gate_secret": "0404040404040404040404040404040404040404040404040404040404040404",
+  "requests": [
+    {
+      "method": "POST",
+      "request_target": "/api/sync/inventory",
+      "ts": 1786979000,
+      "body_utf8": "{\"track_uuids\":[\"8a4a1a5e-2c1e-5f8b-9c1e-3f0d1a2b3c4d\",\"0d3f9d2a-7b6c-5e4d-8a1b-2c3d4e5f6a7b\"]}",
+      "body_sha256": "86b45a2ea1893729e9dff1e4c191a7a0063336548a9f58322e9ee706f6a1d3fa",
+      "canonical_message": "sautium-request:v1\n8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394\nPOST\n/api/sync/inventory\n1786979000\n86b45a2ea1893729e9dff1e4c191a7a0063336548a9f58322e9ee706f6a1d3fa",
+      "headers": {
+        "X-Sautium-Peer-Pubkey": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "X-Sautium-Peer-Ts": "1786979000",
+        "X-Sautium-Peer-Sig": "dc0dd3016f89afcd24f49afe6a020a2d669af8a124973b860f6c3f78ba761587300464838c0eb269074589be7a5752eba60b196aa2ed380a669a366517683b0b"
+      }
+    },
+    {
+      "method": "GET",
+      "request_target": "/api/mb/search?q=Tangerine%20Dream&limit=5",
+      "ts": 1786979001,
+      "body_utf8": "",
+      "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "canonical_message": "sautium-request:v1\n8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394\nGET\n/api/mb/search?q=Tangerine%20Dream&limit=5\n1786979001\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "headers": {
+        "X-Sautium-Peer-Pubkey": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "X-Sautium-Peer-Ts": "1786979001",
+        "X-Sautium-Peer-Sig": "e859029011041bf8249f9ce426df17fda22a58f3c208b34675cc7b83b4416d08174d93c6aad60a713852e131970947603b25f66a8acab8717f34ca728367ba0a"
+      }
+    }
+  ],
+  "cert_bundle": {
+    "json": "{\"cert\":{\"difficulty\":1,\"email_class\":null,\"email_token\":null,\"issued_at\":\"2026-08-17T16:00:00Z\",\"issuer\":\"ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1\",\"method\":\"pow\",\"params_version\":1,\"pubkey\":\"8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c\",\"sig\":\"988ff5be9a27e421cb431d74e6cb422018d470eadc3f2b39207da6091881b11c47749dc3901723267f6f85af189de83121a35a007109d30ad1fd4fc6dcc5f70b\",\"v\":2},\"proof\":{\"cert_sig\":\"988ff5be9a27e421cb431d74e6cb422018d470eadc3f2b39207da6091881b11c47749dc3901723267f6f85af189de83121a35a007109d30ad1fd4fc6dcc5f70b\",\"difficulty\":1,\"mined_at\":\"2026-08-17T16:01:00Z\",\"nonce\":\"00000000000000000000000000000000\",\"params_version\":1,\"pubkey\":\"8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c\",\"v\":1}}",
+    "header": {
+      "X-Sautium-Peer-Cert": "eyJjZXJ0Ijp7ImRpZmZpY3VsdHkiOjEsImVtYWlsX2NsYXNzIjpudWxsLCJlbWFpbF90b2tlbiI6bnVsbCwiaXNzdWVkX2F0IjoiMjAyNi0wOC0xN1QxNjowMDowMFoiLCJpc3N1ZXIiOiJlZDQ5MjhjNjI4ZDFjMmM2ZWFlOTAzMzg5MDU5OTU2MTI5NTkyNzNhNWM2M2Y5MzYzNmMxNDYxNGFjODczN2QxIiwibWV0aG9kIjoicG93IiwicGFyYW1zX3ZlcnNpb24iOjEsInB1YmtleSI6IjhhODhlM2RkNzQwOWYxOTVmZDUyZGIyZDNjYmE1ZDcyY2E2NzA5YmYxZDk0MTIxYmYzNzQ4ODAxYjQwZjZmNWMiLCJzaWciOiI5ODhmZjViZTlhMjdlNDIxY2I0MzFkNzRlNmNiNDIyMDE4ZDQ3MGVhZGMzZjJiMzkyMDdkYTYwOTE4ODFiMTFjNDc3NDlkYzM5MDE3MjMyNjdmNmY4NWFmMTg5ZGU4MzEyMWEzNWEwMDcxMDlkMzBhZDFmZDRmYzZkY2M1ZjcwYiIsInYiOjJ9LCJwcm9vZiI6eyJjZXJ0X3NpZyI6Ijk4OGZmNWJlOWEyN2U0MjFjYjQzMWQ3NGU2Y2I0MjIwMThkNDcwZWFkYzNmMmIzOTIwN2RhNjA5MTg4MWIxMWM0Nzc0OWRjMzkwMTcyMzI2N2Y2Zjg1YWYxODlkZTgzMTIxYTM1YTAwNzEwOWQzMGFkMWZkNGZjNmRjYzVmNzBiIiwiZGlmZmljdWx0eSI6MSwibWluZWRfYXQiOiIyMDI2LTA4LTE3VDE2OjAxOjAwWiIsIm5vbmNlIjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJwYXJhbXNfdmVyc2lvbiI6MSwicHVia2V5IjoiOGE4OGUzZGQ3NDA5ZjE5NWZkNTJkYjJkM2NiYTVkNzJjYTY3MDliZjFkOTQxMjFiZjM3NDg4MDFiNDBmNmY1YyIsInYiOjF9fQ"
+    }
+  },
+  "gate": {
+    "quote_response": {
+      "quote": {
+        "v": 1,
+        "server": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+        "client": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "nonce": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        "issued": 1786979000,
+        "deadline": 1786979120,
+        "price_version": 1,
+        "params_version": 1,
+        "n": 3,
+        "tasks_digest": "422dbce46d4fca59a11966305a598af145e8d5391dfe6f5379875c9950fa182a"
+      },
+      "tasks": [
+        "19ed547a19a9d12e2265bf9d8ae6ced24766e371690b1075176e3814f6b4517b",
+        "a755033e8c75fbbe7fd183d15565bacf86f19706f1fe8bc19b33eaf641e78bd0",
+        "5496b6e99f602b48fe935ab6fca66dbb166d0dba818466df05790d72cebbc9ab"
+      ],
+      "sig": "0daa33637e8a2c96e2d440dbb625056da8e32e09df28a9e19b96ff9b9e31b915fac66f0ae471bd3974e70be2c80fd35bcc7f0769ee647d5021d302d737df9208"
+    },
+    "quote_signed_message": "sautium-gate-quote:v1:{\"client\":\"8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c\",\"deadline\":1786979120,\"issued\":1786979000,\"n\":3,\"nonce\":\"a1b2c3d4e5f60718293a4b5c6d7e8f90\",\"params_version\":1,\"price_version\":1,\"server\":\"8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394\",\"tasks_digest\":\"422dbce46d4fca59a11966305a598af145e8d5391dfe6f5379875c9950fa182a\",\"v\":1}",
+    "fresh_input_rule": "HMAC-SHA256(gate_secret, b'gate-fresh:v1' || nonce || client_pubkey_bytes || i as 2-byte big-endian)",
+    "answer_rule": "Argon2id(secret=input, salt=b'sautium-gate:v1', memory=64 MiB, time_cost=1, parallelism=1, hash_len=32) as hex",
+    "submission_json": "{\"answers\":[\"546927476ddf4abbf436e395aa254de33c63e850380fc00440d5e9683f64155c\",\"a561a00e10bebce8b86cc148a028b4f0896d86459c81e3917900bb53bca936e7\",\"d7151279db4e576df6f8d505cf127f4c7351ca01bf8f3de571f9e062dc8aa079\"],\"quote\":{\"client\":\"8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c\",\"deadline\":1786979120,\"issued\":1786979000,\"n\":3,\"nonce\":\"a1b2c3d4e5f60718293a4b5c6d7e8f90\",\"params_version\":1,\"price_version\":1,\"server\":\"8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394\",\"tasks_digest\":\"422dbce46d4fca59a11966305a598af145e8d5391dfe6f5379875c9950fa182a\",\"v\":1},\"sig\":\"0daa33637e8a2c96e2d440dbb625056da8e32e09df28a9e19b96ff9b9e31b915fac66f0ae471bd3974e70be2c80fd35bcc7f0769ee647d5021d302d737df9208\"}",
+    "header": {
+      "X-Sautium-Gate": "eyJhbnN3ZXJzIjpbIjU0NjkyNzQ3NmRkZjRhYmJmNDM2ZTM5NWFhMjU0ZGUzM2M2M2U4NTAzODBmYzAwNDQwZDVlOTY4M2Y2NDE1NWMiLCJhNTYxYTAwZTEwYmViY2U4Yjg2Y2MxNDhhMDI4YjRmMDg5NmQ4NjQ1OWM4MWUzOTE3OTAwYmI1M2JjYTkzNmU3IiwiZDcxNTEyNzlkYjRlNTc2ZGY2ZjhkNTA1Y2YxMjdmNGM3MzUxY2EwMWJmOGYzZGU1NzFmOWUwNjJkYzhhYTA3OSJdLCJxdW90ZSI6eyJjbGllbnQiOiI4YTg4ZTNkZDc0MDlmMTk1ZmQ1MmRiMmQzY2JhNWQ3MmNhNjcwOWJmMWQ5NDEyMWJmMzc0ODgwMWI0MGY2ZjVjIiwiZGVhZGxpbmUiOjE3ODY5NzkxMjAsImlzc3VlZCI6MTc4Njk3OTAwMCwibiI6Mywibm9uY2UiOiJhMWIyYzNkNGU1ZjYwNzE4MjkzYTRiNWM2ZDdlOGY5MCIsInBhcmFtc192ZXJzaW9uIjoxLCJwcmljZV92ZXJzaW9uIjoxLCJzZXJ2ZXIiOiI4MTM5NzcwZWE4N2QxNzVmNTZhMzU0NjZjMzRjN2VjY2NiOGQ4YTkxYjRlZTM3YTI1ZGY2MGY1YjhmYzliMzk0IiwidGFza3NfZGlnZXN0IjoiNDIyZGJjZTQ2ZDRmY2E1OWExMTk2NjMwNWE1OThhZjE0NWU4ZDUzOTFkZmU2ZjUzNzk4NzVjOTk1MGZhMTgyYSIsInYiOjF9LCJzaWciOiIwZGFhMzM2MzdlOGEyYzk2ZTJkNDQwZGJiNjI1MDU2ZGE4ZTMyZTA5ZGYyOGE5ZTE5Yjk2ZmY5YjllMzFiOTE1ZmFjNjZmMGFlNDcxYmQzOTc0ZTcwYmUyYzgwZmQzNWJjYzdmMDc2OWVlNjQ3ZDUwMjFkMzAyZDczN2RmOTIwOCJ9"
+    }
+  }
+}
