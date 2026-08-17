@@ -294,6 +294,20 @@ Phase 2 & 3: Embeddings + features (lazy, on demand, gzip)
 - Email verification is optional — the Worker acts as a CA, not as a relay
 - Friend blocklist — blocked friends cannot send messages
 
+### Identity scarcity + identity-bound requests — SHIPPED 2026-08-17 (phases 1–6)
+- Identity certificate v2 from the Worker (`method: pow|email`, pinned
+  difficulty), a background-mined ~2 GiB Argon2id proof for pow
+  identities, a per-node identity registry (`p2p_identities`) with lazy
+  one-time proof verification, the invite-token gate demanding the proof.
+- Sync and MB endpoints (`/api/sync/*`, `/api/mb/*`) accept **wire format
+  v1** signatures (`X-Sautium-Peer-Pubkey/-Ts/-Sig`, ±60 s, bound to the
+  recipient's pubkey) and the `X-Sautium-Peer-Cert` introduction; unsigned
+  requests remain the anonymous lane. Both surfaces answer
+  `X-Sautium-Peer-Identity` / `X-Sautium-Peer-Lane`. In the golden age the
+  lanes share one set of limits — the plumbing decides and reports, the
+  admission gate and pricing arrive in later phases. Format + vectors:
+  P2P-SYNC-INTEGRITY.md § "Wire format v1", `tests/p2p/vectors/`.
+
 ### Future
 - Selective sharing (choose which artists/albums are visible)
 - Bandwidth limiting

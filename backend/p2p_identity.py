@@ -262,3 +262,26 @@ def proof_path(settings):
     from desktop.p2p.identity_proof import PROOF_FILENAME
     d = identity_dir(settings)
     return None if d is None else d / PROOF_FILENAME
+
+
+def peer_identity(settings):
+    """This node as a peer CLIENT (wire format v1, desktop/p2p/peer_auth.py):
+    signer, pubkey and a lazy {cert, proof} loader. None without identity."""
+    from desktop.p2p import identity_proof, peer_auth
+
+    ident = resolve_identity(settings)
+    key = load_signing_key(settings)
+    if not ident or key is None:
+        return None
+
+    def bundle():
+        cert = load_certificate(settings)
+        if not cert:
+            return None
+        path = proof_path(settings)
+        proof = identity_proof.load_proof(path) if path is not None else None
+        return {"cert": cert,
+                "proof": proof if identity_proof.proof_binds(proof, cert) else None}
+
+    return peer_auth.PeerIdentity(pubkey=ident["public_key_hex"].lower(),
+                                  sign=key.sign, cert_bundle=bundle)

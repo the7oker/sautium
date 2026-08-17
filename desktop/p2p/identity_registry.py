@@ -141,6 +141,33 @@ def get(conn, pubkey: str) -> Optional[dict]:
     return dict(zip(_ROW_COLUMNS, row)) if row else None
 
 
+def touch(conn, pubkey: str, addr: Optional[str] = None) -> Optional[dict]:
+    """A signed request from an already-known identity: bump the contact
+    counters, return the row (None when the identity never introduced
+    itself here — the caller answers `X-Sautium-Peer-Identity: unknown`)."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE p2p_identities
+               SET last_seen_at = now(), contacts = contacts + 1,
+                   last_addr = COALESCE(%s, last_addr)
+             WHERE pubkey = %s
+        """, (addr_uuid(addr), pubkey.lower()))
+        hit = cur.rowcount
+    conn.commit()
+    return get(conn, pubkey) if hit else None
+
+
+def lane_for(row: Optional[dict], now: Optional[datetime] = None) -> str:
+    """anonymous | stranger | identity — the identity lane needs a verified
+    AND ripe identity (standing joins the condition later)."""
+    from desktop.p2p.peer_auth import LANE_ANONYMOUS, LANE_IDENTITY, LANE_STRANGER
+    if row is None:
+        return LANE_ANONYMOUS
+    now = now or datetime.now(timezone.utc)
+    ripe = (now - row["issued_at"]).total_seconds() >= RIPENING_SECONDS
+    return LANE_IDENTITY if row["status"] == "verified" and ripe else LANE_STRANGER
+
+
 def is_banned(conn, pubkey: str) -> bool:
     with conn.cursor() as cur:
         cur.execute("SELECT 1 FROM p2p_node_bans WHERE pubkey = %s LIMIT 1", (pubkey.lower(),))

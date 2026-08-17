@@ -24,7 +24,7 @@ import psycopg2
 
 from aiohttp import web
 
-from desktop.p2p import mb_slice_queries, sync_queries
+from desktop.p2p import mb_slice_queries, peer_auth, sync_queries
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +219,73 @@ class SyncServer:
     @web.middleware
     async def _inbound_middleware(self, request: web.Request, handler):
         self._note_inbound(request.remote)
-        return await handler(request)
+        if not peer_auth.is_identity_bound(request.raw_path):
+            return await handler(request)
+        peer_pubkey, status, lane, refusal = await self._authenticate_peer(request)
+        if refusal is not None:
+            return refusal
+        request["peer_pubkey"] = peer_pubkey
+        request["lane"] = lane
+        response = await handler(request)
+        if peer_pubkey is not None:
+            response.headers[peer_auth.HDR_IDENTITY] = status
+            response.headers[peer_auth.HDR_LANE] = lane
+        return response
+
+    async def _authenticate_peer(self, request: web.Request):
+        """Wire format v1 (peer_auth.py): an unsigned request is the
+        anonymous lane; a signed one is checked against OUR pubkey, then
+        the identity registry decides stranger vs identity lane; the
+        introduction header is recorded (never evaluated here — lazy).
+        Returns (pubkey|None, status|None, lane, refusal_response|None)."""
+        own = (self.account_info or {}).get("public_key_hex", "")
+        body = b""
+        if request.can_read_body:
+            body = await request.read()
+        if not own:
+            return None, None, peer_auth.LANE_ANONYMOUS, None
+        pubkey, err = peer_auth.verify_request(
+            request.headers, own, request.method, request.raw_path, body)
+        if err is not None:
+            return None, None, None, self._json_response(
+                request, {"error": err}, status=403)
+        if pubkey is None:
+            return None, None, peer_auth.LANE_ANONYMOUS, None
+
+        bundle = None
+        raw_bundle = request.headers.get(peer_auth.HDR_CERT)
+        if raw_bundle:
+            from desktop.p2p.birth_cert import verify_certificate
+            bundle = peer_auth.decode_cert_bundle(raw_bundle)
+            if (bundle is None or not verify_certificate(bundle["cert"])
+                    or bundle["cert"].get("pubkey", "").lower() != pubkey):
+                return None, None, None, self._json_response(
+                    request, {"error": "identity certificate invalid"}, status=400)
+
+        from desktop.p2p import identity_registry
+        addr = request.remote
+
+        def _registry():
+            with identity_registry.psycopg2_conn_factory(self.db_dsn) as conn:
+                if identity_registry.is_banned(conn, pubkey):
+                    return "banned", None
+                if bundle is not None:
+                    row = identity_registry.observe(
+                        conn, bundle["cert"], proof=bundle["proof"], addr=addr)
+                else:
+                    row = identity_registry.touch(conn, pubkey, addr)
+                return None, row
+
+        try:
+            banned, row = await asyncio.get_event_loop().run_in_executor(None, _registry)
+        except Exception as e:
+            logger.warning(f"identity registry unavailable: {e}")
+            return pubkey, "unknown", peer_auth.LANE_STRANGER, None
+        if banned or (row is not None and row["status"] == "failed"):
+            return None, None, None, self._json_response(
+                request, {"error": "identity banned"}, status=403)
+        status = row["status"] if row is not None else "unknown"
+        return pubkey, status, identity_registry.lane_for(row), None
 
     def set_chat_service(self, chat_service, on_message_cb: Callable = None):
         """Attach chat service for handling chat endpoints."""

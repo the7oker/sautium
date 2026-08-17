@@ -968,9 +968,10 @@ class P2PManager:
         """
         loop = asyncio.get_event_loop()
 
+        peer_identity = self._peer_identity()
         if "://" in peer_addr:
             # Explicit scheme — try as-is
-            api = BackendAPIClient(peer_addr)
+            api = BackendAPIClient(peer_addr, peer=peer_identity)
             attempts = 2 if is_lan else 1
             for attempt in range(attempts):
                 health = await loop.run_in_executor(
@@ -989,11 +990,28 @@ class P2PManager:
         # No scheme — try HTTPS (desktop peers) then HTTP (Docker)
         for scheme in ("https", "http"):
             url = f"{scheme}://{peer_addr}"
-            api = BackendAPIClient(url)
+            api = BackendAPIClient(url, peer=peer_identity)
             health = await loop.run_in_executor(None, api.get_health)
             if health:
                 return api
         return None
+
+    def _peer_identity(self):
+        """This node as a peer CLIENT (wire format v1, desktop/p2p/peer_auth.py):
+        signer, pubkey and a lazy {cert, proof} loader — the certificate and
+        the mined proof can land after the client object exists."""
+        from desktop.node_identity import get_account_info, sign_message
+        from desktop.p2p import birth_cert, peer_auth
+        account = get_account_info()
+        if not account:
+            return None
+
+        def bundle():
+            cert = birth_cert.load_certificate()
+            return {"cert": cert, "proof": birth_cert.load_proof()} if cert else None
+
+        return peer_auth.PeerIdentity(pubkey=account["public_key_hex"].lower(),
+                                      sign=sign_message, cert_bundle=bundle)
 
     async def _sync_from_peer(
         self,

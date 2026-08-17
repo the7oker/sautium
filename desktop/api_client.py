@@ -4,12 +4,20 @@ Minimal HTTP/HTTPS client for communicating with the Sautium backend.
 Uses only urllib (no extra dependencies) to fetch stats and health info.
 Supports HTTPS with self-signed certificates for P2P connections.
 
-Every request is signed with HMAC-SHA256 over
-``METHOD\\nPATH_AND_QUERY\\nTS\\nsha256_hex(body)`` using the secret
-shared with the backend (lives in ``backend/data/.api_secret``).
-Signature headers: ``X-Sautium-Ts``, ``X-Sautium-Sig``. Endpoints
-that the backend whitelists (e.g. ``/api/sync/*``) tolerate
-unsigned requests — see backend/auth_hmac.py.
+Two signing modes, chosen at construction:
+
+- LOCAL backend (default): HMAC-SHA256 over
+  ``METHOD\\nPATH_AND_QUERY\\nTS\\nsha256_hex(body)`` with the secret shared
+  with the backend (``backend/data/.api_secret``); headers ``X-Sautium-Ts``,
+  ``X-Sautium-Sig``; see backend/auth_hmac.py.
+- PEER (``peer=PeerIdentity(...)``): Ed25519 by this node's key over the
+  wire-format-v1 message (desktop/p2p/peer_auth.py) — headers
+  ``X-Sautium-Peer-Pubkey/-Ts/-Sig`` — bound to the peer's pubkey learned
+  from its ``/health``; the {certificate, proof} bundle rides along as
+  ``X-Sautium-Peer-Cert`` on the first request and whenever the peer
+  answers ``X-Sautium-Peer-Identity: unknown``. Until ``/health`` has been
+  read the request goes out unsigned (the anonymous lane). The local
+  secret is never sent to a peer.
 """
 
 import gzip
@@ -24,6 +32,8 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 from typing import Iterator, Optional
+
+from desktop.p2p import peer_auth
 
 logger = logging.getLogger(__name__)
 
@@ -95,15 +105,50 @@ def _get_ssl_context() -> ssl.SSLContext:
 
 
 class BackendAPIClient:
-    """HTTP/HTTPS client for the backend API."""
+    """HTTP/HTTPS client for the backend API (local) or a peer node."""
 
-    def __init__(self, base_url: str = "https://127.0.0.1:8000"):
+    def __init__(self, base_url: str = "https://127.0.0.1:8000",
+                 peer: Optional[peer_auth.PeerIdentity] = None):
         self.base_url = base_url.rstrip("/")
         self._ssl_ctx = (
             _get_ssl_context() if self.base_url.startswith("https://") else None
         )
         self._streams: list = []
         self._stream_closed = False
+        self.peer = peer
+        self._server_pubkey: Optional[str] = None
+        self._introduced = False
+        self.last_peer_identity: Optional[str] = None   # last X-Sautium-Peer-Identity seen
+        self.last_peer_lane: Optional[str] = None
+
+    def _auth_headers(self, method: str, path: str, data: bytes) -> dict:
+        if self.peer is None:
+            return _sign_headers(method, path, data)
+        if not self._server_pubkey and path != "/health":
+            self.get_health()            # learn the recipient before signing
+        if not self._server_pubkey:
+            return {}
+        headers = peer_auth.sign_headers(self.peer.sign, self.peer.pubkey,
+                                         self._server_pubkey, method, path, data)
+        if not self._introduced:
+            bundle = self.peer.cert_bundle()
+            if bundle and bundle.get("cert"):
+                headers[peer_auth.HDR_CERT] = peer_auth.encode_cert_bundle(
+                    bundle["cert"], bundle.get("proof"))
+                self._introduced = True
+        return headers
+
+    def _note_peer_response(self, headers) -> None:
+        if self.peer is None:
+            return
+        identity = headers.get(peer_auth.HDR_IDENTITY)
+        if identity:
+            self.last_peer_identity = identity
+            if identity == "unknown":
+                self._introduced = False        # re-send the bundle next time
+        lane = headers.get(peer_auth.HDR_LANE)
+        if lane:
+            self.last_peer_lane = lane
 
     def set_port(self, port: int):
         """Update the backend port."""
@@ -116,12 +161,17 @@ class BackendAPIClient:
         try:
             req = urllib.request.Request(url, method="GET")
             req.add_header("Accept-Encoding", "gzip")
-            for k, v in _sign_headers("GET", path, b"").items():
+            for k, v in self._auth_headers("GET", path, b"").items():
                 req.add_header(k, v)
             resp = urllib.request.urlopen(
                 req, timeout=timeout, context=self._ssl_ctx
             )
+            self._note_peer_response(resp.headers)
             return _read_json_body(resp)
+        except urllib.error.HTTPError as e:
+            self._note_peer_response(e.headers)
+            logger.debug(f"API request failed: {url} — {e}")
+            return None
         except Exception as e:
             logger.debug(f"API request failed: {url} — {e}")
             return None
@@ -140,13 +190,15 @@ class BackendAPIClient:
                 data = b""
                 req = urllib.request.Request(url, method="POST", data=data)
             req.add_header("Accept-Encoding", "gzip")
-            for k, v in _sign_headers("POST", path, data).items():
+            for k, v in self._auth_headers("POST", path, data).items():
                 req.add_header(k, v)
             resp = urllib.request.urlopen(
                 req, timeout=timeout, context=self._ssl_ctx
             )
+            self._note_peer_response(resp.headers)
             return _read_json_body(resp)
         except urllib.error.HTTPError as e:
+            self._note_peer_response(e.headers)
             try:
                 body_resp = _read_json_body(e)
                 logger.warning(f"API POST {url} returned {e.code}: {body_resp}")
@@ -163,8 +215,16 @@ class BackendAPIClient:
         return self._get_json("/stats")
 
     def get_health(self) -> Optional[dict]:
-        """Fetch health status from GET /health."""
-        return self._get_json("/health")
+        """Fetch health status from GET /health. For a peer this is also
+        where its pubkey (node_id) is learned — every later request is
+        signed for that recipient."""
+        health = self._get_json("/health")
+        if self.peer is not None and health and health.get("node_id"):
+            node_id = str(health["node_id"]).lower()
+            if node_id != self._server_pubkey:
+                self._server_pubkey = node_id
+                self._introduced = False
+        return health
 
     def start_scan(self, subpath: str = None) -> Optional[dict]:
         """Start library scan as background task."""

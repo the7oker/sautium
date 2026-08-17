@@ -675,6 +675,10 @@ responsibility).
 | `docs/design/POSITIONING.md` | Product positioning + UI design principles (source of truth) |
 | `docs/design/INFORMATION-ARCHITECTURE.md` | Navigation model, screen inventory, state flows (source of truth for UI layout) |
 | `docs/design/reference/claude-design-bundle/` | Claude Design handoff bundle — visual-intent reference |
+| `desktop/p2p/identity_pow.py` | Identity proof-of-work primitive (2 GiB Argon2id hashcash, difficulty = expected attempts) |
+| `desktop/p2p/identity_proof.py` | Proof file + the background miner policy shared by launcher and Docker |
+| `desktop/p2p/identity_registry.py` | `p2p_identities` registry + lazy `IdentityGate` (one-time proof verification, bans) |
+| `desktop/p2p/peer_auth.py` | Wire format v1: peer request signatures, cert introduction, lanes |
 | `backend/routers/sync.py` | Backend sync endpoints (P2P protocol) |
 | `backend/routers/p2p.py` | Web UI Friends/Chat/invite-token endpoints |
 | `backend/p2p_app.py` | Docker peer surface (8801): sync + chat/relay |

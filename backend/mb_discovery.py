@@ -297,12 +297,14 @@ def _fetch_remote_slice(artist_name: str) -> bool:
         logger.warning(f"MB slice client unavailable in this runtime: {e}")
         return False
     from config import settings as app_settings
+    from p2p_identity import peer_identity
 
     sources = remote_sources()
     ordered = ([s["url"] for s in sources if s.get("kind") == "replica"]
                + [s["url"] for s in sources if s.get("kind") == "dump"])
+    identity = peer_identity(app_settings)
     for url in ordered:
-        client = MBSliceClient(BackendAPIClient(url),
+        client = MBSliceClient(BackendAPIClient(url, peer=identity),
                                db_dsn=app_settings.database_url,
                                source_node=url)
         try:

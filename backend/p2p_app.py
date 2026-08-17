@@ -24,6 +24,8 @@ server: an internet-facing port meets scanners, and a peer that wants more
 than a request a second is not syncing.
 """
 
+import asyncio
+import json
 import logging
 import time
 from collections import defaultdict
@@ -32,6 +34,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
+from db_pool import get_conn
 from routers.sync import (
     SYNC_CAPABILITIES, mb_dump_version, mb_router, node_pubkey_hex, router,
 )
@@ -59,6 +62,125 @@ app = FastAPI(
 )
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+
+class PeerAuthMiddleware:
+    """Wire format v1 on the Docker peer surface (mirror of the launcher's
+    sync_server._authenticate_peer, same shared desktop/p2p/peer_auth.py):
+    identity-bound paths get their body buffered and their signature checked
+    against THIS node's pubkey; a signed request is looked up / introduced
+    in the identity registry (never evaluated here — lazy) and answered
+    with X-Sautium-Peer-Identity / X-Sautium-Peer-Lane. Pure ASGI so the
+    buffered body can be replayed to the endpoint."""
+
+    def __init__(self, app):
+        self.app = app
+        self._own_pubkey = None
+
+    def _own(self):
+        if self._own_pubkey is None:
+            from config import settings
+            from p2p_identity import resolve_identity
+            ident = resolve_identity(settings)
+            self._own_pubkey = (ident or {}).get("public_key_hex", "").lower() or ""
+        return self._own_pubkey
+
+    async def __call__(self, scope, receive, send):
+        from desktop.p2p import peer_auth
+        if scope["type"] != "http" or not peer_auth.is_identity_bound(scope["path"]):
+            return await self.app(scope, receive, send)
+
+        chunks, more = [], True
+        while more:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            chunks.append(message.get("body", b""))
+            more = message.get("more_body", False)
+        body = b"".join(chunks)
+
+        async def replay():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def refuse(status, error):
+            payload = json.dumps({"error": error}).encode()
+            await send({"type": "http.response.start", "status": status,
+                        "headers": [(b"content-type", b"application/json"),
+                                    (b"content-length", str(len(payload)).encode())]})
+            await send({"type": "http.response.body", "body": payload})
+
+        headers = _CIHeaders(scope["headers"])
+        raw_target = scope.get("raw_path", scope["path"].encode()).decode("latin-1")
+        if scope.get("query_string"):
+            raw_target += "?" + scope["query_string"].decode("latin-1")
+        own = self._own()
+        pubkey, err = (peer_auth.verify_request(headers, own, scope["method"], raw_target, body)
+                       if own else (None, None))
+        if err is not None:
+            return await refuse(403, err)
+
+        status, lane = None, peer_auth.LANE_ANONYMOUS
+        if pubkey is not None:
+            import birth_authority
+            from desktop.p2p import identity_registry
+            bundle = None
+            raw_bundle = headers.get(peer_auth.HDR_CERT)
+            if raw_bundle:
+                bundle = peer_auth.decode_cert_bundle(raw_bundle)
+                if (bundle is None or not birth_authority.verify_certificate(bundle["cert"])
+                        or bundle["cert"].get("pubkey", "").lower() != pubkey):
+                    return await refuse(400, "identity certificate invalid")
+            client = scope.get("client")
+            addr = client[0] if client else None
+
+            def _registry():
+                with get_conn() as conn:
+                    if identity_registry.is_banned(conn, pubkey):
+                        return "banned", None
+                    if bundle is not None:
+                        return None, identity_registry.observe(
+                            conn, bundle["cert"], proof=bundle["proof"], addr=addr)
+                    return None, identity_registry.touch(conn, pubkey, addr)
+
+            try:
+                banned, row = await asyncio.to_thread(_registry)
+            except Exception as e:
+                logger.warning(f"identity registry unavailable: {e}")
+                banned, row = None, None
+                status = "unknown"
+            else:
+                if banned or (row is not None and row["status"] == "failed"):
+                    return await refuse(403, "identity banned")
+                status = row["status"] if row is not None else "unknown"
+            lane = identity_registry.lane_for(row) if pubkey else lane
+            if lane == peer_auth.LANE_ANONYMOUS:
+                lane = peer_auth.LANE_STRANGER
+
+        state = scope.setdefault("state", {})
+        state["peer_pubkey"] = pubkey
+        state["lane"] = lane
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start" and pubkey is not None:
+                extra = [(peer_auth.HDR_IDENTITY.lower().encode(), status.encode()),
+                         (peer_auth.HDR_LANE.lower().encode(), lane.encode())]
+                message = {**message, "headers": list(message.get("headers", [])) + extra}
+            await send(message)
+
+        await self.app(scope, replay, send_wrapper)
+
+
+class _CIHeaders(dict):
+    """ASGI headers (lowercase bytes pairs) with case-insensitive .get()."""
+
+    def __init__(self, pairs):
+        super().__init__((k.decode("latin-1").lower(), v.decode("latin-1")) for k, v in pairs)
+
+    def get(self, key, default=None):
+        return super().get(key.lower(), default)
+
+
+app.add_middleware(PeerAuthMiddleware)
 
 _hits: dict[str, list[float]] = defaultdict(list)
 _search_hits: dict[str, list[float]] = defaultdict(list)
