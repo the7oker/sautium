@@ -24,9 +24,23 @@ import psycopg2
 
 from aiohttp import web
 
-from desktop.p2p import mb_slice_queries, peer_auth, sync_queries
+from desktop.p2p import contact_log, mb_slice_queries, peer_auth, sync_queries
 
 logger = logging.getLogger(__name__)
+
+
+def _response_bytes(response) -> int:
+    """Body size before the response is written (aiohttp's body_length is
+    only known after write)."""
+    body = getattr(response, "body", None)
+    return len(body) if isinstance(body, (bytes, bytearray)) else 0
+
+
+def _conn_factory_for(dsn: str):
+    """One short-lived autocommit connection per call (executor-safe)."""
+    from desktop.p2p.identity_registry import psycopg2_conn_factory
+    return psycopg2_conn_factory(dsn)
+
 
 # Rate limiting: max requests per IP per minute
 RATE_LIMIT_PER_MINUTE = 60
@@ -136,6 +150,8 @@ class SyncServer:
         self._sharing = True
         self._sharing_checked = 0.0
         self._gate = None          # identity_registry.IdentityGate, lazy
+        self._contact_log = contact_log.ContactLog(
+            partial(_conn_factory_for, self.db_dsn))
         # Relay wake registry: subscriber pubkey -> _WakeSub
         self._wake_subs: dict[str, _WakeSub] = {}
         # Peer-relay clients (Phase D): pubkey -> voucher record
@@ -219,18 +235,40 @@ class SyncServer:
     @web.middleware
     async def _inbound_middleware(self, request: web.Request, handler):
         self._note_inbound(request.remote)
-        if not peer_auth.is_identity_bound(request.raw_path):
-            return await handler(request)
-        peer_pubkey, status, lane, refusal = await self._authenticate_peer(request)
-        if refusal is not None:
-            return refusal
-        request["peer_pubkey"] = peer_pubkey
-        request["lane"] = lane
-        response = await handler(request)
-        if peer_pubkey is not None:
-            response.headers[peer_auth.HDR_IDENTITY] = status
-            response.headers[peer_auth.HDR_LANE] = lane
-        return response
+        timer = contact_log.RequestTimer()
+        peer_pubkey = lane = None
+        items = targets = None
+        response = None
+        try:
+            if not peer_auth.is_identity_bound(request.raw_path):
+                response = await handler(request)
+                return response
+            peer_pubkey, status, lane, refusal = await self._authenticate_peer(request)
+            items, targets = contact_log.extract_request_shape(
+                request.raw_path, await request.read())
+            if refusal is not None:
+                response = refusal
+                return response
+            request["peer_pubkey"] = peer_pubkey
+            request["lane"] = lane
+            response = await handler(request)
+            if peer_pubkey is not None:
+                response.headers[peer_auth.HDR_IDENTITY] = status
+                response.headers[peer_auth.HDR_LANE] = lane
+            return response
+        except web.HTTPException as e:
+            response = e
+            raise
+        finally:
+            wall_ms, cpu_ms = timer.elapsed_ms()
+            self._contact_log.record(
+                endpoint=contact_log.endpoint_family(request.raw_path),
+                status=getattr(response, "status", 500),
+                wall_ms=wall_ms, cpu_ms=cpu_ms, pubkey=peer_pubkey,
+                addr=request.remote, lane=lane,
+                bytes_in=request.content_length or 0,
+                bytes_out=_response_bytes(response),
+                items=items, targets=targets)
 
     async def _authenticate_peer(self, request: web.Request):
         """Wire format v1 (peer_auth.py): an unsigned request is the
@@ -239,9 +277,7 @@ class SyncServer:
         introduction header is recorded (never evaluated here — lazy).
         Returns (pubkey|None, status|None, lane, refusal_response|None)."""
         own = (self.account_info or {}).get("public_key_hex", "")
-        body = b""
-        if request.can_read_body:
-            body = await request.read()
+        body = await request.read()          # cached by aiohttp; b"" for GET
         if not own:
             return None, None, peer_auth.LANE_ANONYMOUS, None
         pubkey, err = peer_auth.verify_request(
@@ -285,7 +321,7 @@ class SyncServer:
             return None, None, None, self._json_response(
                 request, {"error": "identity banned"}, status=403)
         status = row["status"] if row is not None else "unknown"
-        return pubkey, status, identity_registry.lane_for(row), None
+        return pubkey, status, identity_registry.lane_for(row, signed=True), None
 
     def set_chat_service(self, chat_service, on_message_cb: Callable = None):
         """Attach chat service for handling chat endpoints."""
@@ -1790,12 +1826,14 @@ class SyncServer:
                     mb_slice_queries.ensure_blob_table(conn)
                     from desktop.p2p import identity_registry
                     identity_registry.ensure_schema(conn)
+                    contact_log.ensure_schema(conn)
                     conn.commit()
                 finally:
                     conn.close()
             await asyncio.get_event_loop().run_in_executor(None, _prep)
         except Exception as e:
             logger.warning(f"slice blob table init failed: {e}")
+        self._contact_log.start()
         self._app = web.Application(middlewares=[self._inbound_middleware])
         self._app.router.add_get("/health", self.handle_health)
         self._app.router.add_post("/api/sync/inventory", self.handle_inventory)
@@ -1878,4 +1916,5 @@ class SyncServer:
             await self._site.stop()
         if self._runner:
             await self._runner.cleanup()
+        await asyncio.get_event_loop().run_in_executor(None, self._contact_log.stop)
         logger.info("Sync server stopped")

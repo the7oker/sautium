@@ -311,8 +311,10 @@ async def lifespan(app: FastAPI):
         from db_pool import get_conn as _get_conn
 
         def _registry_schema():
+            from desktop.p2p import contact_log
             with _get_conn() as conn:
                 identity_registry.ensure_schema(conn)
+                contact_log.ensure_schema(conn)
         await asyncio.to_thread(_registry_schema)
     except Exception as e:
         logger.warning(f"identity registry schema init failed: {e}")

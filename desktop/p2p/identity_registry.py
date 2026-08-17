@@ -157,12 +157,16 @@ def touch(conn, pubkey: str, addr: Optional[str] = None) -> Optional[dict]:
     return get(conn, pubkey) if hit else None
 
 
-def lane_for(row: Optional[dict], now: Optional[datetime] = None) -> str:
-    """anonymous | stranger | identity — the identity lane needs a verified
-    AND ripe identity (standing joins the condition later)."""
+def lane_for(row: Optional[dict], signed: bool = True,
+             now: Optional[datetime] = None) -> str:
+    """anonymous | stranger | identity — a signed request is a stranger
+    until its identity is verified AND ripe (standing joins the condition
+    later); an unsigned one is anonymous whatever the registry knows."""
     from desktop.p2p.peer_auth import LANE_ANONYMOUS, LANE_IDENTITY, LANE_STRANGER
-    if row is None:
+    if not signed:
         return LANE_ANONYMOUS
+    if row is None:
+        return LANE_STRANGER
     now = now or datetime.now(timezone.utc)
     ripe = (now - row["issued_at"]).total_seconds() >= RIPENING_SECONDS
     return LANE_IDENTITY if row["status"] == "verified" and ripe else LANE_STRANGER

@@ -86,9 +86,48 @@ class PeerAuthMiddleware:
         return self._own_pubkey
 
     async def __call__(self, scope, receive, send):
-        from desktop.p2p import peer_auth
-        if scope["type"] != "http" or not peer_auth.is_identity_bound(scope["path"]):
+        from desktop.p2p import contact_log, peer_auth
+        if scope["type"] != "http":
             return await self.app(scope, receive, send)
+
+        timer = contact_log.RequestTimer()
+        client = scope.get("client")
+        addr = client[0] if client else None
+        raw_target = scope.get("raw_path", scope["path"].encode()).decode("latin-1")
+        if scope.get("query_string"):
+            raw_target += "?" + scope["query_string"].decode("latin-1")
+        headers = _CIHeaders(scope["headers"])
+        outcome = {"status": 500, "bytes_out": 0}
+        pubkey, status, lane = None, None, None
+        items = targets = None
+        body = b""
+
+        def _record():
+            wall_ms, cpu_ms = timer.elapsed_ms()
+            _contact_log().record(
+                endpoint=contact_log.endpoint_family(scope["path"]),
+                status=outcome["status"], wall_ms=wall_ms, cpu_ms=cpu_ms,
+                pubkey=pubkey, addr=addr, lane=lane,
+                bytes_in=len(body) or int(headers.get("content-length") or 0),
+                bytes_out=outcome["bytes_out"], items=items, targets=targets)
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                outcome["status"] = message["status"]
+                if pubkey is not None:
+                    extra = [(peer_auth.HDR_IDENTITY.lower().encode(), status.encode()),
+                             (peer_auth.HDR_LANE.lower().encode(), lane.encode())]
+                    message = {**message, "headers": list(message.get("headers", [])) + extra}
+            elif message["type"] == "http.response.body":
+                outcome["bytes_out"] += len(message.get("body", b""))
+            await send(message)
+
+        if not peer_auth.is_identity_bound(scope["path"]):
+            try:
+                await self.app(scope, receive, send_wrapper)
+            finally:
+                _record()
+            return
 
         chunks, more = [], True
         while more:
@@ -98,28 +137,26 @@ class PeerAuthMiddleware:
             chunks.append(message.get("body", b""))
             more = message.get("more_body", False)
         body = b"".join(chunks)
+        items, targets = contact_log.extract_request_shape(raw_target, body)
 
         async def replay():
             return {"type": "http.request", "body": body, "more_body": False}
 
-        async def refuse(status, error):
+        async def refuse(code, error):
             payload = json.dumps({"error": error}).encode()
-            await send({"type": "http.response.start", "status": status,
-                        "headers": [(b"content-type", b"application/json"),
-                                    (b"content-length", str(len(payload)).encode())]})
-            await send({"type": "http.response.body", "body": payload})
+            await send_wrapper({"type": "http.response.start", "status": code,
+                                "headers": [(b"content-type", b"application/json"),
+                                            (b"content-length", str(len(payload)).encode())]})
+            await send_wrapper({"type": "http.response.body", "body": payload})
+            _record()
 
-        headers = _CIHeaders(scope["headers"])
-        raw_target = scope.get("raw_path", scope["path"].encode()).decode("latin-1")
-        if scope.get("query_string"):
-            raw_target += "?" + scope["query_string"].decode("latin-1")
         own = self._own()
         pubkey, err = (peer_auth.verify_request(headers, own, scope["method"], raw_target, body)
                        if own else (None, None))
         if err is not None:
             return await refuse(403, err)
 
-        status, lane = None, peer_auth.LANE_ANONYMOUS
+        lane = peer_auth.LANE_ANONYMOUS
         if pubkey is not None:
             import birth_authority
             from desktop.p2p import identity_registry
@@ -130,9 +167,6 @@ class PeerAuthMiddleware:
                 if (bundle is None or not birth_authority.verify_certificate(bundle["cert"])
                         or bundle["cert"].get("pubkey", "").lower() != pubkey):
                     return await refuse(400, "identity certificate invalid")
-            client = scope.get("client")
-            addr = client[0] if client else None
-
             def _registry():
                 with get_conn() as conn:
                     if identity_registry.is_banned(conn, pubkey):
@@ -152,22 +186,27 @@ class PeerAuthMiddleware:
                 if banned or (row is not None and row["status"] == "failed"):
                     return await refuse(403, "identity banned")
                 status = row["status"] if row is not None else "unknown"
-            lane = identity_registry.lane_for(row) if pubkey else lane
-            if lane == peer_auth.LANE_ANONYMOUS:
-                lane = peer_auth.LANE_STRANGER
+            lane = identity_registry.lane_for(row, signed=True)
 
         state = scope.setdefault("state", {})
         state["peer_pubkey"] = pubkey
         state["lane"] = lane
+        try:
+            await self.app(scope, replay, send_wrapper)
+        finally:
+            _record()
 
-        async def send_wrapper(message):
-            if message["type"] == "http.response.start" and pubkey is not None:
-                extra = [(peer_auth.HDR_IDENTITY.lower().encode(), status.encode()),
-                         (peer_auth.HDR_LANE.lower().encode(), lane.encode())]
-                message = {**message, "headers": list(message.get("headers", [])) + extra}
-            await send(message)
 
-        await self.app(scope, replay, send_wrapper)
+_log = None
+
+
+def _contact_log():
+    global _log
+    if _log is None:
+        from desktop.p2p import contact_log
+        _log = contact_log.ContactLog(get_conn)
+        _log.start()
+    return _log
 
 
 class _CIHeaders(dict):

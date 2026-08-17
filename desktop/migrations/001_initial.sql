@@ -2231,6 +2231,46 @@ CREATE INDEX IF NOT EXISTS idx_p2p_identities_email_token
 CREATE INDEX IF NOT EXISTS idx_p2p_identities_last_seen ON p2p_identities (last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_p2p_identities_issued ON p2p_identities (issued_at);
 
+-- Contact log — the measurement layer (P2P-SYNC-INTEGRITY.md "measure
+-- before you arm"): one row per served peer request (who / what / how much),
+-- 30-day retention under a row cap, plus the per-endpoint cost EMA that will
+-- become base(action) of the pricing formula. Local, never shared. Written
+-- off the request path by desktop/p2p/contact_log.py.
+DO $$ BEGIN
+    CREATE TYPE p2p_lane AS ENUM ('anonymous', 'stranger', 'identity');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS p2p_contact_events (
+    id          BIGSERIAL PRIMARY KEY,
+    ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    pubkey      TEXT,                               -- signed requests only
+    addr        UUID,                               -- uuid5(NS, 'node_addr:{host}')
+    subnet      UUID,                               -- uuid5(NS, 'node_subnet:{/24 | /48}')
+    endpoint    TEXT NOT NULL,                      -- route family: sync.pull, mb.search, chat.handshake…
+    lane        p2p_lane,                           -- NULL outside identity-bound routes
+    status      SMALLINT NOT NULL,
+    bytes_in    INTEGER NOT NULL DEFAULT 0,
+    bytes_out   INTEGER NOT NULL DEFAULT 0,
+    wall_ms     REAL NOT NULL,
+    cpu_ms      REAL NOT NULL,                      -- process-wide CPU delta (over-attributes under concurrency)
+    items       INTEGER,                            -- request size in ids/names when known
+    targets     TEXT[]                              -- up to 8 name keys (mb.search / mb.slice)
+);
+CREATE INDEX IF NOT EXISTS idx_p2p_contact_events_ts ON p2p_contact_events (ts);
+CREATE INDEX IF NOT EXISTS idx_p2p_contact_events_pubkey_ts
+    ON p2p_contact_events (pubkey, ts) WHERE pubkey IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_p2p_contact_events_addr_ts ON p2p_contact_events (addr, ts);
+CREATE INDEX IF NOT EXISTS idx_p2p_contact_events_endpoint_ts ON p2p_contact_events (endpoint, ts);
+
+CREATE TABLE IF NOT EXISTS p2p_action_costs (
+    endpoint      TEXT PRIMARY KEY,
+    ema_cpu_ms    REAL NOT NULL,
+    ema_wall_ms   REAL NOT NULL,
+    ema_bytes_out REAL NOT NULL,
+    samples       BIGINT NOT NULL,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ============================================================
 -- Streaming-minted phantoms
 -- ============================================================
