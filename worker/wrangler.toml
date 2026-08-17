@@ -7,5 +7,15 @@ compatibility_date = "2024-01-01"
 binding = "RATE_LIMITS"
 id = "bf74d396ca6c4b1cb46ff216ff2aa585"
 
+# Birth ledger: one SQLite-backed Durable Object ("births") records every
+# first issuance for adaptive difficulty (shadow until armed in verify.js).
+[[durable_objects.bindings]]
+name = "BIRTH_LEDGER"
+class_name = "BirthLedger"
+
+[exports.BirthLedger]
+type = "durable-object"
+storage = "sqlite"
+
 # Custom domain (optional): verify.sautium.net
 # Configure in Cloudflare dashboard: Workers → Triggers → Custom Domains

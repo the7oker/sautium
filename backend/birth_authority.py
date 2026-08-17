@@ -1,10 +1,13 @@
-"""Birth certificates — the identity-age anchor of the P2P trust design.
+"""Identity (birth) certificates — the identity-age anchor of the P2P trust
+design and, since v2, the challenge of the identity proof-of-work.
 
-A birth certificate is the network authority's signed statement
-{pubkey, born_at}: "the network first saw this identity at this moment". It
+A certificate is the network authority's signed statement {pubkey,
+issued_at, method, difficulty, params_version, [email_token, email_class]}:
+"the network first saw this identity at this moment, under this policy". It
 anchors identity age for cold-start trust weights (see
 docs/design/P2P-SYNC-INTEGRITY.md) — a certificate grants initial weight,
-never immunity.
+never immunity; a method:pow certificate is worth nothing until its holder
+also presents the proof mined over its signature (desktop/p2p/identity_pow.py).
 
 ISSUANCE LIVES ON THE CLOUDFLARE WORKER (worker/verify.js): the master node
 is a laptop with laptop uptime and a home IP, so it cannot be the network's
@@ -26,30 +29,58 @@ worker/verify.js. Update all three together; authority key rotation also
 means redeploying the Worker.
 """
 
+import re
 from typing import Optional
 
-# The network's certificate authorities. [0] is the active signing key (its
-# private half is the Worker's BIRTH_SIGNING_KEY secret); later entries
-# would be co-authorities (accepted for verification, not signing).
+# [0] is the active signing key (its private half is the Worker's
+# BIRTH_SIGNING_KEY secret); later entries would be co-authorities.
 TRUSTED_AUTHORITIES = [
     "a9f40f70a796926828d894d4384655963ae5bdce38d2c502ede75792552d33cd",
 ]
 
-CERT_VERSION = 1
+# v2 (2026-08-17): the birth certificate and the proof-of-work certificate are
+# one type. `method: pow` is the anonymous path — its holder must present a
+# separate proof mined over this certificate's signature (identity_pow.py);
+# `method: email` carries no work requirement and adds the Worker-peppered
+# email_token (equality = same mailbox, the similarity hard link and the
+# succession key) plus a coarse email_class. `difficulty` is the expected
+# number of ~2 GiB Argon2id attempts pinned at issuance; `issued_at` is the
+# first-issuance moment (idempotent, the age anchor).
+CERT_VERSION = 2
+CERT_METHODS = ("pow", "email")
+EMAIL_CLASSES = ("major", "other", "disposable")
+
+_ISSUED_AT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+_EMAIL_TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-def canonical_payload(pubkey_hex: str, born_at_iso: str) -> bytes:
-    return f"sautium-birth:v{CERT_VERSION}:{pubkey_hex}:{born_at_iso}".encode("utf-8")
+def canonical_payload(cert: dict) -> bytes:
+    """Fixed nine-field payload; the two email fields are empty for pow.
+    Mirrors birthPayload() in worker/verify.js."""
+    return (
+        f"sautium-birth:v{CERT_VERSION}:{cert['pubkey']}:{cert['issued_at']}:"
+        f"{cert['method']}:{int(cert['difficulty'])}:{int(cert['params_version'])}:"
+        f"{cert.get('email_token') or ''}:{cert.get('email_class') or ''}"
+    ).encode("utf-8")
 
 
-def _validate_pubkey(pubkey_hex: str) -> bytes:
-    """Reject anything that is not a valid 32-byte Ed25519 public key."""
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    raw = bytes.fromhex(pubkey_hex)
-    if len(raw) != 32:
-        raise ValueError("pubkey must be 32 bytes")
-    Ed25519PublicKey.from_public_bytes(raw)   # raises on invalid point
-    return raw
+def _valid_shape(cert: dict, trusted: list) -> bool:
+    if cert.get("v") != CERT_VERSION or cert.get("issuer") not in trusted:
+        return False
+    if cert.get("method") not in CERT_METHODS:
+        return False
+    if not isinstance(cert.get("issued_at"), str) or not _ISSUED_AT_RE.match(cert["issued_at"]):
+        return False
+    difficulty, params_version = cert.get("difficulty"), cert.get("params_version")
+    if not (isinstance(difficulty, int) and not isinstance(difficulty, bool) and difficulty >= 1):
+        return False
+    if not (isinstance(params_version, int) and not isinstance(params_version, bool) and params_version >= 1):
+        return False
+    token, klass = cert.get("email_token"), cert.get("email_class")
+    if cert["method"] == "email":
+        return (isinstance(token, str) and bool(_EMAIL_TOKEN_RE.match(token))
+                and klass in EMAIL_CLASSES)
+    return not token and not klass
 
 
 def verify_certificate(cert: dict,
@@ -58,13 +89,14 @@ def verify_certificate(cert: dict,
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     try:
-        issuer = cert.get("issuer")
-        if cert.get("v") != CERT_VERSION or issuer not in (trusted or TRUSTED_AUTHORITIES):
+        if not _valid_shape(cert, trusted or TRUSTED_AUTHORITIES):
             return False
-        _validate_pubkey(cert["pubkey"])
-        authority = Ed25519PublicKey.from_public_bytes(bytes.fromhex(issuer))
-        authority.verify(bytes.fromhex(cert["sig"]),
-                         canonical_payload(cert["pubkey"], cert["born_at"]))
+        raw = bytes.fromhex(cert["pubkey"])
+        if len(raw) != 32:
+            return False
+        Ed25519PublicKey.from_public_bytes(raw)
+        authority = Ed25519PublicKey.from_public_bytes(bytes.fromhex(cert["issuer"]))
+        authority.verify(bytes.fromhex(cert["sig"]), canonical_payload(cert))
         return True
     except (InvalidSignature, KeyError, ValueError, TypeError):
         return False

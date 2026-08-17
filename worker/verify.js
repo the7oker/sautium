@@ -6,12 +6,17 @@
  *    and checks the code; clients never see the expected value)
  * 2. Stores verified email records in KV: {email, pubkey, born_at, verified_at}
  * 3. Sends signed invite emails with verified sender info
- * 4. Issues birth certificates — the network's identity-age anchor
- *    (see docs/design/P2P-SYNC-INTEGRITY.md: cert = initial trust weight,
- *    never immunity). Issuance is idempotent: the first request for a pubkey
- *    signs {pubkey, now} into KV; every later request returns the stored
+ * 4. Issues identity (birth) certificates — the network's identity-age
+ *    anchor and, since v2, the challenge for the identity proof-of-work (see
+ *    docs/design/P2P-SYNC-INTEGRITY.md §§ "Birth certificates",
+ *    "Proof-of-work certificates": cert = initial trust weight, never
+ *    immunity; the Worker is a pure NOTARY — it signs facts, it verifies no
+ *    work). Issuance is idempotent: the first request for a pubkey signs
+ *    {pubkey, now, policy} into KV; every later request returns the stored
  *    certificate — recreating an account on another device (Argon2id
- *    login+password → same keypair) never changes the birth date.
+ *    login+password → same keypair) never changes the birth date. A
+ *    successful email verification upgrades the same record to
+ *    `method: email` (issued_at unchanged) and adds the peppered email token.
  *
  * All state-changing requests require Ed25519 signature verification.
  * Masha can't impersonate Alice because she can't sign with Alice's keys.
@@ -28,6 +33,10 @@
  *          wrangler secret put BIRTH_SIGNING_KEY   (64-char hex Ed25519 seed;
  *            offline backup lives in data/authority/master_signing.key on the
  *            master host)
+ *          wrangler secret put IP_PEPPER           (data/authority/ip_pepper.key)
+ *          wrangler secret put EMAIL_PEPPER        (data/authority/email_pepper.key;
+ *            NEVER rotate — every email_token link across the network is
+ *            keyed under it, the IP_HASH_VERSION=2 lesson)
  *
  * Endpoints:
  *   POST /send-verification    — generate + send verification code to email
@@ -36,9 +45,22 @@
  *   GET  /check-email          — check if email already verified for invite code
  *   POST /accept-invite        — accept an invite (stores reciprocal + notifies sender)
  *   GET  /pending-accepts      — poll for accepted invites (one-time pickup)
- *   POST /birth-certificate    — issue (or return existing) birth certificate
+ *   POST /birth-certificate    — issue (or return existing) identity certificate
  *   GET  /birth-certificate    — public read of an issued certificate
+ *   GET  /issuance-stats       — public issuance counters + policy + birth-ledger
+ *                                aggregates (CT-lite)
  *   GET  /health               — health check
+ *
+ * Birth ledger (Durable Object BIRTH_LEDGER, SQLite): every first issuance is
+ * recorded with its time, ASN, country and a peppered /24 token, scored
+ * against the recent births that look like it, and stored with the
+ * would-be difficulty multiplier. SHADOW ONLY until
+ * ADAPTIVE_DIFFICULTY_ARMED flips: certificates keep the base difficulty,
+ * the ledger just measures — a botnet is a mass event, and only the notary
+ * sees the whole birth process (docs/design/P2P-SYNC-INTEGRITY.md
+ * § "Defense strategy"; plan phase Ф2b). Pricing is per CLUSTER (same /24,
+ * same ASN, then a mild capped global term), never a global switch — an
+ * honest launch wave from one ISP must not pay for a cloud flood.
  */
 
 const RATE_LIMIT_PER_IP = 20;
@@ -56,7 +78,49 @@ const FROM_NAME = "Sautium";
 const TRUSTED_AUTHORITIES = [
   "a9f40f70a796926828d894d4384655963ae5bdce38d2c502ede75792552d33cd",
 ];
-const BIRTH_CERT_VERSION = 1;
+// v2 (2026-08-17): {pubkey, issued_at, method: pow|email, difficulty,
+// params_version, email_token, email_class}. Payload format is mirrored by
+// canonical_payload() in the two Python files above.
+const BIRTH_CERT_VERSION = 2;
+const CERT_METHODS = new Set(["pow", "email"]);
+// Identity proof-of-work policy pinned into every certificate at issuance
+// (desktop/p2p/identity_pow.py owns the parameters themselves). difficulty is
+// the EXPECTED number of ~2 GiB Argon2id attempts — a continuous price scale.
+// Golden-age level: ~45 s of background mining on a desktop; raising it later
+// touches new births only, existing certificates keep the price they paid.
+const POW_PARAMS_VERSION = 1;
+const POW_DIFFICULTY = 32;
+// Adaptive birth pricing: shadow (measure only) until flipped. When armed the
+// certificate difficulty becomes POW_DIFFICULTY x shadowMultiplier(), capped
+// at x8 — the cap bounds both a false positive (an honest wave mines a few
+// minutes longer, and a newborn needs no proof for hours anyway) and the
+// blast radius of a formula bug.
+const ADAPTIVE_DIFFICULTY_ARMED = false;
+const ADAPTIVE_MULT_CAP = 8;
+const LEDGER_RETENTION_MS = 90 * 24 * 3600 * 1000;
+// email_class is a coarse, Worker-side hint (the node never sees the domain):
+// disposable → reduced similarity weight, major → shared-provider (many honest
+// users collide on it), other → custom/ISP domains.
+const MAJOR_EMAIL_DOMAINS = new Set([
+  "gmail.com", "outlook.com", "hotmail.com", "live.com", "msn.com",
+  "yahoo.com", "ymail.com", "icloud.com", "me.com", "mac.com", "proton.me",
+  "protonmail.com", "pm.me", "fastmail.com", "gmx.com", "gmx.de", "gmx.net",
+  "web.de", "aol.com", "zoho.com", "mail.com", "yandex.com", "yandex.ru",
+  "mail.ru", "ukr.net", "i.ua", "meta.ua", "email.ua", "seznam.cz", "wp.pl",
+  "o2.pl", "onet.pl", "interia.pl", "orange.fr", "free.fr", "laposte.net",
+  "libero.it", "t-online.de", "qq.com", "163.com", "126.com", "naver.com",
+]);
+const DISPOSABLE_EMAIL_DOMAINS = new Set([
+  "mailinator.com", "guerrillamail.com", "guerrillamail.net", "sharklasers.com",
+  "grr.la", "10minutemail.com", "10minutemail.net", "temp-mail.org",
+  "tempmail.com", "tempmail.net", "tempr.email", "yopmail.com", "yopmail.fr",
+  "throwawaymail.com", "getnada.com", "nada.email", "dispostable.com",
+  "trashmail.com", "trashmail.me", "maildrop.cc", "fakeinbox.com", "mohmal.com",
+  "emailondeck.com", "mintemail.com", "discard.email", "mailnesia.com",
+  "spamgourmet.com", "mytemp.email", "tmpmail.org", "tmpmail.net",
+  "burnermail.io", "moakt.com", "tempail.com", "crazymailing.com",
+  "guerrillamailblock.com", "spam4.me", "mailcatch.com", "inboxkitten.com",
+]);
 
 // Timestamp-notary payload version. v2 binds the submitter's ip_hash into the
 // signed root (accountability for who notarized a batch). Decoupled from
@@ -124,6 +188,9 @@ export default {
         return await handleBirthCertificate(request, env, corsHeaders);
       }
 
+      if (url.pathname === "/issuance-stats" && request.method === "GET") {
+        return await handleIssuanceStats(env, corsHeaders);
+      }
       if (url.pathname === "/birth-certificate" && request.method === "GET") {
         return await handleBirthCertificateGet(url, env, corsHeaders);
       }
@@ -143,10 +210,31 @@ export default {
 // Birth certificates
 // -----------------------------------------------------------------------
 
-function birthPayload(pubkeyHex, bornAtIso) {
+function birthPayload(pubkeyHex, rec) {
+  // Fixed nine-field shape; the two email fields are empty for method:pow.
+  // Field values never contain ':' (hex, ISO seconds, enum names, integers).
   return new TextEncoder().encode(
-    `sautium-birth:v${BIRTH_CERT_VERSION}:${pubkeyHex}:${bornAtIso}`
+    `sautium-birth:v${BIRTH_CERT_VERSION}:${pubkeyHex}:${rec.issued_at}:` +
+    `${rec.method}:${rec.difficulty}:${rec.params_version}:` +
+    `${rec.email_token || ""}:${rec.email_class || ""}`
   );
+}
+
+function isValidCertShape(cert) {
+  if (!cert || cert.v !== BIRTH_CERT_VERSION) return false;
+  if (!TRUSTED_AUTHORITIES.includes(cert.issuer)) return false;
+  if (!isValidPubkeyHex(cert.pubkey)) return false;
+  if (!CERT_METHODS.has(cert.method)) return false;
+  if (typeof cert.issued_at !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(cert.issued_at)) return false;
+  if (!Number.isInteger(cert.difficulty) || cert.difficulty < 1) return false;
+  if (!Number.isInteger(cert.params_version) || cert.params_version < 1) return false;
+  if (cert.method === "email") {
+    if (!/^[0-9a-f]{64}$/.test(cert.email_token || "")) return false;
+    if (!["major", "other", "disposable"].includes(cert.email_class)) return false;
+  } else if (cert.email_token || cert.email_class) {
+    return false;
+  }
+  return true;
 }
 
 function nowIsoSeconds() {
@@ -172,15 +260,91 @@ async function birthSigningKey(env) {
 
 async function verifyBirthCertificate(cert) {
   try {
-    if (!cert || cert.v !== BIRTH_CERT_VERSION) return false;
-    if (!TRUSTED_AUTHORITIES.includes(cert.issuer)) return false;
-    if (!isValidPubkeyHex(cert.pubkey)) return false;
+    if (!isValidCertShape(cert)) return false;
     return await verifySignatureBytes(
-      birthPayload(cert.pubkey, cert.born_at), cert.sig, cert.issuer
+      birthPayload(cert.pubkey, cert), cert.sig, cert.issuer
     );
   } catch {
     return false;
   }
+}
+
+async function signBirthRecord(env, pubkey, rec) {
+  const key = await birthSigningKey(env);
+  return bytesToHex(new Uint8Array(
+    await crypto.subtle.sign("Ed25519", key, birthPayload(pubkey, rec))
+  ));
+}
+
+function certFromRecord(pubkey, rec) {
+  return {
+    v: BIRTH_CERT_VERSION,
+    pubkey,
+    issued_at: rec.issued_at,
+    method: rec.method,
+    difficulty: rec.difficulty,
+    params_version: rec.params_version,
+    email_token: rec.email_token || null,
+    email_class: rec.email_class || null,
+    issuer: TRUSTED_AUTHORITIES[0],
+    sig: rec.sig_v2,
+  };
+}
+
+async function loadBirthRecord(env, pubkey) {
+  /**
+   * The KV record behind `born:{pubkey}`, upgraded in place from the v1
+   * shape {born_at, sig} on first touch: issued_at keeps the original
+   * born_at (the age anchor never moves), method starts as pow under the
+   * current policy. The v1 fields stay in the record so a Worker rollback
+   * still serves the old certificate byte-for-byte.
+   */
+  const record = await env.RATE_LIMITS.get(`born:${pubkey}`, "json");
+  if (!record) return null;
+  if (record.v === BIRTH_CERT_VERSION) return record;
+  const upgraded = {
+    ...record,
+    v: BIRTH_CERT_VERSION,
+    issued_at: record.born_at,
+    method: "pow",
+    difficulty: POW_DIFFICULTY,
+    params_version: POW_PARAMS_VERSION,
+    email_token: null,
+    email_class: null,
+  };
+  upgraded.sig_v2 = await signBirthRecord(env, pubkey, upgraded);
+  await env.RATE_LIMITS.put(`born:${pubkey}`, JSON.stringify(upgraded));
+  return upgraded;
+}
+
+async function bumpIssuance(env, field) {
+  // Best-effort daily counters (KV read-modify-write races only undercount).
+  // Public via /issuance-stats: mass minting under a compromised authority
+  // key would show up as certificates the notary never counted.
+  const day = nowIsoSeconds().slice(0, 10);
+  const stats = (await env.RATE_LIMITS.get("stats:issuance", "json")) || {};
+  const row = stats[day] || { births: 0, email: 0 };
+  row[field] = (row[field] || 0) + 1;
+  stats[day] = row;
+  for (const k of Object.keys(stats)) {
+    if (k < new Date(Date.now() - 90 * 86400 * 1000).toISOString().slice(0, 10)) delete stats[k];
+  }
+  await env.RATE_LIMITS.put("stats:issuance", JSON.stringify(stats));
+}
+
+async function handleIssuanceStats(env, corsHeaders) {
+  const stats = (await env.RATE_LIMITS.get("stats:issuance", "json")) || {};
+  return json({
+    policy: {
+      cert_version: BIRTH_CERT_VERSION,
+      pow_difficulty: POW_DIFFICULTY,
+      pow_params_version: POW_PARAMS_VERSION,
+      adaptive_armed: ADAPTIVE_DIFFICULTY_ARMED,
+      adaptive_cap: ADAPTIVE_MULT_CAP,
+    },
+    days: stats,
+    ledger: await ledgerCall(env, "/stats"),
+  }, corsHeaders);
 }
 
 async function handleBirthCertificate(request, env, corsHeaders) {
@@ -220,24 +384,26 @@ async function handleBirthCertificate(request, env, corsHeaders) {
     return json({ error: rateLimitResult }, corsHeaders, 429);
   }
 
-  let record = await env.RATE_LIMITS.get(`born:${pubkey}`, "json");
+  let record = await loadBirthRecord(env, pubkey);
   if (!record) {
-    const bornAt = nowIsoSeconds();
-    const key = await birthSigningKey(env);
-    const sig = bytesToHex(new Uint8Array(
-      await crypto.subtle.sign("Ed25519", key, birthPayload(pubkey, bornAt))
-    ));
-    record = { born_at: bornAt, sig };
+    const issuedAt = nowIsoSeconds();
+    const verdict = await ledgerBirth(env, request, pubkey, issuedAt);
+    const mult = ADAPTIVE_DIFFICULTY_ARMED && verdict ? verdict.m_shadow : 1;
+    record = {
+      v: BIRTH_CERT_VERSION,
+      issued_at: issuedAt,
+      method: "pow",
+      difficulty: Math.min(POW_DIFFICULTY * mult, POW_DIFFICULTY * ADAPTIVE_MULT_CAP),
+      params_version: POW_PARAMS_VERSION,
+      email_token: null,
+      email_class: null,
+    };
+    record.sig_v2 = await signBirthRecord(env, pubkey, record);
     await env.RATE_LIMITS.put(`born:${pubkey}`, JSON.stringify(record));
+    await bumpIssuance(env, "births");
   }
 
-  return json({
-    v: BIRTH_CERT_VERSION,
-    pubkey,
-    born_at: record.born_at,
-    issuer: TRUSTED_AUTHORITIES[0],
-    sig: record.sig,
-  }, corsHeaders);
+  return json(certFromRecord(pubkey, record), corsHeaders);
 }
 
 async function handleBirthCertificateGet(url, env, corsHeaders) {
@@ -252,18 +418,165 @@ async function handleBirthCertificateGet(url, env, corsHeaders) {
     return json({ error: "invalid pubkey" }, corsHeaders, 400);
   }
 
-  const record = await env.RATE_LIMITS.get(`born:${pubkey}`, "json");
+  const record = await loadBirthRecord(env, pubkey);
   if (!record) {
     return json({ error: "not issued" }, corsHeaders, 404);
   }
 
-  return json({
-    v: BIRTH_CERT_VERSION,
+  return json(certFromRecord(pubkey, record), corsHeaders);
+}
+
+// -----------------------------------------------------------------------
+// Birth ledger — adaptive difficulty (shadow)
+// -----------------------------------------------------------------------
+
+function subnetOf(ip) {
+  if (!ip) return "";
+  if (ip.includes(":")) {
+    // IPv6: /48 — the customer allocation size, one household or one VPS
+    return ip.split(":").slice(0, 3).join(":") + "::/48";
+  }
+  return ip.split(".").slice(0, 3).join(".") + ".0/24";
+}
+
+async function subnetToken(env, ip) {
+  // Peppered like ipHashUuid: equality is all the ledger needs, and a bare
+  // /24 hash would be a 2^24 dictionary. Empty when there is nothing to hash.
+  const subnet = subnetOf(ip);
+  if (!subnet || !env.IP_PEPPER) return "";
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(env.IP_PEPPER),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign(
+    "HMAC", key, new TextEncoder().encode(`sub:${subnet}`)));
+  return bytesToHex(mac).slice(0, 16);
+}
+
+function shadowMultiplier(c) {
+  // v0 placeholder thresholds — the whole point of shadow mode is to replace
+  // these with measured distributions (/issuance-stats). Counts are PRIOR
+  // births in the window that share the axis with this one. Conjunction
+  // over single axis: same /24 within a day (CGNAT-tolerant: the 3rd birth
+  // from one /24 in 24 h doubles), an ASN minting fast, and a mild global
+  // term for a flood that is spread across networks.
+  let m = 1;
+  if (c.n_sub24 >= 2) m *= 2;
+  if (c.n_sub24 >= 5) m *= 2;
+  if (c.n_asn1 >= 20) m *= 2;
+  if (c.n_glob1 >= 60) m *= 2;
+  return Math.min(m, ADAPTIVE_MULT_CAP);
+}
+
+export class BirthLedger {
+  constructor(state, env) {
+    this.state = state;
+    this.sql = state.storage.sql;
+    state.blockConcurrencyWhile(async () => this._init());
+  }
+
+  _init() {
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS births (
+      pubkey TEXT PRIMARY KEY, ts INTEGER NOT NULL, asn INTEGER NOT NULL,
+      cc TEXT NOT NULL, sub TEXT NOT NULL, method TEXT NOT NULL,
+      m_shadow REAL NOT NULL, n_sub24 INTEGER NOT NULL, n_asn1 INTEGER NOT NULL,
+      n_asn24 INTEGER NOT NULL, n_glob1 INTEGER NOT NULL, n_glob24 INTEGER NOT NULL)`);
+    this.sql.exec("CREATE INDEX IF NOT EXISTS births_ts ON births (ts)");
+    this.sql.exec("CREATE INDEX IF NOT EXISTS births_sub_ts ON births (sub, ts)");
+    this.sql.exec("CREATE INDEX IF NOT EXISTS births_asn_ts ON births (asn, ts)");
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/birth") {
+      return Response.json(this.recordBirth(await request.json()));
+    }
+    if (request.method === "POST" && url.pathname === "/method") {
+      const { pubkey, method } = await request.json();
+      this.sql.exec("UPDATE births SET method = ? WHERE pubkey = ?", method, pubkey);
+      return Response.json({ ok: true });
+    }
+    if (request.method === "GET" && url.pathname === "/stats") {
+      return Response.json(this.stats(Date.now()));
+    }
+    return new Response("not found", { status: 404 });
+  }
+
+  _count(query, ...params) {
+    return Number(this.sql.exec(query, ...params).one().n);
+  }
+
+  recordBirth({ pubkey, ts, asn, cc, sub }) {
+    const prior = this.sql.exec(
+      "SELECT m_shadow, n_sub24, n_asn1, n_asn24, n_glob1, n_glob24 FROM births WHERE pubkey = ?",
+      pubkey).toArray();
+    if (prior.length) return prior[0];               // idempotent, like issuance
+    const hour = ts - 3600 * 1000, day = ts - 86400 * 1000;
+    const counts = {
+      n_sub24: sub ? this._count("SELECT count(*) AS n FROM births WHERE sub = ? AND ts > ?", sub, day) : 0,
+      n_asn1: asn ? this._count("SELECT count(*) AS n FROM births WHERE asn = ? AND ts > ?", asn, hour) : 0,
+      n_asn24: asn ? this._count("SELECT count(*) AS n FROM births WHERE asn = ? AND ts > ?", asn, day) : 0,
+      n_glob1: this._count("SELECT count(*) AS n FROM births WHERE ts > ?", hour),
+      n_glob24: this._count("SELECT count(*) AS n FROM births WHERE ts > ?", day),
+    };
+    const m_shadow = shadowMultiplier(counts);
+    this.sql.exec(
+      `INSERT INTO births (pubkey, ts, asn, cc, sub, method, m_shadow, n_sub24, n_asn1, n_asn24, n_glob1, n_glob24)
+       VALUES (?, ?, ?, ?, ?, 'pow', ?, ?, ?, ?, ?, ?)`,
+      pubkey, ts, asn, cc, sub, m_shadow, counts.n_sub24, counts.n_asn1,
+      counts.n_asn24, counts.n_glob1, counts.n_glob24);
+    this.sql.exec("DELETE FROM births WHERE ts < ?", ts - LEDGER_RETENTION_MS);
+    return { m_shadow, ...counts };
+  }
+
+  stats(now) {
+    const day = now - 86400 * 1000, week = now - 7 * 86400 * 1000;
+    const hist = (since) => ({
+      births: this._count("SELECT count(*) AS n FROM births WHERE ts > ?", since),
+      email: this._count("SELECT count(*) AS n FROM births WHERE ts > ? AND method = 'email'", since),
+      distinct_asn: this._count("SELECT count(DISTINCT asn) AS n FROM births WHERE ts > ?", since),
+      distinct_sub: this._count("SELECT count(DISTINCT sub) AS n FROM births WHERE ts > ?", since),
+      m2: this._count("SELECT count(*) AS n FROM births WHERE ts > ? AND m_shadow >= 2", since),
+      m4: this._count("SELECT count(*) AS n FROM births WHERE ts > ? AND m_shadow >= 4", since),
+      m8: this._count("SELECT count(*) AS n FROM births WHERE ts > ? AND m_shadow >= 8", since),
+    });
+    const topAsn = this.sql.exec(
+      "SELECT asn, cc, count(*) AS n FROM births WHERE ts > ? GROUP BY asn, cc ORDER BY n DESC LIMIT 5",
+      week).toArray().map((r) => ({ asn: Number(r.asn), cc: r.cc, births: Number(r.n) }));
+    return {
+      total: this._count("SELECT count(*) AS n FROM births"),
+      last_24h: hist(day),
+      last_7d: hist(week),
+      top_asn_7d: topAsn,
+    };
+  }
+}
+
+async function ledgerCall(env, path, body) {
+  // The ledger is advisory: issuance never fails because the ledger did.
+  if (!env.BIRTH_LEDGER) return null;
+  try {
+    const stub = env.BIRTH_LEDGER.get(env.BIRTH_LEDGER.idFromName("births"));
+    const res = await stub.fetch(`https://ledger${path}`, {
+      method: body === undefined ? "GET" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return await res.json();
+  } catch (e) {
+    console.error("birth ledger unavailable:", e);
+    return null;
+  }
+}
+
+async function ledgerBirth(env, request, pubkey, issuedAtIso) {
+  const cf = request.cf || {};
+  return await ledgerCall(env, "/birth", {
     pubkey,
-    born_at: record.born_at,
-    issuer: TRUSTED_AUTHORITIES[0],
-    sig: record.sig,
-  }, corsHeaders);
+    ts: Date.parse(issuedAtIso),
+    asn: Number(cf.asn) || 0,
+    cc: String(cf.country || ""),
+    sub: await subnetToken(env, request.headers.get("CF-Connecting-IP") || ""),
+  });
 }
 
 // -----------------------------------------------------------------------
@@ -395,10 +708,13 @@ async function handleRegisterEmail(request, env, corsHeaders) {
    * Requires:
    * - the verification code the Worker generated and emailed (proves mailbox
    *   ownership to the Worker, not to the client itself);
-   * - a valid birth certificate for the same pubkey (the KV record carries
+   * - a valid identity certificate for the same pubkey (the KV record carries
    *   born_at, so a verified badge can cite identity age).
    *
-   * Stored value: {email, pubkey, born_at, verified_at}.
+   * Stored value: {email, pubkey, born_at, verified_at}. The identity's
+   * certificate record is upgraded to method:email with the peppered
+   * email_token + email_class (issued_at unchanged) and the new certificate is
+   * returned as `birth_cert` so the client persists it in one round-trip.
    */
   const body = await request.json();
   const { invite_code, email, public_key_hex, signature, code, birth_cert } = body;
@@ -424,20 +740,41 @@ async function handleRegisterEmail(request, env, corsHeaders) {
     return json({ error: "invalid or expired code" }, corsHeaders, 403);
   }
 
-  if (!await verifyBirthCertificate(birth_cert) ||
-      birth_cert.pubkey !== public_key_hex.toLowerCase()) {
+  const pubkey = public_key_hex.toLowerCase();
+  if (!await verifyBirthCertificate(birth_cert) || birth_cert.pubkey !== pubkey) {
     return json({ error: "invalid birth certificate" }, corsHeaders, 403);
+  }
+  const record = await loadBirthRecord(env, pubkey);
+  if (!record) {
+    return json({ error: "certificate not issued here" }, corsHeaders, 403);
+  }
+
+  const normalized = normalizeEmail(email);
+  const upgraded = {
+    ...record,
+    method: "email",
+    email_token: await emailToken(env, normalized),
+    email_class: emailClass(normalized),
+  };
+  upgraded.sig_v2 = await signBirthRecord(env, pubkey, upgraded);
+  await env.RATE_LIMITS.put(`born:${pubkey}`, JSON.stringify(upgraded));
+  if (record.method !== "email") {
+    await bumpIssuance(env, "email");
+    await ledgerCall(env, "/method", { pubkey, method: "email" });
   }
 
   await env.RATE_LIMITS.put(`verified:${kvKey(invite_code)}`, JSON.stringify({
     email,
-    pubkey: public_key_hex.toLowerCase(),
-    born_at: birth_cert.born_at,
+    pubkey,
+    born_at: upgraded.issued_at,
     verified_at: nowIsoSeconds(),
   }));
   await env.RATE_LIMITS.delete(codeKey);
 
-  return json({ status: "registered", invite_code, email }, corsHeaders);
+  return json({
+    status: "registered", invite_code, email,
+    birth_cert: certFromRecord(pubkey, upgraded),
+  }, corsHeaders);
 }
 
 async function handleInvite(request, env, corsHeaders) {
@@ -497,6 +834,8 @@ async function handleCheckEmail(url, env, corsHeaders) {
    *
    * Returns {verified: true} only if the stored email matches exactly.
    * Safe: requires signature (proves key ownership), doesn't leak emails.
+   * When verified for this very pubkey, also returns (and, if needed,
+   * upgrades to) the method:email identity certificate.
    */
   const inviteCode = url.searchParams.get("invite_code");
   const email = url.searchParams.get("email");
@@ -518,7 +857,33 @@ async function handleCheckEmail(url, env, corsHeaders) {
   }
 
   const stored = await getVerified(env, inviteCode);
-  return json({ verified: stored?.email === email }, corsHeaders);
+  const pubkey = publicKeyHex.toLowerCase();
+  const verified = stored?.email === email;
+  if (!verified || stored.pubkey !== pubkey) {
+    return json({ verified }, corsHeaders);
+  }
+  // Mailbox ownership was already proven for THIS key when the record was
+  // stored, so an identity verified before certificate v2 gets its
+  // method:email certificate here without a second code round — same
+  // proof, same binding (signed request + invite↔pubkey + stored pubkey).
+  let record = await loadBirthRecord(env, pubkey);
+  if (record && record.method !== "email") {
+    const normalized = normalizeEmail(email);
+    record = {
+      ...record,
+      method: "email",
+      email_token: await emailToken(env, normalized),
+      email_class: emailClass(normalized),
+    };
+    record.sig_v2 = await signBirthRecord(env, pubkey, record);
+    await env.RATE_LIMITS.put(`born:${pubkey}`, JSON.stringify(record));
+    await bumpIssuance(env, "email");
+    await ledgerCall(env, "/method", { pubkey, method: "email" });
+  }
+  return json({
+    verified: true,
+    birth_cert: record ? certFromRecord(pubkey, record) : null,
+  }, corsHeaders);
 }
 
 async function handleAcceptInvite(request, env, corsHeaders) {
@@ -920,6 +1285,44 @@ async function ipHashUuid(env, ip) {
 
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function normalizeEmail(email) {
+  // One person, one token: case, gmail dots and +tags must not mint distinct
+  // identities. Sub-addressing is stripped for every domain — the rare
+  // provider where alice+a@ and alice+b@ are different people costs a false
+  // link, the common case (one mailbox, many tags) would otherwise cost a
+  // free identity multiplier.
+  const at = email.lastIndexOf("@");
+  let local = email.slice(0, at).trim().toLowerCase().normalize("NFC");
+  let domain = email.slice(at + 1).trim().toLowerCase().normalize("NFC");
+  if (domain === "googlemail.com") domain = "gmail.com";
+  const plus = local.indexOf("+");
+  if (plus > 0) local = local.slice(0, plus);
+  if (domain === "gmail.com") local = local.replace(/\./g, "");
+  return `${local}@${domain}`;
+}
+
+function emailClass(normalizedEmail) {
+  const domain = normalizedEmail.slice(normalizedEmail.lastIndexOf("@") + 1);
+  if (DISPOSABLE_EMAIL_DOMAINS.has(domain)) return "disposable";
+  if (MAJOR_EMAIL_DOMAINS.has(domain)) return "major";
+  return "other";
+}
+
+async function emailToken(env, normalizedEmail) {
+  // Same construction as ipHashUuid: HMAC under a Worker-only pepper keeps
+  // equality (same token = same mailbox = a hard similarity link and the
+  // succession key across a password change) while a bare hash of a
+  // low-entropy address would be dictionary-reversible on any node.
+  const pepper = env.EMAIL_PEPPER;
+  if (!pepper) throw new Error("EMAIL_PEPPER is not configured");
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(pepper),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign(
+    "HMAC", key, new TextEncoder().encode(`email:${normalizedEmail}`)));
+  return bytesToHex(mac);
 }
 
 function escapeHtml(str) {

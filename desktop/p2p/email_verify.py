@@ -144,6 +144,9 @@ def is_email_already_verified(
     })
     if result and result.get("verified"):
         logger.info(f"Email {email} already verified for {ctx['invite_code']}")
+        if result.get("birth_cert"):
+            from desktop.p2p import birth_cert
+            birth_cert.save_certificate(result["birth_cert"])
         return True
     return False
 
@@ -193,7 +196,7 @@ def register_verified_email(
 
     Sends the user-entered code (the Worker compares against its stored
     hash — mailbox ownership is proven server-side) plus this identity's
-    birth certificate (fetched from the Worker first when missing; the
+    identity certificate (fetched from the Worker first when missing; the
     stored record carries born_at). Returns True if registered.
     """
     ctx = _identity_ctx(username, password)
@@ -221,6 +224,10 @@ def register_verified_email(
     })
     if result and result.get("status") == "registered":
         logger.info(f"Email {email} registered for {ctx['invite_code']}")
+        # The Worker upgraded our record to method:email — persist the new
+        # certificate now instead of discovering it on the next re-fetch.
+        if result.get("birth_cert"):
+            birth_cert.save_certificate(result["birth_cert"])
         return True
     return False
 

@@ -128,11 +128,18 @@ class SettingsDialog(ctk.CTkToplevel):
         ).pack(side="left")
 
     def _cert_status_text(self) -> str:
-        from desktop.p2p.birth_cert import load_certificate
+        from desktop.p2p.birth_cert import load_certificate, load_proof
         cert = load_certificate()
         if cert:
-            return f"Birth certificate: born {cert['born_at']}"
-        return "Birth certificate: none (fetched automatically at P2P start)"
+            if cert["method"] == "email":
+                work = "email-verified, no proof needed"
+            elif load_proof() is not None:
+                work = "proof ready"
+            else:
+                work = "proof pending (mined in the background while P2P runs)"
+            return (f"Identity certificate: issued {cert['issued_at']}"
+                    f" ({cert['method']}) — {work}")
+        return "Identity certificate: none (fetched automatically at P2P start)"
 
     def _export_birth_cert(self):
         from tkinter import filedialog
