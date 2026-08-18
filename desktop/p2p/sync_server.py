@@ -255,7 +255,9 @@ class SyncServer:
             payment = request.headers.get(admission.HDR_GATE)
             gate_result = None
             if payment:
-                verdict = await self._admission().check_payment(payment, peer_pubkey)
+                keys = await asyncio.get_event_loop().run_in_executor(
+                    None, self._client_keys, peer_pubkey or "", request.remote) if peer_pubkey else None
+                verdict = await self._admission().check_payment(payment, peer_pubkey, keys)
                 if verdict.status not in ("ok", "none"):
                     headers = ({"Retry-After": str(verdict.retry_after)}
                                if verdict.retry_after else None)
@@ -353,11 +355,31 @@ class SyncServer:
         asyncio semaphore inside must be born on the serving loop."""
         if self._gate_service is None:
             from desktop.node_identity import get_private_key_raw, sign_message
-            from desktop.p2p import gate_service
+            from desktop.p2p import gate_service, identity_registry
+
+            def evidence(pubkey: str, reason: str) -> None:
+                with _conn_factory_for(self.db_dsn) as conn:
+                    identity_registry.mark_failed(conn, pubkey, None, reason)
+
             self._gate_service = gate_service.GateService(
                 self.account_info.get("public_key_hex", ""), sign_message,
-                admission.derive_gate_secret(get_private_key_raw()))
+                admission.derive_gate_secret(get_private_key_raw()),
+                conn_factory=partial(_conn_factory_for, self.db_dsn),
+                on_evidence=evidence)
         return self._gate_service
+
+    def _client_keys(self, pubkey: str, addr: Optional[str]) -> list:
+        """Exclusion keys for the pool: pubkey, subnet, and the email domain
+        token when the registry knows this identity (blocking — executor)."""
+        from desktop.p2p import gate_service, identity_registry
+        domain = None
+        try:
+            with _conn_factory_for(self.db_dsn) as conn:
+                row = identity_registry.get(conn, pubkey)
+                domain = row["email_domain_token"] if row else None
+        except Exception as e:
+            logger.debug("registry lookup for gate keys failed: %s", e)
+        return gate_service.client_keys(pubkey, addr, domain)
 
     async def handle_gate_quote(self, request: web.Request) -> web.Response:
         """GET /api/gate/quote?pubkey=… — a free, O(1), signed, client-bound
@@ -373,7 +395,10 @@ class SyncServer:
             return self._json_response(request, {"error": "invalid pubkey"}, status=400)
         if not self.account_info.get("public_key_hex"):
             return self._json_response(request, {"error": "gate unavailable"}, status=503)
-        return self._json_response(request, self._admission().quote(pubkey))
+        loop = asyncio.get_event_loop()
+        keys = await loop.run_in_executor(None, self._client_keys, pubkey, request.remote)
+        quote = await loop.run_in_executor(None, self._admission().quote, pubkey, keys)
+        return self._json_response(request, quote)
 
     def _identity_gate(self):
         """Lazy: the asyncio semaphore inside must be born on the serving loop."""
@@ -1867,9 +1892,10 @@ class SyncServer:
                 conn = self._new_db()
                 try:
                     mb_slice_queries.ensure_blob_table(conn)
-                    from desktop.p2p import identity_registry
+                    from desktop.p2p import gate_pool, identity_registry
                     identity_registry.ensure_schema(conn)
                     contact_log.ensure_schema(conn)
+                    gate_pool.ensure_schema(conn)
                     conn.commit()
                 finally:
                     conn.close()

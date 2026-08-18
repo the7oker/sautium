@@ -195,7 +195,8 @@ class PeerAuthMiddleware:
 
         payment = headers.get(HDR_GATE)
         if payment:
-            verdict = await _gate().check_payment(payment, pubkey)
+            keys = await asyncio.to_thread(_client_keys, pubkey, addr) if pubkey else None
+            verdict = await _gate().check_payment(payment, pubkey, keys)
             if verdict.status not in ("ok", "none"):
                 await send_wrapper({"type": "http.response.start", "status": verdict.http_status,
                                     "headers": [(b"content-type", b"application/json")]
@@ -229,13 +230,32 @@ def _gate():
     if _gate_svc is None:
         from config import settings
         from p2p_identity import load_signing_key, resolve_identity
-        from desktop.p2p import admission, gate_service
+        from desktop.p2p import admission, gate_service, identity_registry
         key = load_signing_key(settings)
         ident = resolve_identity(settings)
+
+        def evidence(pubkey: str, reason: str) -> None:
+            with get_conn() as conn:
+                identity_registry.mark_failed(conn, pubkey, None, reason)
+
         _gate_svc = gate_service.GateService(
             ident["public_key_hex"], key.sign,
-            admission.derive_gate_secret(key.private_bytes_raw()))
+            admission.derive_gate_secret(key.private_bytes_raw()),
+            conn_factory=get_conn, on_evidence=evidence)
     return _gate_svc
+
+
+def _client_keys(pubkey: str, addr):
+    """Exclusion keys for the pool: pubkey, subnet, registry email domain."""
+    from desktop.p2p import gate_service, identity_registry
+    domain = None
+    try:
+        with get_conn() as conn:
+            row = identity_registry.get(conn, pubkey)
+            domain = row["email_domain_token"] if row else None
+    except Exception as e:
+        logger.debug(f"registry lookup for gate keys failed: {e}")
+    return gate_service.client_keys(pubkey, addr, domain)
 
 
 @app.get("/api/gate/quote")
@@ -248,7 +268,9 @@ async def gate_quote(request: Request, pubkey: str = "") -> JSONResponse:
     except ValueError:
         return JSONResponse({"error": "invalid pubkey"}, status_code=400)
     try:
-        return JSONResponse(_gate().quote(pubkey))
+        addr = request.client.host if request.client else None
+        keys = await asyncio.to_thread(_client_keys, pubkey, addr)
+        return JSONResponse(await asyncio.to_thread(_gate().quote, pubkey, keys))
     except Exception as e:                       # no identity configured → no gate
         logger.warning(f"gate quote unavailable: {e}")
         return JSONResponse({"error": "gate unavailable"}, status_code=503)

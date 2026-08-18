@@ -2274,6 +2274,45 @@ CREATE TABLE IF NOT EXISTS p2p_action_costs (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Admission-gate pool (Mode B): first-party truths (gold) and unchecked
+-- claims (silver) minted as by-products of gate verification, leased into
+-- future packets — gold as an O(1) memcmp prefilter, silver as quorum probes.
+-- Retire-on-use, abandoned leases retire, never reissued to a recipient
+-- sharing a hard axis with anyone who held it (recipient_keys), 7-day TTL,
+-- row cap. Local. Logic in desktop/p2p/gate_pool.py + gate_service.py.
+DO $$ BEGIN
+    CREATE TYPE p2p_pool_class AS ENUM ('gold', 'silver');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    CREATE TYPE p2p_pool_origin AS ENUM ('sample', 'audit', 'garbage', 'claim');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS p2p_gate_pool (
+    id              BIGSERIAL PRIMARY KEY,
+    task_input      BYTEA NOT NULL,                 -- 32-byte task
+    answer          BYTEA NOT NULL,                 -- gold: truth; silver: the claim
+    class           p2p_pool_class NOT NULL,
+    origin          p2p_pool_origin NOT NULL,       -- promoted silver keeps origin 'claim'
+    params_version  SMALLINT NOT NULL,
+    source_pubkey   TEXT NOT NULL,
+    source_nonce    TEXT NOT NULL,
+    votes           SMALLINT NOT NULL DEFAULT 0,
+    use_count       INTEGER NOT NULL DEFAULT 0,
+    recipient_keys  TEXT[] NOT NULL DEFAULT '{}',   -- pubkey / subnet:… / domain:… of everyone who held it
+    leased_nonce    TEXT,
+    leased_at       TIMESTAMPTZ,
+    lease_deadline  TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at      TIMESTAMPTZ NOT NULL,
+    retired_at      TIMESTAMPTZ,
+    retire_reason   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_p2p_gate_pool_free
+    ON p2p_gate_pool (class, expires_at) WHERE retired_at IS NULL AND leased_nonce IS NULL;
+CREATE INDEX IF NOT EXISTS idx_p2p_gate_pool_lease
+    ON p2p_gate_pool (leased_nonce) WHERE leased_nonce IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_p2p_gate_pool_recipients ON p2p_gate_pool USING GIN (recipient_keys);
+
 -- ============================================================
 -- Streaming-minted phantoms
 -- ============================================================
