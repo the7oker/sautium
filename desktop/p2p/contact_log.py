@@ -393,6 +393,14 @@ def report(conn, days: int = 7) -> str:
         out.append("  hour of day (UTC): " + " ".join(f"{h:02d}:{hours.get(h, 0)}" for h in range(24)))
         cur.execute("SELECT method, status, count(*) FROM p2p_identities GROUP BY 1, 2 ORDER BY 1, 2")
         out.append("  registry: " + ", ".join(f"{m}/{s}={c}" for m, s, c in cur.fetchall()))
+        cur.execute("""
+            SELECT count(*) FILTER (WHERE succeeded_by IS NOT NULL),
+                   count(*) FILTER (WHERE predecessor IS NOT NULL),
+                   (SELECT count(*) FROM p2p_node_bans WHERE reason = 'succession')
+              FROM p2p_identities
+        """)
+        succeeded, heirs, inherited = cur.fetchone()
+        out.append(f"  succession: {succeeded} rows succeeded, {heirs} heirs, {inherited} inherited bans")
     return "\n".join(out)
 
 

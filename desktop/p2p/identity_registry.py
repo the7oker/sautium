@@ -31,6 +31,17 @@ holding a superseded pow certificate for an email identity is stale, not
 suspicious); `email_token` may change (a changed mailbox); `first_seen_at`
 and a `verified` status survive every update — the work was done.
 
+Succession (Ф13). A password change makes a new key; re-verifying the
+mailbox makes the notary name the previous holder in the new certificate
+(`predecessor`, cert v4), and the peppered `email_token` links every key
+that ever verified that mailbox. On observe the new identity inherits from
+its predecessor and its token-mates what this node WITNESSED about them:
+`first_seen_at` (the older wins — witnessed age carries), the contact
+count, and any ban (`p2p_node_bans` reason `succession`) — re-birth by
+password change buys a verified user nothing, good or bad. Old rows get
+`succeeded_by` = the current holder. Nothing is transferred that this node
+did not see itself: a predecessor unknown here carries nothing.
+
 Ripening (`T_min`) is a separate, computed property (`is_ripe`): the
 identity lane will require it; token acceptance does not — a newborn
 must be able to befriend the master minutes after birth, ripening buys
@@ -91,9 +102,13 @@ SCHEMA_SQL = (
          last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
          contacts        BIGINT NOT NULL DEFAULT 1,
          first_addr      UUID,
-         last_addr       UUID
+         last_addr       UUID,
+         predecessor     TEXT,
+         succeeded_by    TEXT
        )""",
     """ALTER TABLE p2p_identities ADD COLUMN IF NOT EXISTS email_domain_token TEXT""",
+    """ALTER TABLE p2p_identities ADD COLUMN IF NOT EXISTS predecessor TEXT""",
+    """ALTER TABLE p2p_identities ADD COLUMN IF NOT EXISTS succeeded_by TEXT""",
     """CREATE INDEX IF NOT EXISTS idx_p2p_identities_email_token
          ON p2p_identities (email_token) WHERE email_token IS NOT NULL""",
     """CREATE INDEX IF NOT EXISTS idx_p2p_identities_email_domain
@@ -134,7 +149,7 @@ _ROW_COLUMNS = ("pubkey", "cert_v", "method", "issued_at", "difficulty",
                 "params_version", "email_token", "email_class", "email_domain_token", "issuer",
                 "cert_sig", "proof_nonce", "status", "fail_reason",
                 "first_seen_at", "verified_at", "last_seen_at", "contacts",
-                "first_addr", "last_addr")
+                "first_addr", "last_addr", "predecessor", "succeeded_by")
 
 
 def get(conn, pubkey: str) -> Optional[dict]:
@@ -199,14 +214,15 @@ def observe(conn, cert: dict, *, proof: Optional[dict] = None,
             cur.execute("""
                 INSERT INTO p2p_identities (pubkey, cert_v, method, issued_at, difficulty,
                     params_version, email_token, email_class, email_domain_token, issuer,
-                    cert_sig, proof_nonce, status, verified_at, first_addr, last_addr)
+                    cert_sig, proof_nonce, status, verified_at, first_addr, last_addr, predecessor)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        CASE WHEN %s = 'verified' THEN now() END, %s, %s)
+                        CASE WHEN %s = 'verified' THEN now() END, %s, %s, %s)
             """, (pubkey, cert["v"], cert["method"], issued_at, cert["difficulty"],
                   cert["params_version"], cert.get("email_token"), cert.get("email_class"),
                   cert.get("email_domain_token"), cert["issuer"], cert["sig"], proof_nonce,
-                  email_status, email_status, addr_id, addr_id))
+                  email_status, email_status, addr_id, addr_id, cert.get("predecessor")))
             _evict_if_over_cap(cur)
+            _succeed(cur, pubkey, cert)
             conn.commit()
             row = get(conn, pubkey)
             row["anomaly"] = False
@@ -233,7 +249,7 @@ def observe(conn, cert: dict, *, proof: Optional[dict] = None,
                 UPDATE p2p_identities
                    SET cert_v = %s, method = %s, difficulty = %s, params_version = %s,
                        email_token = %s, email_class = %s, email_domain_token = %s,
-                       issuer = %s, cert_sig = %s,
+                       issuer = %s, cert_sig = %s, predecessor = COALESCE(%s, predecessor),
                        proof_nonce = COALESCE(%s, proof_nonce),
                        status = CASE WHEN %s AND status <> 'failed' THEN 'verified'::p2p_identity_status
                                      ELSE status END,
@@ -244,11 +260,53 @@ def observe(conn, cert: dict, *, proof: Optional[dict] = None,
                  WHERE pubkey = %s
             """, (cert["v"], cert["method"], cert["difficulty"], cert["params_version"],
                   cert.get("email_token"), cert.get("email_class"), cert.get("email_domain_token"),
-                  cert["issuer"], cert["sig"], proof_nonce, upgrade, upgrade, addr_id, pubkey))
+                  cert["issuer"], cert["sig"], cert.get("predecessor"), proof_nonce, upgrade, upgrade,
+                  addr_id, pubkey))
+            _succeed(cur, pubkey, cert)
     conn.commit()
     row = get(conn, pubkey)
     row["anomaly"] = False
     return row
+
+
+def _succeed(cur, pubkey: str, cert: dict) -> None:
+    """Carry what this node witnessed about the identity's predecessors onto
+    the new key: the notary-named predecessor and every row sharing the
+    email token (the hard link), excluding the key itself. Idempotent — a
+    row already pointing at this holder contributes nothing twice."""
+    predecessor = (cert.get("predecessor") or "").lower() or None
+    token = cert.get("email_token") if cert.get("method") == "email" else None
+    if not predecessor and not token:
+        return
+    cur.execute("""
+        SELECT pubkey, first_seen_at, contacts, status, succeeded_by,
+               EXISTS (SELECT 1 FROM p2p_node_bans b WHERE b.pubkey = i.pubkey) AS banned
+          FROM p2p_identities i
+         WHERE pubkey <> %s AND (pubkey = %s OR (%s IS NOT NULL AND email_token = %s))
+    """, (pubkey, predecessor, token, token))
+    linked = cur.fetchall()
+    if not linked:
+        return
+    fresh = [r for r in linked if r[4] != pubkey]
+    first_seen = min(r[1] for r in linked)
+    carried = max((r[2] for r in fresh), default=0)
+    cur.execute("""
+        UPDATE p2p_identities
+           SET first_seen_at = LEAST(first_seen_at, %s), contacts = contacts + %s, succeeded_by = NULL
+         WHERE pubkey = %s
+    """, (first_seen, carried, pubkey))
+    cur.execute("UPDATE p2p_identities SET succeeded_by = %s WHERE pubkey = ANY(%s)",
+                (pubkey, [r[0] for r in linked]))
+    inherited_ban = [r[0] for r in linked if r[3] == "failed" or r[5]]
+    if inherited_ban:
+        cur.execute("SELECT 1 FROM p2p_node_bans WHERE pubkey = %s LIMIT 1", (pubkey,))
+        if cur.fetchone() is None:
+            _ban(cur, pubkey, None, "succession")
+            logger.info("identity %s inherits a ban from %s", pubkey[:8],
+                        ", ".join(p[:8] for p in inherited_ban))
+    if fresh:
+        logger.info("identity %s succeeds %s (witnessed age carried)", pubkey[:8],
+                    ", ".join(r[0][:8] for r in fresh))
 
 
 def _evict_if_over_cap(cur) -> None:
@@ -276,23 +334,26 @@ def mark_verified(conn, pubkey: str, proof_nonce: str) -> None:
 def mark_failed(conn, pubkey: str, addr: Optional[str], reason: str) -> None:
     """Deterministic evidence: the identity is `failed` here and its pubkey
     goes on the local ban list (never shared)."""
-    pubkey = pubkey.lower()
     with conn.cursor() as cur:
-        cur.execute("""
-            UPDATE p2p_identities SET status = 'failed', fail_reason = %s
-             WHERE pubkey = %s
-        """, (reason, pubkey))
-        cur.execute("""
-            INSERT INTO p2p_node_bans (pubkey, addr, reason) VALUES (%s, %s, %s)
-        """, (pubkey, addr_uuid(addr), reason))
-        cur.execute("SELECT count(*) FROM p2p_node_bans WHERE reason = %s", (reason,))
-        if cur.fetchone()[0] > BAN_ROWS_CAP:
-            cur.execute("""
-                DELETE FROM p2p_node_bans WHERE id IN (
-                    SELECT id FROM p2p_node_bans WHERE reason = %s
-                     ORDER BY created_at ASC LIMIT 500)
-            """, (reason,))
+        _ban(cur, pubkey.lower(), addr, reason)
     conn.commit()
+
+
+def _ban(cur, pubkey: str, addr: Optional[str], reason: str) -> None:
+    cur.execute("""
+        UPDATE p2p_identities SET status = 'failed', fail_reason = %s
+         WHERE pubkey = %s
+    """, (reason, pubkey))
+    cur.execute("""
+        INSERT INTO p2p_node_bans (pubkey, addr, reason) VALUES (%s, %s, %s)
+    """, (pubkey, addr_uuid(addr), reason))
+    cur.execute("SELECT count(*) FROM p2p_node_bans WHERE reason = %s", (reason,))
+    if cur.fetchone()[0] > BAN_ROWS_CAP:
+        cur.execute("""
+            DELETE FROM p2p_node_bans WHERE id IN (
+                SELECT id FROM p2p_node_bans WHERE reason = %s
+                 ORDER BY created_at ASC LIMIT 500)
+        """, (reason,))
 
 
 @dataclass(frozen=True)
@@ -430,11 +491,12 @@ def _selftest(dsn: str) -> None:
     trusted_verify = partial(birth_cert.verify_certificate, trusted=[issuer])
 
     def make_cert(method="pow", difficulty=2, issued_at="2026-08-17T10:00:00Z", pubkey=None):
-        cert = {"v": 3, "pubkey": pubkey or os.urandom(32).hex(), "issued_at": issued_at,
+        cert = {"v": 4, "pubkey": pubkey or os.urandom(32).hex(), "issued_at": issued_at,
                 "method": method, "difficulty": difficulty, "params_version": 1,
-                "email_token": "ab" * 32 if method == "email" else None,
+                "email_token": os.urandom(32).hex() if method == "email" else None,
                 "email_class": "other" if method == "email" else None,
-                "email_domain_token": "cd" * 32 if method == "email" else None, "issuer": issuer}
+                "email_domain_token": "cd" * 32 if method == "email" else None,
+                "predecessor": None, "issuer": issuer}
         cert["sig"] = authority.sign(birth_cert.canonical_payload(cert)).hex()
         return cert
 
@@ -503,6 +565,53 @@ def _selftest(dsn: str) -> None:
         q = make_cert("pow"); created.append(q["pubkey"])
         qp = identity_proof.make_proof(q, os.urandom(16))
         assert (await gate.admit(q["pubkey"], q, qp, "198.51.100.1")).status == "rate_limited"
+        # succession: a banned email identity changes password → the new key,
+        # whose certificate names it as predecessor, is banned on sight and
+        # inherits the witnessed age; a clean predecessor carries age + contacts
+        old = make_cert("email", issued_at="2026-08-01T00:00:00Z"); created.append(old["pubkey"])
+        for _ in range(3):
+            assert (await gate.admit(old["pubkey"], old, None, "203.0.113.20")).status == "verified"
+        with factory() as conn:
+            mark_failed(conn, old["pubkey"], "203.0.113.20", "gate_lie")
+            with conn.cursor() as cur:            # make its witnessed age visibly old
+                cur.execute("UPDATE p2p_identities SET first_seen_at = now() - interval '40 days' WHERE pubkey = %s",
+                            (old["pubkey"],))
+            conn.commit()
+        heir = make_cert("email", issued_at="2026-08-18T12:00:00Z"); created.append(heir["pubkey"])
+        heir["predecessor"] = old["pubkey"]
+        heir["sig"] = authority.sign(birth_cert.canonical_payload(heir)).hex()
+        adm = await gate.admit(heir["pubkey"], heir, None, "203.0.113.21")
+        assert adm.status == "failed", adm                       # the ban survived the password change
+        with factory() as conn:
+            row = get(conn, heir["pubkey"])
+            assert is_banned(conn, heir["pubkey"]) and row["fail_reason"] == "succession"
+            assert row["predecessor"] == old["pubkey"] and row["succeeded_by"] is None
+            assert (datetime.now(timezone.utc) - row["first_seen_at"]).days >= 39     # age carried
+            assert get(conn, old["pubkey"])["succeeded_by"] == heir["pubkey"]
+        # a clean identity: contacts and age carry, status stays verified; token-mates
+        # link even when the named predecessor is unknown here (multi-hop)
+        vet = make_cert("email", issued_at="2026-06-01T00:00:00Z"); created.append(vet["pubkey"])
+        vet["email_token"] = "77" * 32
+        vet["sig"] = authority.sign(birth_cert.canonical_payload(vet)).hex()
+        for _ in range(5):
+            assert (await gate.admit(vet["pubkey"], vet, None, "203.0.113.30")).status == "verified"
+        with factory() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE p2p_identities SET first_seen_at = now() - interval '70 days' WHERE pubkey = %s",
+                        (vet["pubkey"],))
+            conn.commit()
+        heir2 = make_cert("email", issued_at="2026-08-18T12:30:00Z"); created.append(heir2["pubkey"])
+        heir2["email_token"] = "77" * 32
+        heir2["predecessor"] = os.urandom(32).hex()              # a hop this node never met
+        heir2["sig"] = authority.sign(birth_cert.canonical_payload(heir2)).hex()
+        assert (await gate.admit(heir2["pubkey"], heir2, None, "203.0.113.31")).status == "verified"
+        with factory() as conn:
+            row = get(conn, heir2["pubkey"])
+            assert row["contacts"] == 1 + 5 and (datetime.now(timezone.utc) - row["first_seen_at"]).days >= 69
+            assert get(conn, vet["pubkey"])["succeeded_by"] == heir2["pubkey"]
+            assert not is_banned(conn, heir2["pubkey"])
+        assert (await gate.admit(heir2["pubkey"], heir2, None, "203.0.113.31")).status == "verified"
+        with factory() as conn:
+            assert get(conn, heir2["pubkey"])["contacts"] == 7      # idempotent: nothing carried twice
         # ripening is computed, not stored
         assert not is_ripe(make_cert(issued_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
         assert is_ripe(p)

@@ -45,7 +45,11 @@ TRUSTED_AUTHORITIES = [
 # mailbox: a similarity axis on its own (a rare domain shared by many
 # identities) that the whole-address token cannot express; empty on email
 # records migrated before the field existed until their next email touch.
-CERT_VERSION = 3
+# v4 (2026-08-18) adds predecessor — the pubkey that held this mailbox
+# before this one registered it (a password change makes a new key; the
+# notary names the link, nodes carry witnessed age AND bans across it).
+# Email records only, empty otherwise.
+CERT_VERSION = 4
 CERT_METHODS = ("pow", "email")
 EMAIL_CLASSES = ("major", "other", "disposable")
 
@@ -54,13 +58,13 @@ _EMAIL_TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def canonical_payload(cert: dict) -> bytes:
-    """Fixed ten-field payload; the three email fields are empty for pow.
-    Mirrors birthPayload() in worker/verify.js."""
+    """Fixed eleven-field payload; the three email fields and the predecessor
+    are empty for pow. Mirrors birthPayload() in worker/verify.js."""
     return (
         f"sautium-birth:v{CERT_VERSION}:{cert['pubkey']}:{cert['issued_at']}:"
         f"{cert['method']}:{int(cert['difficulty'])}:{int(cert['params_version'])}:"
         f"{cert.get('email_token') or ''}:{cert.get('email_class') or ''}:"
-        f"{cert.get('email_domain_token') or ''}"
+        f"{cert.get('email_domain_token') or ''}:{cert.get('predecessor') or ''}"
     ).encode("utf-8")
 
 
@@ -77,11 +81,14 @@ def _valid_shape(cert: dict, trusted: list) -> bool:
     if not (isinstance(params_version, int) and not isinstance(params_version, bool) and params_version >= 1):
         return False
     token, klass, domain = cert.get("email_token"), cert.get("email_class"), cert.get("email_domain_token")
+    predecessor = cert.get("predecessor")
     if cert["method"] == "email":
         return (isinstance(token, str) and bool(_EMAIL_TOKEN_RE.match(token))
                 and klass in EMAIL_CLASSES
-                and (not domain or (isinstance(domain, str) and bool(_EMAIL_TOKEN_RE.match(domain)))))
-    return not token and not klass and not domain
+                and (not domain or (isinstance(domain, str) and bool(_EMAIL_TOKEN_RE.match(domain))))
+                and (not predecessor or (isinstance(predecessor, str) and bool(_EMAIL_TOKEN_RE.match(predecessor))
+                                         and predecessor != cert.get("pubkey"))))
+    return not token and not klass and not domain and not predecessor
 
 
 def verify_certificate(cert: dict,

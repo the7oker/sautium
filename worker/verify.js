@@ -40,7 +40,9 @@
  *
  * Endpoints:
  *   POST /send-verification    — generate + send verification code to email
- *   POST /register-email       — store verified email (requires code + birth cert)
+ *   POST /register-email       — store verified email (requires code + birth cert);
+ *                                the mailbox moves to this key, the previous
+ *                                holder becomes the certificate's predecessor
  *   POST /send-invite          — send signed invite email with verified sender
  *   GET  /check-email          — check if email already verified for invite code
  *   POST /accept-invite        — accept an invite (stores reciprocal + notifies sender)
@@ -82,12 +84,15 @@ const TRUSTED_AUTHORITIES = [
 // params_version, email_token, email_class}; v3 (2026-08-18) adds
 // email_domain_token — the peppered DOMAIN of a verified mailbox, a
 // similarity axis on its own ("50 identities on one rare domain") that the
-// whole-address token cannot express. Payload format is mirrored by
+// whole-address token cannot express; v4 (2026-08-18) adds predecessor —
+// the pubkey that held this mailbox before (succession across a password
+// change: the notary names the link, nodes carry standing AND bans over it;
+// email records only, "" otherwise). Payload format is mirrored by
 // canonical_payload() in the two Python files above. A version bump
 // re-signs every record; a pow identity's proof (mined over the signature)
 // goes stale and is re-mined by the node — the price of "challenge = the
 // authority signature", acceptable pre-release, a grace policy later.
-const BIRTH_CERT_VERSION = 3;
+const BIRTH_CERT_VERSION = 4;
 const SIG_FIELD = `sig_v${BIRTH_CERT_VERSION}`;
 const CERT_METHODS = new Set(["pow", "email"]);
 // Identity proof-of-work policy pinned into every certificate at issuance
@@ -218,12 +223,14 @@ export default {
 // -----------------------------------------------------------------------
 
 function birthPayload(pubkeyHex, rec) {
-  // Fixed ten-field shape; the three email fields are empty for method:pow.
-  // Field values never contain ':' (hex, ISO seconds, enum names, integers).
+  // Fixed eleven-field shape; the three email fields and the predecessor are
+  // empty for method:pow. Field values never contain ':' (hex, ISO seconds,
+  // enum names, integers).
   return new TextEncoder().encode(
     `sautium-birth:v${BIRTH_CERT_VERSION}:${pubkeyHex}:${rec.issued_at}:` +
     `${rec.method}:${rec.difficulty}:${rec.params_version}:` +
-    `${rec.email_token || ""}:${rec.email_class || ""}:${rec.email_domain_token || ""}`
+    `${rec.email_token || ""}:${rec.email_class || ""}:${rec.email_domain_token || ""}:` +
+    `${rec.predecessor || ""}`
   );
 }
 
@@ -241,7 +248,8 @@ function isValidCertShape(cert) {
     // Domain token: 64 hex, or absent on a record migrated before the field
     // existed (recomputed on the next email touch — register/check-email).
     if (cert.email_domain_token && !/^[0-9a-f]{64}$/.test(cert.email_domain_token)) return false;
-  } else if (cert.email_token || cert.email_class || cert.email_domain_token) {
+    if (cert.predecessor && (!isValidPubkeyHex(cert.predecessor) || cert.predecessor === cert.pubkey)) return false;
+  } else if (cert.email_token || cert.email_class || cert.email_domain_token || cert.predecessor) {
     return false;
   }
   return true;
@@ -297,6 +305,7 @@ function certFromRecord(pubkey, rec) {
     email_token: rec.email_token || null,
     email_class: rec.email_class || null,
     email_domain_token: rec.email_domain_token || null,
+    predecessor: rec.predecessor || null,
     issuer: TRUSTED_AUTHORITIES[0],
     sig: rec[SIG_FIELD],
   };
@@ -313,13 +322,15 @@ async function loadBirthRecord(env, pubkey) {
   const record = await env.RATE_LIMITS.get(`born:${pubkey}`, "json");
   if (!record) return null;
   if (record.v === BIRTH_CERT_VERSION && record[SIG_FIELD]) return record;
-  // v1 {born_at, sig} → policy fields start as pow; v2 → keep every field
+  // v1 {born_at, sig} → policy fields start as pow; v2/v3 → keep every field
   // (an email record keeps its tokens; the domain token arrives on the next
-  // email touch). Older signature fields stay for rollback.
+  // email touch; predecessor is empty — succession is only ever recorded at
+  // a registration). Older signature fields stay for rollback.
   const upgraded = record.v >= 2 ? {
     ...record,
     v: BIRTH_CERT_VERSION,
     email_domain_token: record.email_domain_token || null,
+    predecessor: record.predecessor || null,
   } : {
     ...record,
     v: BIRTH_CERT_VERSION,
@@ -330,10 +341,31 @@ async function loadBirthRecord(env, pubkey) {
     email_token: null,
     email_class: null,
     email_domain_token: null,
+    predecessor: null,
   };
   upgraded[SIG_FIELD] = await signBirthRecord(env, pubkey, upgraded);
   await env.RATE_LIMITS.put(`born:${pubkey}`, JSON.stringify(upgraded));
+  if (upgraded.method === "email" && upgraded.email_token) {
+    await claimMailbox(env, upgraded.email_token, pubkey);   // backfill the owner index lazily
+  }
   return upgraded;
+}
+
+async function claimMailbox(env, emailToken, pubkey, { takeOver = false } = {}) {
+  /**
+   * `mailbox:{email_token}` → the pubkey that currently holds this mailbox.
+   * With takeOver (a fresh /register-email) the record moves to the new key
+   * and the previous holder is returned as the successor's predecessor;
+   * without it (backfill from check-email / migration) an existing owner is
+   * left alone — the newest REGISTRATION owns the mailbox, not the newest
+   * touch. Returns the previous holder when it differs from `pubkey`.
+   */
+  const key = `mailbox:${emailToken}`;
+  const current = await env.RATE_LIMITS.get(key, "json");
+  if (current && current.pubkey === pubkey) return null;
+  if (current && !takeOver) return current.pubkey;
+  await env.RATE_LIMITS.put(key, JSON.stringify({ pubkey, since: nowIsoSeconds() }));
+  return current ? current.pubkey : null;
 }
 
 async function bumpIssuance(env, field) {
@@ -788,12 +820,18 @@ async function handleRegisterEmail(request, env, corsHeaders) {
   }
 
   const normalized = normalizeEmail(email);
+  const token = await emailToken(env, normalized);
+  // Succession: the mailbox moves to this key; whoever held it before is
+  // named in the certificate as the predecessor (a password change makes a
+  // new key — nodes carry witnessed age and bans across the link).
+  const previous = await claimMailbox(env, token, pubkey, { takeOver: true });
   const upgraded = {
     ...record,
     method: "email",
-    email_token: await emailToken(env, normalized),
+    email_token: token,
     email_class: emailClass(normalized),
     email_domain_token: await emailDomainToken(env, normalized),
+    predecessor: previous || record.predecessor || null,
   };
   upgraded[SIG_FIELD] = await signBirthRecord(env, pubkey, upgraded);
   await env.RATE_LIMITS.put(`born:${pubkey}`, JSON.stringify(upgraded));
@@ -801,6 +839,7 @@ async function handleRegisterEmail(request, env, corsHeaders) {
     await bumpIssuance(env, "email");
     await ledgerCall(env, "/method", { pubkey, method: "email" });
   }
+  if (previous) await bumpIssuance(env, "succession");
 
   await env.RATE_LIMITS.put(`verified:${kvKey(invite_code)}`, JSON.stringify({
     email,
@@ -922,6 +961,9 @@ async function handleCheckEmail(url, env, corsHeaders) {
       await bumpIssuance(env, "email");
       await ledgerCall(env, "/method", { pubkey, method: "email" });
     }
+  }
+  if (record && record.email_token) {
+    await claimMailbox(env, record.email_token, pubkey);   // owner index, no take-over
   }
   return json({
     verified: true,

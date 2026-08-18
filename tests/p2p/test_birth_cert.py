@@ -1,4 +1,4 @@
-"""Identity certificate v2 — the three mirrors must agree byte-for-byte.
+"""Identity certificate v4 — the three mirrors must agree byte-for-byte.
 
 Pure-Python cases build certificates under a throwaway authority and check
 both Python mirrors; the Worker contract case drives the REAL worker/verify.js
@@ -34,8 +34,8 @@ def _subject_hex():
 
 
 def _signed(mirror, key, issuer, **fields):
-    cert = {"v": 3, "issuer": issuer, "email_token": None, "email_class": None,
-            "email_domain_token": None}
+    cert = {"v": 4, "issuer": issuer, "email_token": None, "email_class": None,
+            "email_domain_token": None, "predecessor": None}
     cert.update(fields)
     cert["sig"] = key.sign(mirror.canonical_payload(cert)).hex()
     return cert
@@ -69,8 +69,11 @@ def test_mirrors_produce_identical_payloads():
     assert launcher_mirror.canonical_payload(cert) == backend_mirror.canonical_payload(cert)
     assert backend_mirror.verify_certificate(cert, trusted=[issuer])
     pow_cert = _pow_cert(launcher_mirror, key, issuer)
-    assert launcher_mirror.canonical_payload(pow_cert).endswith(b":32:1:::")
-    assert launcher_mirror.canonical_payload(pow_cert).startswith(b"sautium-birth:v3:")
+    assert launcher_mirror.canonical_payload(pow_cert).endswith(b":32:1::::")
+    assert launcher_mirror.canonical_payload(pow_cert).startswith(b"sautium-birth:v4:")
+    successor = _email_cert(launcher_mirror, key, issuer, predecessor="ef" * 32)
+    assert launcher_mirror.canonical_payload(successor).endswith(b":" + b"ef" * 32)
+    assert backend_mirror.verify_certificate(successor, trusted=[issuer])
 
 
 @pytest.mark.parametrize("mirror", MIRRORS, ids=["launcher", "backend"])
@@ -114,6 +117,12 @@ def test_rejects_forgeries_and_bad_shapes(mirror):
     # a migrated email record may lack the domain token (empty) — signed as such
     assert mirror.verify_certificate(_email_cert(mirror, key, issuer, email_domain_token=None), trusted=[issuer])
     assert not mirror.verify_certificate(dict(good, email_domain_token="cd" * 32), trusted=[issuer])
+    # predecessor: email only, a real foreign pubkey, and signed like everything else
+    assert not mirror.verify_certificate(dict(good, predecessor="ef" * 32), trusted=[issuer])
+    assert not mirror.verify_certificate(dict(email, predecessor="ef" * 32), trusted=[issuer])   # unsigned claim
+    assert not mirror.verify_certificate(_email_cert(mirror, key, issuer, predecessor="zz" * 32), trusted=[issuer])
+    own = _subject_hex()
+    assert not mirror.verify_certificate(_email_cert(mirror, key, issuer, pubkey=own, predecessor=own), trusted=[issuer])
     assert not mirror.verify_certificate({}, trusted=[issuer])
     assert not mirror.verify_certificate({"v": 2, "issuer": issuer}, trusted=[issuer])
 
@@ -130,11 +139,11 @@ def test_worker_contract():
 
     pow_cert = r["issue1"]["body"]
     assert r["issue1"]["status"] == 200
-    assert pow_cert["v"] == 3
+    assert pow_cert["v"] == 4
     assert pow_cert["method"] == "pow" and pow_cert["difficulty"] == 32
     assert pow_cert["params_version"] == 1
     assert pow_cert["email_token"] is None and pow_cert["email_class"] is None
-    assert pow_cert["email_domain_token"] is None
+    assert pow_cert["email_domain_token"] is None and pow_cert["predecessor"] is None
     for mirror in MIRRORS:
         assert mirror.verify_certificate(pow_cert, trusted=[issuer])
         assert not mirror.verify_certificate(pow_cert)      # not the real authority
@@ -153,9 +162,25 @@ def test_worker_contract():
     for mirror in MIRRORS:
         assert mirror.verify_certificate(email_cert, trusted=[issuer])
     assert r["read1AfterEmail"]["body"] == email_cert
+    assert email_cert["predecessor"] is None                    # first holder of the mailbox
     # same mailbox under dots / +tag / case / googlemail alias → same token
-    assert r["register3"]["body"]["birth_cert"]["email_token"] == email_cert["email_token"]
-    assert r["register3"]["body"]["birth_cert"]["pubkey"] != email_cert["pubkey"]
+    successor = r["register3"]["body"]["birth_cert"]
+    assert successor["email_token"] == email_cert["email_token"]
+    assert successor["pubkey"] != email_cert["pubkey"]
+    # succession: the mailbox moved to s3, whose certificate names s1 as predecessor
+    assert successor["predecessor"] == email_cert["pubkey"]
+    for mirror in MIRRORS:
+        assert mirror.verify_certificate(successor, trusted=[issuer])
+    assert r["mailboxAfter3"]["pubkey"] == successor["pubkey"]
+    # s1 takes the mailbox back: predecessor s3, anchor unchanged, index follows the registration
+    retake = r["retake"]["body"]["birth_cert"]
+    assert r["retake"]["status"] == 200
+    assert retake["predecessor"] == successor["pubkey"] and retake["issued_at"] == email_cert["issued_at"]
+    assert retake["pubkey"] == email_cert["pubkey"] and retake["sig"] != email_cert["sig"]
+    for mirror in MIRRORS:
+        assert mirror.verify_certificate(retake, trusted=[issuer])
+    assert r["mailboxAfterRetake"]["pubkey"] == email_cert["pubkey"]
+    assert r["retakeAgain"]["body"]["birth_cert"] == retake         # same key, same mailbox → no change
     # the domain token: shared by every gmail identity, distinct from the address token
     assert len(email_cert["email_domain_token"]) == 64
     assert r["register3"]["body"]["birth_cert"]["email_domain_token"] == email_cert["email_domain_token"]
@@ -176,15 +201,16 @@ def test_worker_contract():
         assert mirror.verify_certificate(legacy, trusted=[issuer])
     rec = r["legacyRecord"]
     assert rec["born_at"] == "2026-07-05T10:11:12Z" and rec["sig"] == "ab" * 64   # rollback-safe
-    assert rec["sig_v3"] == legacy["sig"]
-    # a v2 email record (pre-domain-token) is served as v3 with the field empty,
+    assert rec["sig_v4"] == legacy["sig"]
+    # a v2 email record (pre-domain-token) is served as v4 with the field empty,
     # keeps its v2 signature for rollback, and gains the token on check-email
     v2 = r["legacyV2Read"]["body"]
-    assert v2["v"] == 3 and v2["method"] == "email" and v2["email_domain_token"] is None
+    assert v2["v"] == 4 and v2["method"] == "email" and v2["email_domain_token"] is None
+    assert v2["predecessor"] is None
     assert v2["issued_at"] == "2026-07-06T00:00:00Z"
     for mirror in MIRRORS:
         assert mirror.verify_certificate(v2, trusted=[issuer])
-    assert r["legacyV2Record"]["sig_v2"] == "cd" * 64 and r["legacyV2Record"]["sig_v3"] == v2["sig"]
+    assert r["legacyV2Record"]["sig_v2"] == "cd" * 64 and r["legacyV2Record"]["sig_v4"] == v2["sig"]
     filled = r["legacyV2Check"]["body"]["birth_cert"]
     assert filled["email_domain_token"] and len(filled["email_domain_token"]) == 64
     assert filled["issued_at"] == v2["issued_at"]            # the anchor never moves
@@ -224,10 +250,11 @@ def test_worker_contract():
     assert [row["n_glob1"] for row in rows] == list(range(7))
 
     policy = r["stats"]["body"]["policy"]
-    assert policy["cert_version"] == 3 and policy["pow_difficulty"] == 32
+    assert policy["cert_version"] == 4 and policy["pow_difficulty"] == 32
     assert policy["adaptive_armed"] is False and policy["adaptive_cap"] == 8
     day = next(iter(r["stats"]["body"]["days"].values()))
     assert day["births"] == 7 and day["email"] == 4       # 3 registrations + 1 check-email upgrade
+    assert day["succession"] == 2                          # s3 took alice's mailbox, s1 took it back
     ledger = r["stats"]["body"]["ledger"]
     assert ledger["total"] == 7 and ledger["last_24h"]["births"] == 7
     assert ledger["last_24h"]["distinct_addr"] == 5

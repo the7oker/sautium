@@ -2225,7 +2225,9 @@ CREATE TABLE IF NOT EXISTS p2p_identities (
     last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     contacts        BIGINT NOT NULL DEFAULT 1,
     first_addr      UUID,                           -- uuid5(NS, 'node_addr:{host}')
-    last_addr       UUID
+    last_addr       UUID,
+    predecessor     TEXT,                           -- cert v4: the key that held the mailbox before (notary-named)
+    succeeded_by    TEXT                            -- the current holder, set here when the successor is observed
 );
 CREATE INDEX IF NOT EXISTS idx_p2p_identities_email_token
     ON p2p_identities (email_token) WHERE email_token IS NOT NULL;

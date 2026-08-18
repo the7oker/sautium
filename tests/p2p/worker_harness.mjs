@@ -130,6 +130,8 @@ const register3 = await call("POST", "/register-email", {
   signature: await sign(s3, `register:${inviteCode3}:${email3}`),
   code, birth_cert: issue3.body,
 });
+// the mailbox owner index moved to s3; s1 is named as s3's predecessor
+const mailboxAfter3 = JSON.parse(store.get(`mailbox:${register3.body.birth_cert.email_token}`));
 
 // --- subject 2: legacy v1 record already in KV ---
 const s2 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
@@ -197,6 +199,25 @@ for (let i = 0; i < 4; i++) {
 }
 const ledgerRows = db.prepare("SELECT asn, cc, method, m_shadow, n_sub24, n_asn1, n_glob1, addr, n_addr24 FROM births ORDER BY rowid").all();
 
+// s1 takes the mailbox back (a second registration by the earlier holder):
+// its certificate now names s3 as predecessor, the anchor does not move
+store.set(`emailcode:${inviteCode.replace("#", ":")}`,
+  JSON.stringify({ email, hash: await sha256Hex(code) }));
+const retake = await call("POST", "/register-email", {
+  invite_code: inviteCode, email, public_key_hex: s1.pubHex,
+  signature: await sign(s1, `register:${inviteCode}:${email}`),
+  code, birth_cert: register.body.birth_cert,
+});
+const mailboxAfterRetake = JSON.parse(store.get(`mailbox:${register3.body.birth_cert.email_token}`));
+// …and registering the same mailbox for the same key again changes nothing
+store.set(`emailcode:${inviteCode.replace("#", ":")}`,
+  JSON.stringify({ email, hash: await sha256Hex(code) }));
+const retakeAgain = await call("POST", "/register-email", {
+  invite_code: inviteCode, email, public_key_hex: s1.pubHex,
+  signature: await sign(s1, `register:${inviteCode}:${email}`),
+  code, birth_cert: retake.body.birth_cert,
+});
+
 const stats = await call("GET", "/issuance-stats");
 const badSig = await call("POST", "/birth-certificate", {
   pubkey_hex: s1.pubHex, signature: "00".repeat(64),
@@ -205,7 +226,7 @@ const badSig = await call("POST", "/birth-certificate", {
 console.log(JSON.stringify({
   authority_pub: authority.pubHex,
   issue1, issue1Again, read1, register, read1AfterEmail,
-  register3,
+  register3, mailboxAfter3, retake, retakeAgain, mailboxAfterRetake,
   legacyRead, legacyRecord,
   register4,
   check1, check2, legacyRecordAfterCheck, check5,
