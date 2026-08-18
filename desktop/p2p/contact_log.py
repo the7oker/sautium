@@ -401,6 +401,8 @@ def report(conn, days: int = 7) -> str:
         """)
         succeeded, heirs, inherited = cur.fetchone()
         out.append(f"  succession: {succeeded} rows succeeded, {heirs} heirs, {inherited} inherited bans")
+    from desktop.p2p import similarity
+    out.append(similarity.report(conn))
     return "\n".join(out)
 
 

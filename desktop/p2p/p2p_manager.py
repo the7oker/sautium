@@ -90,6 +90,7 @@ class P2PManager:
         self._peer_relay_task: Optional[asyncio.Task] = None
         # Live peer-relay subscriptions: relay_pubkey -> asyncio.Task
         self._peer_relay_subs: dict[str, asyncio.Task] = {}
+        self._peer_relay_addrs: dict[str, tuple] = {}
         self._reachability_task: Optional[asyncio.Task] = None
         # unknown | reachable | cgnat | unreachable — see _reachability_loop
         self._reachability_status = "unknown"
@@ -2015,12 +2016,22 @@ class P2PManager:
                     continue
                 scored.append(
                     (0 if node_id in known else 1, ip, port, node_id))
-        # Stable sort on the known-flag alone: known relays first, the
-        # shuffled order preserved inside each group.
-        scored.sort(key=lambda t: t[0])
-        for _, ip, port, node_id in scored:
+        # Dependency diversity (Ф14): the least similar candidates first —
+        # a relay in the /24 of one we already hold is an eclipse waiting to
+        # happen — then previously used relays, then the shuffled order.
+        from desktop.p2p import similarity
+        held = [{"ip": a[0], "pubkey": pk} for pk, a in self._peer_relay_addrs.items()
+                if pk in self._peer_relay_subs]
+        index = similarity.current()
+        ordered = await asyncio.get_event_loop().run_in_executor(
+            None, partial(similarity.relay_order,
+                          [{"ip": ip, "port": port, "pubkey": node_id, "known": known == 0}
+                           for known, ip, port, node_id in scored],
+                          held, index.relay_pair if index else (lambda a, b: 0.0)))
+        for cand in ordered:
             if len(self._peer_relay_subs) >= self.PEER_RELAY_K:
                 break
+            ip, port, node_id = cand["ip"], cand["port"], cand["pubkey"]
             addr = (ip, port)
 
             async def resolve(a=addr):
@@ -2029,6 +2040,7 @@ class P2PManager:
             task = asyncio.create_task(self._relay_subscription_loop(
                 node_id, resolve, is_master=False))
             self._peer_relay_subs[node_id] = task
+            self._peer_relay_addrs[node_id] = addr
             logger.info("Recruited peer relay %s… at %s:%s",
                         node_id[:8], ip, port)
         if self._peer_relay_subs:

@@ -2227,10 +2227,16 @@ CREATE TABLE IF NOT EXISTS p2p_identities (
     first_addr      UUID,                           -- uuid5(NS, 'node_addr:{host}')
     last_addr       UUID,
     predecessor     TEXT,                           -- cert v4: the key that held the mailbox before (notary-named)
-    succeeded_by    TEXT                            -- the current holder, set here when the successor is observed
+    succeeded_by    TEXT,                           -- the current holder, set here when the successor is observed
+    first_subnet    UUID,                           -- uuid5(NS, 'node_subnet:{/24|/48}') — the subnet axis of similarity
+    last_subnet     UUID
 );
 CREATE INDEX IF NOT EXISTS idx_p2p_identities_email_token
     ON p2p_identities (email_token) WHERE email_token IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_p2p_identities_first_addr ON p2p_identities (first_addr) WHERE first_addr IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_p2p_identities_last_addr ON p2p_identities (last_addr) WHERE last_addr IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_p2p_identities_first_subnet ON p2p_identities (first_subnet) WHERE first_subnet IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_p2p_identities_last_subnet ON p2p_identities (last_subnet) WHERE last_subnet IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_p2p_identities_email_domain
     ON p2p_identities (email_domain_token) WHERE email_domain_token IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_p2p_identities_last_seen ON p2p_identities (last_seen_at);

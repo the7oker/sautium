@@ -267,9 +267,11 @@ def _price():
     singleton so /api/settings/p2p can show it."""
     global _pricer
     if _pricer is None:
-        from desktop.p2p import load_meter, pricing
+        from desktop.p2p import load_meter, pricing, similarity
+        index = similarity.current() or similarity.install(similarity.SimilarityIndex(get_conn))
         _pricer = pricing.install(pricing.Pricer(
-            load_meter.current(), costs=_contact_log().costs, mode=_read_gate_mode))
+            load_meter.current(), costs=_contact_log().costs, mode=_read_gate_mode,
+            sim_mult=index.sim_mult))
     return _pricer
 
 

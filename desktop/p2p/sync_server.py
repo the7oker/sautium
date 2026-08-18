@@ -415,9 +415,13 @@ class SyncServer:
         """The pricer of this surface (base × load × siege), lazy; installed
         as the process singleton so diagnostics can read it."""
         if self._pricer is None:
-            from desktop.p2p import load_meter, pricing
+            from functools import partial
+            from desktop.p2p import load_meter, pricing, similarity
+            index = similarity.current() or similarity.install(
+                similarity.SimilarityIndex(partial(_conn_factory_for, self.db_dsn)))
             self._pricer = pricing.install(pricing.Pricer(
-                load_meter.current(), costs=self._contact_log.costs, mode=self._read_gate_mode))
+                load_meter.current(), costs=self._contact_log.costs, mode=self._read_gate_mode,
+                sim_mult=index.sim_mult))
         return self._pricer
 
     def _lane_of(self, pubkey: str) -> str:

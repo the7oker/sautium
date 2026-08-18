@@ -104,11 +104,23 @@ SCHEMA_SQL = (
          first_addr      UUID,
          last_addr       UUID,
          predecessor     TEXT,
-         succeeded_by    TEXT
+         succeeded_by    TEXT,
+         first_subnet    UUID,
+         last_subnet     UUID
        )""",
     """ALTER TABLE p2p_identities ADD COLUMN IF NOT EXISTS email_domain_token TEXT""",
     """ALTER TABLE p2p_identities ADD COLUMN IF NOT EXISTS predecessor TEXT""",
     """ALTER TABLE p2p_identities ADD COLUMN IF NOT EXISTS succeeded_by TEXT""",
+    """ALTER TABLE p2p_identities ADD COLUMN IF NOT EXISTS first_subnet UUID""",
+    """ALTER TABLE p2p_identities ADD COLUMN IF NOT EXISTS last_subnet UUID""",
+    """CREATE INDEX IF NOT EXISTS idx_p2p_identities_first_addr
+         ON p2p_identities (first_addr) WHERE first_addr IS NOT NULL""",
+    """CREATE INDEX IF NOT EXISTS idx_p2p_identities_last_addr
+         ON p2p_identities (last_addr) WHERE last_addr IS NOT NULL""",
+    """CREATE INDEX IF NOT EXISTS idx_p2p_identities_first_subnet
+         ON p2p_identities (first_subnet) WHERE first_subnet IS NOT NULL""",
+    """CREATE INDEX IF NOT EXISTS idx_p2p_identities_last_subnet
+         ON p2p_identities (last_subnet) WHERE last_subnet IS NOT NULL""",
     """CREATE INDEX IF NOT EXISTS idx_p2p_identities_email_token
          ON p2p_identities (email_token) WHERE email_token IS NOT NULL""",
     """CREATE INDEX IF NOT EXISTS idx_p2p_identities_email_domain
@@ -145,11 +157,19 @@ def addr_uuid(host: Optional[str]) -> Optional[str]:
     return _addr_uuid(host)
 
 
+def subnet_uuid(host: Optional[str]) -> Optional[str]:
+    """The /24 (IPv6 /48) sibling of addr_uuid — the subnet axis of
+    similarity (contact_log.addr_ids is the same formula)."""
+    from desktop.p2p.contact_log import addr_ids
+    return addr_ids(host)[1]
+
+
 _ROW_COLUMNS = ("pubkey", "cert_v", "method", "issued_at", "difficulty",
                 "params_version", "email_token", "email_class", "email_domain_token", "issuer",
                 "cert_sig", "proof_nonce", "status", "fail_reason",
                 "first_seen_at", "verified_at", "last_seen_at", "contacts",
-                "first_addr", "last_addr", "predecessor", "succeeded_by")
+                "first_addr", "last_addr", "predecessor", "succeeded_by",
+                "first_subnet", "last_subnet")
 
 
 def get(conn, pubkey: str) -> Optional[dict]:
@@ -168,9 +188,10 @@ def touch(conn, pubkey: str, addr: Optional[str] = None) -> Optional[dict]:
         cur.execute("""
             UPDATE p2p_identities
                SET last_seen_at = now(), contacts = contacts + 1,
-                   last_addr = COALESCE(%s, last_addr)
+                   last_addr = COALESCE(%s, last_addr),
+                   last_subnet = COALESCE(%s, last_subnet)
              WHERE pubkey = %s
-        """, (addr_uuid(addr), pubkey.lower()))
+        """, (addr_uuid(addr), subnet_uuid(addr), pubkey.lower()))
         hit = cur.rowcount
     conn.commit()
     return get(conn, pubkey) if hit else None
@@ -206,6 +227,7 @@ def observe(conn, cert: dict, *, proof: Optional[dict] = None,
     pubkey = cert["pubkey"].lower()
     issued_at = parse_issued_at(cert["issued_at"])
     addr_id = addr_uuid(addr)
+    subnet_id = subnet_uuid(addr)
     proof_nonce = proof["nonce"] if identity_proof.proof_binds(proof, cert) else None
     email_status = "verified" if cert["method"] == "email" else "unverified"
     existing = get(conn, pubkey)
@@ -214,13 +236,15 @@ def observe(conn, cert: dict, *, proof: Optional[dict] = None,
             cur.execute("""
                 INSERT INTO p2p_identities (pubkey, cert_v, method, issued_at, difficulty,
                     params_version, email_token, email_class, email_domain_token, issuer,
-                    cert_sig, proof_nonce, status, verified_at, first_addr, last_addr, predecessor)
+                    cert_sig, proof_nonce, status, verified_at, first_addr, last_addr, predecessor,
+                    first_subnet, last_subnet)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        CASE WHEN %s = 'verified' THEN now() END, %s, %s, %s)
+                        CASE WHEN %s = 'verified' THEN now() END, %s, %s, %s, %s, %s)
             """, (pubkey, cert["v"], cert["method"], issued_at, cert["difficulty"],
                   cert["params_version"], cert.get("email_token"), cert.get("email_class"),
                   cert.get("email_domain_token"), cert["issuer"], cert["sig"], proof_nonce,
-                  email_status, email_status, addr_id, addr_id, cert.get("predecessor")))
+                  email_status, email_status, addr_id, addr_id, cert.get("predecessor"),
+                  subnet_id, subnet_id))
             _evict_if_over_cap(cur)
             _succeed(cur, pubkey, cert)
             conn.commit()
@@ -240,9 +264,10 @@ def observe(conn, cert: dict, *, proof: Optional[dict] = None,
             cur.execute("""
                 UPDATE p2p_identities
                    SET last_seen_at = now(), contacts = contacts + 1,
-                       last_addr = COALESCE(%s, last_addr)
+                       last_addr = COALESCE(%s, last_addr),
+                       last_subnet = COALESCE(%s, last_subnet)
                  WHERE pubkey = %s
-            """, (addr_id, pubkey))
+            """, (addr_id, subnet_id, pubkey))
         else:
             upgrade = existing["method"] == "pow" and cert["method"] == "email"
             cur.execute("""
@@ -256,12 +281,13 @@ def observe(conn, cert: dict, *, proof: Optional[dict] = None,
                        verified_at = CASE WHEN %s AND status <> 'failed' AND verified_at IS NULL
                                           THEN now() ELSE verified_at END,
                        last_seen_at = now(), contacts = contacts + 1,
-                       last_addr = COALESCE(%s, last_addr)
+                       last_addr = COALESCE(%s, last_addr),
+                       last_subnet = COALESCE(%s, last_subnet)
                  WHERE pubkey = %s
             """, (cert["v"], cert["method"], cert["difficulty"], cert["params_version"],
                   cert.get("email_token"), cert.get("email_class"), cert.get("email_domain_token"),
                   cert["issuer"], cert["sig"], cert.get("predecessor"), proof_nonce, upgrade, upgrade,
-                  addr_id, pubkey))
+                  addr_id, subnet_id, pubkey))
             _succeed(cur, pubkey, cert)
     conn.commit()
     row = get(conn, pubkey)
