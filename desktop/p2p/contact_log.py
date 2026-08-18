@@ -74,6 +74,8 @@ SCHEMA_SQL = (
          ON p2p_contact_events (pubkey, ts) WHERE pubkey IS NOT NULL""",
     """CREATE INDEX IF NOT EXISTS idx_p2p_contact_events_addr_ts ON p2p_contact_events (addr, ts)""",
     """CREATE INDEX IF NOT EXISTS idx_p2p_contact_events_endpoint_ts ON p2p_contact_events (endpoint, ts)""",
+    """ALTER TABLE p2p_contact_events ADD COLUMN IF NOT EXISTS gate_price SMALLINT""",
+    """ALTER TABLE p2p_contact_events ADD COLUMN IF NOT EXISTS gate_status TEXT""",
     """CREATE TABLE IF NOT EXISTS p2p_action_costs (
          endpoint      TEXT PRIMARY KEY,
          ema_cpu_ms    REAL NOT NULL,
@@ -179,16 +181,22 @@ class ContactLog:
     def record(self, *, endpoint: str, status: int, wall_ms: float, cpu_ms: float,
                pubkey: Optional[str] = None, addr: Optional[str] = None,
                lane: Optional[str] = None, bytes_in: int = 0, bytes_out: int = 0,
-               items: Optional[int] = None, targets: Optional[list] = None) -> None:
+               items: Optional[int] = None, targets: Optional[list] = None,
+               gate_price: Optional[int] = None, gate_status: Optional[str] = None) -> None:
         addr_id, subnet_id = addr_ids(addr)
         row = (datetime.now(timezone.utc), pubkey.lower() if pubkey else None, addr_id, subnet_id,
                endpoint, lane, int(status), int(bytes_in or 0), int(bytes_out or 0),
-               float(wall_ms), float(cpu_ms), items, targets)
+               float(wall_ms), float(cpu_ms), items, targets, gate_price, gate_status)
         with self._lock:
             self._queue.append(row)
             self._bump_cost(endpoint, cpu_ms, wall_ms, bytes_out)
             if len(self._queue) >= FLUSH_BATCH:
                 self._wake.set()
+
+    def costs(self) -> dict:
+        """{endpoint: (ema_cpu_ms, ema_bytes_out)} — the pricer's base(action)."""
+        with self._lock:
+            return {e: (c["cpu"], c["bytes"]) for e, c in self._costs.items()}
 
     def _bump_cost(self, endpoint, cpu_ms, wall_ms, bytes_out) -> None:
         c = self._costs.get(endpoint)
@@ -229,7 +237,8 @@ class ContactLog:
                     execute_values(cur, """
                         INSERT INTO p2p_contact_events
                             (ts, pubkey, addr, subnet, endpoint, lane, status,
-                             bytes_in, bytes_out, wall_ms, cpu_ms, items, targets)
+                             bytes_in, bytes_out, wall_ms, cpu_ms, items, targets,
+                             gate_price, gate_status)
                         VALUES %s
                     """, rows, page_size=500)
                 for endpoint, c in dirty.items():
@@ -314,6 +323,18 @@ def report(conn, days: int = 7) -> str:
         out.append(f"  {'endpoint':<22}{'lane':<11}{'events':>8}{'ids':>6}{'addrs':>7}{'wall ms':>9}{'cpu ms':>8}{'bytes':>9}")
         for r in cur.fetchall():
             out.append(f"  {r[0]:<22}{r[1]:<11}{r[2]:>8}{r[3]:>6}{r[4]:>7}{r[5]:>9}{r[6]:>8}{r[7]:>9}")
+
+        cur.execute("""
+            SELECT coalesce(gate_status, '-'), count(*), round(avg(gate_price)::numeric, 1), max(gate_price)
+              FROM p2p_contact_events
+             WHERE ts > now() - make_interval(days => %s) AND lane IS NOT NULL
+             GROUP BY 1 ORDER BY 2 DESC
+        """, (days,))
+        gate_rows = cur.fetchall()
+        if gate_rows:
+            out.append("\ngate (shadow/enforce): status · events · avg would-be price · max")
+            for st, n, avg, mx in gate_rows:
+                out.append(f"  {st:<10} {n:>7}   {avg if avg is not None else '-':>6}   {mx if mx is not None else '-'}")
 
         out.append("\naction costs (EMA, per node):")
         cur.execute("SELECT endpoint, ema_cpu_ms, ema_wall_ms, ema_bytes_out, samples FROM p2p_action_costs ORDER BY ema_cpu_ms DESC")

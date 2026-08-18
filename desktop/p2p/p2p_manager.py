@@ -140,7 +140,11 @@ class P2PManager:
 
         def _publish_load(snap: dict) -> None:
             try:
-                self._write_settings_blocking({"p2p.load": snap})
+                from desktop.p2p import pricing
+                values = {"p2p.load": snap}
+                if pricing.current() is not None:
+                    values["p2p.gate"] = pricing.current().snapshot()
+                self._write_settings_blocking(values)
                 self._notify_blocking("sautium_identity")
             except Exception as e:
                 logger.debug("load publish failed: %s", e)

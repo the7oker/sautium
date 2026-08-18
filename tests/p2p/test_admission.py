@@ -46,10 +46,11 @@ def test_quote_signature_and_submission_header_match_vectors():
 
 def test_build_quote_core_reproduces_the_vector_shape():
     inputs = adm.derive_fresh_inputs(GATE_SECRET, NONCE, CORE["client"], 3)
-    core = adm.build_quote_core(CORE["server"], CORE["client"], NONCE, inputs,
+    core = adm.build_quote_core(CORE["server"], CORE["client"], NONCE, inputs, action="mb.slice",
                                 issued=CORE["issued"], deadline=CORE["deadline"])
     assert core == CORE
     auto = adm.build_quote_core(CORE["server"], CORE["client"], NONCE, inputs, issued=100)
+    assert auto["action"] == ""
     assert auto["deadline"] == 100 + int(adm.QUOTE_BASE_TTL + adm.QUOTE_TTL_PER_TASK * 3)
 
 

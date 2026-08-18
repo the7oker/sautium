@@ -121,6 +121,7 @@ class LoadMeter:
         self._mem_available_kib = mem_available_kib
         self._lock = threading.Lock()
         self._subs: list = []
+        self._sample_subs: list = []
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_cpu = self._cpu_seconds()
@@ -170,6 +171,13 @@ class LoadMeter:
                 logger.debug("playback probe failed: %s", e)
         self.updated_at = datetime.now(timezone.utc)
         self._notify_if_changed()
+        with self._lock:
+            sample_subs = list(self._sample_subs)
+        for cb in sample_subs:                       # every sample (integrators), not band changes
+            try:
+                cb(None)
+            except Exception as e:
+                logger.debug("load sample subscriber failed: %s", e)
         return self.snapshot()
 
     def set_playback_active(self, active: bool) -> None:
@@ -225,6 +233,12 @@ class LoadMeter:
     def subscribe(self, cb: Callable[[dict], None]) -> None:
         with self._lock:
             self._subs.append(cb)
+
+    def subscribe_samples(self, cb: Callable[[Optional[dict]], None]) -> None:
+        """Fires on EVERY sample (for integrators such as the pricer's
+        siege term) — unlike subscribe(), which fires on band changes."""
+        with self._lock:
+            self._sample_subs.append(cb)
 
     def _notify_if_changed(self) -> None:
         key = (int(self.headroom / BAND + 1e-9), self.dormant, self.playback_active)

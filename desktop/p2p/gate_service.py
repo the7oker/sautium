@@ -97,7 +97,7 @@ def client_keys(pubkey: str, addr: Optional[str] = None,
 
 class GateService:
     def __init__(self, server_pubkey: str, sign: Callable[[bytes], bytes], gate_secret: bytes, *,
-                 price: Callable[[str], int] = lambda client_pubkey: 0,
+                 price: Callable[[str, str], int] = lambda client_pubkey, action: 0,
                  conn_factory: Optional[Callable] = None,
                  on_evidence: Optional[Callable[[str, str], None]] = None,
                  sample_r: int = admission.DEFAULT_SAMPLE,
@@ -140,11 +140,14 @@ class GateService:
 
     # -- quote -----------------------------------------------------------------
 
-    def quote(self, client_pubkey: str, keys: Optional[Sequence[str]] = None) -> dict:
-        """Blocking (pool DB) — callers run it in a thread."""
+    def quote(self, client_pubkey: str, keys: Optional[Sequence[str]] = None,
+              action: str = "", n_fresh: Optional[int] = None) -> dict:
+        """Blocking (pool DB) — callers run it in a thread. `n_fresh` lets the
+        caller supply the price it computed with lane knowledge; otherwise
+        the constructor's price(client, action) is used."""
         client_pubkey = client_pubkey.lower()
         keys = list(keys) if keys else [client_pubkey]
-        n_fresh = max(0, int(self._price(client_pubkey)))
+        n_fresh = max(0, int(self._price(client_pubkey, action) if n_fresh is None else n_fresh))
         nonce = secrets.token_bytes(admission.NONCE_LEN)
         issued = int(self._clock())
         with_pool = n_fresh > 0 and self._conn_factory is not None
@@ -158,7 +161,7 @@ class GateService:
             entries = self._lease(nonce.hex(), deadline, keys)
         inputs = self._packet_inputs(client_pubkey, nonce, n_fresh, [e["task_input"] for e in entries])
         core = admission.build_quote_core(self.server_pubkey, client_pubkey, nonce, inputs,
-                                          issued=issued, deadline=deadline,
+                                          action=action, issued=issued, deadline=deadline,
                                           params_version=self._params_version)
         return {"quote": core, "tasks": [t.hex() for t in inputs],
                 "sig": admission.sign_quote(self._sign, core)}
@@ -192,7 +195,7 @@ class GateService:
             self._seen.pop(nonce_hex, None)
 
     async def check_payment(self, header_value: Optional[str], client_pubkey: Optional[str],
-                            keys: Optional[Sequence[str]] = None) -> GateVerdict:
+                            keys: Optional[Sequence[str]] = None, action: str = "") -> GateVerdict:
         if not header_value:
             return GateVerdict("none")
         if not client_pubkey:
@@ -207,6 +210,8 @@ class GateService:
             return GateVerdict("invalid", "quote signature")
         if core.get("client") != client_pubkey:
             return GateVerdict("invalid", "quote is for another client")
+        if core.get("action", "") != action:
+            return GateVerdict("invalid", "quote is for another action")
         try:
             n = int(core["n"])
             nonce = bytes.fromhex(core["nonce"])
@@ -375,7 +380,7 @@ def _selftest(dsn: str) -> None:
     server = Ed25519PrivateKey.generate()
     svc = GateService(server.public_key().public_bytes_raw().hex(), server.sign,
                       admission.derive_gate_secret(server.private_bytes_raw()),
-                      price=lambda c: 8, conn_factory=factory,
+                      price=lambda c, a: 8, conn_factory=factory,
                       on_evidence=lambda pub, reason: evidence.append((pub[:8], reason)))
     svc._params = small
 

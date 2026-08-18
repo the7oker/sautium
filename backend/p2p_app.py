@@ -27,6 +27,7 @@ than a request a second is not syncing.
 import asyncio
 import json
 import logging
+import re
 import time
 from collections import defaultdict
 
@@ -100,6 +101,7 @@ class PeerAuthMiddleware:
         outcome = {"status": 500, "bytes_out": 0}
         pubkey, status, lane = None, None, None
         gate_result = None
+        gate = {"price": None, "status": None}
         items = targets = None
         body = b""
 
@@ -110,7 +112,8 @@ class PeerAuthMiddleware:
                 status=outcome["status"], wall_ms=wall_ms, cpu_ms=cpu_ms,
                 pubkey=pubkey, addr=addr, lane=lane,
                 bytes_in=len(body) or int(headers.get("content-length") or 0),
-                bytes_out=outcome["bytes_out"], items=items, targets=targets)
+                bytes_out=outcome["bytes_out"], items=items, targets=targets,
+                gate_price=gate["price"], gate_status=gate["status"])
 
         async def send_wrapper(message):
             if message["type"] == "http.response.start":
@@ -193,10 +196,14 @@ class PeerAuthMiddleware:
                 status = row["status"] if row is not None else "unknown"
             lane = identity_registry.lane_for(row, signed=True)
 
+        action = contact_log.endpoint_family(scope["path"])
+        pricer = _price()
+        gate["price"] = pricer.would_be(pubkey or "", action, lane)
         payment = headers.get(HDR_GATE)
         if payment:
             keys = await asyncio.to_thread(_client_keys, pubkey, addr) if pubkey else None
-            verdict = await _gate().check_payment(payment, pubkey, keys)
+            verdict = await _gate().check_payment(payment, pubkey, keys, action)
+            gate["status"] = verdict.status
             if verdict.status not in ("ok", "none"):
                 await send_wrapper({"type": "http.response.start", "status": verdict.http_status,
                                     "headers": [(b"content-type", b"application/json")]
@@ -207,6 +214,16 @@ class PeerAuthMiddleware:
                 _record()
                 return
             gate_result = verdict.status
+        elif pricer.mode() == "enforce" and gate["price"] > 0:
+            gate["status"] = "required"
+            payload = json.dumps({"error": "gate_required", "price": gate["price"],
+                                  "quote_url": f"/api/gate/quote?pubkey={pubkey or ''}&action={action}"}).encode()
+            await send_wrapper({"type": "http.response.start", "status": 402,
+                                "headers": [(b"content-type", b"application/json"),
+                                            (b"content-length", str(len(payload)).encode())]})
+            await send_wrapper({"type": "http.response.body", "body": payload})
+            _record()
+            return
 
         state = scope.setdefault("state", {})
         state["peer_pubkey"] = pubkey
@@ -220,8 +237,49 @@ class PeerAuthMiddleware:
 
 _log = None
 _gate_svc = None
+_pricer = None
+_gate_mode = ("shadow", 0.0)
 HDR_GATE = "X-Sautium-Gate"
 HDR_GATE_RESULT = "X-Sautium-Gate-Result"
+
+
+def _read_gate_mode() -> str:
+    """user_settings['p2p.gate_mode'] cached 10 s; unreadable → shadow."""
+    global _gate_mode
+    value, at = _gate_mode
+    now = time.time()
+    if now - at < 10.0:
+        return value
+    mode = "shadow"
+    try:
+        from routers.settings import _read
+        m = _read("p2p.gate_mode")
+        if isinstance(m, str):
+            mode = m
+    except Exception as e:
+        logger.debug(f"gate mode unreadable ({e}) — shadow")
+    _gate_mode = (mode, now)
+    return mode
+
+
+def _price():
+    """This surface's pricer (base × load × siege), installed as the process
+    singleton so /api/settings/p2p can show it."""
+    global _pricer
+    if _pricer is None:
+        from desktop.p2p import load_meter, pricing
+        _pricer = pricing.install(pricing.Pricer(
+            load_meter.current(), costs=_contact_log().costs, mode=_read_gate_mode))
+    return _pricer
+
+
+def _lane_of(pubkey: str) -> str:
+    from desktop.p2p import identity_registry, peer_auth
+    try:
+        with get_conn() as conn:
+            return identity_registry.lane_for(identity_registry.get(conn, pubkey), signed=True)
+    except Exception:
+        return peer_auth.LANE_STRANGER
 
 
 def _gate():
@@ -259,18 +317,23 @@ def _client_keys(pubkey: str, addr):
 
 
 @app.get("/api/gate/quote")
-async def gate_quote(request: Request, pubkey: str = "") -> JSONResponse:
-    """A free, O(1), signed, client-bound quote (wire format v1 § 4)."""
+async def gate_quote(request: Request, pubkey: str = "", action: str = "") -> JSONResponse:
+    """A free, O(1), signed, client-bound quote (wire format v1 § 4), priced
+    for the action the client is about to perform."""
     pubkey = pubkey.lower()
     try:
         if len(bytes.fromhex(pubkey)) != 32:
             raise ValueError
     except ValueError:
         return JSONResponse({"error": "invalid pubkey"}, status_code=400)
+    if not re.match(r"^[a-z]+\.[a-z_]+$", action or ""):
+        action = ""
     try:
         addr = request.client.host if request.client else None
         keys = await asyncio.to_thread(_client_keys, pubkey, addr)
-        return JSONResponse(await asyncio.to_thread(_gate().quote, pubkey, keys))
+        lane = await asyncio.to_thread(_lane_of, pubkey)
+        n = _price().price(pubkey, action, lane)
+        return JSONResponse(await asyncio.to_thread(_gate().quote, pubkey, keys, action, n))
     except Exception as e:                       # no identity configured → no gate
         logger.warning(f"gate quote unavailable: {e}")
         return JSONResponse({"error": "gate unavailable"}, status_code=503)

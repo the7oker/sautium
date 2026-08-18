@@ -24,7 +24,7 @@ def _service(price=5, clock=None, params=SMALL):
     pub = server.public_key().public_bytes_raw().hex()
     seed = server.private_bytes_raw()
     svc = gs.GateService(pub, server.sign, admission.derive_gate_secret(seed),
-                         price=lambda c: price, clock=clock or Clock())
+                         price=lambda c, a: price, clock=clock or Clock())
     svc._params = params                       # cheap Argon2 for the test
     return svc, pub
 

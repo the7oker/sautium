@@ -10749,6 +10749,10 @@
           <span class="form-label">Headroom</span>
           <span class="form-value mono" title="${escapeProfileHtml(loadDetail(sync.load))}">${escapeProfileHtml(loadLabel(sync.load))}</span>
         </div>
+        <div class="form-row">
+          <span class="form-label">Market</span>
+          <span class="form-value mono" title="${escapeProfileHtml(gateDetail(sync.gate))}">${escapeProfileHtml(gateLabel(sync.gate))}</span>
+        </div>
       </div>
       <div class="btn-row single">
         <button class="btn btn-secondary" data-action="force-sync"${_syncInFlight ? ' disabled' : ''}>${_syncInFlight ? 'Syncing…' : 'Force sync now'}</button>
@@ -10795,6 +10799,19 @@
                    `using ${(100 * (ld.cpu_frac || 0)).toFixed(1)}%`, `announce pace ×${ld.pace}`];
     if (ld.mem_available_mib != null) parts.push(`${ld.mem_available_mib} MiB free`);
     return parts.join(' · ');
+  }
+
+  // Admission-gate pricer (desktop/p2p/pricing.py): mode off/shadow/enforce
+  // and the live multipliers; the price itself is per action.
+  function gateLabel(g) {
+    if (!g || !g.mode) return '—';
+    if (g.dormant) return `${g.mode} · dormant`;
+    return `${g.mode} · ×${g.load_mult} load${g.pi_mult > 1 ? ` · ×${g.pi_mult} siege` : ''}`;
+  }
+  function gateDetail(g) {
+    if (!g || !g.mode) return '';
+    return [`w = ${g.w_ms} ms${g.w_calibrated ? '' : ' (default)'}`, `headroom ${Math.round((g.headroom || 0) * 100)}%`,
+            `siege ${g.siege_s || 0}s`].join(' · ');
   }
 
   // Module-scope state for the async Force sync flow. _syncInFlight

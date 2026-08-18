@@ -273,6 +273,7 @@ _DEFAULTS: Dict[str, Any] = {
     "sync.last_items_received":  None,
     "p2p.identity":              None,   # {status, detail, method, attempts, difficulty, p_done, …}
     "p2p.load":                  None,   # {profile, ceiling, cpu_frac, headroom, dormant, playback, pace, …}
+    "p2p.gate_mode":             "shadow",   # off | shadow | enforce — arming is a release decision
     # MusicBrainz local dump — optional auxiliary layer for artist
     # canonicalization. version/last-update written by the loader.
     "musicbrainz.auto_update":   False,
@@ -680,7 +681,22 @@ def _sync_state() -> Dict[str, Any]:
         "reachability_checked_at": _read("p2p.reachability_checked_at"),
         "identity":                _read("p2p.identity"),
         "load":                    _read("p2p.load"),
+        "gate":                    _gate_snapshot(),
     }
+
+
+def _gate_snapshot() -> Optional[Dict[str, Any]]:
+    """The admission gate's pricer as seen by this process (the peer surface
+    lives in the same process on Docker); the launcher publishes its own
+    snapshot to user_settings['p2p.gate']."""
+    try:
+        from desktop.p2p import pricing
+        pricer = pricing.current()
+        if pricer is not None:
+            return pricer.snapshot()
+    except Exception:
+        pass
+    return _read("p2p.gate")
 
 
 def _audio_output_state() -> Dict[str, Any]:

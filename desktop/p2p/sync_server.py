@@ -20,6 +20,8 @@ from collections import defaultdict, deque
 from functools import partial
 from typing import Callable, Optional
 
+import re
+
 import psycopg2
 
 from aiohttp import web
@@ -27,6 +29,9 @@ from aiohttp import web
 from desktop.p2p import admission, contact_log, mb_slice_queries, peer_auth, sync_queries
 
 logger = logging.getLogger(__name__)
+
+
+_ACTION_RE = re.compile(r"^[a-z]+\.[a-z_]+$")     # an endpoint family, e.g. mb.slice
 
 
 def _response_bytes(response) -> int:
@@ -151,6 +156,8 @@ class SyncServer:
         self._sharing_checked = 0.0
         self._gate = None          # identity_registry.IdentityGate, lazy
         self._gate_service = None  # gate_service.GateService, lazy
+        self._pricer = None        # pricing.Pricer, lazy
+        self._gate_mode = ("shadow", 0.0)   # (value, read-at) — user_settings p2p.gate_mode, cached
         self._contact_log = contact_log.ContactLog(
             partial(_conn_factory_for, self.db_dsn))
         # Relay wake registry: subscriber pubkey -> _WakeSub
@@ -239,6 +246,7 @@ class SyncServer:
         timer = contact_log.RequestTimer()
         peer_pubkey = lane = None
         items = targets = None
+        gate_price = gate_status = None
         response = None
         try:
             if not peer_auth.is_identity_bound(request.raw_path):
@@ -252,12 +260,16 @@ class SyncServer:
                 return response
             request["peer_pubkey"] = peer_pubkey
             request["lane"] = lane
+            action = contact_log.endpoint_family(request.raw_path)
+            pricer = self._price()
+            gate_price = pricer.would_be(peer_pubkey or "", action, lane)
             payment = request.headers.get(admission.HDR_GATE)
             gate_result = None
             if payment:
                 keys = await asyncio.get_event_loop().run_in_executor(
                     None, self._client_keys, peer_pubkey or "", request.remote) if peer_pubkey else None
-                verdict = await self._admission().check_payment(payment, peer_pubkey, keys)
+                verdict = await self._admission().check_payment(payment, peer_pubkey, keys, action)
+                gate_status = verdict.status
                 if verdict.status not in ("ok", "none"):
                     headers = ({"Retry-After": str(verdict.retry_after)}
                                if verdict.retry_after else None)
@@ -267,6 +279,14 @@ class SyncServer:
                     return response
                 gate_result = verdict.status
                 request["gate"] = verdict
+            elif pricer.mode() == "enforce" and gate_price > 0:
+                # The market lane pays; a quote is one free GET away.
+                gate_status = "required"
+                response = self._json_response(request, {
+                    "error": "gate_required", "price": gate_price,
+                    "quote_url": f"/api/gate/quote?pubkey={peer_pubkey or ''}&action={action}",
+                }, status=402)
+                return response
             response = await handler(request)
             if peer_pubkey is not None:
                 response.headers[peer_auth.HDR_IDENTITY] = status
@@ -286,7 +306,8 @@ class SyncServer:
                 addr=request.remote, lane=lane,
                 bytes_in=request.content_length or 0,
                 bytes_out=_response_bytes(response),
-                items=items, targets=targets)
+                items=items, targets=targets,
+                gate_price=gate_price, gate_status=gate_status)
 
     async def _authenticate_peer(self, request: web.Request):
         """Wire format v1 (peer_auth.py): an unsigned request is the
@@ -368,6 +389,43 @@ class SyncServer:
                 on_evidence=evidence)
         return self._gate_service
 
+    def _read_gate_mode(self) -> str:
+        """user_settings['p2p.gate_mode'] (off|shadow|enforce), cached 10 s
+        like the sharing flag; unreadable → shadow (never enforce by accident)."""
+        value, at = self._gate_mode
+        now = time.time()
+        if now - at < 10.0:
+            return value
+        mode = "shadow"
+        try:
+            with _conn_factory_for(self.db_dsn) as conn, conn.cursor() as cur:
+                cur.execute("SELECT value FROM user_settings WHERE key = 'p2p.gate_mode'")
+                row = cur.fetchone()
+                if row and isinstance(row[0], str):
+                    mode = row[0]
+        except Exception as e:
+            logger.debug("gate mode unreadable (%s) — shadow", e)
+        self._gate_mode = (mode, now)
+        return mode
+
+    def _price(self):
+        """The pricer of this surface (base × load × siege), lazy; installed
+        as the process singleton so diagnostics can read it."""
+        if self._pricer is None:
+            from desktop.p2p import load_meter, pricing
+            self._pricer = pricing.install(pricing.Pricer(
+                load_meter.current(), costs=self._contact_log.costs, mode=self._read_gate_mode))
+        return self._pricer
+
+    def _lane_of(self, pubkey: str) -> str:
+        """Registry lane for a signed requester (blocking — executor)."""
+        from desktop.p2p import identity_registry
+        try:
+            with _conn_factory_for(self.db_dsn) as conn:
+                return identity_registry.lane_for(identity_registry.get(conn, pubkey), signed=True)
+        except Exception:
+            return peer_auth.LANE_STRANGER
+
     def _client_keys(self, pubkey: str, addr: Optional[str]) -> list:
         """Exclusion keys for the pool: pubkey, subnet, and the email domain
         token when the registry knows this identity (blocking — executor)."""
@@ -395,9 +453,14 @@ class SyncServer:
             return self._json_response(request, {"error": "invalid pubkey"}, status=400)
         if not self.account_info.get("public_key_hex"):
             return self._json_response(request, {"error": "gate unavailable"}, status=503)
+        action = request.query.get("action") or ""
+        if not _ACTION_RE.match(action):
+            action = ""
         loop = asyncio.get_event_loop()
         keys = await loop.run_in_executor(None, self._client_keys, pubkey, request.remote)
-        quote = await loop.run_in_executor(None, self._admission().quote, pubkey, keys)
+        lane = await loop.run_in_executor(None, self._lane_of, pubkey)
+        n = self._price().price(pubkey, action, lane)
+        quote = await loop.run_in_executor(None, self._admission().quote, pubkey, keys, action, n)
         return self._json_response(request, quote)
 
     def _identity_gate(self):
@@ -1903,6 +1966,11 @@ class SyncServer:
         except Exception as e:
             logger.warning(f"slice blob table init failed: {e}")
         self._contact_log.start()
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, self._price().calibrate_w)
+            logger.info("gate price unit w = %.1f ms", self._price().w_ms)
+        except Exception as e:
+            logger.warning(f"gate price calibration failed: {e}")
         self._app = web.Application(middlewares=[self._inbound_middleware])
         self._app.router.add_get("/health", self.handle_health)
         self._app.router.add_post("/api/sync/inventory", self.handle_inventory)

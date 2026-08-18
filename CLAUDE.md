@@ -221,7 +221,10 @@ See:
   artist DHT tail), `sync.carry_limit` (foreign TRACKS carried, ~46 KB
   each), `p2p.relay_enabled` (relay role), `enrichment.reanalyze_imported`
   (re-derive first-hand analysis over P2P-imported — default off: the
-  sync's whole point is not doing the work twice).
+  sync's whole point is not doing the work twice), `p2p.gate_mode`
+  (`off|shadow|enforce`, default `shadow` — the admission gate prices
+  strangers' requests in 64 MiB tasks; arming is a release decision, see
+  P2P-SYNC-INTEGRITY.md § "Pricing formula v1").
 
 ---
 

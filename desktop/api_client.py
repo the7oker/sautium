@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from desktop.p2p import admission, peer_auth
+from desktop.p2p.contact_log import endpoint_family
 
 logger = logging.getLogger(__name__)
 
@@ -143,19 +144,20 @@ class BackendAPIClient:
             self._gate_header = None
         return headers
 
-    def gate_pay(self) -> Optional[str]:
-        """Admission gate: fetch this peer's quote for us, verify it is theirs
-        and ours, solve every task (a small thread pool), return the
-        X-Sautium-Gate value — or None when anything about the quote is off
-        (a wrong quote is never worth working on)."""
+    def gate_pay(self, action: str = "") -> Optional[str]:
+        """Admission gate: fetch this peer's quote for us and for `action` (the
+        endpoint family we are about to call — a quote is bound to one),
+        verify it is theirs and ours, solve every task (a small thread pool),
+        return the X-Sautium-Gate value — or None when anything about the
+        quote is off (a wrong quote is never worth working on)."""
         if self.peer is None or not self._server_pubkey:
             return None
-        q = self._get_json(f"/api/gate/quote?pubkey={self.peer.pubkey}", timeout=15)
+        q = self._get_json(f"/api/gate/quote?pubkey={self.peer.pubkey}&action={action}", timeout=15)
         if not q or "quote" not in q or not admission.verify_quote(q["quote"], q.get("sig", ""),
                                                                     self._server_pubkey):
             return None
         core = q["quote"]
-        if core.get("client") != self.peer.pubkey:
+        if core.get("client") != self.peer.pubkey or core.get("action", "") != action:
             return None
         try:
             inputs = [bytes.fromhex(t) for t in q.get("tasks", [])]
@@ -166,10 +168,10 @@ class BackendAPIClient:
         answers = admission.solve_all(inputs) if inputs else []
         return admission.encode_submission(core, q["sig"], answers)
 
-    def gate_prepay(self) -> bool:
+    def gate_prepay(self, action: str = "") -> bool:
         """Solve a quote now and attach it to the next request (tests, or a
         client that knows the peer is armed)."""
-        self._gate_header = self.gate_pay()
+        self._gate_header = self.gate_pay(action)
         return self._gate_header is not None
 
     def _note_peer_response(self, headers) -> None:
@@ -207,7 +209,7 @@ class BackendAPIClient:
             return _read_json_body(resp)
         except urllib.error.HTTPError as e:
             self._note_peer_response(e.headers)
-            if e.code == 402 and self.peer is not None and not _paid and self.gate_prepay():
+            if e.code == 402 and self.peer is not None and not _paid and self.gate_prepay(endpoint_family(path)):
                 return self._get_json(path, timeout, _paid=True)     # priced: pay once and retry
             logger.debug(f"API request failed: {url} — {e}")
             return None
@@ -239,7 +241,7 @@ class BackendAPIClient:
             return _read_json_body(resp)
         except urllib.error.HTTPError as e:
             self._note_peer_response(e.headers)
-            if e.code == 402 and self.peer is not None and not _paid and self.gate_prepay():
+            if e.code == 402 and self.peer is not None and not _paid and self.gate_prepay(endpoint_family(path)):
                 return self._post_json(path, body, timeout, _paid=True)   # priced: pay once and retry
             try:
                 body_resp = _read_json_body(e)

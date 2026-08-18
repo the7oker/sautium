@@ -346,6 +346,14 @@ async def lifespan(app: FastAPI):
                 logger.debug(f"load publish failed: {e}")
         _load_meter.subscribe(_publish_load)
         _load_meter.start()
+        # The gate price unit w (one 64 MiB task) — measured on this machine
+        # once, off the hot path, before the peer surface prices anything.
+        try:
+            from p2p_app import _price as _gate_price
+            await asyncio.to_thread(_gate_price().calibrate_w)
+            logger.info(f"gate price unit w = {_gate_price().w_ms:.1f} ms")
+        except Exception as e:
+            logger.warning(f"gate price calibration skipped: {e}")
     except Exception as e:
         logger.warning(f"load meter unavailable: {e}")
 

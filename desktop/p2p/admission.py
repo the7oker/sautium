@@ -24,11 +24,14 @@ builds on it in later phases):
 - one answer function for every task on every connection (so a pool
   answer stays valid across connections):
   `Argon2id(secret = input, salt = "sautium-gate:v1", 64 MiB, t = 1, p = 1, 32 B)`;
-- the quote core `{v, server, client, nonce, issued, deadline,
+- the quote core `{v, server, client, action, nonce, issued, deadline,
   price_version, params_version, n, tasks_digest}` signed by the server
   key over `sautium-gate-quote:v1:` + canonical JSON (sorted keys,
-  compact); the payment `{quote, sig, answers}` rides the priced request
-  as `X-Sautium-Gate` (base64url, unpadded).
+  compact) — `action` is the endpoint family the payment is good for
+  (base(action) prices the request the client is about to make, so a
+  cheap quote cannot be spent on an expensive action); the payment
+  `{quote, sig, answers}` rides the priced request as `X-Sautium-Gate`
+  (base64url, unpadded).
 
 Shared by both peer surfaces and both clients through the bind mount.
 Depends on identity_pow (argon2-cffi) and `cryptography` for the quote
@@ -158,14 +161,15 @@ def quote_deadline(issued: int, n: int) -> int:
 
 
 def build_quote_core(server_pubkey: str, client_pubkey: str, nonce: bytes, inputs: Sequence[bytes],
-                     *, issued: Optional[int] = None, deadline: Optional[int] = None,
-                     price_version: int = 1,
+                     *, action: str = "", issued: Optional[int] = None,
+                     deadline: Optional[int] = None, price_version: int = 1,
                      params_version: int = CURRENT_GATE_PARAMS_VERSION) -> dict:
     issued = int(time.time()) if issued is None else int(issued)
     return {
         "v": QUOTE_VERSION,
         "server": server_pubkey.lower(),
         "client": client_pubkey.lower(),
+        "action": action,
         "nonce": nonce.hex(),
         "issued": issued,
         "deadline": quote_deadline(issued, len(inputs)) if deadline is None else int(deadline),
