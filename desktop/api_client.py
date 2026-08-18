@@ -33,7 +33,7 @@ import urllib.error
 from pathlib import Path
 from typing import Iterator, Optional
 
-from desktop.p2p import peer_auth
+from desktop.p2p import admission, peer_auth
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +120,8 @@ class BackendAPIClient:
         self._introduced = False
         self.last_peer_identity: Optional[str] = None   # last X-Sautium-Peer-Identity seen
         self.last_peer_lane: Optional[str] = None
+        self.last_gate_result: Optional[str] = None
+        self._gate_header: Optional[str] = None       # a solved quote, attached to the next request once
 
     def _auth_headers(self, method: str, path: str, data: bytes) -> dict:
         if self.peer is None:
@@ -136,11 +138,46 @@ class BackendAPIClient:
                 headers[peer_auth.HDR_CERT] = peer_auth.encode_cert_bundle(
                     bundle["cert"], bundle.get("proof"))
                 self._introduced = True
+        if self._gate_header:
+            headers[admission.HDR_GATE] = self._gate_header
+            self._gate_header = None
         return headers
+
+    def gate_pay(self) -> Optional[str]:
+        """Admission gate: fetch this peer's quote for us, verify it is theirs
+        and ours, solve every task (a small thread pool), return the
+        X-Sautium-Gate value — or None when anything about the quote is off
+        (a wrong quote is never worth working on)."""
+        if self.peer is None or not self._server_pubkey:
+            return None
+        q = self._get_json(f"/api/gate/quote?pubkey={self.peer.pubkey}", timeout=15)
+        if not q or "quote" not in q or not admission.verify_quote(q["quote"], q.get("sig", ""),
+                                                                    self._server_pubkey):
+            return None
+        core = q["quote"]
+        if core.get("client") != self.peer.pubkey:
+            return None
+        try:
+            inputs = [bytes.fromhex(t) for t in q.get("tasks", [])]
+        except (ValueError, TypeError):
+            return None
+        if len(inputs) != core.get("n") or admission.tasks_digest(inputs) != core.get("tasks_digest"):
+            return None
+        answers = admission.solve_all(inputs) if inputs else []
+        return admission.encode_submission(core, q["sig"], answers)
+
+    def gate_prepay(self) -> bool:
+        """Solve a quote now and attach it to the next request (tests, or a
+        client that knows the peer is armed)."""
+        self._gate_header = self.gate_pay()
+        return self._gate_header is not None
 
     def _note_peer_response(self, headers) -> None:
         if self.peer is None:
             return
+        gate = headers.get(admission.HDR_GATE_RESULT)
+        if gate:
+            self.last_gate_result = gate
         identity = headers.get(peer_auth.HDR_IDENTITY)
         if identity:
             self.last_peer_identity = identity
@@ -155,7 +192,7 @@ class BackendAPIClient:
         self.base_url = f"https://127.0.0.1:{port}"
         self._ssl_ctx = _get_ssl_context()
 
-    def _get_json(self, path: str, timeout: int = 5) -> Optional[dict]:
+    def _get_json(self, path: str, timeout: int = 5, _paid: bool = False) -> Optional[dict]:
         """GET request returning parsed JSON, or None on failure."""
         url = f"{self.base_url}{path}"
         try:
@@ -170,13 +207,16 @@ class BackendAPIClient:
             return _read_json_body(resp)
         except urllib.error.HTTPError as e:
             self._note_peer_response(e.headers)
+            if e.code == 402 and self.peer is not None and not _paid and self.gate_prepay():
+                return self._get_json(path, timeout, _paid=True)     # priced: pay once and retry
             logger.debug(f"API request failed: {url} — {e}")
             return None
         except Exception as e:
             logger.debug(f"API request failed: {url} — {e}")
             return None
 
-    def _post_json(self, path: str, body: dict = None, timeout: int = 600) -> Optional[dict]:
+    def _post_json(self, path: str, body: dict = None, timeout: int = 600,
+                   _paid: bool = False) -> Optional[dict]:
         """POST request returning parsed JSON, or None on failure."""
         url = f"{self.base_url}{path}"
         try:
@@ -199,6 +239,8 @@ class BackendAPIClient:
             return _read_json_body(resp)
         except urllib.error.HTTPError as e:
             self._note_peer_response(e.headers)
+            if e.code == 402 and self.peer is not None and not _paid and self.gate_prepay():
+                return self._post_json(path, body, timeout, _paid=True)   # priced: pay once and retry
             try:
                 body_resp = _read_json_body(e)
                 logger.warning(f"API POST {url} returned {e.code}: {body_resp}")

@@ -24,7 +24,7 @@ import psycopg2
 
 from aiohttp import web
 
-from desktop.p2p import contact_log, mb_slice_queries, peer_auth, sync_queries
+from desktop.p2p import admission, contact_log, mb_slice_queries, peer_auth, sync_queries
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +150,7 @@ class SyncServer:
         self._sharing = True
         self._sharing_checked = 0.0
         self._gate = None          # identity_registry.IdentityGate, lazy
+        self._gate_service = None  # gate_service.GateService, lazy
         self._contact_log = contact_log.ContactLog(
             partial(_conn_factory_for, self.db_dsn))
         # Relay wake registry: subscriber pubkey -> _WakeSub
@@ -251,10 +252,25 @@ class SyncServer:
                 return response
             request["peer_pubkey"] = peer_pubkey
             request["lane"] = lane
+            payment = request.headers.get(admission.HDR_GATE)
+            gate_result = None
+            if payment:
+                verdict = await self._admission().check_payment(payment, peer_pubkey)
+                if verdict.status not in ("ok", "none"):
+                    headers = ({"Retry-After": str(verdict.retry_after)}
+                               if verdict.retry_after else None)
+                    response = self._json_response(
+                        request, {"error": verdict.error, "detail": verdict.detail},
+                        status=verdict.http_status, headers=headers)
+                    return response
+                gate_result = verdict.status
+                request["gate"] = verdict
             response = await handler(request)
             if peer_pubkey is not None:
                 response.headers[peer_auth.HDR_IDENTITY] = status
                 response.headers[peer_auth.HDR_LANE] = lane
+            if gate_result:
+                response.headers[admission.HDR_GATE_RESULT] = gate_result
             return response
         except web.HTTPException as e:
             response = e
@@ -331,6 +347,33 @@ class SyncServer:
     def set_delivery_trigger(self, cb: Callable):
         """Set callback to trigger immediate P2P message delivery."""
         self._delivery_trigger_cb = cb
+
+    def _admission(self):
+        """The admission gate of this surface (dormant: price 0). Lazy — the
+        asyncio semaphore inside must be born on the serving loop."""
+        if self._gate_service is None:
+            from desktop.node_identity import get_private_key_raw, sign_message
+            from desktop.p2p import gate_service
+            self._gate_service = gate_service.GateService(
+                self.account_info.get("public_key_hex", ""), sign_message,
+                admission.derive_gate_secret(get_private_key_raw()))
+        return self._gate_service
+
+    async def handle_gate_quote(self, request: web.Request) -> web.Response:
+        """GET /api/gate/quote?pubkey=… — a free, O(1), signed, client-bound
+        quote (wire format v1 § 4). Dormant → n = 0."""
+        ip = request.remote or "unknown"
+        if not self._check_rate_limit(ip):
+            return self._json_response(request, {"error": "rate limited"}, status=429)
+        pubkey = (request.query.get("pubkey") or "").lower()
+        try:
+            if len(bytes.fromhex(pubkey)) != 32:
+                raise ValueError
+        except ValueError:
+            return self._json_response(request, {"error": "invalid pubkey"}, status=400)
+        if not self.account_info.get("public_key_hex"):
+            return self._json_response(request, {"error": "gate unavailable"}, status=503)
+        return self._json_response(request, self._admission().quote(pubkey))
 
     def _identity_gate(self):
         """Lazy: the asyncio semaphore inside must be born on the serving loop."""
@@ -1845,6 +1888,7 @@ class SyncServer:
             "/api/sync/push/{category}", self.handle_carry_push)
         self._app.router.add_post("/api/mb/slice", self.handle_mb_slice)
         self._app.router.add_get("/api/mb/search", self.handle_mb_search)
+        self._app.router.add_get("/api/gate/quote", self.handle_gate_quote)
         # Chat endpoints
         self._app.router.add_post(
             "/api/chat/handshake", self.handle_chat_handshake

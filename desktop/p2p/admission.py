@@ -59,9 +59,21 @@ QUOTE_VERSION = 1
 NONCE_LEN = 16
 TASK_LEN = 32
 HDR_GATE = "X-Sautium-Gate"
+HDR_GATE_RESULT = "X-Sautium-Gate-Result"     # response: ok | none
 DEFAULT_SAMPLE = 2                       # R
 QUOTE_BASE_TTL = 30.0                    # seconds — placeholder, calibrated in Ф8/Ф10
 QUOTE_TTL_PER_TASK = 0.5
+
+
+# ----------------------------------------------------------------------------
+# node gate secret
+# ----------------------------------------------------------------------------
+
+def derive_gate_secret(private_seed: bytes) -> bytes:
+    """The per-node secret behind fresh inputs and the shuffle, derived from
+    the node's Ed25519 seed (no new file to keep, survives restarts, never
+    leaves the process). Both surfaces derive it the same way."""
+    return hmac.new(private_seed, b"sautium-gate-secret:v1", hashlib.sha256).digest()
 
 
 # ----------------------------------------------------------------------------

@@ -99,6 +99,7 @@ class PeerAuthMiddleware:
         headers = _CIHeaders(scope["headers"])
         outcome = {"status": 500, "bytes_out": 0}
         pubkey, status, lane = None, None, None
+        gate_result = None
         items = targets = None
         body = b""
 
@@ -114,9 +115,13 @@ class PeerAuthMiddleware:
         async def send_wrapper(message):
             if message["type"] == "http.response.start":
                 outcome["status"] = message["status"]
+                extra = []
                 if pubkey is not None:
-                    extra = [(peer_auth.HDR_IDENTITY.lower().encode(), status.encode()),
-                             (peer_auth.HDR_LANE.lower().encode(), lane.encode())]
+                    extra += [(peer_auth.HDR_IDENTITY.lower().encode(), status.encode()),
+                              (peer_auth.HDR_LANE.lower().encode(), lane.encode())]
+                if gate_result:
+                    extra.append((HDR_GATE_RESULT.lower().encode(), gate_result.encode()))
+                if extra:
                     message = {**message, "headers": list(message.get("headers", [])) + extra}
             elif message["type"] == "http.response.body":
                 outcome["bytes_out"] += len(message.get("body", b""))
@@ -188,9 +193,24 @@ class PeerAuthMiddleware:
                 status = row["status"] if row is not None else "unknown"
             lane = identity_registry.lane_for(row, signed=True)
 
+        payment = headers.get(HDR_GATE)
+        if payment:
+            verdict = await _gate().check_payment(payment, pubkey)
+            if verdict.status not in ("ok", "none"):
+                await send_wrapper({"type": "http.response.start", "status": verdict.http_status,
+                                    "headers": [(b"content-type", b"application/json")]
+                                    + ([(b"retry-after", str(verdict.retry_after).encode())]
+                                       if verdict.retry_after else [])})
+                await send_wrapper({"type": "http.response.body",
+                                    "body": json.dumps({"error": verdict.error, "detail": verdict.detail}).encode()})
+                _record()
+                return
+            gate_result = verdict.status
+
         state = scope.setdefault("state", {})
         state["peer_pubkey"] = pubkey
         state["lane"] = lane
+        state["gate"] = gate_result
         try:
             await self.app(scope, replay, send_wrapper)
         finally:
@@ -198,6 +218,40 @@ class PeerAuthMiddleware:
 
 
 _log = None
+_gate_svc = None
+HDR_GATE = "X-Sautium-Gate"
+HDR_GATE_RESULT = "X-Sautium-Gate-Result"
+
+
+def _gate():
+    """This surface's admission gate (dormant: price 0), lazy on the loop."""
+    global _gate_svc
+    if _gate_svc is None:
+        from config import settings
+        from p2p_identity import load_signing_key, resolve_identity
+        from desktop.p2p import admission, gate_service
+        key = load_signing_key(settings)
+        ident = resolve_identity(settings)
+        _gate_svc = gate_service.GateService(
+            ident["public_key_hex"], key.sign,
+            admission.derive_gate_secret(key.private_bytes_raw()))
+    return _gate_svc
+
+
+@app.get("/api/gate/quote")
+async def gate_quote(request: Request, pubkey: str = "") -> JSONResponse:
+    """A free, O(1), signed, client-bound quote (wire format v1 § 4)."""
+    pubkey = pubkey.lower()
+    try:
+        if len(bytes.fromhex(pubkey)) != 32:
+            raise ValueError
+    except ValueError:
+        return JSONResponse({"error": "invalid pubkey"}, status_code=400)
+    try:
+        return JSONResponse(_gate().quote(pubkey))
+    except Exception as e:                       # no identity configured → no gate
+        logger.warning(f"gate quote unavailable: {e}")
+        return JSONResponse({"error": "gate unavailable"}, status_code=503)
 
 
 def _contact_log():
