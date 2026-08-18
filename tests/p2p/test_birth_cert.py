@@ -37,8 +37,6 @@ def _signed(mirror, key, issuer, **fields):
     cert = {"v": 4, "issuer": issuer, "email_token": None, "email_class": None,
             "email_domain_token": None, "predecessor": None}
     cert.update(fields)
-    if cert["v"] < 4:
-        cert.pop("predecessor")
     cert["sig"] = key.sign(mirror.canonical_payload(cert)).hex()
     return cert
 
@@ -100,17 +98,6 @@ def test_rejects_forgeries_and_bad_shapes(mirror):
           "issuer": issuer, "sig": good["sig"]}
     assert not mirror.verify_certificate(v1, trusted=[issuer])
     assert not mirror.verify_certificate(dict(good, v=2), trusted=[issuer])
-    assert not mirror.verify_certificate(dict(good, v=3), trusted=[issuer])        # relabelled, not re-signed
-    # grace: the previous format verifies over its own (ten-field) payload
-    v3 = _email_cert(mirror, key, issuer, v=3)
-    assert v3["v"] == 3 and "predecessor" not in v3
-    assert mirror.canonical_payload(v3).startswith(b"sautium-birth:v3:") and mirror.canonical_payload(v3).count(b":") == 11
-    assert mirror.verify_certificate(v3, trusted=[issuer]) and not mirror.is_current(v3)
-    assert mirror.is_current(good) and mirror.ACCEPTED_CERT_VERSIONS == (4, 3)
-    assert not mirror.verify_certificate(dict(v3, predecessor="ef" * 32), trusted=[issuer])   # not a v3 field
-    v2 = _email_cert(mirror, key, issuer, v=2)
-    assert not mirror.verify_certificate(v2, trusted=[issuer])                                # out of grace
-    assert not mirror.verify_certificate(dict(good, v=True), trusted=[issuer])
 
     # Shape checks run before the signature check and must never raise on
     # network-supplied garbage.
@@ -247,12 +234,6 @@ def test_worker_contract():
     # …and never for a key the verified record is not bound to
     assert r["check5"]["body"] == {"verified": True}      # no certificate for a foreign key
 
-    # grace: a v3-format copy of a current record still registers an email
-    # (the Worker verifies it over the v3 payload) and gets a v4 back; v2 is out
-    assert r["registerV2"]["status"] == 403
-    assert r["registerV3"]["status"] == 200
-    assert r["registerV3"]["body"]["birth_cert"]["v"] == 4 and r["registerV3"]["body"]["birth_cert"]["method"] == "email"
-
     # birth ledger (shadow): every first issuance is recorded and scored,
     # certificates keep the base difficulty while not armed
     assert all(b["status"] == 200 and b["body"]["difficulty"] == 32 for b in r["burst"])
@@ -275,14 +256,14 @@ def test_worker_contract():
     assert policy["cert_version"] == 4 and policy["pow_difficulty"] == 32
     assert policy["adaptive_armed"] is False and policy["adaptive_cap"] == 8
     day = next(iter(r["stats"]["body"]["days"].values()))
-    assert day["births"] == 8 and day["email"] == 5       # 4 registrations + 1 check-email upgrade
+    assert day["births"] == 7 and day["email"] == 4       # 3 registrations + 1 check-email upgrade
     assert day["succession"] == 2                          # s3 took alice's mailbox, s1 took it back
     ledger = r["stats"]["body"]["ledger"]
-    assert ledger["total"] == 8 and ledger["last_24h"]["births"] == 8
-    assert ledger["last_24h"]["distinct_addr"] == 6
+    assert ledger["total"] == 7 and ledger["last_24h"]["births"] == 7
+    assert ledger["last_24h"]["distinct_addr"] == 5
     # m2 = 3: two burst rows plus the third of the earlier identities — all
     # three of those were born from the same test IP within one second
-    assert ledger["last_24h"]["email"] == 4 and ledger["last_24h"]["m2"] == 3
+    assert ledger["last_24h"]["email"] == 3 and ledger["last_24h"]["m2"] == 3
     assert ledger["last_24h"]["m4"] == 1
     assert ledger["top_asn_7d"][0] == {"asn": 64500, "cc": "UA", "births": 4}
     assert r["badSig"]["status"] == 403

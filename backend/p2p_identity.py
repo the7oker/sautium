@@ -264,11 +264,6 @@ def proof_path(settings):
     return None if d is None else d / PROOF_FILENAME
 
 
-def cert_path(settings):
-    d = identity_dir(settings)
-    return None if d is None else d / CERT_FILENAME
-
-
 def peer_identity(settings):
     """This node as a peer CLIENT (wire format v1, desktop/p2p/peer_auth.py):
     signer, pubkey and a lazy {cert, proof} loader. None without identity."""

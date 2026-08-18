@@ -49,19 +49,7 @@ TRUSTED_AUTHORITIES = [
 # before this one registered it (a password change makes a new key; the
 # notary names the link, nodes carry witnessed age AND bans across it).
 # Email records only, empty otherwise.
-#
-# Grace (2026-08-18): a bump used to cut every peer on the previous release
-# off at once (their certificates failed the shape check) and to leave every
-# pow identity proof-less until it re-mined. Verification now accepts the
-# CURRENT and the PREVIOUS format, each over its own payload (fields are
-# only ever appended); issuance is always current, clients upgrade eagerly
-# but STAGE the new pow certificate until its proof is mined
-# (identity_proof.stage_certificate) — an identity is never left without a
-# valid (certificate, proof) pair. When bumping: CERT_VERSION += 1, add the
-# new field to canonical_payload/_valid_shape, drop the oldest accepted
-# version. MIRRORS worker/verify.js ACCEPTED_CERT_VERSIONS.
 CERT_VERSION = 4
-ACCEPTED_CERT_VERSIONS = (4, 3)
 CERT_METHODS = ("pow", "email")
 EMAIL_CLASSES = ("major", "other", "disposable")
 
@@ -70,33 +58,18 @@ _EMAIL_TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def canonical_payload(cert: dict) -> bytes:
-    """The payload of the certificate's OWN version (fields are appended per
-    version: v3 added email_domain_token, v4 predecessor); the email fields
-    and the predecessor are empty for pow. Mirrors birthPayload() in
-    worker/verify.js."""
-    v = int(cert.get("v") or CERT_VERSION)
-    fields = [cert['pubkey'], cert['issued_at'], cert['method'], str(int(cert['difficulty'])),
-              str(int(cert['params_version'])), cert.get('email_token') or '', cert.get('email_class') or '']
-    if v >= 3:
-        fields.append(cert.get('email_domain_token') or '')
-    if v >= 4:
-        fields.append(cert.get('predecessor') or '')
-    return (f"sautium-birth:v{v}:" + ":".join(fields)).encode("utf-8")
-
-
-def is_current(cert: dict) -> bool:
-    """A verified certificate of an accepted-but-superseded version: still
-    good on the wire, but the holder should refetch (and re-mine, staged)."""
-    return cert.get("v") == CERT_VERSION
+    """Fixed eleven-field payload; the three email fields and the predecessor
+    are empty for pow. Mirrors birthPayload() in worker/verify.js."""
+    return (
+        f"sautium-birth:v{CERT_VERSION}:{cert['pubkey']}:{cert['issued_at']}:"
+        f"{cert['method']}:{int(cert['difficulty'])}:{int(cert['params_version'])}:"
+        f"{cert.get('email_token') or ''}:{cert.get('email_class') or ''}:"
+        f"{cert.get('email_domain_token') or ''}:{cert.get('predecessor') or ''}"
+    ).encode("utf-8")
 
 
 def _valid_shape(cert: dict, trusted: list) -> bool:
-    v = cert.get("v")
-    if v not in ACCEPTED_CERT_VERSIONS or isinstance(v, bool) or cert.get("issuer") not in trusted:
-        return False
-    if v < 4 and cert.get("predecessor"):
-        return False                                   # a field the version does not carry
-    if v < 3 and cert.get("email_domain_token"):
+    if cert.get("v") != CERT_VERSION or cert.get("issuer") not in trusted:
         return False
     if cert.get("method") not in CERT_METHODS:
         return False
@@ -140,10 +113,6 @@ def verify_certificate(cert: dict,
 def _cert_path() -> Path:
     from desktop.node_identity import _identity_dir
     return _identity_dir() / "birth_certificate.json"
-
-
-def cert_path() -> Path:
-    return _cert_path()
 
 
 def proof_path() -> Path:
@@ -240,14 +209,11 @@ def import_certificate(src_path: str) -> bool:
     proof = data.get("proof")
     if identity_proof.proof_binds(proof, cert):
         identity_proof.save_proof(proof_path(), proof)
-    staged = identity_proof.next_cert_path(_cert_path())
-    if staged.exists():
-        staged.unlink()                        # an import replaces whatever upgrade was in flight
     return True
 
 
 def request_certificate(pubkey_hex: Optional[str] = None,
-                        sign_fn=None, save: bool = True) -> Optional[dict]:
+                        sign_fn=None) -> Optional[dict]:
     """Request (or idempotently re-fetch) a certificate from the Worker
     authority. The request is signed by the subject key itself — only the
     key's owner can trigger first issuance.
@@ -276,10 +242,9 @@ def request_certificate(pubkey_hex: Optional[str] = None,
         logger.warning("birth cert request failed or returned invalid cert")
         return None
 
-    if save:
-        _cert_path().write_text(json.dumps(cert, indent=2), encoding="utf-8")
-        logger.info("identity cert obtained (issued_at=%s method=%s)",
-                    cert["issued_at"], cert["method"])
+    _cert_path().write_text(json.dumps(cert, indent=2), encoding="utf-8")
+    logger.info("identity cert obtained (issued_at=%s method=%s)",
+                cert["issued_at"], cert["method"])
     return cert
 
 
@@ -292,14 +257,7 @@ def ensure_certificate() -> Optional[dict]:
     happened elsewhere — one cheap request keeps this device from mining
     and presenting a superseded certificate. Unreachable Worker → the
     stored copy stands."""
-    from desktop.p2p import identity_proof
     cert = load_certificate()
-    if cert is not None and cert["method"] != "pow" and is_current(cert):
+    if cert is not None and cert["method"] != "pow":
         return cert
-    fetched = request_certificate(save=False)
-    if fetched is None:
-        return cert
-    # A re-signed pow certificate (version bump, email upgrade elsewhere) is
-    # STAGED behind the current pair until its proof is mined — the identity
-    # keeps presenting a valid (certificate, proof) pair meanwhile.
-    return identity_proof.stage_certificate(cert, fetched, _cert_path(), proof_path(), verify_certificate)
+    return request_certificate() or cert

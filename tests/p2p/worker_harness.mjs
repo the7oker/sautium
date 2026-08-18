@@ -238,37 +238,6 @@ const retakeAgain = await call("POST", "/register-email", {
   code, birth_cert: retake.body.birth_cert,
 });
 
-// --- grace: a client still holding the PREVIOUS certificate format registers its email ---
-const s7 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
-const issue7 = await call("POST", "/birth-certificate", {
-  pubkey_hex: s7.pubHex, signature: await sign(s7, `birth:${s7.pubHex}`),
-}, { ip: "192.0.2.99", cf: { asn: 64501, country: "PL" } });
-const asVersion = async (cert, v) => {
-  const fields = [cert.pubkey, cert.issued_at, cert.method, cert.difficulty, cert.params_version,
-                  cert.email_token || "", cert.email_class || ""];
-  if (v >= 3) fields.push(cert.email_domain_token || "");
-  const copy = { ...cert, v };
-  delete copy.predecessor;
-  if (v < 3) delete copy.email_domain_token;
-  copy.sig = await sign(authority, `sautium-birth:v${v}:${fields.join(":")}`);
-  return copy;
-};
-const pubDigest7 = hex(new Uint8Array(await subtle.digest("SHA-256", s7.pubBytes))).slice(0, 12).toUpperCase();
-const inviteCode7 = `grace#${pubDigest7.slice(0, 4)}-${pubDigest7.slice(4, 8)}-${pubDigest7.slice(8, 12)}`;
-const email7 = "grace@example.org";
-store.set(`emailcode:${inviteCode7.replace("#", ":")}`,
-  JSON.stringify({ email: email7, hash: await sha256Hex(code) }));
-const registerV2 = await call("POST", "/register-email", {
-  invite_code: inviteCode7, email: email7, public_key_hex: s7.pubHex,
-  signature: await sign(s7, `register:${inviteCode7}:${email7}`),
-  code, birth_cert: await asVersion(issue7.body, 2),
-});
-const registerV3 = await call("POST", "/register-email", {
-  invite_code: inviteCode7, email: email7, public_key_hex: s7.pubHex,
-  signature: await sign(s7, `register:${inviteCode7}:${email7}`),
-  code, birth_cert: await asVersion(issue7.body, 3),
-});
-
 // --- master mailbox: s1 (certified) parks messages for the offline master ---
 const mailPayload = async (sender, uuid, text) => {
   const encrypted = Buffer.from(`box:${text}`).toString("base64");
@@ -322,7 +291,6 @@ console.log(JSON.stringify({
   burst, ledgerRows,
   stats, badSig,
   master_pub: master.pubHex,
-  registerV2, registerV3,
   mail1, mail2, mailDup, mail3, mailCap, mailNoCert, mailBadSig, mailWrongTo, mailTooBig,
   drain, drainForeign, drainStale, ack, drainAfterAck, wakeNoUpgrade,
   verified_record: JSON.parse(store.get(`verified:${inviteCode.replace("#", ":")}`)),

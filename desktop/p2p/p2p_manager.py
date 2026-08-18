@@ -601,10 +601,9 @@ class P2PManager:
         hold = self._load_meter.mining_hold if self._load_meter else (lambda: None)
         self._proof_stop = threading.Event()
         self._proof_thread = threading.Thread(
-            target=identity_proof.run_worker,
-            args=(birth_cert.cert_path(), birth_cert.proof_path()),
-            kwargs={"verify": birth_cert.verify_certificate, "own_pubkey": cert.get("pubkey"),
-                    "stop": self._proof_stop, "on_state": publish, "hold": hold},
+            target=identity_proof.ensure_identity_proof,
+            args=(cert, birth_cert.proof_path()),
+            kwargs={"stop": self._proof_stop, "on_state": publish, "hold": hold},
             daemon=True, name="identity-proof")
         self._proof_thread.start()
 

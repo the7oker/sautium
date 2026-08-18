@@ -22,20 +22,6 @@ thread, Docker startup task):
   through `stop.wait()` — cancellable, and not a race being papered over.
   `HashingError` (allocation failure) is the same pause, not an error.
 
-Staged upgrades (grace policy, 2026-08-18). A re-signed certificate (a
-version bump, an email upgrade) invalidates the proof mined over the old
-signature. Peers accept the previous format for a grace period, so the
-old (certificate, proof) pair stays PRESENTABLE — `stage_certificate`
-keeps it as the current pair and parks the fresh pow certificate in
-`birth_certificate.next.json`; `run_worker` mines for the staged one and
-promotes it (proof written, then the certificate renamed into place) only
-when the new proof is ready. An email certificate needs no proof and is
-adopted at once; a node without a complete old pair adopts the fresh one
-directly (nothing to protect). Result: a bump never leaves an identity
-without a valid pair, and a crash between the two promotion writes is
-healed on the next start (a stored proof that binds to the staged
-certificate promotes without mining).
-
 Depends only on identity_pow (argon2-cffi); psutil is optional and used
 solely for the battery check.
 """
@@ -56,7 +42,6 @@ logger = logging.getLogger(__name__)
 
 PROOF_VERSION = 1
 PROOF_FILENAME = "identity_proof.json"
-NEXT_CERT_SUFFIX = ".next.json"
 MEM_GUARD_KIB = 2560 * 1024          # 2 GiB working set + headroom
 PAUSE_SECONDS = 30.0
 
@@ -118,112 +103,6 @@ def load_proof(path: Path) -> Optional[dict]:
 
 def save_proof(path: Path, proof: dict) -> None:
     Path(path).write_text(json.dumps(proof, indent=2), encoding="utf-8")
-
-
-def next_cert_path(cert_path: Path) -> Path:
-    cert_path = Path(cert_path)
-    return cert_path.with_name(cert_path.stem + NEXT_CERT_SUFFIX)
-
-
-def _load_cert(path: Path, verify: Callable[[dict], bool], own_pubkey: Optional[str]) -> Optional[dict]:
-    try:
-        cert = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(cert, dict) or not verify(cert):
-        return None
-    if own_pubkey and cert.get("pubkey", "").lower() != own_pubkey.lower():
-        return None
-    return cert
-
-
-def _write_json(path: Path, value: dict) -> None:
-    Path(path).write_text(json.dumps(value, indent=2), encoding="utf-8")
-
-
-def stage_certificate(current: Optional[dict], fetched: dict, cert_path: Path,
-                      proof_path: Path, verify: Callable[[dict], bool]) -> dict:
-    """A fresh certificate arrived from the Worker: decide what this node
-    PRESENTS from now on and persist accordingly. Returns the presented
-    certificate. `current` is the verified stored certificate (or None).
-
-    - nothing stored / not verifiable, or the same signature: adopt/keep;
-    - email (no proof needed): adopt at once, drop any staged file;
-    - pow with a complete old pair (stored proof binds to `current`): keep
-      the old pair current, stage the fresh certificate for the worker;
-    - pow without a complete old pair: adopt at once (nothing to protect)."""
-    cert_path, proof_path = Path(cert_path), Path(proof_path)
-    staged = next_cert_path(cert_path)
-    if not verify(fetched):
-        return current if current is not None else fetched
-    if current is not None and current.get("sig") == fetched.get("sig"):
-        return current
-    if fetched["method"] != "pow" or current is None:
-        _write_json(cert_path, fetched)
-        if staged.exists():
-            staged.unlink()
-        logger.info("identity cert %s (issued_at=%s method=%s v%s)",
-                    "adopted" if current is None else "upgraded",
-                    fetched["issued_at"], fetched["method"], fetched.get("v"))
-        return fetched
-    if proof_binds(load_proof(proof_path), current):
-        _write_json(staged, fetched)
-        logger.info("identity cert v%s staged behind the current pair (v%s) until its proof is mined",
-                    fetched.get("v"), current.get("v"))
-        return current
-    _write_json(cert_path, fetched)
-    if staged.exists():
-        staged.unlink()
-    logger.info("identity cert upgraded to v%s (no complete pair to keep)", fetched.get("v"))
-    return fetched
-
-
-def promote_staged(cert_path: Path) -> Optional[dict]:
-    """The staged certificate becomes the current one (its proof is on
-    disk). Returns it, or None when nothing was staged."""
-    cert_path = Path(cert_path)
-    staged = next_cert_path(cert_path)
-    if not staged.exists():
-        return None
-    try:
-        cert = json.loads(staged.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        staged.unlink()
-        return None
-    os.replace(staged, cert_path)
-    logger.info("identity cert v%s promoted — proof ready", cert.get("v"))
-    return cert
-
-
-def run_worker(cert_path: Path, proof_path: Path, *, verify: Callable[[dict], bool],
-               own_pubkey: Optional[str], stop: threading.Event,
-               on_state: Callable[[dict], None], **kwargs) -> Optional[dict]:
-    """The node's identity worker: mine for a STAGED certificate and promote
-    it when its proof is ready, otherwise keep the current certificate's
-    proof ready (ensure_identity_proof). Returns the final proof or None."""
-    cert_path, proof_path = Path(cert_path), Path(proof_path)
-    current = _load_cert(cert_path, verify, own_pubkey)
-    staged = _load_cert(next_cert_path(cert_path), verify, own_pubkey)
-    if staged is None:
-        if next_cert_path(cert_path).exists():
-            next_cert_path(cert_path).unlink()            # unverifiable leftovers
-        if current is None:
-            on_state({"status": "stopped", "detail": "no certificate", "updated_at": _now_iso()})
-            return None
-        return ensure_identity_proof(current, proof_path, stop=stop, on_state=on_state, **kwargs)
-    if current is None or current.get("sig") == staged.get("sig"):
-        promote_staged(cert_path)                          # nothing to keep behind it
-        return ensure_identity_proof(staged, proof_path, stop=stop, on_state=on_state, **kwargs)
-    # The old pair stays presentable while this runs — the UI shows an
-    # upgrade in progress, not a proof-less identity.
-    proof = ensure_identity_proof(staged, proof_path, stop=stop,
-                                  on_state=lambda st: on_state({**st, "upgrade": True}), **kwargs)
-    if proof is not None and proof_binds(proof, staged):
-        promote_staged(cert_path)
-        on_state({"status": "ready", "detail": "proof", "method": staged["method"],
-                  "difficulty": staged["difficulty"], "params_version": staged["params_version"],
-                  "proof_mined_at": proof.get("mined_at"), "updated_at": _now_iso()})
-    return proof
 
 
 def _lower_thread_priority() -> None:

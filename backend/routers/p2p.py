@@ -850,7 +850,7 @@ async def pending_accepts() -> Dict[str, Any]:
 
 # -- Email verification -------------------------------------------------------
 
-async def _get_own_birth_cert(refresh: bool = False, persist: bool = True) -> Optional[dict]:
+async def _get_own_birth_cert(refresh: bool = False) -> Optional[dict]:
     """This node's identity certificate: the disk cache first (verified on
     load), else the Worker — public read, then self-signed issuance when not
     yet issued — persisted for next time. `refresh` skips the cache (after
@@ -878,8 +878,7 @@ async def _get_own_birth_cert(refresh: bool = False, persist: bool = True) -> Op
             "signature": signature,
         })
     if cert and cert.get("pubkey") == pubkey and verify_certificate(cert):
-        if persist:
-            p2p_identity.save_certificate(settings, cert)
+        p2p_identity.save_certificate(settings, cert)
         return cert
     return None
 
@@ -926,24 +925,14 @@ async def identity_proof_task(stop: threading.Event) -> None:
         except Exception as e:
             logger.debug(f"identity state publish failed: {e}")
 
-    from birth_authority import is_current, verify_certificate
     backoff = 300
     while not stop.is_set():
         cert = await _get_own_birth_cert()
-        if cert is None or cert["method"] == "pow" or not is_current(cert):
-            # Portable identity / grace: the email upgrade may have happened
-            # on another device, or the format moved on — one Worker read;
-            # a re-signed pow certificate is STAGED behind the current pair
-            # until its proof is mined (desktop/p2p/identity_proof.py).
-            fetched = await _get_own_birth_cert(refresh=True, persist=False)
-            if fetched is not None:
-                cert_path = p2p_identity.cert_path(settings)
-                proof_p = p2p_identity.proof_path(settings)
-                if cert_path is not None and proof_p is not None:
-                    cert = await asyncio.to_thread(identity_proof.stage_certificate, cert, fetched,
-                                                   cert_path, proof_p, verify_certificate)
-                else:
-                    cert = fetched
+        if cert is not None and cert["method"] == "pow":
+            # Portable identity: the email upgrade may have happened on
+            # another device holding the same key — one Worker read before
+            # committing minutes of mining to a possibly superseded cert.
+            cert = await _get_own_birth_cert(refresh=True) or cert
         if cert is None:
             # Worker unreachable / not configured: retry with backoff — the
             # certificate is a network fact, nothing local can replace it.
@@ -963,8 +952,7 @@ async def identity_proof_task(stop: threading.Event) -> None:
             return
         from desktop.p2p import load_meter
         meter = load_meter.current()
-        await asyncio.to_thread(identity_proof.run_worker, p2p_identity.cert_path(settings), path,
-                                verify=verify_certificate, own_pubkey=cert["pubkey"],
+        await asyncio.to_thread(identity_proof.ensure_identity_proof, cert, path,
                                 stop=stop, on_state=publish,
                                 hold=meter.mining_hold if meter else (lambda: None))
         return
