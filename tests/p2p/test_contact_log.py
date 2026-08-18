@@ -51,6 +51,13 @@ def test_ema_cost_tracking_without_a_database():
     assert c["n"] == 3 and abs(c["cpu"] - 100.0) < 1e-9 and c["dirty"]
     log.record(endpoint="mb.slice", status=200, wall_ms=200.0, cpu_ms=200.0)
     assert 100.0 < log._costs["mb.slice"]["cpu"] < 110.0        # EMA_ALPHA = 0.05
-    assert len(log._queue) == 4
+    ema = log._costs["mb.slice"]["cpu"]
+    for status in (402, 403, 429, 503):                         # refusals are logged, never priced into base
+        log.record(endpoint="mb.slice", status=status, wall_ms=1.0, cpu_ms=0.5)
+    assert log._costs["mb.slice"]["cpu"] == ema and log._costs["mb.slice"]["n"] == 4
+    assert "gate.quote" not in log._costs
+    log.record(endpoint="gate.quote", status=402, wall_ms=1.0, cpu_ms=0.5)
+    assert "gate.quote" not in log._costs
+    assert len(log._queue) == 9
     row = log._queue[0]
     assert row[4] == "mb.slice" and row[6] == 200 and row[2] is not None and row[3] is not None

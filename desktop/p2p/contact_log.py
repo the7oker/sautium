@@ -4,10 +4,11 @@
 Every request a peer surface serves becomes one row in
 `p2p_contact_events` (who: pubkey when signed, pseudonymised address +
 /24 subnet; what: endpoint family, lane, status, request items /
-target names; how much: bytes in/out, wall and CPU milliseconds) and one
-sample in the per-endpoint cost EMA (`p2p_action_costs` — the future
-`base(action)` of the pricing formula, calibrated per node). Raw rows
-live 30 days under a row cap; aggregates are the report's business.
+target names; how much: bytes in/out, wall and CPU milliseconds) and —
+for served (2xx) responses only — one sample in the per-endpoint cost
+EMA (`p2p_action_costs`, the `base(action)` of the pricing formula,
+calibrated per node). Raw rows live 30 days under a row cap; aggregates
+are the report's business.
 
 Local by construction — this history is never shared and never becomes a
 banlist. Recording is off the request path: `record()` appends to an
@@ -189,7 +190,12 @@ class ContactLog:
                float(wall_ms), float(cpu_ms), items, targets, gate_price, gate_status)
         with self._lock:
             self._queue.append(row)
-            self._bump_cost(endpoint, cpu_ms, wall_ms, bytes_out)
+            if 200 <= int(status) < 300:
+                # base(action) is what a SERVED request costs us; refusals
+                # (402/403/429, ~0 ms, 0 bytes) would drag the EMA toward
+                # zero and price the real work away — measured on the
+                # master: mb.slice EMA 3 ms next to a 1046 ms real slice.
+                self._bump_cost(endpoint, cpu_ms, wall_ms, bytes_out)
             if len(self._queue) >= FLUSH_BATCH:
                 self._wake.set()
 
