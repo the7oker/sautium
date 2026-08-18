@@ -54,7 +54,19 @@ TRUSTED_AUTHORITIES = [
 # before this one registered it (a password change makes a new key; the
 # notary names the link, nodes carry witnessed age AND bans across it).
 # Email records only, empty otherwise.
+#
+# Grace (2026-08-18): a bump used to cut every peer on the previous release
+# off at once (their certificates failed the shape check) and to leave every
+# pow identity proof-less until it re-mined. Verification now accepts the
+# CURRENT and the PREVIOUS format, each over its own payload (fields are
+# only ever appended); issuance is always current, clients upgrade eagerly
+# but STAGE the new pow certificate until its proof is mined
+# (identity_proof.stage_certificate) — an identity is never left without a
+# valid (certificate, proof) pair. When bumping: CERT_VERSION += 1, add the
+# new field to canonical_payload/_valid_shape, drop the oldest accepted
+# version. MIRRORS worker/verify.js ACCEPTED_CERT_VERSIONS.
 CERT_VERSION = 4
+ACCEPTED_CERT_VERSIONS = (4, 3)
 CERT_METHODS = ("pow", "email")
 EMAIL_CLASSES = ("major", "other", "disposable")
 
@@ -63,18 +75,33 @@ _EMAIL_TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def canonical_payload(cert: dict) -> bytes:
-    """Fixed eleven-field payload; the three email fields and the predecessor
-    are empty for pow. Mirrors birthPayload() in worker/verify.js."""
-    return (
-        f"sautium-birth:v{CERT_VERSION}:{cert['pubkey']}:{cert['issued_at']}:"
-        f"{cert['method']}:{int(cert['difficulty'])}:{int(cert['params_version'])}:"
-        f"{cert.get('email_token') or ''}:{cert.get('email_class') or ''}:"
-        f"{cert.get('email_domain_token') or ''}:{cert.get('predecessor') or ''}"
-    ).encode("utf-8")
+    """The payload of the certificate's OWN version (fields are appended per
+    version: v3 added email_domain_token, v4 predecessor); the email fields
+    and the predecessor are empty for pow. Mirrors birthPayload() in
+    worker/verify.js."""
+    v = int(cert.get("v") or CERT_VERSION)
+    fields = [cert['pubkey'], cert['issued_at'], cert['method'], str(int(cert['difficulty'])),
+              str(int(cert['params_version'])), cert.get('email_token') or '', cert.get('email_class') or '']
+    if v >= 3:
+        fields.append(cert.get('email_domain_token') or '')
+    if v >= 4:
+        fields.append(cert.get('predecessor') or '')
+    return (f"sautium-birth:v{v}:" + ":".join(fields)).encode("utf-8")
+
+
+def is_current(cert: dict) -> bool:
+    """A verified certificate of an accepted-but-superseded version: still
+    good on the wire, but the holder should refetch (and re-mine, staged)."""
+    return cert.get("v") == CERT_VERSION
 
 
 def _valid_shape(cert: dict, trusted: list) -> bool:
-    if cert.get("v") != CERT_VERSION or cert.get("issuer") not in trusted:
+    v = cert.get("v")
+    if v not in ACCEPTED_CERT_VERSIONS or isinstance(v, bool) or cert.get("issuer") not in trusted:
+        return False
+    if v < 4 and cert.get("predecessor"):
+        return False                                   # a field the version does not carry
+    if v < 3 and cert.get("email_domain_token"):
         return False
     if cert.get("method") not in CERT_METHODS:
         return False

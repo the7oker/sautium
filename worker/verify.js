@@ -98,6 +98,11 @@ const TRUSTED_AUTHORITIES = [
 // goes stale and is re-mined by the node — the price of "challenge = the
 // authority signature", acceptable pre-release, a grace policy later.
 const BIRTH_CERT_VERSION = 4;
+// Grace: certificates of the previous format still verify (each over its own
+// payload) so a client whose cached copy predates a bump can register its
+// email before it refetches; issuance is always current. MIRRORS
+// ACCEPTED_CERT_VERSIONS in the two Python files.
+const ACCEPTED_CERT_VERSIONS = [4, 3];
 const SIG_FIELD = `sig_v${BIRTH_CERT_VERSION}`;
 const CERT_METHODS = new Set(["pow", "email"]);
 // Identity proof-of-work policy pinned into every certificate at issuance
@@ -252,20 +257,22 @@ export default {
 // Birth certificates
 // -----------------------------------------------------------------------
 
-function birthPayload(pubkeyHex, rec) {
-  // Fixed eleven-field shape; the three email fields and the predecessor are
-  // empty for method:pow. Field values never contain ':' (hex, ISO seconds,
-  // enum names, integers).
-  return new TextEncoder().encode(
-    `sautium-birth:v${BIRTH_CERT_VERSION}:${pubkeyHex}:${rec.issued_at}:` +
-    `${rec.method}:${rec.difficulty}:${rec.params_version}:` +
-    `${rec.email_token || ""}:${rec.email_class || ""}:${rec.email_domain_token || ""}:` +
-    `${rec.predecessor || ""}`
-  );
+function birthPayload(pubkeyHex, rec, version = BIRTH_CERT_VERSION) {
+  // The payload of the given version — fields are appended per version (v3:
+  // email_domain_token, v4: predecessor); the email fields and the
+  // predecessor are empty for method:pow. Field values never contain ':'
+  // (hex, ISO seconds, enum names, integers).
+  const fields = [pubkeyHex, rec.issued_at, rec.method, rec.difficulty, rec.params_version,
+                  rec.email_token || "", rec.email_class || ""];
+  if (version >= 3) fields.push(rec.email_domain_token || "");
+  if (version >= 4) fields.push(rec.predecessor || "");
+  return new TextEncoder().encode(`sautium-birth:v${version}:${fields.join(":")}`);
 }
 
 function isValidCertShape(cert) {
-  if (!cert || cert.v !== BIRTH_CERT_VERSION) return false;
+  if (!cert || !ACCEPTED_CERT_VERSIONS.includes(cert.v)) return false;
+  if (cert.v < 4 && cert.predecessor) return false;
+  if (cert.v < 3 && cert.email_domain_token) return false;
   if (!TRUSTED_AUTHORITIES.includes(cert.issuer)) return false;
   if (!isValidPubkeyHex(cert.pubkey)) return false;
   if (!CERT_METHODS.has(cert.method)) return false;
@@ -310,7 +317,7 @@ async function verifyBirthCertificate(cert) {
   try {
     if (!isValidCertShape(cert)) return false;
     return await verifySignatureBytes(
-      birthPayload(cert.pubkey, cert), cert.sig, cert.issuer
+      birthPayload(cert.pubkey, cert, cert.v), cert.sig, cert.issuer
     );
   } catch {
     return false;
