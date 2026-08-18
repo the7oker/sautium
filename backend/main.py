@@ -70,6 +70,7 @@ _dht_reannounce_task: asyncio.Task | None = None
 _p2p_server_task: asyncio.Task | None = None
 _identity_task: asyncio.Task | None = None
 _identity_stop: threading.Event | None = None
+_mailbox_task: asyncio.Task | None = None
 _load_meter = None
 
 
@@ -360,11 +361,26 @@ async def lifespan(app: FastAPI):
 
     # Identity certificate + proof: cache/fetch the certificate, mine the
     # proof for a pow identity in the background (routers/p2p.identity_proof_task).
-    global _identity_task, _identity_stop
+    global _identity_task, _identity_stop, _mailbox_task
     if _p2p_identity:
         from routers.p2p import identity_proof_task
         _identity_stop = threading.Event()
         _identity_task = asyncio.create_task(identity_proof_task(_identity_stop))
+
+    # The master's Worker mailbox (Ф16): messages parked while this node was
+    # offline are drained on the wake socket — only the shipped master has one.
+    try:
+        from master_node import MASTER_PUBKEY_HEX
+        if _p2p_identity and _p2p_identity.get("public_key_hex") == MASTER_PUBKEY_HEX:
+            from desktop.p2p import mailbox_client
+            from p2p_identity import load_signing_key
+            from routers.peer_chat import mailbox_import
+            _mailbox = mailbox_client.MasterMailbox(MASTER_PUBKEY_HEX, load_signing_key(settings).sign,
+                                                    mailbox_import)
+            _mailbox_task = asyncio.create_task(_mailbox.run(lambda: not _identity_stop.is_set()))
+            logger.info("master mailbox: wake socket task started")
+    except Exception as e:
+        logger.warning(f"master mailbox init failed: {e}")
 
     # The peer surface: sync protocol only, on its own port (p2p_app.py).
     # Everything a peer is told about this node points here — never at the
@@ -571,6 +587,12 @@ async def lifespan(app: FastAPI):
         _identity_task.cancel()
         try:
             await _identity_task
+        except asyncio.CancelledError:
+            pass
+    if _mailbox_task:
+        _mailbox_task.cancel()
+        try:
+            await _mailbox_task
         except asyncio.CancelledError:
             pass
     if _p2p_server_task:

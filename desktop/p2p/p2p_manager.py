@@ -2581,6 +2581,36 @@ class P2PManager:
         if undelivered:
             await self._relay_forward(friend_id, pubkey, undelivered)
 
+    async def _mailbox_deposit(self, friend_id: int, messages: list[dict]) -> None:
+        """The master's off-master fallback (Ф16): what the direct path could
+        not deliver is parked, still E2E-encrypted, in the Worker mailbox the
+        master drains when it is back. Acceptance counts as delivery — the
+        master dedups by message_uuid, so an older undelivered copy pushed
+        directly later is harmless."""
+        import aiohttp
+        from desktop.node_identity import sign_message
+        from desktop.p2p import mailbox_client
+        from desktop.p2p.master_node import MASTER_PUBKEY_HEX
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15),
+                                         headers={"Accept-Encoding": "gzip"}) as session:
+            for msg in messages:
+                if not msg.get("message_uuid"):
+                    continue                       # pre-uuid rows stay on the direct path
+                try:
+                    encrypted = self._chat_service.encrypt_message(msg["content"], MASTER_PUBKEY_HEX)
+                except Exception as e:
+                    logger.error(f"Encrypt for mailbox failed: {e}")
+                    return
+                result = await mailbox_client.deposit(
+                    session, master_pubkey=MASTER_PUBKEY_HEX,
+                    sender_pubkey=self._chat_service.public_key_hex, sign=sign_message,
+                    encrypted=encrypted, timestamp_iso=self._iso_utc(msg["timestamp"]),
+                    message_uuid=msg["message_uuid"])
+                if result is None:
+                    return                         # unreachable or refused: the outbox keeps the rest
+                self._chat_service.mark_delivered(msg["id"])
+                logger.info("Message %s parked in the master mailbox", msg["message_uuid"][:8])
+
     async def _relay_forward(self, friend_id: int, friend_pubkey: str,
                              messages: list[dict]) -> None:
         """Deliver via a relay: the recipient holds an outbound stream to it,
@@ -2590,7 +2620,10 @@ class P2PManager:
         touching `delivered`."""
         from desktop.p2p.master_node import MASTER_PUBKEY_HEX
         if friend_pubkey == MASTER_PUBKEY_HEX:
-            return  # the relay is the recipient; the direct path is the path
+            # The relay is the recipient, so no relay helps — the Worker
+            # mailbox is the master's fallback (Ф16).
+            await self._mailbox_deposit(friend_id, messages)
+            return
 
         relays = await self._resolve_relay_for(friend_pubkey)
         if not relays:

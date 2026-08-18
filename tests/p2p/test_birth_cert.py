@@ -264,3 +264,31 @@ def test_worker_contract():
     assert ledger["last_24h"]["m4"] == 1
     assert ledger["top_asn_7d"][0] == {"asn": 64500, "cc": "UA", "births": 4}
     assert r["badSig"]["status"] == 403
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_worker_mailbox_contract():
+    """The master mailbox (Ф16): certified senders park E2E ciphertext for
+    the offline master; only the master (signed, fresh) drains and acks."""
+    seed, _, _ = _authority()
+    r = json.loads(subprocess.run(
+        ["node", str(HERE / "worker_harness.mjs"), seed.hex(), "test-email-pepper"],
+        capture_output=True, text=True, timeout=120, check=True,
+    ).stdout)
+    assert r["mail1"]["body"] == {"stored": True, "id": 1}
+    assert r["mail2"]["body"] == {"stored": True, "id": 2}
+    assert r["mailDup"]["body"] == {"stored": False, "duplicate": True}     # message_uuid dedup
+    assert r["mail3"]["status"] == 200
+    assert r["mailCap"]["status"] == 429                                    # per-sender/day cap (3 in the harness)
+    assert r["mailNoCert"]["status"] == 403                                 # no birth certificate → no free keys
+    assert r["mailBadSig"]["status"] == 403
+    assert r["mailWrongTo"]["status"] == 404                                # only the master has a mailbox
+    assert r["mailTooBig"]["status"] == 413
+    drained = r["drain"]["body"]["messages"]
+    assert [m["id"] for m in drained] == [1, 2, 3] and r["drain"]["body"]["more"] is False
+    assert all(m["from_public_key"] == r["issue1"]["body"]["pubkey"] for m in drained)
+    assert set(drained[0]) == {"id", "message_uuid", "from_public_key", "encrypted", "timestamp", "received_at"}
+    assert r["drainForeign"]["status"] == 403 and r["drainStale"]["status"] == 403
+    assert r["ack"]["body"] == {"deleted": 3}
+    assert r["drainAfterAck"]["body"] == {"messages": [], "more": False}
+    assert r["wakeNoUpgrade"]["status"] == 426

@@ -415,6 +415,30 @@ async def chat_message(request: Request):
     return JSONResponse({"status": "delivered"})
 
 
+def mailbox_import(m: dict) -> None:
+    """One message drained from the master's Worker mailbox (Ф16) — the same
+    checks as /message above, minus the transport: friendship right, size,
+    handle_incoming (dedup by message_uuid, decrypt, store → the insert
+    trigger wakes the UI). A refused message is dropped, not retried: the
+    mailbox is a parking lot for the direct path, not a second protocol."""
+    svc = get_peer_chat()
+    if svc is None:
+        raise RuntimeError("chat not available")          # skips the ack → served again later
+    sender_pubkey = m.get("from_public_key", "")
+    encrypted = m.get("encrypted", "")
+    if len(encrypted) > MAX_ENCRYPTED_CHARS:
+        logger.warning("mailbox: oversized message from %s dropped", sender_pubkey[:8])
+        return
+    with get_conn() as conn:
+        if not invite_tokens.friend_has_right(conn, sender_pubkey, "can_message"):
+            logger.info("mailbox: message from %s without can_message dropped", sender_pubkey[:8])
+            return
+    result = svc.handle_incoming(sender_pubkey, encrypted, m.get("timestamp", ""),
+                                 message_uuid=m.get("message_uuid") or None)
+    if result is None:
+        logger.info("mailbox: message %s from %s rejected", (m.get("message_uuid") or "")[:8], sender_pubkey[:8])
+
+
 @chat_router.post("/history")
 async def chat_history(request: Request):
     svc = get_peer_chat()

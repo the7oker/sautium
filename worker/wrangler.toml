@@ -17,5 +17,16 @@ class_name = "BirthLedger"
 type = "durable-object"
 storage = "sqlite"
 
+# Master mailbox: one SQLite-backed Durable Object per recipient (only the
+# shipped master has one) — offline store-and-forward for E2E chat, with a
+# hibernating WebSocket the master holds for "mail" wake-ups.
+[[durable_objects.bindings]]
+name = "MAILBOX"
+class_name = "MasterMailbox"
+
+[exports.MasterMailbox]
+type = "durable-object"
+storage = "sqlite"
+
 # Custom domain (optional): verify.sautium.net
 # Configure in Cloudflare dashboard: Workers → Triggers → Custom Domains

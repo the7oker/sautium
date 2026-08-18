@@ -37,13 +37,19 @@ async function sha256Hex(text) {
 
 const authority = await keyFromSeed(authoritySeedHex);
 
-// Swap the pinned authority for the test key, then import the module.
+// Swap the pinned authority and master for test keys (and shrink the
+// per-sender mailbox cap so the harness can hit it), then import the module.
+const master = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
 const src = readFileSync(workerPath, "utf-8");
-const swapped = src.replace(
+let swapped = src.replace(
   /const TRUSTED_AUTHORITIES = \[\n  "[0-9a-f]{64}",\n\];/,
   `const TRUSTED_AUTHORITIES = [\n  "${authority.pubHex}",\n];`,
 );
 if (swapped === src) throw new Error("TRUSTED_AUTHORITIES pattern not found");
+const swapped2 = swapped.replace(/const MASTER_PUBKEY = "[0-9a-f]{64}";/, `const MASTER_PUBKEY = "${master.pubHex}";`);
+if (swapped2 === swapped) throw new Error("MASTER_PUBKEY pattern not found");
+swapped = swapped2.replace("const MAIL_PER_SENDER_DAY = 30;", "const MAIL_PER_SENDER_DAY = 3;");
+if (swapped === swapped2) throw new Error("MAIL_PER_SENDER_DAY pattern not found");
 const tmp = join(mkdtempSync(join(tmpdir(), "sautium-worker-")), "verify.mjs");
 writeFileSync(tmp, swapped);
 const workerModule = await import(pathToFileURL(tmp).href);
@@ -62,6 +68,19 @@ const sqlAdapter = {
 const ledger = new workerModule.BirthLedger(
   { storage: { sql: sqlAdapter }, blockConcurrencyWhile: (fn) => fn() }, {});
 const ledgerStub = { fetch: (url, init) => ledger.fetch(new Request(url, init)) };
+// The master mailbox DO on its own in-memory database (no WebSockets in Node —
+// the wake path is exercised for its refusal codes only).
+const mailDb = new DatabaseSync(":memory:");
+const mailSql = {
+  exec(query, ...params) {
+    const stmt = mailDb.prepare(query);
+    const rows = /^\s*(SELECT|INSERT[\s\S]*RETURNING)/i.test(query) ? stmt.all(...params) : (stmt.run(...params), []);
+    return { toArray: () => rows, one: () => rows[0] };
+  },
+};
+const mailbox = new workerModule.MasterMailbox(
+  { storage: { sql: mailSql }, blockConcurrencyWhile: (fn) => fn() }, {});
+const mailboxStub = { fetch: (url, init) => mailbox.fetch(url instanceof Request ? url : new Request(url, init)) };
 
 const store = new Map();
 const env = {
@@ -69,6 +88,7 @@ const env = {
   EMAIL_PEPPER: emailPepper,
   IP_PEPPER: "test-ip-pepper",
   BIRTH_LEDGER: { idFromName: (name) => name, get: () => ledgerStub },
+  MAILBOX: { idFromName: (name) => name, get: () => mailboxStub },
   RATE_LIMITS: {
     async get(k, type) {
       const v = store.get(k);
@@ -218,6 +238,43 @@ const retakeAgain = await call("POST", "/register-email", {
   code, birth_cert: retake.body.birth_cert,
 });
 
+// --- master mailbox: s1 (certified) parks messages for the offline master ---
+const mailPayload = async (sender, uuid, text) => {
+  const encrypted = Buffer.from(`box:${text}`).toString("base64");
+  const timestamp = "2026-08-18T14:00:00Z";
+  const digest = await sha256Hex(encrypted);
+  return {
+    to: master.pubHex, from_public_key: sender.pubHex, encrypted, timestamp, message_uuid: uuid,
+    signature: await sign(sender, `mailbox:v1:${master.pubHex}:${uuid}:${timestamp}:${digest}`),
+  };
+};
+const mailUuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const mail1 = await call("POST", "/mailbox", await mailPayload(s1, mailUuid(1), "hello"));
+const mail2 = await call("POST", "/mailbox", await mailPayload(s1, mailUuid(2), "again"));
+const mailDup = await call("POST", "/mailbox", await mailPayload(s1, mailUuid(1), "hello"));
+const mail3 = await call("POST", "/mailbox", await mailPayload(s1, mailUuid(3), "third"));
+const mailCap = await call("POST", "/mailbox", await mailPayload(s1, mailUuid(4), "fourth"));   // per-sender cap 3
+const stranger = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
+const mailNoCert = await call("POST", "/mailbox", await mailPayload(stranger, mailUuid(5), "x"));
+const forged = await mailPayload(s3, mailUuid(6), "x");
+forged.signature = "00".repeat(64);
+const mailBadSig = await call("POST", "/mailbox", forged);
+const wrongTo = await mailPayload(s3, mailUuid(7), "x");
+wrongTo.to = s1.pubHex;
+const mailWrongTo = await call("POST", "/mailbox", wrongTo);
+const big = await mailPayload(s3, mailUuid(8), "x".repeat(9000));
+const mailTooBig = await call("POST", "/mailbox", big);
+const nowTs = String(Math.floor(Date.now() / 1000));
+const drainSig = await sign(master, `mailbox-drain:v1:${nowTs}:0`);
+const drain = await call("GET", `/mailbox?public_key_hex=${master.pubHex}&ts=${nowTs}&after=0&signature=${drainSig}`);
+const drainForeign = await call("GET", `/mailbox?public_key_hex=${s1.pubHex}&ts=${nowTs}&after=0&signature=${await sign(s1, `mailbox-drain:v1:${nowTs}:0`)}`);
+const staleTs = String(Math.floor(Date.now() / 1000) - 3600);
+const drainStale = await call("GET", `/mailbox?public_key_hex=${master.pubHex}&ts=${staleTs}&after=0&signature=${await sign(master, `mailbox-drain:v1:${staleTs}:0`)}`);
+const lastId = drain.body.messages[drain.body.messages.length - 1].id;
+const ack = await call("DELETE", `/mailbox?public_key_hex=${master.pubHex}&ts=${nowTs}&upto=${lastId}&signature=${await sign(master, `mailbox-ack:v1:${nowTs}:${lastId}`)}`);
+const drainAfterAck = await call("GET", `/mailbox?public_key_hex=${master.pubHex}&ts=${nowTs}&after=0&signature=${drainSig}`);
+const wakeNoUpgrade = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&signature=${await sign(master, `mailbox-wake:v1:${nowTs}`)}`);
+
 const stats = await call("GET", "/issuance-stats");
 const badSig = await call("POST", "/birth-certificate", {
   pubkey_hex: s1.pubHex, signature: "00".repeat(64),
@@ -233,5 +290,8 @@ console.log(JSON.stringify({
   legacyV2Read, legacyV2Record, legacyV2Check,
   burst, ledgerRows,
   stats, badSig,
+  master_pub: master.pubHex,
+  mail1, mail2, mailDup, mail3, mailCap, mailNoCert, mailBadSig, mailWrongTo, mailTooBig,
+  drain, drainForeign, drainStale, ack, drainAfterAck, wakeNoUpgrade,
   verified_record: JSON.parse(store.get(`verified:${inviteCode.replace("#", ":")}`)),
 }));

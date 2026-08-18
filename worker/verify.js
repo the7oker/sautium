@@ -51,6 +51,11 @@
  *   GET  /birth-certificate    — public read of an issued certificate
  *   GET  /issuance-stats       — public issuance counters + policy + birth-ledger
  *                                aggregates (CT-lite)
+ *   POST /mailbox              — drop an E2E-encrypted chat message for the
+ *                                master while it is offline (sender-signed,
+ *                                needs a birth certificate issued here)
+ *   GET  /mailbox              — master-signed drain; DELETE /mailbox — ack
+ *   GET  /mailbox/wake         — master-signed WebSocket: "mail" on arrival
  *   GET  /health               — health check
  *
  * Birth ledger (Durable Object BIRTH_LEDGER, SQLite): every first issuance is
@@ -110,6 +115,21 @@ const POW_DIFFICULTY = 32;
 const ADAPTIVE_DIFFICULTY_ARMED = false;
 const ADAPTIVE_MULT_CAP = 8;
 const LEDGER_RETENTION_MS = 90 * 24 * 3600 * 1000;
+// The shipped master node (MIRRORS desktop/p2p/master_node.py and
+// backend/master_node.py — the only identity with a mailbox here). The
+// mailbox de-specializes the master (P2P-SYNC-INTEGRITY.md § "Defense
+// strategy"): a message for it that finds no route is parked here,
+// ciphertext only (NaCl Box to the master's chat key — the Worker cannot
+// read it), and drained when the master is back. Blocking the master
+// achieves nothing; the master being offline costs nothing.
+const MASTER_PUBKEY = "3aa2ae91bc41863468ea4df3346811bcb0f7e0d6a9644b931cfd628d81247042";
+const MAIL_MAX_CHARS = 8192;             // encrypted payload (chat caps are far below)
+const MAIL_PER_SENDER_DAY = 30;
+const MAIL_PER_DAY = 5000;
+const MAIL_CAP = 20000;                  // rows kept; oldest evicted beyond this
+const MAIL_TTL_MS = 30 * 24 * 3600 * 1000;
+const MAIL_IP_PER_HOUR = 60;
+const MAIL_SIG_SKEW_S = 300;
 // email_class is a coarse, Worker-side hint (the node never sees the domain):
 // disposable → reduced similarity weight, major → shared-provider (many honest
 // users collide on it), other → custom/ISP domains.
@@ -157,7 +177,7 @@ export default {
   async fetch(request, env) {
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+      "Access-Control-Allow-Methods": "POST, GET, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
     };
 
@@ -194,6 +214,16 @@ export default {
 
       if (url.pathname === "/pending-accepts" && request.method === "GET") {
         return await handlePendingAccepts(url, env, corsHeaders);
+      }
+
+      if (url.pathname === "/mailbox" && request.method === "POST") {
+        return await handleMailboxPut(request, env, corsHeaders);
+      }
+      if (url.pathname === "/mailbox" && (request.method === "GET" || request.method === "DELETE")) {
+        return await handleMailboxDrain(request, url, env, corsHeaders);
+      }
+      if (url.pathname === "/mailbox/wake" && request.method === "GET") {
+        return await handleMailboxWake(request, url, env, corsHeaders);
       }
 
       if (url.pathname === "/birth-certificate" && request.method === "POST") {
@@ -652,6 +682,248 @@ async function ledgerBirth(env, request, pubkey, issuedAtIso) {
 // -----------------------------------------------------------------------
 // Timestamp notary (authorship priority for signed enrichment records)
 // -----------------------------------------------------------------------
+
+// -----------------------------------------------------------------------
+// Master mailbox (Ф16) — store-and-forward for ONE recipient, E2E opaque
+// -----------------------------------------------------------------------
+
+function mailboxStub(env) {
+  return env.MAILBOX.get(env.MAILBOX.idFromName(MASTER_PUBKEY));
+}
+
+async function mailboxCall(env, path, body, init) {
+  const stub = mailboxStub(env);
+  const res = await stub.fetch(`https://mailbox${path}`, init || {
+    method: body === undefined ? "GET" : "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return { status: res.status, body: await res.json() };
+}
+
+function tsFresh(ts) {
+  const n = Number(ts);
+  return Number.isFinite(n) && Math.abs(Date.now() / 1000 - n) <= MAIL_SIG_SKEW_S;
+}
+
+async function bumpWindow(env, key, limit, ttlSeconds) {
+  // Same pessimistic KV counter as checkRateLimit, on its own key.
+  const count = (parseInt(await env.RATE_LIMITS.get(key)) || 0) + 1;
+  await env.RATE_LIMITS.put(key, String(count), { expirationTtl: ttlSeconds });
+  return count > limit;
+}
+
+async function handleMailboxPut(request, env, corsHeaders) {
+  /**
+   * Body: {to, from_public_key, encrypted, timestamp, message_uuid, signature}
+   * — the exact chat wire payload plus a sender signature over
+   *   mailbox:v1:{to}:{message_uuid}:{timestamp}:{sha256hex(encrypted)}
+   * `to` must be the master; the sender must hold a certificate issued
+   * here (no free keys); per-IP, per-sender and global caps bound the
+   * storage. The Worker never sees plaintext.
+   */
+  if (!env.MAILBOX) return json({ error: "mailbox not configured" }, corsHeaders, 503);
+  const body = await request.json();
+  const { to, from_public_key, encrypted, timestamp, message_uuid, signature } = body;
+  if (!to || !from_public_key || !encrypted || !timestamp || !message_uuid || !signature) {
+    return json({ error: "missing fields" }, corsHeaders, 400);
+  }
+  if (to.toLowerCase() !== MASTER_PUBKEY) {
+    return json({ error: "no mailbox for this recipient" }, corsHeaders, 404);
+  }
+  const sender = from_public_key.toLowerCase();
+  if (!isValidPubkeyHex(sender) || sender === MASTER_PUBKEY) {
+    return json({ error: "invalid sender" }, corsHeaders, 400);
+  }
+  if (typeof encrypted !== "string" || encrypted.length > MAIL_MAX_CHARS) {
+    return json({ error: "message too large" }, corsHeaders, 413);
+  }
+  if (!/^[0-9a-f-]{36}$/.test(message_uuid) || typeof timestamp !== "string" || timestamp.length > 40) {
+    return json({ error: "invalid message" }, corsHeaders, 400);
+  }
+  const digest = await sha256Hex(encrypted);
+  const message = `mailbox:v1:${MASTER_PUBKEY}:${message_uuid}:${timestamp}:${digest}`;
+  if (!await verifySignature(message, signature, sender)) {
+    return json({ error: "invalid signature" }, corsHeaders, 403);
+  }
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  if (await bumpWindow(env, `rl:mbx:${ip}`, MAIL_IP_PER_HOUR, 3600)) {
+    return json({ error: "rate limited" }, corsHeaders, 429);
+  }
+  if (!await env.RATE_LIMITS.get(`born:${sender}`, "json")) {
+    return json({ error: "sender has no certificate" }, corsHeaders, 403);
+  }
+  const r = await mailboxCall(env, "/put", {
+    uuid: message_uuid, sender, encrypted, ts: timestamp, now: Date.now(),
+  });
+  return json(r.body, corsHeaders, r.status);
+}
+
+async function verifyMasterRequest(url, label, extra) {
+  // Query: public_key_hex (must be the master), ts, signature over
+  //   {label}:v1:{ts}[:{extra}]
+  const pubkey = (url.searchParams.get("public_key_hex") || "").toLowerCase();
+  const ts = url.searchParams.get("ts") || "";
+  const signature = url.searchParams.get("signature") || "";
+  if (pubkey !== MASTER_PUBKEY) return "not the master";
+  if (!tsFresh(ts)) return "stale timestamp";
+  const message = extra === undefined ? `${label}:v1:${ts}` : `${label}:v1:${ts}:${extra}`;
+  if (!await verifySignature(message, signature, pubkey)) return "invalid signature";
+  return null;
+}
+
+async function handleMailboxDrain(request, url, env, corsHeaders) {
+  /**
+   * GET  /mailbox?public_key_hex&ts&signature&after=N  → {messages, more}
+   *      signature over mailbox-drain:v1:{ts}:{after}
+   * DELETE /mailbox?public_key_hex&ts&signature&upto=N → {deleted}
+   *      signature over mailbox-ack:v1:{ts}:{upto}
+   * The master imports what it drains (dedup by message_uuid on its side)
+   * and acks by id; an unacked batch is served again next time.
+   */
+  if (!env.MAILBOX) return json({ error: "mailbox not configured" }, corsHeaders, 503);
+  if (request.method === "GET") {
+    const after = String(parseInt(url.searchParams.get("after") || "0") || 0);
+    const err = await verifyMasterRequest(url, "mailbox-drain", after);
+    if (err) return json({ error: err }, corsHeaders, 403);
+    const r = await mailboxCall(env, `/drain?after=${after}`);
+    return json(r.body, corsHeaders, r.status);
+  }
+  const upto = String(parseInt(url.searchParams.get("upto") || "0") || 0);
+  const err = await verifyMasterRequest(url, "mailbox-ack", upto);
+  if (err) return json({ error: err }, corsHeaders, 403);
+  const r = await mailboxCall(env, "/ack", { upto: Number(upto) });
+  return json(r.body, corsHeaders, r.status);
+}
+
+async function handleMailboxWake(request, url, env, corsHeaders) {
+  /**
+   * GET /mailbox/wake?public_key_hex&ts&signature (Upgrade: websocket)
+   *   signature over mailbox-wake:v1:{ts}
+   * The master holds this socket (hibernating on the Durable Object side);
+   * every stored message sends "mail" — the master drains on it and on
+   * (re)connect. No polling anywhere.
+   */
+  if (!env.MAILBOX) return json({ error: "mailbox not configured" }, corsHeaders, 503);
+  const err = await verifyMasterRequest(url, "mailbox-wake");
+  if (err) return json({ error: err }, corsHeaders, 403);
+  if ((request.headers.get("Upgrade") || "").toLowerCase() !== "websocket") {
+    return json({ error: "websocket upgrade required" }, corsHeaders, 426);
+  }
+  return await mailboxStub(env).fetch(new Request("https://mailbox/wake", request));
+}
+
+export class MasterMailbox {
+  constructor(state, env) {
+    this.state = state;
+    this.sql = state.storage.sql;
+    state.blockConcurrencyWhile(async () => this._init());
+  }
+
+  _init() {
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS mail (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, uuid TEXT NOT NULL UNIQUE,
+      sender TEXT NOT NULL, encrypted TEXT NOT NULL, ts TEXT NOT NULL,
+      received_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`);
+    this.sql.exec("CREATE INDEX IF NOT EXISTS mail_sender_recv ON mail (sender, received_at)");
+    this.sql.exec("CREATE INDEX IF NOT EXISTS mail_recv ON mail (received_at)");
+    if (typeof WebSocketRequestResponsePair !== "undefined" && this.state.setWebSocketAutoResponse) {
+      // Keepalives answered by the runtime without waking the object.
+      this.state.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+    }
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/put") {
+      return this._json(this.put(await request.json()));
+    }
+    if (request.method === "GET" && url.pathname === "/drain") {
+      return Response.json(this.drain(parseInt(url.searchParams.get("after") || "0") || 0));
+    }
+    if (request.method === "POST" && url.pathname === "/ack") {
+      const { upto } = await request.json();
+      const before = this._count("SELECT count(*) AS n FROM mail");
+      this.sql.exec("DELETE FROM mail WHERE id <= ?", Number(upto) || 0);
+      return Response.json({ deleted: before - this._count("SELECT count(*) AS n FROM mail") });
+    }
+    if (request.method === "GET" && url.pathname === "/wake") {
+      if (typeof WebSocketPair === "undefined") {
+        return Response.json({ error: "websockets unavailable" }, { status: 501 });
+      }
+      const pair = new WebSocketPair();
+      this.state.acceptWebSocket(pair[1]);
+      return new Response(null, { status: 101, webSocket: pair[0] });
+    }
+    if (request.method === "GET" && url.pathname === "/stats") {
+      return Response.json({ pending: this._count("SELECT count(*) AS n FROM mail"),
+                             sockets: this.state.getWebSockets ? this.state.getWebSockets().length : 0 });
+    }
+    return new Response("not found", { status: 404 });
+  }
+
+  _json(result) {
+    return Response.json(result.body, { status: result.status });
+  }
+
+  _count(query, ...params) {
+    return Number(this.sql.exec(query, ...params).one().n);
+  }
+
+  put({ uuid, sender, encrypted, ts, now }) {
+    now = Number(now) || Date.now();
+    this.sql.exec("DELETE FROM mail WHERE expires_at <= ?", now);
+    const day = now - 86400 * 1000;
+    if (this._count("SELECT count(*) AS n FROM mail WHERE uuid = ?", uuid) > 0) {
+      return { status: 200, body: { stored: false, duplicate: true } };
+    }
+    if (this._count("SELECT count(*) AS n FROM mail WHERE sender = ? AND received_at > ?", sender, day) >= MAIL_PER_SENDER_DAY) {
+      return { status: 429, body: { error: "sender cap reached" } };
+    }
+    if (this._count("SELECT count(*) AS n FROM mail WHERE received_at > ?", day) >= MAIL_PER_DAY) {
+      return { status: 429, body: { error: "mailbox busy" } };
+    }
+    const total = this._count("SELECT count(*) AS n FROM mail");
+    if (total >= MAIL_CAP) {
+      this.sql.exec("DELETE FROM mail WHERE id IN (SELECT id FROM mail ORDER BY id LIMIT ?)", total - MAIL_CAP + 1);
+    }
+    const id = Number(this.sql.exec(
+      "INSERT INTO mail (uuid, sender, encrypted, ts, received_at, expires_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+      uuid, sender, encrypted, ts, now, now + MAIL_TTL_MS).one().id);
+    this._wake();
+    return { status: 200, body: { stored: true, id } };
+  }
+
+  drain(after) {
+    const rows = this.sql.exec(
+      "SELECT id, uuid, sender, encrypted, ts, received_at FROM mail WHERE id > ? ORDER BY id LIMIT 201", after).toArray();
+    const more = rows.length > 200;
+    return {
+      messages: rows.slice(0, 200).map((r) => ({
+        id: Number(r.id), message_uuid: r.uuid, from_public_key: r.sender,
+        encrypted: r.encrypted, timestamp: r.ts, received_at: Number(r.received_at),
+      })),
+      more,
+    };
+  }
+
+  _wake() {
+    if (!this.state.getWebSockets) return;
+    for (const ws of this.state.getWebSockets()) {
+      try { ws.send("mail"); } catch (e) { /* closing socket */ }
+    }
+  }
+
+  webSocketMessage(ws, message) { /* keepalives are auto-answered; nothing else is expected */ }
+
+  webSocketClose(ws, code, reason, wasClean) {
+    try { ws.close(code, reason); } catch (e) { /* already closed */ }
+  }
+
+  webSocketError(ws, error) {
+    try { ws.close(1011, "error"); } catch (e) { /* already closed */ }
+  }
+}
 
 async function handleTimestamp(request, env, corsHeaders) {
   /**
