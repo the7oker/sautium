@@ -382,11 +382,14 @@ class SyncServer:
                 with _conn_factory_for(self.db_dsn) as conn:
                     identity_registry.mark_failed(conn, pubkey, None, reason)
 
+            from desktop.p2p import load_meter
+            meter = load_meter.current()
             self._gate_service = gate_service.GateService(
                 self.account_info.get("public_key_hex", ""), sign_message,
                 admission.derive_gate_secret(get_private_key_raw()),
                 conn_factory=partial(_conn_factory_for, self.db_dsn),
-                on_evidence=evidence)
+                on_evidence=evidence, meter=meter,
+                verify_concurrency=1 if (meter is not None and meter.profile == "lite") else 2)
         return self._gate_service
 
     def _read_gate_mode(self) -> str:
@@ -1969,6 +1972,7 @@ class SyncServer:
         try:
             await asyncio.get_event_loop().run_in_executor(None, self._price().calibrate_w)
             logger.info("gate price unit w = %.1f ms", self._price().w_ms)
+            self._admission()          # eager: the idle gold seeder rides the load meter from now on
         except Exception as e:
             logger.warning(f"gate price calibration failed: {e}")
         self._app = web.Application(middlewares=[self._inbound_middleware])

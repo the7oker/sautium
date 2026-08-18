@@ -10,6 +10,15 @@ server computed in order to compare. Those pairs are the pool:
   garbage cannot pass. Single-use (retired on redemption). Entries minted
   while FAILING a packet are the cleanest — their author never solved
   them, so no self-redemption is possible.
+- **seed gold** — minted by the node itself while idle (one 64 MiB task per
+  load-meter sample below a small target): no author, no recipient keys,
+  eligible for everyone. It exists so the O(1) prefilter is armed from the
+  very first packet — otherwise a garbage flood in an empty pool costs us
+  R·w per packet while gold minted from that garbage can never be issued
+  back to its author (self-redemption rule) and the flood is free to run.
+  Not the "pre-mined pool" the design rejects for peers (that was about
+  scarcity at 1:1 parity); this is a bootstrap of the filter, bounded and
+  idle-only.
 - **silver** — the unchecked claims from packets that passed their sample
   (`not_verified`, never ground truth). Mixed into future packets as free
   cross-validation probes: a match is a quorum vote (M votes from distinct
@@ -42,8 +51,9 @@ SCHEMA_SQL = (
          CREATE TYPE p2p_pool_class AS ENUM ('gold', 'silver');
        EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
     """DO $$ BEGIN
-         CREATE TYPE p2p_pool_origin AS ENUM ('sample', 'audit', 'garbage', 'claim');
+         CREATE TYPE p2p_pool_origin AS ENUM ('sample', 'audit', 'garbage', 'claim', 'seed');
        EXCEPTION WHEN duplicate_object THEN NULL; END $$""",
+    """ALTER TYPE p2p_pool_origin ADD VALUE IF NOT EXISTS 'seed'""",
     """CREATE TABLE IF NOT EXISTS p2p_gate_pool (
          id              BIGSERIAL PRIMARY KEY,
          task_input      BYTEA NOT NULL,
@@ -120,21 +130,37 @@ def lease(conn, *, nonce: str, deadline, keys: Sequence[str], params_version: in
         for klass, count in (("gold", gold), ("silver", silver)):
             if count <= 0:
                 continue
+            # The pick is a MATERIALIZED CTE: evaluated exactly once. As an
+            # `id IN (SELECT … ORDER BY random() …)` semi-join the planner may
+            # re-run the volatile subquery per candidate row and the LIMIT
+            # stops bounding the packet.
             cur.execute(f"""
-                UPDATE p2p_gate_pool
-                   SET leased_nonce = %s, leased_at = now(), lease_deadline = %s
-                 WHERE id IN (
+                WITH picked AS MATERIALIZED (
                      SELECT id FROM p2p_gate_pool
                       WHERE class = %s AND retired_at IS NULL AND leased_nonce IS NULL
                         AND expires_at > now() AND params_version = %s
                         AND NOT (recipient_keys && %s::text[])
                       ORDER BY random() LIMIT %s
                       FOR UPDATE SKIP LOCKED)
-             RETURNING {', '.join(_COLS)}
-            """, (nonce, deadline, klass, params_version, keys, count))
+                UPDATE p2p_gate_pool AS g
+                   SET leased_nonce = %s, leased_at = now(), lease_deadline = %s
+                  FROM picked WHERE g.id = picked.id
+             RETURNING {', '.join('g.' + c for c in _COLS)}
+            """, (klass, params_version, keys, count, nonce, deadline))
             picked.extend(_row(r) for r in cur.fetchall())
     conn.commit()
     return sorted(picked, key=lambda e: e["id"])
+
+
+def free_seed_gold(conn, params_version: int) -> int:
+    """How many authorless gold entries are on offer right now."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT count(*) FROM p2p_gate_pool
+             WHERE class = 'gold' AND origin = 'seed' AND retired_at IS NULL
+               AND leased_nonce IS NULL AND expires_at > now() AND params_version = %s
+        """, (params_version,))
+        return cur.fetchone()[0]
 
 
 def leased(conn, nonce: str) -> list:

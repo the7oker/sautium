@@ -371,6 +371,10 @@ class IdentityGate:
         if self._addr_rate_limited(addr):
             return Admission("rate_limited", "too many failed proofs from this address",
                              RETRY_RATE_LIMITED_SECONDS)
+        from desktop.p2p import load_meter
+        meter = load_meter.current()
+        if meter is not None and meter.headroom < load_meter.VERIFY_MIN_HEADROOM:
+            return Admission("busy", "node at its ceiling", RETRY_BUSY_SECONDS)   # the ceiling wins
         try:
             await asyncio.wait_for(self._sem.acquire(), VERIFY_WAIT_SECONDS)
         except asyncio.TimeoutError:
@@ -453,6 +457,19 @@ def _selftest(dsn: str) -> None:
         nonce = identity_pow.pow_mine(identity_pow.pow_challenge(p), p["difficulty"],
                                       identity_pow.POW_PARAMS[1])
         proof = identity_proof.make_proof(p, nonce)
+        # at the ceiling the 2 GiB evaluation is not attempted (503, nothing recorded)
+        from desktop.p2p import load_meter
+        class Ceiling:
+            headroom = 0.05
+        prev_meter = load_meter.current()
+        load_meter.install(Ceiling())
+        try:
+            busy = await gate.admit(p["pubkey"], p, proof, "203.0.113.6")
+            assert busy.status == "busy" and busy.http_status == 503, busy
+        finally:
+            load_meter._current = prev_meter
+        with factory() as conn:
+            assert get(conn, p["pubkey"])["status"] == "unverified"
         t0 = time.perf_counter()
         assert (await gate.admit(p["pubkey"], p, proof, "203.0.113.6")).status == "verified"
         print(f"  verified real proof in {time.perf_counter() - t0:.2f}s")
@@ -479,7 +496,7 @@ def _selftest(dsn: str) -> None:
         assert (await gate.admit(p["pubkey"], up, None, None)).status == "verified"
         with factory() as conn:
             row = get(conn, p["pubkey"])
-            assert row["method"] == "email" and row["first_seen_at"] == before and row["contacts"] == 4
+            assert row["method"] == "email" and row["first_seen_at"] == before and row["contacts"] == 5   # the busy admit was a contact too
         # per-address backstop
         for _ in range(FAILS_PER_ADDR_HOUR):
             gate._note_failure("198.51.100.1")

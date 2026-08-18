@@ -51,6 +51,8 @@ PLAYBACK_LEASE_SECONDS = 30.0
 PLAYBACK_HEADROOM_FACTOR = 0.5
 BAND = 0.1
 PACE_MAX = 8.0
+VERIFY_MIN_HEADROOM = 0.1           # below this the discretionary verifiers (gate R·w, 2 GiB
+                                    # identity proof) answer 503 instead of spending — the ceiling wins
 
 _current: Optional["LoadMeter"] = None
 

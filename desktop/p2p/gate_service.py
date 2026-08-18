@@ -51,6 +51,7 @@ from datetime import datetime, timezone
 from typing import Callable, Optional, Sequence
 
 from desktop.p2p import admission, gate_pool, identity_pow
+from desktop.p2p.load_meter import VERIFY_MIN_HEADROOM
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +63,15 @@ SEEN_CAP = 100_000                 # state-growth cap for the nonce seen-set
 GOLD_PER_PACKET = 1
 SILVER_PER_PACKET = 2
 MAINTENANCE_EVERY = 50             # quotes between pool sweeps
+SEED_GOLD_TARGET = 24              # authorless gold kept on offer while idle
+SEED_CHECK_EVERY = 15              # load-meter samples (2 s each) between count queries
+FAILS_PER_HOUR = 5                 # failed payments per pubkey/subnet before 429
+RETRY_RATE_LIMITED_SECONDS = 3600
 
 
 @dataclass(frozen=True)
 class GateVerdict:
-    status: str          # ok | none | invalid | replay | expired | failed | busy
+    status: str          # ok | none | invalid | replay | expired | failed | busy | rate_limited
     detail: str = ""
     n: int = 0
     retry_after: Optional[int] = None
@@ -74,12 +79,14 @@ class GateVerdict:
 
     @property
     def http_status(self) -> int:
-        return {"ok": 200, "none": 200, "expired": 410, "busy": 503}.get(self.status, 403)
+        return {"ok": 200, "none": 200, "expired": 410, "busy": 503,
+                "rate_limited": 429}.get(self.status, 403)
 
     @property
     def error(self) -> str:
         return {"invalid": "gate_invalid", "replay": "gate_replay", "expired": "gate_expired",
-                "failed": "gate_failed", "busy": "gate_busy"}.get(self.status, "")
+                "failed": "gate_failed", "busy": "gate_busy",
+                "rate_limited": "gate_rate_limited"}.get(self.status, "")
 
 
 def client_keys(pubkey: str, addr: Optional[str] = None,
@@ -100,6 +107,7 @@ class GateService:
                  price: Callable[[str, str], int] = lambda client_pubkey, action: 0,
                  conn_factory: Optional[Callable] = None,
                  on_evidence: Optional[Callable[[str, str], None]] = None,
+                 meter=None, verify_concurrency: int = VERIFY_CONCURRENCY,
                  sample_r: int = admission.DEFAULT_SAMPLE,
                  params_version: int = admission.CURRENT_GATE_PARAMS_VERSION,
                  clock: Callable[[], float] = time.time):
@@ -109,14 +117,69 @@ class GateService:
         self._price = price
         self._conn_factory = conn_factory
         self._on_evidence = on_evidence
+        self._meter = meter
         self._r = sample_r
         self._params_version = params_version
         self._params = admission.GATE_PARAMS[params_version]
         self._clock = clock
         self._seen: dict = {}                     # nonce hex → deadline
         self._seen_lock = threading.Lock()
-        self._sem = asyncio.Semaphore(VERIFY_CONCURRENCY)
+        self._sem = asyncio.Semaphore(max(1, verify_concurrency))
         self._quotes = 0
+        self._fails: dict = {}                    # exclusion key → [timestamps]
+        self._fails_lock = threading.Lock()
+        self._seed_ticks = 0
+        self._seed_free: Optional[int] = None
+        if meter is not None and conn_factory is not None:
+            meter.subscribe_samples(self.idle_seed)
+
+    # -- idle gold seeding -----------------------------------------------------------
+
+    def idle_seed(self, _snapshot=None) -> None:
+        """One authorless gold entry per load-meter sample while the node is
+        dormant and fewer than SEED_GOLD_TARGET are on offer — the O(1)
+        prefilter is armed from the first packet, at ~34 ms per 2 s at most,
+        and never under load (runs on the meter's thread, off any request)."""
+        if self._meter is None or not self._meter.dormant:
+            return
+        self._seed_ticks += 1
+        if self._seed_free is None or self._seed_ticks % SEED_CHECK_EVERY == 0:
+            self._seed_free = self._pool(gate_pool.free_seed_gold, self._params_version) or 0
+        if self._seed_free >= SEED_GOLD_TARGET:
+            return
+        import os
+        task = os.urandom(admission.TASK_LEN)
+        try:
+            answer = admission.solve(task, self._params)
+        except identity_pow.HashingError:
+            return
+        self._pool(gate_pool.mint, task_input=task, answer=answer, klass="gold", origin="seed",
+                   params_version=self._params_version, source_pubkey=self.server_pubkey,
+                   source_nonce="seed", recipient_keys=[])
+        self._seed_free += 1
+
+    # -- failed-payment backstop --------------------------------------------------------
+
+    def _rate_limited(self, keys: Sequence[str]) -> bool:
+        now = self._clock()
+        with self._fails_lock:
+            for k in keys:
+                stamps = [t for t in self._fails.get(k, ()) if now - t < 3600]
+                if stamps:
+                    self._fails[k] = stamps
+                else:
+                    self._fails.pop(k, None)
+                if len(stamps) >= FAILS_PER_HOUR:
+                    return True
+        return False
+
+    def _note_failure(self, keys: Sequence[str]) -> None:
+        now = self._clock()
+        with self._fails_lock:
+            for k in keys:
+                self._fails.setdefault(k, []).append(now)
+            if len(self._fails) > 20_000:
+                self._fails = {k: v for k, v in self._fails.items() if v and now - v[-1] < 3600}
 
     # -- pool plumbing (sync, callers wrap in to_thread) --------------------------
 
@@ -227,6 +290,12 @@ class GateService:
         if params_version != self._params_version:
             return GateVerdict("invalid", "params version", n)
 
+        # A key/subnet that keeps failing payments does not get to make us
+        # verify anything for an hour (WAF-grade: an honest client fails once
+        # by accident, not five times).
+        if self._rate_limited(keys):
+            return GateVerdict("rate_limited", "too many failed payments", n, RETRY_RATE_LIMITED_SECONDS)
+
         # Replay is decided on the nonce alone — before anything that depends
         # on lease state (a settled lease no longer resolves), and before the
         # expensive part; a transient failure releases it again.
@@ -242,7 +311,10 @@ class GateService:
             return GateVerdict("invalid", "tasks digest", n)
         if len(answers) != n:
             await asyncio.to_thread(self._settle_used, entries, keys)
+            self._note_failure(keys)
             return GateVerdict("failed", "answer count", n)          # nonce stays burned
+        if n == 0:
+            return GateVerdict("ok", "", 0)                          # a free quote verifies nothing
 
         # Positions: packet position p holds original index order[p]; original
         # indices >= n_fresh are pool entries (in lease/id order).
@@ -256,10 +328,16 @@ class GateService:
             if e["class"] == "gold" and e["origin"] != "claim":
                 if not hmac.compare_digest(e["answer"], answers[p]):
                     await asyncio.to_thread(self._settle_used, entries, keys)
+                    self._note_failure(keys)
                     logger.info("gate: gold mismatch from %s", client_pubkey[:8])
                     return GateVerdict("failed", "gold mismatch", n)
 
-        # 3. fresh sample — R·w, the one place a transient failure may occur
+        # 3. fresh sample — R·w, the one place a transient failure may occur.
+        # The ceiling wins: at exhausted headroom we do not spend R·w on
+        # strangers at all (identity lane never reaches this path).
+        if self._meter is not None and self._meter.headroom < VERIFY_MIN_HEADROOM:
+            self._release_nonce(nonce_hex)
+            return GateVerdict("busy", "node at its ceiling", n, RETRY_BUSY_SECONDS)
         try:
             await asyncio.wait_for(self._sem.acquire(), VERIFY_WAIT_SECONDS)
         except asyncio.TimeoutError:
@@ -293,9 +371,11 @@ class GateService:
             self._settle, client_pubkey, nonce_hex, keys, inputs, answers, entries, pool_at,
             fresh_positions, sampled, truths, fresh_ok, audits)
         if not fresh_ok:
+            self._note_failure(keys)
             logger.info("gate payment failed for %s (n=%d)", client_pubkey[:8], n)
             return GateVerdict("failed", "sampled answers wrong", n, minted=minted)
         if minted.get("client_lied"):
+            self._note_failure(keys)
             logger.info("gate: %s lied on a probe (audit)", client_pubkey[:8])
             return GateVerdict("failed", "probe audit", n, minted=minted)
         return GateVerdict("ok", "", n, minted=minted)
@@ -442,6 +522,56 @@ def _selftest(dsn: str) -> None:
         # replay
         vR = asyncio.run(svc.check_payment(admission.encode_submission(qD["quote"], qD["sig"], answers), D, kD))
         assert vR.status == "replay"
+        # idle seeding: a dormant meter grows authorless gold to the target, one per sample;
+        # a stranger's very first garbage packet then dies on memcmp — no fresh sample spent
+        class Meter:
+            headroom = 0.9
+            profile = "standard"
+            @property
+            def dormant(self):
+                return self.headroom >= 0.5
+        svc._meter = Meter()
+        for _ in range(SEED_GOLD_TARGET + 3):
+            svc.idle_seed()
+        with factory() as conn:
+            assert gate_pool.free_seed_gold(conn, 1) == SEED_GOLD_TARGET
+            with conn.cursor() as cur:            # leave only seed gold on offer
+                cur.execute("UPDATE p2p_gate_pool SET retired_at = now(), retire_reason = 'test' "
+                            "WHERE class = 'gold' AND origin <> 'seed' AND retired_at IS NULL AND id > %s", (first_id,))
+            conn.commit()
+        E, kE = "ff" * 32, ["ff" * 32, "subnet:5"]
+        qE = svc.quote(E, kE)
+        with factory() as conn:
+            gold = [e for e in gate_pool.leased(conn, qE["quote"]["nonce"]) if e["class"] == "gold"]
+        vE = asyncio.run(svc.check_payment(admission.encode_submission(
+            qE["quote"], qE["sig"], [os.urandom(32) for _ in qE["tasks"]]), E, kE))
+        assert vE.status == "failed" and vE.detail == "gold mismatch" and vE.minted == {}, vE
+        assert len(gold) == 1 and gold[0]["origin"] == "seed" and gold[0]["recipient_keys"] == [] , gold
+        with factory() as conn, conn.cursor() as cur:
+            cur.execute("SELECT retire_reason, recipient_keys FROM p2p_gate_pool WHERE id = %s", (gold[0]["id"],))
+            assert cur.fetchone() == ("used", kE)
+            assert gate_pool.free_seed_gold(conn, 1) == SEED_GOLD_TARGET - 1
+        svc._meter.headroom = 0.2                 # under load the seeder is silent
+        svc.idle_seed()
+        with factory() as conn:
+            assert gate_pool.free_seed_gold(conn, 1) == SEED_GOLD_TARGET - 1
+        # the ceiling wins: at exhausted headroom a priced packet is not verified at all (503, nonce released)
+        svc._meter.headroom = 0.05
+        qF = svc.quote(D, kD)
+        inputs = [bytes.fromhex(t) for t in qF["tasks"]]
+        answers = admission.solve_all(inputs, small, threads=1)
+        vF = asyncio.run(svc.check_payment(admission.encode_submission(qF["quote"], qF["sig"], answers), D, kD))
+        assert vF.status == "busy" and vF.http_status == 503, vF
+        svc._meter.headroom = 0.9
+        assert asyncio.run(svc.check_payment(admission.encode_submission(qF["quote"], qF["sig"], answers), D, kD)).status == "ok"
+        # failed-payment backstop: E already failed twice (garbage above counted once) → keep failing
+        assert svc._rate_limited(kE) is False
+        for _ in range(FAILS_PER_HOUR):
+            pay(E, kE, corrupt="garbage")
+        _, vG = pay(E, kE)
+        assert vG.status == "rate_limited" and vG.http_status == 429, vG
+        _, vH = pay("0a" * 32, ["0a" * 32, "subnet:5"])           # same subnet → same verdict
+        assert vH.status == "rate_limited", vH
         with factory() as conn:
             print("  final:", gate_pool.stats(conn))
         print("selftest OK")

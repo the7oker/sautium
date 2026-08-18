@@ -2286,7 +2286,7 @@ DO $$ BEGIN
     CREATE TYPE p2p_pool_class AS ENUM ('gold', 'silver');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN
-    CREATE TYPE p2p_pool_origin AS ENUM ('sample', 'audit', 'garbage', 'claim');
+    CREATE TYPE p2p_pool_origin AS ENUM ('sample', 'audit', 'garbage', 'claim', 'seed');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 CREATE TABLE IF NOT EXISTS p2p_gate_pool (
@@ -2294,7 +2294,7 @@ CREATE TABLE IF NOT EXISTS p2p_gate_pool (
     task_input      BYTEA NOT NULL,                 -- 32-byte task
     answer          BYTEA NOT NULL,                 -- gold: truth; silver: the claim
     class           p2p_pool_class NOT NULL,
-    origin          p2p_pool_origin NOT NULL,       -- promoted silver keeps origin 'claim'
+    origin          p2p_pool_origin NOT NULL,       -- promoted silver keeps origin 'claim'; 'seed' = idle-minted, authorless
     params_version  SMALLINT NOT NULL,
     source_pubkey   TEXT NOT NULL,
     source_nonce    TEXT NOT NULL,

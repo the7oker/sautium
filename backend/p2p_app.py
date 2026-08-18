@@ -296,10 +296,13 @@ def _gate():
             with get_conn() as conn:
                 identity_registry.mark_failed(conn, pubkey, None, reason)
 
+        from desktop.p2p import load_meter
+        meter = load_meter.current()
         _gate_svc = gate_service.GateService(
             ident["public_key_hex"], key.sign,
             admission.derive_gate_secret(key.private_bytes_raw()),
-            conn_factory=get_conn, on_evidence=evidence)
+            conn_factory=get_conn, on_evidence=evidence, meter=meter,
+            verify_concurrency=1 if (meter is not None and meter.profile == "lite") else 2)
     return _gate_svc
 
 
