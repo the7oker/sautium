@@ -181,7 +181,10 @@ def test_worker_contract():
         assert mirror.verify_certificate(retake, trusted=[issuer])
     assert r["mailboxAfterRetake"]["pubkey"] == email_cert["pubkey"]
     assert r["retakeAgain"]["body"]["birth_cert"] == retake         # same key, same mailbox → no change
-    # the domain token: shared by every gmail identity, distinct from the address token
+    # the domain token: shared by every gmail identity, distinct from the address token,
+    # and exactly what the node-side table computes under the same pepper
+    from desktop.p2p import email_domains
+    assert email_cert["email_domain_token"] == email_domains.compute_token("test-email-pepper", "gmail.com")
     assert len(email_cert["email_domain_token"]) == 64
     assert r["register3"]["body"]["birth_cert"]["email_domain_token"] == email_cert["email_domain_token"]
     assert email_cert["email_domain_token"] != email_cert["email_token"]

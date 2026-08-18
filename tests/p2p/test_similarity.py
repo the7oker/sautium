@@ -34,6 +34,14 @@ def test_single_axes_are_worth_nothing_and_conjunctions_add_up():
     assert hits == ["birth", "addr"] and score == sim.W_BIRTH_10MIN + sim.W_ADDR
     # symmetric
     assert sim.pair_score(b, a2) == sim.pair_score(a2, b)
+    # the node-side domain table decides informativeness: a populous provider's real
+    # token says nothing even if the Worker's label drifted; a disposable one is a fleet marker
+    from desktop.p2p import email_domains as ed
+    gmail, mailinator = ed.EMAIL_DOMAINS["gmail.com"][2], ed.EMAIL_DOMAINS["mailinator.com"][2]
+    x = row(issued=T0, subnet="s9", domain=gmail, klass="other")
+    assert sim.pair_score(x, row(issued=T0 + timedelta(seconds=9), subnet="s9", domain=gmail, klass="other"))[1] == ["birth", "subnet"]
+    y = row(issued=T0, subnet="s9", domain=mailinator, klass="disposable")
+    assert sim.pair_score(y, row(issued=T0 + timedelta(seconds=9), subnet="s9", domain=mailinator, klass="disposable"))[1] == ["birth", "subnet", "domain"]
 
 
 def test_mailbox_is_a_hard_link_and_the_wave_hint_is_an_axis():

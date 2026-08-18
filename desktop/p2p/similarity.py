@@ -22,9 +22,10 @@ that set them are measured after launch, plan § "Точки поверненн�
               punished for it)
     addr      an exact address in common (first/last)        1.5
     subnet    a /24 (IPv6 /48) in common                     1.0
-    domain    same mailbox domain, class other|disposable    1.5
-              (every gmail identity shares the major-class domain: no
-              information)
+    domain    same mailbox domain when sharing it means      1.5
+              something (email_domains.informative: a populous
+              provider — no; a disposable service or a domain the
+              table has no opinion about — yes)
 
 Behaviour and taste (targets, schedule) carry no identity weight on
 purpose — "economic ballast": a bot fills them with noise for free, and in
@@ -52,7 +53,6 @@ mount; `install()/current()` like the load meter and the pricer.
 
 import ipaddress
 import logging
-import math
 import queue
 import threading
 import time
@@ -140,13 +140,24 @@ def pair_score(a: dict, b: dict) -> tuple:
         if subs_a & subs_b:
             hits.append("subnet")
             score += W_SUBNET
-    if (a.get("email_domain_token") and a.get("email_domain_token") == b.get("email_domain_token")
-            and a.get("email_class") != "major" and b.get("email_class") != "major"):
+    domain = a.get("email_domain_token")
+    if domain and domain == b.get("email_domain_token") and _domain_informative(domain, a, b):
         hits.append("domain")
         score += W_DOMAIN
     if "mailbox" not in hits and len(hits) < CONJUNCTION_MIN_AXES:
         return 0.0, []
     return score, hits
+
+
+def _domain_informative(domain_token: str, a: dict, b: dict) -> bool:
+    """The node-side table decides (email_domains); when it has no opinion,
+    the Worker's issuance-time class still rules out a populous provider —
+    the two lists may drift, and a false "rare domain" is the costlier
+    mistake."""
+    from desktop.p2p import email_domains
+    if email_domains.tier_of(domain_token) is not None:
+        return email_domains.informative(domain_token)
+    return a.get("email_class") != "major" and b.get("email_class") != "major"
 
 
 def cluster_from_rows(row: dict, candidates: Sequence[dict]) -> list:
