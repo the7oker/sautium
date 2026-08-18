@@ -137,6 +137,20 @@ store.set(`born:${s2.pubHex}`, JSON.stringify({ born_at: "2026-07-05T10:11:12Z",
 const legacyRead = await call("GET", `/birth-certificate?pubkey=${s2.pubHex}`);
 const legacyRecord = JSON.parse(store.get(`born:${s2.pubHex}`));
 
+// --- subject 6: a v2 EMAIL record from before the domain token existed ---
+const s6 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
+store.set(`born:${s6.pubHex}`, JSON.stringify({
+  v: 2, issued_at: "2026-07-06T00:00:00Z", method: "email", difficulty: 32, params_version: 1,
+  email_token: "ef".repeat(32), email_class: "other", sig_v2: "cd".repeat(64) }));
+const legacyV2Read = await call("GET", `/birth-certificate?pubkey=${s6.pubHex}`);
+const legacyV2Record = JSON.parse(store.get(`born:${s6.pubHex}`));
+const pubDigest6 = hex(new Uint8Array(await subtle.digest("SHA-256", s6.pubBytes))).slice(0, 12).toUpperCase();
+const inviteCode6 = `frank#${pubDigest6.slice(0, 4)}-${pubDigest6.slice(4, 8)}-${pubDigest6.slice(8, 12)}`;
+const email6 = "frank@example.net";
+store.set(`verified:${inviteCode6.replace("#", ":")}`,
+  JSON.stringify({ email: email6, pubkey: s6.pubHex, born_at: "2026-07-06T00:00:00Z", verified_at: "2026-07-06T00:10:00Z" }));
+const legacyV2Check = await call("GET", `/check-email?invite_code=${encodeURIComponent(inviteCode6)}&email=${encodeURIComponent(email6)}&public_key_hex=${s6.pubHex}&signature=${await sign(s6, `check-email:${inviteCode6}:${email6}`)}`);
+
 // --- a disposable-domain registration for the class marker ---
 const s4 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
 const issue4 = await call("POST", "/birth-certificate", {
@@ -181,7 +195,7 @@ for (let i = 0; i < 4; i++) {
   }, { ip: `198.51.100.${10 + i}`, cf: { asn: 64500, country: "UA" } });
   burst.push(r);
 }
-const ledgerRows = db.prepare("SELECT asn, cc, method, m_shadow, n_sub24, n_asn1, n_glob1 FROM births ORDER BY rowid").all();
+const ledgerRows = db.prepare("SELECT asn, cc, method, m_shadow, n_sub24, n_asn1, n_glob1, addr, n_addr24 FROM births ORDER BY rowid").all();
 
 const stats = await call("GET", "/issuance-stats");
 const badSig = await call("POST", "/birth-certificate", {
@@ -195,6 +209,7 @@ console.log(JSON.stringify({
   legacyRead, legacyRecord,
   register4,
   check1, check2, legacyRecordAfterCheck, check5,
+  legacyV2Read, legacyV2Record, legacyV2Check,
   burst, ledgerRows,
   stats, badSig,
   verified_record: JSON.parse(store.get(`verified:${inviteCode.replace("#", ":")}`)),

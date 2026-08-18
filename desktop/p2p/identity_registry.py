@@ -80,6 +80,7 @@ SCHEMA_SQL = (
          params_version  SMALLINT NOT NULL,
          email_token     TEXT,
          email_class     p2p_email_class,
+         email_domain_token TEXT,
          issuer          TEXT NOT NULL,
          cert_sig        TEXT NOT NULL,
          proof_nonce     TEXT,
@@ -92,8 +93,11 @@ SCHEMA_SQL = (
          first_addr      UUID,
          last_addr       UUID
        )""",
+    """ALTER TABLE p2p_identities ADD COLUMN IF NOT EXISTS email_domain_token TEXT""",
     """CREATE INDEX IF NOT EXISTS idx_p2p_identities_email_token
          ON p2p_identities (email_token) WHERE email_token IS NOT NULL""",
+    """CREATE INDEX IF NOT EXISTS idx_p2p_identities_email_domain
+         ON p2p_identities (email_domain_token) WHERE email_domain_token IS NOT NULL""",
     """CREATE INDEX IF NOT EXISTS idx_p2p_identities_last_seen
          ON p2p_identities (last_seen_at)""",
     """CREATE INDEX IF NOT EXISTS idx_p2p_identities_issued
@@ -127,7 +131,7 @@ def addr_uuid(host: Optional[str]) -> Optional[str]:
 
 
 _ROW_COLUMNS = ("pubkey", "cert_v", "method", "issued_at", "difficulty",
-                "params_version", "email_token", "email_class", "issuer",
+                "params_version", "email_token", "email_class", "email_domain_token", "issuer",
                 "cert_sig", "proof_nonce", "status", "fail_reason",
                 "first_seen_at", "verified_at", "last_seen_at", "contacts",
                 "first_addr", "last_addr")
@@ -194,14 +198,14 @@ def observe(conn, cert: dict, *, proof: Optional[dict] = None,
         if existing is None:
             cur.execute("""
                 INSERT INTO p2p_identities (pubkey, cert_v, method, issued_at, difficulty,
-                    params_version, email_token, email_class, issuer, cert_sig, proof_nonce,
-                    status, verified_at, first_addr, last_addr)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    params_version, email_token, email_class, email_domain_token, issuer,
+                    cert_sig, proof_nonce, status, verified_at, first_addr, last_addr)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         CASE WHEN %s = 'verified' THEN now() END, %s, %s)
             """, (pubkey, cert["v"], cert["method"], issued_at, cert["difficulty"],
                   cert["params_version"], cert.get("email_token"), cert.get("email_class"),
-                  cert["issuer"], cert["sig"], proof_nonce, email_status, email_status,
-                  addr_id, addr_id))
+                  cert.get("email_domain_token"), cert["issuer"], cert["sig"], proof_nonce,
+                  email_status, email_status, addr_id, addr_id))
             _evict_if_over_cap(cur)
             conn.commit()
             row = get(conn, pubkey)
@@ -228,7 +232,8 @@ def observe(conn, cert: dict, *, proof: Optional[dict] = None,
             cur.execute("""
                 UPDATE p2p_identities
                    SET cert_v = %s, method = %s, difficulty = %s, params_version = %s,
-                       email_token = %s, email_class = %s, issuer = %s, cert_sig = %s,
+                       email_token = %s, email_class = %s, email_domain_token = %s,
+                       issuer = %s, cert_sig = %s,
                        proof_nonce = COALESCE(%s, proof_nonce),
                        status = CASE WHEN %s AND status <> 'failed' THEN 'verified'::p2p_identity_status
                                      ELSE status END,
@@ -238,8 +243,8 @@ def observe(conn, cert: dict, *, proof: Optional[dict] = None,
                        last_addr = COALESCE(%s, last_addr)
                  WHERE pubkey = %s
             """, (cert["v"], cert["method"], cert["difficulty"], cert["params_version"],
-                  cert.get("email_token"), cert.get("email_class"), cert["issuer"], cert["sig"],
-                  proof_nonce, upgrade, upgrade, addr_id, pubkey))
+                  cert.get("email_token"), cert.get("email_class"), cert.get("email_domain_token"),
+                  cert["issuer"], cert["sig"], proof_nonce, upgrade, upgrade, addr_id, pubkey))
     conn.commit()
     row = get(conn, pubkey)
     row["anomaly"] = False
@@ -421,10 +426,11 @@ def _selftest(dsn: str) -> None:
     trusted_verify = partial(birth_cert.verify_certificate, trusted=[issuer])
 
     def make_cert(method="pow", difficulty=2, issued_at="2026-08-17T10:00:00Z", pubkey=None):
-        cert = {"v": 2, "pubkey": pubkey or os.urandom(32).hex(), "issued_at": issued_at,
+        cert = {"v": 3, "pubkey": pubkey or os.urandom(32).hex(), "issued_at": issued_at,
                 "method": method, "difficulty": difficulty, "params_version": 1,
                 "email_token": "ab" * 32 if method == "email" else None,
-                "email_class": "other" if method == "email" else None, "issuer": issuer}
+                "email_class": "other" if method == "email" else None,
+                "email_domain_token": "cd" * 32 if method == "email" else None, "issuer": issuer}
         cert["sig"] = authority.sign(birth_cert.canonical_payload(cert)).hex()
         return cert
 

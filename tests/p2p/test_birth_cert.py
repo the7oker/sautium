@@ -34,7 +34,8 @@ def _subject_hex():
 
 
 def _signed(mirror, key, issuer, **fields):
-    cert = {"v": 2, "issuer": issuer, "email_token": None, "email_class": None}
+    cert = {"v": 3, "issuer": issuer, "email_token": None, "email_class": None,
+            "email_domain_token": None}
     cert.update(fields)
     cert["sig"] = key.sign(mirror.canonical_payload(cert)).hex()
     return cert
@@ -50,7 +51,7 @@ def _pow_cert(mirror, key, issuer, **over):
 def _email_cert(mirror, key, issuer, **over):
     base = dict(pubkey=_subject_hex(), issued_at="2026-08-17T12:00:00Z",
                 method="email", difficulty=32, params_version=1,
-                email_token="ab" * 32, email_class="major")
+                email_token="ab" * 32, email_class="major", email_domain_token="cd" * 32)
     base.update(over)
     return _signed(mirror, key, issuer, **base)
 
@@ -68,7 +69,8 @@ def test_mirrors_produce_identical_payloads():
     assert launcher_mirror.canonical_payload(cert) == backend_mirror.canonical_payload(cert)
     assert backend_mirror.verify_certificate(cert, trusted=[issuer])
     pow_cert = _pow_cert(launcher_mirror, key, issuer)
-    assert launcher_mirror.canonical_payload(pow_cert).endswith(b":32:1::")
+    assert launcher_mirror.canonical_payload(pow_cert).endswith(b":32:1:::")
+    assert launcher_mirror.canonical_payload(pow_cert).startswith(b"sautium-birth:v3:")
 
 
 @pytest.mark.parametrize("mirror", MIRRORS, ids=["launcher", "backend"])
@@ -92,6 +94,7 @@ def test_rejects_forgeries_and_bad_shapes(mirror):
     v1 = {"v": 1, "pubkey": good["pubkey"], "born_at": "2026-07-05T10:11:12Z",
           "issuer": issuer, "sig": good["sig"]}
     assert not mirror.verify_certificate(v1, trusted=[issuer])
+    assert not mirror.verify_certificate(dict(good, v=2), trusted=[issuer])
 
     # Shape checks run before the signature check and must never raise on
     # network-supplied garbage.
@@ -107,6 +110,10 @@ def test_rejects_forgeries_and_bad_shapes(mirror):
     assert not mirror.verify_certificate(dict(email, email_token=None), trusted=[issuer])
     assert not mirror.verify_certificate(dict(email, email_token="zz" * 32), trusted=[issuer])
     assert not mirror.verify_certificate(dict(email, email_class="corporate"), trusted=[issuer])
+    assert not mirror.verify_certificate(dict(email, email_domain_token="zz" * 32), trusted=[issuer])
+    # a migrated email record may lack the domain token (empty) — signed as such
+    assert mirror.verify_certificate(_email_cert(mirror, key, issuer, email_domain_token=None), trusted=[issuer])
+    assert not mirror.verify_certificate(dict(good, email_domain_token="cd" * 32), trusted=[issuer])
     assert not mirror.verify_certificate({}, trusted=[issuer])
     assert not mirror.verify_certificate({"v": 2, "issuer": issuer}, trusted=[issuer])
 
@@ -123,9 +130,11 @@ def test_worker_contract():
 
     pow_cert = r["issue1"]["body"]
     assert r["issue1"]["status"] == 200
+    assert pow_cert["v"] == 3
     assert pow_cert["method"] == "pow" and pow_cert["difficulty"] == 32
     assert pow_cert["params_version"] == 1
     assert pow_cert["email_token"] is None and pow_cert["email_class"] is None
+    assert pow_cert["email_domain_token"] is None
     for mirror in MIRRORS:
         assert mirror.verify_certificate(pow_cert, trusted=[issuer])
         assert not mirror.verify_certificate(pow_cert)      # not the real authority
@@ -147,12 +156,17 @@ def test_worker_contract():
     # same mailbox under dots / +tag / case / googlemail alias → same token
     assert r["register3"]["body"]["birth_cert"]["email_token"] == email_cert["email_token"]
     assert r["register3"]["body"]["birth_cert"]["pubkey"] != email_cert["pubkey"]
+    # the domain token: shared by every gmail identity, distinct from the address token
+    assert len(email_cert["email_domain_token"]) == 64
+    assert r["register3"]["body"]["birth_cert"]["email_domain_token"] == email_cert["email_domain_token"]
+    assert email_cert["email_domain_token"] != email_cert["email_token"]
     # the verified-email record keeps the age anchor under its historic name
     assert r["verified_record"]["born_at"] == pow_cert["issued_at"]
 
     disposable = r["register4"]["body"]["birth_cert"]
     assert disposable["email_class"] == "disposable"
     assert disposable["email_token"] != email_cert["email_token"]
+    assert disposable["email_domain_token"] != email_cert["email_domain_token"]
     for mirror in MIRRORS:
         assert mirror.verify_certificate(disposable, trusted=[issuer])
 
@@ -162,7 +176,19 @@ def test_worker_contract():
         assert mirror.verify_certificate(legacy, trusted=[issuer])
     rec = r["legacyRecord"]
     assert rec["born_at"] == "2026-07-05T10:11:12Z" and rec["sig"] == "ab" * 64   # rollback-safe
-    assert rec["sig_v2"] == legacy["sig"]
+    assert rec["sig_v3"] == legacy["sig"]
+    # a v2 email record (pre-domain-token) is served as v3 with the field empty,
+    # keeps its v2 signature for rollback, and gains the token on check-email
+    v2 = r["legacyV2Read"]["body"]
+    assert v2["v"] == 3 and v2["method"] == "email" and v2["email_domain_token"] is None
+    assert v2["issued_at"] == "2026-07-06T00:00:00Z"
+    for mirror in MIRRORS:
+        assert mirror.verify_certificate(v2, trusted=[issuer])
+    assert r["legacyV2Record"]["sig_v2"] == "cd" * 64 and r["legacyV2Record"]["sig_v3"] == v2["sig"]
+    filled = r["legacyV2Check"]["body"]["birth_cert"]
+    assert filled["email_domain_token"] and len(filled["email_domain_token"]) == 64
+    assert filled["issued_at"] == v2["issued_at"]            # the anchor never moves
+    assert len(filled["email_token"]) == 64                   # recomputed from the real mailbox
 
     # check-email returns the email cert for an upgraded identity…
     assert r["check1"]["body"]["verified"] is True
@@ -187,21 +213,27 @@ def test_worker_contract():
     burst_rows = rows[3:]
     assert [row["n_sub24"] for row in burst_rows] == [0, 1, 2, 3]
     assert [row["n_asn1"] for row in burst_rows] == [0, 1, 2, 3]
+    assert [row["n_addr24"] for row in burst_rows] == [0, 0, 0, 0]     # distinct addresses in the burst
     assert [row["m_shadow"] for row in burst_rows] == [1, 1, 2, 2]     # 3rd from one /24 in a day doubles
+    # the three earlier identities came from ONE test address → the exact-address axis fires
+    assert [row["n_addr24"] for row in rows[:3]] == [0, 1, 2]
+    assert rows[2]["m_shadow"] == 4                                    # addr (≥2) × subnet (≥2)
+    assert all(row["addr"] for row in rows)
     assert all(row["asn"] == 64500 and row["cc"] == "UA" for row in burst_rows)
     assert [row["method"] for row in rows[:3]] == ["email", "email", "email"]   # upgrades marked
     assert [row["n_glob1"] for row in rows] == list(range(7))
 
     policy = r["stats"]["body"]["policy"]
-    assert policy["cert_version"] == 2 and policy["pow_difficulty"] == 32
+    assert policy["cert_version"] == 3 and policy["pow_difficulty"] == 32
     assert policy["adaptive_armed"] is False and policy["adaptive_cap"] == 8
     day = next(iter(r["stats"]["body"]["days"].values()))
     assert day["births"] == 7 and day["email"] == 4       # 3 registrations + 1 check-email upgrade
     ledger = r["stats"]["body"]["ledger"]
     assert ledger["total"] == 7 and ledger["last_24h"]["births"] == 7
+    assert ledger["last_24h"]["distinct_addr"] == 5
     # m2 = 3: two burst rows plus the third of the earlier identities — all
     # three of those were born from the same test IP within one second
     assert ledger["last_24h"]["email"] == 3 and ledger["last_24h"]["m2"] == 3
-    assert ledger["last_24h"]["m4"] == 0
+    assert ledger["last_24h"]["m4"] == 1
     assert ledger["top_asn_7d"][0] == {"asn": 64500, "cc": "UA", "births": 4}
     assert r["badSig"]["status"] == 403

@@ -46,7 +46,11 @@ TRUSTED_AUTHORITIES = [
 # succession key) plus a coarse email_class. `difficulty` is the expected
 # number of ~2 GiB Argon2id attempts pinned at issuance; `issued_at` is the
 # first-issuance moment (idempotent, the age anchor).
-CERT_VERSION = 2
+# v3 (2026-08-18) adds email_domain_token — the peppered DOMAIN of the
+# mailbox: a similarity axis on its own (a rare domain shared by many
+# identities) that the whole-address token cannot express; empty on email
+# records migrated before the field existed until their next email touch.
+CERT_VERSION = 3
 CERT_METHODS = ("pow", "email")
 EMAIL_CLASSES = ("major", "other", "disposable")
 
@@ -55,12 +59,13 @@ _EMAIL_TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def canonical_payload(cert: dict) -> bytes:
-    """Fixed nine-field payload; the two email fields are empty for pow.
+    """Fixed ten-field payload; the three email fields are empty for pow.
     Mirrors birthPayload() in worker/verify.js."""
     return (
         f"sautium-birth:v{CERT_VERSION}:{cert['pubkey']}:{cert['issued_at']}:"
         f"{cert['method']}:{int(cert['difficulty'])}:{int(cert['params_version'])}:"
-        f"{cert.get('email_token') or ''}:{cert.get('email_class') or ''}"
+        f"{cert.get('email_token') or ''}:{cert.get('email_class') or ''}:"
+        f"{cert.get('email_domain_token') or ''}"
     ).encode("utf-8")
 
 
@@ -76,11 +81,12 @@ def _valid_shape(cert: dict, trusted: list) -> bool:
         return False
     if not (isinstance(params_version, int) and not isinstance(params_version, bool) and params_version >= 1):
         return False
-    token, klass = cert.get("email_token"), cert.get("email_class")
+    token, klass, domain = cert.get("email_token"), cert.get("email_class"), cert.get("email_domain_token")
     if cert["method"] == "email":
         return (isinstance(token, str) and bool(_EMAIL_TOKEN_RE.match(token))
-                and klass in EMAIL_CLASSES)
-    return not token and not klass
+                and klass in EMAIL_CLASSES
+                and (not domain or (isinstance(domain, str) and bool(_EMAIL_TOKEN_RE.match(domain)))))
+    return not token and not klass and not domain
 
 
 def verify_certificate(cert: dict,

@@ -79,9 +79,16 @@ const TRUSTED_AUTHORITIES = [
   "a9f40f70a796926828d894d4384655963ae5bdce38d2c502ede75792552d33cd",
 ];
 // v2 (2026-08-17): {pubkey, issued_at, method: pow|email, difficulty,
-// params_version, email_token, email_class}. Payload format is mirrored by
-// canonical_payload() in the two Python files above.
-const BIRTH_CERT_VERSION = 2;
+// params_version, email_token, email_class}; v3 (2026-08-18) adds
+// email_domain_token — the peppered DOMAIN of a verified mailbox, a
+// similarity axis on its own ("50 identities on one rare domain") that the
+// whole-address token cannot express. Payload format is mirrored by
+// canonical_payload() in the two Python files above. A version bump
+// re-signs every record; a pow identity's proof (mined over the signature)
+// goes stale and is re-mined by the node — the price of "challenge = the
+// authority signature", acceptable pre-release, a grace policy later.
+const BIRTH_CERT_VERSION = 3;
+const SIG_FIELD = `sig_v${BIRTH_CERT_VERSION}`;
 const CERT_METHODS = new Set(["pow", "email"]);
 // Identity proof-of-work policy pinned into every certificate at issuance
 // (desktop/p2p/identity_pow.py owns the parameters themselves). difficulty is
@@ -211,12 +218,12 @@ export default {
 // -----------------------------------------------------------------------
 
 function birthPayload(pubkeyHex, rec) {
-  // Fixed nine-field shape; the two email fields are empty for method:pow.
+  // Fixed ten-field shape; the three email fields are empty for method:pow.
   // Field values never contain ':' (hex, ISO seconds, enum names, integers).
   return new TextEncoder().encode(
     `sautium-birth:v${BIRTH_CERT_VERSION}:${pubkeyHex}:${rec.issued_at}:` +
     `${rec.method}:${rec.difficulty}:${rec.params_version}:` +
-    `${rec.email_token || ""}:${rec.email_class || ""}`
+    `${rec.email_token || ""}:${rec.email_class || ""}:${rec.email_domain_token || ""}`
   );
 }
 
@@ -231,7 +238,10 @@ function isValidCertShape(cert) {
   if (cert.method === "email") {
     if (!/^[0-9a-f]{64}$/.test(cert.email_token || "")) return false;
     if (!["major", "other", "disposable"].includes(cert.email_class)) return false;
-  } else if (cert.email_token || cert.email_class) {
+    // Domain token: 64 hex, or absent on a record migrated before the field
+    // existed (recomputed on the next email touch — register/check-email).
+    if (cert.email_domain_token && !/^[0-9a-f]{64}$/.test(cert.email_domain_token)) return false;
+  } else if (cert.email_token || cert.email_class || cert.email_domain_token) {
     return false;
   }
   return true;
@@ -286,8 +296,9 @@ function certFromRecord(pubkey, rec) {
     params_version: rec.params_version,
     email_token: rec.email_token || null,
     email_class: rec.email_class || null,
+    email_domain_token: rec.email_domain_token || null,
     issuer: TRUSTED_AUTHORITIES[0],
-    sig: rec.sig_v2,
+    sig: rec[SIG_FIELD],
   };
 }
 
@@ -301,8 +312,15 @@ async function loadBirthRecord(env, pubkey) {
    */
   const record = await env.RATE_LIMITS.get(`born:${pubkey}`, "json");
   if (!record) return null;
-  if (record.v === BIRTH_CERT_VERSION) return record;
-  const upgraded = {
+  if (record.v === BIRTH_CERT_VERSION && record[SIG_FIELD]) return record;
+  // v1 {born_at, sig} → policy fields start as pow; v2 → keep every field
+  // (an email record keeps its tokens; the domain token arrives on the next
+  // email touch). Older signature fields stay for rollback.
+  const upgraded = record.v >= 2 ? {
+    ...record,
+    v: BIRTH_CERT_VERSION,
+    email_domain_token: record.email_domain_token || null,
+  } : {
     ...record,
     v: BIRTH_CERT_VERSION,
     issued_at: record.born_at,
@@ -311,8 +329,9 @@ async function loadBirthRecord(env, pubkey) {
     params_version: POW_PARAMS_VERSION,
     email_token: null,
     email_class: null,
+    email_domain_token: null,
   };
-  upgraded.sig_v2 = await signBirthRecord(env, pubkey, upgraded);
+  upgraded[SIG_FIELD] = await signBirthRecord(env, pubkey, upgraded);
   await env.RATE_LIMITS.put(`born:${pubkey}`, JSON.stringify(upgraded));
   return upgraded;
 }
@@ -397,8 +416,9 @@ async function handleBirthCertificate(request, env, corsHeaders) {
       params_version: POW_PARAMS_VERSION,
       email_token: null,
       email_class: null,
+      email_domain_token: null,
     };
-    record.sig_v2 = await signBirthRecord(env, pubkey, record);
+    record[SIG_FIELD] = await signBirthRecord(env, pubkey, record);
     await env.RATE_LIMITS.put(`born:${pubkey}`, JSON.stringify(record));
     await bumpIssuance(env, "births");
   }
@@ -460,6 +480,7 @@ function shadowMultiplier(c) {
   // from one /24 in 24 h doubles), an ASN minting fast, and a mild global
   // term for a flood that is spread across networks.
   let m = 1;
+  if (c.n_addr24 >= 2) m *= 2;          // 3rd birth from one exact address in a day
   if (c.n_sub24 >= 2) m *= 2;
   if (c.n_sub24 >= 5) m *= 2;
   if (c.n_asn1 >= 20) m *= 2;
@@ -479,10 +500,19 @@ export class BirthLedger {
       pubkey TEXT PRIMARY KEY, ts INTEGER NOT NULL, asn INTEGER NOT NULL,
       cc TEXT NOT NULL, sub TEXT NOT NULL, method TEXT NOT NULL,
       m_shadow REAL NOT NULL, n_sub24 INTEGER NOT NULL, n_asn1 INTEGER NOT NULL,
-      n_asn24 INTEGER NOT NULL, n_glob1 INTEGER NOT NULL, n_glob24 INTEGER NOT NULL)`);
+      n_asn24 INTEGER NOT NULL, n_glob1 INTEGER NOT NULL, n_glob24 INTEGER NOT NULL,
+      addr TEXT NOT NULL DEFAULT '', n_addr24 INTEGER NOT NULL DEFAULT 0)`);
+    // Columns added after the first deployment (SQLite: ADD COLUMN only).
+    for (const ddl of [
+      "ALTER TABLE births ADD COLUMN addr TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE births ADD COLUMN n_addr24 INTEGER NOT NULL DEFAULT 0",
+    ]) {
+      try { this.sql.exec(ddl); } catch (e) { /* already there */ }
+    }
     this.sql.exec("CREATE INDEX IF NOT EXISTS births_ts ON births (ts)");
     this.sql.exec("CREATE INDEX IF NOT EXISTS births_sub_ts ON births (sub, ts)");
     this.sql.exec("CREATE INDEX IF NOT EXISTS births_asn_ts ON births (asn, ts)");
+    this.sql.exec("CREATE INDEX IF NOT EXISTS births_addr_ts ON births (addr, ts)");
   }
 
   async fetch(request) {
@@ -505,13 +535,15 @@ export class BirthLedger {
     return Number(this.sql.exec(query, ...params).one().n);
   }
 
-  recordBirth({ pubkey, ts, asn, cc, sub }) {
+  recordBirth({ pubkey, ts, asn, cc, sub, addr }) {
     const prior = this.sql.exec(
-      "SELECT m_shadow, n_sub24, n_asn1, n_asn24, n_glob1, n_glob24 FROM births WHERE pubkey = ?",
+      "SELECT m_shadow, n_sub24, n_asn1, n_asn24, n_glob1, n_glob24, n_addr24 FROM births WHERE pubkey = ?",
       pubkey).toArray();
     if (prior.length) return prior[0];               // idempotent, like issuance
+    addr = addr || "";
     const hour = ts - 3600 * 1000, day = ts - 86400 * 1000;
     const counts = {
+      n_addr24: addr ? this._count("SELECT count(*) AS n FROM births WHERE addr = ? AND ts > ?", addr, day) : 0,
       n_sub24: sub ? this._count("SELECT count(*) AS n FROM births WHERE sub = ? AND ts > ?", sub, day) : 0,
       n_asn1: asn ? this._count("SELECT count(*) AS n FROM births WHERE asn = ? AND ts > ?", asn, hour) : 0,
       n_asn24: asn ? this._count("SELECT count(*) AS n FROM births WHERE asn = ? AND ts > ?", asn, day) : 0,
@@ -520,10 +552,10 @@ export class BirthLedger {
     };
     const m_shadow = shadowMultiplier(counts);
     this.sql.exec(
-      `INSERT INTO births (pubkey, ts, asn, cc, sub, method, m_shadow, n_sub24, n_asn1, n_asn24, n_glob1, n_glob24)
-       VALUES (?, ?, ?, ?, ?, 'pow', ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO births (pubkey, ts, asn, cc, sub, method, m_shadow, n_sub24, n_asn1, n_asn24, n_glob1, n_glob24, addr, n_addr24)
+       VALUES (?, ?, ?, ?, ?, 'pow', ?, ?, ?, ?, ?, ?, ?, ?)`,
       pubkey, ts, asn, cc, sub, m_shadow, counts.n_sub24, counts.n_asn1,
-      counts.n_asn24, counts.n_glob1, counts.n_glob24);
+      counts.n_asn24, counts.n_glob1, counts.n_glob24, addr, counts.n_addr24);
     this.sql.exec("DELETE FROM births WHERE ts < ?", ts - LEDGER_RETENTION_MS);
     return { m_shadow, ...counts };
   }
@@ -535,6 +567,7 @@ export class BirthLedger {
       email: this._count("SELECT count(*) AS n FROM births WHERE ts > ? AND method = 'email'", since),
       distinct_asn: this._count("SELECT count(DISTINCT asn) AS n FROM births WHERE ts > ?", since),
       distinct_sub: this._count("SELECT count(DISTINCT sub) AS n FROM births WHERE ts > ?", since),
+      distinct_addr: this._count("SELECT count(DISTINCT addr) AS n FROM births WHERE ts > ? AND addr <> ''", since),
       m2: this._count("SELECT count(*) AS n FROM births WHERE ts > ? AND m_shadow >= 2", since),
       m4: this._count("SELECT count(*) AS n FROM births WHERE ts > ? AND m_shadow >= 4", since),
       m8: this._count("SELECT count(*) AS n FROM births WHERE ts > ? AND m_shadow >= 8", since),
@@ -570,12 +603,17 @@ async function ledgerCall(env, path, body) {
 
 async function ledgerBirth(env, request, pubkey, issuedAtIso) {
   const cf = request.cf || {};
+  const ip = request.headers.get("CF-Connecting-IP") || "";
   return await ledgerCall(env, "/birth", {
     pubkey,
     ts: Date.parse(issuedAtIso),
     asn: Number(cf.asn) || 0,
     cc: String(cf.country || ""),
-    sub: await subnetToken(env, request.headers.get("CF-Connecting-IP") || ""),
+    sub: await subnetToken(env, ip),
+    // The exact address too (peppered, same pseudonym the timestamp notary
+    // uses): a /24 in a cloud provider spans many tenants, one VPS minting
+    // twenty identities is a sharper conjunction than its subnet.
+    addr: ip && env.IP_PEPPER ? await ipHashUuid(env, ip) : "",
   });
 }
 
@@ -755,8 +793,9 @@ async function handleRegisterEmail(request, env, corsHeaders) {
     method: "email",
     email_token: await emailToken(env, normalized),
     email_class: emailClass(normalized),
+    email_domain_token: await emailDomainToken(env, normalized),
   };
-  upgraded.sig_v2 = await signBirthRecord(env, pubkey, upgraded);
+  upgraded[SIG_FIELD] = await signBirthRecord(env, pubkey, upgraded);
   await env.RATE_LIMITS.put(`born:${pubkey}`, JSON.stringify(upgraded));
   if (record.method !== "email") {
     await bumpIssuance(env, "email");
@@ -867,18 +906,22 @@ async function handleCheckEmail(url, env, corsHeaders) {
   // method:email certificate here without a second code round — same
   // proof, same binding (signed request + invite↔pubkey + stored pubkey).
   let record = await loadBirthRecord(env, pubkey);
-  if (record && record.method !== "email") {
+  if (record && (record.method !== "email" || !record.email_domain_token)) {
+    const wasEmail = record.method === "email";
     const normalized = normalizeEmail(email);
     record = {
       ...record,
       method: "email",
       email_token: await emailToken(env, normalized),
       email_class: emailClass(normalized),
+      email_domain_token: await emailDomainToken(env, normalized),
     };
-    record.sig_v2 = await signBirthRecord(env, pubkey, record);
+    record[SIG_FIELD] = await signBirthRecord(env, pubkey, record);
     await env.RATE_LIMITS.put(`born:${pubkey}`, JSON.stringify(record));
-    await bumpIssuance(env, "email");
-    await ledgerCall(env, "/method", { pubkey, method: "email" });
+    if (!wasEmail) {
+      await bumpIssuance(env, "email");
+      await ledgerCall(env, "/method", { pubkey, method: "email" });
+    }
   }
   return json({
     verified: true,
@@ -1308,6 +1351,27 @@ function emailClass(normalizedEmail) {
   if (DISPOSABLE_EMAIL_DOMAINS.has(domain)) return "disposable";
   if (MAJOR_EMAIL_DOMAINS.has(domain)) return "major";
   return "other";
+}
+
+function emailDomain(normalizedEmail) {
+  return normalizedEmail.slice(normalizedEmail.lastIndexOf("@") + 1);
+}
+
+async function emailDomainToken(env, normalizedEmail) {
+  // The mailbox's DOMAIN under the same pepper, separate prefix: for a
+  // major provider it is shared by millions (no information), for a rare
+  // domain it is a cluster axis on its own — the whole-address token cannot
+  // say "these fifty identities live on one odd domain". No local-part
+  // token on purpose: near-zero signal, and it would link a person across
+  // providers by name — beyond the accepted mailbox-level trade.
+  const pepper = env.EMAIL_PEPPER;
+  if (!pepper) throw new Error("EMAIL_PEPPER is not configured");
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(pepper),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign(
+    "HMAC", key, new TextEncoder().encode(`email-domain:${emailDomain(normalizedEmail)}`)));
+  return bytesToHex(mac);
 }
 
 async function emailToken(env, normalizedEmail) {

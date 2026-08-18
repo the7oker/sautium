@@ -9,9 +9,9 @@ TEST_PARAMS = PowParams(version=0, memory_kib=8 * 1024, time_cost=1, parallelism
 
 
 def _cert(method="pow", difficulty=6):
-    return {"v": 2, "pubkey": os.urandom(32).hex(), "issued_at": "2026-08-17T12:00:00Z",
+    return {"v": 3, "pubkey": os.urandom(32).hex(), "issued_at": "2026-08-17T12:00:00Z",
             "method": method, "difficulty": difficulty, "params_version": 1,
-            "email_token": None, "email_class": None,
+            "email_token": None, "email_class": None, "email_domain_token": None,
             "issuer": "ab" * 32, "sig": os.urandom(64).hex()}
 
 

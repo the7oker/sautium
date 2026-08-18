@@ -2214,6 +2214,7 @@ CREATE TABLE IF NOT EXISTS p2p_identities (
     params_version  SMALLINT NOT NULL,
     email_token     TEXT,                           -- HMAC under the Worker pepper; equality = same mailbox
     email_class     p2p_email_class,
+    email_domain_token TEXT,                        -- HMAC of the mailbox DOMAIN; a rare shared domain = cluster axis
     issuer          TEXT NOT NULL,
     cert_sig        TEXT NOT NULL,                  -- the PoW challenge
     proof_nonce     TEXT,
@@ -2228,6 +2229,8 @@ CREATE TABLE IF NOT EXISTS p2p_identities (
 );
 CREATE INDEX IF NOT EXISTS idx_p2p_identities_email_token
     ON p2p_identities (email_token) WHERE email_token IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_p2p_identities_email_domain
+    ON p2p_identities (email_domain_token) WHERE email_domain_token IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_p2p_identities_last_seen ON p2p_identities (last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_p2p_identities_issued ON p2p_identities (issued_at);
 
