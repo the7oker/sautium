@@ -9232,8 +9232,14 @@
           return;
         }
         msg.style.color = 'var(--color-positive)';
-        msg.textContent = 'Saved.';
-        setTimeout(() => { close(); render(); }, 400);
+        msg.textContent = 'Saved — sending the code…';
+        // A freshly entered address goes straight into verification: the
+        // code is sent and its dialog opens without a second tap on
+        // "Verify" (that row stays for retries). The screen re-renders
+        // afterwards either way, so the row reflects the outcome.
+        close();
+        await openEmailVerifyFlow();
+        render();
       } catch (err) {
         msg.style.color = 'var(--color-negative)';
         msg.textContent = String(err);

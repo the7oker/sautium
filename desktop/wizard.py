@@ -194,51 +194,60 @@ class SetupWizard(ctk.CTkToplevel):
             self._account_pass2_val = password2
             self._account_email_val = email
 
+            if email and "@" not in email:
+                self._account_error.configure(text="Invalid email address")
+                return False
+
             if not username:
                 # Skipping the form still produces a real account —
                 # `anonymous-<4 hex>` username plus a 32-byte random
                 # password. Without one `_get_identity()` returns None
                 # downstream, which hides the invite code and leaves
                 # Friends / chat / P2P sync silently broken. The user
-                # can rename later from Profile.
-                anon_user = "anonymous-" + secrets.token_hex(2)
-                anon_pass = secrets.token_urlsafe(32)
+                # can rename later from Profile. An email entered with
+                # it is NOT dropped: it is verified for the anonymous
+                # identity below, exactly as for a named one (an
+                # anonymous account with a verified mailbox is a
+                # method:email identity). The credentials are minted
+                # once and reused across re-renders, so the identity
+                # that received the code is the one that redeems it.
+                acct = self.config.get("_account") or {}
+                if not acct.get("anonymous"):
+                    acct = {
+                        "username": "anonymous-" + secrets.token_hex(2),
+                        "password": secrets.token_urlsafe(32),
+                        "anonymous": True,
+                    }
+                self.config["_account"] = acct
+                username, password = acct["username"], acct["password"]
+                if not email:
+                    return True
+            else:
+                from desktop.node_identity import validate_username
+                try:
+                    validate_username(username)
+                except ValueError as e:
+                    self._account_error.configure(text=str(e))
+                    return False
+
+                if not password:
+                    self._account_error.configure(text="Password is required")
+                    return False
+
+                if len(password) < 8:
+                    self._account_error.configure(
+                        text="Password must be at least 8 characters"
+                    )
+                    return False
+
+                if password != password2:
+                    self._account_error.configure(text="Passwords don't match")
+                    return False
+
                 self.config["_account"] = {
-                    "username": anon_user,
-                    "password": anon_pass,
-                    "anonymous": True,
+                    "username": username,
+                    "password": password,
                 }
-                return True
-
-            from desktop.node_identity import validate_username
-            try:
-                validate_username(username)
-            except ValueError as e:
-                self._account_error.configure(text=str(e))
-                return False
-
-            if not password:
-                self._account_error.configure(text="Password is required")
-                return False
-
-            if len(password) < 8:
-                self._account_error.configure(
-                    text="Password must be at least 8 characters"
-                )
-                return False
-
-            if password != password2:
-                self._account_error.configure(text="Passwords don't match")
-                return False
-
-            if email and "@" not in email:
-                self._account_error.configure(text="Invalid email address")
-                return False
-
-            self.config["_account"] = {
-                "username": username,
-                "password": password,
-            }
 
             # If email provided — check if already verified, otherwise send code
             if email:

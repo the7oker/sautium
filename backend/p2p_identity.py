@@ -143,6 +143,7 @@ def derive_private_key(username: str, password: str):
 # derivation, so uncached per-call use is not an option.
 _signing_key_cache = None
 _identity_cache = None
+_identity_cache_mtime = None
 
 
 def load_signing_key(settings):
@@ -176,14 +177,21 @@ def resolve_identity(settings) -> Optional[dict]:
     import json
     from pathlib import Path
 
-    global _identity_cache
-    if _identity_cache is not None:
-        return _identity_cache
+    global _identity_cache, _identity_cache_mtime
 
     if settings.p2p_identity_dir:
+        # Desktop mode: node_info.json is written by the launcher AND by
+        # this backend (email changes) while we run — the cache is keyed
+        # on the file's mtime, so an edit is seen on the next call and a
+        # stale copy can never claim "no email configured" after one was
+        # just saved (the bug this replaced: two independent caches, one
+        # invalidated, the other not).
         info_path = Path(settings.p2p_identity_dir) / "node_info.json"
         if info_path.exists():
             try:
+                mtime = info_path.stat().st_mtime_ns
+                if _identity_cache is not None and _identity_cache_mtime == mtime:
+                    return _identity_cache
                 data = json.loads(info_path.read_text(encoding="utf-8"))
                 if data.get("username"):
                     _identity_cache = {
@@ -193,9 +201,12 @@ def resolve_identity(settings) -> Optional[dict]:
                         "invite_code": data["invite_code"],
                         "email": data.get("email", ""),
                     }
+                    _identity_cache_mtime = mtime
                     return _identity_cache
             except Exception as e:
                 logger.warning(f"Failed to read node_info.json: {e}")
+    if _identity_cache is not None:
+        return _identity_cache
     if settings.p2p_username and settings.p2p_password:
         _identity_cache = derive_identity(
             settings.p2p_username, settings.p2p_password, settings.p2p_email)

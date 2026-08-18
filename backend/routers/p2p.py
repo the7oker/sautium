@@ -145,15 +145,11 @@ def stop_chat_listener():
 
 
 # Cache identity to avoid re-deriving (Argon2id is slow)
-_cached_identity = None
-
-
 def _get_identity():
-    global _cached_identity
-    if _cached_identity is None:
-        from p2p_identity import resolve_identity
-        _cached_identity = resolve_identity(settings)
-    return _cached_identity
+    """One resolution point (p2p_identity.resolve_identity — cached there,
+    keyed on node_info.json's mtime in desktop mode); no second cache here."""
+    from p2p_identity import resolve_identity
+    return resolve_identity(settings)
 
 
 VERIFY_WORKER_URL = "https://sautium-verify.sautium.workers.dev"
@@ -255,8 +251,6 @@ async def set_account_email(req: SetEmailRequest) -> Dict[str, Any]:
     (desktop mode only) and resets user_profile.email_verified — both
     a new email and changing an existing one invalidate the Worker's
     `invite_code → email` mapping for this identity."""
-    global _cached_identity
-
     email = req.email.strip()
     if "@" not in email or "." not in email.split("@", 1)[1]:
         raise HTTPException(400, "Invalid email address")
@@ -280,9 +274,8 @@ async def set_account_email(req: SetEmailRequest) -> Dict[str, Any]:
 
     data["email"] = email
     data["email_verified"] = False
-    info_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    info_path.write_text(json.dumps(data, indent=2), encoding="utf-8")   # resolve_identity re-reads on mtime change
 
-    _cached_identity = None
     _db_execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")
 
     return {"email": email, "email_verified": False}
