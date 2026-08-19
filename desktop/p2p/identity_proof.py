@@ -17,13 +17,21 @@ thread, Docker startup task):
 - otherwise mine in the background at below-normal thread priority behind
   an admission gate that runs before EVERY attempt: >= 2.5 GiB available
   memory (the 2 GiB working set beside a resident ML stack is the real
-  constraint, not CPU) and not on battery. There is no notification API
-  for either condition, so a paused worker re-checks on a fixed cadence
-  through `stop.wait()` — cancellable, and not a race being papered over.
-  `HashingError` (allocation failure) is the same pause, not an error.
+  constraint, not CPU). There is no notification API for that condition,
+  so a paused worker re-checks on a fixed cadence through `stop.wait()` —
+  cancellable, and not a race being papered over. `HashingError`
+  (allocation failure) is the same pause, not an error.
 
-Depends only on identity_pow (argon2-cffi); psutil is optional and used
-solely for the battery check.
+There is deliberately NO battery gate (removed 2026-08-19, Valerii). At
+the golden-age difficulty (E=32 ≈ 30–60 s of one core) the battery cost
+is negligible, while the pause produced an undebuggable-for-users chain
+on laptops: the master refuses the handshake because the proof is
+missing because the machine is unplugged — three hops nobody sees. If an
+armed-era difficulty (E in the hundreds) ever makes minutes of mining on
+battery a real cost, resurrect the gate from git history WITH a visible
+"plug in to finish securing your identity" prompt, not silently.
+
+Depends only on identity_pow (argon2-cffi).
 """
 
 import json
@@ -119,15 +127,6 @@ def _lower_thread_priority() -> None:
         logger.debug("thread priority unchanged: %s", e)
 
 
-def on_battery() -> bool:
-    try:
-        import psutil
-        batt = psutil.sensors_battery()
-    except (ImportError, AttributeError, OSError):
-        return False
-    return bool(batt is not None and batt.power_plugged is False)
-
-
 def ensure_identity_proof(
     cert: dict,
     proof_path: Path,
@@ -137,7 +136,6 @@ def ensure_identity_proof(
     params: Optional[identity_pow.PowParams] = None,
     mem_available_kib: Callable[[], Optional[int]] = identity_pow.mem_available_kib,
     mem_guard_kib: int = MEM_GUARD_KIB,
-    battery: Callable[[], bool] = on_battery,
     hold: Callable[[], Optional[str]] = lambda: None,
     pause_seconds: float = PAUSE_SECONDS,
 ) -> Optional[dict]:
@@ -147,7 +145,7 @@ def ensure_identity_proof(
     `on_state(state)` receives every state change plus one update per
     mining attempt — the caller publishes it (user_settings + NOTIFY).
     `hold()` is an external pause reason (the load meter's "playback"),
-    checked by the same per-attempt gate as memory and battery."""
+    checked by the same per-attempt gate as memory."""
     _lower_thread_priority()
     started = _now_iso()
     state = {"method": cert["method"], "difficulty": cert["difficulty"],
@@ -193,8 +191,6 @@ def ensure_identity_proof(
             external = hold()
             if avail is not None and avail < mem_guard_kib:
                 new_reason = "memory"
-            elif battery():
-                new_reason = "battery"
             elif external:
                 new_reason = external
             else:

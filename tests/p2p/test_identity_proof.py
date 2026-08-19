@@ -18,7 +18,6 @@ def _cert(method="pow", difficulty=6):
 def _run(cert, path, stop=None, **kw):
     states = []
     kw.setdefault("mem_available_kib", lambda: 10 ** 9)
-    kw.setdefault("battery", lambda: False)
     kw.setdefault("pause_seconds", 0.01)
     proof = ip.ensure_identity_proof(cert, path, stop=stop or threading.Event(),
                                      on_state=states.append, params=TEST_PARAMS, **kw)
@@ -93,29 +92,24 @@ def test_corrupt_stored_proof_is_remined(tmp_path):
             stop.set()
 
     ip.ensure_identity_proof(cert, path, stop=stop, on_state=on_state, params=TEST_PARAMS,
-                             mem_available_kib=lambda: 10 ** 9, battery=lambda: False,
+                             mem_available_kib=lambda: 10 ** 9,
                              pause_seconds=0.01)
     assert [s["status"] for s in states][:2] == ["checking", "mining"]
 
 
-def test_gate_pauses_on_memory_and_battery(tmp_path):
+def test_gate_pauses_on_memory(tmp_path):
     cert = _cert(difficulty=2)
-    calls = {"mem": 0, "batt": 0}
+    calls = {"mem": 0}
 
     def mem():
         calls["mem"] += 1
         return 1024 if calls["mem"] <= 2 else 10 ** 9      # low, low, then fine
 
-    def batt():
-        calls["batt"] += 1
-        return calls["batt"] == 1                            # on battery once
-
-    proof, states = _run(cert, tmp_path / ip.PROOF_FILENAME, mem_available_kib=mem, battery=batt)
+    proof, states = _run(cert, tmp_path / ip.PROOF_FILENAME, mem_available_kib=mem)
     assert proof is not None
     seq = [(s["status"], s["detail"]) for s in states]
-    assert ("paused", "memory") in seq and ("paused", "battery") in seq
+    assert ("paused", "memory") in seq
     assert seq[-1] == ("ready", "proof")
-    assert seq.index(("paused", "memory")) < seq.index(("paused", "battery"))
 
 
 def test_stop_before_start_and_during_pause(tmp_path):
@@ -134,7 +128,7 @@ def test_stop_before_start_and_during_pause(tmp_path):
             stop.set()
 
     ip.ensure_identity_proof(cert, tmp_path / ip.PROOF_FILENAME, stop=stop, on_state=on_state,
-                             params=TEST_PARAMS, mem_available_kib=lambda: 1, battery=lambda: False,
+                             params=TEST_PARAMS, mem_available_kib=lambda: 1,
                              pause_seconds=0.01)
     assert [s["status"] for s in states] == ["mining", "paused", "stopped"]
 
