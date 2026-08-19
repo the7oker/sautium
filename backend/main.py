@@ -402,11 +402,22 @@ async def lifespan(app: FastAPI):
 
     # Identity certificate + proof: cache/fetch the certificate, mine the
     # proof for a pow identity in the background (routers/p2p.identity_proof_task).
+    # ONE miner per deployment: in desktop mode (node_info.json present — the
+    # launcher process owns the identity, its own worker mines and publishes
+    # p2p.identity) this backend must not start a second one. Two miners over
+    # the same identity dir each mined their own proof and raced for the file
+    # (Mac stand, 2026-08-19: the registry held one nonce, the disk another).
     global _identity_task, _identity_stop, _mailbox_task
+    _identity_stop = threading.Event()
     if _p2p_identity:
-        from routers.p2p import identity_proof_task
-        _identity_stop = threading.Event()
-        _identity_task = asyncio.create_task(identity_proof_task(_identity_stop))
+        from pathlib import Path as _Path
+        launcher_owned = bool(settings.p2p_identity_dir) and (
+            _Path(settings.p2p_identity_dir) / "node_info.json").exists()
+        if launcher_owned:
+            logger.info("identity proof: launcher owns the miner — backend task skipped")
+        else:
+            from routers.p2p import identity_proof_task
+            _identity_task = asyncio.create_task(identity_proof_task(_identity_stop))
 
     # The master's Worker mailbox (Ф16): messages parked while this node was
     # offline are drained on the wake socket — only the shipped master has one.
