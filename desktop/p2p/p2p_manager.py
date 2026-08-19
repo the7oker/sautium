@@ -58,6 +58,7 @@ class P2PManager:
         self._proof_stop: Optional[threading.Event] = None
         self._resolve_nudge: Optional[asyncio.Event] = None
         self._proof_wait_invites: set = set()
+        self._dht_refresh_inflight: set = set()
         self._load_meter = None
         self._sync_server: Optional[SyncServer] = None
         self._dht_service: Optional[DHTService] = None
@@ -1438,9 +1439,22 @@ class P2PManager:
         if fid and not refresh:
             add(self._friend_peer_cache.get(fid, []))
 
-        # 3. DHT — an announcement, not a promise of reachability.
+        # 3. DHT — an announcement, not a promise of reachability. Awaited
+        # only when it is the ONLY hope (no LAN hit, no known-good cache)
+        # or the caller asked for fresh data: a get_peers that finds
+        # nothing burns its full 30 s timeout and empty results are never
+        # cached, so awaiting it with a working candidate already in hand
+        # put half a minute in front of EVERY chat message whenever the
+        # DHT was unhealthy (measured 2026-08-19: 30–33 s per message on a
+        # LAN pair; the master-wake resolve burned the same 30 s per
+        # reconnect attempt). With candidates present the lookup still
+        # runs — in the background, refreshing the cache for later calls.
         if self._dht_service and self._dht_service.is_available:
-            add(await self._dht_service.lookup_user(invite_code))
+            if refresh or not peers:
+                add(await self._dht_service.lookup_user(invite_code))
+            elif fid and fid not in self._dht_refresh_inflight:
+                self._dht_refresh_inflight.add(fid)
+                asyncio.ensure_future(self._dht_refresh_peers(fid, invite_code))
 
         if fid and peers:
             self._friend_peer_cache[fid] = list(peers)
@@ -1454,6 +1468,21 @@ class P2PManager:
             add(self._lan_discovery.peers)
 
         return peers
+
+    async def _dht_refresh_peers(self, fid: int, invite_code: str) -> None:
+        """Background half of _find_friend_peers step 3: merge whatever the
+        DHT knows into the friend's candidate cache without holding up the
+        caller. Append-only — the known-good head keeps its slot."""
+        try:
+            found = await self._dht_service.lookup_user(invite_code)
+            if found:
+                cached = self._friend_peer_cache.get(fid, [])
+                self._friend_peer_cache[fid] = cached + [
+                    p for p in found if p not in cached]
+        except Exception as e:
+            logger.debug(f"background DHT refresh for {invite_code} failed: {e}")
+        finally:
+            self._dht_refresh_inflight.discard(fid)
 
     async def _sync_chat_history(
         self, friend: dict, peers: list[tuple],
