@@ -1449,8 +1449,13 @@ class P2PManager:
         # LAN pair; the master-wake resolve burned the same 30 s per
         # reconnect attempt). With candidates present the lookup still
         # runs — in the background, refreshing the cache for later calls.
+        # The untargeted final tier (every live LAN peer, step 4 below)
+        # counts as "something to try now": the push path survives wrong
+        # nodes (403 → next candidate), so a cold cache on a LAN pair must
+        # not wait out a dead DHT either.
+        lan_others = list(self._lan_discovery.peers) if self._lan_discovery else []
         if self._dht_service and self._dht_service.is_available:
-            if refresh or not peers:
+            if refresh or not (peers or lan_others):
                 add(await self._dht_service.lookup_user(invite_code))
             elif fid and fid not in self._dht_refresh_inflight:
                 self._dht_refresh_inflight.add(fid)
@@ -1464,8 +1469,7 @@ class P2PManager:
         # 4. Every other live LAN peer. A handful of addresses, and the
         # reason a same-LAN or localhost-probed node stays reachable when
         # its DHT address is an unhairpinnable public IP.
-        if self._lan_discovery:
-            add(self._lan_discovery.peers)
+        add(lan_others)
 
         return peers
 
