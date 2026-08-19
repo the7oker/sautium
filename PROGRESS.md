@@ -191,8 +191,9 @@ The short version of the hard-learned lessons:
   download 403'd on stable 2026.07.04 — the android_vr client was killed —
   while nightly already carried the fix). Both runtimes track **nightly** and
   refresh at every start (Docker `entrypoint.py` → `pip install -U --pre
-  "yt-dlp[default]"`; launcher `refresh_media_tools` → `yt-dlp.exe
-  --update-to nightly`), and ship **deno** as the sandboxed JS runtime for the
+  "yt-dlp[default]"`; launcher `refresh_media_tools` → the standalone
+  `yt-dlp` binary's own `--update-to nightly`, Windows and macOS alike — never
+  brew's, which is a stable pip install), and ship **deno** as the sandboxed JS runtime for the
   player-challenge solver — the runtime-less extraction path is deprecated
   upstream and is the one that breaks. A node with a working Deezer plugin
   masks a dead YouTube provider: grep the log for `preview fetch failed …
