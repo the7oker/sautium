@@ -105,6 +105,13 @@ services:
       # External port announced to peers when the router maps it to a
       # different number; empty/0 = announce P2P_SYNC_PORT itself.
       P2P_ANNOUNCE_PORT: ${P2P_ANNOUNCE_PORT:-0}
+      # 1 = a TLS-terminating front on the host (scripts/master-front/) is
+      # the only thing reaching the published peer port: the container
+      # serves it plain HTTP and takes the peer's address from the front's
+      # X-Forwarded-For (signals only — pricing, backstops, similarity —
+      # never auth). Pair with P2P_SYNC_PUBLISH=127.0.0.1:<upstream port>
+      # below; a directly reachable upstream lets anyone set that header.
+      P2P_TRUSTED_FRONT: ${P2P_TRUSTED_FRONT:-0}
       P2P_USERNAME: ${P2P_USERNAME:-}
       P2P_PASSWORD: ${P2P_PASSWORD:-}
       P2P_EMAIL: ${P2P_EMAIL:-}
@@ -215,7 +222,16 @@ services:
       # The peer surface (backend/p2p_app.py) — sync protocol only, no Web
       # UI, no API secret. THIS is the port that may be published to the
       # internet (desktop/portmap.py map ...), never 8800.
-      - "${P2P_SYNC_PORT:-8801}:${P2P_SYNC_PORT:-8801}"
+      # Docker Desktop (Windows/macOS) forwards published ports through
+      # user-space hops that rewrite the source address — the container sees
+      # every peer as the bridge gateway. A node that wants real peer
+      # addresses (the master: similarity axes, per-peer backstops, a working
+      # probe-connect) runs a TLS-terminating front on the host instead
+      # (scripts/master-front/) and publishes the upstream on loopback ONLY:
+      #   P2P_SYNC_PUBLISH=127.0.0.1:18801   P2P_TRUSTED_FRONT=1
+      # Native-Linux Docker (iptables DNAT) sees real addresses and needs none
+      # of this.
+      - "${P2P_SYNC_PUBLISH:-${P2P_SYNC_PORT:-8801}}:${P2P_SYNC_PORT:-8801}"
       # P2P DHT MUST stay on 0.0.0.0 — that's the public peer surface.
       - "${P2P_DHT_PORT:-19001}:${P2P_DHT_PORT:-19001}/udp"
       # Phantom-preview media proxy (plain http — HQPlayer pulls from it).

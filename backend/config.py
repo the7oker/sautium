@@ -127,6 +127,12 @@ class Settings(BaseSettings):
     # port must never be handed to peers (it carries the API secret).
     p2p_sync_port: int = 8801
     p2p_announce_port: int = 0            # external port announced; 0 = p2p_sync_port
+    # The peer surface sits behind a TLS-terminating front on the host
+    # (scripts/master-front/) that is the ONLY thing reaching the published
+    # port: serve plain HTTP and take the client address from its
+    # X-Forwarded-For. Needed on Docker Desktop (Windows/macOS), whose
+    # user-space port forwarders show every peer as the bridge gateway.
+    p2p_trusted_front: bool = False
     p2p_username: str = ""
     p2p_password: str = ""
 

@@ -105,12 +105,40 @@ async def _relay_cap_loop() -> None:
             logger.debug(f"relay cap loop: {e}")
 
 
+def _default_gateway() -> Optional[str]:
+    """The container's default gateway from /proc/net/route — the address
+    every host-local connection arrives from inside a bridge-networked
+    container, the trusted front's included."""
+    import socket
+    import struct
+    try:
+        rows = _Path("/proc/net/route").read_text().splitlines()[1:]
+    except OSError:
+        return None
+    for row in rows:
+        fields = row.split()
+        if len(fields) >= 3 and fields[1] == "00000000":
+            return socket.inet_ntoa(struct.pack("<L", int(fields[2], 16)))
+    return None
+
+
 async def _serve_p2p(port: int) -> None:
     """Serve the peer surface (p2p_app) on its own port, HTTPS with the same
     self-signed cert as the Web UI. A second uvicorn in this process rather
     than a second container: it shares the DB pool and the DHT service, and
     the split that matters is which ROUTES face the port, not which process
     serves them.
+
+    Behind a trusted front (P2P_TRUSTED_FRONT, scripts/master-front/) the
+    front terminates the peer TLS on the host and forwards plain HTTP with
+    X-Forwarded-For, so here it is plain HTTP and uvicorn's proxy-headers
+    middleware rewrites scope["client"] from that header — but only on
+    connections from the docker gateway, which is what every host-local
+    connection looks like from inside. The real guarantee is the publish
+    spec (P2P_SYNC_PUBLISH=127.0.0.1:<port>): nothing but the front can
+    reach the upstream, so nothing else can set the header. The address
+    feeds signals (contact log, registry, pricing, backstops, similarity),
+    never auth — CLAUDE.md Security Posture rule #5.
 
     Nothing here may take the main server down with it. uvicorn answers a
     failed bind with sys.exit(), i.e. SystemExit — which is a BaseException
@@ -138,14 +166,27 @@ async def _serve_p2p(port: int) -> None:
     finally:
         probe.close()
 
-    cert_path, key_path = ensure_cert(
-        _Path(os.getenv("SAUTIUM_TLS_DIR", "/app/data/tls")),
-        [s.strip() for s in os.getenv("SAUTIUM_HOST_IPS", "").split(",") if s.strip()],
-    )
-    config = uvicorn.Config(
-        peer_app, host="0.0.0.0", port=port, log_level="info",
-        ssl_keyfile=str(key_path), ssl_certfile=str(cert_path),
-    )
+    if settings.p2p_trusted_front:
+        gateway = _default_gateway()
+        if gateway is None:
+            logger.warning("P2P peer surface on :%d behind a trusted front, but no default "
+                           "gateway in /proc/net/route — X-Forwarded-For will be ignored", port)
+        else:
+            logger.info("P2P peer surface on :%d behind a trusted front — plain HTTP, "
+                        "X-Forwarded-For trusted from %s", port, gateway)
+        config = uvicorn.Config(
+            peer_app, host="0.0.0.0", port=port, log_level="info",
+            proxy_headers=True, forwarded_allow_ips=gateway,
+        )
+    else:
+        cert_path, key_path = ensure_cert(
+            _Path(os.getenv("SAUTIUM_TLS_DIR", "/app/data/tls")),
+            [s.strip() for s in os.getenv("SAUTIUM_HOST_IPS", "").split(",") if s.strip()],
+        )
+        config = uvicorn.Config(
+            peer_app, host="0.0.0.0", port=port, log_level="info",
+            ssl_keyfile=str(key_path), ssl_certfile=str(cert_path),
+        )
     try:
         await uvicorn.Server(config).serve()
     except asyncio.CancelledError:

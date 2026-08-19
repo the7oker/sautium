@@ -14,6 +14,7 @@ Framework-agnostic like sync_queries: functions take a psycopg2 connection.
 """
 
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -194,9 +195,19 @@ def addr_uuid(url_or_addr: str) -> str:
     the address id catches a banned key returning under a fresh identity from
     the same place. An IPv4 is enumerable from it by design — uniform
     storage, not privacy. Collisions are irrelevant at this population and
-    fail open (a collided ban just skips one more peer)."""
-    s = url_or_addr if "://" in url_or_addr else "//" + url_or_addr
-    host = (urlsplit(s).hostname or "").lower()
+    fail open (a collided ban just skips one more peer).
+
+    A bare IP — what scope["client"] / request.remote carry — bypasses the
+    URL parser: unbracketed IPv6 reads as host "2001" ("2001:db8::1") or as
+    no host at all ("::1"), which folded every IPv6 peer into one token in
+    the identity registry while contact_log kept them apart. Same lowercase
+    raw string as contact_log.addr_ids, so both tables agree."""
+    try:
+        ipaddress.ip_address(url_or_addr)
+        host = url_or_addr.lower()
+    except ValueError:
+        s = url_or_addr if "://" in url_or_addr else "//" + url_or_addr
+        host = (urlsplit(s).hostname or "").lower()
     return str(uuid5(_SAUTIUM_NAMESPACE, f"node_addr:{host}"))
 
 

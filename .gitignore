@@ -95,3 +95,12 @@ backend/mcp-wsl.json
 # Bring-your-own streaming provider plugins (closed-repo, §1201 — Deezer etc.).
 # Each is the user's OWN private repo cloned in here; never tracked by Sautium.
 backend/streaming/providers/
+
+# Master front (scripts/master-front): pinned binaries fetched by install.ps1,
+# WinSW service state and logs — only Caddyfile, the service XML and the
+# script are source
+scripts/master-front/*.exe
+scripts/master-front/*.zip
+scripts/master-front/*.download
+scripts/master-front/caddy.unzip/
+scripts/master-front/*.log

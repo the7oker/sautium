@@ -363,7 +363,12 @@ distribution model.
    (`172.x.0.1`), not the real client — `request.client.host`
    loopback checks silently allow everything. If app-level auth
    ever lands, do it with a shared secret (HMAC or signed token),
-   not source-IP filtering.
+   not source-IP filtering. The master's peer surface runs behind
+   a **trusted front** (`P2P_TRUSTED_FRONT`, `scripts/master-front/`)
+   that rewrites `scope["client"]` from its own X-Forwarded-For, so
+   there the address IS the real peer — still signals only (contact
+   log, identity registry, pricing, backstops, similarity), never
+   auth; the rule stands.
 6. **Web UI lives at the same origin as the API.** CSRF is blocked
    today by HMAC: a foreign origin cannot read `window.__SAUTIUM_SECRET`
    (cross-origin HTML reads are forbidden by the browser), so it
@@ -395,9 +400,18 @@ slices and — since the invite-token work — the chat/relay protocol
 (`backend/routers/peer_chat.py`) on 8801. What Docker still lacks is
 UPnP (SSDP multicast doesn't survive the bridge), so reaching it from
 the internet needs `python -m desktop.portmap map 8801` from the host
-or a manual router forward. On Windows also add the `netsh portproxy`
-+ firewall pair (see rule #3's note; `connectaddress` goes stale
-whenever the WSL VM IP changes after a reboot).
+or a manual router forward. On Windows a plain `netsh portproxy` +
+firewall pair (rule #3's note) gets the port through, but Docker
+Desktop's user-space hops then show every peer as the bridge gateway
+— no addr/subnet axes, a per-address backstop that is really global,
+a probe-connect calling back the wrong host. The master therefore
+runs the **trusted front** instead (`scripts/master-front/`: Caddy as
+a Windows service owns :8801, terminates the peer TLS and forwards
+plain HTTP + X-Forwarded-For to the loopback-only upstream
+`127.0.0.1:18801`; `.env` carries `P2P_SYNC_PUBLISH=127.0.0.1:18801`
++ `P2P_TRUSTED_FRONT=1`). Native-Linux Docker (iptables DNAT) sees
+real addresses and needs none of this. See P2P_NETWORK.md § "Master
+behind a trusted front".
 
 **Master node + reachability.** The maintainer's Docker node ships as
 a contact in every install: `master_node.py` (mirrored

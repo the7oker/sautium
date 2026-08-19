@@ -1,0 +1,28 @@
+<!--
+  WinSW (https://github.com/winsw/winsw, v2) service definition for the
+  Sautium master front: runs Caddy with the Caddyfile next to this file
+  under the Windows service manager, so the peer port is held from boot,
+  restarted on failure and logged into this directory. %BASE% is the
+  directory holding sautium-front.exe (= this one); install.ps1 puts
+  caddy.exe and the renamed WinSW binary next to it.
+-->
+<service>
+  <id>sautium-front</id>
+  <name>Sautium Peer Front</name>
+  <description>Caddy in front of the Sautium Docker peer surface: terminates peer TLS on :8801 and forwards plain HTTP with X-Forwarded-For to the loopback-only upstream 127.0.0.1:18801 (scripts/master-front/Caddyfile).</description>
+
+  <executable>%BASE%\caddy.exe</executable>
+  <arguments>run --config "%BASE%\Caddyfile" --adapter caddyfile</arguments>
+  <workingdirectory>%BASE%</workingdirectory>
+
+  <startmode>Automatic</startmode>
+  <onfailure action="restart" delay="10 sec"/>
+  <resetfailure>1 hour</resetfailure>
+  <stoptimeout>15 sec</stoptimeout>
+
+  <!-- Caddy writes its JSON log to stderr; keep a bounded history here. -->
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>4</keepFiles>
+  </log>
+</service>

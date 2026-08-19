@@ -679,3 +679,78 @@ E2E: dump → client (2 matched, 12277 rows, zero-match closed) → a dump-less
 replica re-serves a verified blob → a second hop verifies it **against the dump
 node's key**; a flipped byte and a blob served under another name are both
 rejected.
+
+### Master behind a trusted front — SHIPPED 2026-08-19
+
+**The problem.** A Docker node behind Docker Desktop (Windows/macOS) never
+sees a peer's address: every published port is reached through user-space
+hops — `netsh portproxy` (Windows) and Docker Desktop's own port forwarder —
+that rewrite the source, so inside the container `scope["client"]` is the
+bridge gateway (`172.22.0.1` here) for everyone. Measured on the master before
+the change: all 261 contact events and all 5 registry rows carried ONE addr
+token. Consequences: the similarity addr/subnet axes are blind, the per-address
+backstop is really a global one, and `/api/relay/probe-connect` — the
+"definitive" reachability oracle launcher nodes ask the master for — called
+back the gateway and always answered `reachable:false`. Native-Linux Docker
+(iptables DNAT) and launcher nodes (aiohttp natively) see real addresses and
+are untouched by all of this.
+
+**The fix — a front on the host, a knob in the container.** Topology:
+
+```
+peer ──TLS──▶ host :8801  Caddy (scripts/master-front/): terminates the peer TLS
+                 │        with the node's own self-signed cert, stamps X-Forwarded-For
+                 └─HTTP──▶ 127.0.0.1:18801  Docker publish on loopback ONLY
+                               └──▶ container :8801  uvicorn, plain HTTP,
+                                     proxy-headers trusted from the docker gateway
+```
+
+- Container: `P2P_TRUSTED_FRONT=1` → `_serve_p2p` drops TLS and runs
+  uvicorn's `ProxyHeadersMiddleware` with `forwarded_allow_ips` = the default
+  gateway read from `/proc/net/route` (the address every host-local connection
+  has from inside). The middleware rewrites `scope["client"]`, so the contact
+  log, the identity registry (`first_addr/first_subnet`), gate-pool exclusion
+  keys, per-IP limiters, wake-stream caps and probe-connect all see the real
+  peer with no per-site code. uvicorn takes the rightmost **untrusted** entry
+  of the header, and Caddy discards a client-supplied X-Forwarded-For
+  (verified) — spoofing needs a direct connection to the upstream, which is
+  what the loopback-only publish rules out. `P2P_SYNC_PUBLISH=127.0.0.1:18801`
+  is the compose-side half; the two lines travel together in `.env`.
+- The role is generic — any reverse proxy that sets X-Forwarded-For fits;
+  Caddy is the tested one: a hostless `https://:8801` site with our own cert
+  file answers clients WITHOUT SNI (aiohttp/httpx connecting by IP), passes
+  the raw request target byte-for-byte (wire-format v1 signatures cover
+  `METHOD + target + sha256(body)`, not Host or scheme), flushes SSE/chunked
+  immediately; `tls internal` does not work hostless and is not used. No policy
+  in the front — rate limits, gate and auth stay in `p2p_app.py`.
+- Host: `scripts/master-front/install.ps1` (elevated) fetches pinned
+  `caddy.exe` 2.11.4 + WinSW 2.12.0 (SHA-256 checked), deletes the old
+  `portproxy 0.0.0.0:8801` hop, refuses while anything else holds TCP 8801,
+  installs `sautium-front` as an auto-start service (`sautium-front.xml`:
+  restart on failure, rolling logs) and smoke-tests `/health` through it. The
+  existing port-based firewall rule covers Caddy; the router forward is the
+  same port. `-Uninstall` reverses the service part.
+
+**Verified live 2026-08-19** (install.ps1 elevated via UAC from WSL, transcript
+in `scripts/master-front/install.log`): Caddy holds `0.0.0.0:8801` + `[::]:8801`,
+the old portproxy is gone, `/health` through the front answers 200; contact
+events now carry one token per source (LAN address, `::1` from the host's own
+curl, the WSL NAT address), a client-supplied `X-Forwarded-For: 9.9.9.9` left
+no trace, and the bridge-gateway token stopped appearing for outside traffic.
+Found on the way: `mb_slice_queries.addr_uuid` parsed a bare IPv6 as a URL
+(`"2001:db8::1"` → host `2001`, `"::1"` → no host), so the identity registry
+would have folded every IPv6 peer into one token while contact_log kept them
+apart — fixed at the shared formula (bare IPs bypass the URL parser); IPv4
+tokens are unchanged.
+
+**What the address is for — and not.** Signals only: pricing, backstops,
+similarity, the registry's addr axes, probe-connect's call-back target. Never
+auth (CLAUDE.md Security Posture rule #5 still stands). Consequence to accept:
+the master's per-IP 60/min limiter stops being an accidental global cap and
+becomes per-peer, like on every launcher node; the global `mb/search` window,
+the load meter and the gate's backstops remain the node-wide protection.
+
+**Rollback.** `install.ps1 -Uninstall`; remove the two `.env` lines;
+`docker compose up -d backend`; re-add `netsh interface portproxy add v4tov4
+listenport=8801 listenaddress=0.0.0.0 connectport=8801 connectaddress=<WSL VM
+IP>`.

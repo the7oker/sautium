@@ -104,6 +104,11 @@ services:
       # split exists to prevent (mirrors docker-compose.yml).
       P2P_ANNOUNCE_PORT: ${P2P_ANNOUNCE_PORT:-0}
       P2P_SYNC_PORT: ${P2P_SYNC_PORT:-8801}
+      # Trusted TLS-terminating front on the host (scripts/master-front/):
+      # plain-HTTP upstream, peer address from X-Forwarded-For — signals
+      # only, never auth. Pair with P2P_SYNC_PUBLISH=127.0.0.1:<port>
+      # (mirrors docker-compose.yml).
+      P2P_TRUSTED_FRONT: ${P2P_TRUSTED_FRONT:-0}
       P2P_USERNAME: ${P2P_USERNAME:-}
       P2P_PASSWORD: ${P2P_PASSWORD:-}
       P2P_EMAIL: ${P2P_EMAIL:-}
@@ -151,7 +156,9 @@ services:
       - "8831:8831"
       # The peer surface — the ONLY port that may be forwarded to the
       # internet (sync + chat/relay protocol, no secrets; see p2p_app.py).
-      - "${P2P_SYNC_PORT:-8801}:${P2P_SYNC_PORT:-8801}"
+      # Behind the host front: P2P_SYNC_PUBLISH=127.0.0.1:18801 publishes
+      # the upstream on loopback only (mirrors docker-compose.yml).
+      - "${P2P_SYNC_PUBLISH:-${P2P_SYNC_PORT:-8801}}:${P2P_SYNC_PORT:-8801}"
       - "${P2P_DHT_PORT:-19001}:${P2P_DHT_PORT:-19001}/udp"
     networks:
       - sautium-network
