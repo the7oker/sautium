@@ -3344,6 +3344,9 @@
           <button class="btn btn-secondary" id="dEmptyMbBtn" type="button" hidden
                   style="margin: 0 var(--space-4) var(--space-4);">
             Search the MusicBrainz catalog</button>
+          <button class="btn btn-secondary" id="dMbNetBtn" type="button" hidden
+                  style="margin: 0 var(--space-4) var(--space-4);">
+            Search the network</button>
         </div>
       </section>
     `;
@@ -3498,7 +3501,7 @@
       panel.hidden = true;
       toggle.setAttribute('aria-expanded', 'false');
       toggle.classList.remove('is-open');
-      triggerDiscoverySearch(screen);
+      triggerDiscoverySearch(screen, true);
     });
   }
 
@@ -3725,7 +3728,7 @@
 
     input.addEventListener('keydown', e => {
       clearTimeout(screen._debounceTimer);
-      if (e.key === 'Enter') triggerDiscoverySearch(screen);
+      if (e.key === 'Enter') triggerDiscoverySearch(screen, true);
     });
     input.addEventListener('input', () => {
       clearTimeout(screen._debounceTimer);
@@ -3745,8 +3748,11 @@
       const chip = screen.querySelector('#discoveryMbChip');
       if (!chip || chip.classList.contains('is-disabled')) return;
       chip.click();
-      triggerDiscoverySearch(screen);
+      triggerDiscoverySearch(screen, true);
     });
+    const mbNet = screen.querySelector('#dMbNetBtn');
+    if (mbNet) mbNet.addEventListener('click', () =>
+      triggerDiscoverySearch(screen, true));
   }
 
   // Single entry point for "do a search now" — invoked by the
@@ -3755,18 +3761,20 @@
   //   query >= MIN_QUERY_LEN          → composite search (text + chips)
   //   no query, but filters active    → filter-only browse (same path, no q)
   //   neither                         → fall back to the shuffle mosaic
-  function triggerDiscoverySearch(screen) {
+  function triggerDiscoverySearch(screen, explicit = false) {
     const input = screen.querySelector('#discoverySearchInput');
     const q = ((input && input.value) || '').trim();
     const filters = screen._filters || {};
     screen._activeQueryId = (screen._activeQueryId || 0) + 1;
     const id = screen._activeQueryId;
     const getActive = () => screen._activeQueryId;
+    const netBtn = screen.querySelector('#dMbNetBtn');
+    if (netBtn) netBtn.hidden = true;
 
     if (q.length >= DISCOVERY_MIN_QUERY_LEN) {
-      runUnifiedSearch(screen, q, id, getActive);
+      runUnifiedSearch(screen, q, id, getActive, explicit);
     } else if (hasActiveFilters(filters)) {
-      runUnifiedSearch(screen, '', id, getActive);
+      runUnifiedSearch(screen, '', id, getActive, explicit);
     } else {
       showShuffle(screen);
     }
@@ -3801,7 +3809,7 @@
     if (shuffle) shuffle.hidden = false;
   }
 
-  function runUnifiedSearch(screen, query, queryId, getActiveId) {
+  function runUnifiedSearch(screen, query, queryId, getActiveId, explicit = false) {
     const shuffle = screen.querySelector('#discoveryShuffle');
     const results = screen.querySelector('#discoveryResults');
     const empty = screen.querySelector('#dEmpty');
@@ -3827,6 +3835,26 @@
     // MB scope bypasses the engine entirely: one dump query fills the
     // Artists/Albums blocks with mintable MB rows (see runMbSearch).
     if ((filters.scope || 'names') === 'mb') {
+      // A REMOTE catalog is a shared volunteer resource with a tight
+      // requester-side burst (mb_discovery REMOTE_BURST) — as-you-type
+      // spends it on typos and half-words. Typing only prompts; the
+      // request itself fires on a deliberate act (Enter, Apply, a button).
+      // A local dump stays live-as-you-type: it costs nobody anything.
+      const chip = screen.querySelector('#discoveryMbChip');
+      if (!explicit && query && chip && chip.dataset.mbState === 'remote') {
+        searching.hidden = true;
+        renderMbBlock(screen, 'artists', 'Artists · MusicBrainz (via network)', '', 0);
+        renderMbBlock(screen, 'albums', 'Albums · MusicBrainz', '', 0);
+        const emptyP = empty.querySelector('p');
+        if (emptyP) emptyP.textContent =
+          'Network search runs on shared volunteer nodes — press Enter or tap Search when your query is ready.';
+        const mbBtn = empty.querySelector('#dEmptyMbBtn');
+        if (mbBtn) mbBtn.hidden = true;
+        const netBtn = empty.querySelector('#dMbNetBtn');
+        if (netBtn) netBtn.hidden = false;
+        empty.hidden = false;
+        return;
+      }
       runMbSearch(screen, query, queryId, getActiveId, searching, empty);
       return;
     }
