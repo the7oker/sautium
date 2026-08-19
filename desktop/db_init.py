@@ -440,11 +440,14 @@ def _link_pgvector_to_pg(brew: str) -> None:
 # ================================================================
 # The audio pipeline shells out to external binaries: ffmpeg (+ ffprobe) for
 # the shared 48kHz decode path (embeddings + analysis), fpcalc (Chromaprint)
-# for the content-address fingerprint, flac for stream->FLAC transcode, and
-# yt-dlp for the core YouTube streaming-preview provider. A fresh node missing
-# any fails those steps silently (ffmpeg: 0 embeddings; fpcalc: no fingerprint
-# provenance; yt-dlp: no phantom streaming). The launcher installs them all at
-# first run so the app is self-contained.
+# for the content-address fingerprint, flac for stream->FLAC transcode,
+# yt-dlp for the core YouTube streaming-preview provider and deno, the
+# sandboxed JavaScript runtime yt-dlp solves YouTube's player challenges in.
+# A fresh node missing any fails those steps silently (ffmpeg: 0 embeddings;
+# fpcalc: no fingerprint provenance; yt-dlp: no phantom streaming; deno:
+# yt-dlp limps along on a deprecated runtime-less path that breaks whenever
+# YouTube moves). The launcher installs them all at first run so the app is
+# self-contained.
 
 # (binary, macOS brew formula, Windows static-build zip URL). The ffmpeg zip
 # also carries ffprobe; the Windows extractor copies every .exe beside it.
@@ -459,8 +462,14 @@ _MEDIA_TOOLS = [
     # Standalone onefile build — yt-dlp_win.zip is a PyInstaller ONEDIR
     # (yt-dlp.exe + _internal/ DLLs); copying just the .exe out of it
     # yields a binary that dies with "Failed to load Python DLL".
+    # NIGHTLY channel: upstream calls stable "often stale and prone to
+    # external breakage" and recommends nightly for regular users (the
+    # 2026-08 android_vr 403 was stable-only); refresh_media_tools keeps
+    # the binary current through its own self-updater at every start.
     ("yt-dlp", "yt-dlp",
-     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"),
+     "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.exe"),
+    ("deno", "deno",
+     "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip"),
 ]
 
 # brew installs into these on macOS; a GUI-launched .app has a minimal PATH
@@ -495,9 +504,9 @@ def _which_tool(binary: str) -> Optional[str]:
 
 
 def ensure_media_tools(progress_cb: Optional[Callable] = None) -> dict:
-    """Ensure every media CLI binary (ffmpeg, fpcalc, flac, yt-dlp) is present.
-    Idempotent per tool. Non-fatal — a failure leaves that one step degraded,
-    never blocks setup. Returns {binary: present?}."""
+    """Ensure every media CLI binary (ffmpeg, fpcalc, flac, yt-dlp, deno) is
+    present. Idempotent per tool. Non-fatal — a failure leaves that one step
+    degraded, never blocks setup. Returns {binary: present?}."""
     result = {}
     for binary, formula, win_url in _MEDIA_TOOLS:
         if _which_tool(binary):
@@ -511,6 +520,35 @@ def ensure_media_tools(progress_cb: Optional[Callable] = None) -> dict:
             logger.warning("%s not found on PATH — install it via your package manager", binary)
             result[binary] = False
     return result
+
+
+def refresh_media_tools() -> None:
+    """Move the standalone yt-dlp we installed to the latest nightly through
+    its own self-updater (`--update-to nightly` also migrates a binary that
+    is still on stable). YouTube changes its side every few weeks and a
+    frozen yt-dlp silently loses phantom streaming — the Docker node does
+    the same at container start (entrypoint.py). Only OUR binary: a yt-dlp
+    the user put on PATH (pip, brew, winget) is theirs to update. Offline or
+    rate-limited → the current binary stays; non-fatal either way."""
+    from desktop.utils import get_project_root
+    ytdlp = get_project_root() / "yt-dlp" / "bin" / "yt-dlp.exe"   # _download_win_tool's target
+    if not ytdlp.is_file():
+        return
+    try:
+        result = subprocess.run(
+            [str(ytdlp), "--update-to", "nightly"],
+            capture_output=True, text=True, timeout=300,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("yt-dlp self-update timed out; keeping the current binary")
+        return
+    summary = (result.stdout or result.stderr).strip().splitlines()
+    summary = summary[-1] if summary else f"rc={result.returncode}"
+    if result.returncode != 0:
+        logger.warning("yt-dlp self-update failed (rc=%s): %s", result.returncode, summary)
+    else:
+        logger.info("yt-dlp: %s", summary)
 
 
 def _brew_install(binary: str, formula: str, progress_cb: Optional[Callable] = None) -> bool:

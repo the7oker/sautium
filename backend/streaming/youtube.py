@@ -5,13 +5,23 @@ providers (Deezer/Spotify) are NOT bundled — they live as external BYO modules
 HQPlayer doesn't decode AAC/m4a (tested), so we transcode YouTube's m4a/opus
 source to FLAC via yt-dlp's built-in ffmpeg pass (``-x --audio-format flac``) —
 lossless of the lossy source, and HQPlayer's native format. yt-dlp and ffmpeg
-are external tools; their paths are configurable (user-installed)."""
+are external tools; their paths are configurable (user-installed).
+
+yt-dlp is a moving target by design: YouTube changes its side every few weeks
+and upstream's *stable* channel lags ("often stale and prone to external
+breakage" — their words; the 2026-08 android_vr 403 hit stable only). Both
+runtimes therefore track the *nightly* channel and refresh it at every start
+(Docker: entrypoint.py; launcher: desktop/db_init.py), and ship deno — the
+sandboxed JS runtime yt-dlp solves YouTube's player challenges in. Without a
+runtime yt-dlp falls back to a deprecated, runtime-less extraction path that
+is exactly what breaks when YouTube moves."""
 from __future__ import annotations
 
 import glob
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 
@@ -36,6 +46,12 @@ class YouTubeProvider(StreamProvider):
         self._ytdlp = ytdlp_path
         self._ffmpeg_location = ffmpeg_location
         self._timeout = timeout
+        # Advisory only — yt-dlp decides at run time; this just surfaces a
+        # degraded install at boot instead of one cryptic 403 per track.
+        if not shutil.which("deno"):
+            logger.warning("youtube: deno (yt-dlp's JS runtime) is not on PATH — "
+                           "extraction runs on the deprecated runtime-less path "
+                           "and breaks whenever YouTube moves")
 
     SEARCH_N = 5    # candidates to score before downloading one
 
@@ -143,8 +159,10 @@ class YouTubeProvider(StreamProvider):
         # dir is a transient buffer, deleted at once — no persisted rip.
         url = f"https://www.youtube.com/watch?v={video_id}"
         with tempfile.TemporaryDirectory(prefix="sautium-yt-") as tmp:
+            # Warnings stay on: they are read only on failure, and yt-dlp's
+            # "no JS runtime" one names the actual cause of a 403.
             cmd = [self._ytdlp, url, "-x", "--audio-format", "flac",
-                   "--no-playlist", "--no-warnings", "--quiet",
+                   "--no-playlist", "--quiet",
                    "-o", os.path.join(tmp, "t.%(ext)s")]
             if self._ffmpeg_location:
                 cmd += ["--ffmpeg-location", self._ffmpeg_location]
@@ -154,8 +172,12 @@ class YouTubeProvider(StreamProvider):
             except subprocess.TimeoutExpired as e:
                 raise ProviderError(f"youtube download timeout: {video_id}") from e
             except subprocess.CalledProcessError as e:
-                tail = e.stderr.decode("utf-8", "replace")[-300:] if e.stderr else ""
-                raise ProviderError(f"youtube download failed for {video_id}: {tail}") from e
+                err = e.stderr.decode("utf-8", "replace") if e.stderr else ""
+                lines = [ln for ln in err.splitlines() if ln.strip()]
+                detail = lines[-1][-300:] if lines else ""
+                if "No supported JavaScript runtime" in err:
+                    detail += " (yt-dlp found no JS runtime — install deno)"
+                raise ProviderError(f"youtube download failed for {video_id}: {detail}") from e
             flacs = glob.glob(os.path.join(tmp, "*.flac"))
             if not flacs:
                 raise ProviderError(f"youtube: no audio for {video_id}")

@@ -186,6 +186,23 @@ The short version of the hard-learned lessons:
   `max_parallel_maintenance_workers=4` per statement via SET LOCAL.
 - **PostgreSQL ENUM type changes** require drop default → drop constraint →
   `ALTER TYPE USING col::new_type` → set default. Straight `ALTER TYPE` fails.
+- **yt-dlp is a perishable dependency.** YouTube changes its side every few
+  weeks; upstream's *stable* channel lags and breaks (2026-08-18: every
+  download 403'd on stable 2026.07.04 — the android_vr client was killed —
+  while nightly already carried the fix). Both runtimes track **nightly** and
+  refresh at every start (Docker `entrypoint.py` → `pip install -U --pre
+  "yt-dlp[default]"`; launcher `refresh_media_tools` → `yt-dlp.exe
+  --update-to nightly`), and ship **deno** as the sandboxed JS runtime for the
+  player-challenge solver — the runtime-less extraction path is deprecated
+  upstream and is the one that breaks. A node with a working Deezer plugin
+  masks a dead YouTube provider: grep the log for `preview fetch failed …
+  via youtube`.
+- **streamrip `--no-db` disables only the downloads db.** The Deezer plugin's
+  config template carries the dump node's `/root/.config/streamrip/*.db`
+  paths; the failed-downloads db still opened at that path → "unable to open
+  database file" on every rip from the Windows launcher, reported as a bare
+  `rc=1` because streamrip writes its tracebacks to STDOUT (rich). The plugin
+  now switches both dbs off in its per-process config and reads stdout.
 
 ---
 

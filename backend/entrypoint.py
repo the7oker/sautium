@@ -6,6 +6,7 @@ are read from SAUTIUM_HOST_IPS (comma-separated).
 """
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -53,9 +54,33 @@ def _enable_hf_offline_if_cached() -> None:
     print("[entrypoint] All HF model snapshots cached → offline mode", flush=True)
 
 
+def _refresh_ytdlp() -> None:
+    """Move yt-dlp to the latest nightly. YouTube changes its side every few
+    weeks and a frozen yt-dlp silently loses phantom streaming (upstream
+    recommends the nightly channel for regular users); the image carries a
+    build-time snapshot, so a long-lived container refreshes at every start —
+    the treatment entrypoint.sh gives the Claude Code CLI. The launcher does
+    the same through the binary's self-updater (desktop/db_init.py). Offline
+    → keep what is installed; never blocks the start."""
+    cmd = [sys.executable, "-m", "pip", "install", "-q", "-U", "--pre",
+           "--no-cache-dir", "--root-user-action=ignore",
+           "--retries", "2", "--timeout", "15", "yt-dlp[default]"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        print("[entrypoint] yt-dlp refresh timed out; keeping the installed build", flush=True)
+        return
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout).strip().splitlines()
+        print(f"[entrypoint] yt-dlp refresh skipped: {tail[-1] if tail else r.returncode}", flush=True)
+    ver = subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True).stdout.strip()
+    print(f"[entrypoint] yt-dlp {ver}", flush=True)
+
+
 def main() -> int:
     cert_path, key_path = ensure_cert(DATA_DIR, _parse_extra_ips())
     _enable_hf_offline_if_cached()
+    _refresh_ytdlp()
     print(f"[entrypoint] TLS cert: {cert_path}", flush=True)
     print(f"[entrypoint] uvicorn HTTPS on {HOST}:{PORT} (reload={RELOAD})", flush=True)
     uvicorn.run(

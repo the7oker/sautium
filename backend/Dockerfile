@@ -101,9 +101,23 @@ RUN pip install --no-cache-dir pynacl
 
 # yt-dlp — the core YouTube streaming-preview provider shells out to it
 # (streaming/youtube.py). Pip puts the `yt-dlp` entry point on PATH; the
-# launcher counterpart bootstraps it as a media tool (desktop/db_init.py).
-# Late standalone layer: a version bump must not re-run the pip install above.
-RUN pip install --no-cache-dir yt-dlp
+# launcher counterpart bootstraps the standalone binary as a media tool
+# (desktop/db_init.py). NIGHTLY channel (--pre): upstream calls stable "often
+# stale and prone to external breakage" and recommends nightly for regular
+# users — the 2026-08 android_vr 403 was stable-only. This layer is only the
+# offline baseline: entrypoint.py re-runs the install at every container
+# start so a long-lived image keeps up with YouTube. [default] brings
+# yt-dlp-ejs, the player-challenge solver; deno is the sandboxed runtime it
+# runs in — node is in the image too, but the solver executes YouTube's own
+# JS, and deno gives it no permissions where node would give it ours.
+# Late standalone layer: a version bump must not re-run the pip install above
+# (which already pulled the stable yt-dlp requirements.txt names — hence -U).
+RUN pip install --no-cache-dir -U --pre "yt-dlp[default]" \
+    && curl -fsSL https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip \
+         -o /tmp/deno.zip \
+    && python -c "import zipfile; zipfile.ZipFile('/tmp/deno.zip').extractall('/usr/local/bin')" \
+    && chmod +x /usr/local/bin/deno && rm /tmp/deno.zip \
+    && deno --version && yt-dlp --version
 
 # Parallel bzip2 — fast MusicBrainz dump decompression (mb_dump_load). Kept in a
 # late, standalone layer so it never busts the expensive pip-install cache above.
