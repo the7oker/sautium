@@ -56,6 +56,8 @@ class P2PManager:
         self._thread: Optional[threading.Thread] = None
         self._proof_thread: Optional[threading.Thread] = None
         self._proof_stop: Optional[threading.Event] = None
+        self._resolve_nudge: Optional[asyncio.Event] = None
+        self._proof_wait_invites: set = set()
         self._load_meter = None
         self._sync_server: Optional[SyncServer] = None
         self._dht_service: Optional[DHTService] = None
@@ -597,6 +599,11 @@ class P2PManager:
                 self._notify_blocking("sautium_identity")
             except Exception as e:
                 logger.debug("identity state publish failed: %s", e)
+            if (state.get("status") == "ready" and self._loop
+                    and self._resolve_nudge and not self._loop.is_closed()):
+                # The freshly mined proof is the event the parked cert-gated
+                # handshakes wait for — wake the resolver now, not in ≤15 s.
+                self._loop.call_soon_threadsafe(self._resolve_nudge.set)
 
         hold = self._load_meter.mining_hold if self._load_meter else (lambda: None)
         self._proof_stop = threading.Event()
@@ -1559,7 +1566,11 @@ class P2PManager:
         return {}
 
     async def _resolve_pending_friends(self):
-        """Periodically resolve pending friends via LAN handshake."""
+        """Periodically resolve pending friends via LAN handshake. The 15 s
+        cadence is the fallback; _resolve_nudge cuts it short on an event
+        (today: our identity proof finished mining — the parked cert-gated
+        handshake retries the moment it can succeed, not on the next tick)."""
+        self._resolve_nudge = asyncio.Event()
         await asyncio.sleep(5)  # initial delay for LAN beacons to arrive
         while self._running:
             try:
@@ -1567,7 +1578,11 @@ class P2PManager:
                     await self._do_resolve_pending()
             except Exception as e:
                 logger.debug(f"Resolve pending friends error: {e}")
-            await asyncio.sleep(15)  # check every 15 seconds
+            try:
+                await asyncio.wait_for(self._resolve_nudge.wait(), 15)
+            except asyncio.TimeoutError:
+                pass
+            self._resolve_nudge.clear()
 
     async def _do_resolve_pending(self):
         """Check LAN/DHT peers for pending friends and do handshake."""
@@ -1607,6 +1622,19 @@ class P2PManager:
             "invite_code": account["invite_code"],
         }
 
+        from desktop.p2p.birth_cert import load_certificate, load_proof
+        own_cert = load_certificate()
+        own_proof = load_proof() if own_cert else None
+        # While our own pow proof is still being mined, a cert-gated issuer
+        # can only answer "proof required" — friends parked on that answer
+        # are skipped instead of re-asked every tick. Mining completion sets
+        # _resolve_nudge (see _start_identity_proof_worker), so the retry
+        # happens the moment it can succeed.
+        proof_pending = bool(own_cert and own_cert.get("method") == "pow"
+                             and own_proof is None)
+        if not proof_pending:
+            self._proof_wait_invites.clear()
+
         for friend in pending:
             invite = friend.get("invite_code", "")
             if not invite:
@@ -1619,6 +1647,9 @@ class P2PManager:
             # it as its anti-sybil gate.
             per_friend = dict(handshake_data)
             join_token = friend.get("join_token_id")
+            if join_token and proof_pending and invite in self._proof_wait_invites:
+                logger.debug(f"Handshake for {invite} waits for our identity proof")
+                continue
             if join_token:
                 import time as _time
 
@@ -1629,16 +1660,10 @@ class P2PManager:
                 per_friend["signature"] = sign_message(
                     f"token_handshake:{ts}:{join_token}:{invite}"
                     .encode("utf-8")).hex()
-                from desktop.p2p.birth_cert import load_certificate, load_proof
-                cert = load_certificate()
-                if cert:
-                    per_friend["birth_cert"] = cert
-                    # A pow identity also proves its work; while the proof is
-                    # still being mined the issuer answers "proof required"
-                    # and this loop simply comes back in 15 s.
-                    proof = load_proof()
-                    if proof:
-                        per_friend["identity_proof"] = proof
+                if own_cert:
+                    per_friend["birth_cert"] = own_cert
+                    if own_proof:
+                        per_friend["identity_proof"] = own_proof
 
             peers = await self._find_friend_peers(friend)
 
@@ -1725,6 +1750,16 @@ class P2PManager:
                                 except Exception:
                                     pass
                                 if err.startswith("identity"):
+                                    if "proof required" in err and proof_pending:
+                                        # A known-failing precondition on OUR
+                                        # side: park this friend until the
+                                        # proof is mined instead of asking
+                                        # again for the same answer.
+                                        self._proof_wait_invites.add(invite)
+                                        logger.info(
+                                            f"Handshake for {invite} parked "
+                                            f"until our identity proof is mined")
+                                        break      # same answer from every address
                                     logger.info(
                                         f"Handshake for {invite} refused by "
                                         f"{ip}:{port}: {err}")
