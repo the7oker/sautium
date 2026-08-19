@@ -449,27 +449,35 @@ def _link_pgvector_to_pg(brew: str) -> None:
 # YouTube moves). The launcher installs them all at first run so the app is
 # self-contained.
 
-# (binary, macOS brew formula, Windows static-build zip URL). The ffmpeg zip
-# also carries ffprobe; the Windows extractor copies every .exe beside it.
+# (binary, macOS brew formula, Windows download URL, macOS download URL).
+# A tool with a macOS URL and no formula is OURS on both platforms — a
+# standalone build installed into <root>/<binary>/bin that refreshes itself
+# (yt-dlp). Everything else: brew on macOS, a static build on Windows. The
+# ffmpeg zip also carries ffprobe; the Windows extractor copies every .exe
+# beside it.
 _MEDIA_TOOLS = [
     ("ffmpeg", "ffmpeg",
-     "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"),
+     "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip", None),
     ("fpcalc", "chromaprint",
      "https://github.com/acoustid/chromaprint/releases/download/v1.5.1/"
-     "chromaprint-fpcalc-1.5.1-windows-x86_64.zip"),
+     "chromaprint-fpcalc-1.5.1-windows-x86_64.zip", None),
     ("flac", "flac",
-     "https://ftp.osuosl.org/pub/xiph/releases/flac/flac-1.4.3-win.zip"),
-    # Standalone onefile build — yt-dlp_win.zip is a PyInstaller ONEDIR
-    # (yt-dlp.exe + _internal/ DLLs); copying just the .exe out of it
-    # yields a binary that dies with "Failed to load Python DLL".
+     "https://ftp.osuosl.org/pub/xiph/releases/flac/flac-1.4.3-win.zip", None),
+    # Standalone onefile builds on BOTH platforms, never brew: the formula is
+    # a stable-channel pip install that cannot self-update. (yt-dlp_win.zip is
+    # a PyInstaller ONEDIR — yt-dlp.exe + _internal/ DLLs — copying just the
+    # .exe out of it yields a binary that dies with "Failed to load Python
+    # DLL"; yt-dlp_macos is the universal x86_64+arm64 executable.)
     # NIGHTLY channel: upstream calls stable "often stale and prone to
     # external breakage" and recommends nightly for regular users (the
     # 2026-08 android_vr 403 was stable-only); refresh_media_tools keeps
     # the binary current through its own self-updater at every start.
-    ("yt-dlp", "yt-dlp",
-     "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.exe"),
+    ("yt-dlp", None,
+     "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.exe",
+     "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp_macos"),
     ("deno", "deno",
-     "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip"),
+     "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip",
+     None),
 ]
 
 # brew installs into these on macOS; a GUI-launched .app has a minimal PATH
@@ -477,17 +485,23 @@ _MEDIA_TOOLS = [
 _MACOS_BREW_BIN_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"]
 
 
+def _tool_path(binary: str) -> Path:
+    """Where the launcher installs a downloaded tool."""
+    from desktop.utils import get_project_root
+    exe = binary + ".exe" if IS_WINDOWS else binary
+    return get_project_root() / binary / "bin" / exe
+
+
 def media_tool_dirs() -> list:
     """Dirs to prepend to a child-process PATH so the media binaries resolve,
-    independent of how the launcher itself was started."""
-    if IS_MACOS:
-        return [d for d in _MACOS_BREW_BIN_DIRS if os.path.isdir(d)]
-    if IS_WINDOWS:
-        from desktop.utils import get_project_root
-        root = get_project_root()
-        return [str(root / b / "bin") for b, _, _ in _MEDIA_TOOLS
-                if (root / b / "bin").exists()]
-    return []
+    independent of how the launcher itself was started. Ours come first: a
+    brew/winget yt-dlp on PATH would otherwise shadow the nightly we refresh."""
+    if not (IS_MACOS or IS_WINDOWS):
+        return []
+    ours = [str(_tool_path(b).parent) for b, *_ in _MEDIA_TOOLS
+            if _tool_path(b).parent.is_dir()]
+    brew = [d for d in _MACOS_BREW_BIN_DIRS if os.path.isdir(d)] if IS_MACOS else []
+    return ours + brew
 
 
 def _which_tool(binary: str) -> Optional[str]:
@@ -508,14 +522,18 @@ def ensure_media_tools(progress_cb: Optional[Callable] = None) -> dict:
     present. Idempotent per tool. Non-fatal — a failure leaves that one step
     degraded, never blocks setup. Returns {binary: present?}."""
     result = {}
-    for binary, formula, win_url in _MEDIA_TOOLS:
-        if _which_tool(binary):
+    for binary, formula, win_url, mac_url in _MEDIA_TOOLS:
+        # A tool we refresh ourselves must be OUR copy — a stable one on PATH
+        # (brew, winget, pip) would satisfy a PATH check and then rot.
+        owned = formula is None
+        if (_tool_path(binary).is_file() if owned else _which_tool(binary)):
             result[binary] = True
             continue
         if IS_MACOS:
-            result[binary] = _brew_install(binary, formula, progress_cb)
+            result[binary] = (_download_tool(binary, mac_url, progress_cb) if owned
+                              else _brew_install(binary, formula, progress_cb))
         elif IS_WINDOWS:
-            result[binary] = _download_win_tool(binary, win_url, progress_cb)
+            result[binary] = _download_tool(binary, win_url, progress_cb)
         else:
             logger.warning("%s not found on PATH — install it via your package manager", binary)
             result[binary] = False
@@ -530,15 +548,14 @@ def refresh_media_tools() -> None:
     the same at container start (entrypoint.py). Only OUR binary: a yt-dlp
     the user put on PATH (pip, brew, winget) is theirs to update. Offline or
     rate-limited → the current binary stays; non-fatal either way."""
-    from desktop.utils import get_project_root
-    ytdlp = get_project_root() / "yt-dlp" / "bin" / "yt-dlp.exe"   # _download_win_tool's target
+    ytdlp = _tool_path("yt-dlp")
     if not ytdlp.is_file():
         return
+    kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {}
     try:
         result = subprocess.run(
             [str(ytdlp), "--update-to", "nightly"],
-            capture_output=True, text=True, timeout=300,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            capture_output=True, text=True, timeout=300, **kwargs,
         )
     except subprocess.TimeoutExpired:
         logger.warning("yt-dlp self-update timed out; keeping the current binary")
@@ -605,20 +622,22 @@ def _brew_install(binary: str, formula: str, progress_cb: Optional[Callable] = N
     return True
 
 
-def _download_win_tool(binary: str, url: str, progress_cb: Optional[Callable] = None) -> bool:
+def _download_tool(binary: str, url: str, progress_cb: Optional[Callable] = None) -> bool:
     import tempfile
     from desktop.utils import get_project_root
-    bin_dir = get_project_root() / binary / "bin"
-    exe = binary + ".exe"
-    if (bin_dir / exe).exists():
+    target = _tool_path(binary)
+    bin_dir = target.parent
+    if target.exists():
         return True
-    if url.endswith(".exe"):
-        # Standalone single-binary tool (yt-dlp) — no archive to unpack.
+    if not url.endswith(".zip"):
+        # Standalone single binary (yt-dlp) — no archive to unpack.
         try:
             if progress_cb:
                 progress_cb(f"Downloading {binary}...")
             bin_dir.mkdir(parents=True, exist_ok=True)
-            urllib.request.urlretrieve(url, str(bin_dir / exe))
+            urllib.request.urlretrieve(url, str(target))
+            if not IS_WINDOWS:
+                target.chmod(0o755)
             logger.info("%s installed to %s", binary, bin_dir)
             return True
         except Exception as e:
@@ -635,14 +654,18 @@ def _download_win_tool(binary: str, url: str, progress_cb: Optional[Callable] = 
         with tempfile.TemporaryDirectory() as tmp:
             with zipfile.ZipFile(zip_path, "r") as zf:
                 zf.extractall(tmp)
-            hits = list(Path(tmp).rglob(exe))
+            hits = list(Path(tmp).rglob(target.name))
             if not hits:
-                logger.error("%s not found in downloaded archive", exe)
+                logger.error("%s not found in downloaded archive", target.name)
                 return False
-            for f in hits[0].parent.glob("*.exe"):   # ffmpeg ships ffprobe alongside
+            # ffmpeg ships ffprobe alongside — take every .exe beside the hit.
+            siblings = hits[0].parent.glob("*.exe") if IS_WINDOWS else [hits[0]]
+            for f in siblings:
                 shutil.copy2(f, bin_dir / f.name)
+                if not IS_WINDOWS:
+                    (bin_dir / f.name).chmod(0o755)
         logger.info("%s installed to %s", binary, bin_dir)
-        return (bin_dir / exe).exists()
+        return target.exists()
     except Exception as e:
         logger.error("Failed to download %s: %s", binary, e)
         if progress_cb:
