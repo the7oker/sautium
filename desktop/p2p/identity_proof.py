@@ -29,7 +29,12 @@ on laptops: the master refuses the handshake because the proof is
 missing because the machine is unplugged — three hops nobody sees. If an
 armed-era difficulty (E in the hundreds) ever makes minutes of mining on
 battery a real cost, resurrect the gate from git history WITH a visible
-"plug in to finish securing your identity" prompt, not silently.
+"plug in to finish securing your identity" prompt, not silently — and
+know that `power_plugged` itself is unreliable on macOS: charge-limiter
+utilities (AlDente-style) hold the battery at a target via the SMC, and
+the OS then reports "battery, discharging" with the cable in. Valerii's
+Mac showed exactly that — the old gate would have paused such machines
+forever, docked or not.
 
 Depends only on identity_pow (argon2-cffi).
 """
