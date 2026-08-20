@@ -34,6 +34,11 @@ from desktop.p2p.upnp_service import (
 
 # Refresh at 75% of the lease — the same margin the launcher's renewal uses.
 RENEW_RATIO = 0.75
+# A permanent mapping still dies with a router reboot; --keep re-asserts it
+# on this cadence (add_mapping is idempotent) so the dead window after a
+# reboot is minutes, not "until someone notices" — the master's 8801 was
+# down for days exactly that way (2026-08-20, found by an external probe).
+PERMANENT_REASSERT_SECONDS = 15 * 60
 
 
 def _igd_or_exit():
@@ -147,17 +152,21 @@ def cmd_map(args) -> None:
                   f"protocol=TCP localport={port} profile=any")
     if permanent:
         print("lease: permanent (survives until removed or the router reboots)")
-        return
-
-    print(f"lease: {lease}s - this router refused a permanent mapping, so it "
-          f"expires")
-    if not args.keep:
-        print(f"       re-run this command before it lapses, or use --keep to "
-              f"hold it open")
-        return
-
-    every = max(60, int(lease * RENEW_RATIO))
-    print(f"       holding it open, refreshing every {every}s (Ctrl-C to stop)")
+        if not args.keep:
+            return
+        every = PERMANENT_REASSERT_SECONDS
+        print(f"       holding it open anyway, re-asserting every {every}s so "
+              f"a router reboot costs minutes, not days (Ctrl-C to stop)")
+    else:
+        print(f"lease: {lease}s - this router refused a permanent mapping, "
+              f"so it expires")
+        if not args.keep:
+            print(f"       re-run this command before it lapses, or use "
+                  f"--keep to hold it open")
+            return
+        every = max(60, int(lease * RENEW_RATIO))
+        print(f"       holding it open, refreshing every {every}s "
+              f"(Ctrl-C to stop)")
     try:
         while True:
             time.sleep(every)
