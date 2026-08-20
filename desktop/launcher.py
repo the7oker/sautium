@@ -268,8 +268,15 @@ class LauncherApp(ctk.CTk):
                 fn()
             except Exception as e:
                 logger.debug(f"ui_call callback failed: {e}")
-        if not self._shutting_down and self.winfo_exists():
-            self.after(100, self._drain_ui_queue)
+        # The pump outlives _shutting_down ON PURPOSE: the quit worker's
+        # LAST act is ui_call(self._final_quit) — a pump that stopped on the
+        # flag left that callback queued forever and the window hung on Quit
+        # (Mac, 2026-08-20). Only the window's death ends the pump.
+        try:
+            if self.winfo_exists():
+                self.after(100, self._drain_ui_queue)
+        except Exception:
+            pass                       # Tcl interp already torn down
 
     def _startup_sequence(self):
         """Start all services in a background thread."""
