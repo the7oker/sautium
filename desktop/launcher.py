@@ -6,6 +6,7 @@ Minimizes to system tray on close.
 """
 
 import logging
+import queue
 import subprocess
 import sys
 import threading
@@ -51,6 +52,10 @@ class LauncherApp(ctk.CTk):
         self.tray = None
         self._update_thread = None
         self._shutting_down = False   # gates the stats worker from touching Tk after the loop is torn down
+        # Cross-thread UI marshaling (see ui_call): started before any worker
+        # thread exists, drained on the Tk thread's own timer.
+        self._ui_queue: queue.Queue = queue.Queue()
+        self.after(100, self._drain_ui_queue)
         self._streams_started = False
         self._active_job = None       # "scan" | "enrich" — what a Library wake refers to
         self._qr_timer = None
@@ -241,6 +246,31 @@ class LauncherApp(ctk.CTk):
             fg_color="#8B0000", hover_color="#A52A2A",
         ).pack(pady=(5, 15))
 
+    def ui_call(self, fn):
+        """THE way a worker thread touches the UI. Tcl binds its interpreter
+        to the thread that created it: widget.after() from any other thread
+        enters Tcl off-apartment and can deadlock both threads — seen live
+        on macOS 2026-08-20 (frozen window + frozen asyncio loop, first ^C
+        ignored, non-deterministic). tkinter exposes no thread-safe event
+        primitive (event_generate enters Tcl the same way), so the sanctioned
+        pattern is a queue drained by the Tk thread's own timer — a UI pump,
+        not a state-settling poll. Callable from the Tk thread too (the
+        callback then runs ≤100 ms later)."""
+        self._ui_queue.put(fn)
+
+    def _drain_ui_queue(self):
+        while True:
+            try:
+                fn = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except Exception as e:
+                logger.debug(f"ui_call callback failed: {e}")
+        if not self._shutting_down and self.winfo_exists():
+            self.after(100, self._drain_ui_queue)
+
     def _startup_sequence(self):
         """Start all services in a background thread."""
         self.service_manager.on_backend_event = self._on_backend_event
@@ -249,21 +279,21 @@ class LauncherApp(ctk.CTk):
             self._set_status("starting", "Starting services...")
 
             def progress(msg):
-                self.after(0, lambda: self._progress_text.configure(text=msg))
+                self.ui_call(lambda: self._progress_text.configure(text=msg))
 
             try:
                 success = self.service_manager.start_all(progress_cb=progress)
             except Exception as e:
                 logger.error(f"Startup failed: {e}", exc_info=True)
                 err_msg = str(e)[:200]
-                self.after(0, lambda: self._set_status("error", "Startup failed"))
-                self.after(0, lambda: self._progress_text.configure(text=err_msg))
+                self.ui_call(lambda: self._set_status("error", "Startup failed"))
+                self.ui_call(lambda: self._progress_text.configure(text=err_msg))
                 return
 
             if success:
-                self.after(0, self._on_services_ready)
+                self.ui_call(self._on_services_ready)
             else:
-                self.after(0, lambda: self._set_status("error", "Failed to start services"))
+                self.ui_call(lambda: self._set_status("error", "Failed to start services"))
 
         threading.Thread(target=_start, daemon=True).start()
 
@@ -284,7 +314,7 @@ class LauncherApp(ctk.CTk):
             else:  # gave_up
                 self._set_status("error", "Backend down")
                 self._progress_text.configure(text=message)
-        self.after(0, apply)
+        self.ui_call(apply)
 
     def _on_services_ready(self):
         """Called when all services are running."""
@@ -377,7 +407,7 @@ class LauncherApp(ctk.CTk):
                 if self._shutting_down:
                     return
                 try:
-                    self.after(0, handler)
+                    self.ui_call(handler)
                 except RuntimeError:
                     return          # main loop gone
 
@@ -420,7 +450,7 @@ class LauncherApp(ctk.CTk):
             if self._shutting_down:
                 return
             try:
-                self.after(0, lambda: self._draw_pairing_qr(info, targets))
+                self.ui_call(lambda: self._draw_pairing_qr(info, targets))
             except RuntimeError:
                 pass
 
@@ -654,9 +684,7 @@ class LauncherApp(ctk.CTk):
         def _start():
             try:
                 def progress(msg):
-                    self.after(
-                        0,
-                        lambda: self._progress_text.configure(text=msg),
+                    self.ui_call(lambda: self._progress_text.configure(text=msg),
                     )
 
                 # Auto-install P2P deps if missing
@@ -687,12 +715,12 @@ class LauncherApp(ctk.CTk):
                     node_id=node_id, progress_cb=progress,
                 )
                 # Enable Sync button now that P2P is ready
-                self.after(0, lambda: self._btn_sync.configure(
+                self.ui_call(lambda: self._btn_sync.configure(
                     state="normal"))
             except Exception as e:
                 logger.error(f"P2P startup failed: {e}", exc_info=True)
                 # Enable Sync anyway — it will show a clear error
-                self.after(0, lambda: self._btn_sync.configure(
+                self.ui_call(lambda: self._btn_sync.configure(
                     state="normal"))
             finally:
                 self._p2p_starting = False
@@ -721,7 +749,7 @@ class LauncherApp(ctk.CTk):
                 webbrowser.open(result["auth_url"])
 
                 # Show dialog asking user to complete auth
-                self.after(0, lambda: self._show_lastfm_auth_dialog())
+                self.ui_call(lambda: self._show_lastfm_auth_dialog())
             except Exception as e:
                 logger.warning(f"Last.fm auth failed: {e}")
 
@@ -783,14 +811,14 @@ class LauncherApp(ctk.CTk):
                     if result.get("username")
                     else "Authorized successfully!"
                 )
-                self.after(0, lambda: self._lastfm_dialog_msg.configure(
+                self.ui_call(lambda: self._lastfm_dialog_msg.configure(
                     text=ok_text, text_color="#22c55e"))
-                self.after(1500, dialog.destroy)
+                self.ui_call(lambda: self.after(1500, dialog.destroy))
             else:
                 detail = ""
                 if result and result.get("detail"):
                     detail = f"\n{result['detail']}"
-                self.after(0, lambda: self._lastfm_dialog_msg.configure(
+                self.ui_call(lambda: self._lastfm_dialog_msg.configure(
                     text=f"Authorization failed.{detail}\nYou can try again in Settings.",
                     text_color="#ef4444"))
 
@@ -808,7 +836,7 @@ class LauncherApp(ctk.CTk):
             if self._shutting_down:
                 return
             try:
-                self.after(0, lambda: self._apply_stats(data))
+                self.ui_call(lambda: self._apply_stats(data))
             except RuntimeError:
                 pass   # main loop gone between the check and the call
 
@@ -932,28 +960,28 @@ class LauncherApp(ctk.CTk):
         def _do_start():
             if need_restart:
                 def progress(msg):
-                    self.after(0, lambda: self._progress_text.configure(text=msg))
+                    self.ui_call(lambda: self._progress_text.configure(text=msg))
 
                 msg = "Setting up music library..." if not music_p else "Restarting with new music path..."
                 self._set_status_safe("starting", msg)
                 ok = self.service_manager.restart_backend_and_tracker(progress_cb=progress)
                 if not ok:
-                    self.after(0, lambda: self._progress_text.configure(
+                    self.ui_call(lambda: self._progress_text.configure(
                         text="Failed to restart backend"))
-                    self.after(0, self._scan_done)
+                    self.ui_call(self._scan_done)
                     return
                 port = self.config.get("ports", {}).get("web", 8000)
                 self.api_client.set_port(port)
-                self.after(0, lambda: self._on_services_ready())
+                self.ui_call(lambda: self._on_services_ready())
 
             result = self.api_client.start_scan(subpath)
             if result and result.get("success"):
                 self._active_job = "scan"
-                self.after(0, self._refresh_scan)
+                self.ui_call(self._refresh_scan)
             else:
-                self.after(0, lambda: self._progress_text.configure(
+                self.ui_call(lambda: self._progress_text.configure(
                     text="Failed to start scan"))
-                self.after(0, self._scan_done)
+                self.ui_call(self._scan_done)
 
         threading.Thread(target=_do_start, daemon=True).start()
 
@@ -964,17 +992,17 @@ class LauncherApp(ctk.CTk):
         def _check():
             status = self.api_client.scan_status()
             if not status:
-                self.after(0, self._scan_done)
+                self.ui_call(self._scan_done)
                 return
 
             progress = status.get("progress", "")
             running = status.get("running", False)
 
-            self.after(0, lambda: self._progress_text.configure(text=progress))
+            self.ui_call(lambda: self._progress_text.configure(text=progress))
             if status.get("stats"):
-                self.after(0, self._fetch_and_display_stats)
+                self.ui_call(self._fetch_and_display_stats)
             if not running:
-                self.after(0, self._scan_done)
+                self.ui_call(self._scan_done)
 
         threading.Thread(target=_check, daemon=True).start()
 
@@ -1017,16 +1045,16 @@ class LauncherApp(ctk.CTk):
         def _check():
             status = self.api_client.enrich_status()
             if not status:
-                self.after(0, self._enrich_done)
+                self.ui_call(self._enrich_done)
                 return
 
             progress = status.get("progress", "")
             running = status.get("running", False)
 
-            self.after(0, lambda: self._progress_text.configure(text=progress))
-            self.after(0, self._fetch_and_display_stats)
+            self.ui_call(lambda: self._progress_text.configure(text=progress))
+            self.ui_call(self._fetch_and_display_stats)
             if not running:
-                self.after(0, self._enrich_done)
+                self.ui_call(self._enrich_done)
 
         threading.Thread(target=_check, daemon=True).start()
 
@@ -1070,7 +1098,7 @@ class LauncherApp(ctk.CTk):
 
         def _do_sync():
             # Normalize local artists before sync
-            self.after(0, lambda: self._progress_text.configure(
+            self.ui_call(lambda: self._progress_text.configure(
                 text="Normalizing artists..."))
             norm_result = self.api_client.normalize_artists()
             if norm_result:
@@ -1079,8 +1107,7 @@ class LauncherApp(ctk.CTk):
                     logger.info(f"Pre-sync normalization: {p1}")
 
             def progress(msg):
-                self.after(
-                    0, lambda: self._progress_text.configure(text=msg)
+                self.ui_call(lambda: self._progress_text.configure(text=msg)
                 )
 
             try:
@@ -1089,9 +1116,9 @@ class LauncherApp(ctk.CTk):
                 )
             except Exception as e:
                 logger.error(f"P2P sync failed: {e}", exc_info=True)
-                self.after(0, lambda: self._progress_text.configure(
+                self.ui_call(lambda: self._progress_text.configure(
                     text=f"Sync failed: {str(e)[:100]}"))
-                self.after(0, self._sync_done)
+                self.ui_call(self._sync_done)
                 return
 
             total = sum(
@@ -1099,7 +1126,7 @@ class LauncherApp(ctk.CTk):
             )
 
             if total == 0:
-                self.after(0, lambda: self._progress_text.configure(
+                self.ui_call(lambda: self._progress_text.configure(
                     text="No peers found with enrichment data"))
             else:
                 msg = f"Sync complete — {total} items imported"
@@ -1109,9 +1136,9 @@ class LauncherApp(ctk.CTk):
                 )
                 if details:
                     msg += f" ({details})"
-                self.after(0, lambda: self._progress_text.configure(text=msg))
+                self.ui_call(lambda: self._progress_text.configure(text=msg))
 
-            self.after(0, self._sync_done)
+            self.ui_call(self._sync_done)
 
         threading.Thread(target=_do_sync, daemon=True).start()
 
@@ -1133,7 +1160,7 @@ class LauncherApp(ctk.CTk):
 
     def _set_status_safe(self, state: str, text: str):
         """Thread-safe version of _set_status."""
-        self.after(0, lambda: self._set_status(state, text))
+        self.ui_call(lambda: self._set_status(state, text))
 
     def _open_settings(self):
         from desktop.settings import SettingsDialog
@@ -1149,10 +1176,10 @@ class LauncherApp(ctk.CTk):
 
         def _restart():
             def progress(msg):
-                self.after(0, lambda: self._progress_text.configure(text=msg))
+                self.ui_call(lambda: self._progress_text.configure(text=msg))
 
             self.service_manager.restart_backend_and_tracker(progress_cb=progress)
-            self.after(0, self._on_services_ready)
+            self.ui_call(self._on_services_ready)
 
         threading.Thread(target=_restart, daemon=True).start()
 
@@ -1166,15 +1193,15 @@ class LauncherApp(ctk.CTk):
             has_updates, count, old_hash = check_for_updates()
 
             if not has_updates:
-                self.after(0, lambda: self._show_update_result(False, 0))
+                self.ui_call(lambda: self._show_update_result(False, 0))
             else:
-                self.after(0, lambda: self._show_update_dialog(count, old_hash))
+                self.ui_call(lambda: self._show_update_dialog(count, old_hash))
 
             # Same button also freshens the measurement registries —
             # best-effort: needs a running backend, and the server-side
             # import guardrails already refuse degraded datasets.
             try:
-                self.after(0, lambda: self._progress_text.configure(
+                self.ui_call(lambda: self._progress_text.configure(
                     text="Refreshing gear registries..."))
                 reg = self.api_client.refresh_gear_registries()
                 if reg:
@@ -1191,8 +1218,9 @@ class LauncherApp(ctk.CTk):
                             for v in reg.values() if isinstance(v, dict))
                 else:
                     msg = "Registries skipped (backend offline)"
-                self.after(0, lambda m=msg: self._progress_text.configure(text=m))
-                self.after(8000, lambda: self._progress_text.configure(text=""))
+                self.ui_call(lambda m=msg: self._progress_text.configure(text=m))
+                self.ui_call(lambda: self.after(
+                    8000, lambda: self._progress_text.configure(text="")))
             except Exception as e:
                 logger.debug(f"Registry refresh failed: {e}")
 
@@ -1205,7 +1233,7 @@ class LauncherApp(ctk.CTk):
                 from desktop.updater import check_for_updates
                 has_updates, count, _ = check_for_updates()
                 if has_updates:
-                    self.after(0, lambda: self._btn_update.configure(
+                    self.ui_call(lambda: self._btn_update.configure(
                         text=f"Update Available ({count} commits)",
                         fg_color="#3b82f6",
                     ))
@@ -1271,7 +1299,7 @@ class LauncherApp(ctk.CTk):
             from desktop.updater import perform_update
 
             def progress(msg):
-                self.after(0, lambda: self._progress_text.configure(text=msg))
+                self.ui_call(lambda: self._progress_text.configure(text=msg))
 
             success, changelog = perform_update(
                 self.service_manager, self.config, progress_cb=progress,
@@ -1283,10 +1311,10 @@ class LauncherApp(ctk.CTk):
                 # Reload P2P modules so new code takes effect
                 # (backend is a separate process, but P2P runs in-process)
                 self._reload_p2p_modules()
-                self.after(0, lambda: self._show_changelog(changelog))
-                self.after(0, self._on_services_ready)
+                self.ui_call(lambda: self._show_changelog(changelog))
+                self.ui_call(self._on_services_ready)
             else:
-                self.after(0, lambda: self._set_status("error", "Update failed"))
+                self.ui_call(lambda: self._set_status("error", "Update failed"))
 
         threading.Thread(target=_update, daemon=True).start()
 
@@ -1352,7 +1380,7 @@ class LauncherApp(ctk.CTk):
                 except Exception as e:
                     logger.debug(f"P2P stop error: {e}")
             self.service_manager.stop_all()
-            self.after(0, self._final_quit)
+            self.ui_call(self._final_quit)
 
         threading.Thread(target=_shutdown, daemon=True).start()
 

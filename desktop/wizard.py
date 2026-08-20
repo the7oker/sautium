@@ -10,6 +10,7 @@ A multi-step customtkinter wizard that collects:
 """
 
 import logging
+import queue
 import secrets
 import shutil
 import subprocess
@@ -55,6 +56,10 @@ class SetupWizard(ctk.CTkToplevel):
 
         self.on_complete = on_complete
         self.config = load_config()
+        # Cross-thread UI marshaling — mirrors LauncherApp.ui_call (Tcl is
+        # apartment-threaded; after() from a worker thread deadlocks on macOS).
+        self._ui_queue: queue.Queue = queue.Queue()
+        self.after(100, self._drain_ui_queue)
         self.current_step = 0
         self.steps = [
             self._step_welcome,
@@ -148,6 +153,23 @@ class SetupWizard(ctk.CTkToplevel):
             self._show_step()
         else:
             self._finish()
+
+    def ui_call(self, fn):
+        """Thread-safe UI marshaling — see LauncherApp.ui_call for the why."""
+        self._ui_queue.put(fn)
+
+    def _drain_ui_queue(self):
+        while True:
+            try:
+                fn = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except Exception as e:
+                logger.debug(f"ui_call callback failed: {e}")
+        if self.winfo_exists():
+            self.after(100, self._drain_ui_queue)
 
     def _step_name(self) -> str:
         """Which step we are on, by name. Positional indices used to decide this,
@@ -970,7 +992,7 @@ class SetupWizard(ctk.CTkToplevel):
 
         def _worker():
             ok, msg = install_claude_runtime()
-            self.after(0, lambda: self._on_claude_install_done(ok, msg))
+            self.ui_call(lambda: self._on_claude_install_done(ok, msg))
 
         self._claude_install_thread = threading.Thread(
             target=_worker, daemon=True
@@ -1012,7 +1034,7 @@ class SetupWizard(ctk.CTkToplevel):
 
         def _worker():
             ok = claude_auth_verified()
-            self.after(0, lambda: self._on_claude_verify_done(ok))
+            self.ui_call(lambda: self._on_claude_verify_done(ok))
 
         self._claude_verify_thread = threading.Thread(target=_worker, daemon=True)
         self._claude_verify_thread.start()
@@ -1414,7 +1436,7 @@ class SetupWizard(ctk.CTkToplevel):
         def _init_thread():
             try:
                 def progress(msg):
-                    self.after(0, lambda: self._progress_label.configure(text=msg))
+                    self.ui_call(lambda: self._progress_label.configure(text=msg))
 
                 # Install crypto dependencies if missing
                 self._ensure_crypto_deps(progress)
@@ -1472,7 +1494,7 @@ class SetupWizard(ctk.CTkToplevel):
 
                 full_init(password, port=port, progress_cb=progress)
 
-                self.after(0, self._init_complete)
+                self.ui_call(self._init_complete)
             except Exception as e:
                 logger.error(f"Initialization failed: {e}")
                 # A partial init may have started PostgreSQL. Stop it so it
@@ -1484,14 +1506,12 @@ class SetupWizard(ctk.CTkToplevel):
                     stop_postgres()
                 except Exception as se:
                     logger.warning(f"Cleanup stop_postgres failed: {se}")
-                self.after(
-                    0,
-                    lambda: self._progress_label.configure(
+                self.ui_call(lambda: self._progress_label.configure(
                         text=f"Error: {e}", text_color="red"
                     ),
                 )
-                self.after(0, lambda: self._progress_bar.stop())
-                self.after(0, lambda: self.btn_back.configure(state="normal"))
+                self.ui_call(lambda: self._progress_bar.stop())
+                self.ui_call(lambda: self.btn_back.configure(state="normal"))
 
         threading.Thread(target=_init_thread, daemon=True).start()
 
