@@ -427,8 +427,9 @@ async def lifespan(app: FastAPI):
             from desktop.p2p import mailbox_client
             from p2p_identity import load_signing_key
             from routers.peer_chat import mailbox_import
-            _mailbox = mailbox_client.MasterMailbox(MASTER_PUBKEY_HEX, load_signing_key(settings).sign,
-                                                    mailbox_import)
+            _mailbox = mailbox_client.MasterMailbox(
+                MASTER_PUBKEY_HEX, load_signing_key(settings).sign, mailbox_import,
+                peer_port=settings.p2p_announce_port or settings.p2p_sync_port)
             _mailbox_task = asyncio.create_task(_mailbox.run(lambda: not _identity_stop.is_set()))
             logger.info("master mailbox: wake socket task started")
     except Exception as e:

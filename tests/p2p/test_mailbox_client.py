@@ -174,3 +174,18 @@ def test_wake_socket_drains_on_connect_and_on_mail():
                 for ws in list(fake.sockets):
                     await ws.close()
     asyncio.run(run())
+
+
+def test_wake_query_declares_the_peer_port_inside_the_signature():
+    box = mc.MasterMailbox(MASTER_PUB, MASTER.sign, lambda m: None, peer_port=8801,
+                           clock=lambda: 1_800_000_000)
+    q = box._signed_query("mailbox-wake", "8801")
+    parts = dict(p.split("=", 1) for p in q.split("&"))
+    Ed25519PublicKey.from_public_bytes(bytes.fromhex(MASTER_PUB)).verify(
+        bytes.fromhex(parts["signature"]), b"mailbox-wake:v1:1800000000:8801")
+    # without a port the legacy format stands
+    q2 = mc.MasterMailbox(MASTER_PUB, MASTER.sign, lambda m: None,
+                          clock=lambda: 1_800_000_000)._signed_query("mailbox-wake")
+    parts2 = dict(p.split("=", 1) for p in q2.split("&"))
+    Ed25519PublicKey.from_public_bytes(bytes.fromhex(MASTER_PUB)).verify(
+        bytes.fromhex(parts2["signature"]), b"mailbox-wake:v1:1800000000")

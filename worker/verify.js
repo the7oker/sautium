@@ -55,7 +55,14 @@
  *                                master while it is offline (sender-signed,
  *                                needs a birth certificate issued here)
  *   GET  /mailbox              — master-signed drain; DELETE /mailbox — ack
- *   GET  /mailbox/wake         — master-signed WebSocket: "mail" on arrival
+ *   GET  /mailbox/wake         — master-signed WebSocket: "mail" on arrival;
+ *                                also records the master's current address
+ *                                (egress IP + declared peer port) as the
+ *                                bootstrap hint below
+ *   GET  /master-hint          — the master's last known peer address, for
+ *                                nodes whose DHT is dead (mobile carriers
+ *                                throttle UDP): rides HTTPS/443, the one
+ *                                transport every newborn provably has
  *   GET  /health               — health check
  *
  * Birth ledger (Durable Object BIRTH_LEDGER, SQLite): every first issuance is
@@ -224,6 +231,9 @@ export default {
       }
       if (url.pathname === "/mailbox/wake" && request.method === "GET") {
         return await handleMailboxWake(request, url, env, corsHeaders);
+      }
+      if (url.pathname === "/master-hint" && request.method === "GET") {
+        return await handleMasterHint(env, corsHeaders);
       }
 
       if (url.pathname === "/birth-certificate" && request.method === "POST") {
@@ -798,19 +808,56 @@ async function handleMailboxDrain(request, url, env, corsHeaders) {
 
 async function handleMailboxWake(request, url, env, corsHeaders) {
   /**
-   * GET /mailbox/wake?public_key_hex&ts&signature (Upgrade: websocket)
-   *   signature over mailbox-wake:v1:{ts}
+   * GET /mailbox/wake?public_key_hex&ts&signature[&peer_port] (Upgrade: websocket)
+   *   signature over mailbox-wake:v1:{ts}[:{peer_port}]
    * The master holds this socket (hibernating on the Durable Object side);
    * every stored message sends "mail" — the master drains on it and on
    * (re)connect. No polling anywhere.
+   *
+   * When peer_port is declared, the connection doubles as the MASTER
+   * ADDRESS HINT: the egress IP the edge observed + that port are stored
+   * for /master-hint. The port is inside the master's signature and the
+   * update is single-use per signature (KV nonce, TTL = the skew window) —
+   * a captured URL replayed from another host can neither change the port
+   * nor point the hint at the replayer's address.
    */
   if (!env.MAILBOX) return json({ error: "mailbox not configured" }, corsHeaders, 503);
-  const err = await verifyMasterRequest(url, "mailbox-wake");
+  const peerPort = url.searchParams.get("peer_port") || "";
+  const err = await verifyMasterRequest(url, "mailbox-wake",
+                                        peerPort === "" ? undefined : peerPort);
   if (err) return json({ error: err }, corsHeaders, 403);
+  // The hint is recorded on the SIGNED request itself (before the upgrade
+  // gate): the signature is the authority, the upgrade only carries the
+  // wake stream.
+  const port = parseInt(peerPort);
+  if (Number.isInteger(port) && port > 0 && port < 65536) {
+    const sigNonce = `wakesig:${await sha256Hex(url.searchParams.get("signature") || "")}`;
+    if (!await env.RATE_LIMITS.get(sigNonce)) {
+      await env.RATE_LIMITS.put(sigNonce, "1", { expirationTtl: 2 * MAIL_SIG_SKEW_S });
+      const host = request.headers.get("CF-Connecting-IP") || "";
+      if (host) {
+        await env.RATE_LIMITS.put("master:hint", JSON.stringify({
+          host, port, updated_at: nowIsoSeconds(),
+        }));
+      }
+    }
+  }
   if ((request.headers.get("Upgrade") || "").toLowerCase() !== "websocket") {
     return json({ error: "websocket upgrade required" }, corsHeaders, 426);
   }
   return await mailboxStub(env).fetch(new Request("https://mailbox/wake", request));
+}
+
+async function handleMasterHint(env, corsHeaders) {
+  /**
+   * The master's last known peer address — a DISCOVERY tier of last
+   * resort, never a trust statement: whoever dials it still faces the
+   * full peer handshake (pinned pubkey, certificates, signatures), and
+   * the address itself is public anyway through the master's own DHT
+   * announces. Empty until the master's wake socket has connected once.
+   */
+  const hint = await env.RATE_LIMITS.get("master:hint", "json");
+  return json(hint || {}, corsHeaders);
 }
 
 export class MasterMailbox {

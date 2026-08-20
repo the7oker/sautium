@@ -295,3 +295,12 @@ def test_worker_mailbox_contract():
     assert r["ack"]["body"] == {"deleted": 3}
     assert r["drainAfterAck"]["body"] == {"messages": [], "more": False}
     assert r["wakeNoUpgrade"]["status"] == 426
+    # the master address hint: empty before, set by a signed wake with a port
+    # (edge IP + declared port), immune to replays from elsewhere
+    assert r["hintEmpty"]["body"] == {}
+    assert r["wakeWithPort"]["status"] == 426                # signature+hint accepted, upgrade still required
+    assert r["hintSet"]["body"]["host"] == "198.51.100.77" and r["hintSet"]["body"]["port"] == 8801
+    assert r["hintReplayPort"]["status"] == 403              # the port is inside the signature
+    assert r["hintReplaySame"]["status"] == 426              # sig valid — but the nonce already burned:
+    assert r["hintAfterReplay"]["body"]["host"] == "198.51.100.77"   # the replayer's address never lands
+    assert r["hintBadPort"]["status"] == 426                 # a junk port never touches the hint

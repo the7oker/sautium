@@ -960,6 +960,14 @@ class P2PManager:
             # node's inventory answers for the whole library at once.
             _progress("Searching DHT for nodes...")
             await _drain_new(await self._dht_service.lookup_nodes())
+            if not dht_seen and not synced_peers:
+                # Dead DHT (mobile): the master serves sync too — one hint
+                # candidate; _drain_peer validates like any other node.
+                from desktop.p2p import master_hint
+                hint = await asyncio.get_event_loop().run_in_executor(
+                    None, master_hint.fetch)
+                if hint:
+                    await _drain_new([hint])
 
             # Step B: residual artists — targeted keys against the rare-artist
             # tail peers announce. Small by construction: whatever is common
@@ -1454,6 +1462,21 @@ class P2PManager:
         # nodes (403 → next candidate), so a cold cache on a LAN pair must
         # not wait out a dead DHT either.
         lan_others = list(self._lan_discovery.peers) if self._lan_discovery else []
+
+        # Last resort, MASTER only: the Worker-served address hint. Mobile
+        # carriers throttle UDP hard enough that a newborn's DHT bootstrap
+        # can find zero nodes while HTTPS works — without this tier such a
+        # node has NO route to the support/dump/relay node at all. Purely a
+        # discovery candidate: the handshake still checks the pinned pubkey.
+        if not (peers or lan_others):
+            from desktop.p2p.master_node import MASTER_PUBKEY_HEX
+            if pubkey == MASTER_PUBKEY_HEX:
+                from desktop.p2p import master_hint
+                hint = await asyncio.get_event_loop().run_in_executor(
+                    None, master_hint.fetch)
+                if hint:
+                    add([hint])
+
         if self._dht_service and self._dht_service.is_available:
             if refresh or not (peers or lan_others):
                 add(await self._dht_service.lookup_user(invite_code))
@@ -3343,6 +3366,14 @@ class P2PManager:
         if self._dht_service:
             for ip, port in await self._dht_service.lookup_capability("mbdump"):
                 candidates.append(f"{ip}:{port}")
+        if not candidates:
+            # Dead DHT + no LAN + no manual peers (the mobile newborn): the
+            # master IS a dump node — the Worker hint supplies the address,
+            # the ban/health/node_id validation below stays the judge.
+            from desktop.p2p import master_hint
+            hint = await loop.run_in_executor(None, master_hint.fetch)
+            if hint:
+                candidates.append(f"{hint[0]}:{hint[1]}")
 
         for addr in candidates:
             if addr in seen_addrs:

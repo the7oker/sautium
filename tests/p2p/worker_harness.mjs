@@ -275,6 +275,20 @@ const ack = await call("DELETE", `/mailbox?public_key_hex=${master.pubHex}&ts=${
 const drainAfterAck = await call("GET", `/mailbox?public_key_hex=${master.pubHex}&ts=${nowTs}&after=0&signature=${drainSig}`);
 const wakeNoUpgrade = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&signature=${await sign(master, `mailbox-wake:v1:${nowTs}`)}`);
 
+// --- master address hint: set by a signed wake with peer_port, replay-proof ---
+const hintEmpty = await call("GET", "/master-hint");
+const wakeSig = await sign(master, `mailbox-wake:v1:${nowTs}:8801`);
+const wakeWithPort = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&peer_port=8801&signature=${wakeSig}`, undefined, { ip: "198.51.100.77" });
+const hintSet = await call("GET", "/master-hint");
+// the same signature replayed from another address with another port: refused by
+// the signature (port differs) …
+const hintReplayPort = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&peer_port=9999&signature=${wakeSig}`, undefined, { ip: "203.0.113.99" });
+// …and replayed verbatim from another address: signature valid, but the
+// single-use nonce blocks the hint update
+const hintReplaySame = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&peer_port=8801&signature=${wakeSig}`, undefined, { ip: "203.0.113.99" });
+const hintAfterReplay = await call("GET", "/master-hint");
+const hintBadPort = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&peer_port=abc&signature=${await sign(master, `mailbox-wake:v1:${nowTs}:abc`)}`);
+
 const stats = await call("GET", "/issuance-stats");
 const badSig = await call("POST", "/birth-certificate", {
   pubkey_hex: s1.pubHex, signature: "00".repeat(64),
@@ -293,5 +307,6 @@ console.log(JSON.stringify({
   master_pub: master.pubHex,
   mail1, mail2, mailDup, mail3, mailCap, mailNoCert, mailBadSig, mailWrongTo, mailTooBig,
   drain, drainForeign, drainStale, ack, drainAfterAck, wakeNoUpgrade,
+  hintEmpty, wakeWithPort, hintSet, hintReplayPort, hintReplaySame, hintAfterReplay, hintBadPort,
   verified_record: JSON.parse(store.get(`verified:${inviteCode.replace("#", ":")}`)),
 }));

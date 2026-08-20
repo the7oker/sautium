@@ -79,14 +79,19 @@ class MasterMailbox:
 
     def __init__(self, pubkey_hex: str, sign: Signer,
                  on_message: Callable[[dict], object], *,
+                 peer_port: Optional[int] = None,
                  worker_url: str = WORKER_URL, clock: Callable[[], float] = time.time):
         """`on_message(m)` runs in a worker thread (it hits the DB) for every
         drained message: {message_uuid, from_public_key, encrypted,
         timestamp, received_at, id}. Raising skips the ack — the batch is
-        served again on the next drain."""
+        served again on the next drain. `peer_port` (the master's public
+        peer port) makes every wake connect double as the master ADDRESS
+        HINT the Worker serves at /master-hint — the port rides inside the
+        signature (see the Worker's replay guard)."""
         self.pubkey = pubkey_hex.lower()
         self._sign = sign
         self._on_message = on_message
+        self._peer_port = peer_port
         self._worker_url = worker_url
         self._clock = clock
         self._drain_lock = asyncio.Lock()
@@ -142,7 +147,10 @@ class MasterMailbox:
                 # what the edge then sends (seen on the dev host).
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=15),
                                                  headers={"Accept-Encoding": "gzip"}) as session:
-                    q = self._signed_query("mailbox-wake")
+                    q = self._signed_query("mailbox-wake",
+                                           str(self._peer_port) if self._peer_port else None)
+                    if self._peer_port:
+                        q += f"&peer_port={self._peer_port}"
                     async with session.ws_connect(f"{self._worker_url}/mailbox/wake?{q}",
                                                   heartbeat=WS_HEARTBEAT_S) as ws:
                         self.connected = True
