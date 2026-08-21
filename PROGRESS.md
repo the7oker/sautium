@@ -178,6 +178,16 @@ The short version of the hard-learned lessons:
   reports battery power and the assertion silently stops applying, which is
   the worst possible failure direction. Neither API blocks deliberate sleep,
   and neither takes a display assertion.
+- **A browser plays what a gesture allowed, not what the server asked for.**
+  Media elements are activated by a `play()` inside a user gesture; ours
+  arrives seconds later over SSE, after the provider fetch. So the first
+  track of a fresh browser profile is refused, the renderer reports paused,
+  and the tracker files a 0% skip for a track nobody heard — then a manual
+  tap fixes it permanently (the element stays activated, and the browser's
+  per-origin engagement score keeps growing). It is a first-impression bug by
+  construction: it cannot be reproduced once it has been hit, only on a fresh
+  profile. `maybeClaimRenderer()` therefore spends the gesture on a 45-byte
+  silent clip; transport handlers ignore events while that clip is the src.
 - **libtorrent 2.1+ `peers()`** returns `(ip, port)` tuples, not objects with
   `.address()/.port()`. Compat handling in `dht_service.py`.
 - **libtorrent DHT alerts** require `alert_mask += dht_operation_notification`
