@@ -446,10 +446,23 @@ def resolve_artist_photo(db: Session, artist_id: str) -> Optional[uuid.UUID]:
     if existing is not None:
         return existing
 
+    # Albums WE credit to this artist, most-of-their-tracks first: the
+    # evidence that tells apart same-named artists on Deezer (a compilation
+    # they appear on once ranks below a record that is theirs).
+    album_titles = [r[0] for r in db.execute(text("""
+        SELECT al.title
+        FROM albums al
+        JOIN album_tracks att ON att.album_id = al.id
+        JOIN track_artists ta ON ta.track_id = att.track_id AND ta.artist_id = :id
+        GROUP BY al.id, al.title
+        ORDER BY count(*) DESC
+        LIMIT 6
+    """), {"id": artist_id}).fetchall()]
+
     photo_url: Optional[str] = None
     any_source_errored = False
     try:
-        photo_url = fetch_deezer_photo_url(name)
+        photo_url = fetch_deezer_photo_url(name, album_titles)
         api_cooldown.clear('deezer')   # a clean response clears any prior cooldown
     except RateLimitError as e:
         logger.warning(f"artist photo rate-limited via Deezer for {name!r}: {e}")

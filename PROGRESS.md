@@ -197,6 +197,18 @@ The short version of the hard-learned lessons:
   generation now. The Now Playing sheet paints into a real `<img>`, where
   assigning `src` aborts the load in flight — same task, no race, and the
   difference is the reason one of them needed fixing.
+- **A name is not an identity — Deezer ranks namesakes by nothing useful.**
+  `search/artist?q=vangelis` returns three artists called exactly "Vangelis",
+  and the one it puts FIRST has one album and 20 followers while the composer
+  has 68 and 209k — so `limit=1` put a stranger's face on the artist page.
+  Artist-photo lookup now sends the album titles we credit to the artist and
+  keeps the candidate whose Deezer catalogue actually contains one of them;
+  followers only break a tie nothing else could. Deezer's advanced query
+  `artist:"X" album:"Y"` looks like the shortcut and is a trap: it answers
+  with other artists' COVERS of that album (John Beal for "Vangelis / Blade
+  Runner"), trading a wrong namesake for an outright wrong artist. Photos are
+  pinned once and never re-resolved, so anything resolved before this stays
+  wrong until its `artists.photo_cover_id` is cleared.
 - **libtorrent 2.1+ `peers()`** returns `(ip, port)` tuples, not objects with
   `.address()/.port()`. Compat handling in `dht_service.py`.
 - **libtorrent DHT alerts** require `alert_mask += dht_operation_notification`
