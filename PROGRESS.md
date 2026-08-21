@@ -202,8 +202,15 @@ The short version of the hard-learned lessons:
   and the one it puts FIRST has one album and 20 followers while the composer
   has 68 and 209k — so `limit=1` put a stranger's face on the artist page.
   Artist-photo lookup now sends the album titles we credit to the artist and
-  keeps the candidate whose Deezer catalogue actually contains one of them;
-  followers only break a tie nothing else could. Deezer's advanced query
+  keeps the candidate whose catalogue matches most of them; followers only
+  break a tie nothing else could. The titles must be CANONICAL to be worth
+  sending: our rows are editions, and seven of them are one record ("Blade
+  Runner (Esper Edition MK2)", "(Trilogy, 25th Anniversary)", "(Deck Art-765
+  Limited Edition)"…) under names no catalogue carries — so the context
+  collapses to the release group (`albums.musicbrainz_id` IS the RG id) and
+  sends the group's shortest title. Matching still strips edition baggage
+  from BOTH sides: Deezer has its own ("Blade Runner (Music From The Original
+  Soundtrack)"), so plain containment fails in both directions. Deezer's advanced query
   `artist:"X" album:"Y"` looks like the shortcut and is a trap: it answers
   with other artists' COVERS of that album (John Beal for "Vangelis / Blade
   Runner"), trading a wrong namesake for an outright wrong artist. Photos are

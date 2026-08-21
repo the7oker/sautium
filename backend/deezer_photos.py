@@ -43,7 +43,7 @@ _ALBUMS_URL = "https://api.deezer.com/artist/{}/albums"
 
 _CANDIDATES = 5          # exact-name namesakes to look at
 _DISAMBIGUATE_MAX = 3    # ...of which this many are worth a catalogue request
-_CATALOGUE_LIMIT = 50    # albums pulled per candidate
+_CATALOGUE_LIMIT = 100   # albums pulled per candidate (Vangelis alone has 68)
 
 # Deezer error codes that mean "back off", not "no such artist".
 _QUOTA_CODES = {4, 700}
@@ -53,16 +53,25 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
 
 
+def _base(title: str) -> str:
+    """The title without its edition baggage: both sides carry their own and
+    it rarely agrees — ours says "Blade Runner (Esper Edition MK2)" where
+    Deezer says "Blade Runner (Music From The Original Soundtrack)"."""
+    return _norm(re.sub(r"[\(\[].*?[\)\]]|\s[-–]\s.*$", " ", title or ""))
+
+
 def _titles_match(ours: str, theirs: str) -> bool:
-    """Our titles carry edition baggage Deezer's do not ("Blade Runner (Esper
-    Edition MK2)" vs "Blade Runner"), so containment either way counts — but
-    only for titles long enough that containment means something."""
     a, b = _norm(ours), _norm(theirs)
     if not a or not b:
         return False
     if a == b:
         return True
-    return len(a) >= 5 and len(b) >= 5 and (a in b or b in a)
+    # One side annotated, the other bare ("Blade Runner" ⊂ "Blade Runner
+    # (Esper Edition MK2)"), then both annotated differently.
+    if len(a) >= 5 and len(b) >= 5 and (a in b or b in a):
+        return True
+    ba, bb = _base(ours), _base(theirs)
+    return ba == bb and len(ba) >= 5
 
 
 def _get(url: str, params: dict) -> dict:
@@ -97,10 +106,14 @@ def _picture(artist: dict) -> Optional[str]:
     return None if (not pic or "/artist//" in pic) else pic
 
 
-def _releases_any_of(artist_id, titles: Sequence[str]) -> bool:
-    """Does this Deezer artist's catalogue hold an album we know them by?"""
+def _catalogue_overlap(artist_id, titles: Sequence[str]) -> int:
+    """How many of the albums we know this artist by are in their Deezer
+    catalogue. A COUNT, not a flag: generic titles ("Greatest Hits", "Live")
+    collide across artists, so one hit is weak evidence and several is strong
+    — and the namesake that matches most is the one we mean."""
     data = _get(_ALBUMS_URL.format(artist_id), {"limit": _CATALOGUE_LIMIT}).get("data") or []
-    return any(_titles_match(ours, a.get("title", "")) for a in data for ours in titles)
+    theirs = [a.get("title", "") for a in data]
+    return sum(1 for ours in titles if any(_titles_match(ours, t) for t in theirs))
 
 
 def _pick(candidates: list, name: str, album_titles: Sequence[str]) -> dict:
@@ -113,11 +126,16 @@ def _pick(candidates: list, name: str, album_titles: Sequence[str]) -> dict:
 
     exact.sort(key=lambda a: a.get("nb_fan") or 0, reverse=True)
     if album_titles:
+        best, best_overlap = None, 0
         for cand in exact[:_DISAMBIGUATE_MAX]:
-            if _releases_any_of(cand["id"], album_titles):
-                logger.info("deezer namesakes for %r: %d exact — picked id=%s by catalogue",
-                            name, len(exact), cand["id"])
-                return cand
+            overlap = _catalogue_overlap(cand["id"], album_titles)
+            if overlap > best_overlap:
+                best, best_overlap = cand, overlap
+        if best is not None:
+            logger.info("deezer namesakes for %r: %d exact — picked id=%s, "
+                        "%d/%d albums match its catalogue",
+                        name, len(exact), best["id"], best_overlap, len(album_titles))
+            return best
     logger.info("deezer namesakes for %r: %d exact — no catalogue evidence, "
                 "picked id=%s on %s followers", name, len(exact),
                 exact[0]["id"], exact[0].get("nb_fan"))
