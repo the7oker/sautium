@@ -455,6 +455,14 @@ def resolve_artist_photo(db: Session, artist_id: str) -> Optional[uuid.UUID]:
     # the group's shortest title is the canonical one Deezer also uses. MB-
     # backed groups rank first, then by how much of the artist's work they
     # are, so a compilation they appear on once never outranks their own.
+    #
+    # Sending MANY costs nothing: the candidate's catalogue is fetched once
+    # and every title is checked against it, so the request count is the same
+    # for one title or forty — while a narrow context can miss entirely when
+    # an artist's biggest records are obscure. Measured on Vangelis, whose
+    # top six are French and Italian soundtracks: the right candidate goes
+    # 2 -> 3 -> 9 -> 15 matches at 6/12/25/40 titles, and both impostors stay
+    # at zero throughout. Wider evidence, same cost, no extra noise.
     album_titles = [r[0] for r in db.execute(text("""
         SELECT (array_agg(al.title ORDER BY length(al.title), al.title))[1] AS title
         FROM albums al
@@ -462,7 +470,7 @@ def resolve_artist_photo(db: Session, artist_id: str) -> Optional[uuid.UUID]:
         JOIN track_artists ta ON ta.track_id = att.track_id AND ta.artist_id = :id
         GROUP BY COALESCE(al.musicbrainz_id::text, al.id::text)
         ORDER BY bool_or(al.musicbrainz_id IS NOT NULL) DESC, count(*) DESC
-        LIMIT 6
+        LIMIT 40
     """), {"id": artist_id}).fetchall()]
 
     photo_url: Optional[str] = None
