@@ -192,6 +192,8 @@
         && !browserRenderer.active) {
       browserRenderer.attach();
     }
+    // We are inside a user gesture; the play that follows will not be.
+    browserRenderer.unlock();
   }
 
   async function playerCmd(cmd) {
@@ -232,8 +234,13 @@
   // events are POSTed back and become the backend's status feed.
   // MediaSession mirrors metadata to the lock screen. Backend counterpart:
   // playback/browser_backend.py.
+  // 45 bytes of silence — the smallest thing a media element accepts as a
+  // real resource, and all that is needed to spend a user gesture on it.
+  const SILENT_CLIP = 'data:audio/wav;base64,UklGRiUAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQEAAACA';
+
   const browserRenderer = {
     tab: null,
+    unlocked: false,
     ctrl: null,
     audio: null,
     pendingPlay: false,
@@ -308,11 +315,41 @@
       this._clearBlobs();
     },
 
+    onSilentClip() {
+      // True while the element holds the unlock clip rather than a track:
+      // its play/pause/ended fire like any other media and must not be
+      // reported as transport state.
+      return !!this.audio && this.audio.src === SILENT_CLIP;
+    },
+
+    unlock() {
+      // Autoplay policies activate a media element only when play() runs
+      // inside a user gesture, and OUR play() lands seconds later over SSE,
+      // once the server has finished buffering. The element is usually born
+      // in the same gesture that asked for the track (attach()), but the
+      // directive that plays it is not — so on a first visit the very first
+      // track is refused and the UI shows a pause nobody asked for. Once the
+      // user taps play the element is activated for good, which is why this
+      // only ever bites the first track of a fresh browser profile.
+      //
+      // So spend THIS gesture on the silent clip. It stays loaded (45 bytes)
+      // until the first real load directive replaces it.
+      if (this.unlocked || !this.audio || this.audio.src) return;
+      this.audio.src = SILENT_CLIP;
+      const p = this.audio.play();
+      if (p && p.then) {
+        p.then(() => { this.unlocked = true; this.audio.pause(); }, () => {});
+      } else {
+        this.unlocked = true;
+      }
+    },
+
     resumeLocal() {
       // Called inside a real user gesture (play tap) — unlocks autoplay.
       // Returns true only when playback was genuinely handled locally;
       // false falls through to the server path.
       if (!this.audio || !this.audio.src) return false;
+      if (this.onSilentClip()) return false;   // only the unlock clip is loaded
       if (this.audio.error) {
         // Dead pipeline (network died mid-stream): a held blob revives it
         // at the same position; without one the server reload is the floor.
@@ -362,21 +399,26 @@
 
     _wireAudio() {
       const a = this.audio;
+      const isUnlockClip = () => this.onSilentClip();
       a.addEventListener('playing', () => {
+        if (isUnlockClip()) return;
         this.pendingPlay = false;
         this.playingNow = true;
         this._post('playing');
         this._prefetchNext();
       });
       a.addEventListener('pause', () => {
+        if (isUnlockClip()) return;
         this.playingNow = false;
         if (!a.ended) this._post('paused');
       });
       a.addEventListener('ended', () => {
+        if (isUnlockClip()) return;
         this.playingNow = false;
         if (!this._advanceLocal()) this._post('ended');
       });
       a.addEventListener('error', () => {
+        if (isUnlockClip()) return;
         if (!a.src) return;
         // A parked network killed the streaming src mid-track — the fully
         // fetched blob takes over at the same position instead of dying.
