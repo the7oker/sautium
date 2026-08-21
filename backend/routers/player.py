@@ -1630,36 +1630,64 @@ def _parallel_resolve(provider, queries: list) -> list:
         return list(ex.map(one, queries))
 
 
+# Resolved-source cache: (track_id, provider order) -> (timestamp, chain). One
+# resolve pass is tens of provider searches — seconds — and the album page runs
+# it (availability) moments before Play runs it AGAIN on the exact same tracks,
+# that second one sitting squarely in front of the first sound. Source ids are
+# stable catalogue facts, so one resolve serves both readers; a stale id simply
+# fails its download and cascades down the chain. Keyed on the provider order
+# too: a Deezer cooldown demotes/drops it (providers_preferred), and those
+# thinner chains must not outlive the cooldown.
+_chain_cache: dict[tuple, tuple] = {}
+_CHAIN_TTL_S = 3600.0
+
+
 def _resolve_waterfall(queries: list) -> list:
     """Per-track lossless-first fallback CHAIN ``[(provider, source_id), ...]``.
     Each track resolves to its best provider (Deezer FLAC before YouTube lossy);
     the chain then appends LOWER-preference providers (source_id=None, resolved
     lazily inside fetch) as DOWNLOAD-failure fallbacks — so a track Deezer has but
     can't serve in FLAC (region/licensing) still streams from YouTube instead of
-    just dropping. An empty chain == no provider resolved it (truly unavailable)."""
+    just dropping. An empty chain == no provider resolved it (truly unavailable).
+    Cached per track (see _chain_cache) — including the empty chain, or every
+    play would re-search every provider for a track known to be nowhere."""
     from streaming import service as streaming_service
 
     provs = streaming_service.providers_preferred()
-    best = [None] * len(queries)            # index into provs that resolved
-    sids = [None] * len(queries)
-    durs = [None] * len(queries)            # provider-reported duration (s), for length_ms backfill
-    arts = [None] * len(queries)            # provider album art, for the CAA-cover fallback
-    pending = list(range(len(queries)))
+    order = tuple(p.manifest.id for p in provs)
+    now = time.time()
+    for key, (ts, _chain) in list(_chain_cache.items()):
+        if now - ts >= _CHAIN_TTL_S:
+            _chain_cache.pop(key, None)
+
+    chains = [None] * len(queries)
+    pending = []                            # indices still to resolve
+    for i, q in enumerate(queries):
+        hit = _chain_cache.get((q.track_id, order)) if q.track_id else None
+        if hit is not None:
+            chains[i] = hit[1]
+        else:
+            pending.append(i)
+
+    best = {}                               # index -> index into provs that resolved
+    sids, durs, arts = {}, {}, {}
+    unresolved = list(pending)
     for pi, prov in enumerate(provs):
-        if not pending:
+        if not unresolved:
             break
         if not prov.supports_resolve:
             continue                        # can't pre-resolve; appears only as a lazy fallback
-        res = _parallel_resolve(prov, [queries[i] for i in pending])
+        res = _parallel_resolve(prov, [queries[i] for i in unresolved])
         still = []
-        for i, r in zip(pending, res):
+        for i, r in zip(unresolved, res):
             if r is not None:
                 best[i], sids[i], durs[i], arts[i] = pi, r.source_id, r.duration, r.artwork_url
             else:
                 still.append(i)
-        pending = still
+        unresolved = still
 
-    for q, d, art in zip(queries, durs, arts):
+    for i in pending:
+        q, d, art = queries[i], durs.get(i), arts.get(i)
         # Only MB-length-less tracks — the virtual duration is a FALLBACK, never an
         # override of a known MB length (that is the canonical display; the resolved
         # source may be a mismatch at a different length).
@@ -1668,14 +1696,14 @@ def _resolve_waterfall(queries: list) -> list:
         if art and q.track_id:
             _resolved_artwork[q.track_id] = art
 
-    chains = []
-    for i in range(len(queries)):
-        if best[i] is not None:
+        if i in best:
             chain = [(provs[best[i]], sids[i])]
             chain += [(provs[pi], None) for pi in range(best[i] + 1, len(provs))]
         else:
             chain = [(p, None) for p in provs if not p.supports_resolve]
-        chains.append(chain)
+        chains[i] = chain
+        if q.track_id:
+            _chain_cache[(q.track_id, order)] = (now, chain)
     return chains
 
 
@@ -1761,54 +1789,41 @@ def _phantom_album_queries(album_id: str) -> list:
     ]
 
 
-# Phantom-availability cache: track ids a provider can't resolve, per
-# (album_id, provider_id). One resolve pass is tens of provider searches — far
-# too slow to redo on every album-page view, so cache it (catalogs are stable).
-_availability_cache: dict[tuple, tuple] = {}   # key -> (timestamp, frozenset(unavailable))
-_AVAILABILITY_TTL_S = 3600.0
-
-
 @router.get("/phantom-availability/{album_id}")
 def phantom_availability(album_id: str) -> dict:
     """Track ids of a phantom album NO provider can stream, so the album page can
     dim + disable them up front (no need to stream first). Tries every provider
     (lossless-first); a track is unavailable only if none has it, and available if
     ANY of its tracklist rows resolves (the same title can appear at several
-    durations — one match is enough). Cached per album + provider-set."""
+    durations — one match is enough). The resolve behind it is cached per track
+    (_chain_cache), which is also what the Play that follows this page view
+    reads — so the album resolves ONCE, off the path to the first sound."""
     from streaming import service as streaming_service
     if not streaming_service.is_enabled():
         return {"unavailable": []}
-    provs = streaming_service.providers_preferred()
-    if not provs:
+    if not streaming_service.providers_preferred():
         return {"unavailable": []}
 
-    key = (album_id, tuple(p.manifest.id for p in provs))
-    now = time.time()
-    hit = _availability_cache.get(key)
-    if hit and now - hit[0] < _AVAILABILITY_TTL_S:
-        unavailable, quality, durations = hit[1], hit[2], hit[3]
-    else:
-        queries = _phantom_album_queries(album_id)
-        chains = _resolve_waterfall(queries)
-        # Per distinct track_id, keep the BEST quality among its rows (the same
-        # title at several durations may resolve on different providers). Quality
-        # is the chain HEAD (preferred provider); a download-failure fallback can
-        # still drop it to lossy at stream time.
-        best_lossless = {}
-        for q, chain in zip(queries, chains):
-            if not chain or not q.track_id:
-                continue
-            best_lossless[q.track_id] = (best_lossless.get(q.track_id, False)
-                                         or chain[0][0].manifest.lossless)
-        all_ids = {q.track_id for q in queries if q.track_id}
-        unavailable = frozenset(all_ids - set(best_lossless))
-        quality = _mix_quality(sum(best_lossless.values()),
-                               sum(1 for v in best_lossless.values() if not v))
-        # DISPLAY-only durations the resolve recovered for MB-length-less tracks
-        # (not persisted — see _resolved_durations).
-        durations = {t: _resolved_durations[t] for t in all_ids
-                     if t in _resolved_durations}
-        _availability_cache[key] = (now, unavailable, quality, durations)
+    queries = _phantom_album_queries(album_id)
+    chains = _resolve_waterfall(queries)
+    # Per distinct track_id, keep the BEST quality among its rows (the same
+    # title at several durations may resolve on different providers). Quality
+    # is the chain HEAD (preferred provider); a download-failure fallback can
+    # still drop it to lossy at stream time.
+    best_lossless = {}
+    for q, chain in zip(queries, chains):
+        if not chain or not q.track_id:
+            continue
+        best_lossless[q.track_id] = (best_lossless.get(q.track_id, False)
+                                     or chain[0][0].manifest.lossless)
+    all_ids = {q.track_id for q in queries if q.track_id}
+    unavailable = all_ids - set(best_lossless)
+    quality = _mix_quality(sum(best_lossless.values()),
+                           sum(1 for v in best_lossless.values() if not v))
+    # DISPLAY-only durations the resolve recovered for MB-length-less tracks
+    # (not persisted — see _resolved_durations).
+    durations = {t: _resolved_durations[t] for t in all_ids
+                 if t in _resolved_durations}
 
     return {"unavailable": [{"track_id": t} for t in unavailable],
             "quality": quality, "durations": durations}
