@@ -251,39 +251,71 @@ See:
 
 ## Security Posture (read before touching network/auth)
 
-**Current state (as of 2026-05-02):** the backend on port 8800 has
+**Current state (as of 2026-08-21):** the backend on port 8800 has
 **HMAC-SHA256 request signing** (`backend/auth_hmac.py`) and serves
-**HTTPS only** with a self-signed cert (`backend/tls_gen.py`). The
-secret is inlined into the HTML at `/` as `window.__SAUTIUM_SECRET`
-and `backend/static/auth.js` monkey-patches `window.fetch` to sign
-every request as `hex(HMAC-SHA256(secret, METHOD\nPATH\nTS\nsha256(body)))`
-with a 60s replay window. `/`, `/static/*`, `/health`, OAuth callback
-endpoints, and a few other public routes are whitelisted (see
-`WHITELIST_EXACT`/`WHITELIST_PREFIX` in `auth_hmac.py`). HTTPS is
-required because browsers gate `crypto.subtle` (the API auth.js
-needs to compute HMAC) behind secure contexts — over plain HTTP from
-a phone on LAN nothing can sign and the Web UI dies silently with
-401s. **HTTPS is the only listening protocol** — uvicorn binds with
-`--ssl-keyfile`/`--ssl-certfile`, no HTTP fallback.
+**HTTPS only** with a self-signed cert (`backend/tls_gen.py`).
+`backend/static/auth.js` monkey-patches `window.fetch` to sign every
+request as `hex(HMAC-SHA256(key, METHOD\nPATH\nTS\nsha256(body)))`
+with a 60s replay window.
+
+The key is a **per-browser device token**, not a shared secret. The
+page carries no key at all: a browser earns its token once, with the
+account password (checked by re-deriving the identity — there is no
+password hash anywhere) or a pairing PIN shown on the host, and keeps
+it in `localStorage`, which is bound to an origin. The server never
+stores tokens; it derives them as
+`HMAC(server secret, "sautium-device:v1:{epoch}:{node pubkey}")`, so
+bumping `auth.token_epoch` ("log out everywhere") invalidates every
+copy at once, and a **different node cannot mint the same token** —
+that is what the node pubkey is doing in there. Deleting a node and
+creating another one therefore revokes access, which it did NOT
+before 2026-08-21: both inputs used to be node-independent, so a
+recreated node handed every previously paired browser full access on
+a page refresh.
+
+The **server secret** (`<p2p_identity_dir>/.api_secret`, 0600) sits
+beside the identity because it is part of who the node is, not of the
+code it runs — it used to live in `backend/data/` inside the checkout,
+where it outlived every uninstall and was SHARED by the launcher and
+Docker nodes on one machine (compose bind-mounts `./backend`). It is
+still accepted as a signing key on its own, for callers that already
+live on the host and read the file (launcher, MCP server): whoever can
+read it has the host anyway. Four readers, all resolving the same
+path — `main`, `media_urls`, `desktop/api_client`, `mcp/assistant_server`.
+
+Unsigned requests are accepted only on the whitelist
+(`WHITELIST_EXACT`/`WHITELIST_PREFIX` in `auth_hmac.py`): the page and
+its static assets, `/health`, the credential checks themselves
+(`/api/auth/status|login|pair|create-account` — a client with no token
+cannot sign, so these defend themselves: Argon2id under a semaphore,
+five PIN attempts under a lock, account creation only while the node
+has no identity), and the routes that carry their own signatures
+(`/api/player/media/` query params, the peer `/api/sync/` surface).
+
+HTTPS is required because browsers gate `crypto.subtle` (the API
+auth.js needs to compute HMAC) behind secure contexts — over plain
+HTTP from a phone on LAN nothing can sign and the Web UI dies silently
+with 401s. **HTTPS is the only listening protocol** — uvicorn binds
+with `--ssl-keyfile`/`--ssl-certfile`, no HTTP fallback.
 
 The defence layer is still the network: backend is reachable on the
 LAN (so phones/tablets can use the Web UI), but **never exposed to
-the public internet**. HMAC raises the bar for hostile LAN devices
-but is not a substitute for network isolation — the secret leaks to
-anyone who can fetch `/` (every same-origin browser load) and the
-self-signed cert protects only transport, not the secret-in-HTML
-distribution model.
+the public internet**. Device tokens raise the bar for hostile LAN
+devices — they now have to pass the password or PIN check — but they
+are not a substitute for network isolation: the self-signed cert
+protects transport only, and any process running as this user can
+read the secret file and sign as the host.
 
 **The threat model we defend against right now:**
 
 - ✅ Random internet scanners / "young hackers" probing the public
   IP — blocked because nothing forwards 8800 outside the router.
-- ⚠️ Other devices on the same LAN — defended by HMAC, but the
-  shared secret is served inline in the HTML at `/` to anyone who
-  can `GET /`. So a hostile LAN device that can read the page can
-  also sign requests. Accepted: this is a single-user home
-  appliance, the bar is "no random scanner", not "no targeted LAN
-  attacker".
+- ⚠️ Other devices on the same LAN — they can load the page, and
+  that is all: it carries no key, so they must pass the account
+  password or a PIN read off the host screen to earn a token. What
+  is left is the strength of that password and the window in which
+  a PIN is live. Accepted: this is a single-user home appliance,
+  the bar is "no random scanner", not "no targeted LAN attacker".
 - ✅ DNS rebinding — a page on a hostile domain whose name resolves
   to this node, talking to us from the victim's own browser. Signed
   routes never fell to it (the device token is in localStorage, bound
@@ -370,11 +402,13 @@ distribution model.
    log, identity registry, pricing, backstops, similarity), never
    auth; the rule stands.
 6. **Web UI lives at the same origin as the API.** CSRF is blocked
-   today by HMAC: a foreign origin cannot read `window.__SAUTIUM_SECRET`
-   (cross-origin HTML reads are forbidden by the browser), so it
-   cannot forge `X-Sautium-Sig`. Don't replace HMAC with cookies
-   without thinking through `SameSite=Strict` and the inline-secret
-   distribution model.
+   by where the key lives: the device token is in `localStorage`,
+   which is per-origin, so a foreign page cannot read it and cannot
+   forge `X-Sautium-Sig` — and a request the browser sends on its own
+   (a form post, an `<img>`) carries no signature at all. Don't
+   replace this with cookies without thinking through
+   `SameSite=Strict`: cookies ride along automatically, which is
+   exactly the property being avoided here.
 7. **Don't add Windows Firewall rules for 8800.** Windows mis-
    classifies networks as Public surprisingly often (Wi-Fi hand-off
    bugs, user clicks "Public" by mistake) — a profile-locked rule
@@ -459,11 +493,12 @@ becomes a breadth-first walk of all recorded music.
 **Before any public release, multi-user deployment, or remote-access
 feature** (Tailscale exposure, "headless mode", reverse proxy), the
 rules above are no longer sufficient. HMAC + HTTPS as currently
-deployed are LAN-only by design — the secret-in-HTML distribution
-model assumes a trusted origin, and the cert is self-signed. Public
-exposure needs: per-user credentials (not a shared inline secret), a
-real CA-signed cert (Let's Encrypt or similar), and CSRF-aware
-session handling. Revisit this section then.
+deployed are LAN-only by design: the cert is self-signed, and a node
+has exactly ONE account — device tokens tell browsers apart, never
+people, so there is nothing to grant, revoke or audit per user.
+Public exposure needs: real per-user credentials, a CA-signed cert
+(Let's Encrypt or similar), and a token lifetime shorter than
+"forever, until someone bumps the epoch". Revisit this section then.
 
 ---
 
