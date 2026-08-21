@@ -10,6 +10,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional, Tuple
@@ -496,3 +497,70 @@ def check_port_in_use(port: int) -> bool:
             return False
     except OSError:
         return True
+
+
+# ================================================================
+# Idle-sleep inhibition (held while the node's services are up)
+# ================================================================
+# A suspended host is an offline node: playback stops mid-album, the DHT
+# announces go stale, a CGNAT peer's wake subscription drops and nobody can
+# reach it until someone wiggles the mouse. So the launcher holds off sleep
+# for as long as it is actually running services.
+#
+# IDLE sleep only, and the display is left alone: a music node that keeps the
+# monitor lit all night is a worse bug than the one being fixed. Deliberate
+# sleep — lid, power button, Start menu — is untouched by both APIs, so the
+# machine still obeys its owner.
+_awake_release: Optional[threading.Event] = None
+
+
+def _windows_stay_awake(release: threading.Event) -> None:
+    """SetThreadExecutionState is PER-THREAD and dies with the thread that set
+    it, so this thread must outlive the hold — it parks here until released
+    (and process exit releases it just as well)."""
+    import ctypes
+    ES_CONTINUOUS = 0x80000000
+    ES_SYSTEM_REQUIRED = 0x00000001
+    kernel32 = ctypes.windll.kernel32
+    if not kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED):
+        logger.warning("Could not inhibit sleep (SetThreadExecutionState failed)")
+        return
+    logger.info("Idle sleep inhibited while services run")
+    release.wait()
+    kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+
+
+def keep_awake(enabled: bool) -> None:
+    """Hold (or drop) the idle-sleep inhibition. Idempotent — a second acquire
+    is a no-op. Never fatal: a node that cannot inhibit sleep still works, it
+    just sleeps."""
+    global _awake_release
+    if enabled == (_awake_release is not None):
+        return
+
+    if not enabled:
+        _awake_release.set()          # Windows thread wakes; macOS caffeinate exits
+        _awake_release = None
+        logger.info("Idle sleep inhibition released")
+        return
+
+    release = threading.Event()
+    if sys.platform == "win32":
+        threading.Thread(target=_windows_stay_awake, args=(release,),
+                         name="stay-awake", daemon=True).start()
+    elif sys.platform == "darwin":
+        # -s prevents system sleep and is scoped to AC power by macOS itself,
+        # which is the behaviour a laptop wants; -w ties the assertion to our
+        # pid, so it lifts even if the launcher is killed outright.
+        try:
+            proc = subprocess.Popen(["caffeinate", "-s", "-w", str(os.getpid())])
+        except OSError as e:
+            logger.warning("Could not inhibit sleep (caffeinate): %s", e)
+            return
+        threading.Thread(target=lambda: (release.wait(), proc.terminate()),
+                         name="stay-awake", daemon=True).start()
+        logger.info("Idle sleep inhibited while services run (caffeinate)")
+    else:
+        logger.debug("No idle-sleep inhibition on %s", sys.platform)
+        return
+    _awake_release = release

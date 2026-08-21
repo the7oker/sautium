@@ -634,19 +634,25 @@ class ServiceManager:
     # ================================================================
 
     def start_all(self, progress_cb: Optional[Callable] = None) -> bool:
-        """Start all services in order: PostgreSQL -> backend -> tracker."""
+        """Start all services in order: PostgreSQL -> backend -> tracker, and
+        hold off the host's idle sleep for as long as they run — a suspended
+        host is an offline node (see utils.keep_awake)."""
+        from desktop.utils import keep_awake
         if not self.start_postgres(progress_cb):
             return False
         if not self.start_backend(progress_cb):
             return False
         if not self.start_tracker(progress_cb):
             return False
+        keep_awake(True)
         if progress_cb:
             progress_cb("All services running!")
         return True
 
     def stop_all(self) -> None:
         """Stop all services in reverse order."""
+        from desktop.utils import keep_awake
+        keep_awake(False)
         self.stop_tracker()
         self.stop_backend()
         self.stop_postgres()
