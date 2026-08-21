@@ -1162,6 +1162,7 @@
     el: null, cover: null, title: null, artist: null,
     playPauseIcon: null, playPause: null, next: null,
     lastSongKey: null,
+    coverGen: 0,
 
     init() {
       this.el = document.getElementById('miniPlayer');
@@ -1249,6 +1250,7 @@
       const songKey = (data.song || '') + '|' + (data.album || '');
       if (songKey !== this.lastSongKey) {
         this.lastSongKey = songKey;
+        this.coverGen++;
         const c = coverPlaceholderColors(data.song || data.album || '');
         this.cover.style.backgroundImage =
           `linear-gradient(135deg, ${c.bg1}, ${c.bg2})`;
@@ -1268,13 +1270,24 @@
       // mp-cover is a <div> with background-image. Preload via Image() so the
       // gradient placeholder stays when a URL 404s. Try CAA first, then the
       // provider art (CAA 404s for some phantom release-groups).
+      //
+      // The probe outlives the track it was started for: phantom art comes
+      // from an outside host, and a CAA 404 sends the chain on to a second
+      // URL, so a load can easily land after the user has moved to another
+      // album — and paint the previous cover over the new track. Unlike the
+      // sheet's <img>, where assigning src aborts the load in flight, nothing
+      // here cancels a probe, so it carries the generation it belongs to.
+      const gen = this.coverGen;
       const urls = [coverUrl(detail), detail && detail.provider_cover_url].filter(Boolean);
       let i = 0;
       const tryNext = () => {
-        if (i >= urls.length) return;
+        if (i >= urls.length || gen !== this.coverGen) return;
         const u = urls[i++];
         const probe = new Image();
-        probe.onload = () => { this.cover.style.backgroundImage = `url(${u})`; };
+        probe.onload = () => {
+          if (gen !== this.coverGen) return;
+          this.cover.style.backgroundImage = `url(${u})`;
+        };
         probe.onerror = tryNext;
         probe.src = u;
       };

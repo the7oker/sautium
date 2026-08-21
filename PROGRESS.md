@@ -188,6 +188,15 @@ The short version of the hard-learned lessons:
   construction: it cannot be reproduced once it has been hit, only on a fresh
   profile. `maybeClaimRenderer()` therefore spends the gesture on a 45-byte
   silent clip; transport handlers ignore events while that clip is the src.
+- **An `Image()` preload cannot be cancelled; an `<img>` src assignment
+  cancels itself.** The mini-player preloads covers through a detached
+  `Image()` so a 404 leaves the gradient placeholder standing — but nothing
+  aborts that probe when the track changes, so a slow one (phantom art comes
+  from an outside host, and a CAA 404 sends the chain on to a second URL)
+  lands later and paints the previous cover over the new track. It carries a
+  generation now. The Now Playing sheet paints into a real `<img>`, where
+  assigning `src` aborts the load in flight — same task, no race, and the
+  difference is the reason one of them needed fixing.
 - **libtorrent 2.1+ `peers()`** returns `(ip, port)` tuples, not objects with
   `.address()/.port()`. Compat handling in `dht_service.py`.
 - **libtorrent DHT alerts** require `alert_mask += dht_operation_notification`
