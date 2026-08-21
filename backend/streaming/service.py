@@ -7,9 +7,12 @@ box. ``streaming_preview_enabled=false`` is an explicit opt-out for nodes
 that never preview."""
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import logging
+import subprocess
 import sys
+import time
 from typing import Optional
 
 import api_cooldown
@@ -93,6 +96,70 @@ def init(settings) -> bool:
                 settings.media_proxy_host, settings.media_proxy_port,
                 settings.media_proxy_advertised_host)
     return True
+
+
+# yt-dlp is perishable: YouTube changes its side every few weeks and upstream's
+# stable channel lags behind the breakage, so every runtime keeps it on the
+# NIGHTLY channel. Refreshing only at start is not enough — this node runs for
+# weeks (restart: unless-stopped) and a nightly lands most days, which is
+# exactly how a working node wakes up unable to stream. One loop here covers
+# all three runtimes because all three run this backend; the launcher's own
+# "check for updates" is start-only too, and docker-compose.mac.yml bypasses
+# entrypoint.py entirely.
+_REFRESH_INTERVAL_S = 24 * 3600
+_REFRESH_MIN_GAP_S = 6 * 3600      # a burst of failures is still one pip run
+_refresh_wake: Optional[asyncio.Event] = None
+_refresh_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _pip_refresh() -> None:
+    """Move this interpreter's yt-dlp to the latest nightly. Blocking (pip) —
+    called in a worker thread. Offline or rate-limited → whatever is installed
+    stays; never raises."""
+    cmd = [sys.executable, "-m", "pip", "install", "-q", "-U", "--pre",
+           "--no-cache-dir", "--root-user-action=ignore",
+           "--retries", "2", "--timeout", "15", "yt-dlp[default]"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        logger.warning("yt-dlp refresh timed out; keeping the installed build")
+        return
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout).strip().splitlines()
+        logger.warning("yt-dlp refresh skipped: %s",
+                       tail[-1] if tail else f"rc={r.returncode}")
+    ver = subprocess.run([sys.executable, "-m", "yt_dlp", "--version"],
+                         capture_output=True, text=True).stdout.strip()
+    logger.info("yt-dlp %s", ver or "not installed")
+
+
+def request_ytdlp_refresh() -> None:
+    """Ask for an out-of-band refresh: a fetch failed the way a stale build
+    fails (403 / signature), which is YouTube telling us our yt-dlp no longer
+    speaks its protocol. Never blocks the caller — the failing track is already
+    lost, and the point is that the NEXT one isn't. Called from the proxy's
+    fetch thread, hence call_soon_threadsafe."""
+    if _refresh_loop is None or _refresh_wake is None:
+        return
+    _refresh_loop.call_soon_threadsafe(_refresh_wake.set)
+
+
+async def ytdlp_refresh_loop() -> None:
+    """Daily refresh, plus whatever request_ytdlp_refresh() asks for, no more
+    often than _REFRESH_MIN_GAP_S apart."""
+    global _refresh_wake, _refresh_loop
+    _refresh_wake = asyncio.Event()
+    _refresh_loop = asyncio.get_running_loop()
+    last = float("-inf")
+    while True:
+        if time.monotonic() - last >= _REFRESH_MIN_GAP_S:
+            last = time.monotonic()
+            await asyncio.to_thread(_pip_refresh)
+        _refresh_wake.clear()
+        try:
+            await asyncio.wait_for(_refresh_wake.wait(), timeout=_REFRESH_INTERVAL_S)
+        except asyncio.TimeoutError:
+            pass
 
 
 def ensure_proxy() -> Optional[MediaProxy]:

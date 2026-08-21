@@ -190,10 +190,15 @@ The short version of the hard-learned lessons:
   weeks; upstream's *stable* channel lags and breaks (2026-08-18: every
   download 403'd on stable 2026.07.04 — the android_vr client was killed —
   while nightly already carried the fix). Both runtimes track **nightly** and
-  refresh at every start: every runtime runs `pip install -U --pre
-  "yt-dlp[default]"` against its OWN backend interpreter (Docker
-  `entrypoint.py`, launcher `refresh_media_tools`), and the provider invokes
-  `<that interpreter> -m yt_dlp`. Standalone binaries were tried and dropped:
+  refresh from ONE place — `streaming/service.py:ytdlp_refresh_loop`, which
+  every runtime gets because every runtime runs this backend: `pip install -U
+  --pre "yt-dlp[default]"` against its own interpreter at start, once a day
+  after that, and on demand when a download fails the way a stale build fails
+  (403 / signature — narrow on purpose, rate-limited to one pip run per 6 h).
+  Start-only refreshes were not enough: this node runs `restart:
+  unless-stopped` for weeks, the launcher's own update check is start-only
+  too, and `docker-compose.mac.yml` bypasses `entrypoint.py` entirely. The
+  provider invokes `<that interpreter> -m yt_dlp`. Standalone binaries were tried and dropped:
   the Windows onefile burns 0.95 s per run unpacking itself into `%TEMP%`, the
   ONEDIR zip reports variant `win_exe` so its own updater replaces it with the
   onefile, and brew's macOS formula is stable-channel and cannot self-update at

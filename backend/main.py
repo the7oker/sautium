@@ -313,7 +313,11 @@ async def lifespan(app: FastAPI):
     # No-op unless streaming_preview_enabled — costs nothing when off.
     try:
         from streaming import service as streaming_service
-        streaming_service.init(settings)
+        if streaming_service.init(settings):
+            # yt-dlp lives on the nightly channel; this keeps it there for the
+            # life of the process (see the loop's own note on why start-only
+            # refreshes are not enough).
+            asyncio.create_task(streaming_service.ytdlp_refresh_loop())
     except Exception as e:
         logger.warning(f"Streaming preview init failed: {e}")
 

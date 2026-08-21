@@ -448,8 +448,8 @@ def _link_pgvector_to_pg(brew: str) -> None:
 # launcher installs them all at first run so the app is self-contained.
 #
 # yt-dlp itself is NOT here: it is a dependency of the backend interpreter
-# (requirements.txt) which streaming/youtube.py runs as `-m yt_dlp`, and
-# refresh_media_tools keeps it on the nightly channel.
+# (requirements.txt) which streaming/youtube.py runs as `-m yt_dlp`, and the
+# backend keeps it on the nightly channel itself (streaming/service.py).
 
 # (binary, macOS brew formula, Windows static-build zip URL). The ffmpeg zip
 # also carries ffprobe; the Windows extractor copies every .exe beside it.
@@ -513,32 +513,6 @@ def ensure_media_tools(progress_cb: Optional[Callable] = None) -> dict:
             logger.warning("%s not found on PATH — install it via your package manager", binary)
             result[binary] = False
     return result
-
-
-def refresh_media_tools(backend_python: str) -> None:
-    """Move the backend interpreter's yt-dlp to the latest nightly. YouTube
-    changes its side every few weeks and a frozen yt-dlp silently loses phantom
-    streaming — upstream calls stable "prone to external breakage" and points
-    regular users at nightly. Same call the Docker node makes at container
-    start (backend/entrypoint.py), against a different interpreter. Offline or
-    rate-limited → whatever is installed stays; non-fatal either way."""
-    cmd = [backend_python, "-m", "pip", "install", "-q", "-U", "--pre",
-           "--no-cache-dir", "--retries", "2", "--timeout", "15",
-           "yt-dlp[default]"]
-    kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {}
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                                timeout=300, **kwargs)
-    except subprocess.TimeoutExpired:
-        logger.warning("yt-dlp refresh timed out; keeping the installed build")
-        return
-    if result.returncode != 0:
-        tail = (result.stderr or result.stdout).strip().splitlines()
-        logger.warning("yt-dlp refresh skipped: %s",
-                       tail[-1] if tail else f"rc={result.returncode}")
-    ver = subprocess.run([backend_python, "-m", "yt_dlp", "--version"],
-                         capture_output=True, text=True, **kwargs).stdout.strip()
-    logger.info("yt-dlp %s", ver or "not installed")
 
 
 def _brew_install(binary: str, formula: str, progress_cb: Optional[Callable] = None) -> bool:

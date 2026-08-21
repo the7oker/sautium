@@ -385,8 +385,7 @@ class ServiceManager:
         # exist, and it's the only retry path if the wizard's media step
         # failed or the tools were deleted — without it a missing ffmpeg
         # degrades to a silent "0/N enriched" with no recovery on relaunch.
-        from desktop.db_init import (ensure_media_tools, media_tool_dirs,
-                                     refresh_media_tools)
+        from desktop.db_init import ensure_media_tools, media_tool_dirs
         backend_python = self._get_backend_python()
         logger.info(f"Backend Python: {backend_python}")
         tools = ensure_media_tools(progress_cb)
@@ -397,12 +396,6 @@ class ServiceManager:
                 "fingerprinting will be degraded until installed",
                 ", ".join(missing),
             )
-        # yt-dlp's nightly refresh rides alongside the start, not in front of
-        # it: a new nightly lands most days, and pip installs into a staging
-        # dir then swaps, so the backend's first call lands on whichever build
-        # is in place — never a half-written one.
-        threading.Thread(target=refresh_media_tools, args=(backend_python,),
-                         name="media-tools-refresh", daemon=True).start()
         tool_dirs = media_tool_dirs()
         if tool_dirs:
             env["PATH"] = os.pathsep.join(tool_dirs + [env.get("PATH", "")])

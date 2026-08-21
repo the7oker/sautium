@@ -42,6 +42,12 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
 
+# A download that dies on the signed URL — the failure shape of a yt-dlp that
+# has fallen behind YouTube. Deliberately narrow: "video unavailable", geo
+# blocks and no-match errors say something about the TRACK, not about us.
+_STALE_BUILD_RE = re.compile(r"HTTP Error 403|nsig|signature", re.I)
+
+
 class YouTubeProvider(StreamProvider):
     manifest = ProviderManifest(
         id="youtube", name="YouTube", kind="direct_url", lossless=False,
@@ -191,6 +197,13 @@ class YouTubeProvider(StreamProvider):
                 detail = lines[-1][-300:] if lines else ""
                 if "No supported JavaScript runtime" in err:
                     detail += " (yt-dlp found no JS runtime — install deno)"
+                if _STALE_BUILD_RE.search(err):
+                    # How YouTube tells us our yt-dlp no longer speaks its
+                    # protocol (2026-08-18: every download 403'd on a stable
+                    # build). Asking costs this track nothing — it already
+                    # failed — and the refresh is rate-limited upstream.
+                    from . import service
+                    service.request_ytdlp_refresh()
                 raise ProviderError(f"youtube download failed for {video_id}: {detail}") from e
             flacs = glob.glob(os.path.join(tmp, "*.flac"))
             if not flacs:
