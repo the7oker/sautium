@@ -216,6 +216,17 @@ The short version of the hard-learned lessons:
   Runner"), trading a wrong namesake for an outright wrong artist. Photos are
   pinned once and never re-resolved, so anything resolved before this stays
   wrong until its `artists.photo_cover_id` is cleared.
+- **Content hashing dedups files, not refetches.** `covers` keys on a BLAKE2
+  of the bytes, which is exact for a file on disk and useless for anything
+  pulled over a CDN: Deezer re-encodes on the fly, so the same artist photo
+  arrived at 194,650 bytes and then 196,274 — a new row per refetch, the
+  previous one orphaned, and nothing collects orphans. One pass over the
+  library left 1,560 of them (153 MB). The perceptual hash is identical
+  across that re-encode (the column and its index already existed; nothing
+  queried them), so ingest now dedups on `(perceptual_hash, source_path)` —
+  scoped to one asset so a refetch collapses while two different images that
+  happen to hash alike, as album editions differing by a sticker can, stay
+  apart.
 - **libtorrent 2.1+ `peers()`** returns `(ip, port)` tuples, not objects with
   `.address()/.port()`. Compat handling in `dht_service.py`.
 - **libtorrent DHT alerts** require `alert_mask += dht_operation_notification`

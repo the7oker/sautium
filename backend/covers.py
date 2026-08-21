@@ -239,6 +239,27 @@ def ingest_cover(
         return None
     webp_bytes, w, h, orig_w, orig_h, orig_format, phash_int = encoded
 
+    if phash_int is not None:
+        # Byte-identical dedup does not survive a round trip through a CDN:
+        # Deezer re-encodes on the fly, so the SAME artist photo came back
+        # 194,650 bytes one minute and 196,274 the next — a fresh row every
+        # refetch, orphaning the last (1,560 of them, 153 MB, after a single
+        # pass over the library). The perceptual hash is identical across
+        # that re-encode, which is what makes it the right key here.
+        #
+        # Scoped to the same source_path on purpose: this dedups REFETCHES of
+        # one asset, and never merges two different images that happen to
+        # hash alike — a real risk between album editions that differ only by
+        # a sticker.
+        same = db.execute(
+            text("""SELECT id FROM covers
+                     WHERE perceptual_hash = :ph AND source_path = :sp
+                     LIMIT 1"""),
+            {"ph": phash_int, "sp": source_path},
+        ).first()
+        if same:
+            return same[0]
+
     cover_id = _cover_uuid(content_hash)
     mtime_dt = (
         datetime.fromtimestamp(source_mtime, tz=timezone.utc)
