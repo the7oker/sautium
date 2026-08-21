@@ -376,7 +376,7 @@ class ServiceManager:
         # click-to-mint slice fetch on dump-less nodes.
         env["PYTHONPATH"] = os.pathsep.join(
             [str(self._backend_dir), str(self._project_root)])
-        # Ensure the media binaries (ffmpeg/fpcalc/flac/yt-dlp/deno) resolve for the
+        # Ensure the media binaries (ffmpeg/fpcalc/flac/deno) resolve for the
         # backend even when the launcher was started as a GUI .app (minimal
         # PATH without Homebrew/bundled bins). The audio pipeline shells out
         # to them (audio_analysis, provenance, streaming).
@@ -387,6 +387,8 @@ class ServiceManager:
         # degrades to a silent "0/N enriched" with no recovery on relaunch.
         from desktop.db_init import (ensure_media_tools, media_tool_dirs,
                                      refresh_media_tools)
+        backend_python = self._get_backend_python()
+        logger.info(f"Backend Python: {backend_python}")
         tools = ensure_media_tools(progress_cb)
         missing = [name for name, ok in tools.items() if not ok]
         if missing:
@@ -395,12 +397,11 @@ class ServiceManager:
                 "fingerprinting will be degraded until installed",
                 ", ".join(missing),
             )
-        # yt-dlp's nightly self-update rides alongside the start, not in
-        # front of it: a new nightly lands most days (~18 MB), and the
-        # updater swaps the binary atomically (rename), so the backend's
-        # first call lands on whichever build is in place — never a
-        # half-written one.
-        threading.Thread(target=refresh_media_tools,
+        # yt-dlp's nightly refresh rides alongside the start, not in front of
+        # it: a new nightly lands most days, and pip installs into a staging
+        # dir then swaps, so the backend's first call lands on whichever build
+        # is in place — never a half-written one.
+        threading.Thread(target=refresh_media_tools, args=(backend_python,),
                          name="media-tools-refresh", daemon=True).start()
         tool_dirs = media_tool_dirs()
         if tool_dirs:
@@ -412,9 +413,6 @@ class ServiceManager:
         # long-lived backend (measured −71% frag gap). setdefault so an
         # explicit .env / shell override still wins.
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-
-        backend_python = self._get_backend_python()
-        logger.info(f"Backend Python: {backend_python}")
 
         # Generate (or reuse) self-signed TLS cert. Browsers gate
         # crypto.subtle behind a secure context, so HMAC request signing

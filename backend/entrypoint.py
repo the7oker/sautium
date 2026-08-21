@@ -59,8 +59,8 @@ def _refresh_ytdlp() -> None:
     weeks and a frozen yt-dlp silently loses phantom streaming (upstream
     recommends the nightly channel for regular users); the image carries a
     build-time snapshot, so a long-lived container refreshes at every start —
-    the treatment entrypoint.sh gives the Claude Code CLI. The launcher does
-    the same through the binary's self-updater (desktop/db_init.py). Offline
+    the treatment entrypoint.sh gives the Claude Code CLI. The launcher makes
+    the same call against its own interpreter (desktop/db_init.py). Offline
     → keep what is installed; never blocks the start."""
     cmd = [sys.executable, "-m", "pip", "install", "-q", "-U", "--pre",
            "--no-cache-dir", "--root-user-action=ignore",
@@ -73,7 +73,8 @@ def _refresh_ytdlp() -> None:
     if r.returncode != 0:
         tail = (r.stderr or r.stdout).strip().splitlines()
         print(f"[entrypoint] yt-dlp refresh skipped: {tail[-1] if tail else r.returncode}", flush=True)
-    ver = subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True).stdout.strip()
+    ver = subprocess.run([sys.executable, "-m", "yt_dlp", "--version"],
+                         capture_output=True, text=True).stdout.strip()
     print(f"[entrypoint] yt-dlp {ver}", flush=True)
 
 

@@ -90,8 +90,11 @@ pytest>=7.4.4
 pytest-asyncio>=0.23.3
 Unidecode>=1.3.8
 
-# Streaming preview — phantom-album resolution (non-DRM; ffmpeg already in image)
-yt-dlp>=2024.12.0
+# Streaming preview — phantom-album resolution (non-DRM; ffmpeg already in image).
+# [default] pulls yt-dlp-ejs, the YouTube player-challenge solver. Pinned to no
+# version on purpose: every runtime moves this to the nightly channel at start
+# (backend/entrypoint.py, desktop/db_init.py) because stable breaks with YouTube.
+yt-dlp[default]>=2024.12.0
 
 # Cross-script search transliteration (Phase 0a) — name_latin population.
 # All permissive (anyascii ISC, rest MIT) and ALL ship binary wheels, so the

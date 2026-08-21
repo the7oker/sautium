@@ -99,19 +99,18 @@ RUN pip install --no-cache-dir libtorrent || echo "WARNING: libtorrent not avail
 # stack). Standalone late layer so it never busts the pip-install cache.
 RUN pip install --no-cache-dir pynacl
 
-# yt-dlp — the core YouTube streaming-preview provider shells out to it
-# (streaming/youtube.py). Pip puts the `yt-dlp` entry point on PATH; the
-# launcher counterpart bootstraps the standalone binary as a media tool
-# (desktop/db_init.py). NIGHTLY channel (--pre): upstream calls stable "often
-# stale and prone to external breakage" and recommends nightly for regular
-# users — the 2026-08 android_vr 403 was stable-only. This layer is only the
-# offline baseline: entrypoint.py re-runs the install at every container
-# start so a long-lived image keeps up with YouTube. [default] brings
-# yt-dlp-ejs, the player-challenge solver; deno is the sandboxed runtime it
-# runs in — node is in the image too, but the solver executes YouTube's own
-# JS, and deno gives it no permissions where node would give it ours.
-# Late standalone layer: a version bump must not re-run the pip install above
-# (which already pulled the stable yt-dlp requirements.txt names — hence -U).
+# yt-dlp — the core YouTube streaming-preview provider runs it as `-m yt_dlp`
+# on this same interpreter (streaming/youtube.py), and the launcher installs
+# it into its own the same way (desktop/db_init.py). NIGHTLY channel (--pre):
+# upstream calls stable "often stale and prone to external breakage" and
+# recommends nightly for regular users — the 2026-08 android_vr 403 was
+# stable-only. This layer is only the offline baseline: entrypoint.py re-runs
+# the install at every container start so a long-lived image keeps up with
+# YouTube. [default] brings yt-dlp-ejs, the player-challenge solver; deno is
+# the sandboxed runtime it runs in — node is in the image too, but the solver
+# executes YouTube's own JS, and deno gives it no permissions where node would
+# give it ours. Late standalone layer: a version bump must not re-run the pip
+# install above (which already pulled stable from requirements.txt — hence -U).
 RUN pip install --no-cache-dir -U --pre "yt-dlp[default]" \
     && curl -fsSL https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip \
          -o /tmp/deno.zip \

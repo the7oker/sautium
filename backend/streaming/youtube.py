@@ -4,17 +4,23 @@ providers (Deezer/Spotify) are NOT bundled — they live as external BYO modules
 
 HQPlayer doesn't decode AAC/m4a (tested), so we transcode YouTube's m4a/opus
 source to FLAC via yt-dlp's built-in ffmpeg pass (``-x --audio-format flac``) —
-lossless of the lossy source, and HQPlayer's native format. yt-dlp and ffmpeg
-are external tools; their paths are configurable (user-installed).
+lossless of the lossy source, and HQPlayer's native format.
+
+yt-dlp runs as ``<our interpreter> -m yt_dlp``: a child process (a wedged
+extraction dies on the timeout instead of hanging the single fetch worker),
+but OUR Python, so it is the pip package every runtime already installs
+rather than a binary to find on PATH. The standalone Windows exe it replaced
+is a PyInstaller onefile that unpacks itself into %TEMP% on every run —
+measured 0.95 s before the first line of Python, against 0.26 s here.
 
 yt-dlp is a moving target by design: YouTube changes its side every few weeks
 and upstream's *stable* channel lags ("often stale and prone to external
-breakage" — their words; the 2026-08 android_vr 403 hit stable only). Both
-runtimes therefore track the *nightly* channel and refresh it at every start
-(Docker: entrypoint.py; launcher: desktop/db_init.py), and ship deno — the
-sandboxed JS runtime yt-dlp solves YouTube's player challenges in. Without a
-runtime yt-dlp falls back to a deprecated, runtime-less extraction path that
-is exactly what breaks when YouTube moves."""
+breakage" — their words; the 2026-08 android_vr 403 hit stable only). Every
+runtime therefore tracks the *nightly* channel and refreshes at start (Docker:
+entrypoint.py; launcher: desktop/db_init.py), and ships deno — the sandboxed
+JS runtime yt-dlp solves YouTube's player challenges in. Without a runtime
+yt-dlp falls back to a deprecated, runtime-less extraction path that is
+exactly what breaks when YouTube moves."""
 from __future__ import annotations
 
 import glob
@@ -23,6 +29,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
 from .base import (FetchedAudio, ProviderError, ProviderManifest, ResolvedSource,
@@ -40,10 +47,9 @@ class YouTubeProvider(StreamProvider):
         id="youtube", name="YouTube", kind="direct_url", lossless=False,
     )
 
-    def __init__(self, ytdlp_path: str = "yt-dlp",
-                 ffmpeg_location: str | None = None, timeout: float = 120.0):
+    def __init__(self, ffmpeg_location: str | None = None, timeout: float = 120.0):
         # ffmpeg_location: directory containing ffmpeg, or None to use PATH.
-        self._ytdlp = ytdlp_path
+        self._ytdlp = [sys.executable, "-m", "yt_dlp"]
         self._ffmpeg_location = ffmpeg_location
         self._timeout = timeout
         # Advisory only — yt-dlp decides at run time; this just surfaces a
@@ -108,7 +114,7 @@ class YouTubeProvider(StreamProvider):
             artwork_url=f"https://i.ytimg.com/vi/{best['id']}/hqdefault.jpg")
 
     def _flat_search(self, search: str) -> list[dict]:
-        cmd = [self._ytdlp, f"ytsearch{self.SEARCH_N}:{search}", "--flat-playlist",
+        cmd = [*self._ytdlp, f"ytsearch{self.SEARCH_N}:{search}", "--flat-playlist",
                "--no-warnings", "--quiet",
                "--print", "%(id)s\t%(title)s\t%(duration)s\t%(channel)s"]
         try:
@@ -161,8 +167,16 @@ class YouTubeProvider(StreamProvider):
         with tempfile.TemporaryDirectory(prefix="sautium-yt-") as tmp:
             # Warnings stay on: they are read only on failure, and yt-dlp's
             # "no JS runtime" one names the actual cause of a 403.
-            cmd = [self._ytdlp, url, "-x", "--audio-format", "flac",
+            # formats=dashy re-expresses the same audio stream as range
+            # fragments, which download concurrently — YouTube shapes a single
+            # connection well below the link (measured 2.9 s -> 2.6 s for a
+            # 4.5-min track, byte-identical output). Fragments of ONE track a
+            # listener is waiting on; the cross-track fetch stays sequential,
+            # which is the part that must not look like a bulk pull.
+            cmd = [*self._ytdlp, url, "-x", "--audio-format", "flac",
                    "--no-playlist", "--quiet",
+                   "--extractor-args", "youtube:formats=dashy",
+                   "--concurrent-fragments", "8",
                    "-o", os.path.join(tmp, "t.%(ext)s")]
             if self._ffmpeg_location:
                 cmd += ["--ffmpeg-location", self._ffmpeg_location]
