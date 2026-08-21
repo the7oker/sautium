@@ -549,11 +549,17 @@ def keep_awake(enabled: bool) -> None:
         threading.Thread(target=_windows_stay_awake, args=(release,),
                          name="stay-awake", daemon=True).start()
     elif sys.platform == "darwin":
-        # -s prevents system sleep and is scoped to AC power by macOS itself,
-        # which is the behaviour a laptop wants; -w ties the assertion to our
-        # pid, so it lifts even if the launcher is killed outright.
+        # -i (PreventUserIdleSystemSleep), NOT -s: macOS scopes -s to AC power,
+        # and that scoping cannot be trusted — a charge limiter like AlDente
+        # discharges the battery with the charger plugged in, at which point the
+        # system reports battery power and the assertion silently stops
+        # applying. An AC gate that fails towards "quietly does nothing" is
+        # worse than no gate; -i matches what Windows does here anyway. A
+        # laptop on real battery keeps its usual protection: closing the lid
+        # sleeps regardless. -w ties the assertion to our pid, so it lifts even
+        # if the launcher is killed outright.
         try:
-            proc = subprocess.Popen(["caffeinate", "-s", "-w", str(os.getpid())])
+            proc = subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())])
         except OSError as e:
             logger.warning("Could not inhibit sleep (caffeinate): %s", e)
             return

@@ -172,8 +172,12 @@ The short version of the hard-learned lessons:
   `start_all` would have evaporated the moment that worker returned —
   measured: after a thread that set ES_SYSTEM_REQUIRED exits, the flag is gone
   from the caller's state. macOS has the opposite shape: `caffeinate -w <pid>`
-  outlives us on purpose and lifts on a hard kill. Neither API blocks
-  deliberate sleep, and neither takes a display assertion.
+  outlives us on purpose and lifts on a hard kill. Use `-i`, never `-s`: `-s`
+  is scoped to AC power by macOS, and a charge limiter (AlDente and friends)
+  discharges the battery while the charger is plugged in — the system then
+  reports battery power and the assertion silently stops applying, which is
+  the worst possible failure direction. Neither API blocks deliberate sleep,
+  and neither takes a display assertion.
 - **libtorrent 2.1+ `peers()`** returns `(ip, port)` tuples, not objects with
   `.address()/.port()`. Compat handling in `dht_service.py`.
 - **libtorrent DHT alerts** require `alert_mask += dht_operation_notification`
