@@ -96,8 +96,18 @@ def _epoch() -> int:
 def current_token(server_secret: bytes) -> str:
     """The token every paired browser signs with. Derived, not stored — the
     server can always recompute it, and bumping the epoch invalidates every
-    copy in existence at once."""
-    return hmac.new(server_secret, f"sautium-device:v1:{_epoch()}".encode(),
+    copy in existence at once.
+
+    The node's own public key is part of the derivation, because a credential
+    has to name what it grants access to. Without it the token was a function
+    of (secret file, epoch) alone, and neither belongs to the node: deleting a
+    node and creating a new one — new account, new identity, new database —
+    handed the browsers paired with the OLD one full access to the new one,
+    silently, on a page refresh. An empty key (no account yet) is a value like
+    any other: pairing before the node has an owner ends when it gets one."""
+    pubkey = _expected_pubkey() or ""
+    return hmac.new(server_secret,
+                    f"sautium-device:v1:{_epoch()}:{pubkey}".encode(),
                     "sha256").hexdigest()
 
 

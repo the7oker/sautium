@@ -10,7 +10,11 @@ where:
 
     canonical = METHOD + "\n" + PATH_AND_QUERY + "\n" + TS + "\n" + sha256_hex(body)
 
-The shared secret lives in ``data/.api_secret`` (32 bytes, mode 0600);
+The shared secret lives beside the node's identity (``<identity dir>/
+.api_secret``, 32 bytes, mode 0600) — it is part of who this node IS, not
+of the code it runs. It used to sit in ``backend/data/`` inside the checkout,
+which made it survive deleting the node and made the launcher and Docker
+nodes on one machine share a credential (compose bind-mounts ./backend);
 the file is created on first startup if missing. Native launcher
 clients and the JS frontend read the same file (frontend gets it
 inlined into the HTML at GET / so it never travels through a
@@ -146,6 +150,16 @@ def _is_whitelisted(path: str) -> bool:
     if path in WHITELIST_EXACT:
         return True
     return any(path.startswith(p) for p in WHITELIST_PREFIX)
+
+
+def secret_path() -> Path:
+    """Where this node keeps its API secret. Anchored to the identity
+    directory, which is what every runtime already treats as the node's own
+    state: the launcher points it at %APPDATA%/Sautium (or ~/.config on mac),
+    Docker at the mounted ./data/node_identity. Deleting the node therefore
+    deletes the secret, and two nodes sharing a checkout no longer share it."""
+    from config import settings
+    return Path(settings.p2p_identity_dir) / ".api_secret"
 
 
 def _read_existing(secret_path: Path) -> Optional[str]:

@@ -227,6 +227,21 @@ The short version of the hard-learned lessons:
   scoped to one asset so a refetch collapses while two different images that
   happen to hash alike, as album editions differing by a sticker can, stay
   apart.
+- **A credential has to name what it grants access to.** The device token was
+  `HMAC(secret, "sautium-device:v1:{epoch}")` — and neither input belonged to
+  the node. The secret lived in `backend/data/` INSIDE the checkout (on the
+  mac test node it was dated May 3 while the node's data dir was minted that
+  morning), and the epoch lives in the node's own database, so a fresh node
+  reset it. Delete a node, create another — new account, new identity, new
+  database — and every browser paired with the old one authenticated against
+  the new one on a page refresh. The same file also served BOTH nodes on this
+  machine, since compose bind-mounts `./backend` into the container; only
+  mismatched epochs kept their tokens apart, by luck. Now the node's public
+  key is part of the derivation and the secret sits beside the identity
+  (`<p2p_identity_dir>/.api_secret`), which every runtime already treats as
+  node state and every uninstall already deletes. Readers: `main`,
+  `media_urls`, `desktop/api_client`, `mcp/assistant_server` — the MCP one is
+  easy to miss and breaks the AI DJ silently.
 - **libtorrent 2.1+ `peers()`** returns `(ip, port)` tuples, not objects with
   `.address()/.port()`. Compat handling in `dht_service.py`.
 - **libtorrent DHT alerts** require `alert_mask += dht_operation_notification`

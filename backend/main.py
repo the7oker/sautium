@@ -25,10 +25,11 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path as _Path
 
 from auth_hmac import HMACAuthMiddleware, ensure_secret
+from auth_hmac import secret_path as _secret_path
 from config import settings, get_settings, ui_build, LOGGING_CONFIG
 from dht_service import DHTService, HAS_LIBTORRENT
 
-_API_SECRET_PATH = _Path(__file__).parent / "data" / ".api_secret"
+_API_SECRET_PATH = _secret_path()
 _INDEX_HTML_PATH = _Path(__file__).parent / "static" / "index.html"
 _API_SECRET_CACHE: Optional[bytes] = None
 _INDEX_HTML_CACHE: Optional[str] = None

@@ -57,7 +57,9 @@ BACKEND_URL = os.getenv("BACKEND_URL", "https://localhost:8000")
 # -- Signed backend HTTP -------------------------------------------------------
 # The backend requires HMAC-SHA256 request signatures (backend/auth_hmac.py).
 # Reimplemented stdlib-only: importing auth_hmac would drag starlette into the
-# MCP environment. The secret file is shared via BACKEND_PATH (bind-mounted).
+# MCP environment. The secret sits beside the node's identity — same resolution
+# the backend uses (config.p2p_identity_dir), reached through the environment
+# rather than an import for the same reason.
 
 _API_SECRET: bytes | None = None
 
@@ -65,8 +67,9 @@ _API_SECRET: bytes | None = None
 def _api_secret() -> bytes:
     global _API_SECRET
     if _API_SECRET is None:
-        path = os.path.join(backend_path, "data", ".api_secret")
-        with open(path, encoding="ascii") as f:
+        identity_dir = os.environ.get("P2P_IDENTITY_DIR") or os.path.join(
+            backend_path, "data", "node_identity")
+        with open(os.path.join(identity_dir, ".api_secret"), encoding="ascii") as f:
             _API_SECRET = f.read().strip().encode("ascii")
     return _API_SECRET
 

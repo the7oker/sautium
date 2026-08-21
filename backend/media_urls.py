@@ -12,12 +12,9 @@ these routes carry their own check.
 import hashlib
 import hmac
 import time
-from pathlib import Path
 from typing import Optional
 
-from auth_hmac import ensure_secret
-
-_SECRET_PATH = Path(__file__).parent / "data" / ".api_secret"
+from auth_hmac import ensure_secret, secret_path as _secret_path
 _SECRET_CACHE: Optional[bytes] = None
 _TTL_SECONDS = 4 * 3600
 
@@ -25,7 +22,7 @@ _TTL_SECONDS = 4 * 3600
 def _secret() -> bytes:
     global _SECRET_CACHE
     if _SECRET_CACHE is None:
-        _SECRET_CACHE = ensure_secret(_SECRET_PATH)
+        _SECRET_CACHE = ensure_secret(_secret_path())
     return _SECRET_CACHE
 
 

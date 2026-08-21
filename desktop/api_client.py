@@ -38,12 +38,14 @@ from desktop.p2p.contact_log import endpoint_family
 
 logger = logging.getLogger(__name__)
 
-# Secret file is written by the backend on first startup. We share the
-# same file because launcher and backend run on the same host (Docker
-# bind-mounts ./backend into the container, so /app/data/.api_secret
-# inside the container is the same inode as backend/data/.api_secret
-# on the host).
-_SECRET_PATH = Path(__file__).parent.parent / "backend" / "data" / ".api_secret"
+# Secret file is written by the backend on first startup, beside the node's
+# identity — the launcher and its backend are the same node, so they share it
+# there. NOT in the checkout, where it used to live: that made one credential
+# serve every node the checkout ever ran, including the Docker one alongside.
+def _secret_path() -> Path:
+    from desktop.config_manager import get_config_dir
+    return get_config_dir() / "node_identity" / ".api_secret"
+
 _cached_secret: Optional[bytes] = None
 
 # SSL context for self-signed P2P certificates
@@ -58,7 +60,7 @@ def _load_secret() -> Optional[bytes]:
         return _cached_secret
     for _ in range(10):
         try:
-            data = _SECRET_PATH.read_text(encoding="ascii").strip()
+            data = _secret_path().read_text(encoding="ascii").strip()
             if data:
                 _cached_secret = data.encode("ascii")
                 return _cached_secret
@@ -66,7 +68,7 @@ def _load_secret() -> Optional[bytes]:
             pass
         time.sleep(0.5)
     logger.warning(
-        f"API secret file not found at {_SECRET_PATH}; requests will be unsigned"
+        f"API secret file not found at {_secret_path()}; requests will be unsigned"
     )
     return None
 
