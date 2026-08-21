@@ -112,6 +112,8 @@ class BrowserBackend(PlayerBackend):
             self._channel = channel
             self._loop = loop
         self._cancel_grace()
+        logger.info("browser renderer attached: tab %s (pending play: %s)",
+                    tab[:8], self._pending_play_index)
         if self._pending_play_index is not None:
             # A play intent queued up while no renderer existed — honor it
             # now on the tab that just claimed the output.
@@ -185,9 +187,19 @@ class BrowserBackend(PlayerBackend):
         downlink that provably works from a frozen background tab (its SSE
         channel is dead exactly when radio refills matter)."""
         if tab != self._tab:
+            logger.info("renderer event ignored (displaced tab %s): %s", tab[:8], event)
             return None   # a displaced tab still flushing events
         if epoch is not None and epoch != self._epoch:
+            logger.info("renderer event ignored (stale epoch %s != %s): %s",
+                        epoch, self._epoch, event)
             return None   # stale event raced a newer load directive
+        if event != "timeupdate":
+            # The renderer is a black box on the other side of an SSE
+            # channel: without this line a track that quietly refuses to
+            # play is indistinguishable from one that played and was
+            # skipped. timeupdate is excluded — it fires every second.
+            logger.info("renderer event: %s at %.1fs (slot %s, state %s)",
+                        event, position or 0.0, queue_index, self._state)
         if queue_index is not None and int(queue_index) != self._index:
             # The renderer advanced locally (mobile background path — see
             # _queue_tail). Within an epoch its slot is the truth; every
@@ -341,11 +353,14 @@ class BrowserBackend(PlayerBackend):
             # No renderer tab: don't pretend to play — park the intent (the
             # next tab to claim the output starts here) and report honestly.
             if play:
+                logger.info("play intent parked — no renderer tab yet (slot %d)", index)
                 self._pending_play_index = index
             self._state = "stopped"
             self._emit_now()
             return True
         self._epoch += 1
+        logger.info("renderer directive: load slot %d play=%s (%s — %s)",
+                    index, play, item.artist, item.title)
         self._push(self._load_directive(index, item, play=play))
         if play:
             self._state = "playing"
