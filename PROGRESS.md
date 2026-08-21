@@ -166,6 +166,14 @@ The short version of the hard-learned lessons:
   delivers a status message (the stream pushes current status on connect),
   which cancels the pending paint — so the paint fires only when the link
   has genuinely been down the whole window.
+- **`SetThreadExecutionState` is per-thread and dies with its thread.** The
+  Windows sleep inhibition (`utils.keep_awake`) therefore parks a dedicated
+  thread for the length of the hold; firing it from whichever worker called
+  `start_all` would have evaporated the moment that worker returned —
+  measured: after a thread that set ES_SYSTEM_REQUIRED exits, the flag is gone
+  from the caller's state. macOS has the opposite shape: `caffeinate -w <pid>`
+  outlives us on purpose and lifts on a hard kill. Neither API blocks
+  deliberate sleep, and neither takes a display assertion.
 - **libtorrent 2.1+ `peers()`** returns `(ip, port)` tuples, not objects with
   `.address()/.port()`. Compat handling in `dht_service.py`.
 - **libtorrent DHT alerts** require `alert_mask += dht_operation_notification`
