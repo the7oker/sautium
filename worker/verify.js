@@ -59,6 +59,12 @@
  *                                also records the master's current address
  *                                (egress IP + declared peer port) as the
  *                                bootstrap hint below
+ *   POST /node-register        — a reachable volunteer node lists itself in
+ *                                the capability directory (address from the
+ *                                edge, port+caps inside the signature)
+ *   GET  /node-hints           — K random fresh volunteers for a capability:
+ *                                the DHT-less bootstrap stops funneling every
+ *                                role onto the master
  *   GET  /master-hint          — the master's last known peer address, for
  *                                nodes whose DHT is dead (mobile carriers
  *                                throttle UDP): rides HTTPS/443, the one
@@ -137,6 +143,13 @@ const MAIL_CAP = 20000;                  // rows kept; oldest evicted beyond thi
 const MAIL_TTL_MS = 30 * 24 * 3600 * 1000;
 const MAIL_IP_PER_HOUR = 60;
 const MAIL_SIG_SKEW_S = 300;
+// Capability directory (Ф16c): reachable volunteers re-register on their
+// existing periodic cycles; an entry older than the TTL is dead. K keeps
+// the answer a SAMPLE, not a map of the network.
+const DIRECTORY_TTL_MS = 2 * 3600 * 1000;
+const DIRECTORY_K = 5;
+const DIRECTORY_CAPS = new Set(["sync", "mbdump", "relay", "mbslices"]);
+const DIRECTORY_REG_PER_IP_HOUR = 12;
 // email_class is a coarse, Worker-side hint (the node never sees the domain):
 // disposable → reduced similarity weight, major → shared-provider (many honest
 // users collide on it), other → custom/ISP domains.
@@ -234,6 +247,12 @@ export default {
       }
       if (url.pathname === "/master-hint" && request.method === "GET") {
         return await handleMasterHint(env, corsHeaders);
+      }
+      if (url.pathname === "/node-register" && request.method === "POST") {
+        return await handleNodeRegister(request, env, corsHeaders);
+      }
+      if (url.pathname === "/node-hints" && request.method === "GET") {
+        return await handleNodeHints(url, env, corsHeaders);
       }
 
       if (url.pathname === "/birth-certificate" && request.method === "POST") {
@@ -885,6 +904,131 @@ async function handleMasterHint(env, corsHeaders) {
    */
   const hint = await env.RATE_LIMITS.get("master:hint", "json");
   return json(hint || {}, corsHeaders);
+}
+
+async function directoryCall(env, path, body) {
+  if (!env.NODE_DIRECTORY) return { status: 503, body: { error: "directory not configured" } };
+  const stub = env.NODE_DIRECTORY.get(env.NODE_DIRECTORY.idFromName("nodes"));
+  const res = await stub.fetch(`https://directory${path}`, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return { status: res.status, body: await res.json() };
+}
+
+async function handleNodeRegister(request, env, corsHeaders) {
+  /**
+   * Body: {pubkey, port, capabilities: [..], ts, signature}
+   *   signature over sautium-directory:v1:{port}:{caps sorted, comma}:{ts}
+   * The ADDRESS is never taken from the client: the edge observed it
+   * (CF-Connecting-IP), so a registration cannot point at somebody else —
+   * and the signature is single-use (KV nonce), so a captured request
+   * replayed from another host cannot re-point the entry either (the same
+   * two guards the master hint uses). Requires a certificate issued here;
+   * the master itself is refused — it has /master-hint, and clients keep
+   * it as the LAST tier by design.
+   */
+  const body = await request.json();
+  const { pubkey, port, capabilities, ts, signature } = body;
+  const key = String(pubkey || "").toLowerCase();
+  if (!isValidPubkeyHex(key) || !signature) {
+    return json({ error: "missing fields" }, corsHeaders, 400);
+  }
+  if (key === MASTER_PUBKEY) {
+    return json({ error: "the master publishes /master-hint" }, corsHeaders, 403);
+  }
+  const p = parseInt(port);
+  if (!Number.isInteger(p) || p <= 0 || p >= 65536) {
+    return json({ error: "invalid port" }, corsHeaders, 400);
+  }
+  if (!Array.isArray(capabilities) || capabilities.length === 0 || capabilities.length > 4
+      || !capabilities.every((c) => DIRECTORY_CAPS.has(c))) {
+    return json({ error: "invalid capabilities" }, corsHeaders, 400);
+  }
+  if (!tsFresh(ts)) {
+    return json({ error: "stale timestamp" }, corsHeaders, 403);
+  }
+  const caps = [...new Set(capabilities)].sort();
+  const message = `sautium-directory:v1:${p}:${caps.join(",")}:${Number(ts)}`;
+  if (!await verifySignature(message, signature, key)) {
+    return json({ error: "invalid signature" }, corsHeaders, 403);
+  }
+  const ip = request.headers.get("CF-Connecting-IP") || "";
+  if (await bumpWindow(env, `rl:dir:${ip}`, DIRECTORY_REG_PER_IP_HOUR, 3600)) {
+    return json({ error: "rate limited" }, corsHeaders, 429);
+  }
+  if (!await env.RATE_LIMITS.get(`born:${key}`, "json")) {
+    return json({ error: "node has no certificate" }, corsHeaders, 403);
+  }
+  const sigNonce = `dirsig:${await sha256Hex(signature)}`;
+  if (await env.RATE_LIMITS.get(sigNonce)) {
+    return json({ error: "signature already used" }, corsHeaders, 403);
+  }
+  await env.RATE_LIMITS.put(sigNonce, "1", { expirationTtl: 2 * MAIL_SIG_SKEW_S });
+  if (!ip) return json({ error: "no source address" }, corsHeaders, 400);
+  const r = await directoryCall(env, "/register", {
+    pubkey: key, host: ip, fam: ip.includes(":") ? 6 : 4, port: p,
+    caps: caps.join(","), now: Date.now(),
+  });
+  return json(r.body, corsHeaders, r.status);
+}
+
+async function handleNodeHints(url, env, corsHeaders) {
+  const cap = url.searchParams.get("cap") || "";
+  if (!DIRECTORY_CAPS.has(cap)) {
+    return json({ error: "unknown capability" }, corsHeaders, 400);
+  }
+  const r = await directoryCall(env, `/hints?cap=${cap}&now=${Date.now()}`);
+  return json(r.body, corsHeaders, r.status);
+}
+
+export class NodeDirectory {
+  constructor(state, env) {
+    this.state = state;
+    this.sql = state.storage.sql;
+    state.blockConcurrencyWhile(async () => this._init());
+  }
+
+  _init() {
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS nodes (
+      pubkey TEXT PRIMARY KEY, host4 TEXT, host6 TEXT, port INTEGER NOT NULL,
+      caps TEXT NOT NULL, ts INTEGER NOT NULL)`);
+    this.sql.exec("CREATE INDEX IF NOT EXISTS nodes_ts ON nodes (ts)");
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/register") {
+      const { pubkey, host, fam, port, caps, now } = await request.json();
+      const prev = this.sql.exec("SELECT host4, host6 FROM nodes WHERE pubkey = ?", pubkey).toArray()[0] || {};
+      const host4 = fam === 4 ? host : (prev.host4 || null);
+      const host6 = fam === 6 ? host : (prev.host6 || null);
+      this.sql.exec(
+        `INSERT INTO nodes (pubkey, host4, host6, port, caps, ts) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(pubkey) DO UPDATE SET host4 = excluded.host4, host6 = excluded.host6,
+           port = excluded.port, caps = excluded.caps, ts = excluded.ts`,
+        pubkey, host4, host6, port, caps, now);
+      this.sql.exec("DELETE FROM nodes WHERE ts < ?", now - 7 * 24 * 3600 * 1000);
+      return Response.json({ registered: true });
+    }
+    if (request.method === "GET" && url.pathname === "/hints") {
+      const cap = url.searchParams.get("cap") || "";
+      const now = parseInt(url.searchParams.get("now")) || 0;
+      const rows = this.sql.exec(
+        `SELECT pubkey, host4, host6, port, caps FROM nodes
+          WHERE ts > ? AND (',' || caps || ',') LIKE ?
+          ORDER BY RANDOM() LIMIT ?`,
+        now - DIRECTORY_TTL_MS, `%,${cap},%`, DIRECTORY_K).toArray();
+      return Response.json({ nodes: rows.map((r) => ({
+        pubkey: r.pubkey, host: r.host4 || null, host6: r.host6 || null, port: Number(r.port),
+      })) });
+    }
+    if (request.method === "GET" && url.pathname === "/stats") {
+      return Response.json({ nodes: Number(this.sql.exec("SELECT count(*) AS n FROM nodes").one().n) });
+    }
+    return new Response("not found", { status: 404 });
+  }
 }
 
 export class MasterMailbox {

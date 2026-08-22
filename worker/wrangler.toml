@@ -28,5 +28,15 @@ class_name = "MasterMailbox"
 type = "durable-object"
 storage = "sqlite"
 
+# Capability directory: reachable volunteer nodes list themselves so a
+# DHT-less client's bootstrap does not funnel every role onto the master.
+[[durable_objects.bindings]]
+name = "NODE_DIRECTORY"
+class_name = "NodeDirectory"
+
+[exports.NodeDirectory]
+type = "durable-object"
+storage = "sqlite"
+
 # Custom domain (optional): verify.sautium.net
 # Configure in Cloudflare dashboard: Workers → Triggers → Custom Domains

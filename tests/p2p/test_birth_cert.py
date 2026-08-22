@@ -314,3 +314,18 @@ def test_worker_mailbox_contract():
     assert len(rows6) == 2 and rows6[0]["sub"] == rows6[1]["sub"]
     assert rows6[1]["n_sub24"] == 1                          # the second v6 birth saw the first in its /48
     assert r["stats"]["body"]["ledger"]["last_24h"]["v6"] == 2
+    # capability directory: certified volunteers in, the edge decides the address
+    assert r["reg1"]["body"] == {"registered": True}
+    assert r["reg3"]["body"] == {"registered": True}
+    assert r["regNoCert"]["status"] == 403                   # no certificate → no listing
+    assert r["regBadSig"]["status"] == 403
+    assert r["masterReg"]["status"] == 403                   # the master publishes /master-hint instead
+    assert r["regReplay"]["status"] == 403                   # single-use signature: a replay from
+    dump = r["hintsDump"]["body"]["nodes"]                   # another host cannot re-point the entry
+    assert [ (n["pubkey"], n["host"], n["port"]) for n in dump ] == [
+        (r["issue1"]["body"]["pubkey"], "198.51.100.50", 20246)]
+    relay = r["hintsRelay"]["body"]["nodes"]
+    assert len(relay) == 1 and relay[0]["host"] is None and relay[0]["host6"] == "2a00:db8::77"
+    assert r["hintsSlices"]["body"]["nodes"] == []           # nobody registered that capability
+    assert r["hintsBadCap"]["status"] == 400
+    assert [n["host"] for n in r["hintsAfterStale"]["body"]["nodes"]] == ["198.51.100.50"]   # TTL hides the stale row

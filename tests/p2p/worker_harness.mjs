@@ -81,6 +81,17 @@ const mailSql = {
 const mailbox = new workerModule.MasterMailbox(
   { storage: { sql: mailSql }, blockConcurrencyWhile: (fn) => fn() }, {});
 const mailboxStub = { fetch: (url, init) => mailbox.fetch(url instanceof Request ? url : new Request(url, init)) };
+const dirDb = new DatabaseSync(":memory:");
+const dirSql = {
+  exec(query, ...params) {
+    const stmt = dirDb.prepare(query);
+    const rows = /^\s*SELECT/i.test(query) ? stmt.all(...params) : (stmt.run(...params), []);
+    return { toArray: () => rows, one: () => rows[0] };
+  },
+};
+const directory = new workerModule.NodeDirectory(
+  { storage: { sql: dirSql }, blockConcurrencyWhile: (fn) => fn() }, {});
+const directoryStub = { fetch: (url, init) => directory.fetch(url instanceof Request ? url : new Request(url, init)) };
 
 const store = new Map();
 const env = {
@@ -89,6 +100,7 @@ const env = {
   IP_PEPPER: "test-ip-pepper",
   BIRTH_LEDGER: { idFromName: (name) => name, get: () => ledgerStub },
   MAILBOX: { idFromName: (name) => name, get: () => mailboxStub },
+  NODE_DIRECTORY: { idFromName: (name) => name, get: () => directoryStub },
   RATE_LIMITS: {
     async get(k, type) {
       const v = store.get(k);
@@ -305,6 +317,29 @@ const ts6 = String(Math.floor(Date.now() / 1000) + 1);
 const wake6 = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${ts6}&peer_port=8801&signature=${await sign(master, `mailbox-wake:v1:${ts6}:8801`)}`, undefined, { ip: "2a00:db8::99" });
 const hintDual = await call("GET", "/master-hint");
 
+// --- capability directory (Ф16c): certified volunteers register, K random served ---
+const dirTs = Math.floor(Date.now() / 1000);
+const regPayload = async (key, port, caps, ts = dirTs) => ({
+  pubkey: key.pubHex, port, capabilities: caps, ts,
+  signature: await sign(key, `sautium-directory:v1:${port}:${[...caps].sort().join(",")}:${ts}`),
+});
+const reg1 = await call("POST", "/node-register", await regPayload(s1, 20246, ["sync", "mbdump"]), { ip: "198.51.100.50" });
+const reg3 = await call("POST", "/node-register", await regPayload(s3, 20300, ["sync", "relay"]), { ip: "2a00:db8::77" });
+const stranger2 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
+const regNoCert = await call("POST", "/node-register", await regPayload(stranger2, 20000, ["sync"]));
+const regBadSig = await call("POST", "/node-register",
+  { ...(await regPayload(s4, 20400, ["sync"])), signature: "00".repeat(64) });
+const masterReg = await call("POST", "/node-register", await regPayload(master, 8801, ["sync"]));
+const regReplay = await call("POST", "/node-register", await regPayload(s1, 20246, ["sync", "mbdump"]), { ip: "203.0.113.66" });
+const hintsDump = await call("GET", "/node-hints?cap=mbdump");
+const hintsRelay = await call("GET", "/node-hints?cap=relay");
+const hintsSlices = await call("GET", "/node-hints?cap=mbslices");
+const hintsBadCap = await call("GET", "/node-hints?cap=nonsense");
+// an expired entry (older than the TTL) is never served
+dirDb.prepare("INSERT INTO nodes (pubkey, host4, host6, port, caps, ts) VALUES (?, ?, NULL, ?, ?, ?)")
+  .run("ee".repeat(32), "203.0.113.200", 21000, "mbdump", Date.now() - 3 * 3600 * 1000);
+const hintsAfterStale = await call("GET", "/node-hints?cap=mbdump");
+
 const stats = await call("GET", "/issuance-stats");
 const badSig = await call("POST", "/birth-certificate", {
   pubkey_hex: s1.pubHex, signature: "00".repeat(64),
@@ -325,5 +360,7 @@ console.log(JSON.stringify({
   drain, drainForeign, drainStale, ack, drainAfterAck, wakeNoUpgrade,
   hintEmpty, wakeWithPort, hintSet, hintReplayPort, hintReplaySame, hintAfterReplay, hintBadPort,
   v6birth, v6birth2, wake6, hintDual, ledgerRowsV6,
+  reg1, reg3, regNoCert, regBadSig, masterReg, regReplay,
+  hintsDump, hintsRelay, hintsSlices, hintsBadCap, hintsAfterStale,
   verified_record: JSON.parse(store.get(`verified:${inviteCode.replace("#", ":")}`)),
 }));

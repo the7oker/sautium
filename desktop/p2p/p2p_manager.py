@@ -423,6 +423,9 @@ class P2PManager:
             self._reachability_task = asyncio.create_task(
                 self._reachability_loop()
             )
+            self._directory_register_task = asyncio.create_task(
+                self._directory_register_loop()
+            )
 
             # Sync triggers: NOTIFY sautium_sync_request (Web UI Force
             # sync now → backend → here) + auto-sync timer
@@ -962,9 +965,14 @@ class P2PManager:
             _progress("Searching DHT for nodes...")
             await _drain_new(await self._dht_service.lookup_nodes())
             if not dht_seen and not synced_peers:
-                # Dead DHT (mobile): the master serves sync too — one hint
-                # candidate; _drain_peer validates like any other node.
-                from desktop.p2p import master_hint
+                # Dead DHT (mobile): volunteer sync nodes from the Worker
+                # directory first, the master hint last (Ф16c) —
+                # _drain_peer validates each like any other node.
+                from desktop.p2p import master_hint, node_hints
+                volunteers = await asyncio.get_event_loop().run_in_executor(
+                    None, node_hints.fetch, "sync")
+                if volunteers:
+                    await _drain_new([(h, p) for h, p, _ in volunteers])
                 hint = await asyncio.get_event_loop().run_in_executor(
                     None, master_hint.fetch)
                 if hint:
@@ -2080,6 +2088,14 @@ class P2PManager:
         known = self._read_setting("p2p.relay_pubkeys") or []
         candidates = await self._dht_service.lookup_capability("relay")
         if not candidates:
+            # Dead DHT: relay volunteers from the Worker directory (Ф16c) —
+            # the subscription handshake (voucher, signatures) judges them
+            # exactly like DHT-found relays.
+            from desktop.p2p import node_hints
+            candidates = [(h, p) for h, p, _ in
+                          await asyncio.get_event_loop().run_in_executor(
+                              None, node_hints.fetch, "relay")]
+        if not candidates:
             return
         # Every client sees the SAME candidate order from the DHT — without
         # a shuffle they all pile onto the first relay in the list and the
@@ -2460,6 +2476,38 @@ class P2PManager:
             except Exception as e:
                 logger.debug(f"Probe via {ip}:{mport} failed: {e}")
         return None
+
+    async def _directory_register_loop(self) -> None:
+        """The volunteer side of the capability directory (Ф16c): while this
+        node is REACHABLE (and not the master — it publishes /master-hint),
+        re-register hourly so DHT-less clients can find sync/slices/relay
+        beyond the master. The Worker's TTL (2 h) makes a vanished node
+        disappear on its own."""
+        from desktop.node_identity import get_account_info, sign_message
+        from desktop.p2p import node_hints
+        from desktop.p2p.master_node import MASTER_PUBKEY_HEX
+        while self._running:
+            try:
+                account = get_account_info()
+                if (account and self._reachability_status == "reachable"
+                        and account["public_key_hex"] != MASTER_PUBKEY_HEX):
+                    caps = ["sync"]
+                    if self._mb_dump_version:
+                        caps.append("mbdump")
+                    elif self.config.get("mb_slice", {}).get("serve", True):
+                        caps.append("mbslices")
+                    if self._read_setting("p2p.relay_enabled") is not False:
+                        caps.append("relay")
+                    port = ((self._upnp.get_external_port(self._http_port)
+                             if self._upnp else None) or self._http_port)
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, node_hints.register,
+                        account["public_key_hex"], sign_message, port, caps)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug(f"directory registration cycle: {e}")
+            await asyncio.sleep(3600)
 
     async def _reachability_loop(self) -> None:
         """Adaptive-cadence self-check: retry every RETRY_UNKNOWN while we
@@ -3368,10 +3416,15 @@ class P2PManager:
             for ip, port in await self._dht_service.lookup_capability("mbdump"):
                 candidates.append(fmt_addr(ip, port))
         if not candidates:
-            # Dead DHT + no LAN + no manual peers (the mobile newborn): the
-            # master IS a dump node — the Worker hint supplies the address,
-            # the ban/health/node_id validation below stays the judge.
-            from desktop.p2p import master_hint
+            # Dead DHT + no LAN + no manual peers (the mobile newborn):
+            # volunteer dump nodes from the Worker directory FIRST, the
+            # master hint LAST — that ordering is the de-specialization
+            # (Ф16c). The ban/health/node_id validation below stays the
+            # judge for every one of them.
+            from desktop.p2p import master_hint, node_hints
+            for host, hport, _pk in await loop.run_in_executor(
+                    None, node_hints.fetch, "mbdump"):
+                candidates.append(fmt_addr(host, hport))
             hint = await loop.run_in_executor(None, master_hint.fetch)
             if hint:
                 candidates.append(fmt_addr(*hint))
