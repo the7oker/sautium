@@ -24,6 +24,7 @@ import psycopg2.extensions
 from desktop.api_client import BackendAPIClient
 from desktop.mb_slice_client import MBSliceClient
 from desktop.p2p import mb_slice_queries, sync_queries
+from desktop.p2p.addrs import fmt_addr
 from desktop.p2p.chat_service import ChatService
 from desktop.p2p.dht_service import DHTService
 from desktop.p2p.lan_discovery import LANDiscovery
@@ -872,7 +873,7 @@ class P2PManager:
                     info = self._lan_discovery.get_peer_info(ip, port)
                     artist_count = (info or {}).get("artists", "?")
                     scheme = (info or {}).get("scheme", "https")
-                    peer_url = f"{scheme}://{ip}:{port}"
+                    peer_url = f"{scheme}://{fmt_addr(ip, port)}"
                     _progress(
                         f"LAN peer {peer_url} "
                         f"({artist_count} artists)..."
@@ -949,7 +950,7 @@ class P2PManager:
 
             async def _drain_new(peers) -> None:
                 for ip, port in peers:
-                    addr = f"{ip}:{port}"
+                    addr = fmt_addr(ip, port)
                     if (addr in dht_seen or addr in synced_peers
                             or addr in skip_dht_addrs):
                         continue
@@ -1218,7 +1219,7 @@ class P2PManager:
 
         async def _try_send(targets: list[tuple]) -> bool:
             for ip, port in targets:
-                url = f"https://{ip}:{port}/api/chat/message"
+                url = f"https://{fmt_addr(ip, port)}/api/chat/message"
                 try:
                     async with aiohttp.ClientSession(
                         connector=aiohttp.TCPConnector(ssl=False)
@@ -1335,7 +1336,7 @@ class P2PManager:
         }
 
         for ip, port in peers:
-            url = f"https://{ip}:{port}/api/chat/handshake"
+            url = f"https://{fmt_addr(ip, port)}/api/chat/handshake"
             try:
                 async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
                     async with session.post(
@@ -1552,7 +1553,7 @@ class P2PManager:
 
         import aiohttp
         for ip, port in peers:
-            url = f"https://{ip}:{port}/api/chat/history"
+            url = f"https://{fmt_addr(ip, port)}/api/chat/history"
             try:
                 async with aiohttp.ClientSession(
                     connector=aiohttp.TCPConnector(ssl=False)
@@ -1728,7 +1729,7 @@ class P2PManager:
 
             resolved = False
             for ip, port in peers:
-                url = f"https://{ip}:{port}/api/chat/handshake"
+                url = f"https://{fmt_addr(ip, port)}/api/chat/handshake"
                 try:
                     async with aiohttp.ClientSession(
                         connector=aiohttp.TCPConnector(ssl=False)
@@ -1847,7 +1848,7 @@ class P2PManager:
         The peer checks the Worker for pending accepts and auto-adds us.
         Returns True if the nudge succeeded and the friend was resolved.
         """
-        url = f"https://{ip}:{port}/api/chat/invite-accepted"
+        url = f"https://{fmt_addr(ip, port)}/api/chat/invite-accepted"
         try:
             import aiohttp
             async with session.post(
@@ -2097,7 +2098,7 @@ class P2PManager:
                     break
                 try:
                     async with session.get(
-                            f"https://{ip}:{port}/health") as r:
+                            f"https://{fmt_addr(ip, port)}/health") as r:
                         node_id = (await r.json()).get("node_id", "")
                 except Exception:
                     continue
@@ -2174,7 +2175,7 @@ class P2PManager:
                 sig = sign_message(
                     f"wake_subscribe:{ts}:{relay_pubkey}:{own}"
                     .encode("utf-8")).hex()
-                url = (f"https://{ip}:{port}/api/relay/wake-stream"
+                url = (f"https://{fmt_addr(ip, port)}/api/relay/wake-stream"
                        f"?pubkey={own}&ts={ts}&sig={sig}")
                 # A voucher rides along whenever this node needs relaying —
                 # peer relays always (that is their whole point), the master
@@ -2327,7 +2328,7 @@ class P2PManager:
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as session:
                 async with session.post(
-                        f"https://{ip}:{port}/api/relay/ack",
+                        f"https://{fmt_addr(ip, port)}/api/relay/ack",
                         json=payload) as resp:
                     if resp.status != 200:
                         logger.debug("Receipt refused by relay: %s",
@@ -2446,7 +2447,7 @@ class P2PManager:
                     timeout=aiohttp.ClientTimeout(total=15),
                 ) as session:
                     async with session.post(
-                            f"https://{ip}:{mport}/api/relay/probe-connect",
+                            f"https://{fmt_addr(ip, mport)}/api/relay/probe-connect",
                             json=payload) as resp:
                         if resp.status == 429:
                             return None  # cooldown — try next cycle
@@ -2650,7 +2651,7 @@ class P2PManager:
 
                 delivered = False
                 for ip, port in peers:
-                    url = f"https://{ip}:{port}/api/chat/message"
+                    url = f"https://{fmt_addr(ip, port)}/api/chat/message"
                     try:
                         async with session.post(url, json=payload) as resp:
                             if resp.status == 200:
@@ -2795,7 +2796,7 @@ class P2PManager:
                 },
             }
             for ip, port in relay_peers:
-                url = f"https://{ip}:{port}/api/relay/forward"
+                url = f"https://{fmt_addr(ip, port)}/api/relay/forward"
                 try:
                     async with session.post(url, json=payload) as resp:
                         if resp.status == 409:
@@ -2908,13 +2909,13 @@ class P2PManager:
         impostor dies here."""
         from desktop.node_identity import verify_signature
         try:
-            async with session.get(f"https://{ip}:{port}/health") as r:
+            async with session.get(f"https://{fmt_addr(ip, port)}/health") as r:
                 node_id = (await r.json()).get("node_id", "")
             if not node_id or node_id.lower() == friend_pubkey.lower():
                 return None      # the friend itself — direct path territory
             from urllib.parse import quote
             async with session.get(
-                    f"https://{ip}:{port}/api/relay/voucher"
+                    f"https://{fmt_addr(ip, port)}/api/relay/voucher"
                     f"?invite={quote(invite)}") as r:
                 if r.status != 200:
                     return None
@@ -3362,10 +3363,10 @@ class P2PManager:
             for ip, port in self._lan_discovery.peers:
                 info = self._lan_discovery.get_peer_info(ip, port) or {}
                 scheme = info.get("scheme", "https")
-                candidates.append(f"{scheme}://{ip}:{port}")
+                candidates.append(f"{scheme}://{fmt_addr(ip, port)}")
         if self._dht_service:
             for ip, port in await self._dht_service.lookup_capability("mbdump"):
-                candidates.append(f"{ip}:{port}")
+                candidates.append(fmt_addr(ip, port))
         if not candidates:
             # Dead DHT + no LAN + no manual peers (the mobile newborn): the
             # master IS a dump node — the Worker hint supplies the address,
@@ -3373,7 +3374,7 @@ class P2PManager:
             from desktop.p2p import master_hint
             hint = await loop.run_in_executor(None, master_hint.fetch)
             if hint:
-                candidates.append(f"{hint[0]}:{hint[1]}")
+                candidates.append(fmt_addr(*hint))
 
         for addr in candidates:
             if addr in seen_addrs:

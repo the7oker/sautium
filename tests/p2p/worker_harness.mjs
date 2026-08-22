@@ -217,7 +217,7 @@ for (let i = 0; i < 4; i++) {
   }, { ip: `198.51.100.${10 + i}`, cf: { asn: 64500, country: "UA" } });
   burst.push(r);
 }
-const ledgerRows = db.prepare("SELECT asn, cc, method, m_shadow, n_sub24, n_asn1, n_glob1, addr, n_addr24 FROM births ORDER BY rowid").all();
+const ledgerRows = db.prepare("SELECT asn, cc, method, m_shadow, n_sub24, n_asn1, n_glob1, addr, n_addr24, sub, fam FROM births ORDER BY rowid").all();
 
 // s1 takes the mailbox back (a second registration by the earlier holder):
 // its certificate now names s3 as predecessor, the anchor does not move
@@ -289,6 +289,22 @@ const hintReplaySame = await call("GET", `/mailbox/wake?public_key_hex=${master.
 const hintAfterReplay = await call("GET", "/master-hint");
 const hintBadPort = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${nowTs}&peer_port=abc&signature=${await sign(master, `mailbox-wake:v1:${nowTs}:abc`)}`);
 
+// --- births over IPv6: the fam sensor + the canonical /48 bucket ---
+const s8 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
+const v6birth = await call("POST", "/birth-certificate", {
+  pubkey_hex: s8.pubHex, signature: await sign(s8, `birth:${s8.pubHex}`),
+}, { ip: "2a00:db8::210e", cf: { asn: 64502, country: "DE" } });
+const s9 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
+const v6birth2 = await call("POST", "/birth-certificate", {
+  pubkey_hex: s9.pubHex, signature: await sign(s9, `birth:${s9.pubHex}`),
+}, { ip: "2a00:db8:0:beef::7", cf: { asn: 64502, country: "DE" } });   // same /48, another spelling shape
+const ledgerRowsV6 = db.prepare("SELECT sub, fam, n_sub24 FROM births WHERE fam = 6 ORDER BY rowid").all();
+
+// --- a wake over IPv6 fills host6 and PRESERVES the v4 slot ---
+const ts6 = String(Math.floor(Date.now() / 1000) + 1);
+const wake6 = await call("GET", `/mailbox/wake?public_key_hex=${master.pubHex}&ts=${ts6}&peer_port=8801&signature=${await sign(master, `mailbox-wake:v1:${ts6}:8801`)}`, undefined, { ip: "2a00:db8::99" });
+const hintDual = await call("GET", "/master-hint");
+
 const stats = await call("GET", "/issuance-stats");
 const badSig = await call("POST", "/birth-certificate", {
   pubkey_hex: s1.pubHex, signature: "00".repeat(64),
@@ -308,5 +324,6 @@ console.log(JSON.stringify({
   mail1, mail2, mailDup, mail3, mailCap, mailNoCert, mailBadSig, mailWrongTo, mailTooBig,
   drain, drainForeign, drainStale, ack, drainAfterAck, wakeNoUpgrade,
   hintEmpty, wakeWithPort, hintSet, hintReplayPort, hintReplaySame, hintAfterReplay, hintBadPort,
+  v6birth, v6birth2, wake6, hintDual, ledgerRowsV6,
   verified_record: JSON.parse(store.get(`verified:${inviteCode.replace("#", ":")}`)),
 }));

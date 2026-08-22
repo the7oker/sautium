@@ -78,7 +78,10 @@ def fetch(force: bool = False, _get=None) -> Optional[Tuple[str, int]]:
             logger.debug("master hint fetch failed: %s", e)
             _failed_at = now
             return _cached
-        host, port = hint.get("host"), hint.get("port")
+        # Two family slots since IPv6-Ф0: `host` is the v4 address, `host6`
+        # the v6 one. Prefer v4 (universally dialable); a v6-only hint is
+        # still a valid candidate — fmt_addr brackets it for the dial.
+        host, port = hint.get("host") or hint.get("host6"), hint.get("port")
         if isinstance(host, str) and host and isinstance(port, int) and 0 < port < 65536:
             _cached = (host, port)
         else:

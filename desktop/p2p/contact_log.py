@@ -111,7 +111,8 @@ def addr_ids(host: Optional[str]):
     /24 (IPv6 /48) sibling for the subnet axis. Both None without a host."""
     if not host:
         return None, None
-    host = host.lower()
+    from desktop.p2p.addrs import canon_host
+    host = canon_host(host)              # one spelling per address (IPv6!)
     addr = str(uuid5(_SAUTIUM_NAMESPACE, f"node_addr:{host}"))
     try:
         ip = ipaddress.ip_address(host)

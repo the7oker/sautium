@@ -25,6 +25,8 @@ import socket
 import time
 from typing import Dict, Optional, Tuple
 
+from desktop.p2p.addrs import fmt_addr
+
 logger = logging.getLogger(__name__)
 
 LAN_DISCOVERY_PORT = 19002
@@ -303,7 +305,7 @@ class LANDiscovery:
         def _probe():
             try:
                 urllib.request.urlopen(
-                    f"https://{ip}:{port}/health",
+                    f"https://{fmt_addr(ip, port)}/health",
                     timeout=5, context=ctx,
                 )
             except Exception:

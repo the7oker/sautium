@@ -256,11 +256,11 @@ def test_worker_contract():
     assert policy["cert_version"] == 4 and policy["pow_difficulty"] == 32
     assert policy["adaptive_armed"] is False and policy["adaptive_cap"] == 8
     day = next(iter(r["stats"]["body"]["days"].values()))
-    assert day["births"] == 7 and day["email"] == 4       # 3 registrations + 1 check-email upgrade
+    assert day["births"] == 9 and day["email"] == 4       # +2 v6 births; 3 registrations + 1 upgrade
     assert day["succession"] == 2                          # s3 took alice's mailbox, s1 took it back
     ledger = r["stats"]["body"]["ledger"]
-    assert ledger["total"] == 7 and ledger["last_24h"]["births"] == 7
-    assert ledger["last_24h"]["distinct_addr"] == 5
+    assert ledger["total"] == 9 and ledger["last_24h"]["births"] == 9
+    assert ledger["last_24h"]["distinct_addr"] == 7
     # m2 = 3: two burst rows plus the third of the earlier identities — all
     # three of those were born from the same test IP within one second
     assert ledger["last_24h"]["email"] == 3 and ledger["last_24h"]["m2"] == 3
@@ -304,3 +304,13 @@ def test_worker_mailbox_contract():
     assert r["hintReplaySame"]["status"] == 426              # sig valid — but the nonce already burned:
     assert r["hintAfterReplay"]["body"]["host"] == "198.51.100.77"   # the replayer's address never lands
     assert r["hintBadPort"]["status"] == 426                 # a junk port never touches the hint
+    # a wake over IPv6 fills the host6 slot and PRESERVES the v4 one
+    assert r["wake6"]["status"] == 426
+    assert r["hintDual"]["body"]["host"] == "198.51.100.77"
+    assert r["hintDual"]["body"]["host6"] == "2a00:db8::99"
+    # the fam sensor: v6 births counted, and both spellings of one /48 share a bucket
+    assert r["v6birth"]["status"] == 200 and r["v6birth2"]["status"] == 200
+    rows6 = r["ledgerRowsV6"]
+    assert len(rows6) == 2 and rows6[0]["sub"] == rows6[1]["sub"]
+    assert rows6[1]["n_sub24"] == 1                          # the second v6 birth saw the first in its /48
+    assert r["stats"]["body"]["ledger"]["last_24h"]["v6"] == 2

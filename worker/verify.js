@@ -525,8 +525,20 @@ async function handleBirthCertificateGet(url, env, corsHeaders) {
 function subnetOf(ip) {
   if (!ip) return "";
   if (ip.includes(":")) {
-    // IPv6: /48 — the customer allocation size, one household or one VPS
-    return ip.split(":").slice(0, 3).join(":") + "::/48";
+    // IPv6: /48 — the customer allocation size, one household or one VPS.
+    // Expand :: first: textual slicing put 2a00:db8::x and 2a00:db8:0:1::x
+    // (the same /48) into different buckets.
+    let groups;
+    if (ip.includes("::")) {
+      const [head, tail] = ip.split("::", 2);
+      const h = head ? head.split(":") : [];
+      const t = tail ? tail.split(":") : [];
+      groups = h.concat(Array(Math.max(0, 8 - h.length - t.length)).fill("0"), t);
+    } else {
+      groups = ip.split(":");
+    }
+    const norm = groups.slice(0, 3).map((g) => (parseInt(g || "0", 16) || 0).toString(16));
+    return norm.join(":") + "::/48";
   }
   return ip.split(".").slice(0, 3).join(".") + ".0/24";
 }
@@ -578,6 +590,7 @@ export class BirthLedger {
     for (const ddl of [
       "ALTER TABLE births ADD COLUMN addr TEXT NOT NULL DEFAULT ''",
       "ALTER TABLE births ADD COLUMN n_addr24 INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE births ADD COLUMN fam INTEGER NOT NULL DEFAULT 4",
     ]) {
       try { this.sql.exec(ddl); } catch (e) { /* already there */ }
     }
@@ -607,7 +620,7 @@ export class BirthLedger {
     return Number(this.sql.exec(query, ...params).one().n);
   }
 
-  recordBirth({ pubkey, ts, asn, cc, sub, addr }) {
+  recordBirth({ pubkey, ts, asn, cc, sub, addr, fam }) {
     const prior = this.sql.exec(
       "SELECT m_shadow, n_sub24, n_asn1, n_asn24, n_glob1, n_glob24, n_addr24 FROM births WHERE pubkey = ?",
       pubkey).toArray();
@@ -624,10 +637,11 @@ export class BirthLedger {
     };
     const m_shadow = shadowMultiplier(counts);
     this.sql.exec(
-      `INSERT INTO births (pubkey, ts, asn, cc, sub, method, m_shadow, n_sub24, n_asn1, n_asn24, n_glob1, n_glob24, addr, n_addr24)
-       VALUES (?, ?, ?, ?, ?, 'pow', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO births (pubkey, ts, asn, cc, sub, method, m_shadow, n_sub24, n_asn1, n_asn24, n_glob1, n_glob24, addr, n_addr24, fam)
+       VALUES (?, ?, ?, ?, ?, 'pow', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       pubkey, ts, asn, cc, sub, m_shadow, counts.n_sub24, counts.n_asn1,
-      counts.n_asn24, counts.n_glob1, counts.n_glob24, addr, counts.n_addr24);
+      counts.n_asn24, counts.n_glob1, counts.n_glob24, addr, counts.n_addr24,
+      Number(fam) === 6 ? 6 : 4);
     this.sql.exec("DELETE FROM births WHERE ts < ?", ts - LEDGER_RETENTION_MS);
     return { m_shadow, ...counts };
   }
@@ -643,6 +657,8 @@ export class BirthLedger {
       m2: this._count("SELECT count(*) AS n FROM births WHERE ts > ? AND m_shadow >= 2", since),
       m4: this._count("SELECT count(*) AS n FROM births WHERE ts > ? AND m_shadow >= 4", since),
       m8: this._count("SELECT count(*) AS n FROM births WHERE ts > ? AND m_shadow >= 8", since),
+      // Working-IPv6-egress share — the upper bound of the dual-stack prize.
+      v6: this._count("SELECT count(*) AS n FROM births WHERE ts > ? AND fam = 6", since),
     });
     const topAsn = this.sql.exec(
       "SELECT asn, cc, count(*) AS n FROM births WHERE ts > ? GROUP BY asn, cc ORDER BY n DESC LIMIT 5",
@@ -686,6 +702,10 @@ async function ledgerBirth(env, request, pubkey, issuedAtIso) {
     // uses): a /24 in a cloud provider spans many tenants, one VPS minting
     // twenty identities is a sharper conjunction than its subnet.
     addr: ip && env.IP_PEPPER ? await ipHashUuid(env, ip) : "",
+    // Address family: the working-IPv6-egress share of the audience — the
+    // upper bound of what dual-stack support (plan Ф19/Ф1) could win,
+    // measured before any client supports v6 at all.
+    fam: ip.includes(":") ? 6 : 4,
   });
 }
 
@@ -836,8 +856,15 @@ async function handleMailboxWake(request, url, env, corsHeaders) {
       await env.RATE_LIMITS.put(sigNonce, "1", { expirationTtl: 2 * MAIL_SIG_SKEW_S });
       const host = request.headers.get("CF-Connecting-IP") || "";
       if (host) {
+        // Two family slots: a connect updates the slot of ITS family and
+        // preserves the other — if the master's egress ever moves to IPv6,
+        // v4-only clients must not lose their half of the hint (`host`
+        // stays the v4 slot for wire compatibility).
+        const prev = (await env.RATE_LIMITS.get("master:hint", "json")) || {};
+        const hint = { host: prev.host || null, host6: prev.host6 || null };
+        hint[host.includes(":") ? "host6" : "host"] = host;
         await env.RATE_LIMITS.put("master:hint", JSON.stringify({
-          host, port, updated_at: nowIsoSeconds(),
+          ...hint, port, updated_at: nowIsoSeconds(),
         }));
       }
     }

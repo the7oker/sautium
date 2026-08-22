@@ -202,13 +202,17 @@ def addr_uuid(url_or_addr: str) -> str:
     no host at all ("::1"), which folded every IPv6 peer into one token in
     the identity registry while contact_log kept them apart. Same lowercase
     raw string as contact_log.addr_ids, so both tables agree."""
+    from desktop.p2p.addrs import canon_host
     try:
         ipaddress.ip_address(url_or_addr)
-        host = url_or_addr.lower()
+        host = url_or_addr
     except ValueError:
         s = url_or_addr if "://" in url_or_addr else "//" + url_or_addr
-        host = (urlsplit(s).hostname or "").lower()
-    return str(uuid5(_SAUTIUM_NAMESPACE, f"node_addr:{host}"))
+        host = urlsplit(s).hostname or ""
+    # canon_host: IPv6 has many spellings of one address (2a00:0DB8::1 =
+    # 2a00:db8::1 = [2a00:db8::1]) — hashing the raw string would fan one
+    # peer into several pseudonyms. v4 strings pass through unchanged.
+    return str(uuid5(_SAUTIUM_NAMESPACE, f"node_addr:{canon_host(host)}"))
 
 
 # ---------------------------------------------------------------------------
