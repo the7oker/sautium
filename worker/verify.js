@@ -454,6 +454,9 @@ async function handleIssuanceStats(env, corsHeaders) {
     },
     days: stats,
     ledger: await ledgerCall(env, "/stats"),
+    // Live reachable-volunteer count (fresh directory entries) — the
+    // relay/volunteer share the T-points want, visible for free.
+    directory: (await directoryCall(env, `/stats?now=${Date.now()}`)).body,
   }, corsHeaders);
 }
 
@@ -1025,7 +1028,16 @@ export class NodeDirectory {
       })) });
     }
     if (request.method === "GET" && url.pathname === "/stats") {
-      return Response.json({ nodes: Number(this.sql.exec("SELECT count(*) AS n FROM nodes").one().n) });
+      const now = parseInt(url.searchParams.get("now")) || 0;
+      const fresh = (cap) => Number(this.sql.exec(
+        `SELECT count(*) AS n FROM nodes WHERE ts > ? AND (',' || caps || ',') LIKE ?`,
+        now - DIRECTORY_TTL_MS, `%,${cap},%`).one().n);
+      return Response.json({
+        nodes: Number(this.sql.exec("SELECT count(*) AS n FROM nodes WHERE ts > ?",
+                                    now - DIRECTORY_TTL_MS).one().n),
+        sync: fresh("sync"), mbdump: fresh("mbdump"),
+        mbslices: fresh("mbslices"), relay: fresh("relay"),
+      });
     }
     return new Response("not found", { status: 404 });
   }
