@@ -3422,9 +3422,13 @@ class P2PManager:
             # (Ф16c). The ban/health/node_id validation below stays the
             # judge for every one of them.
             from desktop.p2p import master_hint, node_hints
-            for host, hport, _pk in await loop.run_in_executor(
-                    None, node_hints.fetch, "mbdump"):
-                candidates.append(fmt_addr(host, hport))
+            # Replica volunteers too — the health probe sorts them into the
+            # replicas tier, and replicas are asked BEFORE dump nodes by
+            # design: they are the load-spreader this directory exists for.
+            for cap in ("mbslices", "mbdump"):
+                for host, hport, _pk in await loop.run_in_executor(
+                        None, node_hints.fetch, cap):
+                    candidates.append(fmt_addr(host, hport))
             hint = await loop.run_in_executor(None, master_hint.fetch)
             if hint:
                 candidates.append(fmt_addr(*hint))
