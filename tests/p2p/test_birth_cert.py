@@ -256,11 +256,11 @@ def test_worker_contract():
     assert policy["cert_version"] == 4 and policy["pow_difficulty"] == 32
     assert policy["adaptive_armed"] is False and policy["adaptive_cap"] == 8
     day = next(iter(r["stats"]["body"]["days"].values()))
-    assert day["births"] == 9 and day["email"] == 4       # +2 v6 births; 3 registrations + 1 upgrade
+    assert day["births"] == 11 and day["email"] == 4      # +2 native v6, +2 tunnels; 3 reg + 1 upgrade
     assert day["succession"] == 2                          # s3 took alice's mailbox, s1 took it back
     ledger = r["stats"]["body"]["ledger"]
-    assert ledger["total"] == 9 and ledger["last_24h"]["births"] == 9
-    assert ledger["last_24h"]["distinct_addr"] == 7
+    assert ledger["total"] == 11 and ledger["last_24h"]["births"] == 11
+    assert ledger["last_24h"]["distinct_addr"] == 9
     # m2 = 3: two burst rows plus the third of the earlier identities — all
     # three of those were born from the same test IP within one second
     assert ledger["last_24h"]["email"] == 3 and ledger["last_24h"]["m2"] == 3
@@ -314,6 +314,10 @@ def test_worker_mailbox_contract():
     assert len(rows6) == 2 and rows6[0]["sub"] == rows6[1]["sub"]
     assert rows6[1]["n_sub24"] == 1                          # the second v6 birth saw the first in its /48
     assert r["stats"]["body"]["ledger"]["last_24h"]["v6"] == 2
+    # 6to4 (2002::/16) and Teredo (2001:0::/32) are v6 syntactically but NOT
+    # a v6-peer signal: recorded fam=4, never counted in the prize metric
+    assert r["tun6to4"]["status"] == 200 and r["tunTeredo"]["status"] == 200
+    assert [row["fam"] for row in r["tunnelFams"]] == [4, 4]
     # capability directory: certified volunteers in, the edge decides the address
     assert r["reg1"]["body"] == {"registered": True}
     assert r["reg3"]["body"] == {"registered": True}

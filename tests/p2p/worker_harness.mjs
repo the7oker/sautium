@@ -310,7 +310,17 @@ const s9 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))))
 const v6birth2 = await call("POST", "/birth-certificate", {
   pubkey_hex: s9.pubHex, signature: await sign(s9, `birth:${s9.pubHex}`),
 }, { ip: "2a00:db8:0:beef::7", cf: { asn: 64502, country: "DE" } });   // same /48, another spelling shape
+// tunneled/ULA v6 must NOT count as native v6 (2002::/16 6to4, 2001:0::/32 Teredo)
+const sT1 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
+const tun6to4 = await call("POST", "/birth-certificate", {
+  pubkey_hex: sT1.pubHex, signature: await sign(sT1, `birth:${sT1.pubHex}`),
+}, { ip: "2002:5be3:b5b3::1", cf: { asn: 64503, country: "DE" } });
+const sT2 = await keyFromSeed(hex(webcrypto.getRandomValues(new Uint8Array(32))));
+const tunTeredo = await call("POST", "/birth-certificate", {
+  pubkey_hex: sT2.pubHex, signature: await sign(sT2, `birth:${sT2.pubHex}`),
+}, { ip: "2001:0:5ef5:79fb:0:59d3:1234:5678", cf: { asn: 64504, country: "DE" } });
 const ledgerRowsV6 = db.prepare("SELECT sub, fam, n_sub24 FROM births WHERE fam = 6 ORDER BY rowid").all();
+const tunnelFams = db.prepare("SELECT fam FROM births WHERE asn IN (64503, 64504)").all();
 
 // --- a wake over IPv6 fills host6 and PRESERVES the v4 slot ---
 const ts6 = String(Math.floor(Date.now() / 1000) + 1);
@@ -359,7 +369,7 @@ console.log(JSON.stringify({
   mail1, mail2, mailDup, mail3, mailCap, mailNoCert, mailBadSig, mailWrongTo, mailTooBig,
   drain, drainForeign, drainStale, ack, drainAfterAck, wakeNoUpgrade,
   hintEmpty, wakeWithPort, hintSet, hintReplayPort, hintReplaySame, hintAfterReplay, hintBadPort,
-  v6birth, v6birth2, wake6, hintDual, ledgerRowsV6,
+  v6birth, v6birth2, tun6to4, tunTeredo, tunnelFams, wake6, hintDual, ledgerRowsV6,
   reg1, reg3, regNoCert, regBadSig, masterReg, regReplay,
   hintsDump, hintsRelay, hintsSlices, hintsBadCap, hintsAfterStale,
   verified_record: JSON.parse(store.get(`verified:${inviteCode.replace("#", ":")}`)),

@@ -544,6 +544,26 @@ async function handleBirthCertificateGet(url, env, corsHeaders) {
 // Birth ledger — adaptive difficulty (shadow)
 // -----------------------------------------------------------------------
 
+function isNativeGlobalV6(ip) {
+  // A "real" IPv6 for the dual-stack-prize sensor: native global unicast
+  // only. 2000::/3 already excludes ULA (fc00::/7) and link-local
+  // (fe80::/10) by range; inside global space we carve out the transition
+  // tunnels, which say NOTHING about whether the user could be a v6 peer:
+  // 2002::/16 (6to4), 2001:0000::/32 (Teredo), 2001:db8::/32 (docs). A
+  // node that reaches Cloudflare only through one of these must not inflate
+  // the "v6 works" count that decides whether Ф1 is worth building.
+  if (!ip || !ip.includes(":")) return false;
+  const head = ip.split("::", 1)[0];
+  const groups = head === "" ? [] : head.split(":");
+  const g0 = parseInt(groups[0] || "0", 16) || 0;
+  const g1 = parseInt(groups[1] || "0", 16) || 0;
+  if (g0 < 0x2000 || g0 > 0x3fff) return false;      // not global unicast
+  if (g0 === 0x2002) return false;                   // 6to4
+  if (g0 === 0x2001 && g1 === 0x0000) return false;  // Teredo
+  if (g0 === 0x2001 && g1 === 0x0db8) return false;  // documentation
+  return true;
+}
+
 function subnetOf(ip) {
   if (!ip) return "";
   if (ip.includes(":")) {
@@ -724,10 +744,11 @@ async function ledgerBirth(env, request, pubkey, issuedAtIso) {
     // uses): a /24 in a cloud provider spans many tenants, one VPS minting
     // twenty identities is a sharper conjunction than its subnet.
     addr: ip && env.IP_PEPPER ? await ipHashUuid(env, ip) : "",
-    // Address family: the working-IPv6-egress share of the audience — the
-    // upper bound of what dual-stack support (plan Ф19/Ф1) could win,
-    // measured before any client supports v6 at all.
-    fam: ip.includes(":") ? 6 : 4,
+    // NATIVE-IPv6-egress share of the audience — the upper bound of what
+    // dual-stack support (plan Ф19/Ф1) could win, measured before any
+    // client supports v6. Tunneled/ULA v6 counts as 4: it is not a v6-peer
+    // signal (isNativeGlobalV6).
+    fam: isNativeGlobalV6(ip) ? 6 : 4,
   });
 }
 
