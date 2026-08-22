@@ -112,6 +112,23 @@ def cmd_map(args) -> None:
             f"page contains the API secret. Exposing it would hand over the "
             f"whole API. Map the P2P sync port instead.")
 
+    if getattr(args, "pcp", False):
+        from desktop.p2p import pcp as pcp_mod
+        gw = pcp_mod.default_gateway_v4()
+        if not gw:
+            sys.exit("No default gateway found for PCP.")
+        proto_num = pcp_mod.PROTO_UDP if args.udp else pcp_mod.PROTO_TCP
+        res = pcp_mod.map_port(gw, port, protocol=proto_num, external_port=external,
+                               lifetime=args.lease or pcp_mod.DEFAULT_LIFETIME)
+        if res is None:
+            sys.exit(f"No PCP server on {gw}:5351.")
+        if not res.success:
+            sys.exit(f"PCP server refused: {res.result_name}")
+        print(f"mapped {res.external_ip}:{res.external_port}/{proto} -> "
+              f":{port} via PCP, lifetime {res.lifetime}s")
+        print(f"nonce (needed to unmap early): {res.nonce.hex()}")
+        return
+
     u = _igd_or_exit()
     if proto == "TCP" and not _port_is_listening(port):
         print(f"warning: nothing is listening on 127.0.0.1:{port} - mapping "
@@ -204,6 +221,10 @@ def main(argv=None) -> None:
                    ).set_defaults(func=cmd_list)
 
     m = sub.add_parser("map", help="open a port")
+    m.add_argument("--pcp", action="store_true",
+                   help="use PCP (RFC 6887) instead of UPnP — works where "
+                        "SSDP is filtered, and is the protocol that will "
+                        "open IPv6 pinholes once a v6 gateway exists")
     m.add_argument("port", type=int, help="local port to expose")
     m.add_argument("--external", type=int,
                    help="external port (default: same as local)")
