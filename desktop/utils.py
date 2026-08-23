@@ -321,15 +321,20 @@ def get_codex_prefix() -> Path:
     return base / "Sautium" / "codex-prefix"
 
 
-def _codex_native_binary(pkg_root: Path) -> Optional[Path]:
-    """Native codex binary inside an @openai/codex package root. The JS
-    shim `bin/codex.js` spawns a platform binary from a nested platform
-    package (`@openai/codex-<os>-<arch>/vendor/<triple>/bin/codex[.exe]`);
-    glob over the rust triple so target renames don't break lookup."""
+def _codex_native_binary(node_modules: Path) -> Optional[Path]:
+    """Native codex binary under a node_modules dir. The JS shim
+    `bin/codex.js` spawns a platform binary from a separate platform
+    package (`@openai/codex-<os>-<arch>/vendor/<triple>/bin/codex[.exe]`)
+    — and npm places that package HOISTED next to @openai/codex on
+    local `--prefix` installs but NESTED inside it on global installs
+    (measured both, 2026-08-23; the nested-only assumption made the
+    wizard report "binary not found in prefix" right after a successful
+    install). Callers pass every candidate node_modules dir; the rust
+    triple is globbed so target renames don't break lookup."""
     plat = {"win32": "win32", "darwin": "darwin"}.get(sys.platform, "linux")
     arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
     exe = "codex.exe" if sys.platform == "win32" else "codex"
-    vendor = pkg_root / "node_modules" / f"@openai/codex-{plat}-{arch}" / "vendor"
+    vendor = node_modules / "@openai" / f"codex-{plat}-{arch}" / "vendor"
     if not vendor.is_dir():
         return None
     for cand in sorted(vendor.glob(f"*/bin/{exe}")):
@@ -339,27 +344,41 @@ def _codex_native_binary(pkg_root: Path) -> Optional[Path]:
 
 
 def get_codex_executable() -> Optional[Path]:
-    """Prefer the native binary (skips the node shim hop); the shim is an
+    """Prefer the native binary (skips the node shim hop); a shim is an
     acceptable fallback — codex argv stays tiny (the DJ prompt travels
     as AGENTS.md on disk, not the command line, so cmd.exe's 8191-char
-    cap never bites the way it did for claude)."""
-    native = _codex_native_binary(
-        get_codex_prefix() / "node_modules" / "@openai" / "codex")
-    if native is not None:
-        return native
+    cap never bites the way it did for claude). Shim priority: the
+    prefix's own node_modules/.bin (survives any future vendor-layout
+    change) before whatever is on PATH."""
+    prefix_nm = get_codex_prefix() / "node_modules"
+    nm_candidates = [
+        prefix_nm,                                          # local --prefix: hoisted
+        prefix_nm / "@openai" / "codex" / "node_modules",   # nested variant
+    ]
+    shim_candidates: list = []
+    shim_names = ("codex.cmd", "codex") if sys.platform == "win32" else ("codex",)
+    for name in shim_names:
+        cand = prefix_nm / ".bin" / name
+        if cand.is_file():
+            shim_candidates.append(cand)
 
-    shim = shutil.which("codex.cmd") if sys.platform == "win32" else None
-    shim = shim or shutil.which("codex")
-    if shim:
-        for pkg_root in (
-            Path(shim).parent.parent / "lib" / "node_modules" / "@openai" / "codex",
-            Path(shim).parent / "node_modules" / "@openai" / "codex",
+    path_shim = shutil.which("codex.cmd") if sys.platform == "win32" else None
+    path_shim = path_shim or shutil.which("codex")
+    if path_shim:
+        shim_dir = Path(path_shim).parent
+        for nm in (
+            shim_dir / "node_modules",                 # win global: shim beside node_modules
+            shim_dir.parent / "lib" / "node_modules",  # unix global: bin/../lib/node_modules
+            shim_dir.parent,                           # shim in node_modules/.bin → parent IS node_modules
         ):
-            native = _codex_native_binary(pkg_root)
-            if native is not None:
-                return native
-        return Path(shim)
-    return None
+            nm_candidates += [nm, nm / "@openai" / "codex" / "node_modules"]
+        shim_candidates.append(Path(path_shim))
+
+    for nm in nm_candidates:
+        native = _codex_native_binary(nm)
+        if native is not None:
+            return native
+    return shim_candidates[0] if shim_candidates else None
 
 
 def detect_codex_cli() -> bool:

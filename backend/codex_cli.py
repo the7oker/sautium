@@ -49,18 +49,19 @@ def get_codex_prefix() -> Path:
     return base / "Sautium" / "codex-prefix"
 
 
-def _native_binary_in(pkg_root: Path) -> Optional[Path]:
-    """Native codex binary inside an @openai/codex package root.
-
-    npm layout: the JS shim `bin/codex.js` spawns a platform binary from
-    a nested platform package —
-    `node_modules/@openai/codex-<os>-<arch>/vendor/<triple>/bin/codex[.exe]`.
-    Glob over the triple so rust target renames don't break resolution.
-    """
+def _native_binary_in(node_modules: Path) -> Optional[Path]:
+    """Native codex binary under a node_modules dir. The JS shim
+    `bin/codex.js` spawns a platform binary from a separate platform
+    package (`@openai/codex-<os>-<arch>/vendor/<triple>/bin/codex[.exe]`)
+    — npm places that package HOISTED next to @openai/codex on local
+    `--prefix` installs but NESTED inside it on global installs
+    (measured both, 2026-08-23). Callers pass every candidate
+    node_modules dir; the rust triple is globbed so target renames
+    don't break resolution. Mirror of desktop/utils.py — keep in sync."""
     plat = {"win32": "win32", "darwin": "darwin"}.get(sys.platform, "linux")
     arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
     exe = "codex.exe" if sys.platform == "win32" else "codex"
-    vendor = pkg_root / "node_modules" / f"@openai/codex-{plat}-{arch}" / "vendor"
+    vendor = node_modules / "@openai" / f"codex-{plat}-{arch}" / "vendor"
     if not vendor.is_dir():
         return None
     for cand in sorted(vendor.glob(f"*/bin/{exe}")):
@@ -71,34 +72,40 @@ def _native_binary_in(pkg_root: Path) -> Optional[Path]:
 
 def get_codex_executable() -> Optional[Path]:
     """Path to the codex CLI. Prefers the native binary (skips the
-    node shim hop); the shim is an acceptable fallback because codex —
+    node shim hop); a shim is an acceptable fallback because codex —
     unlike claude with its ~13.5k-char --system-prompt — never pushes
     argv anywhere near cmd.exe's 8191-char cap (the DJ prompt travels
-    as AGENTS.md on disk)."""
-    bundled_pkg = get_codex_prefix() / "node_modules" / "@openai" / "codex"
-    native = _native_binary_in(bundled_pkg)
-    if native is not None:
-        return native
+    as AGENTS.md on disk). Shim priority: the prefix's own
+    node_modules/.bin before whatever is on PATH."""
+    prefix_nm = get_codex_prefix() / "node_modules"
+    nm_candidates = [
+        prefix_nm,                                          # local --prefix: hoisted
+        prefix_nm / "@openai" / "codex" / "node_modules",   # nested variant
+    ]
+    shim_candidates: list = []
+    shim_names = ("codex.cmd", "codex") if sys.platform == "win32" else ("codex",)
+    for name in shim_names:
+        cand = prefix_nm / ".bin" / name
+        if cand.is_file():
+            shim_candidates.append(cand)
 
-    shim = shutil.which("codex.cmd") if sys.platform == "win32" else None
-    shim = shim or shutil.which("codex")
-    if shim:
-        shim_path = Path(shim).resolve()
-        # npm global layout: shim in <prefix>/bin (symlink into lib/) or
-        # <prefix>/ on Windows; package root is codex.js's grandparent.
-        if shim_path.name == "codex.js":
-            native = _native_binary_in(shim_path.parent.parent)
-            if native is not None:
-                return native
-        for pkg_root in (
-            Path(shim).parent.parent / "lib" / "node_modules" / "@openai" / "codex",
-            Path(shim).parent / "node_modules" / "@openai" / "codex",
+    path_shim = shutil.which("codex.cmd") if sys.platform == "win32" else None
+    path_shim = path_shim or shutil.which("codex")
+    if path_shim:
+        shim_dir = Path(path_shim).parent
+        for nm in (
+            shim_dir / "node_modules",                 # win global: shim beside node_modules
+            shim_dir.parent / "lib" / "node_modules",  # unix global: bin/../lib/node_modules
+            shim_dir.parent,                           # shim in node_modules/.bin → parent IS node_modules
         ):
-            native = _native_binary_in(pkg_root)
-            if native is not None:
-                return native
-        return Path(shim)
-    return None
+            nm_candidates += [nm, nm / "@openai" / "codex" / "node_modules"]
+        shim_candidates.append(Path(path_shim))
+
+    for nm in nm_candidates:
+        native = _native_binary_in(nm)
+        if native is not None:
+            return native
+    return shim_candidates[0] if shim_candidates else None
 
 
 # --- Auth --------------------------------------------------------------------
