@@ -128,7 +128,10 @@ class OpenAIProvider(BaseProvider):
         return None
 
     def models(self) -> list[str]:
-        return ["gpt-4o", "gpt-4o-mini"]
+        # Order matters: models[0] is the chat default, models[-1] is
+        # the cheap tier title generation picks. Same slugs the Codex
+        # CLI uses — verified present in this key's /v1/models.
+        return ["gpt-5.6-terra", "gpt-5.6-luna"]
 
     def chat(
         self,

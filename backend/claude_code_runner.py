@@ -44,7 +44,10 @@ ALLOWED_MODELS = {"sonnet", "haiku"}
 # so the graceful timeout `done` event reaches the client (a clean "took too
 # long" message) instead of the stream dying as a raw "network error".
 TIMEOUT_SECONDS = 150
-CLAUDE_USER = "claudeuser"  # non-root user (--dangerously-skip-permissions requires non-root)
+# Non-root user every CLI agent (claude, codex) runs demoted to — Claude
+# refuses --dangerously-skip-permissions as root, and codex gets the same
+# treatment. Its home holds both credential dirs (~/.claude, ~/.codex).
+AGENT_USER = "agent"
 
 # The DJ must reach its MCP servers and nothing else. Chat text arrives as the
 # agent's prompt, and the chat is reachable by anyone holding the API secret —
@@ -245,7 +248,7 @@ def call_claude_code(
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         elif sys.platform != "darwin":
             # Linux/Docker: run as non-root user
-            pw = pwd.getpwnam(CLAUDE_USER)
+            pw = pwd.getpwnam(AGENT_USER)
 
             def demote():
                 os.setgid(pw.pw_gid)
@@ -334,7 +337,7 @@ def _spawn_claude(cmd: list[str], stdout=subprocess.PIPE, stderr=subprocess.PIPE
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     elif sys.platform != "darwin":
         # Linux/Docker: run as non-root user
-        pw = pwd.getpwnam(CLAUDE_USER)
+        pw = pwd.getpwnam(AGENT_USER)
 
         def demote():
             os.setgid(pw.pw_gid)
@@ -612,6 +615,6 @@ def call_claude_code_stream(
     yield StreamDone(
         model=use_model, provider="claude_code",
         tool_calls_count=tool_calls_count,
-        claude_session_id=claude_sid,
+        agent_session_id=claude_sid,
         error=error_msg,
     )

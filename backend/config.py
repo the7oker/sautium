@@ -108,6 +108,9 @@ class Settings(BaseSettings):
     # Claude Code integration (agent-based AI DJ)
     claude_code_enabled: bool = False
 
+    # OpenAI Codex CLI integration (second agent-based AI DJ)
+    codex_cli_enabled: bool = False
+
     # Multi-provider LLM support
     openai_api_key: Optional[str] = None
     groq_api_key: Optional[str] = None
@@ -225,6 +228,7 @@ class Settings(BaseSettings):
             self.anthropic_api_key,
             self.openai_api_key,
             self.claude_code_enabled,
+            self.codex_cli_enabled,
             self.openai_compat_base_url and self.openai_compat_model,
         ])
         if not has_provider:

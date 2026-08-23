@@ -96,6 +96,7 @@ services:
       MEDIA_PROXY_ADVERTISED_HOST: ${MEDIA_PROXY_ADVERTISED_HOST:-127.0.0.1}
       MUSIC_HOST_PATH: ${MUSIC_HOST_PATH:-}
       CLAUDE_CODE_ENABLED: ${CLAUDE_CODE_ENABLED:-true}
+      CODEX_CLI_ENABLED: ${CODEX_CLI_ENABLED:-true}
       P2P_ENABLED: ${P2P_ENABLED:-true}
       P2P_DHT_PORT: ${P2P_DHT_PORT:-19001}
       # 0 = announce the peer-surface port we actually serve. NEVER default
@@ -147,8 +148,13 @@ services:
       # docker-compose.yml for why): single-file bind pins the inode and
       # the CLI rewrites credentials via atomic rename, so the container
       # would otherwise stick to a stale token until restart.
-      - ${SAUTIUM_WSL_HOME:?Set SAUTIUM_WSL_HOME=/home/<user> in .env}/.claude:/home/claudeuser/.claude
-      - ./data/claude_sessions:/home/claudeuser/.claude/projects
+      - ${SAUTIUM_WSL_HOME:?Set SAUTIUM_WSL_HOME=/home/<user> in .env}/.claude:/home/agent/.claude
+      - ./data/claude_sessions:/home/agent/.claude/projects
+      # OpenAI Codex auth + sessions — whole-dir mount, same rationale
+      # as .claude. No sessions sub-overlay: codex keeps its thread
+      # index in sqlite files at the .codex root, splitting sessions/
+      # off would desync index from rollouts (see docker-compose.yml).
+      - ${SAUTIUM_WSL_HOME:?Set SAUTIUM_WSL_HOME=/home/<user> in .env}/.codex:/home/agent/.codex
     ports:
       - "8800:8000"
       - "${MEDIA_PROXY_PORT:-8830}:${MEDIA_PROXY_PORT:-8830}"   # phantom-preview media proxy (plain http, HQPlayer pulls)

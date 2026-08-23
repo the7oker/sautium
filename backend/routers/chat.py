@@ -130,23 +130,36 @@ def _get_player_context() -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Claude Code DJ integration
+# CLI agent DJ integration (Claude Code / Codex)
 # ---------------------------------------------------------------------------
 
-def _get_claude_session_id(session_id: int) -> Optional[str]:
-    """Get Claude Code session ID mapped to our chat session."""
+# Each CLI agent keeps its own resume handle on the chat session, so
+# switching providers mid-session resumes the right agent-side thread
+# (and the other agent's handle stays untouched).
+_AGENT_SESSION_COLUMNS = {
+    "claude_code": "claude_session_id",
+    "codex": "codex_thread_id",
+}
+
+
+def _get_agent_session_id(session_id: int, provider: str) -> Optional[str]:
+    """Agent-side resume handle mapped to our chat session."""
+    col = _AGENT_SESSION_COLUMNS[provider]
     row = _db_query_one(
-        "SELECT claude_session_id FROM chat_sessions WHERE id = %(id)s",
+        f"SELECT {col} AS sid FROM chat_sessions WHERE id = %(id)s",
         {"id": session_id},
     )
-    return row["claude_session_id"] if row and row.get("claude_session_id") else None
+    return row["sid"] if row and row.get("sid") else None
 
 
-def _save_claude_session_id(session_id: int, claude_sid: str):
-    """Save Claude Code session ID for continuity."""
+def _save_agent_session_id(session_id: int, provider: str, agent_sid: str):
+    """Persist the agent-side resume handle for continuity."""
+    col = _AGENT_SESSION_COLUMNS.get(provider)
+    if col is None:
+        return
     _db_execute(
-        "UPDATE chat_sessions SET claude_session_id = %(csid)s WHERE id = %(id)s",
-        {"csid": claude_sid, "id": session_id},
+        f"UPDATE chat_sessions SET {col} = %(sid)s WHERE id = %(id)s",
+        {"sid": agent_sid, "id": session_id},
     )
 
 
@@ -479,7 +492,7 @@ def _title_via_claude_code(prompt: str) -> Optional[str]:
     """Fallback: spawn the Claude Code CLI in a bare one-shot mode —
     no `--mcp-config`, no tool definitions, no resumable session. This
     is ~10s faster than reusing `call_claude_code` because the CLI
-    skips loading the entire DJ MCP server. Demote to `claudeuser`
+    skips loading the entire DJ MCP server. Demote to `agent`
     is preserved (Linux/Docker path) so `--dangerously-skip-permissions`
     is accepted, and `ANTHROPIC_API_KEY` is stripped from the env so
     the CLI uses the user's Claude subscription rather than the
@@ -489,7 +502,7 @@ def _title_via_claude_code(prompt: str) -> Optional[str]:
     if _get_provider("claude_code") is None:
         return None
     try:
-        from claude_code_runner import _resolve_claude_executable, CLAUDE_USER
+        from claude_code_runner import _resolve_claude_executable, AGENT_USER
         import subprocess
         import sys
         import os
@@ -514,7 +527,7 @@ def _title_via_claude_code(prompt: str) -> Optional[str]:
             # Linux/Docker — same demote path as call_claude_code.
             import pwd
 
-            pw = pwd.getpwnam(CLAUDE_USER)
+            pw = pwd.getpwnam(AGENT_USER)
 
             def demote():
                 os.setgid(pw.pw_gid)
@@ -543,6 +556,23 @@ def _title_via_claude_code(prompt: str) -> Optional[str]:
         return None
 
 
+def _title_via_codex(prompt: str) -> Optional[str]:
+    """Codex analog of `_title_via_claude_code`: a bare `codex exec
+    --ephemeral` one-shot — no MCP, no DJ workdir, fast small model.
+    All spawn details (demote, env key handling, sandbox flag) live in
+    the runner's oneshot helper."""
+    from providers import get_provider as _get_provider
+    if _get_provider("codex") is None:
+        return None
+    try:
+        from codex_runner import call_codex_oneshot
+        answer = call_codex_oneshot(prompt)
+        return _clean_title(answer or "")
+    except Exception as e:
+        logger.debug(f"Codex title gen failed: {e}")
+        return None
+
+
 def _generate_session_title(
     first_user: str, first_assistant: str, provider_name: str,
 ) -> Optional[str]:
@@ -567,6 +597,8 @@ def _generate_session_title(
         # Subprocess CLI — see _title_via_claude_code for why this
         # bypasses BaseProvider.chat() and the MCP config.
         title = _title_via_claude_code(prompt)
+    elif provider_name == "codex":
+        title = _title_via_codex(prompt)
     else:
         title = _title_via_provider(provider_name, prompt)
     if not title:
@@ -641,6 +673,10 @@ def _resolve_model(provider_name: str, req_model: Optional[str]) -> str:
         from claude_code_runner import ALLOWED_MODELS, DEFAULT_MODEL
         return fallback if fallback in ALLOWED_MODELS else DEFAULT_MODEL
 
+    if provider_name == "codex":
+        from codex_runner import ALLOWED_MODELS, DEFAULT_MODEL
+        return fallback if fallback in ALLOWED_MODELS else DEFAULT_MODEL
+
     from providers import get_provider
 
     provider = get_provider(provider_name)
@@ -668,13 +704,28 @@ def _build_provider_stream(
     if provider_name == "claude_code":
         from claude_code_runner import call_claude_code_stream
 
-        claude_sid = _get_claude_session_id(session_id)
+        claude_sid = _get_agent_session_id(session_id, "claude_code")
         prompt = get_system_prompt("claude_code", player_context)
         return call_claude_code_stream(
             message=message,
             system_prompt=prompt,
             session_id=claude_sid,
             resume=bool(claude_sid),
+            model=model,
+        )
+
+    if provider_name == "codex":
+        from codex_runner import call_codex_stream
+
+        # The runner owns the system prompt (AGENTS.md) and folds the
+        # volatile player context into the message itself — codex has
+        # no --system-prompt flag.
+        thread_id = _get_agent_session_id(session_id, "codex")
+        return call_codex_stream(
+            message=message,
+            player_context=player_context,
+            thread_id=thread_id,
+            resume=bool(thread_id),
             model=model,
         )
 
@@ -868,11 +919,12 @@ async def send_message(session_id: int, req: ChatMessageRequest):
                 if tool_calls_count else []
             )
 
-            if final and final.claude_session_id:
+            if final and final.agent_session_id:
                 try:
-                    _save_claude_session_id(session_id, final.claude_session_id)
+                    _save_agent_session_id(
+                        session_id, final.provider, final.agent_session_id)
                 except Exception as e:
-                    logger.warning(f"Failed to save Claude session id: {e}")
+                    logger.warning(f"Failed to save agent session id: {e}")
 
             assistant_row = _db_execute("""
                 INSERT INTO chat_messages

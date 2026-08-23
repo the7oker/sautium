@@ -780,7 +780,10 @@ CREATE TABLE IF NOT EXISTS external_metadata (
 CREATE TABLE IF NOT EXISTS chat_sessions (
     id SERIAL PRIMARY KEY,
     title VARCHAR(500),
+    -- per-CLI-agent resume handles: each agent keeps its own thread,
+    -- so switching providers mid-session resumes the right one
     claude_session_id VARCHAR(100),
+    codex_thread_id VARCHAR(100),
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );

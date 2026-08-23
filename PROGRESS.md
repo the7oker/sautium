@@ -125,6 +125,34 @@ implementation details live in the code, DB and git history.
   `error` event — is fatal. Reconnects escalate (1/3/9/20s) because
   `navigator.onLine` stays true through most real drops, so there is no
   event to wait on and same-tick retries all burn before the network returns.
+- **OpenAI Codex CLI as the second chat agent** (2026-08-23,
+  `backend/codex_runner.py` + `codex_cli.py`, provider id `codex`). Mirrors
+  the Claude runner shape (150s watchdog, stderr drain, non-root demote,
+  same StreamEvent contract) with every difference forced by the CLI:
+  no `--system-prompt` → DJ prompt rides as AGENTS.md in a Sautium-owned
+  `--cd` workdir, volatile player context prefixes the user message
+  (AGENTS.md is not re-read on `exec resume`); no `--mcp-config` → the
+  SAME mcp-docker/windows.json is translated at spawn into dotted `-c
+  mcp_servers.*` overrides + `--ignore-user-config` (analog of
+  `--strict-mcp-config`); no `--disallowed-tools` → shell fenced by
+  `--disable shell_tool` + `--sandbox read-only` when a once-per-process
+  `codex sandbox` probe passes (Landlock in containers is a kernel
+  lottery; fallback is the dangerous bypass, same trust as Claude's) +
+  a prompt-level prohibition. Auth is auth.json-ONLY — a bare
+  OPENAI_API_KEY env is ignored by the CLI (measured, 0.149), so the
+  runner mints auth.json via `codex login --with-api-key` when needed,
+  and POPS the env keys when auth.json exists (mirror of the
+  ANTHROPIC_API_KEY strip: billing must not silently leave the
+  subscription). Resume handle: `chat_sessions.codex_thread_id` next to
+  `claude_session_id` — per-agent columns, switching providers
+  mid-session resumes each agent's own thread. No sessions sub-mount for
+  `~/.codex` (unlike claude_sessions): codex indexes threads in sqlite
+  files at the .codex root, splitting `sessions/` onto a project volume
+  would desync index from rollouts. Transient `error` JSONL events
+  (websocket reconnects) are NOT failures — only `turn.failed` is
+  authoritative. Known gap vs Claude: codex has no `system/init` MCP
+  health report, so a dead tool server can't be caught pre-answer yet
+  (stderr is scanned and logged loudly instead).
 
 ### HQPlayer integration
 

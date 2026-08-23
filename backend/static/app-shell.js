@@ -2685,6 +2685,10 @@
   // them to what the model is actually doing for the user.
   function toolPipLabel(raw) {
     const n = String(raw || '');
+    // Codex built-ins (never MCP-prefixed) — checked before the
+    // generic patterns so 'web_search' doesn't hit /search/.
+    if (/^web_search$/i.test(n)) return 'searching the web…';
+    if (/^shell$/i.test(n)) return 'running a command…';
     if (/postgres|query|sql/i.test(n)) return 'querying the library…';
     if (/search|similar/i.test(n)) return 'searching the library…';
     if (/play|queue|volume|pause|next|previous|stop/i.test(n)) return 'controlling playback…';
@@ -2707,6 +2711,12 @@
     }
     if (/^(sonnet|haiku|opus)$/i.test(m)) {
       return m.charAt(0).toUpperCase() + m.slice(1);
+    }
+    // Codex CLI slugs: gpt-5.6-terra → Terra 5.6.
+    const cxMatch = m.match(/^gpt-([\d.]+)-(sol|terra|luna)$/i);
+    if (cxMatch) {
+      const tier = cxMatch[2].charAt(0).toUpperCase() + cxMatch[2].slice(1);
+      return `${tier} ${cxMatch[1]}`;
     }
     if (/^gpt-/i.test(m)) return m;
     return m.replace(/-\d{8}$/, '');
@@ -10057,6 +10067,7 @@
 
   const PROVIDER_OPTIONS = [
     { id: 'claude_code', label: 'Claude Code (subscription)' },
+    { id: 'codex',       label: 'OpenAI Codex (subscription)' },
     { id: 'anthropic',   label: 'Claude API' },
     { id: 'openai',      label: 'OpenAI' },
   ];
@@ -10071,13 +10082,18 @@
       { id: 'sonnet', label: 'Sonnet' },
       { id: 'haiku',  label: 'Haiku' },
     ],
+    // Codex CLI model slugs (codex_runner.ALLOWED_MODELS).
+    codex: [
+      { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
+      { id: 'gpt-5.6-luna',  label: 'GPT-5.6 Luna (fast)' },
+    ],
     anthropic: [
-      { id: 'claude-sonnet-4-20250514',  label: 'Sonnet 4' },
-      { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
+      { id: 'claude-sonnet-5',  label: 'Sonnet 5' },
+      { id: 'claude-haiku-4-5', label: 'Haiku 4.5' },
     ],
     openai: [
-      { id: 'gpt-4o',      label: 'GPT-4o' },
-      { id: 'gpt-4o-mini', label: 'GPT-4o mini' },
+      { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
+      { id: 'gpt-5.6-luna',  label: 'GPT-5.6 Luna (fast)' },
     ],
   };
   const AUTO_SYNC_OPTIONS = [
@@ -10411,10 +10427,11 @@
     `;
   }
 
-  function _renderAi(ai, claudeState) {
+  function _renderAi(ai, claudeState, codexState) {
     const provider = ai.provider || '';
     const hasProvider = !!provider;
     const isClaudeCode = provider === 'claude_code';
+    const isCodex = provider === 'codex';
     const providerLabel = hasProvider
       ? ((PROVIDER_OPTIONS.find(p => p.id === provider) || {}).label || provider)
       : 'Not selected';
@@ -10477,9 +10494,16 @@
       </div>` : '';
 
     const isUnauth = auth === 'not_authenticated';
-    const ccBlock = (isClaudeCode && claudeState) ? _renderClaudeCodeBlock(claudeState) : '';
-    const ccReady = (isClaudeCode && claudeState && claudeState.state === 'ready');
-    const ccBlocksAuth = (isClaudeCode && claudeState && claudeState.state !== 'ready');
+    // CLI agents (Claude Code / Codex) share the setup-block pattern:
+    // the state machine replaces the generic auth row, and the model
+    // picker unlocks only at state 'ready'.
+    const isCli = isClaudeCode || isCodex;
+    const cliState = isClaudeCode ? claudeState : (isCodex ? codexState : null);
+    const cliBlock = isCli && cliState
+      ? (isClaudeCode ? _renderClaudeCodeBlock(cliState) : _renderCodexBlock(cliState))
+      : '';
+    const cliReady = (isCli && cliState && cliState.state === 'ready');
+    const cliBlocksAuth = (isCli && cliState && cliState.state !== 'ready');
     return `
       <div class="form-group">
         <div class="form-row">
@@ -10493,9 +10517,9 @@
           <span class="form-label">Model</span>
           ${!hasProvider
             ? '<span class="form-value muted">Select provider first</span>'
-            : ccBlocksAuth
+            : cliBlocksAuth
               ? '<span class="form-value muted">Sign in to choose</span>'
-              : (isClaudeCode && ccReady)
+              : (isCli && cliReady)
                 ? `<button class="select-trigger" data-action="pick-model">
                      ${escapeProfileHtml(modelLabel)}
                      <span class="chev">${SETTINGS_ICONS.chev}</span>
@@ -10507,8 +10531,8 @@
                        <span class="chev">${SETTINGS_ICONS.chev}</span>
                      </button>`}
         </div>
-        ${isClaudeCode ? ccBlock : (hasProvider ? authRow : '')}
-        ${hasProvider && !isClaudeCode ? usageRow : ''}
+        ${isCli ? cliBlock : (hasProvider ? authRow : '')}
+        ${hasProvider && !isCli ? usageRow : ''}
       </div>
     `;
   }
@@ -10563,16 +10587,25 @@
     const installing = cc.install && cc.install.running;
     const installErr = cc.install && cc.install.error;
     if (s === 'ready') {
+      // Same Docker gate as the codex block: the terminal flow only
+      // exists on a native host; in Docker credentials ride the
+      // host's ~/.claude mount.
+      const reauth = cc.launcher_mode
+        ? '<button class="btn-link" data-action="cc-signin">Reauthorize</button>'
+        : '<span></span>';
+      const sub = cc.launcher_mode
+        ? 'No API key needed. Plays nicely with the Claude Code CLI.'
+        : 'To switch accounts, run <code style="font-family:var(--font-mono);color:var(--color-blue);">claude /login</code> on the host — picked up automatically.';
       return `
         <div class="form-row stacked">
           <div class="row-stack">
             <span class="row-stack-label">Authentication</span>
-            <button class="btn-link" data-action="cc-signin">Reauthorize</button>
+            ${reauth}
           </div>
           <div class="row-stack-value" style="display:flex;align-items:center;gap:calc(8*var(--px));">
             <span style="color:var(--color-positive);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;"><span class="status-dot green"></span>Signed in via subscription</span>
           </div>
-          <div class="row-stack-sub">No API key needed. Plays nicely with the Claude Code CLI.</div>
+          <div class="row-stack-sub">${sub}</div>
         </div>`;
     }
     if (s === 'host_unsupported') {
@@ -10635,6 +10668,99 @@
           </div>
           <div class="btn-row single" style="margin:calc(10*var(--px)) 0 0;">
             <button class="btn btn-primary" data-action="cc-signin">Sign in to Claude</button>
+          </div>
+        </div>`;
+    }
+    return '';
+  }
+
+  function _renderCodexBlock(cx) {
+    const s = cx.state;
+    const installing = cx.install && cx.install.running;
+    const installErr = cx.install && cx.install.error;
+    if (s === 'ready') {
+      const via = cx.auth_method === 'chatgpt' ? 'Signed in with ChatGPT'
+                : cx.auth_method === 'api_key' ? 'API key (stored)'
+                : 'API key from .env';
+      // Reauthorize opens a terminal — impossible from Docker, where the
+      // credentials arrive via the host's ~/.codex mount instead.
+      const reauth = cx.launcher_mode
+        ? '<button class="btn-link" data-action="cx-signin">Reauthorize</button>'
+        : '<span></span>';
+      const sub = cx.launcher_mode
+        ? 'ChatGPT subscription preferred; an OPENAI_API_KEY works as fallback.'
+        : 'To switch accounts, run <code style="font-family:var(--font-mono);color:var(--color-blue);">codex login</code> on the host — picked up automatically.';
+      return `
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Authentication</span>
+            ${reauth}
+          </div>
+          <div class="row-stack-value" style="display:flex;align-items:center;gap:calc(8*var(--px));">
+            <span style="color:var(--color-positive);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;"><span class="status-dot green"></span>${via}</span>
+          </div>
+          <div class="row-stack-sub">${sub}</div>
+        </div>`;
+    }
+    if (s === 'host_unsupported') {
+      return `
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Setup</span>
+            <span></span>
+          </div>
+          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
+            Codex installation needs native access to your machine. Open the <b>Sautium Desktop Launcher</b> → <b>Settings</b> → <b>AI provider</b> to install and sign in — or run <code style="font-family:var(--font-mono);color:var(--color-blue);">codex login</code> on the host.
+          </div>
+        </div>`;
+    }
+    if (s === 'node_missing') {
+      return `
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Setup</span>
+            <button class="btn-link" data-action="cx-refresh">Refresh</button>
+          </div>
+          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
+            Node.js 18+ is required for Codex. Re-run the Sautium installer (it bundles Node) or install Node.js manually, then tap Refresh.
+          </div>
+        </div>`;
+    }
+    if (s === 'codex_missing') {
+      return `
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Setup</span>
+            <span></span>
+          </div>
+          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
+            OpenAI Codex is not installed yet. Downloads via npm.
+          </div>
+          ${installErr ? `<div class="row-stack-sub" style="color:var(--color-negative);white-space:pre-wrap;">${escapeProfileHtml(installErr)}</div>` : ''}
+          <div class="btn-row single" style="margin:calc(10*var(--px)) 0 0;">
+            <button class="btn btn-primary" data-action="cx-install" ${installing ? 'disabled' : ''}>${installing ? 'Installing…' : 'Install Codex'}</button>
+          </div>
+        </div>`;
+    }
+    if (s === 'not_authed') {
+      return `
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Sign in</span>
+            <button class="btn-link" data-action="cx-refresh">Refresh</button>
+          </div>
+          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.6;">
+            Sautium will open a terminal running <b>codex login</b>. In it:
+            <ol style="margin:calc(6*var(--px)) 0 0;padding-left:calc(18*var(--px));">
+              <li>Choose <i>Sign in with ChatGPT</i></li>
+              <li>Authorize in the browser tab</li>
+              <li>Done — close the terminal window</li>
+            </ol>
+            Sautium detects the sign-in automatically. Alternatively, set
+            <code style="font-family:var(--font-mono);color:var(--color-blue);">OPENAI_API_KEY</code> in .env.
+          </div>
+          <div class="btn-row single" style="margin:calc(10*var(--px)) 0 0;">
+            <button class="btn btn-primary" data-action="cx-signin">Sign in to ChatGPT</button>
           </div>
         </div>`;
     }
@@ -11670,6 +11796,31 @@
     } catch (_) {}
     return null;
   }
+  // Codex mirror of the Claude Code wake-event channel above.
+  let _codexStreamCtrl = null;
+  function _stopCodexStream() {
+    if (_codexStreamCtrl) { _codexStreamCtrl.abort(); _codexStreamCtrl = null; }
+  }
+  function _subscribeCodexStream() {
+    if (_codexStreamCtrl) return;
+    if (typeof window.sseStream !== 'function') return;
+    let primed = false;
+    _codexStreamCtrl = window.sseStream('/api/settings/ai/codex/stream', () => {
+      if (!primed) { primed = true; return; }
+      if (!parseHash().startsWith('more/ai')) {
+        _stopCodexStream();
+        return;
+      }
+      renderAI(document.getElementById('app'));
+    }, (_err) => {});
+  }
+  async function _fetchCodexState() {
+    try {
+      const r = await fetch('/api/settings/ai/codex/state');
+      if (r.ok) return await r.json();
+    } catch (_) {}
+    return null;
+  }
   // AI-canonization run: same wake-event SSE pattern (server pushes on each
   // batch; client re-fetches /api/settings/ai and re-renders in place).
   let _aiCanonStreamCtrl = null;
@@ -11717,11 +11868,15 @@
     if (ai.provider === 'claude_code') {
       claudeState = await _fetchClaudeState();
     }
+    let codexState = null;
+    if (ai.provider === 'codex') {
+      codexState = await _fetchCodexState();
+    }
 
     root.innerHTML = `
       <section class="screen screen-settings">
         ${_settingsHeader('AI assistant')}
-        <div style="margin-top:calc(14*var(--px));">${_renderAi(ai, claudeState)}</div>
+        <div style="margin-top:calc(14*var(--px));">${_renderAi(ai, claudeState, codexState)}</div>
         ${_renderAiCanon(ai)}
       </section>
     `;
@@ -11775,6 +11930,23 @@
       render();
     });
 
+    // Codex state actions — same shapes as the cc-* trio above.
+    onAction('[data-action="cx-refresh"]', () => render());
+    onAction('[data-action="cx-install"]', async () => {
+      try {
+        const r = await fetch('/api/settings/ai/codex/install', { method: 'POST' });
+        if (!r.ok) { await _ccError('Codex install failed', r); return; }
+      } catch (err) { await _ccError('Codex install failed', null, err); return; }
+      render();
+    });
+    onAction('[data-action="cx-signin"]', async () => {
+      try {
+        const r = await fetch('/api/settings/ai/codex/signin', { method: 'POST' });
+        if (!r.ok) { await _ccError('Codex sign-in failed', r); return; }
+      } catch (err) { await _ccError('Codex sign-in failed', null, err); return; }
+      render();
+    });
+
     // AI canonization toggle + "Run now"
     onAction('[data-action="toggle-canon"]', async () => {
       const enabled = !!(ai.canonization && ai.canonization.enabled);
@@ -11791,6 +11963,7 @@
     });
 
     if (ai.provider === 'claude_code') _subscribeClaudeStream();
+    if (ai.provider === 'codex') _subscribeCodexStream();
     if (ai.canonization && ai.canonization.available) _subscribeAiCanonStream();
     refreshAiAvailability();
   }

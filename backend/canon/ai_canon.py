@@ -167,8 +167,10 @@ def _pick_model(provider):
 def _provider():
     r = db_query("SELECT value FROM user_settings WHERE key = 'ai.provider'")
     name = r[0]["value"] if r and r[0]["value"] else None
+    # codex is chat-only: its registry stub cannot .chat() and the tier
+    # has no codex dispatch — fall through to claude_code/anthropic.
     for cand in (name, "claude_code", "anthropic"):
-        if cand and get_provider(cand):
+        if cand and cand != "codex" and get_provider(cand):
             return get_provider(cand)
     return None
 

@@ -27,12 +27,23 @@ def is_launcher_mode() -> bool:
     mode is the only one where we can shell out to node/npm/claude
     and open a terminal window.
 
+    A container is never native, whatever else resolves — checked
+    first, positively, because the path heuristic below lies on the
+    master node: its compose mounts the identity at a CONTAINER path
+    (/app/data/node_identity) that exists, so the old check said
+    "launcher" inside Docker and the signin endpoint tried to open a
+    terminal instead of returning the use-the-host guidance (surfaced
+    via the codex Reauthorize button, 2026-08-23).
+
     The launcher writes its identity dir into the .env it passes to
     the Docker backend (so the container can reuse the same Ed25519
     key), so the *presence* of P2P_IDENTITY_DIR isn't enough — under
-    Docker the path is a Windows path (`C:\\Users\\...\\node_identity`)
-    that doesn't resolve inside the Linux container. Require the path
-    to actually exist on this filesystem."""
+    launcher-managed Docker the path is a Windows path
+    (`C:\\Users\\...\\node_identity`) that doesn't resolve inside the
+    Linux container. Require the path to actually exist on this
+    filesystem."""
+    if Path("/.dockerenv").exists() or Path("/run/.containerenv").exists():
+        return False
     from config import settings
     if not settings.p2p_identity_dir:
         return False
@@ -139,12 +150,12 @@ def claude_authenticated() -> bool:
     platform-dependent: macOS Keychain entry "Claude Code-credentials",
     Windows/Linux JSON at ~/.claude/.credentials.json.
 
-    On Linux (incl. Docker) the CLI is launched as CLAUDE_USER by
+    On Linux (incl. Docker) the CLI is launched as AGENT_USER by
     `claude_code_runner._spawn_claude` (the CLI refuses to run as root
     with --dangerously-skip-permissions), so credentials live in
     that user's HOME — not the backend process's HOME, which under
     Docker is /root and finds nothing while the host mount puts the
-    file at /home/claudeuser/.claude/.credentials.json."""
+    file at /home/agent/.claude/.credentials.json."""
     if sys.platform == "darwin":
         try:
             result = subprocess.run(
@@ -161,10 +172,10 @@ def claude_authenticated() -> bool:
     if sys.platform == "linux":
         try:
             import pwd
-            from claude_code_runner import CLAUDE_USER
-            home = Path(pwd.getpwnam(CLAUDE_USER).pw_dir)
+            from claude_code_runner import AGENT_USER
+            home = Path(pwd.getpwnam(AGENT_USER).pw_dir)
         except (KeyError, ImportError) as e:
-            logger.debug(f"CLAUDE_USER lookup failed, falling back to Path.home(): {e}")
+            logger.debug(f"AGENT_USER lookup failed, falling back to Path.home(): {e}")
 
     creds = home / ".claude" / ".credentials.json"
     if not creds.is_file():

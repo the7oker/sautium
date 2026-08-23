@@ -74,7 +74,7 @@ RESEARCH_TIMEOUT_SECONDS = 600   # one model = many web fetches; chat's 150s is 
                                  # timed out on the first live drain) — headphones carry the
                                  # largest source corpus, so they set the budget.
 RESEARCH_MODEL = "sonnet"        # Claude Code alias; measured-cheap and good enough for extraction
-ANTHROPIC_RESEARCH_MODEL = "claude-sonnet-4-20250514"
+ANTHROPIC_RESEARCH_MODEL = "claude-sonnet-5"
 ANTHROPIC_MAX_TURNS = 8          # pause_turn continuations for server-side web_search
 PAUSE_BETWEEN_MODELS = 3         # seconds; politeness between research calls
 

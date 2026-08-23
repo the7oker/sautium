@@ -38,10 +38,11 @@ RUN apt-get update && apt-get install -y software-properties-common \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 (for Claude Code CLI + MCP servers)
+# Node.js 22 (for Claude Code / Codex CLIs + MCP servers)
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && npm install -g @anthropic-ai/claude-code \
+    && npm install -g @openai/codex \
     && npm install -g @modelcontextprotocol/server-postgres \
     && npm cache clean --force
 
@@ -49,12 +50,16 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 
-# Non-root user for Claude Code (--dangerously-skip-permissions requires non-root)
-RUN useradd -m -s /bin/bash claudeuser \
-    && mkdir -p /home/claudeuser/.claude/debug \
-    && mkdir -p /home/claudeuser/.claude/projects \
-    && echo '{}' > /home/claudeuser/.claude/settings.json \
-    && chown -R claudeuser:claudeuser /home/claudeuser/.claude
+# Non-root user for the CLI agents (Claude Code refuses
+# --dangerously-skip-permissions as root; codex runs demoted the same
+# way). codex-dj is the codex working root — AGENTS.md lands there.
+RUN useradd -m -s /bin/bash agent \
+    && mkdir -p /home/agent/.claude/debug \
+    && mkdir -p /home/agent/.claude/projects \
+    && echo '{}' > /home/agent/.claude/settings.json \
+    && mkdir -p /home/agent/.codex /home/agent/codex-dj \
+    && chown -R agent:agent /home/agent/.claude \
+        /home/agent/.codex /home/agent/codex-dj
 
 # Set Python 3.11 as default
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \

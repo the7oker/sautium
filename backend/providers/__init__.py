@@ -34,22 +34,36 @@ def _claude_code_ready() -> bool:
         return False
 
 
-def _maybe_reset_for_claude_code() -> None:
-    """If Claude Code's readiness has changed since the cache was
-    built, drop the cache so the next access re-detects. Cheap
-    enough to call on every entry — it's two file/keychain probes."""
+def _codex_ready() -> bool:
+    """True when the Codex CLI is installed and can authenticate
+    (auth.json present, or an API key available to mint it). Same
+    fact-based role as `_claude_code_ready` — keep in sync with
+    codex_cli.get_state()."""
+    try:
+        from codex_cli import get_codex_executable, codex_authenticated
+        return get_codex_executable() is not None and codex_authenticated()
+    except Exception as e:
+        logger.debug(f"codex readiness probe failed: {e}")
+        return False
+
+
+def _maybe_reset_for_cli_agents() -> None:
+    """If either CLI agent's readiness has changed since the cache was
+    built, drop the cache so the next access re-detects. Cheap enough
+    to call on every entry — it's a few file/keychain probes."""
     if not _initialized:
         return
-    have = "claude_code" in _providers
-    ready = _claude_code_ready()
-    if have != ready:
+    if ("claude_code" in _providers) != _claude_code_ready():
+        reset()
+        return
+    if ("codex" in _providers) != _codex_ready():
         reset()
 
 
 def _init_providers():
     """Initialize available providers based on configuration."""
     global _initialized
-    _maybe_reset_for_claude_code()
+    _maybe_reset_for_cli_agents()
     if _initialized:
         return
     _initialized = True
@@ -67,6 +81,13 @@ def _init_providers():
     if settings.claude_code_enabled or _claude_code_ready():
         from providers.claude_code import ClaudeCodeProvider
         _providers["claude_code"] = ClaudeCodeProvider()
+
+    # OpenAI Codex (subprocess) — same fact-based detection; registered
+    # after claude_code so the providers[0] fallback in
+    # chat._resolve_provider keeps preferring Claude when both are ready.
+    if settings.codex_cli_enabled or _codex_ready():
+        from providers.codex import CodexProvider
+        _providers["codex"] = CodexProvider()
 
     # Anthropic API
     if settings.anthropic_api_key:

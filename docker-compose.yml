@@ -95,6 +95,8 @@ services:
 
       # Claude Code integration
       CLAUDE_CODE_ENABLED: ${CLAUDE_CODE_ENABLED:-true}
+      # OpenAI Codex CLI integration (second AI DJ agent)
+      CODEX_CLI_ENABLED: ${CODEX_CLI_ENABLED:-true}
 
       # P2P / DHT
       P2P_ENABLED: ${P2P_ENABLED:-true}
@@ -205,14 +207,22 @@ services:
       # the container reads a stale token until restart. Mounting the
       # directory binds the dir inode (which doesn't change on rename),
       # so the container sees the freshly-renamed file immediately.
-      - ${USERPROFILE:-${HOME}}/.claude:/home/claudeuser/.claude
+      - ${USERPROFILE:-${HOME}}/.claude:/home/agent/.claude
       # Claude Code session storage — persisted on the host so chat history
       # survives container rebuilds. Without this, every `up --build`
       # invalidates every saved session_id and chat retries fail with
       # "No conversation found". Stacked on top of the .claude dir mount
       # above so sessions live on the project's own volume, not in the
       # user's home (where they'd mix with the host CLI's sessions).
-      - ./data/claude_sessions:/home/claudeuser/.claude/projects
+      - ./data/claude_sessions:/home/agent/.claude/projects
+      # OpenAI Codex auth + sessions — whole-dir mount for the same
+      # atomic-rename/refresh-rotation reason as .claude above. No
+      # sessions sub-overlay: codex indexes threads in sqlite files at
+      # the .codex root, so splitting sessions/ onto a project volume
+      # would desync the index from the rollout files. Resume state
+      # therefore lives in the host's ~/.codex and survives rebuilds
+      # through this mount alone.
+      - ${USERPROFILE:-${HOME}}/.codex:/home/agent/.codex
     ports:
       # Backend on 0.0.0.0 by design — LAN access (phone, tablet) is the
       # primary workflow. Internet exposure is blocked at the UPnP layer

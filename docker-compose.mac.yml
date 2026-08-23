@@ -118,8 +118,8 @@ services:
       # Mount the WHOLE .claude directory (not just .credentials.json) so
       # the container survives the CLI's atomic-rename refresh cycle —
       # see docker-compose.yml for the long-form rationale.
-      - ${USERPROFILE:-${HOME}}/.claude:/home/claudeuser/.claude
-      - ./data/claude_sessions:/home/claudeuser/.claude/projects
+      - ${USERPROFILE:-${HOME}}/.claude:/home/agent/.claude
+      - ./data/claude_sessions:/home/agent/.claude/projects
     ports:
       # Backend on 0.0.0.0 by design — LAN access (phone, tablet) is the
       # primary workflow. Internet exposure is blocked at the UPnP layer

@@ -97,7 +97,10 @@ class AnthropicProvider(BaseProvider):
         return self._client
 
     def models(self) -> list[str]:
-        return ["claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"]
+        # Current-generation ids carry no date suffix. Order matters:
+        # models[0] is the chat default, models[-1] is the cheap tier
+        # title generation picks (chat._title_via_provider).
+        return ["claude-sonnet-5", "claude-haiku-4-5"]
 
     def chat(
         self,

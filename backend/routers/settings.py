@@ -59,6 +59,10 @@ _library_sse_lock = threading.Lock()
 _claude_sse_clients: List[Tuple[asyncio.Event, asyncio.AbstractEventLoop]] = []
 _claude_sse_lock = threading.Lock()
 
+# Same channel for the AI > Codex screen (install/sign-in state).
+_codex_sse_clients: List[Tuple[asyncio.Event, asyncio.AbstractEventLoop]] = []
+_codex_sse_lock = threading.Lock()
+
 # AI-canonization run: a background thread resolves the residue, pushing batch
 # progress + the AI's reasoning to the More→AI screen over the same wake-event
 # SSE pattern. Single-flight (one run at a time); state is read via GET /ai.
@@ -151,6 +155,16 @@ def notify_claude_subscribers() -> None:
     from the install worker thread on state transitions."""
     with _claude_sse_lock:
         for evt, loop in list(_claude_sse_clients):
+            try:
+                loop.call_soon_threadsafe(evt.set)
+            except RuntimeError:
+                continue
+
+
+def notify_codex_subscribers() -> None:
+    """Thread-safe wake of every AI > Codex SSE client."""
+    with _codex_sse_lock:
+        for evt, loop in list(_codex_sse_clients):
             try:
                 loop.call_soon_threadsafe(evt.set)
             except RuntimeError:
@@ -575,8 +589,8 @@ def _ai_state() -> Dict[str, Any]:
             masked_key = "●" * 8 + (api_key[-4:] if len(api_key) >= 4 else api_key)
         elif provider == "claude_code":
             # Claude Code is OAuth (subscription). claude_code.get_state() knows
-            # where the credentials live — incl. /home/claudeuser/.claude in Docker,
-            # where the CLI runs demoted to CLAUDE_USER. (Previously this imported a
+            # where the credentials live — incl. /home/agent/.claude in Docker,
+            # where the CLI runs demoted to AGENT_USER. (Previously this imported a
             # non-existent routers.chat.oauth_status and swallowed the ImportError,
             # so auth_state was ALWAYS not_authenticated — which hid Claude Code on
             # Docker and disabled the AI-canon tier there.)
@@ -586,6 +600,17 @@ def _ai_state() -> Dict[str, Any]:
                     auth_state = "oauth_signed_in"
             except Exception:
                 logger.exception("claude_code auth-state check failed")
+        elif provider == "codex":
+            # Codex mirrors the Claude Code CLI flow: auth.json from
+            # `codex login` (or minted from OPENAI_API_KEY by the
+            # runner). Either way the credential is CLI-side, so it
+            # surfaces as the OAuth-style state, not api_key_set.
+            try:
+                import codex_cli
+                if codex_cli.get_state() == "ready":
+                    auth_state = "oauth_signed_in"
+            except Exception:
+                logger.exception("codex auth-state check failed")
 
     # Usage is intentionally null until we wire the provider billing
     # API; UI handles "row hidden when null". Placeholder structure
@@ -594,7 +619,21 @@ def _ai_state() -> Dict[str, Any]:
 
     # AI canonization: default On only when the AI is "free" (subscription /
     # OAuth) — a paid API key bills per token, so default Off + the user opts in.
-    canon_free = auth_state == "oauth_signed_in"
+    # The tier runs on claude_code/anthropic only (ai_canon._provider skips
+    # codex — the registry stub cannot .chat()), so with codex selected it is
+    # available exactly when Claude Code is ready underneath; codex auth alone
+    # must not enable it.
+    if provider == "codex":
+        try:
+            import claude_code
+            canon_capable = claude_code.get_state() == "ready"
+        except Exception:
+            logger.exception("claude_code auth-state check failed")
+            canon_capable = False
+        canon_free = canon_capable
+    else:
+        canon_capable = bool(provider) and auth_state != "not_authenticated"
+        canon_free = auth_state == "oauth_signed_in"
     canon_pref = _read("ai.canonization_enabled")
     canon_enabled = canon_free if canon_pref is None else bool(canon_pref)
     try:
@@ -615,7 +654,7 @@ def _ai_state() -> Dict[str, Any]:
             "enabled":   canon_enabled,
             "is_default": canon_pref is None,
             "free":      canon_free,
-            "available": bool(provider) and auth_state != "not_authenticated",
+            "available": canon_capable,
             "mb_dump":   mb_dump,   # the tier resolves against the local MB dump
             "job":       canon_job,
         },
@@ -1129,6 +1168,143 @@ def post_claude_signin() -> Dict[str, Any]:
         )
     try:
         launch_signin_terminal()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"opened": True}
+
+
+# ============================================================
+# OpenAI Codex (subscription CLI) state + install + sign-in
+# ============================================================
+
+_codex_install_state: Dict[str, Any] = {
+    "running": False,
+    "progress": "",
+    "error": None,
+}
+
+
+@router.get("/ai/codex/stream")
+async def codex_stream() -> StreamingResponse:
+    """SSE wake channel for the AI > Codex screen — same pattern as
+    /ai/claude/stream."""
+    loop = asyncio.get_event_loop()
+    evt = asyncio.Event()
+
+    async def event_generator():
+        try:
+            with _codex_sse_lock:
+                _codex_sse_clients.append((evt, loop))
+            yield "data: {}\n\n"
+            while True:
+                try:
+                    await asyncio.wait_for(evt.wait(), timeout=20.0)
+                    evt.clear()
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                yield "data: {}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            with _codex_sse_lock:
+                _codex_sse_clients[:] = [
+                    (e, l) for e, l in _codex_sse_clients if e is not evt
+                ]
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/ai/codex/state")
+def get_codex_state() -> Dict[str, Any]:
+    """State machine for the OpenAI Codex CLI — Web UI branches on
+    `state` exactly like the Claude Code screen. Transition to 'ready'
+    busts the providers cache so chat picks the CLI up without a
+    restart."""
+    import codex_cli
+    from claude_code import detect_node_version, is_launcher_mode
+    state = codex_cli.get_state()
+    if state == "ready":
+        from providers import reset as _reset_providers
+        _reset_providers()
+    node_ver = detect_node_version()
+    codex = codex_cli.get_codex_executable()
+    return {
+        "state":          state,
+        "launcher_mode":  is_launcher_mode(),
+        "node_version":   ".".join(str(p) for p in node_ver) if node_ver else None,
+        "codex_path":     str(codex) if codex else None,
+        "auth_method":    codex_cli.codex_auth_method(),
+        "install":        dict(_codex_install_state),
+    }
+
+
+@router.post("/ai/codex/install")
+def post_codex_install() -> Dict[str, Any]:
+    """Kick off `npm install @openai/codex` in a worker thread —
+    mirror of /ai/claude/install."""
+    import threading
+    import codex_cli
+    from claude_code import detect_node_version, is_launcher_mode
+    if not is_launcher_mode():
+        raise HTTPException(
+            status_code=400,
+            detail="Codex install is only available in the native launcher. "
+                   "Open Sautium's Desktop Launcher to install.",
+        )
+    if _codex_install_state.get("running"):
+        return dict(_codex_install_state)
+
+    node_ver = detect_node_version()
+    if node_ver is None or node_ver[0] < 18:
+        raise HTTPException(
+            status_code=400,
+            detail="Node.js 18+ is required. Re-run the Sautium installer to repair the Node bundle.",
+        )
+
+    _codex_install_state.update({
+        "running": True,
+        "progress": "Running npm install…",
+        "error":   None,
+    })
+    notify_codex_subscribers()
+
+    def _worker():
+        try:
+            ok, msg = codex_cli.install_codex_runtime()
+            _codex_install_state["progress"] = msg
+            _codex_install_state["error"] = None if ok else msg
+        except Exception as e:
+            _codex_install_state["error"] = str(e)
+        finally:
+            _codex_install_state["running"] = False
+            notify_codex_subscribers()
+
+    threading.Thread(target=_worker, daemon=True, name="codex-install").start()
+    return dict(_codex_install_state)
+
+
+@router.post("/ai/codex/signin")
+def post_codex_signin() -> Dict[str, Any]:
+    """Launch a terminal window running `codex login` (ChatGPT OAuth).
+    Caller polls /state.state for transition to 'ready'."""
+    import codex_cli
+    from claude_code import is_launcher_mode
+    if not is_launcher_mode():
+        raise HTTPException(
+            status_code=400,
+            detail="Sign-in requires a native terminal — use the Desktop Launcher.",
+        )
+    try:
+        codex_cli.launch_signin_terminal()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"opened": True}

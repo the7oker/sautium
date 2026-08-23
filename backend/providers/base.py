@@ -60,7 +60,10 @@ class StreamDone(StreamEvent):
     model: str = ""
     provider: str = ""
     tool_calls_count: int = 0
-    claude_session_id: Optional[str] = None  # Claude Code only
+    # CLI agents (claude_code, codex): the agent-side resume handle.
+    # `provider` tells the chat router which chat_sessions column it
+    # belongs to (claude_session_id vs codex_thread_id).
+    agent_session_id: Optional[str] = None
     error: Optional[str] = None
     # When the provider knows what concrete action the user can take to
     # fix `error` (top up balance, rotate the API key, wait out a rate

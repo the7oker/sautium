@@ -604,6 +604,43 @@ Do NOT rely solely on audio features — an artist can sound similar but belong 
 
 
 # ---------------------------------------------------------------------------
+# Codex prompt (MCP-based, delivered as AGENTS.md)
+# ---------------------------------------------------------------------------
+
+# Codex has no --disallowed-tools: its built-in shell/file tools can only
+# be fenced by the OS sandbox and by instruction. This block is the
+# instruction fence; codex_runner adds --disable shell_tool and the
+# sandbox on top. The counts rule replaces the {library_size} injection
+# the Claude prompt gets (see below).
+_CODEX_TOOL_DISCIPLINE = """\
+- You have NO shell, NO file access, NO web browsing for this job. You are \
+NOT working on a code repository — ignore any coding-agent instincts. Do ALL \
+work exclusively through the MCP tools (postgres SQL + assistant search/\
+playback). Never run commands, never read or write files, never browse.
+- Library contents drift while this session lives (scans, sync, streaming \
+mints). NEVER state a track/artist/album count from memory or from an \
+earlier turn — when asked about library size or counts, run a fresh SQL \
+COUNT first.
+"""
+
+# Same template as Claude Code (both agents drive the same MCP servers),
+# with the discipline block injected at the head of # Rules. Two slots
+# behave differently for codex because AGENTS.md is read at session
+# start and not reliably re-read on `codex exec resume`:
+#   - {player_context} stays in the text but is always erased — the
+#     runner delivers live player state inside the user message;
+#   - the ({library_size}) mention is stripped entirely — a snapshot
+#     baked at session start would go stale as the library grows and a
+#     resumed session would keep quoting it (the counts rule above
+#     sends the model to SQL instead).
+CODEX_DJ_SYSTEM_PROMPT = CLAUDE_DJ_SYSTEM_PROMPT.replace(
+    " ({library_size})", "", 1,
+).replace(
+    "# Rules\n", "# Rules\n\n" + _CODEX_TOOL_DISCIPLINE, 1,
+)
+
+
+# ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
 
@@ -645,7 +682,14 @@ def get_system_prompt(provider: str, player_context: str | None = None) -> str:
     """
     pc_block = f"\n\nCurrently playing:\n{player_context}" if player_context else ""
 
-    template = CLAUDE_DJ_SYSTEM_PROMPT if provider == "claude_code" else API_DJ_SYSTEM_PROMPT
-    return (template
-            .replace("{library_size}", _describe_library_size())
-            .replace("{player_context}", pc_block))
+    if provider == "claude_code":
+        template = CLAUDE_DJ_SYSTEM_PROMPT
+    elif provider == "codex":
+        template = CODEX_DJ_SYSTEM_PROMPT
+    else:
+        template = API_DJ_SYSTEM_PROMPT
+    if "{library_size}" in template:
+        # codex has no slot (see CODEX_DJ_SYSTEM_PROMPT) — skip the
+        # COUNT query its build would otherwise pay for nothing.
+        template = template.replace("{library_size}", _describe_library_size())
+    return template.replace("{player_context}", pc_block)
