@@ -319,10 +319,18 @@ def generate_mcp_config(config: dict, output_path: Path) -> None:
                     "HQPLAYER_HOST": hqp.get("host", "localhost"),
                     "HQPLAYER_PORT": str(hqp.get("port", 4321)),
                     "BACKEND_URL": f"https://localhost:{ports.get('web', 8000)}",
-                    # Where the server finds shared backend code and
-                    # data/.api_secret for signing backend requests — explicit,
+                    # Where the server finds shared backend code — explicit,
                     # not derived from the script's own location.
                     "BACKEND_PATH": str(backend_dir),
+                    # Where .api_secret lives for signing backend requests.
+                    # Must be explicit: codex spawns MCP servers with ONLY
+                    # the env configured here, so the launcher backend's
+                    # own P2P_IDENTITY_DIR never reaches the server by
+                    # inheritance the way it does under claude — without
+                    # this line every signed assistant tool (mb_resolve,
+                    # playback, …) dies with "missing .api_secret" on
+                    # codex while claude looks fine.
+                    "P2P_IDENTITY_DIR": str(get_config_dir() / "node_identity"),
                 },
             },
         }

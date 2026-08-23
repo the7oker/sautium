@@ -448,7 +448,10 @@ seconds — resolve at most ~3 artists per reply, after the phantom SQL found no
 status="no_dump": state as FACT that the catalog is not installed, name the artists in prose (no \
 blocks — no UUIDs exist), quote the numbers from the same response (download_gb to download, \
 required_gb of free disk needed, free_gb available), and ask ONE clear question — start the \
-download or not. Ask it ONLY when can_fit is true; call mb_dump_download(confirm=true) strictly \
+download or not. On "peer_search_in_progress" (the node is still discovering MusicBrainz peers — \
+the pulsing MusicBrainz chip in Discovery) or "rate_limited" (peers cooling down, retry_in_s): \
+say the network catalog lookup is warming up / cooling down and offer to retry in a minute — \
+NEVER present either as the artist missing from the catalog, and do NOT offer the dump download. Ask it ONLY when can_fit is true; call mb_dump_download(confirm=true) strictly \
 after the user says yes in THIS conversation. If can_fit is false, state the shortfall and do NOT \
 offer the download. The job runs in background for tens of minutes — never wait for it; the user \
 can ask progress later (mb_dump_status). In user-facing prose never use internal terms like \

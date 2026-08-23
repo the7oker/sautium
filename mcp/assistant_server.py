@@ -699,19 +699,33 @@ def search_genres(query: str, limit: int = 10) -> str:
 def mb_resolve(artist_name: str, album_title: str = "") -> str:
     """Resolve an artist that is NOT in the library (neither owned nor phantom)
     against the full MusicBrainz catalog and materialize them as streamable
-    phantom entities. Returns JSON:
+    phantom entities. On dump-less nodes that know MB peers this transparently
+    searches the PEER NETWORK and fetches the artist's signed catalog slice
+    before minting — same path the Discovery screen uses. Returns JSON:
       status "ok"       -> artist_id (+ album_id when album_title matched) —
                            real UUIDs for your DJ_BLOCKS artist/album cards.
+                           source "peer_network" = resolved via P2P, not a
+                           local dump.
       status "not_found"-> the name is not in the catalog; do not tile it.
-      status "no_dump"  -> the optional MusicBrainz dump is not installed;
+      status "rate_limited" -> peer search is cooling down; retry_in_s says
+                           when — tell the user to ask again, do NOT claim
+                           the artist is missing.
+      status "peer_search_in_progress" -> the node is still discovering MB
+                           peers on the network (the pulsing MusicBrainz
+                           chip in Discovery) — usually settles within a
+                           minute or two of node start. Say the lookup is
+                           warming up and offer to retry; do NOT offer the
+                           dump download and do NOT claim the artist is
+                           missing.
+      status "no_dump"  -> no local dump AND peer discovery found nothing;
                            payload carries download_gb/required_gb/free_gb/
                            can_fit for quoting the user before any download.
 
-    Costs seconds per artist (mints the whole discography) — call it for at
-    most ~3 artists per reply, only after library SQL found nothing. When the
-    dump is absent it returns instantly, so it is always a safe first probe:
-    call it and report facts — never ask the user whether the catalog "is
-    supported" and never ask permission to check.
+    Costs seconds per artist (mints the whole discography; a peer slice fetch
+    adds more) — call it for at most ~3 artists per reply, only after library
+    SQL found nothing. When the dump is absent it returns instantly, so it is
+    always a safe first probe: call it and report facts — never ask the user
+    whether the catalog "is supported" and never ask permission to check.
 
     Args:
         artist_name: Artist to resolve (any script; fuzzy, alias-aware)
@@ -722,7 +736,27 @@ def mb_resolve(artist_name: str, album_title: str = "") -> str:
         return json.dumps({"status": "error", "detail": "artist_name required"})
     try:
         data = _backend_get("/api/discovery/mb-search", {"q": q, "limit": 5})
+        if data.get("cooldown"):
+            # Every known peer is inside its burst budget — a retry-later,
+            # not a miss. Collapsing this into not_found made the agent
+            # tell users an artist "isn't in the catalog".
+            return json.dumps({
+                "status": "rate_limited",
+                "retry_in_s": data["cooldown"],
+            })
         if not data.get("available"):
+            # Same state machine the Discovery chip renders: 'searching'
+            # (the pulsing button) = P2P is up but the first peer-probe
+            # round hasn't completed — a retry-later, not "no catalog".
+            mb_state = (_backend_get("/api/discovery/mb-status", {})
+                        or {}).get("state")
+            if mb_state == "searching":
+                return json.dumps({
+                    "status": "peer_search_in_progress",
+                    "note": ("MB peer discovery is still running; it "
+                             "usually settles within a minute or two of "
+                             "node start — suggest retrying shortly"),
+                })
             st = _backend_get("/api/settings/musicbrainz/status", {})
             upd = st.get("update", {})
             if upd.get("running"):
@@ -748,8 +782,10 @@ def mb_resolve(artist_name: str, album_title: str = "") -> str:
                    ("download_gb", "required_gb", "free_gb", "can_fit")},
             })
         artists = data.get("artists") or []
+        remote = bool(data.get("remote"))
         if not artists:
-            return json.dumps({"status": "not_found", "query": q})
+            return json.dumps({"status": "not_found", "query": q,
+                               **({"source": "peer_network"} if remote else {})})
         best = artists[0]
         out = {
             "status": "ok",
@@ -760,26 +796,66 @@ def mb_resolve(artist_name: str, album_title: str = "") -> str:
             "alternatives": [{"name": a["name"], "comment": a.get("comment")}
                              for a in artists[1:4]],
         }
+        if remote:
+            out["source"] = "peer_network"
         rg_gid = None
         if album_title.strip():
-            alb = _backend_get("/api/discovery/mb-search",
-                               {"q": album_title.strip(), "limit": 10})
-            match = next((r for r in alb.get("albums") or []
-                          if r.get("artist_gid") == best["gid"]), None)
-            if match:
-                rg_gid = match["gid"]
-                out["album"] = {"title": match["title"], "year": match.get("year")}
+            if remote:
+                # Peer search is artist-only by design — album pinning needs
+                # the slice imported first. The mint below does exactly that,
+                # and the post-mint lookup further down fills album_id from
+                # the freshly minted local rows, so the agent still gets a
+                # tileable album card in one tool call.
+                pass
             else:
-                out["album_status"] = "album_not_found"
+                alb = _backend_get("/api/discovery/mb-search",
+                                   {"q": album_title.strip(), "limit": 10})
+                match = next((r for r in alb.get("albums") or []
+                              if r.get("artist_gid") == best["gid"]), None)
+                if match:
+                    rg_gid = match["gid"]
+                    out["album"] = {"title": match["title"], "year": match.get("year")}
+                else:
+                    out["album_status"] = "album_not_found"
         # Big discographies stream tracklists for every release group — give
-        # the mint far more than the default 30s.
+        # the mint far more than the default 30s. artist_name is the P2P
+        # slice key: on a dump-less node the backend fetches this artist's
+        # signed slice by NAME before minting (same contract the Web UI's
+        # mintMbTile uses) — without it a peer-found artist dies with 404
+        # unknown_artist.
         minted = _backend_post("/api/discovery/mb-mint",
-                               {"artist_gid": best["gid"], "rg_gid": rg_gid},
+                               {"artist_gid": best["gid"], "rg_gid": rg_gid,
+                                "artist_name": best["name"]},
                                timeout=180.0)
         out["artist_id"] = minted.get("artist_id")
         if rg_gid:
             # None here = canon declined the group; fall back to the artist card.
             out["album_id"] = minted.get("album_id")
+        elif remote and album_title.strip() and out.get("artist_id"):
+            # Remote path skipped the pre-mint album pin (peer search is
+            # artist-only) — the mint just imported the slice and minted
+            # the discography, so the album exists locally NOW. Resolve it
+            # here so the reply carries a streamable album card instead of
+            # a "go query SQL" hint the model may skip.
+            row = _db_query_one(
+                """
+                SELECT a.id, a.title, a.release_year
+                FROM albums a
+                JOIN album_artists aa ON aa.album_id = a.id
+                WHERE aa.artist_id = %(aid)s::uuid
+                  AND (lower(a.title) = lower(%(t)s)
+                       OR a.title ILIKE '%%' || %(t)s || '%%')
+                ORDER BY (lower(a.title) = lower(%(t)s)) DESC
+                LIMIT 1
+                """,
+                {"aid": out["artist_id"], "t": album_title.strip()},
+            )
+            if row:
+                out["album"] = {"title": row["title"],
+                                "year": row.get("release_year")}
+                out["album_id"] = str(row["id"])
+            else:
+                out["album_status"] = "album_not_found"
         return json.dumps(out, ensure_ascii=False)
     except httpx.ConnectError:
         return "Error: Cannot connect to backend."

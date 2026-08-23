@@ -243,6 +243,11 @@ def _mcp_config_overrides() -> List[str]:
         # The assistant server imports torch-adjacent modules — give it
         # more than the 10s default before codex declares it dead.
         args += ["-c", f"{base}.startup_timeout_sec=30"]
+        # Long tools (mb_resolve mint + peer slice fetch) legally run for
+        # minutes; codex's 60s default would kill them while claude lets
+        # them finish. Align with the chat wallclock — the turn watchdog
+        # is the real ceiling either way.
+        args += ["-c", f"{base}.tool_timeout_sec={TIMEOUT_SECONDS}"]
     return args
 
 
