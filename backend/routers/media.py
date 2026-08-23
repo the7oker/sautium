@@ -95,11 +95,37 @@ def media_file(media_file_id: int, request: Request,
         raise HTTPException(status_code=401, detail="invalid or expired media signature")
 
     row = db_query_one(
-        "SELECT file_path, file_format FROM media_files WHERE id = %(id)s",
+        """
+        SELECT mf.file_path, mf.file_format,
+               mf.cue_start_seconds, mf.cue_end_seconds, mf.track_number,
+               t.title, a.name AS artist, al.title AS album
+        FROM media_files mf
+        JOIN tracks t ON t.id = mf.track_id
+        JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+        JOIN artists a ON a.id = ta.artist_id
+        LEFT JOIN album_variants av ON av.id = mf.album_variant_id
+        LEFT JOIN albums al ON al.id = av.album_id
+        WHERE mf.id = %(id)s
+        """,
         {"id": media_file_id})
     if not row:
         raise HTTPException(status_code=404, detail="media file not found")
     path = settings.translate_to_local_path(row["file_path"])
+    mime = _MIME_BY_FORMAT.get((row["file_format"] or "").upper(),
+                               "application/octet-stream")
+
+    if row["cue_start_seconds"] is not None:
+        # CUE slice: the cached FLAC cut IS the resource (the raw image would
+        # play the whole disc); the Opus branch below then chains off it.
+        try:
+            path = transcode.flac_slice_path_for_file(
+                path, row["cue_start_seconds"], row["cue_end_seconds"],
+                {"title": row["title"], "artist": row["artist"],
+                 "album": row["album"], "track": row["track_number"]})
+        except Exception as e:
+            logger.error("flac slice failed for %s: %s", media_file_id, e)
+            raise HTTPException(status_code=500, detail="slice transcode failed")
+        mime = transcode.FLAC_MIME
 
     if transcode.wants_opus(q):
         try:
@@ -111,8 +137,6 @@ def media_file(media_file_id: int, request: Request,
         if opus:
             return _serve_disk(opus, transcode.MIME, request)
 
-    mime = _MIME_BY_FORMAT.get((row["file_format"] or "").upper(),
-                               "application/octet-stream")
     return _serve_disk(path, mime, request)
 
 

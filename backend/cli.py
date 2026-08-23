@@ -1580,7 +1580,8 @@ def bench(tracks):
 
     with get_db_context() as db:
         rows = db.execute(sql_text("""
-            SELECT mf.file_path, mf.duration_seconds
+            SELECT mf.file_path, mf.duration_seconds,
+                   mf.cue_start_seconds, mf.cue_end_seconds
             FROM media_files mf
             WHERE mf.is_analysis_source = true
               AND mf.duration_seconds BETWEEN 120 AND 480
@@ -1608,7 +1609,8 @@ def bench(tracks):
         local_path = settings.translate_to_local_path(row.file_path)
         t0 = _time.monotonic()
         try:
-            audio = load_full_track_48k(local_path)
+            audio = load_full_track_48k(local_path, row.cue_start_seconds,
+                                        row.cue_end_seconds)
             embedder._compute_segments(audio)
             analyzer.analyze_from_array(audio, sr=48000)
         except Exception as e:

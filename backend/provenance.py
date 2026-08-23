@@ -60,13 +60,22 @@ _UPSERT_SQL = sa_text("""
 """)
 
 
-def pcm_hash_file(local_path: str) -> str:
+def pcm_hash_file(local_path: str, cue_start=None, cue_end=None) -> str:
     """BLAKE2b-256 of the natively-decoded PCM (source rate & channels,
-    f32le). Streamed chunk-wise — hi-res long-form tracks decode to >1 GB."""
+    f32le). Streamed chunk-wise — hi-res long-form tracks decode to >1 GB.
+    cue_start/cue_end bound a CUE image slice, whose PCM then equals a
+    properly split rip of the same disc — the cross-rip content address
+    converges across rip styles."""
     h = hashlib.blake2b(digest_size=32)
+    cmd = ["ffmpeg", "-v", "error"]
+    if cue_start is not None:
+        cmd += ["-ss", f"{cue_start:.6f}"]
+    cmd += ["-i", local_path]
+    if cue_end is not None:
+        cmd += ["-t", f"{cue_end - (cue_start or 0.0):.6f}"]
+    cmd += ["-f", "f32le", "pipe:1"]
     proc = subprocess.Popen(
-        ["ffmpeg", "-v", "error", "-i", local_path, "-f", "f32le", "pipe:1"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     total = 0
     while chunk := proc.stdout.read(1 << 20):
         h.update(chunk)
@@ -81,12 +90,27 @@ def pcm_hash_file(local_path: str) -> str:
     return h.hexdigest()
 
 
-def chromaprint_file(local_path: str) -> Optional[str]:
+def chromaprint_file(local_path: str, cue_start=None,
+                     cue_end=None) -> Optional[str]:
     """AcoustID fingerprint (fpcalc, default 120s window). None on failure —
     the source row is still valid, records just sign without the cross-rip
     anchor (and never gain it later: it is bound into signatures from the
-    start or not at all)."""
+    start or not at all). fpcalc takes only a path, so a CUE slice is decoded
+    to a temp WAV first — fingerprinting the image would stamp every track of
+    the disc with one identical anchor."""
+    tmp_path = None
     try:
+        if cue_start is not None:
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            tmp.close()
+            tmp_path = tmp.name
+            cmd = ["ffmpeg", "-v", "error", "-y", "-ss", f"{cue_start:.6f}",
+                   "-i", local_path]
+            if cue_end is not None:
+                cmd += ["-t", f"{cue_end - cue_start:.6f}"]
+            cmd += [tmp_path]
+            subprocess.run(cmd, capture_output=True, timeout=300, check=True)
+            local_path = tmp_path
         out = subprocess.run(["fpcalc", "-plain", local_path],
                              capture_output=True, text=True, timeout=120,
                              check=True)
@@ -94,16 +118,22 @@ def chromaprint_file(local_path: str) -> Optional[str]:
     except Exception as e:
         logger.warning("fpcalc failed for %s: %s", local_path, e)
         return None
+    finally:
+        if tmp_path is not None:
+            os.unlink(tmp_path)
 
 
 def get_or_create_local(db: Session, track_id, media_file_id: int,
                         file_path: str, sample_rate, bit_depth,
-                        is_lossless, duration_seconds=None) -> Optional[int]:
+                        is_lossless, duration_seconds=None,
+                        cue_start=None, cue_end=None) -> Optional[int]:
     """analysis_sources.id for a local analysis-source file, fingerprinting it
     on first sight. duration_seconds is the scan-known material duration
     (media_files.duration_seconds) — part of the signed material declaration.
-    Returns None when the file can't be decoded (the analysis row then saves
-    unlinked and the staleness predicate retries next run)."""
+    cue_start/cue_end bound a CUE image slice so its hashes address the
+    track's material, not the whole disc. Returns None when the file can't be
+    decoded (the analysis row then saves unlinked and the staleness predicate
+    retries next run)."""
     sid = db.execute(sa_text(
         "SELECT id FROM analysis_sources "
         "WHERE track_id = :tid AND media_file_id = :mfid "
@@ -114,11 +144,11 @@ def get_or_create_local(db: Session, track_id, media_file_id: int,
 
     local_path = settings.translate_to_local_path(file_path)
     try:
-        ph = pcm_hash_file(local_path)
+        ph = pcm_hash_file(local_path, cue_start, cue_end)
     except Exception as e:
         logger.warning("provenance decode failed for %s: %s", local_path, e)
         return None
-    fp = chromaprint_file(local_path)
+    fp = chromaprint_file(local_path, cue_start, cue_end)
 
     return db.execute(_UPSERT_SQL, {
         "tid": str(track_id), "origin": "local", "mfid": media_file_id,

@@ -216,6 +216,7 @@ class CanonicalQueue:
 _MEDIA_ITEM_SQL = """
     SELECT mf.id, mf.file_path, mf.file_format, t.id::text AS track_uuid,
            t.title, mf.track_number, mf.duration_seconds,
+           mf.cue_start_seconds, mf.cue_end_seconds,
            mf.cover_id::text AS cover_id, a.name AS artist, al.title AS album
     FROM media_files mf
     JOIN tracks t ON mf.track_id = t.id
@@ -228,10 +229,18 @@ _MEDIA_ITEM_SQL = """
 
 
 def _item_from_media_row(r: dict) -> QueueItem:
+    source = {"kind": "file", "path": r["file_path"], "format": r["file_format"]}
+    if r.get("cue_start_seconds") is not None:
+        # CUE image slice — every backend must consume [cue_start, cue_end)
+        # as its own resource, never the raw path. Bounds live in the source
+        # dict so queue persistence round-trips them without dataclass churn.
+        source["cue_start"] = float(r["cue_start_seconds"])
+        source["cue_end"] = (float(r["cue_end_seconds"])
+                             if r["cue_end_seconds"] is not None else None)
     return QueueItem(
         track_id=r["track_uuid"],
         media_file_id=r["id"],
-        source={"kind": "file", "path": r["file_path"], "format": r["file_format"]},
+        source=source,
         title=r["title"],
         artist=r["artist"],
         album=r.get("album") or "",

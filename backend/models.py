@@ -21,7 +21,7 @@ from typing import Optional, List
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, Numeric, BigInteger, Float,
     Boolean, ForeignKey, CheckConstraint, Index, ARRAY, UniqueConstraint,
-    LargeBinary, SmallInteger, CHAR, func, text, event,
+    LargeBinary, SmallInteger, CHAR, Double, func, text, event,
 )
 from sqlalchemy.dialects.postgresql import BYTEA, ENUM, JSONB, UUID
 from sqlalchemy.ext.declarative import declarative_base
@@ -494,7 +494,7 @@ class MediaFile(Base):
     album_variant_id = Column(Integer, ForeignKey("album_variants.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
 
     # File information
-    file_path = Column(Text, nullable=False, unique=True)
+    file_path = Column(Text, nullable=False)
     file_format = Column(AudioFileFormatEnum, default="FLAC")
     is_lossless = Column(Boolean, default=True)
     file_size_bytes = Column(BigInteger)
@@ -510,6 +510,12 @@ class MediaFile(Base):
     # Track position within album variant
     track_number = Column(Integer)
     disc_number = Column(Integer, default=1)
+
+    # CUE image slice: a rip stored as one audio image + .cue imports as N
+    # virtual rows sharing one file_path. [start, end) seconds within the
+    # image; NULL start = regular whole-file row; NULL end = to EOF.
+    cue_start_seconds = Column(Double)
+    cue_end_seconds = Column(Double)
 
     # Analysis source flag: TRUE for the preferred file to use for embeddings/analysis
     is_analysis_source = Column(Boolean, default=False)
@@ -550,6 +556,13 @@ class MediaFile(Base):
         Index("idx_media_files_cover_id", "cover_id"),
         Index("idx_media_files_cover_pending", "id",
               postgresql_where="cover_processed_at IS NULL"),
+        UniqueConstraint("file_path", "cue_start_seconds",
+                         name="uq_media_files_path_cue",
+                         postgresql_nulls_not_distinct=True),
+        CheckConstraint("(cue_start_seconds IS NULL AND cue_end_seconds IS NULL)"
+                        " OR (cue_start_seconds >= 0 AND (cue_end_seconds IS NULL"
+                        " OR cue_end_seconds > cue_start_seconds))",
+                        name="chk_mf_cue_span"),
         CheckConstraint("file_size_bytes IS NULL OR file_size_bytes >= 0", name="chk_mf_file_size"),
         CheckConstraint("duration_seconds IS NULL OR duration_seconds >= 0", name="chk_mf_duration"),
         CheckConstraint("play_count >= 0", name="chk_mf_play_count"),

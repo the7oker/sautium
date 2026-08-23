@@ -129,12 +129,14 @@ class AudioEmbeddingGenerator:
 
         return text_features[0].cpu().numpy()
 
-    def _load_audio(self, file_path: str) -> Optional[np.ndarray]:
+    def _load_audio(self, file_path: str, cue_start: Optional[float] = None,
+                    cue_end: Optional[float] = None) -> Optional[np.ndarray]:
         """Load the WHOLE track at 48kHz mono (shared scanner decode path) —
         segments cover the full canonical grid; the track-level vector's
-        middle window is sliced from the same array."""
+        middle window is sliced from the same array. For a CUE slice the
+        bounded decode IS the track, so the grid stays array-relative."""
         try:
-            return load_full_track_48k(file_path)
+            return load_full_track_48k(file_path, cue_start, cue_end)
         except Exception as e:
             logger.error(f"Failed to load audio {file_path}: {e}")
             return None
@@ -289,14 +291,16 @@ class AudioEmbeddingGenerator:
         here unless the caller already holds it."""
         if audio_full is None:
             audio_full = self._load_audio(
-                settings.translate_to_local_path(media_file.file_path))
+                settings.translate_to_local_path(media_file.file_path),
+                media_file.cue_start_seconds, media_file.cue_end_seconds)
             if audio_full is None:
                 return False
         model = self._get_or_create_embedding_model(db)
         src_id = provenance.get_or_create_local(
             db, track_id, media_file.id, media_file.file_path,
             media_file.sample_rate, media_file.bit_depth,
-            media_file.is_lossless, media_file.duration_seconds)
+            media_file.is_lossless, media_file.duration_seconds,
+            media_file.cue_start_seconds, media_file.cue_end_seconds)
         computed = self._compute_segments(audio_full)
         if computed is None:
             return False
@@ -350,7 +354,8 @@ class AudioEmbeddingGenerator:
                 SELECT t.id as track_id, mf.id as media_file_id,
                        mf.file_path, mf.bit_depth,
                        mf.sample_rate, mf.is_lossless,
-                       mf.duration_seconds
+                       mf.duration_seconds,
+                       mf.cue_start_seconds, mf.cue_end_seconds
                 FROM media_files mf
                 JOIN tracks t ON t.id = mf.track_id
                 LEFT JOIN embeddings e ON e.track_id = t.id
@@ -402,7 +407,8 @@ class AudioEmbeddingGenerator:
             # CPU threads decode batch N+1 while GPU processes batch N
             def _load_one(row):
                 local_path = settings.translate_to_local_path(row.file_path)
-                return row, self._load_audio(local_path)
+                return row, self._load_audio(local_path, row.cue_start_seconds,
+                                             row.cue_end_seconds)
 
             def _load_batch(batch_rows):
                 """Load audio for a batch using thread pool. Returns (valid_rows, audio_arrays, failed_count)."""
@@ -482,7 +488,8 @@ class AudioEmbeddingGenerator:
                         src_id = provenance.get_or_create_local(
                             db, row.track_id, row.media_file_id, row.file_path,
                             row.sample_rate, row.bit_depth, row.is_lossless,
-                            row.duration_seconds)
+                            row.duration_seconds,
+                            row.cue_start_seconds, row.cue_end_seconds)
                         computed = self._compute_segments(audio)
                         if computed is None:
                             stats["failed"] += 1

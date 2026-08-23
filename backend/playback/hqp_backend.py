@@ -262,13 +262,44 @@ def _skip_to_first_playable(added: int) -> None:
 _local_provider = None
 
 
-def _owned_play_uri(media_file_id: int, db_path: str, file_format: str) -> str:
+def _owned_play_uri(item: "QueueItem") -> str:
     """HQPlayer URI for an owned track. Native file:// for formats HQPlayer decodes;
     for an m4a (which it can't — MP4 container, AAC or ALAC) transcode to FLAC in
     memory and return the media-proxy http URL so it plays anyway, displayed as
     owned. Falls back to file:// if streaming/proxy is off or the transcode fails.
-    HQPlayer-only workaround: engine-rendered backends decode m4a natively."""
+    HQPlayer-only workaround: engine-rendered backends decode m4a natively.
+
+    A CUE slice always rides the media proxy as a cached FLAC cut — the raw
+    path would play the whole disc image. The only fallback is that whole
+    image, loudly logged; there is no silent path."""
     global _local_provider
+    src = item.source
+    media_file_id, db_path, file_format = (
+        item.media_file_id, src["path"], src.get("format"))
+
+    if src.get("cue_start") is not None:
+        from streaming import service as streaming_service
+        from streaming import transcode
+        container_path = settings.translate_to_local_path(db_path)
+        tags = {"title": item.title, "artist": item.artist,
+                "album": item.album, "track": item.track_number}
+        try:
+            proxy = streaming_service.ensure_proxy()
+            # Produce EAGERLY — _uri_for runs OUTSIDE _hqp_lock by contract,
+            # and HQPlayer probes the URI synchronously at ADD time: the cut
+            # must exist before the command socket ever sees the URL.
+            transcode.flac_slice_path_for_file(
+                container_path, src["cue_start"], src.get("cue_end"), tags)
+        except Exception as e:
+            logger.error("cue slice unavailable for %s [%s, %s) — playing the "
+                         "whole image: %s", db_path, src.get("cue_start"),
+                         src.get("cue_end"), e)
+            return file_path_to_uri(db_path)
+        tok = proxy.register_file(container_path, transcode.FLAC_MIME,
+                                  start=src["cue_start"], end=src.get("cue_end"),
+                                  tags=tags)
+        return proxy.file_url(tok)
+
     from streaming.local import TRANSCODE_FORMATS
     if (file_format or "").upper() not in TRANSCODE_FORMATS:
         return file_path_to_uri(db_path)
@@ -501,6 +532,7 @@ class HqpBackend(PlayerBackend):
             from streaming.local import TRANSCODE_FORMATS
             for t, it in zip(hqp_tracks, snapshot):
                 if (it.source["kind"] != "file"
+                        or it.source.get("cue_start") is not None
                         or (it.source.get("format") or "").upper() in TRANSCODE_FORMATS):
                     continue
                 uri = t.get("uri") or ""
@@ -587,7 +619,7 @@ class HqpBackend(PlayerBackend):
         command socket hostage."""
         src = item.source
         if src["kind"] == "file":
-            return _owned_play_uri(item.media_file_id, src["path"], src.get("format"))
+            return _owned_play_uri(item)
         if src["kind"] == "proxy":
             from streaming import service as streaming_service
             return streaming_service.get_proxy().url_for(src["token"])
@@ -667,13 +699,17 @@ class HqpBackend(PlayerBackend):
             #    by remove(slot). When the last "drop" track is removed, K
             #    has shifted down by exactly (len(old_before) -
             #    len(new_before)), landing on new_status_idx as required.
+            # URIs come from _uri_for (outside the lock — it may transcode):
+            # a raw file_path_to_uri would hand HQPlayer the whole disc image
+            # for a CUE slice and an unplayable path for an m4a.
+            uri_by_id = {mid: self._uri_for(plan.items_by_id[mid])
+                         for mid in plan.new_after}
             with _hqp_lock:
                 hqp = _get_hqp()
                 for _ in range(len(plan.old_after)):
                     hqp.playlist_remove(plan.status_idx + 1)
                 for mid in plan.new_after:
-                    hqp.playlist_add(
-                        file_path_to_uri(plan.items_by_id[mid].source["path"]))
+                    hqp.playlist_add(uri_by_id[mid])
                 cursor = 1
                 new_before_remaining = list(plan.new_before)
                 for old_track in plan.old_before:
@@ -695,15 +731,14 @@ class HqpBackend(PlayerBackend):
         # hqp.stop() is mandatory — HQPlayer ignores PlaylistAdd(clear=True)
         # while playing, silently appending instead, which would double every
         # track and land select_track on the wrong slot.
+        uri_by_id = {mid: self._uri_for(plan.items_by_id[mid])
+                     for mid in plan.order}
         with _hqp_lock:
             hqp = _get_hqp()
             hqp.stop()
-            hqp.playlist_add(
-                file_path_to_uri(plan.items_by_id[plan.order[0]].source["path"]),
-                clear=True)
+            hqp.playlist_add(uri_by_id[plan.order[0]], clear=True)
             for mid in plan.order[1:]:
-                hqp.playlist_add(
-                    file_path_to_uri(plan.items_by_id[mid].source["path"]))
+                hqp.playlist_add(uri_by_id[mid])
             hqp.select_track(plan.new_status_idx)
             if plan.position > 0:
                 hqp.seek(plan.position)

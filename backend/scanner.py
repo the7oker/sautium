@@ -31,13 +31,14 @@ from db_pool import db_query
 from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, is_lossless as check_lossless
 from album_identity import assign_dir_albums
 from canon.identity import elect_analysis_source
+import cue_sheet
 
 logger = logging.getLogger(__name__)
 
 # Genre is album-grain: each imported media file adds +1 to its album's count
 # for every distinct genre in its file tag. A file is imported at most once
-# (skip_existing + file_path UNIQUE) and the whole file's writes share one
-# savepoint, so this never double-counts on re-scan.
+# (skip_existing + the (file_path, cue_start_seconds) UNIQUE) and the whole
+# file's writes share one savepoint, so this never double-counts on re-scan.
 _ALBUM_GENRE_UPSERT = text("""
     INSERT INTO album_genres (album_id, genre_id, source, count)
     VALUES (:album_id, :genre_id, 'filetag', 1)
@@ -67,6 +68,12 @@ def _classify_dirs(metadata_results):
     """
     by_dir = defaultdict(list)
     for fp, md in metadata_results:
+        # Cue slices are excluded: the sheet is the album authority for its
+        # folder, and the renumber-fold below is keyed by file path — N
+        # virtual entries sharing one image path would collapse onto one
+        # track number.
+        if md.get("cue_start_seconds") is not None:
+            continue
         by_dir[settings.translate_to_host_path(str(fp.parent))].append(md)
 
     existing = defaultdict(list)
@@ -248,12 +255,12 @@ class LibraryScanner:
         limit: Optional[int] = None,
         subpath: Optional[str] = None,
         cancel_check: Optional[callable] = None,
-    ) -> List[Path]:
+    ) -> Tuple[List[Path], List[Path]]:
         """
-        Recursively find all audio files in library.
+        Recursively find all audio files (and cue sheets) in library.
 
         Args:
-            limit: Maximum number of files to return (for testing).
+            limit: Maximum number of audio files to return (for testing).
             subpath: Optional subdirectory within library to scan.
             cancel_check: Optional callable returning True if the
                           enclosing scan was cancelled. Discovery can
@@ -263,7 +270,7 @@ class LibraryScanner:
                           instead of waiting until extraction phase.
 
         Returns:
-            List of Path objects for audio files.
+            (audio file Paths, .cue file Paths) — one walk collects both.
         """
         if subpath:
             scan_path = self.library_path / subpath
@@ -275,17 +282,23 @@ class LibraryScanner:
             logger.info(f"Searching for audio files in {scan_path}")
 
         audio_files = []
+        cue_files = []
         for i, file_path in enumerate(scan_path.rglob("*")):
             if cancel_check and (i & 0xFF) == 0 and cancel_check():
                 logger.info("Discovery cancelled by user")
                 break
-            if file_path.is_file() and file_path.suffix.lower() in AUDIO_EXTENSIONS:
+            if not file_path.is_file():
+                continue
+            suffix = file_path.suffix.lower()
+            if suffix in AUDIO_EXTENSIONS:
                 audio_files.append(file_path)
                 if limit and len(audio_files) >= limit:
                     break
+            elif suffix == ".cue":
+                cue_files.append(file_path)
 
-        logger.info(f"Found {len(audio_files)} audio files")
-        return audio_files
+        logger.info(f"Found {len(audio_files)} audio files, {len(cue_files)} cue sheets")
+        return audio_files, cue_files
 
     @staticmethod
     def get_or_create_genre(db: Session, genre_name: str) -> Genre:
@@ -395,6 +408,7 @@ class LibraryScanner:
             "skipped": 0,
             "errors": 0,
             "unique_tracks": 0,
+            "superseded": 0,
         }
         seen_track_ids = set()
 
@@ -408,7 +422,7 @@ class LibraryScanner:
         # ── Discover files ──────────────────────────────────────────
         if progress_cb:
             progress_cb("Discovering files...", stats)
-        audio_files = self.find_audio_files(limit=limit, subpath=subpath, cancel_check=cancel_check)
+        audio_files, cue_files = self.find_audio_files(limit=limit, subpath=subpath, cancel_check=cancel_check)
         if _cancelled():
             logger.info("Scan cancelled during discovery")
             return stats
@@ -419,18 +433,29 @@ class LibraryScanner:
 
         total_files = len(audio_files)
 
+        # str(walk path) -> CueSheet for every image a usable cue governs.
+        cue_map = cue_sheet.build_cue_map(cue_files, AUDIO_EXTENSIONS)
+
         # ── Filter already-imported files ───────────────────────────
-        existing_paths: set = set()
-        if skip_existing:
-            with get_db_context() as db:
-                existing_paths = set(
-                    row[0] for row in db.query(MediaFile.file_path).all()
-                )
-            logger.info(f"Found {len(existing_paths)} existing media files in database")
+        # A path's DB state is its SET of cue_start_seconds values ({None} for
+        # a plain whole-file row). A file is up to date only when that set
+        # matches what this scan would write — so a new/edited/deleted cue
+        # re-processes its image, and untouched files skip as before. Loaded
+        # regardless of skip_existing: cue reconciliation needs it too.
+        db_starts: Dict[str, set] = {}
+        with get_db_context() as db:
+            for path, start in db.query(
+                    MediaFile.file_path, MediaFile.cue_start_seconds).all():
+                db_starts.setdefault(path, set()).add(start)
+        logger.info(f"Found {len(db_starts)} existing media file paths in database")
 
         files_to_process: List[Path] = []
         for fp in audio_files:
-            if settings.translate_to_host_path(str(fp.absolute())) in existing_paths:
+            host_path = settings.translate_to_host_path(str(fp.absolute()))
+            sheet = cue_map.get(str(fp))
+            want = ({t.start_seconds for t in sheet.tracks} if sheet is not None
+                    else {None})
+            if skip_existing and db_starts.get(host_path) == want:
                 stats["skipped"] += 1
             else:
                 files_to_process.append(fp)
@@ -493,6 +518,31 @@ class LibraryScanner:
             _report(f"Done: {stats['added']} added, {stats['skipped']} skipped, {stats['errors']} errors")
             return stats
 
+        # ── Cue expansion + reconciliation plan ─────────────────────
+        # A cue-governed image becomes N virtual entries sharing its path;
+        # recon_plans records, per path, the start-set this scan is about to
+        # write so every OTHER row of that path (a legacy whole-image row, a
+        # stale boundary set, slices of a deleted cue) is removed first.
+        # Plans are built only from files whose metadata extraction succeeded —
+        # an unreadable image must not destroy its existing DB state.
+        recon_plans: Dict[str, set] = {}
+        expanded: List[Tuple[Path, Dict[str, Any]]] = []
+        for fp, md in metadata_results:
+            sheet = cue_map.get(str(fp))
+            host_path = md["file_path"]
+            if sheet is None:
+                expanded.append((fp, md))
+                if any(s is not None for s in db_starts.get(host_path, ())):
+                    recon_plans[host_path] = {None}
+                continue
+            starts = {t.start_seconds for t in sheet.tracks}
+            for tr in sheet.tracks:
+                expanded.append((fp, cue_sheet.synthesize_metadata(
+                    md, sheet, tr, md.get("duration_seconds"))))
+            if db_starts.get(host_path, set()) - starts:
+                recon_plans[host_path] = starts
+        metadata_results = expanded
+
         # ── Phase 2: import to database (single-threaded, cached) ───
         # If cancel was pressed during Phase 1, we still import whatever
         # metadata we managed to extract — cancel means "stop extracting",
@@ -516,6 +566,32 @@ class LibraryScanner:
         # Folder→albums pre-pass: resolve box-set / singles / mix directories
         # once (album_identity.assign_dir_albums).
         dir_albums = _classify_dirs(metadata_results)
+
+        # ── Cue reconciliation pre-pass ─────────────────────────────
+        # Deletes committed before the import starts: if the scan dies in
+        # between, the next scan's start-set inequality re-processes the
+        # image, so the two passes stay idempotent as a pair. -1 encodes the
+        # NULL start (chk_mf_cue_span keeps real starts >= 0).
+        superseded_tracks: set = set()
+        superseded_variants: set = set()
+        if recon_plans:
+            with get_db_context() as db:
+                for host_path, keep in recon_plans.items():
+                    keep_arr = [-1.0 if s is None else s for s in keep]
+                    rows = db.execute(text("""
+                        DELETE FROM media_files
+                         WHERE file_path = :path
+                           AND COALESCE(cue_start_seconds, -1.0) <> ALL(:keep)
+                        RETURNING track_id, album_variant_id
+                    """), {"path": host_path, "keep": keep_arr}).fetchall()
+                    for track_id, variant_id in rows:
+                        superseded_tracks.add(str(track_id))
+                        superseded_variants.add(variant_id)
+                        stats["superseded"] += 1
+                db.commit()
+            if stats["superseded"]:
+                logger.info(f"Cue reconciliation: removed {stats['superseded']} "
+                            f"superseded media_files rows across {len(recon_plans)} paths")
 
         with get_db_context() as db:
             for file_path, metadata in tqdm(
@@ -553,10 +629,13 @@ class LibraryScanner:
                     # Box set / singles / mix folder → album identity comes from
                     # the directory pre-pass (per-group title + credit). The
                     # per-track artist (track_artist_name) is untouched, so track
-                    # identity stands.
-                    asg = dir_albums.get(
-                        settings.translate_to_host_path(str(file_path.parent)), {}
-                    ).get(metadata["file_path"])
+                    # identity stands. Cue slices bypass it — the sheet is the
+                    # album authority (they are excluded from _classify_dirs too).
+                    asg = None
+                    if metadata.get("cue_start_seconds") is None:
+                        asg = dir_albums.get(
+                            settings.translate_to_host_path(str(file_path.parent)), {}
+                        ).get(metadata["file_path"])
                     if asg:
                         album_title, album_artist_name = asg[0], asg[1]
 
@@ -720,6 +799,8 @@ class LibraryScanner:
                             bitrate=metadata.get("bitrate"),
                             channels=metadata.get("channels"),
                             duration_seconds=metadata.get("duration_seconds"),
+                            cue_start_seconds=metadata.get("cue_start_seconds"),
+                            cue_end_seconds=metadata.get("cue_end_seconds"),
                             track_number=(asg[2] if asg and asg[2] is not None
                                           else metadata.get("track_number")),
                             disc_number=(asg[3] if asg and asg[3] is not None
@@ -759,6 +840,45 @@ class LibraryScanner:
                 except Exception as e:
                     logger.error(f"Error processing {file_path}: {e}")
                     stats["errors"] += 1
+
+            # ── Cue supersede post-pass ─────────────────────────────
+            # Runs after the re-import so a track whose slices merely moved
+            # keeps its row (and listening history). Tracks left with no
+            # files die WITH their analysis: the cue replaces the material,
+            # a whole-image embedding must not survive as a spare (contrast
+            # prune_missing_files, which spares vanished-but-real rips).
+            # Orphan cleanup is SCOPED to the affected ids — the global
+            # LEFT JOIN sweeps prune uses would take phantom albums with them.
+            if superseded_tracks:
+                tids = list(superseded_tracks)
+                r = db.execute(text("""
+                    DELETE FROM tracks WHERE id = ANY(CAST(:tids AS uuid[]))
+                      AND NOT EXISTS (SELECT 1 FROM media_files mf
+                                      WHERE mf.track_id = tracks.id)
+                """), {"tids": tids})
+                logger.info(f"Cue supersede: removed {r.rowcount} whole-image tracks")
+
+                for tid in db.execute(text("""
+                    SELECT id FROM tracks WHERE id = ANY(CAST(:tids AS uuid[]))
+                """), {"tids": tids}).scalars():
+                    elect_analysis_source(db, tid)
+
+                vids = list(superseded_variants)
+                affected_albums = list(db.execute(text("""
+                    SELECT DISTINCT album_id FROM album_variants
+                    WHERE id = ANY(:vids)
+                """), {"vids": vids}).scalars())
+                db.execute(text("""
+                    DELETE FROM album_variants WHERE id = ANY(:vids)
+                      AND NOT EXISTS (SELECT 1 FROM media_files mf
+                                      WHERE mf.album_variant_id = album_variants.id)
+                """), {"vids": vids})
+                if affected_albums:
+                    db.execute(text("""
+                        DELETE FROM albums WHERE id = ANY(CAST(:aids AS uuid[]))
+                          AND NOT EXISTS (SELECT 1 FROM album_variants av
+                                          WHERE av.album_id = albums.id)
+                    """), {"aids": [str(a) for a in affected_albums]})
 
             # Final commit
             db.commit()
@@ -820,7 +940,7 @@ def prune_missing_files(
         progress_cb("Discovering files on disk...")
 
     scanner = LibraryScanner()
-    disk_files = scanner.find_audio_files(subpath=subpath, cancel_check=cancel_check)
+    disk_files, _cues = scanner.find_audio_files(subpath=subpath, cancel_check=cancel_check)
     if cancel_check and cancel_check():
         logger.info("Prune cancelled during discovery")
         return stats

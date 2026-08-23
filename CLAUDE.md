@@ -157,6 +157,14 @@ See:
 - **Playback uses `media_files.id` (SERIAL)**, not `tracks.id` (UUID).
   The track UUID is for logical identity; the media_file id is for the
   physical audio file on disk.
+- **CUE images = N virtual `media_files` rows on one `file_path`**, bounded
+  by `cue_start_seconds`/`cue_end_seconds` (NULL for regular files, end NULL
+  = to EOF; `UNIQUE NULLS NOT DISTINCT (file_path, cue_start_seconds)`).
+  The cue governs the image (scanner reconciliation supersedes whole-image
+  rows + their analysis); a slice is always consumed as its own resource —
+  ffmpeg `-ss/-t` locally, a cached FLAC cut (`flac_slice_path_for_file`)
+  for HQPlayer/DLNA/browser. pcm_hash/chromaprint are per-slice. See
+  `PROGRESS.md` § CUE images.
 - **`audio_features.vocal_instrumental` is unreliable.** For vocal/
   instrumental queries, use `artists.is_vocalist` (classified from bio
   keywords). See `PROGRESS.md` design decisions.

@@ -587,6 +587,17 @@ class DlnaBackend(PlayerBackend):
         if src["kind"] == "file":
             proxy = streaming_service.ensure_proxy()
             path = settings.translate_to_local_path(src["path"])
+            if src.get("cue_start") is not None:
+                # CUE slice: the proxy serves a cached FLAC cut (produced
+                # lazily on the renderer's first GET); distinct (path, span)
+                # keys keep slice URLs distinct for URI-based auto-advance.
+                from streaming import transcode
+                tok = proxy.register_file(
+                    path, transcode.FLAC_MIME,
+                    start=src["cue_start"], end=src.get("cue_end"),
+                    tags={"title": item.title, "artist": item.artist,
+                          "album": item.album, "track": item.track_number})
+                return f"http://{host}:{proxy.port}/file/{tok}{qs}"
             mime = _MIME_BY_FORMAT.get((src.get("format") or "").upper(),
                                        "application/octet-stream")
             tok = proxy.register_file(path, mime)

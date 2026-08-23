@@ -71,13 +71,22 @@ _MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53,
 _KEY_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 
-def load_full_track_48k(local_path: str) -> np.ndarray:
+def load_full_track_48k(local_path: str, cue_start: Optional[float] = None,
+                        cue_end: Optional[float] = None) -> np.ndarray:
     """Decode the whole file to 48kHz mono float32 via ffmpeg — one decode
     path shared by the scanner and backfills so scores stay comparable.
     ffmpeg outruns audioread severalfold on mp3 (which has no seek table and
-    must be decoded sequentially anyway)."""
-    cmd = ["ffmpeg", "-v", "error", "-i", local_path,
-           "-ac", "1", "-ar", "48000", "-f", "f32le", "pipe:1"]
+    must be decoded sequentially anyway). cue_start/cue_end bound a CUE image
+    slice: -ss before -i input-seeks (accurate_seek drops samples to the exact
+    position), so the returned array IS the track — every downstream window
+    grid stays array-relative and slice-agnostic."""
+    cmd = ["ffmpeg", "-v", "error"]
+    if cue_start is not None:
+        cmd += ["-ss", f"{cue_start:.6f}"]
+    cmd += ["-i", local_path]
+    if cue_end is not None:
+        cmd += ["-t", f"{cue_end - (cue_start or 0.0):.6f}"]
+    cmd += ["-ac", "1", "-ar", "48000", "-f", "f32le", "pipe:1"]
     out = subprocess.run(cmd, capture_output=True, check=True, timeout=300).stdout
     audio = np.frombuffer(out, dtype=np.float32).copy()
     if not len(audio):
@@ -405,12 +414,13 @@ class AudioAnalyzer:
 
         return results
 
-    def _load_and_extract_librosa(self, file_path: str, duration_seconds: float = None) -> Optional[Dict]:
+    def _load_and_extract_librosa(self, file_path: str, duration_seconds: float = None,
+                                  cue_start: float = None, cue_end: float = None) -> Optional[Dict]:
         """Load the whole track + extract librosa features (I/O + CPU).
         Thread-safe."""
         try:
             local_path = settings.translate_to_local_path(file_path)
-            y_48k = load_full_track_48k(local_path)
+            y_48k = load_full_track_48k(local_path, cue_start, cue_end)
             y_librosa = librosa.resample(y_48k, orig_sr=self.clap_sr, target_sr=self.librosa_sr)
             librosa_features = self._librosa_features(y_librosa)
             del y_librosa
@@ -468,7 +478,8 @@ class AudioAnalyzer:
                     SELECT t.id as track_id, mf.id as media_file_id,
                            mf.file_path, mf.bit_depth,
                            mf.sample_rate as mf_sample_rate, mf.is_lossless,
-                           mf.duration_seconds
+                           mf.duration_seconds,
+                           mf.cue_start_seconds, mf.cue_end_seconds
                     FROM media_files mf
                     JOIN tracks t ON t.id = mf.track_id
                     WHERE mf.is_analysis_source = true
@@ -485,7 +496,8 @@ class AudioAnalyzer:
                     SELECT t.id as track_id, mf.id as media_file_id,
                            mf.file_path, mf.bit_depth,
                            mf.sample_rate as mf_sample_rate, mf.is_lossless,
-                           mf.duration_seconds
+                           mf.duration_seconds,
+                           mf.cue_start_seconds, mf.cue_end_seconds
                     FROM media_files mf
                     JOIN tracks t ON t.id = mf.track_id
                     LEFT JOIN audio_features af ON af.track_id = t.id
@@ -570,6 +582,7 @@ class AudioAnalyzer:
                     _io_pool.submit(
                         self._load_and_extract_librosa, row.file_path,
                         float(row.duration_seconds) if row.duration_seconds else None,
+                        row.cue_start_seconds, row.cue_end_seconds,
                     ): row
                     for row in batch_rows
                 }
@@ -633,7 +646,8 @@ class AudioAnalyzer:
                                 db, row.track_id, row.media_file_id,
                                 row.file_path, row.mf_sample_rate,
                                 row.bit_depth, row.is_lossless,
-                                row.duration_seconds)
+                                row.duration_seconds,
+                                row.cue_start_seconds, row.cue_end_seconds)
                             existing = db.query(AudioFeature).filter(
                                 AudioFeature.track_id == row.track_id
                             ).first()

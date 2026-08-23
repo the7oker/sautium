@@ -655,7 +655,9 @@ class TrackEnrichmentPipeline:
                 from audio_analysis import load_full_track_48k
                 local_path = settings.translate_to_local_path(analysis_file.file_path)
                 try:
-                    audio_48k = load_full_track_48k(local_path)
+                    audio_48k = load_full_track_48k(
+                        local_path, analysis_file.cue_start_seconds,
+                        analysis_file.cue_end_seconds)
                 except Exception as e:
                     logger.error(f"Failed to load audio {local_path}: {e}")
                     audio_48k = None
@@ -723,7 +725,9 @@ class TrackEnrichmentPipeline:
                         db, track.id, analysis_file.id,
                         analysis_file.file_path, analysis_file.sample_rate,
                         analysis_file.bit_depth, analysis_file.is_lossless,
-                        analysis_file.duration_seconds)
+                        analysis_file.duration_seconds,
+                        analysis_file.cue_start_seconds,
+                        analysis_file.cue_end_seconds)
                     existing_af = db.query(AudioFeature).filter(
                         AudioFeature.track_id == track.id
                     ).first()

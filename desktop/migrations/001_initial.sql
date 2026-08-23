@@ -398,7 +398,7 @@ CREATE TABLE IF NOT EXISTS media_files (
     id SERIAL PRIMARY KEY,
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     album_variant_id INTEGER NOT NULL REFERENCES album_variants(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    file_path TEXT NOT NULL UNIQUE,
+    file_path TEXT NOT NULL,
     file_format audio_file_format DEFAULT 'FLAC',
     is_lossless BOOLEAN DEFAULT TRUE,
     file_size_bytes BIGINT,
@@ -410,6 +410,13 @@ CREATE TABLE IF NOT EXISTS media_files (
     duration_seconds NUMERIC(10, 2),
     track_number INTEGER,
     disc_number INTEGER DEFAULT 1,
+    -- CUE image slice: a classic EAC/XLD rip (one audio image + .cue) imports as
+    -- N virtual rows sharing one file_path. [start, end) in seconds within the
+    -- image; NULL start = a regular whole-file row; NULL end = to EOF (the
+    -- image's last cue track). Span: INDEX 01 of track N -> INDEX 01 of N+1
+    -- (the pregap rides at the previous track's tail; CD-linear gapless).
+    cue_start_seconds DOUBLE PRECISION,
+    cue_end_seconds DOUBLE PRECISION,
     is_analysis_source BOOLEAN DEFAULT FALSE,
     play_count INTEGER DEFAULT 0,
     last_played_at TIMESTAMPTZ,
@@ -425,6 +432,12 @@ CREATE TABLE IF NOT EXISTS media_files (
     cover_processed_at TIMESTAMPTZ,                  -- NULL = pending cover resolution
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_media_files_path_cue
+        UNIQUE NULLS NOT DISTINCT (file_path, cue_start_seconds),
+    CONSTRAINT chk_mf_cue_span CHECK (
+        (cue_start_seconds IS NULL AND cue_end_seconds IS NULL)
+        OR (cue_start_seconds >= 0
+            AND (cue_end_seconds IS NULL OR cue_end_seconds > cue_start_seconds))),
     CONSTRAINT chk_mf_file_size CHECK (file_size_bytes IS NULL OR file_size_bytes >= 0),
     CONSTRAINT chk_mf_duration CHECK (duration_seconds IS NULL OR duration_seconds >= 0),
     CONSTRAINT chk_mf_play_count CHECK (play_count >= 0)

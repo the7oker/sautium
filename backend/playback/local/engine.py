@@ -295,12 +295,16 @@ class Engine:
 
         if not self._open_stream(rate, channels):
             return
+        cue_start = item.source.get("cue_start") or 0.0
+        cue_end = item.source.get("cue_end")
+        cue_dur = (cue_end - cue_start) if cue_end is not None else None
         self._current = item
         self._index = index
-        self._length = item.duration_seconds or duration or 0.0
+        self._length = item.duration_seconds or cue_dur or duration or 0.0
         self._position_offset = seek_to
         self._boundaries = [(index, 0, self._length, item)]
-        self._spawn_ffmpeg(src, rate, channels, seek_to)
+        self._spawn_ffmpeg(src, rate, channels, seek_to,
+                           cue_start=cue_start, cue_dur=cue_dur)
         if not self._prefill_and_start():
             return
         self._track_failures = 0
@@ -338,12 +342,21 @@ class Engine:
             return proxy.url_for(src["token"]) if proxy else None
         return src.get("uri")
 
-    def _spawn_ffmpeg(self, src: str, rate: int, channels: int, seek_to: float) -> None:
+    def _spawn_ffmpeg(self, src: str, rate: int, channels: int, seek_to: float,
+                      cue_start: float = 0.0, cue_dur: Optional[float] = None) -> None:
+        """cue_start/cue_dur bound a CUE image slice: the decode starts at
+        cue_start (+ seek) and stops after the slice, so ffmpeg EOF drives the
+        same gapless advance as a real file ending — positions stay
+        track-relative because the output starts AT the slice."""
         ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
         cmd = [ffmpeg, "-v", "error"]
-        if seek_to > 0:
-            cmd += ["-ss", f"{seek_to:.3f}"]
-        cmd += ["-i", src, "-f", "s32le", "-acodec", "pcm_s32le",
+        abs_ss = cue_start + seek_to
+        if abs_ss > 0:
+            cmd += ["-ss", f"{abs_ss:.3f}"]
+        cmd += ["-i", src]
+        if cue_dur is not None:
+            cmd += ["-t", f"{max(0.0, cue_dur - seek_to):.3f}"]
+        cmd += ["-f", "s32le", "-acodec", "pcm_s32le",
                 "-ac", str(channels), "-ar", str(rate), "pipe:1"]
         self._ffmpeg = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                         stderr=subprocess.DEVNULL)
@@ -511,11 +524,15 @@ class Engine:
             index += 1
         rate, channels, duration = probed
         if rate == self._stream_rate and channels == self._stream_channels:
+            cue_start = item.source.get("cue_start") or 0.0
+            cue_end = item.source.get("cue_end")
+            cue_dur = (cue_end - cue_start) if cue_end is not None else None
             with self._written_lock:
                 start = self._written_frames
             self._boundaries.append(
-                (index, start, item.duration_seconds or duration or 0.0, item))
-            self._spawn_ffmpeg(src, rate, channels, 0.0)
+                (index, start, item.duration_seconds or cue_dur or duration or 0.0, item))
+            self._spawn_ffmpeg(src, rate, channels, 0.0,
+                               cue_start=cue_start, cue_dur=cue_dur)
             self._track_failures = 0
         else:
             self._pending_switch = index

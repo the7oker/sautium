@@ -15,6 +15,12 @@ seconds' encode on the first request for a track — which the browser's blob
 prefetch warms ahead for everything but the very first track. The cache is
 LRU-bounded; Opus tracks are small (~3-6 MB), so a modest budget holds a long
 queue.
+
+The same cache also holds lossless FLAC cuts of CUE image slices
+(`flac_slice_path_for_file`) — the slice's file-shaped identity for every
+HTTP consumer (HQPlayer, DLNA, browser). The Opus tiers chain off the cut
+(cut first, then Opus-of-cut), so slicing has exactly one implementation.
+FLAC cuts are ~10× Opus size, hence the budget.
 """
 
 import hashlib
@@ -33,9 +39,10 @@ logger = logging.getLogger(__name__)
 # encoder) is the high-quality one; VBR is Opus's sweet spot.
 OPUS_BITRATES = {"opus_192": 192, "opus_96": 96}
 MIME = "audio/ogg"
+FLAC_MIME = "audio/flac"
 
 _CACHE_DIR = Path(__file__).parent.parent / "data" / "transcode_cache"
-_BUDGET_BYTES = 512 * 1024 * 1024        # ~512 MB of cached Opus
+_BUDGET_BYTES = 1024 * 1024 * 1024       # Opus tracks + FLAC slice cuts
 _index_lock = threading.Lock()
 _key_locks: dict[str, threading.Lock] = {}
 
@@ -53,17 +60,18 @@ def _key_lock(key: str) -> threading.Lock:
 
 
 def _evict_if_needed() -> None:
-    """LRU by access time — drop the least-recently-served Opus files until the
-    cache is back under budget. Runs under _index_lock."""
+    """LRU by access time — drop the least-recently-served cache files until
+    the cache is back under budget. Runs under _index_lock."""
     files = []
     total = 0
-    for p in _CACHE_DIR.glob("*.ogg"):
-        try:
-            st = p.stat()
-        except OSError:
-            continue
-        files.append((st.st_atime, st.st_size, p))
-        total += st.st_size
+    for pattern in ("*.ogg", "*.flac"):
+        for p in _CACHE_DIR.glob(pattern):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            files.append((st.st_atime, st.st_size, p))
+            total += st.st_size
     if total <= _BUDGET_BYTES:
         return
     for _atime, size, p in sorted(files):        # oldest access first
@@ -76,22 +84,25 @@ def _evict_if_needed() -> None:
             break
 
 
-def _run_ffmpeg(args_in: list, bitrate: int, out_path: Path,
+def _opus_args(bitrate: int) -> list:
+    return ["-c:a", "libopus", "-b:a", f"{bitrate}k", "-vbr", "on",
+            "-application", "audio", "-f", "ogg"]
+
+
+def _run_ffmpeg(args_in: list, out_args: list, out_path: Path,
                 stdin_bytes: Optional[bytes]) -> None:
+    """args_in end with the -i input; out_args carry map/metadata/codec/format
+    (an explicit -f is mandatory — the .part temp name defeats inference)."""
+    tmp = out_path.parent / (out_path.name + ".part")
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-           *args_in,
-           "-vn", "-c:a", "libopus", "-b:a", f"{bitrate}k", "-vbr", "on",
-           "-application", "audio", "-f", "ogg", str(out_path)]
-    tmp = out_path.with_suffix(".ogg.part")
-    cmd[-1] = str(tmp)
+           *args_in, "-vn", *out_args, str(tmp)]
     try:
         subprocess.run(cmd, input=stdin_bytes, check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         os.replace(tmp, out_path)               # atomic — no half file is ever served
     except subprocess.CalledProcessError as e:
-        tmp.unlink(missing_ok=True)
         err = (e.stderr or b"").decode(errors="replace")[-300:]
-        raise RuntimeError(f"opus transcode failed: {err}") from e
+        raise RuntimeError(f"transcode failed: {err}") from e
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -115,8 +126,9 @@ def opus_path_for_file(source_path: str, quality: str, ss: float = 0.0) -> Optio
     except OSError:
         return None
     key = hashlib.sha1(f"{source_path}|{mtime}|{bitrate}|{int(ss)}".encode()).hexdigest()
-    return _produce(key, bitrate, args_in=_seek_args(ss, ["-i", source_path]),
-                    stdin_bytes=None)
+    return _produce(key, suffix=".ogg", label=f"opus {bitrate}k",
+                    args_in=_seek_args(ss, ["-i", source_path]),
+                    out_args=_opus_args(bitrate), stdin_bytes=None)
 
 
 def opus_path_for_bytes(token: str, source_bytes: bytes, quality: str,
@@ -128,13 +140,36 @@ def opus_path_for_bytes(token: str, source_bytes: bytes, quality: str,
     if bitrate is None:
         return None
     key = hashlib.sha1(f"{token}|{bitrate}|{int(ss)}".encode()).hexdigest()
-    return _produce(key, bitrate, args_in=_seek_args(ss, ["-i", "pipe:0"]),
-                    stdin_bytes=source_bytes)
+    return _produce(key, suffix=".ogg", label=f"opus {bitrate}k",
+                    args_in=_seek_args(ss, ["-i", "pipe:0"]),
+                    out_args=_opus_args(bitrate), stdin_bytes=source_bytes)
 
 
-def _produce(key: str, bitrate: int, *, args_in: list,
-             stdin_bytes: Optional[bytes]) -> str:
-    out = _CACHE_DIR / f"{key}.ogg"
+def flac_slice_path_for_file(source_path: str, start: float,
+                             end: Optional[float], tags: dict) -> str:
+    """Cached lossless FLAC cut [start, end) of an owned CUE image (end=None
+    = to EOF). Keyed by path + mtime + exact bounds; tags (title/artist/
+    album/track) are display-only and don't key — the first producer's stick.
+    -map 0:a:0 + -map_metadata -1 keep the image's own tags and embedded art
+    out of every slice; explicit -metadata gives HQPlayer proper names."""
+    mtime = int(os.path.getmtime(source_path))
+    span = f"{start:.6f}|{'' if end is None else format(end, '.6f')}"
+    key = hashlib.sha1(f"{source_path}|{mtime}|slice|{span}".encode()).hexdigest()
+    out_args = [] if end is None else ["-t", f"{end - start:.6f}"]
+    out_args += ["-map", "0:a:0", "-map_metadata", "-1"]
+    for tag in ("title", "artist", "album", "track"):
+        value = tags.get(tag)
+        if value not in (None, ""):
+            out_args += ["-metadata", f"{tag}={value}"]
+    out_args += ["-c:a", "flac", "-f", "flac"]
+    return _produce(key, suffix=".flac", label="flac slice",
+                    args_in=["-ss", f"{start:.6f}", "-i", source_path],
+                    out_args=out_args, stdin_bytes=None)
+
+
+def _produce(key: str, *, suffix: str, label: str, args_in: list,
+             out_args: list, stdin_bytes: Optional[bytes]) -> str:
+    out = _CACHE_DIR / f"{key}{suffix}"
     if out.exists():
         os.utime(out, None)                     # bump access time for LRU
         return str(out)
@@ -144,8 +179,8 @@ def _produce(key: str, bitrate: int, *, args_in: list,
             return str(out)
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         started = time.monotonic()
-        _run_ffmpeg(args_in, bitrate, out, stdin_bytes)
-        logger.info("opus %dk transcode in %.1fs (%s)", bitrate,
+        _run_ffmpeg(args_in, out_args, out, stdin_bytes)
+        logger.info("%s transcode in %.1fs (%s)", label,
                     time.monotonic() - started, out.name)
     with _index_lock:
         _evict_if_needed()

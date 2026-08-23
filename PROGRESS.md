@@ -44,6 +44,25 @@ implementation details live in the code, DB and git history.
 - **ENUM over VARCHAR+CHECK** for `artists.gender` and `artists.is_vocalist`.
   Type-level enforcement, smaller on-disk footprint, self-documenting schema
   (`\d+ artists` shows allowed values).
+- **CUE images import as virtual tracks, not split files**. An EAC/XLD rip
+  (one .ape/.flac/.mp3 image + .cue) becomes N `media_files` rows sharing one
+  `file_path`, bounded by `cue_start_seconds`/`cue_end_seconds` (NULL for
+  regular files; `UNIQUE NULLS NOT DISTINCT (file_path, cue_start_seconds)`).
+  Because each slice is its own row, playback keying, analysis-source
+  election, tracking and browser identity all worked unchanged. Two rules
+  carry the design: *the cue governs the image* (scanner reconciliation
+  supersedes a legacy whole-image row AND its whole-image analysis — no
+  embeddings-spare there, unlike prune), and *a slice is always consumed as
+  its own resource* — local engine decodes with `-ss/-t`, every HTTP consumer
+  (HQPlayer, DLNA, browser) gets a cached tagged FLAC cut
+  (`transcode.flac_slice_path_for_file`, Opus tiers chain off the cut), so
+  positions are track-relative everywhere and the tracker never learned CUE
+  exists. Sheet defects are tolerated: FILE extension/casing lies resolve
+  against the real dir listing, encodings fall back utf-8-sig→cp1251→cp1252,
+  multi-FILE cues (already-split rips) are skipped whole. pcm_hash/chromaprint
+  are computed per-slice, so a slice's content address equals a properly split
+  rip of the same disc — cross-rip P2P anchors converge; grid stays v1
+  (windows are material-relative).
 
 ### Embeddings & search
 

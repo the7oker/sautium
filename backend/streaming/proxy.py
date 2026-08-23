@@ -37,13 +37,18 @@ _UNSET_TIMEOUT = object()   # wait_ready sentinel: "use the proxy default"
 
 @dataclass
 class _FileEntry:
-    """Disk-backed serving (owned tracks for DLNA renderers): the proxy
-    streams straight from the file handle — never slurped into RAM, unlike
-    preview buffers."""
+    """Disk-backed serving (owned tracks for DLNA renderers/HQPlayer): the
+    proxy streams straight from the file handle — never slurped into RAM,
+    unlike preview buffers. A CUE slice entry (start is not None) serves the
+    cached FLAC cut of [start, end) produced on first GET, so size resolves
+    at serve time."""
     token: str
     path: str
     mime: str
-    size: int
+    size: Optional[int] = None
+    start: Optional[float] = None
+    end: Optional[float] = None
+    tags: Optional[dict] = None
 
 
 @dataclass
@@ -94,7 +99,7 @@ class MediaProxy:
         # by the manager. Work bound to any other generation has no consumer left.
         self._live_generation: Optional[int] = None
         self._files: dict[str, _FileEntry] = {}          # /file/{token} registry
-        self._file_tokens_by_path: dict[str, str] = {}   # idempotent re-registration
+        self._file_tokens_by_key: dict[tuple, str] = {}  # (path, start, end) → token
         self._blobs: dict[str, tuple[bytes, str]] = {}   # /art/{token} → (data, mime)
         self._blob_tokens_by_key: dict[str, str] = {}    # cover key → token
         self._httpd: Optional[ThreadingHTTPServer] = None
@@ -113,28 +118,36 @@ class MediaProxy:
 
     # ---- owned-file serving (DLNA renderers pull these) -------------------
 
-    def register_file(self, path: str, mime: str) -> str:
-        """Expose one owned file at /file/{token}. Idempotent per path —
-        re-registering returns the existing token (a renderer may still be
-        mid-stream on it). Tokens are unguessable; only registered files are
-        reachable, never the library at large."""
+    def register_file(self, path: str, mime: str, *,
+                      start: Optional[float] = None, end: Optional[float] = None,
+                      tags: Optional[dict] = None) -> str:
+        """Expose one owned file — or a CUE slice [start, end) of it — at
+        /file/{token}. Idempotent per (path, start, end) — re-registering
+        returns the existing token (a renderer may still be mid-stream on it),
+        and two slices of one image get DISTINCT tokens so URI-based
+        auto-advance detection keeps working. Tokens are unguessable; only
+        registered files are reachable, never the library at large."""
         import os
+        key = (path, start, end)
         with self._lock:
-            tok = self._file_tokens_by_path.get(path)
+            tok = self._file_tokens_by_key.get(key)
             if tok:
                 return tok
             tok = secrets.token_urlsafe(12)
-            self._files[tok] = _FileEntry(tok, path, mime, os.path.getsize(path))
-            self._file_tokens_by_path[path] = tok
+            size = os.path.getsize(path) if start is None else None
+            self._files[tok] = _FileEntry(tok, path, mime, size,
+                                          start=start, end=end, tags=tags)
+            self._file_tokens_by_key[key] = tok
             return tok
 
     def clear_files(self, keep_paths: Optional[set] = None) -> None:
-        """Drop file registrations (queue replaced) except `keep_paths`."""
+        """Drop file registrations (queue replaced) except entries whose
+        path is in `keep_paths`."""
         with self._lock:
             keep = keep_paths or set()
-            for path, tok in list(self._file_tokens_by_path.items()):
-                if path not in keep:
-                    del self._file_tokens_by_path[path]
+            for key, tok in list(self._file_tokens_by_key.items()):
+                if key[0] not in keep:
+                    del self._file_tokens_by_key[key]
                     self._files.pop(tok, None)
 
     def file_entry(self, token: str) -> Optional[_FileEntry]:
@@ -432,6 +445,9 @@ class MediaProxy:
     def url_for(self, token: str) -> str:
         return f"http://{self._advertised_host}:{self.port}/preview/{token}"
 
+    def file_url(self, token: str) -> str:
+        return f"http://{self._advertised_host}:{self.port}/file/{token}"
+
     def preview_meta(self, uri: str) -> Optional[dict]:
         """Provider metadata for a current-session preview URI — Now Playing /
         the queue panel use it because HQPlayer only knows the track as
@@ -629,17 +645,32 @@ def _make_handler(proxy: MediaProxy):
             return None
 
         def _serve_file(self, fe, *, body: bool):
+            import os
             path, mime, size = fe.path, fe.mime, fe.size
+            if fe.start is not None:
+                # CUE slice: the cached FLAC cut IS the resource — the raw
+                # image would play the whole disc, so there is no lossless
+                # fallback on failure here, only an error.
+                try:
+                    path = transcode.flac_slice_path_for_file(
+                        fe.path, fe.start, fe.end, fe.tags or {})
+                except Exception as e:
+                    logger.error("flac slice failed %s [%s, %s): %s",
+                                 fe.path, fe.start, fe.end, e)
+                    self.send_error(500)
+                    return
+                mime, size = transcode.FLAC_MIME, os.path.getsize(path)
             q = self._q()
             if transcode.wants_opus(q):
                 try:
-                    opus = transcode.opus_path_for_file(fe.path, q, ss=self._ss())
+                    # For a slice `path` is already the cut, so the Opus tier
+                    # chains off it with slice-relative ?ss for free.
+                    opus = transcode.opus_path_for_file(path, q, ss=self._ss())
                     if opus:
-                        import os
                         path, mime, size = opus, transcode.MIME, os.path.getsize(opus)
                 except Exception as e:
                     logger.warning("opus transcode failed %s — lossless: %s",
-                                   fe.path, e)
+                                   path, e)
             self._serve_disk_file(path, mime, size, body=body)
 
         def _serve_disk_file(self, path: str, mime: str, size: int, *, body: bool):

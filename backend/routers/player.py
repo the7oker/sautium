@@ -1385,7 +1385,10 @@ def _add_owned(rows: list, *, clear_first: bool, position: str = "end") -> int:
     finish async)."""
     from streaming.local import TRANSCODE_FORMATS
     items = queue_mod.items_for_media_ids([r["id"] for r in rows])
+    # CUE slices roll like m4a: each needs its FLAC cut encoded at
+    # _uri_for time, and a whole album of cuts must not block the add.
     needs_roll = any((it.source.get("format") or "").upper() in TRANSCODE_FORMATS
+                     or it.source.get("cue_start") is not None
                      for it in items)
 
     if not needs_roll:
