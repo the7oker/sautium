@@ -134,11 +134,16 @@ implementation details live in the code, DB and git history.
   (AGENTS.md is not re-read on `exec resume`); no `--mcp-config` → the
   SAME mcp-docker/windows.json is translated at spawn into dotted `-c
   mcp_servers.*` overrides + `--ignore-user-config` (analog of
-  `--strict-mcp-config`); no `--disallowed-tools` → shell fenced by
-  `--disable shell_tool` + `--sandbox read-only` when a once-per-process
-  `codex sandbox` probe passes (Landlock in containers is a kernel
-  lottery; fallback is the dangerous bypass, same trust as Claude's) +
-  a prompt-level prohibition. Auth is auth.json-ONLY — a bare
+  `--strict-mcp-config`); no `--disallowed-tools`, and no
+  sandbox either — under ANY sandbox mode `codex exec` auto-denies every
+  MCP tool call ("requires approval, but approval policy is never";
+  measured on macOS Seatbelt, upstream openai/codex#24135), so the
+  dangerous bypass is mandatory, not a fallback. Actual fences:
+  `--disable shell_tool` (verified — the model has no shell), web search
+  off by default, prompt-level prohibition. Known residual: the
+  apply_patch file tool has no off switch (feature flag unknown,
+  include_apply_patch_tool=false inert — both measured) and stays
+  reachable behind the prompt fence. Auth is auth.json-ONLY — a bare
   OPENAI_API_KEY env is ignored by the CLI (measured, 0.149), so the
   runner mints auth.json via `codex login --with-api-key` when needed,
   and POPS the env keys when auth.json exists (mirror of the

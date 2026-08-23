@@ -616,10 +616,11 @@ Do NOT rely solely on audio features — an artist can sound similar but belong 
 # sandbox on top. The counts rule replaces the {library_size} injection
 # the Claude prompt gets (see below).
 _CODEX_TOOL_DISCIPLINE = """\
-- You have NO shell, NO file access, NO web browsing for this job. You are \
-NOT working on a code repository — ignore any coding-agent instincts. Do ALL \
-work exclusively through the MCP tools (postgres SQL + assistant search/\
-playback). Never run commands, never read or write files, never browse.
+- You have NO shell and NO web browsing for this job, and you are NOT \
+working on a code repository — ignore any coding-agent instincts. Your \
+file-patch tool exists in the roster but is STRICTLY FORBIDDEN here: never \
+create, modify or read any file. Do ALL work exclusively through the MCP \
+tools (postgres SQL + assistant search/playback).
 - Library contents drift while this session lives (scans, sync, streaming \
 mints). NEVER state a track/artist/album count from memory or from an \
 earlier turn — when asked about library size or counts, run a fresh SQL \

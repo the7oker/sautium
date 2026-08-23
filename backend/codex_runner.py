@@ -16,11 +16,13 @@ Differences from the Claude runner, all forced by the CLI surface:
   `--ignore-user-config` keeps the user's own ~/.codex/config.toml (and
   any personal MCP connectors in it) out of the run — the codex analog
   of `--strict-mcp-config`.
-- No `--disallowed-tools` — shell cannot be denied outright, so the
-  built-in shell rides behind three fences: `--disable shell_tool`
-  (feature flag), a read-only OS sandbox when available (probed once per
-  process — Landlock in containers is a kernel lottery), and a hard
-  prompt-level prohibition in CODEX_DJ_SYSTEM_PROMPT.
+- No `--disallowed-tools`, and no sandbox either — under any sandbox
+  mode `codex exec` auto-denies every MCP tool call (openai/codex#24135),
+  so the dangerous bypass is mandatory. The fences that remain:
+  `--disable shell_tool` (verified — the model has no shell), web search
+  off by default, and the hard prompt-level prohibition in
+  CODEX_DJ_SYSTEM_PROMPT. The apply_patch file tool has no off switch
+  (measured) and stays prompt-fenced only.
 - Auth is auth.json-only: a bare OPENAI_API_KEY env var is ignored by
   the CLI (measured, 0.149), so when auth.json is missing and a key is
   present the runner mints auth.json via `codex login --with-api-key`
@@ -29,7 +31,6 @@ Differences from the Claude runner, all forced by the CLI surface:
   the ChatGPT subscription to the pay-as-you-go API account.
 """
 
-import functools
 import json
 import logging
 import os
@@ -152,39 +153,6 @@ def _ensure_auth(codex_exe: str) -> Optional[str]:
         return f"Codex API-key login failed: {e}"
 
 
-@functools.lru_cache(maxsize=1)
-def _sandbox_args() -> tuple:
-    """Sandbox flags for `codex exec`, decided once per process.
-
-    `--sandbox read-only` is the only mechanical containment of
-    model-invented shell (codex has no tool deny-list), but its Linux
-    implementation is Landlock — present on some kernels/containers and
-    absent on others. `codex sandbox <cmd>` exercises exactly that
-    machinery, so a 1s probe tells the truth for THIS runtime. Windows
-    has no codex sandbox — the dangerous bypass matches the trust level
-    claude runs at there (--dangerously-skip-permissions).
-    """
-    if sys.platform == "win32":
-        return ("--dangerously-bypass-approvals-and-sandbox",)
-    codex_exe = _resolve_codex_executable()
-    if codex_exe:
-        try:
-            env = os.environ.copy()
-            kwargs = _spawn_kwargs(env)
-            kwargs.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            proc = subprocess.Popen(
-                [codex_exe, "sandbox", "sh", "-c", "true"], **kwargs)
-            if proc.wait(timeout=15) == 0:
-                return ("--sandbox", "read-only")
-        except Exception as e:
-            logger.debug(f"codex sandbox probe failed: {e}")
-    logger.warning(
-        "codex OS sandbox unavailable on this runtime — falling back to "
-        "--dangerously-bypass-approvals-and-sandbox (shell containment is "
-        "prompt-level + --disable shell_tool only)")
-    return ("--dangerously-bypass-approvals-and-sandbox",)
-
-
 def _codex_workdir() -> Path:
     """Sautium-owned working root for DJ sessions: holds AGENTS.md (the
     system prompt) and nothing else. NOT the repo and NOT the user's
@@ -254,11 +222,21 @@ def _mcp_config_overrides() -> List[str]:
 def _base_flags(model: str, effort: str, with_mcp: bool,
                 resume: bool = False) -> List[str]:
     """`codex exec resume` accepts a NARROWER flag set than `codex exec`
-    (measured, 0.149): no `--cd` (the session's recorded cwd — our
-    workdir — is restored from the rollout) and no `--sandbox <mode>`
-    (only the dangerous bypass flag survived the subcommand split; the
-    read-only policy must ride the `-c sandbox_mode=…` config key
-    instead, which resume does accept)."""
+    (measured, 0.149): no `--cd` — the session's recorded cwd (our
+    workdir) is restored from the rollout.
+
+    The dangerous bypass is MANDATORY, not a fallback: under ANY
+    sandbox mode `codex exec` auto-denies every MCP tool call ("MCP
+    tool call requires approval, but approval policy is never" —
+    measured on macOS Seatbelt; upstream openai/codex#24135 confirms no
+    non-interactive allow knob exists). The chat IS its MCP tools, so
+    sandboxed codex is a chat that cannot answer. What actually fences
+    the agent instead: shell_tool disabled (verified — the model
+    reports having no shell), web search off by default, and the
+    prompt-level prohibition in CODEX_DJ_SYSTEM_PROMPT. Known residual:
+    the apply_patch file tool cannot be switched off (no feature flag,
+    include_apply_patch_tool=false is inert — both measured) and stays
+    reachable behind the prompt fence only."""
     flags = ["--json"]
     if not resume:
         flags += ["--cd", str(_codex_workdir())]
@@ -276,11 +254,7 @@ def _base_flags(model: str, effort: str, with_mcp: bool,
     ]
     if with_mcp:
         flags += _mcp_config_overrides()
-    sandbox = list(_sandbox_args())
-    if resume and sandbox[0] == "--sandbox":
-        flags += ["-c", f"sandbox_mode={json.dumps(sandbox[1])}"]
-    else:
-        flags += sandbox
+    flags.append("--dangerously-bypass-approvals-and-sandbox")
     return flags
 
 
@@ -364,7 +338,7 @@ def call_codex_stream(
 
     logger.info(
         f"Codex stream call: message={message[:80]!r}, resume={resume}, "
-        f"thread={thread_id}, model={use_model}, sandbox={_sandbox_args()}"
+        f"thread={thread_id}, model={use_model}"
     )
 
     try:
@@ -562,7 +536,7 @@ def call_codex_oneshot(
         "--disable", "shell_tool",
         "-c", 'model_reasoning_effort="low"',
         "-c", 'approval_policy="never"',
-        *_sandbox_args(),
+        "--dangerously-bypass-approvals-and-sandbox",
         "--", prompt,
     ]
     try:
