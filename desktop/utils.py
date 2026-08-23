@@ -291,12 +291,14 @@ def launch_claude_setup() -> "subprocess.Popen":
             creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
     if sys.platform == "darwin":
-        # AppleScript opens Terminal.app with the command. Quoting: claude
-        # path is absolute and doesn't contain double quotes by convention,
-        # so embedding it directly is safe.
+        # AppleScript opens Terminal.app with the command. The path MUST be
+        # shell-quoted: the bundled prefix lives under "Application Support"
+        # and an unquoted space made zsh run "/Users/…/Library/Application"
+        # (measured on the codex twin, 2026-08-23). Single quotes are safe
+        # inside the AppleScript double-quoted literal.
         script = (
             f'tell application "Terminal"\n'
-            f'  do script "{claude}"\n'
+            f'  do script "\'{claude}\'"\n'
             f'  activate\n'
             f'end tell'
         )
@@ -516,9 +518,11 @@ def launch_codex_setup() -> "subprocess.Popen":
             creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
     if sys.platform == "darwin":
+        # Path shell-quoted — the prefix lives under "Application Support"
+        # (see launch_claude_setup).
         script = (
             f'tell application "Terminal"\n'
-            f'  do script "{codex} login"\n'
+            f'  do script "\'{codex}\' login"\n'
             f'  activate\n'
             f'end tell'
         )

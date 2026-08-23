@@ -281,9 +281,11 @@ def launch_signin_terminal() -> None:
         )
         return
     if sys.platform == "darwin":
+        # Path shell-quoted — the bundled prefix lives under
+        # "Application Support" and an unquoted space breaks zsh.
         script = (
             f'tell application "Terminal"\n'
-            f'  do script "{claude}"\n'
+            f'  do script "\'{claude}\'"\n'
             f'  activate\n'
             f'end tell'
         )
