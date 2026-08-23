@@ -304,6 +304,209 @@ def launch_claude_setup() -> "subprocess.Popen":
     raise RuntimeError("Interactive Claude setup not supported on this platform")
 
 
+# ---------------------------------------------------------------------------
+# OpenAI Codex CLI — the second subscription agent; mirrors the Claude
+# block above. Backend mirror: backend/codex_cli.py (keep in sync).
+# ---------------------------------------------------------------------------
+
+def get_codex_prefix() -> Path:
+    """Per-user prefix where `npm install` puts Codex — sibling of
+    claude-prefix."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return base / "Sautium" / "codex-prefix"
+
+
+def _codex_native_binary(pkg_root: Path) -> Optional[Path]:
+    """Native codex binary inside an @openai/codex package root. The JS
+    shim `bin/codex.js` spawns a platform binary from a nested platform
+    package (`@openai/codex-<os>-<arch>/vendor/<triple>/bin/codex[.exe]`);
+    glob over the rust triple so target renames don't break lookup."""
+    plat = {"win32": "win32", "darwin": "darwin"}.get(sys.platform, "linux")
+    arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
+    exe = "codex.exe" if sys.platform == "win32" else "codex"
+    vendor = pkg_root / "node_modules" / f"@openai/codex-{plat}-{arch}" / "vendor"
+    if not vendor.is_dir():
+        return None
+    for cand in sorted(vendor.glob(f"*/bin/{exe}")):
+        if cand.is_file():
+            return cand
+    return None
+
+
+def get_codex_executable() -> Optional[Path]:
+    """Prefer the native binary (skips the node shim hop); the shim is an
+    acceptable fallback — codex argv stays tiny (the DJ prompt travels
+    as AGENTS.md on disk, not the command line, so cmd.exe's 8191-char
+    cap never bites the way it did for claude)."""
+    native = _codex_native_binary(
+        get_codex_prefix() / "node_modules" / "@openai" / "codex")
+    if native is not None:
+        return native
+
+    shim = shutil.which("codex.cmd") if sys.platform == "win32" else None
+    shim = shim or shutil.which("codex")
+    if shim:
+        for pkg_root in (
+            Path(shim).parent.parent / "lib" / "node_modules" / "@openai" / "codex",
+            Path(shim).parent / "node_modules" / "@openai" / "codex",
+        ):
+            native = _codex_native_binary(pkg_root)
+            if native is not None:
+                return native
+        return Path(shim)
+    return None
+
+
+def detect_codex_cli() -> bool:
+    """Check if the Codex CLI is available (bundled prefix or PATH)."""
+    return get_codex_executable() is not None
+
+
+def codex_authenticated() -> bool:
+    """True iff codex has stored credentials ($CODEX_HOME/auth.json —
+    ChatGPT OAuth or a stored API key). No Keychain variant exists;
+    every platform uses the file."""
+    home = os.environ.get("CODEX_HOME")
+    auth = (Path(home) if home else Path.home() / ".codex") / "auth.json"
+    if not auth.is_file():
+        return False
+    try:
+        json.loads(auth.read_text(encoding="utf-8"))
+        return True
+    except (json.JSONDecodeError, OSError) as e:
+        logger.debug(f"Codex credentials unreadable: {e}")
+        return False
+
+
+def codex_auth_verified(timeout: float = 90.0) -> bool:
+    """Live end-to-end auth check: one minimal ephemeral exec turn.
+    Same rationale as `claude_auth_verified` — auth.json can hold tokens
+    revoked or expired beyond refresh, and only a real turn proves the
+    account bills. No `-m`: the CLI's own default model is always a
+    valid id, so the probe never rots when the catalog moves.
+
+    Slow (seconds; up to `timeout` on a stalled network) — call from a
+    worker thread."""
+    import tempfile
+
+    codex = get_codex_executable()
+    if codex is None:
+        return False
+    env = os.environ.copy()
+    # Mirror the runner: with auth.json present the env keys are dropped
+    # so the probe tests the stored credential, not a stray API key.
+    env.pop("OPENAI_API_KEY", None)
+    env.pop("CODEX_API_KEY", None)
+    kwargs = {
+        "capture_output": True, "text": True,
+        "encoding": "utf-8", "errors": "replace",
+        "timeout": timeout, "env": env,
+        "stdin": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        result = subprocess.run(
+            [str(codex), "exec", "--json", "--ephemeral",
+             "--cd", tempfile.gettempdir(),
+             "--skip-git-repo-check", "--ignore-user-config",
+             "-c", 'model_reasoning_effort="low"',
+             "--", "Reply with exactly: ok"],
+            **kwargs)
+    except Exception as e:
+        logger.debug(f"Codex auth probe failed to run: {e}")
+        return False
+    turn_completed = False
+    for line in (result.stdout or "").splitlines():
+        try:
+            evt = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if evt.get("type") == "turn.completed":
+            turn_completed = True
+        elif evt.get("type") == "turn.failed":
+            logger.info(
+                "Codex auth probe turn.failed: "
+                f"{((evt.get('error') or {}).get('message') or '')[:200]}")
+            return False
+    return turn_completed
+
+
+def install_codex_runtime(progress_cb=None) -> Tuple[bool, str]:
+    """`npm install --prefix <codex_prefix> @openai/codex`. Long-running
+    and network-dependent — call from a worker thread; caller verifies
+    Node first (`detect_node_version()`)."""
+    npm = get_npm_executable()
+    if npm is None:
+        return False, "Node.js not found. Install Node 18+ first."
+
+    prefix = get_codex_prefix()
+    prefix.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        str(npm), "install",
+        "--prefix", str(prefix),
+        "--no-audit", "--no-fund",
+        "@openai/codex",
+    ]
+    if progress_cb:
+        progress_cb("Installing Codex via npm...")
+
+    kwargs = {
+        "capture_output": True, "text": True,
+        "encoding": "utf-8", "errors": "replace",
+        "timeout": 600,  # generous for slow networks
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    try:
+        result = subprocess.run(cmd, **kwargs)
+    except subprocess.TimeoutExpired:
+        return False, "Install timed out after 10 minutes. Check internet connection."
+    except Exception as e:
+        return False, f"Install failed: {e}"
+
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        return False, err[-600:] if err else f"npm exited with code {result.returncode}"
+
+    if get_codex_executable() is None:
+        return False, "Install reported success but codex binary not found in prefix"
+
+    return True, "Codex installed"
+
+
+def launch_codex_setup() -> "subprocess.Popen":
+    """Open `codex login` in a new console/terminal window — the CLI
+    prints an auth URL and finishes the ChatGPT OAuth flow itself.
+    Poll `codex_authenticated()` to know when the user is done."""
+    codex = get_codex_executable()
+    if codex is None:
+        raise RuntimeError("Codex CLI not installed")
+
+    if sys.platform == "win32":
+        return subprocess.Popen(
+            ["cmd.exe", "/c", "start", "Codex Setup",
+             "cmd.exe", "/k", str(codex), "login"],
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+    if sys.platform == "darwin":
+        script = (
+            f'tell application "Terminal"\n'
+            f'  do script "{codex} login"\n'
+            f'  activate\n'
+            f'end tell'
+        )
+        return subprocess.Popen(["osascript", "-e", script])
+    raise RuntimeError("Interactive Codex setup not supported on this platform")
+
+
 def detect_git() -> bool:
     """Check if git is available in PATH."""
     return shutil.which("git") is not None

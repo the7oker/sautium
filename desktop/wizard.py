@@ -27,13 +27,18 @@ from desktop.config_manager import get_data_dir, load_config, save_config
 from desktop.utils import (
     claude_auth_verified,
     claude_authenticated,
+    codex_auth_verified,
+    codex_authenticated,
     detect_claude_cli,
     detect_git,
     detect_gpu,
     detect_node_version,
     get_claude_executable,
+    get_codex_executable,
     install_claude_runtime,
+    install_codex_runtime,
     launch_claude_setup,
+    launch_codex_setup,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,6 +88,12 @@ class SetupWizard(ctk.CTkToplevel):
         # revoked). Presence of .credentials.json alone proves nothing.
         self._claude_verified: Optional[bool] = None
         self._claude_verify_thread: Optional[threading.Thread] = None
+        # Codex mirror of the Claude state machine above.
+        self._codex_install_thread: Optional[threading.Thread] = None
+        self._codex_poll_after_id: Optional[str] = None
+        self._codex_poll_deadline: float = 0.0
+        self._codex_verified: Optional[bool] = None
+        self._codex_verify_thread: Optional[threading.Thread] = None
 
         # Main container
         self.container = ctk.CTkFrame(self, fg_color="transparent")
@@ -126,6 +137,7 @@ class SetupWizard(ctk.CTkToplevel):
 
     def _show_step(self):
         self._cancel_claude_poll()
+        self._cancel_codex_poll()
         self._clear_content()
         self.steps[self.current_step]()
         self.step_label.configure(
@@ -344,6 +356,16 @@ class SetupWizard(ctk.CTkToplevel):
                     )
                     return False
                 self.config["claude_code_available"] = True
+            elif provider == "codex":
+                if self._codex_state() != "ready" or self._codex_verified is not True:
+                    self._provider_error.configure(
+                        text=("Verifying Codex sign-in — give it a few seconds."
+                              if self._codex_state() == "ready"
+                              and self._codex_verified is None
+                              else "Finish Codex setup above (or pick another provider)."),
+                    )
+                    return False
+                self.config["codex_available"] = True
 
             return True
 
@@ -383,16 +405,18 @@ class SetupWizard(ctk.CTkToplevel):
         info_frame = ctk.CTkFrame(self.content_frame)
         info_frame.pack(fill="x", pady=20, padx=40)
 
-        claude_status = {
+        _agent_status = {
             "ready": "Signed in",
             "not_authed": "Installed (sign in required)",
             "claude_missing": "Not installed",
+            "codex_missing": "Not installed",
             "node_missing": "Node.js not found",
-        }[self._claude_state()]
+        }
         items = [
             ("Accelerator", f"{self._gpu_name} ({self._gpu_vram}GB)" if self._gpu_available and self._gpu_vram else
                             self._gpu_name if self._gpu_available else "Not detected"),
-            ("Claude Code", claude_status),
+            ("Claude Code", _agent_status[self._claude_state()]),
+            ("OpenAI Codex", _agent_status[self._codex_state()]),
             ("Git", "Available" if self._git_available else "Not found"),
         ]
         for label, value in items:
@@ -636,6 +660,15 @@ class SetupWizard(ctk.CTkToplevel):
             command=self._update_provider_fields,
         ).pack(anchor="w", pady=3)
 
+        # OpenAI Codex (ChatGPT subscription) — same install/sign-in flow.
+        ctk.CTkRadioButton(
+            providers_frame,
+            text="OpenAI Codex (ChatGPT subscription)",
+            variable=self._provider_var,
+            value="codex",
+            command=self._update_provider_fields,
+        ).pack(anchor="w", pady=3)
+
         # Anthropic
         ctk.CTkRadioButton(
             providers_frame,
@@ -694,6 +727,9 @@ class SetupWizard(ctk.CTkToplevel):
 
         elif provider == "claude_code":
             self._render_claude_state_ui()
+
+        elif provider == "codex":
+            self._render_codex_state_ui()
 
         elif provider == "anthropic":
             ctk.CTkLabel(
@@ -1042,13 +1078,14 @@ class SetupWizard(ctk.CTkToplevel):
     def _on_claude_verify_done(self, ok: bool):
         self._claude_verified = ok
         # The probe takes seconds — the user may have navigated to another
-        # step, destroying the provider frame this render would touch. The
-        # verdict is cached either way; coming back re-renders from it.
+        # step (frame destroyed) or to another provider radio (frame now
+        # renders codex fields this repaint would clobber). The verdict is
+        # cached either way; coming back re-renders from it.
         try:
             alive = bool(self._provider_fields_frame.winfo_exists())
         except Exception:
             alive = False
-        if alive:
+        if alive and self._provider_var.get() == "claude_code":
             self._render_claude_state_ui()
 
     def _refresh_claude_state(self):
@@ -1082,6 +1119,283 @@ class SetupWizard(ctk.CTkToplevel):
             except Exception:
                 pass
             self._claude_poll_after_id = None
+
+    # ================================================================
+    # OpenAI Codex provider — mirror of the Claude state machine above
+    # ================================================================
+
+    def _codex_state(self) -> str:
+        """Return one of 'node_missing' | 'codex_missing' | 'not_authed' | 'ready'."""
+        node_ver = detect_node_version()
+        if node_ver is None or node_ver[0] < 18:
+            return "node_missing"
+        if get_codex_executable() is None:
+            return "codex_missing"
+        if not codex_authenticated():
+            return "not_authed"
+        return "ready"
+
+    def _render_codex_state_ui(self):
+        for widget in self._provider_fields_frame.winfo_children():
+            widget.destroy()
+        self._provider_error.configure(text="")
+
+        state = self._codex_state()
+
+        # Same trust rule as Claude: auth.json existing proves nothing —
+        # tokens can be revoked or expired beyond refresh. Only a live
+        # probe turns the row green.
+        stale_signin = False
+        if state == "ready":
+            if self._codex_verified is True:
+                ctk.CTkLabel(
+                    self._provider_fields_frame,
+                    text="✓ Codex is ready",
+                    text_color="#4CAF50",
+                    font=ctk.CTkFont(size=14, weight="bold"),
+                ).pack(anchor="w")
+                ctk.CTkLabel(
+                    self._provider_fields_frame,
+                    text="Signed in with ChatGPT. No API key needed.",
+                    text_color="gray",
+                ).pack(anchor="w", pady=(2, 0))
+                return
+            if self._codex_verified is None:
+                ctk.CTkLabel(
+                    self._provider_fields_frame,
+                    text="Verifying stored sign-in…",
+                    text_color="gray",
+                    font=ctk.CTkFont(size=13),
+                ).pack(anchor="w")
+                self._start_codex_verify()
+                return
+            stale_signin = True
+            state = "not_authed"
+
+        if state == "node_missing":
+            ctk.CTkLabel(
+                self._provider_fields_frame,
+                text="Node.js 18+ is required.",
+                text_color="orange",
+                font=ctk.CTkFont(size=13, weight="bold"),
+            ).pack(anchor="w")
+            if sys.platform == "darwin":
+                ctk.CTkLabel(
+                    self._provider_fields_frame,
+                    text="Install Node.js via Homebrew, then click Refresh.",
+                    text_color="gray",
+                ).pack(anchor="w", pady=(2, 5))
+                ctk.CTkButton(
+                    self._provider_fields_frame,
+                    text="Show install command",
+                    width=200,
+                    command=self._show_node_macos_dialog,
+                ).pack(anchor="w", pady=(0, 5))
+            else:
+                ctk.CTkLabel(
+                    self._provider_fields_frame,
+                    text=(
+                        "The installer should have placed Node next to Sautium.\n"
+                        "Re-run the Sautium installer to repair, then click Refresh."
+                    ),
+                    text_color="gray",
+                    justify="left",
+                ).pack(anchor="w", pady=(2, 5))
+            ctk.CTkButton(
+                self._provider_fields_frame,
+                text="Refresh",
+                width=120,
+                command=self._refresh_codex_state,
+            ).pack(anchor="w")
+            return
+
+        if state == "codex_missing":
+            ctk.CTkLabel(
+                self._provider_fields_frame,
+                text="OpenAI Codex is not installed yet.",
+                text_color="gray",
+                font=ctk.CTkFont(size=13),
+            ).pack(anchor="w")
+            ctk.CTkLabel(
+                self._provider_fields_frame,
+                text="Downloads via npm. Internet connection required.",
+                text_color="gray",
+                font=ctk.CTkFont(size=12),
+            ).pack(anchor="w", pady=(2, 8))
+
+            self._codex_install_status = ctk.CTkLabel(
+                self._provider_fields_frame, text="", text_color="gray",
+                wraplength=420, justify="left",
+            )
+            self._codex_install_status.pack(anchor="w", pady=(0, 5))
+
+            self._codex_install_btn = ctk.CTkButton(
+                self._provider_fields_frame,
+                text="Install Codex",
+                width=200,
+                command=self._install_codex_clicked,
+            )
+            self._codex_install_btn.pack(anchor="w")
+            return
+
+        # state == "not_authed"
+        ctk.CTkLabel(
+            self._provider_fields_frame,
+            text=("Stored sign-in is expired or revoked — sign in again."
+                  if stale_signin else "Codex installed."),
+            text_color="orange" if stale_signin else "gray",
+            font=ctk.CTkFont(size=13),
+        ).pack(anchor="w")
+
+        instr_frame = ctk.CTkFrame(
+            self._provider_fields_frame,
+            fg_color=("#F0F0F0", "#2B2B2B"),
+        )
+        instr_frame.pack(fill="x", pady=(4, 4))
+
+        ctk.CTkLabel(
+            instr_frame,
+            text="In the new terminal window (runs `codex login`):",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(anchor="w", padx=12, pady=(6, 2))
+
+        ctk.CTkLabel(
+            instr_frame,
+            text="1. Choose 'Sign in with ChatGPT'",
+            font=ctk.CTkFont(size=12),
+        ).pack(anchor="w", padx=20)
+        ctk.CTkLabel(
+            instr_frame,
+            text="2. Authorize in the browser tab that opens",
+            font=ctk.CTkFont(size=12),
+        ).pack(anchor="w", padx=20)
+        ctk.CTkLabel(
+            instr_frame,
+            text="3. Done — close the terminal window",
+            font=ctk.CTkFont(size=12),
+        ).pack(anchor="w", padx=20, pady=(0, 6))
+
+        ctk.CTkLabel(
+            self._provider_fields_frame,
+            text="Sautium will detect the sign-in automatically.",
+            text_color="gray",
+            font=ctk.CTkFont(size=12),
+        ).pack(anchor="w", pady=(0, 4))
+
+        self._codex_signin_status = ctk.CTkLabel(
+            self._provider_fields_frame, text="", text_color="gray",
+        )
+        self._codex_signin_status.pack(anchor="w", pady=(0, 5))
+
+        btn_frame = ctk.CTkFrame(
+            self._provider_fields_frame, fg_color="transparent"
+        )
+        btn_frame.pack(anchor="w")
+        ctk.CTkButton(
+            btn_frame,
+            text="Sign in to ChatGPT",
+            width=180,
+            command=self._signin_codex_clicked,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_frame,
+            text="Refresh",
+            width=100,
+            command=self._refresh_codex_state,
+            fg_color="transparent", border_width=1,
+        ).pack(side="left")
+
+    def _install_codex_clicked(self):
+        if self._codex_install_thread and self._codex_install_thread.is_alive():
+            return
+        self._codex_install_btn.configure(state="disabled", text="Installing...")
+        self._codex_install_status.configure(
+            text="Running npm install (may take a minute)...",
+            text_color="gray",
+        )
+
+        def _worker():
+            ok, msg = install_codex_runtime()
+            self.ui_call(lambda: self._on_codex_install_done(ok, msg))
+
+        self._codex_install_thread = threading.Thread(
+            target=_worker, daemon=True
+        )
+        self._codex_install_thread.start()
+
+    def _on_codex_install_done(self, ok: bool, msg: str):
+        if ok:
+            self._render_codex_state_ui()  # transitions to not_authed UI
+        else:
+            self._codex_install_btn.configure(
+                state="normal", text="Install Codex"
+            )
+            self._codex_install_status.configure(
+                text=f"Install failed: {msg}", text_color="red",
+            )
+
+    def _signin_codex_clicked(self):
+        try:
+            launch_codex_setup()
+        except Exception as e:
+            self._codex_signin_status.configure(
+                text=f"Could not launch codex: {e}", text_color="red",
+            )
+            return
+
+        self._codex_signin_status.configure(
+            text="Waiting for sign-in (poll every 2s for 5 min)...",
+            text_color="gray",
+        )
+        self._codex_poll_deadline = time.monotonic() + 300
+        self._poll_codex_auth()
+
+    def _start_codex_verify(self):
+        if self._codex_verify_thread and self._codex_verify_thread.is_alive():
+            return
+
+        def _worker():
+            ok = codex_auth_verified()
+            self.ui_call(lambda: self._on_codex_verify_done(ok))
+
+        self._codex_verify_thread = threading.Thread(target=_worker, daemon=True)
+        self._codex_verify_thread.start()
+
+    def _on_codex_verify_done(self, ok: bool):
+        self._codex_verified = ok
+        try:
+            alive = bool(self._provider_fields_frame.winfo_exists())
+        except Exception:
+            alive = False
+        if alive and self._provider_var.get() == "codex":
+            self._render_codex_state_ui()
+
+    def _refresh_codex_state(self):
+        self._codex_verified = None
+        self._render_codex_state_ui()
+
+    def _poll_codex_auth(self):
+        if codex_authenticated():
+            self._codex_poll_after_id = None
+            self._codex_verified = None
+            self._render_codex_state_ui()  # transitions to verifying → ready
+            return
+        if time.monotonic() >= self._codex_poll_deadline:
+            self._codex_poll_after_id = None
+            self._codex_signin_status.configure(
+                text="Sign-in not detected. Click Refresh after authorizing.",
+                text_color="orange",
+            )
+            return
+        self._codex_poll_after_id = self.after(2000, self._poll_codex_auth)
+
+    def _cancel_codex_poll(self):
+        if self._codex_poll_after_id is not None:
+            try:
+                self.after_cancel(self._codex_poll_after_id)
+            except Exception:
+                pass
+            self._codex_poll_after_id = None
 
     def _step_lastfm(self):
         ctk.CTkLabel(
@@ -1527,6 +1841,7 @@ class SetupWizard(ctk.CTkToplevel):
         if self.current_step == len(self.steps) - 1:
             return  # Don't close during init
         self._cancel_claude_poll()
+        self._cancel_codex_poll()
         self.destroy()
         # Quit the parent app since setup was not completed
         if self.master:
