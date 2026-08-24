@@ -7,7 +7,7 @@ given a list of UUIDs / media_file_ids, return tile-shaped dicts
 ready for the same `renderArtistRow` / `renderAlbumRow` /
 `renderTrackList` frontend renderers Discovery uses.
 
-Used by AI chat when the model produces a `[DJ_BLOCKS]` payload that
+Used by AI chat when the model produces a `[SAUTIUM_BLOCKS]` payload that
 references entities by ID — covers, names, years and counts get
 filled in here so the chat block list can render with the same
 visual contract as Discovery results.

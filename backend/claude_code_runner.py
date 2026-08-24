@@ -1,8 +1,8 @@
 """
-Claude Code subprocess wrapper for AI DJ.
+Claude Code subprocess wrapper for AI assistant.
 
 Calls `claude -p` in headless mode with MCP tools (PostgreSQL + HQPlayer).
-Returns the raw model answer (including any DJ_BLOCKS marker) — the chat
+Returns the raw model answer (including any SAUTIUM_BLOCKS marker) — the chat
 router parses + hydrates the marker centrally so this wrapper stays
 format-agnostic.
 
@@ -49,7 +49,7 @@ TIMEOUT_SECONDS = 150
 # treatment. Its home holds both credential dirs (~/.claude, ~/.codex).
 AGENT_USER = "agent"
 
-# The DJ must reach its MCP servers and nothing else. Chat text arrives as the
+# The assistant must reach its MCP servers and nothing else. Chat text arrives as the
 # agent's prompt, and the chat is reachable by anyone holding the API secret —
 # which `GET /` hands to any browser that can load the page. Left unrestricted
 # the agent also carries Bash/Write/Edit/Read under
@@ -64,17 +64,17 @@ AGENT_USER = "agent"
 # allow-listed to MCP only. --disallowed-tools is honoured regardless (same
 # probe answered "CANNOT" and wrote nothing). Keep this list in step with the
 # CLI's built-in tools; MCP tools stay reachable because they are never named
-# here. Nothing is lost — claude_dj_prompt.py drives search and playback
+# here. Nothing is lost — assistant_prompt.py drives search and playback
 # entirely through the MCP servers (the postgres one being read-only).
 _FILESYSTEM_AND_SHELL = ("Bash,Write,Edit,MultiEdit,NotebookEdit,Read,Glob,"
                          "Grep,Task,KillShell,BashOutput")
-# The DJ never browses; the gear researcher exists to browse (mcp=False,
+# The assistant never browses; the gear researcher exists to browse (mcp=False,
 # WebSearch/WebFetch are its whole toolset), so the web pair is denied only
 # on the library path.
 DISALLOWED_TOOLS_MCP = _FILESYSTEM_AND_SHELL + ",WebFetch,WebSearch"
 DISALLOWED_TOOLS_RESEARCH = _FILESYSTEM_AND_SHELL
 
-# DJ turns are SQL + list-building; unbounded interleaved thinking burned
+# assistant turns are SQL + list-building; unbounded interleaved thinking burned
 # ~75% of output tokens on a measured chat turn (4.9k-token final turn =
 # 57s of UI silence, 2026-07-22). 1024 keeps short planning steps.
 _MAX_THINKING_TOKENS = "1024"
@@ -182,7 +182,7 @@ def call_claude_code(
 
     Args:
         message: User message to send
-        system_prompt: System prompt for AI DJ context
+        system_prompt: System prompt for AI assistant context
         session_id: Previous Claude Code session ID for continuity
         resume: Whether to resume a previous session
         model: Model to use (sonnet or haiku). Defaults to DEFAULT_MODEL.

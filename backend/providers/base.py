@@ -40,7 +40,7 @@ class TextDelta(StreamEvent):
     """A chunk of generated assistant text. Multiple TextDeltas may
     arrive across iterations of a tool-use loop; the chat router
     concatenates them and runs the marker filter live so prose
-    streams to the UI while the trailing `[DJ_BLOCKS]` payload is
+    streams to the UI while the trailing `[SAUTIUM_BLOCKS]` payload is
     redirected into a structured `blocks` event."""
     text: str
 

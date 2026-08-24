@@ -1,12 +1,12 @@
 """
-AI DJ chat with persistent history and feedback.
+AI assistant chat with persistent history and feedback.
 
 Sessions, messages stored in PostgreSQL. Feedback endpoint for debugging
 recommendation quality. Supports multiple LLM providers.
 
 The send-message endpoint streams the response as Server-Sent Events:
 text deltas as the model generates, an optional `blocks` event after
-the trailing `[DJ_BLOCKS]` marker is parsed and hydrated, and a final
+the trailing `[SAUTIUM_BLOCKS]` marker is parsed and hydrated, and a final
 `done` event with metadata. The router owns the marker contract:
 providers emit raw `TextDelta`s, the router runs them through
 `BlocksFilter` so prose flows live to the UI while the structured
@@ -42,7 +42,7 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 
 # ---------------------------------------------------------------------------
-# Player context (for AI DJ awareness of what's playing)
+# Player context (for AI assistant awareness of what's playing)
 # ---------------------------------------------------------------------------
 
 def _get_player_context() -> Optional[str]:
@@ -130,7 +130,7 @@ def _get_player_context() -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# CLI agent DJ integration (Claude Code / Codex)
+# CLI agent integration (Claude Code / Codex)
 # ---------------------------------------------------------------------------
 
 # Each CLI agent keeps its own resume handle on the chat session, so
@@ -457,7 +457,7 @@ def _clean_title(raw: str) -> Optional[str]:
 
 def _title_via_provider(provider_name: str, prompt: str) -> Optional[str]:
     """Run the title prompt through any SDK-based provider via the
-    shared `BaseProvider.chat()` interface. The DJ tool registry is
+    shared `BaseProvider.chat()` interface. The assistant tool registry is
     still passed in the request (provider implementations always
     attach it), but a pure-summarisation prompt won't trigger tool
     use — single round-trip, ~500-1500ms depending on provider.
@@ -492,7 +492,7 @@ def _title_via_claude_code(prompt: str) -> Optional[str]:
     """Fallback: spawn the Claude Code CLI in a bare one-shot mode —
     no `--mcp-config`, no tool definitions, no resumable session. This
     is ~10s faster than reusing `call_claude_code` because the CLI
-    skips loading the entire DJ MCP server. Demote to `agent`
+    skips loading the entire assistant MCP server. Demote to `agent`
     is preserved (Linux/Docker path) so `--dangerously-skip-permissions`
     is accepted, and `ANTHROPIC_API_KEY` is stripped from the env so
     the CLI uses the user's Claude subscription rather than the
@@ -558,7 +558,7 @@ def _title_via_claude_code(prompt: str) -> Optional[str]:
 
 def _title_via_codex(prompt: str) -> Optional[str]:
     """Codex analog of `_title_via_claude_code`: a bare `codex exec
-    --ephemeral` one-shot — no MCP, no DJ workdir, fast small model.
+    --ephemeral` one-shot — no MCP, no assistant workdir, fast small model.
     All spawn details (demote, env key handling, sandbox flag) live in
     the runner's oneshot helper."""
     from providers import get_provider as _get_provider
@@ -699,7 +699,7 @@ def _build_provider_stream(
     """Pick the right streaming source for the provider name. For
     `claude_code` we go through the subprocess runner; for API
     providers we use `BaseProvider.chat_stream`."""
-    from claude_dj_prompt import get_system_prompt
+    from assistant_prompt import get_system_prompt
 
     if provider_name == "claude_code":
         from claude_code_runner import call_claude_code_stream
@@ -757,7 +757,7 @@ async def send_message(session_id: int, req: ChatMessageRequest):
     Stream events:
       - `meta`   — once at the start; carries the persisted user_msg.
       - `tool`   — every time the model invokes a tool.
-      - `delta`  — text fragments with the `[DJ_BLOCKS]` marker elided.
+      - `delta`  — text fragments with the `[SAUTIUM_BLOCKS]` marker elided.
       - `blocks` — hydrated block list, emitted once when the model
                    closes the marker. May not arrive at all when the
                    reply has no structured payload.
@@ -1121,7 +1121,7 @@ async def legacy_chat(req: LegacyChatRequest):
 
     try:
         from claude_code_runner import call_claude_code
-        from claude_dj_prompt import get_system_prompt
+        from assistant_prompt import get_system_prompt
 
         prompt = get_system_prompt("claude_code", player_context)
 

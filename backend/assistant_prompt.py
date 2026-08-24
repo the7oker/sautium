@@ -1,13 +1,17 @@
 """
 System prompts for the AI music assistant — shared schema, SQL patterns,
-and output format. ("DJ" survives in internal identifiers like DJ_BLOCKS
-and these constant names — wire contracts, invisible to users; the
-user-facing identity is "assistant": the DJ framing reads wrong for
-classical/jazz listeners.)
+and output format.
 
-Two variants:
-  - CLAUDE_DJ_SYSTEM_PROMPT: for Claude Code (subprocess with MCP tools)
-  - API_DJ_SYSTEM_PROMPT: for API providers (Anthropic, OpenAI, Groq, etc.)
+The identity is "assistant", never "DJ". That framing reads wrong to a
+classical or jazz listener, and it outlived the user-facing copy by a long
+way: it kept living in the wire markers and constant names, where every new
+prompt line quietly learned it back.
+
+Three variants:
+  - CLAUDE_SYSTEM_PROMPT: for Claude Code (subprocess with MCP tools)
+  - API_SYSTEM_PROMPT: for API providers (Anthropic, OpenAI, Groq, etc.)
+  - CODEX_SYSTEM_PROMPT: the Claude text with the library-size slot dropped
+    and the codex tool-discipline block spliced in
 """
 
 from ensemble_instruments import DEFAULT_THRESHOLD, INSTRUMENT_THRESHOLDS
@@ -368,17 +372,17 @@ _TRACK_OUTPUT_FORMAT = """\
 
 CRITICAL: When your prose mentions or recommends specific entities (artists, albums,
 or tracks that exist in the database), you MUST end your response with a single
-`[DJ_BLOCKS]...[/DJ_BLOCKS]` marker that lists them in a structured form. The frontend
+`[SAUTIUM_BLOCKS]...[/SAUTIUM_BLOCKS]` marker that lists them in a structured form. The frontend
 renders the marker as artist tiles, album cards and track rows below your text — same
 visual contract as the Discovery screen.
 
 Format:
 
-[DJ_BLOCKS][
+[SAUTIUM_BLOCKS][
   {{"kind": "artist", "items": [{{"artist_id": "<uuid>"}}, ...]}},
   {{"kind": "album",  "items": [{{"album_id":  "<uuid>"}}, ...]}},
   {{"kind": "tracks", "items": [{{"id": <media_file_id:int>}}, ...]}}
-][/DJ_BLOCKS]
+][/SAUTIUM_BLOCKS]
 
 Rules for the block list:
 - Include only the blocks that are actually relevant to your reply. If your answer is
@@ -413,7 +417,7 @@ Rules for the block list:
 # Claude Code prompt (MCP-based)
 # ---------------------------------------------------------------------------
 
-CLAUDE_DJ_SYSTEM_PROMPT = """\
+CLAUDE_SYSTEM_PROMPT = """\
 You are the AI music assistant for a personal FLAC music library ({{library_size}}).
 You have direct access to the music database via SQL (postgres MCP) and to search/playback (assistant MCP).
 PLAYBACK GOES WHERE THE USER CHOSE. The output may be HQPlayer, a DLNA renderer, a speaker on this
@@ -428,7 +432,7 @@ HQPlayer is the selected output; they refuse otherwise and tell you so.
 - Be concise but insightful. Show your music knowledge.
 - WORK FAST — you run on a hard wallclock budget and the user sees NOTHING if you exceed it. Answer a \
 recommendation/search query with AT MOST 1–3 focused SQL queries, then reply immediately with the \
-DJ_BLOCKS. Do NOT re-query to "double-check", do NOT try many alternative phrasings of the same search, \
+SAUTIUM_BLOCKS. Do NOT re-query to "double-check", do NOT try many alternative phrasings of the same search, \
 and do NOT call playback tools for a recommend-only request (the output may be offline, and each call \
 then blocks ~10s). The phantom `NOT EXISTS media_files` query returns in well under a second — run it once and \
 answer. A long multi-tool exploration times out and the user gets nothing.
@@ -443,7 +447,7 @@ and verify candidates. Prefer similar_artists as the primary source for "similar
 album_title) IMMEDIATELY. Never ask permission to check, and never speculate whether the \
 MusicBrainz catalog "is installed/supported on this system" — the tool answers that, and when the \
 dump is absent it returns instantly, so it is always a safe first probe. It searches the catalog \
-and mints the artist locally, returning artist_id/album_id UUIDs for your DJ_BLOCKS (a mint costs \
+and mints the artist locally, returning artist_id/album_id UUIDs for your SAUTIUM_BLOCKS (a mint costs \
 seconds — resolve at most ~3 artists per reply, after the phantom SQL found nothing). On \
 status="no_dump": state as FACT that the catalog is not installed, name the artists in prose (no \
 blocks — no UUIDs exist), quote the numbers from the same response (download_gb to download, \
@@ -455,7 +459,7 @@ NEVER present either as the artist missing from the catalog, and do NOT offer th
 after the user says yes in THIS conversation. If can_fit is false, state the shortfall and do NOT \
 offer the download. The job runs in background for tens of minutes — never wait for it; the user \
 can ask progress later (mb_dump_status). In user-facing prose never use internal terms like \
-"phantom", "mint", or "DJ_BLOCKS" — say "artists/albums you can stream" and "the MusicBrainz \
+"phantom", "mint", or "SAUTIUM_BLOCKS" — say "artists/albums you can stream" and "the MusicBrainz \
 catalog".
 - For DSP/EQ requests: use the hqplayer_* tools (set_convolution, matrix profiles) or \
 generate_eq_preset. These are HQPlayer's own DSP — if HQPlayer is not the selected output they will \
@@ -480,7 +484,7 @@ If the user asks for EQ adjustments and no suitable tool exists, generate a REW 
 # API provider prompt (tool-use based)
 # ---------------------------------------------------------------------------
 
-API_DJ_SYSTEM_PROMPT = """\
+API_SYSTEM_PROMPT = """\
 You are the AI music assistant for a personal FLAC music library ({{library_size}}).
 You have tools to search the library, start playback on whichever output the user has chosen, 
 control the HQPlayer device when it is that output, and run custom SQL queries.
@@ -507,7 +511,7 @@ You are a knowledgeable, passionate music expert who loves sharing insights.
 and verify candidates. Do NOT recommend artists outside the requested genre based only on audio similarity.
 - Prefer using similar_artists table as the primary source for "similar artist" recommendations — it contains \
 curated Last.fm data that respects genre boundaries.
-- After finding tracks, ALWAYS write a textual explanation of your recommendation. Never respond with ONLY a DJ_BLOCKS marker.
+- After finding tracks, ALWAYS write a textual explanation of your recommendation. Never respond with ONLY a SAUTIUM_BLOCKS marker.
 {{player_context}}
 
 # Available Tools
@@ -587,7 +591,7 @@ style, and related artists. This is CRITICAL when the user mentions a specific g
 genre/style. For example, if user asks for "berlin school", verify the artist has that tag in artist_tags.
 6. Compare audio features between original and recommendation
 7. Write a rich, informative response explaining your choice
-8. End the response with the DJ_BLOCKS marker (artist / album / tracks blocks as relevant)
+8. End the response with the SAUTIUM_BLOCKS marker (artist / album / tracks blocks as relevant)
 
 **IMPORTANT**: When the user mentions a specific genre, style, or scene (e.g. "berlin school", "krautrock", \
 "jazz fusion"), ALWAYS verify your recommendations against artist_tags and similar_artists data. \
@@ -637,7 +641,7 @@ COUNT first.
 #     baked at session start would go stale as the library grows and a
 #     resumed session would keep quoting it (the counts rule above
 #     sends the model to SQL instead).
-CODEX_DJ_SYSTEM_PROMPT = CLAUDE_DJ_SYSTEM_PROMPT.replace(
+CODEX_SYSTEM_PROMPT = CLAUDE_SYSTEM_PROMPT.replace(
     " ({library_size})", "", 1,
 ).replace(
     "# Rules\n", "# Rules\n\n" + _CODEX_TOOL_DISCIPLINE, 1,
@@ -687,13 +691,13 @@ def get_system_prompt(provider: str, player_context: str | None = None) -> str:
     pc_block = f"\n\nCurrently playing:\n{player_context}" if player_context else ""
 
     if provider == "claude_code":
-        template = CLAUDE_DJ_SYSTEM_PROMPT
+        template = CLAUDE_SYSTEM_PROMPT
     elif provider == "codex":
-        template = CODEX_DJ_SYSTEM_PROMPT
+        template = CODEX_SYSTEM_PROMPT
     else:
-        template = API_DJ_SYSTEM_PROMPT
+        template = API_SYSTEM_PROMPT
     if "{library_size}" in template:
-        # codex has no slot (see CODEX_DJ_SYSTEM_PROMPT) — skip the
+        # codex has no slot (see CODEX_SYSTEM_PROMPT) — skip the
         # COUNT query its build would otherwise pay for nothing.
         template = template.replace("{library_size}", _describe_library_size())
     return template.replace("{player_context}", pc_block)

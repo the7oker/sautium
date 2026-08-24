@@ -80,7 +80,7 @@ DEFAULT_THRESHOLD = 0.10
 
 # Read-time presence thresholds, keyed by the lowercased DB label.
 # The single source of truth for every instruments reader (discovery
-# engine, search filters, MCP/CLI display, DJ prompt). Labels not
+# engine, search filters, MCP/CLI display, assistant prompt). Labels not
 # listed here use DEFAULT_THRESHOLD.
 #
 # Recalibrated 2026-07-03 on the FULL-TRACK backfill (windowed max).

@@ -280,7 +280,7 @@ def generate_mcp_config(config: dict, output_path: Path) -> None:
     ports = config.get("ports", {})
     hqp = config.get("hqplayer", {})
 
-    # The DJ subprocess spawns the hqplayer server itself, so the command
+    # The assistant subprocess spawns the hqplayer server itself, so the command
     # must be a Python that actually has the backend deps (mcp, httpx,
     # psycopg2) — the launcher-provisioned interpreter, the same one uvicorn
     # runs on. A bare "python" from PATH (the original value) either doesn't

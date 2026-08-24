@@ -38,7 +38,7 @@ unchanged without them.
 
 - **Per-filter `description`** — a human-readable blurb returned alongside each filter in
   the discovery response. Sautium surfaces it live in the HQPlayer settings screen and
-  passes it to the AI DJ, so filter choices are explained in the player's own words.
+  passes it to the AI assistant, so filter choices are explained in the player's own words.
 - **`process_speed` in Status** — a DSP load readout reported by `GetStatus`.
 
 ## Files

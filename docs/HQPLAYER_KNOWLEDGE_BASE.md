@@ -5,7 +5,7 @@
 > **Note (HQP6):** this catalogue was compiled from the HQPlayer 5 Desktop
 > manual (v5.16.0). From HQP6 onwards Sautium reads the filter / shaper / mode
 > lists **and** each filter's description live from HQPlayer at runtime, so
-> this file is now a **secondary reference for humans**, not a source the AI DJ
+> this file is now a **secondary reference for humans**, not a source the AI assistant
 > relies on. Take filter/modulator availability and descriptions from the live
 > HQPlayer instance.
 
@@ -858,7 +858,7 @@ DSD1024 = 44100 × 1024 = 45,158,400 Hz = 45.1584 MHz ≈ 45.2 MHz
 
 ## Automatic setting selection (AI logic)
 
-### Algorithm for the AI DJ
+### Algorithm for the AI assistant
 
 ```python
 def auto_select_settings(track_info, user_preferences=None):

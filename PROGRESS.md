@@ -99,7 +99,7 @@ implementation details live in the code, DB and git history.
   **correctness property, not an optimization** — enrichment re-runs must be
   safe.
 
-### AI DJ assistant
+### AI assistant
 
 - **Claude Code + MCP tools, not custom RAG**. Earlier version had a 557-line
   `assistant.py` with multi-source retrieval, hybrid search, enrichment pipeline,
@@ -129,7 +129,7 @@ implementation details live in the code, DB and git history.
   `backend/codex_runner.py` + `codex_cli.py`, provider id `codex`). Mirrors
   the Claude runner shape (150s watchdog, stderr drain, non-root demote,
   same StreamEvent contract) with every difference forced by the CLI:
-  no `--system-prompt` → DJ prompt rides as AGENTS.md in a Sautium-owned
+  no `--system-prompt` → assistant prompt rides as AGENTS.md in a Sautium-owned
   `--cd` workdir, volatile player context prefixes the user message
   (AGENTS.md is not re-read on `exec resume`); no `--mcp-config` → the
   SAME mcp-docker/windows.json is translated at spawn into dotted `-c
@@ -341,7 +341,7 @@ The short version of the hard-learned lessons:
   (`<p2p_identity_dir>/.api_secret`), which every runtime already treats as
   node state and every uninstall already deletes. Readers: `main`,
   `media_urls`, `desktop/api_client`, `mcp/assistant_server` — the MCP one is
-  easy to miss and breaks the AI DJ silently.
+  easy to miss and breaks the AI assistant silently.
 - **libtorrent 2.1+ `peers()`** returns `(ip, port)` tuples, not objects with
   `.address()/.port()`. Compat handling in `dht_service.py`.
 - **libtorrent DHT alerts** require `alert_mask += dht_operation_notification`

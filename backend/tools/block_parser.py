@@ -1,8 +1,8 @@
 """Parse structured block payloads from AI responses.
 
-The chat protocol invites the model to emit a `[DJ_BLOCKS][...]` JSON
+The chat protocol invites the model to emit a `[SAUTIUM_BLOCKS][...]` JSON
 marker at the very end of its response, replacing the older flat
-`[DJ_TRACKS]` list. The block list mirrors Discovery's three-block
+`[SAUTIUM_TRACKS]` list. The block list mirrors Discovery's three-block
 layout — artists, albums, tracks — so the chat UI can render the
 same visual contract as the Discovery screen.
 
@@ -23,8 +23,8 @@ their identifying field are dropped silently. The caller is expected
 to hydrate the items (cover_id, names, year, ...) via
 `entity_hydration.hydrate_*` before persisting or returning them.
 
-Backwards compatibility: if no `[DJ_BLOCKS]` marker is present but
-a legacy `[DJ_TRACKS]` marker is, `extract_blocks_with_fallback`
+Backwards compatibility: if no `[SAUTIUM_BLOCKS]` marker is present but
+a legacy `[SAUTIUM_TRACKS]` marker is, `extract_blocks_with_fallback`
 synthesizes a single tracks block from the flat list.
 """
 
@@ -40,10 +40,10 @@ logger = logging.getLogger(__name__)
 
 # Greedy match — block JSON contains nested arrays/objects.
 _BLOCKS_RE_CLOSED = re.compile(
-    r'\s*\[DJ_BLOCKS\]\s*(\[.*\])\s*\[/DJ_BLOCKS\]\s*', re.DOTALL,
+    r'\s*\[SAUTIUM_BLOCKS\]\s*(\[.*\])\s*\[/SAUTIUM_BLOCKS\]\s*', re.DOTALL,
 )
 _BLOCKS_RE_OPEN = re.compile(
-    r'\s*\[DJ_BLOCKS\]\s*(\[.*\])\s*\Z', re.DOTALL,
+    r'\s*\[SAUTIUM_BLOCKS\]\s*(\[.*\])\s*\Z', re.DOTALL,
 )
 
 _KIND_CANONICAL = {
@@ -96,14 +96,14 @@ def _normalize_block(b: Any) -> dict | None:
 
 
 def parse_blocks_payload(json_str: str) -> list[dict]:
-    """Parse a raw JSON array (the inside of the `[DJ_BLOCKS]...
-    [/DJ_BLOCKS]` markers) into normalized block dicts. Used by the
+    """Parse a raw JSON array (the inside of the `[SAUTIUM_BLOCKS]...
+    [/SAUTIUM_BLOCKS]` markers) into normalized block dicts. Used by the
     streaming filter, which gives us the payload directly without
     surrounding markers."""
     try:
         raw = json.loads(json_str)
     except (json.JSONDecodeError, TypeError) as e:
-        logger.warning(f"Failed to parse DJ_BLOCKS JSON: {e}")
+        logger.warning(f"Failed to parse SAUTIUM_BLOCKS JSON: {e}")
         return []
     if not isinstance(raw, list):
         return []
@@ -116,7 +116,7 @@ def parse_blocks_payload(json_str: str) -> list[dict]:
 
 
 def extract_blocks(text: str) -> list[dict]:
-    """Extract the `[DJ_BLOCKS]` payload. Returns empty list if absent
+    """Extract the `[SAUTIUM_BLOCKS]` payload. Returns empty list if absent
     or unparseable.
     """
     match = _find_blocks_match(text)
@@ -126,7 +126,7 @@ def extract_blocks(text: str) -> list[dict]:
 
 
 def strip_blocks_marker(text: str) -> str:
-    """Remove the `[DJ_BLOCKS]` marker from the visible answer text."""
+    """Remove the `[SAUTIUM_BLOCKS]` marker from the visible answer text."""
     match = _find_blocks_match(text)
     if not match:
         return text.strip()
@@ -134,8 +134,8 @@ def strip_blocks_marker(text: str) -> str:
 
 
 def extract_blocks_with_fallback(text: str) -> tuple[list[dict], str]:
-    """Extract blocks, falling back to the legacy `[DJ_TRACKS]` flat
-    list when no `[DJ_BLOCKS]` marker is present. Returns
+    """Extract blocks, falling back to the legacy `[SAUTIUM_TRACKS]` flat
+    list when no `[SAUTIUM_BLOCKS]` marker is present. Returns
     `(blocks, clean_text)` with both markers stripped.
     """
     clean = text
@@ -168,7 +168,7 @@ class BlocksFilter:
     """Stateful filter for streamed assistant text.
 
     Sees a sequence of text deltas and produces:
-      - clean text deltas with the `[DJ_BLOCKS]...[/DJ_BLOCKS]` marker
+      - clean text deltas with the `[SAUTIUM_BLOCKS]...[/SAUTIUM_BLOCKS]` marker
         elided, safe to forward live to the UI.
       - one JSON payload string when the closing marker is reached,
         ready to feed into `json.loads` + `_normalize_block`.
@@ -180,16 +180,16 @@ class BlocksFilter:
     leading up to it don't leak into the visible bubble.
 
     State machine:
-      `before` — accumulating prose, watching for `[DJ_BLOCKS]`.
+      `before` — accumulating prose, watching for `[SAUTIUM_BLOCKS]`.
                  Emits everything except the trailing few chars (which
                  might be the start of the marker we haven't seen yet).
       `in`     — between markers, accumulating the JSON payload.
-      `after`  — past `[/DJ_BLOCKS]`. Anything more is unexpected; we
+      `after`  — past `[/SAUTIUM_BLOCKS]`. Anything more is unexpected; we
                  still emit it as text so nothing silently disappears.
     """
 
-    OPEN = "[DJ_BLOCKS]"
-    CLOSE = "[/DJ_BLOCKS]"
+    OPEN = "[SAUTIUM_BLOCKS]"
+    CLOSE = "[/SAUTIUM_BLOCKS]"
     HOLD = len(OPEN) - 1  # chars to hold back so we never split a marker
 
     def __init__(self):

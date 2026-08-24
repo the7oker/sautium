@@ -105,10 +105,10 @@ class Settings(BaseSettings):
     # Launcher: not set or same as MUSIC_LIBRARY_PATH → DB stores native path as-is
     music_host_path: Optional[str] = None
 
-    # Claude Code integration (agent-based AI DJ)
+    # Claude Code integration (agent-based AI assistant)
     claude_code_enabled: bool = False
 
-    # OpenAI Codex CLI integration (second agent-based AI DJ)
+    # OpenAI Codex CLI integration (second agent-based AI assistant)
     codex_cli_enabled: bool = False
 
     # Multi-provider LLM support

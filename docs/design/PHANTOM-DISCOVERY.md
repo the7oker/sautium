@@ -378,7 +378,7 @@ collapses onto the same `track_uuid` row (gains files, no migration).
   artist's shelf. Cross-process by design (DB-level).
 - **Flood gates** (the albums-leak lesson applied to ~770k phantom
   tracks): Last.fm track-stats candidates, lyrics batch (already
-  media-joined), BGE-M3 text-embedding candidates, DJ-prompt library
+  media-joined), BGE-M3 text-embedding candidates, assistant-prompt library
   count, `library_stats.total_tracks` — all gated on
   `EXISTS media_files`. P2P sync inventory is safe by construction
   (tracks rows are never synced; enrichment is requested for the

@@ -198,7 +198,7 @@ def claude_auth_verified(timeout: float = 90.0) -> bool:
     if claude is None:
         return False
     env = os.environ.copy()
-    # The DJ runner drops ANTHROPIC_API_KEY so the CLI bills the OAuth
+    # The assistant runner drops ANTHROPIC_API_KEY so the CLI bills the OAuth
     # subscription — the probe must test the same path, not a stray key.
     env.pop("ANTHROPIC_API_KEY", None)
     kwargs = {
@@ -347,7 +347,7 @@ def _codex_native_binary(node_modules: Path) -> Optional[Path]:
 
 def get_codex_executable() -> Optional[Path]:
     """Prefer the native binary (skips the node shim hop); a shim is an
-    acceptable fallback — codex argv stays tiny (the DJ prompt travels
+    acceptable fallback — codex argv stays tiny (the assistant prompt travels
     as AGENTS.md on disk, not the command line, so cmd.exe's 8191-char
     cap never bites the way it did for claude). Shim priority: the
     prefix's own node_modules/.bin (survives any future vendor-layout

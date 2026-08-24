@@ -95,7 +95,7 @@ services:
 
       # Claude Code integration
       CLAUDE_CODE_ENABLED: ${CLAUDE_CODE_ENABLED:-true}
-      # OpenAI Codex CLI integration (second AI DJ agent)
+      # OpenAI Codex CLI integration (second assistant agent)
       CODEX_CLI_ENABLED: ${CODEX_CLI_ENABLED:-true}
 
       # P2P / DHT

@@ -1617,7 +1617,7 @@ def mb_delete() -> Dict[str, Any]:
 
 @router.get("/musicbrainz/status")
 def mb_status() -> Dict[str, Any]:
-    """Dump state + disk budget in one read — what the DJ agent's
+    """Dump state + disk budget in one read — what the assistant's
     mb_dump_status tool quotes before offering (or declining) a download."""
     import mb_dump_load
     return {**_mb_section(), "disk": mb_dump_load.disk_budget()}
@@ -1629,7 +1629,7 @@ def mb_update(force: bool = False) -> Dict[str, Any]:
     import mb_dump_load
     budget = mb_dump_load.disk_budget()
     if not budget["can_fit"]:
-        # Synchronous refusal (the DJ agent must not report "started"), and
+        # Synchronous refusal (the assistant must not report "started"), and
         # surfaced in _mb_state so the Settings screen's fire-and-forget POST
         # shows the reason instead of silently doing nothing.
         msg = (f"insufficient disk: needs ~{budget['required_gb']} GB, "

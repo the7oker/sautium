@@ -266,7 +266,7 @@ class PreviewLyricsEnricher:
     gated on a known duration (LRCLIB's search fallback covers MB-length-less
     tracks; an absent duration is just a weaker match hint). Populates track_lyrics
     AND its BGE-M3 lyrics embedding, so a streamed phantom becomes findable by the
-    lyrics-similarity search and the AI DJ's get_lyrics, and joins the P2P pool.
+    lyrics-similarity search and the AI assistant's get_lyrics, and joins the P2P pool.
     Idempotent: skips a track that already has lyrics (or a recorded miss), and the
     embedding step no-ops on an already-embedded track — so replays don't re-hit
     LRCLIB or the GPU. Its own single worker keeps the LRCLIB call rate gentle and

@@ -52,14 +52,14 @@ ENTRYPOINT ["/entrypoint.sh"]
 
 # Non-root user for the CLI agents (Claude Code refuses
 # --dangerously-skip-permissions as root; codex runs demoted the same
-# way). codex-dj is the codex working root — AGENTS.md lands there.
+# way). codex-agent is the codex working root — AGENTS.md lands there.
 RUN useradd -m -s /bin/bash agent \
     && mkdir -p /home/agent/.claude/debug \
     && mkdir -p /home/agent/.claude/projects \
     && echo '{}' > /home/agent/.claude/settings.json \
-    && mkdir -p /home/agent/.codex /home/agent/codex-dj \
+    && mkdir -p /home/agent/.codex /home/agent/codex-agent \
     && chown -R agent:agent /home/agent/.claude \
-        /home/agent/.codex /home/agent/codex-dj
+        /home/agent/.codex /home/agent/codex-agent
 
 # Set Python 3.11 as default
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \

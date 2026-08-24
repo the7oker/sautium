@@ -1,12 +1,12 @@
 """
-OpenAI Codex CLI subprocess wrapper for AI DJ.
+OpenAI Codex CLI subprocess wrapper for AI assistant.
 
 Codex mirror of `claude_code_runner.py`: spawns `codex exec --json` in
 headless mode with the same MCP tools (PostgreSQL + assistant) and turns
 its JSONL event stream into provider stream events for the chat router.
 
 Differences from the Claude runner, all forced by the CLI surface:
-- No `--system-prompt` flag — the static DJ prompt is written to
+- No `--system-prompt` flag — the static assistant prompt is written to
   AGENTS.md inside a Sautium-owned working dir (`--cd`), and the
   volatile player context is prefixed into the user message each turn
   (AGENTS.md is read at session start, not reliably re-read on resume).
@@ -21,7 +21,7 @@ Differences from the Claude runner, all forced by the CLI surface:
   so the dangerous bypass is mandatory. The fences that remain:
   `--disable shell_tool` (verified — the model has no shell), web search
   off by default, and the hard prompt-level prohibition in
-  CODEX_DJ_SYSTEM_PROMPT. The apply_patch file tool has no off switch
+  CODEX_SYSTEM_PROMPT. The apply_patch file tool has no off switch
   (measured) and stays prompt-fenced only.
 - Auth is auth.json-only: a bare OPENAI_API_KEY env var is ignored by
   the CLI (measured, 0.149), so when auth.json is missing and a key is
@@ -60,7 +60,7 @@ TITLE_MODEL = "gpt-5.6-luna"
 # Kept below the ~180s at which the browser/LAN drops the streaming
 # connection — same rationale as the Claude runner.
 TIMEOUT_SECONDS = 150
-# Analog of MAX_THINKING_TOKENS=1024: DJ turns are SQL + list-building,
+# Analog of MAX_THINKING_TOKENS=1024: assistant turns are SQL + list-building,
 # reasoning depth buys latency, not quality.
 REASONING_EFFORT = "low"
 
@@ -154,32 +154,32 @@ def _ensure_auth(codex_exe: str) -> Optional[str]:
 
 
 def _codex_workdir() -> Path:
-    """Sautium-owned working root for DJ sessions: holds AGENTS.md (the
+    """Sautium-owned working root for assistant sessions: holds AGENTS.md (the
     system prompt) and nothing else. NOT the repo and NOT the user's
     own projects — `--cd` points here so codex never walks real files."""
     if sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-        wd = base / "Sautium" / "codex-dj"
+        wd = base / "Sautium" / "codex-agent"
     elif sys.platform == "darwin":
-        wd = Path.home() / "Library" / "Application Support" / "Sautium" / "codex-dj"
+        wd = Path.home() / "Library" / "Application Support" / "Sautium" / "codex-agent"
     else:
         try:
-            wd = Path(pwd.getpwnam(AGENT_USER).pw_dir) / "codex-dj"
+            wd = Path(pwd.getpwnam(AGENT_USER).pw_dir) / "codex-agent"
         except KeyError:
-            wd = Path.home() / "codex-dj"
+            wd = Path.home() / "codex-agent"
     wd.mkdir(parents=True, exist_ok=True)
     return wd
 
 
 def _write_agents_md(workdir: Path) -> None:
-    """Atomic refresh of the DJ system prompt. Rewritten on every spawn
+    """Atomic refresh of the assistant system prompt. Rewritten on every spawn
     so NEW sessions always read the current prompt text (rule changes
     ship with code updates); atomic rename keeps a concurrent spawn
     from reading a torn file. Deliberately carries NO volatile data —
     codex reads the file at session start only, so anything live
     (player state, library size) travels per-turn in the message or is
     fetched by the model via SQL."""
-    from claude_dj_prompt import get_system_prompt
+    from assistant_prompt import get_system_prompt
     prompt = get_system_prompt("codex", None)
     tmp = workdir / "AGENTS.md.tmp"
     tmp.write_text(prompt, encoding="utf-8")
@@ -233,7 +233,7 @@ def _base_flags(model: str, effort: str, with_mcp: bool,
     sandboxed codex is a chat that cannot answer. What actually fences
     the agent instead: shell_tool disabled (verified — the model
     reports having no shell), web search off by default, and the
-    prompt-level prohibition in CODEX_DJ_SYSTEM_PROMPT. Known residual:
+    prompt-level prohibition in CODEX_SYSTEM_PROMPT. Known residual:
     the apply_patch file tool cannot be switched off (no feature flag,
     include_apply_patch_tool=false is inert — both measured) and stays
     reachable behind the prompt fence only."""
@@ -243,7 +243,7 @@ def _base_flags(model: str, effort: str, with_mcp: bool,
     flags += [
         "--skip-git-repo-check",
         # Clean room: the user's own config.toml (personal MCP
-        # connectors, model overrides) must not leak into DJ turns.
+        # connectors, model overrides) must not leak into assistant turns.
         # Auth and session storage still use CODEX_HOME (documented).
         "--ignore-user-config",
         "--ignore-rules",
@@ -513,7 +513,7 @@ def call_codex_oneshot(
     model: str = TITLE_MODEL,
     timeout_seconds: int = 25,
 ) -> Optional[str]:
-    """Bare one-shot codex call — no MCP, no DJ workdir (must not inhale
+    """Bare one-shot codex call — no MCP, no assistant workdir (must not inhale
     AGENTS.md), `--ephemeral` so title generations don't litter session
     storage. Returns the final agent message text, or None on any
     failure — callers treat title generation as best-effort."""

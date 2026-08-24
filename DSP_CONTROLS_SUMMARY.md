@@ -155,7 +155,7 @@ with HQPlayerConnection(host="172.26.80.1") as hqp:
 ### Example 3: choosing settings for a track automatically
 ```python
 def auto_configure_for_track(hqp, track):
-    """AI DJ: configure HQPlayer for a track."""
+    """AI assistant: configure HQPlayer for a track."""
 
     if track.sample_rate >= 96000:
         # Hi-res FLAC → PCM upsampled to DSD256

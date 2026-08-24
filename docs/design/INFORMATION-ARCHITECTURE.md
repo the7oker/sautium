@@ -60,7 +60,7 @@ and interaction patterns for the mobile-first Sautium web UI. It is
 
 ### AI — FAB only
 
-AI DJ is **not** a bottom tab. It is a **floating action button** in
+AI assistant is **not** a bottom tab. It is a **floating action button** in
 the bottom-left corner, visible on every root surface. Tap opens a
 chat sheet with the current session list (ported from the existing
 `app.js` chat implementation). The sheet passes an **invisible
@@ -633,7 +633,7 @@ or is a thin query over existing data.
 |-------|------------|-----------|
 | Favourite artists | `local_play_stats` aggregated by artist | + listening recency weight |
 | New in library | `media_files.file_modified_at DESC`, grouped to album | + scanner-assigned "fresh" tag |
-| Recommendations | CLAP audio similarity to top-played tracks, filter to artists not yet heard much | + AI DJ contextual blends |
+| Recommendations | CLAP audio similarity to top-played tracks, filter to artists not yet heard much | + AI assistant contextual blends |
 | Recent queues *(if populated)* | `queue_history` table **(new)** + `(new endpoint)` GET `/queue/history` | + cross-device sync via P2P |
 
 ### Discovery

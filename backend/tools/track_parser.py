@@ -1,6 +1,6 @@
 """Parse track recommendations from AI responses.
 
-Extracts [DJ_TRACKS][...][/DJ_TRACKS] markers from text.
+Extracts [SAUTIUM_TRACKS][...][/SAUTIUM_TRACKS] markers from text.
 Shared between Claude Code runner and API providers.
 """
 
@@ -12,12 +12,12 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-_TRACKS_RE_CLOSED = re.compile(r'\s*\[DJ_TRACKS\]\s*(\[.*\])\s*\[/DJ_TRACKS\]\s*', re.DOTALL)
-_TRACKS_RE_OPEN = re.compile(r'\s*\[DJ_TRACKS\]\s*(\[.*\])\s*\Z', re.DOTALL)
+_TRACKS_RE_CLOSED = re.compile(r'\s*\[SAUTIUM_TRACKS\]\s*(\[.*\])\s*\[/SAUTIUM_TRACKS\]\s*', re.DOTALL)
+_TRACKS_RE_OPEN = re.compile(r'\s*\[SAUTIUM_TRACKS\]\s*(\[.*\])\s*\Z', re.DOTALL)
 
 
 def _find_tracks_block(text: str) -> re.Match | None:
-    """Match [DJ_TRACKS][...][/DJ_TRACKS] greedily.
+    """Match [SAUTIUM_TRACKS][...][/SAUTIUM_TRACKS] greedily.
 
     Greedy match is required because track titles can themselves contain
     `]` (e.g. "Bon Voyage [Live Hamburg 1981]"); a non-greedy `.*?` would
@@ -27,8 +27,8 @@ def _find_tracks_block(text: str) -> re.Match | None:
 
 
 def extract_tracks(text: str) -> list[dict[str, Any]]:
-    """Extract track list from [DJ_TRACKS][...][/DJ_TRACKS] marker.
-    Closing tag [/DJ_TRACKS] is optional for robustness.
+    """Extract track list from [SAUTIUM_TRACKS][...][/SAUTIUM_TRACKS] marker.
+    Closing tag [/SAUTIUM_TRACKS] is optional for robustness.
     """
     match = _find_tracks_block(text)
     if not match:
@@ -49,13 +49,13 @@ def extract_tracks(text: str) -> list[dict[str, Any]]:
                 })
         return valid
     except (json.JSONDecodeError, TypeError) as e:
-        logger.warning(f"Failed to parse DJ_TRACKS JSON: {e}")
+        logger.warning(f"Failed to parse SAUTIUM_TRACKS JSON: {e}")
         return []
 
 
 def strip_tracks_marker(text: str) -> str:
-    """Remove [DJ_TRACKS]...[/DJ_TRACKS] block from answer text.
-    Closing tag [/DJ_TRACKS] is optional for robustness.
+    """Remove [SAUTIUM_TRACKS]...[/SAUTIUM_TRACKS] block from answer text.
+    Closing tag [/SAUTIUM_TRACKS] is optional for robustness.
     """
     match = _find_tracks_block(text)
     if not match:

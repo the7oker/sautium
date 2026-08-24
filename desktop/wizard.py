@@ -631,7 +631,7 @@ class SetupWizard(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             self.content_frame,
-            text="Choose how the AI DJ will generate recommendations.",
+            text="Choose how the AI assistant will generate recommendations.",
         ).pack(pady=5)
 
         self._provider_var = ctk.StringVar(

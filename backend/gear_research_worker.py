@@ -3,7 +3,7 @@ Gear research worker — Phase 2 of the gear catalog.
 
 Picks up gear_models rows in research_state='queued', runs one AI
 research call per model (Claude Code CLI with built-in WebSearch /
-WebFetch preferred — subscription-billed, same runner the AI DJ and
+WebFetch preferred — subscription-billed, same runner the AI assistant and
 ai_canon use; Anthropic API with the server-side web_search tool as
 fallback), parses the strict-JSON payload defined by
 gear_research_prompt.build_prompt() and persists it:

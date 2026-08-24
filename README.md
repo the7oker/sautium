@@ -18,7 +18,7 @@ analytics between collectors.
 - **Hybrid semantic search** — combines audio embeddings with 1024-d
   multilingual text embeddings (BGE-M3), default mix 70% text + 30% audio,
   tunable per query, with a subtle log-scale popularity boost.
-- **AI DJ** — natural-language music discovery powered by Claude Code + MCP
+- **AI assistant** — natural-language music discovery powered by Claude Code + MCP
   tools (22 tools across HQPlayer, PostgreSQL and search) instead of a custom
   RAG pipeline. Pluggable LLM providers (Claude API, Claude Code, OpenAI,
   Groq, OpenAI-compatible endpoints).
@@ -66,7 +66,7 @@ bind to loopback. The P2P DHT listens on `19001/udp`.
 - **Docker + Docker Compose** (WSL2 on Windows, native on macOS)
 - **NVIDIA RTX 4090** for GPU work (CLAP embeddings, BGE-M3 text encoding)
 - **CLAP** (audio, 512-d) + **BGE-M3** (text, 1024-d) + **librosa** + AST/PaSST
-- **anthropic SDK** + Claude Code & MCP for the AI DJ
+- **anthropic SDK** + Claude Code & MCP for the AI assistant
 - **libtorrent** for the DHT (and future file sharing)
 - **aiohttp + PyNaCl + miniupnpc** for the P2P layer
 - **CustomTkinter + PyInstaller + Inno Setup** for the Windows launcher/installer
@@ -205,7 +205,7 @@ sautium/
 │   ├── ensemble_instruments.py     # AST + PaSST instrument tagger
 │   ├── hqplayer_client.py          # HQPlayer XML control client
 │   ├── auth_hmac.py / tls_gen.py   # HMAC request signing + self-signed TLS
-│   ├── claude_dj_prompt.py         # AI DJ system prompt + schema description
+│   ├── assistant_prompt.py         # AI assistant system prompt + schema description
 │   ├── providers/                  # pluggable LLM providers
 │   ├── routers/                    # FastAPI route modules
 │   └── static/                     # Web UI (vanilla HTML/CSS/JS, no build)

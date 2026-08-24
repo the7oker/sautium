@@ -18,7 +18,7 @@ from models import TrackLyrics, ExternalMetadata
 logger = logging.getLogger(__name__)
 
 LRCLIB_BASE_URL = "https://lrclib.net"
-USER_AGENT = "Sautium/1.0 (https://github.com/sautium-dj)"
+USER_AGENT = "Sautium/1.0 (https://github.com/sautium)"
 
 
 class LrclibService:

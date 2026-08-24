@@ -703,7 +703,7 @@ def mb_resolve(artist_name: str, album_title: str = "") -> str:
     searches the PEER NETWORK and fetches the artist's signed catalog slice
     before minting — same path the Discovery screen uses. Returns JSON:
       status "ok"       -> artist_id (+ album_id when album_title matched) —
-                           real UUIDs for your DJ_BLOCKS artist/album cards.
+                           real UUIDs for your SAUTIUM_BLOCKS artist/album cards.
                            source "peer_network" = resolved via P2P, not a
                            local dump.
       status "not_found"-> the name is not in the catalog; do not tile it.

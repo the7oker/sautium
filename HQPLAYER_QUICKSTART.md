@@ -133,7 +133,7 @@ docker exec sautium-backend nc -zv host.docker.internal 4321
 ## Next steps
 
 1. ✅ Basic integration — **DONE**
-2. ⏳ AI DJ integration (recommendations → HQPlayer)
+2. ⏳ AI assistant integration (recommendations → HQPlayer)
 3. ⏳ Voice control (Phase 4.3)
 4. ⏳ Extra features (metering, DSP settings)
 

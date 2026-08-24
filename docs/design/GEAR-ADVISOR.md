@@ -78,7 +78,7 @@ AI call, in preference order:
 
 1. **Claude Code CLI** (`call_claude_code(..., timeout_seconds=480,
    mcp=False)`) — built-in WebSearch/WebFetch, subscription-billed, the same
-   runner the AI DJ chat and ai_canon use. No MCP config: research needs the
+   runner the AI assistant chat and ai_canon use. No MCP config: research needs the
    web, not the library.
 2. **Anthropic API fallback** with the server-side `web_search` tool
    (pause_turn continuation loop, max 12 searches) when Claude Code is absent

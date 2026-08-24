@@ -188,7 +188,7 @@ class OpenAIProvider(BaseProvider):
             choice = response.choices[0]
             msg = choice.message
 
-            # No tool calls — return raw answer including any DJ_BLOCKS
+            # No tool calls — return raw answer including any SAUTIUM_BLOCKS
             # marker. The chat router parses + hydrates the marker
             # centrally so providers stay format-agnostic.
             if choice.finish_reason != "tool_calls" or not msg.tool_calls:

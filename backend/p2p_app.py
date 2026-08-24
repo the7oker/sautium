@@ -6,7 +6,7 @@ slices, the chat/relay protocol, and a `/health` peers identify the node by.
 
 Why a separate port at all: the Web UI on 8800 inlines the API secret into
 its HTML (window.__SAUTIUM_SECRET), so forwarding that port hands an
-attacker the whole API — playback, settings, library, AI DJ. The launcher
+attacker the whole API — playback, settings, library, AI assistant. The launcher
 has had this split from the start (Web UI on 18000, sync on a random
 20000-29999 port); Docker had both on 8800, which is why a Docker master
 could never be a reachable node.

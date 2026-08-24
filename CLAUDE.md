@@ -44,7 +44,7 @@ See:
   monetization and its Cyrillic-only trigger silently skipped
   French/German/CJK queries; torch bf16 GPU serving (5.5 GB VRAM) replaced
   by ct2 int8 2026-07-21
-- **anthropic SDK** for Claude API; Claude Code + MCP tools for the AI assistant (chat); **OpenAI Codex CLI** as the second selectable chat agent (`backend/codex_runner.py` — same MCP servers, `codex exec --json`, DJ prompt via AGENTS.md, auth via `codex login` / minted from `OPENAI_API_KEY`)
+- **anthropic SDK** for Claude API; Claude Code + MCP tools for the AI assistant (chat); **OpenAI Codex CLI** as the second selectable chat agent (`backend/codex_runner.py` — same MCP servers, `codex exec --json`, assistant prompt via AGENTS.md, auth via `codex login` / minted from `OPENAI_API_KEY`)
 - **libtorrent** for DHT (NOT pure-python `kademlia` — incompatible with BT DHT)
 - **CustomTkinter + PyInstaller** for the Windows desktop launcher
 - **aiohttp + PyNaCl + miniupnpc** for the P2P layer
@@ -740,7 +740,7 @@ responsibility).
 | `backend/uuid_utils.py` | UUID v5 generators + normalization |
 | `backend/lastfm.py` | Last.fm enrichment + bio-derived classifiers |
 | `backend/search.py` | Hybrid audio + text semantic search |
-| `backend/claude_dj_prompt.py` | System prompt + schema description for Claude Code + API variants |
+| `backend/assistant_prompt.py` | System prompt + schema description for Claude Code + API variants |
 | `backend/ensemble_instruments.py` | AST + PaSST instrument multi-label tagger (replaces CLAP zero-shot) |
 | `backend/static/tokens.css` | Canonical design-system tokens (colours, type, spacing, scaling) |
 | `docs/design/POSITIONING.md` | Product positioning + UI design principles (source of truth) |

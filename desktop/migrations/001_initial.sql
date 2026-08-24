@@ -1072,7 +1072,7 @@ CREATE INDEX IF NOT EXISTS idx_track_stats_source ON track_stats(source);
 CREATE INDEX IF NOT EXISTS idx_track_stats_listeners ON track_stats(listeners);
 CREATE INDEX IF NOT EXISTS idx_track_stats_playcount ON track_stats(playcount);
 
--- Chat indexes (AI DJ sessions)
+-- Chat indexes (AI assistant sessions)
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id);
 
 -- Listening history indexes

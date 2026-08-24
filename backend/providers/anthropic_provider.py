@@ -162,7 +162,7 @@ class AnthropicProvider(BaseProvider):
             # stop_reason == "tool_use" means: process tools and call me again
             # stop_reason == "end_turn" means: I'm done
             if response.stop_reason != "tool_use":
-                # Model is done — return raw text including any DJ_BLOCKS
+                # Model is done — return raw text including any SAUTIUM_BLOCKS
                 # marker. The chat router parses + hydrates the marker
                 # centrally so providers stay format-agnostic.
                 return ProviderResult(
