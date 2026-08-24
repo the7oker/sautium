@@ -6767,8 +6767,8 @@
                    autocomplete="off" value="${escapeProfileHtml(friend.display_name || '')}"
                    placeholder="${escapeProfileHtml(friend.username || '')}">
           </label>
-          <button class="profile-btn" data-act="favorite">${friend.favorite ? 'Unpin from favorites' : 'Pin to favorites'}</button>
-          <button class="profile-btn" data-act="block">${friend.is_blocked ? 'Unblock' : 'Block'}</button>
+          <button class="profile-btn secondary" data-act="favorite">${friend.favorite ? 'Unpin from favorites' : 'Pin to favorites'}</button>
+          <button class="profile-btn secondary" data-act="block">${friend.is_blocked ? 'Unblock' : 'Block'}</button>
           <button class="profile-btn primary" data-act="save">Save name</button>
           <button class="profile-btn destructive" data-act="delete">Delete friend</button>
           <div id="frMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
