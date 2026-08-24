@@ -81,6 +81,7 @@ class SetupWizard(ctk.CTkToplevel):
         # Claude Code state is computed on-demand via _claude_state()
         # because it can change during the wizard (install, sign-in).
         self._claude_install_thread: Optional[threading.Thread] = None
+        self._node_install_thread: Optional[threading.Thread] = None
         self._claude_poll_after_id: Optional[str] = None
         self._claude_poll_deadline: float = 0.0
         # Live-probe verdict over stored credentials: None = not checked yet,
@@ -810,40 +811,7 @@ class SetupWizard(ctk.CTkToplevel):
             state = "not_authed"
 
         if state == "node_missing":
-            ctk.CTkLabel(
-                self._provider_fields_frame,
-                text="Node.js 18+ is required.",
-                text_color="orange",
-                font=ctk.CTkFont(size=13, weight="bold"),
-            ).pack(anchor="w")
-            if sys.platform == "darwin":
-                ctk.CTkLabel(
-                    self._provider_fields_frame,
-                    text="Install Node.js via Homebrew, then click Refresh.",
-                    text_color="gray",
-                ).pack(anchor="w", pady=(2, 5))
-                ctk.CTkButton(
-                    self._provider_fields_frame,
-                    text="Show install command",
-                    width=200,
-                    command=self._show_node_macos_dialog,
-                ).pack(anchor="w", pady=(0, 5))
-            else:
-                ctk.CTkLabel(
-                    self._provider_fields_frame,
-                    text=(
-                        "The installer should have placed Node next to Sautium.\n"
-                        "Re-run the Sautium installer to repair, then click Refresh."
-                    ),
-                    text_color="gray",
-                    justify="left",
-                ).pack(anchor="w", pady=(2, 5))
-            ctk.CTkButton(
-                self._provider_fields_frame,
-                text="Refresh",
-                width=120,
-                command=self._refresh_claude_state,
-            ).pack(anchor="w")
+            self._render_node_missing(self._refresh_claude_state)
             return
 
         if state == "claude_missing":
@@ -960,61 +928,80 @@ class SetupWizard(ctk.CTkToplevel):
             fg_color="transparent", border_width=1,
         ).pack(side="left")
 
-    def _show_node_macos_dialog(self):
-        """Mirrors `_show_homebrew_dialog` but for `brew install node`."""
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Install Node.js")
-        dialog.geometry("520x260")
-        dialog.resizable(False, False)
-        dialog.transient(self)
-        dialog.grab_set()
-
+    def _render_node_missing(self, on_refresh) -> None:
+        """Both agents are npm packages, so both stall on the same missing
+        Node — one panel serves both. macOS installs it the way this setup
+        installs PostgreSQL and ffmpeg: by asking Homebrew, not by asking the
+        user to open a terminal and paste."""
         ctk.CTkLabel(
-            dialog,
-            text="Install Node.js",
-            font=ctk.CTkFont(size=20, weight="bold"),
-        ).pack(pady=(20, 5))
+            self._provider_fields_frame,
+            text="Node.js 18+ is required.",
+            text_color="orange",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).pack(anchor="w")
 
-        ctk.CTkLabel(
-            dialog,
-            text="Open Terminal and paste this command:",
-            text_color="gray",
-        ).pack(pady=(10, 3))
-
-        node_cmd = "brew install node"
-        cmd_frame = ctk.CTkFrame(dialog)
-        cmd_frame.pack(fill="x", padx=30, pady=5)
-
-        cmd_entry = ctk.CTkEntry(
-            cmd_frame, width=380,
-            font=ctk.CTkFont(size=13, family="Courier"),
-        )
-        cmd_entry.insert(0, node_cmd)
-        cmd_entry.configure(state="readonly")
-        cmd_entry.pack(side="left", padx=(10, 5), pady=8)
-
-        def _copy():
-            dialog.clipboard_clear()
-            dialog.clipboard_append(node_cmd)
-            copy_btn.configure(text="Copied!")
-            dialog.after(1500, lambda: copy_btn.configure(text="Copy"))
-
-        copy_btn = ctk.CTkButton(
-            cmd_frame, text="Copy", width=70, command=_copy,
-        )
-        copy_btn.pack(side="right", padx=(0, 10), pady=8)
-
-        ctk.CTkLabel(
-            dialog,
-            text="After install completes, close this dialog and click Refresh.",
-            text_color="gray",
-            font=ctk.CTkFont(size=12),
-            justify="center",
-        ).pack(pady=10)
+        if sys.platform == "darwin":
+            ctk.CTkLabel(
+                self._provider_fields_frame,
+                text="Sautium installs it through Homebrew - about a minute.",
+                text_color="gray",
+            ).pack(anchor="w", pady=(2, 5))
+            self._node_install_status = ctk.CTkLabel(
+                self._provider_fields_frame, text="", text_color="gray",
+                wraplength=420, justify="left",
+            )
+            self._node_install_status.pack(anchor="w", pady=(0, 5))
+            self._node_install_btn = ctk.CTkButton(
+                self._provider_fields_frame,
+                text="Install Node.js",
+                width=200,
+                command=lambda: self._install_node_clicked(on_refresh),
+            )
+            self._node_install_btn.pack(anchor="w", pady=(0, 5))
+        else:
+            ctk.CTkLabel(
+                self._provider_fields_frame,
+                text=(
+                    "The installer should have placed Node next to Sautium.\n"
+                    "Re-run the Sautium installer to repair, then click Refresh."
+                ),
+                text_color="gray",
+                justify="left",
+            ).pack(anchor="w", pady=(2, 5))
 
         ctk.CTkButton(
-            dialog, text="Done", width=100, command=dialog.destroy,
-        ).pack(pady=10)
+            self._provider_fields_frame,
+            text="Refresh",
+            width=120,
+            command=on_refresh,
+        ).pack(anchor="w")
+
+    def _install_node_clicked(self, on_refresh):
+        """`brew install node` in a worker thread; re-render when it lands."""
+        if self._node_install_thread and self._node_install_thread.is_alive():
+            return
+        self._node_install_btn.configure(state="disabled", text="Installing...")
+        self._node_install_status.configure(
+            text="Installing Node.js...", text_color="gray")
+
+        def _worker():
+            from desktop.db_init import install_node
+            ok = install_node(lambda msg: self.ui_call(
+                lambda m=msg: self._node_install_status.configure(text=m)))
+            self.ui_call(lambda: self._on_node_install_done(ok, on_refresh))
+
+        self._node_install_thread = threading.Thread(target=_worker, daemon=True)
+        self._node_install_thread.start()
+
+    def _on_node_install_done(self, ok: bool, on_refresh):
+        if ok:
+            on_refresh()
+            return
+        self._node_install_btn.configure(state="normal", text="Install Node.js")
+        self._node_install_status.configure(
+            text="Install failed. Run `brew install node` in Terminal, then Refresh.",
+            text_color="red",
+        )
 
     def _install_claude_clicked(self):
         """Run npm install in a worker thread and re-render on completion."""
@@ -1173,40 +1160,7 @@ class SetupWizard(ctk.CTkToplevel):
             state = "not_authed"
 
         if state == "node_missing":
-            ctk.CTkLabel(
-                self._provider_fields_frame,
-                text="Node.js 18+ is required.",
-                text_color="orange",
-                font=ctk.CTkFont(size=13, weight="bold"),
-            ).pack(anchor="w")
-            if sys.platform == "darwin":
-                ctk.CTkLabel(
-                    self._provider_fields_frame,
-                    text="Install Node.js via Homebrew, then click Refresh.",
-                    text_color="gray",
-                ).pack(anchor="w", pady=(2, 5))
-                ctk.CTkButton(
-                    self._provider_fields_frame,
-                    text="Show install command",
-                    width=200,
-                    command=self._show_node_macos_dialog,
-                ).pack(anchor="w", pady=(0, 5))
-            else:
-                ctk.CTkLabel(
-                    self._provider_fields_frame,
-                    text=(
-                        "The installer should have placed Node next to Sautium.\n"
-                        "Re-run the Sautium installer to repair, then click Refresh."
-                    ),
-                    text_color="gray",
-                    justify="left",
-                ).pack(anchor="w", pady=(2, 5))
-            ctk.CTkButton(
-                self._provider_fields_frame,
-                text="Refresh",
-                width=120,
-                command=self._refresh_codex_state,
-            ).pack(anchor="w")
+            self._render_node_missing(self._refresh_codex_state)
             return
 
         if state == "codex_missing":

@@ -515,6 +515,32 @@ def ensure_media_tools(progress_cb: Optional[Callable] = None) -> dict:
     return result
 
 
+def install_node(progress_cb: Optional[Callable] = None) -> bool:
+    """Node for the AI agents — Claude Code and Codex both ship as npm
+    packages. Deliberately NOT in _MEDIA_TOOLS: it is only needed when the user
+    picks an agent, and a node install is a minute the rest of setup should not
+    spend on everyone. On Windows the installer bundles Node beside the app, so
+    there is nothing to do here."""
+    if _which_tool("node"):
+        return True
+    if IS_MACOS:
+        return _brew_install("node", "node", progress_cb)
+    return False
+
+
+def install_node(progress_cb: Optional[Callable] = None) -> bool:
+    """Node for the AI agents — Claude Code and Codex both ship as npm
+    packages. Deliberately NOT in _MEDIA_TOOLS: it is only needed when the user
+    picks an agent, and a node install is a minute the rest of setup should not
+    spend on everyone. On Windows the installer bundles Node beside the app, so
+    there is nothing to do here."""
+    if _which_tool("node"):
+        return True
+    if IS_MACOS:
+        return _brew_install("node", "node", progress_cb)
+    return False
+
+
 def _brew_install(binary: str, formula: str, progress_cb: Optional[Callable] = None) -> bool:
     brew = _find_brew()
     if not brew:
