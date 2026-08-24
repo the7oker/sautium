@@ -461,28 +461,6 @@ async def lifespan(app: FastAPI):
             )
             await _dht_service.start()
 
-            # Yield-to-foreground probe: the announcer holds while playback
-            # is active on ANY output (HQP / local / DLNA / browser — the
-            # audio and control traffic ride the same container->host path
-            # the announce storm chokes).
-            #
-            # An open Web UI used to count too, via the last HMAC-verified
-            # request. It was the wrong signal twice over: a rendered page
-            # does not contend for that path the way an audio stream does,
-            # and the page's own SSE plus friend polling kept the window
-            # permanently open, so the node read as busy at playback:false
-            # and headroom 0.92. The hold was sized for a 3175-artist sweep
-            # (~10.6 min); the tail is capped at sync.announce_limit = 300
-            # today, a 61 s pass (measured), which that signal stretched to
-            # three hours.
-            def _node_busy() -> bool:
-                try:
-                    from playback.manager import manager as _pm
-                    return _pm.latest_status.get("state") in ("playing", "paused")
-                except Exception:
-                    return False
-
-            _dht_service.set_activity_probe(_node_busy)
             if _load_meter is not None:
                 _dht_service.set_pace_provider(_load_meter.announce_pace)
 
@@ -522,9 +500,8 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning(f"relay role init failed: {e}")
 
-            # Rare-artist tail. Paced (dht_service.ANNOUNCE_CHUNK), so it
-            # runs as a background task; awaiting it here would hold the
-            # whole app startup (uvicorn accepts no requests mid-lifespan).
+            # Rare-artist tail — registration only; the drip loop in
+            # dht_service announces it at its own spacing.
             artist_uuids = await asyncio.to_thread(_get_announce_tail_uuids)
             if artist_uuids:
                 asyncio.create_task(_dht_service.announce_artists(artist_uuids))

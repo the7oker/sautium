@@ -52,32 +52,28 @@ INFOHASH_PREFIX_USER = "Sautium-user:"
 INFOHASH_PREFIX_NODE = "Sautium-node"
 INFOHASH_PREFIX_CAP = "Sautium-cap:"
 
-# dht_announce initiations per pacing pause. Each announce fans out into a
-# get_peers traversal, so a tight loop floods the docker-bridge/WSL2 NAT with
-# UDP and starves every other flow in the container — measured 2026-07-10:
-# each 15-min burst lined up with an HQPlayer control-socket timeout cluster.
-# 5/s: initiation must stay under the DHT's traversal-completion rate or the
-# backlog of concurrent traversals accumulates and saturates the path anyway
-# (measured: 25/s still produced timeout bursts near the END of the paced
-# window and ~1 min past it). The mass per-artist sweep this pacing was built
-# for is gone (node + tail, see module docstring): a ~300-key tail takes ~60s
-# of the 15-min cycle instead of the old ~10.6 min.
-ANNOUNCE_CHUNK = 5
-ANNOUNCE_CHUNK_PAUSE = 1.0
-
-# DHT re-announce interval (seconds)
+# DHT re-announce interval (seconds). Also the length of one tail pass:
+# entries live 15-30 min, so refreshing every key once per interval is
+# exactly enough and nothing is gained by going faster.
 REANNOUNCE_INTERVAL = 15 * 60  # 15 minutes
 
-# Yield-to-foreground announce scheduling (HARDWARE-TIERS / announce-storm
-# history): even the paced sweep degrades the container->host path for its
-# whole window — HQPlayer connects time out and audio starves. Playback is
-# a *foreground* value, discoverability a background one, so the announcer
-# HOLDS between chunks while any output is playing. To keep an all-day
-# listening node from vanishing off the DHT (entries live 15-30 min), a
-# hold longer than MAX_DEFER grants a FORCED_TRICKLE allowance anyway.
-BUSY_CHECK_INTERVAL = 15.0
-MAX_DEFER_SECONDS = 30 * 60
-FORCED_TRICKLE = 50
+# Announce-storm history (HARDWARE-TIERS, e0d409b): bursts of announces
+# degrade the container->host path for their whole window — HQPlayer
+# connects time out and audio starves. That was answered with a brake
+# (hold while the node is busy), which had the announcer alternate between
+# storming and standing still, and standing still is what dropped the node
+# out of the DHT. The rate is now safe BY CONSTRUCTION instead: the tail
+# drips one key at a time, spaced so a full pass takes exactly one entry
+# lifetime, and only ONE get_peers traversal is ever in flight. Nothing to
+# yield to, because nothing floods.
+#
+# A tail bigger than REANNOUNCE_INTERVAL/MIN_ANNOUNCE_SPACING keys cannot
+# refresh inside one lifetime, and that is fine: its oldest keys expire and
+# reappear on the next pass, so presence degrades smoothly with tail size
+# instead of collapsing. At the shipped sync.announce_limit of 300 the pass
+# is 3 s per key, well inside the window.
+MIN_ANNOUNCE_SPACING = 0.5
+TAIL_IDLE_RECHECK = 60.0
 
 # How long to wait for DHT bootstrap (seconds)
 DHT_BOOTSTRAP_TIMEOUT = 30
@@ -156,61 +152,14 @@ class DHTService:
         self._pending_lookups: dict[str, list[tuple[asyncio.Future, bool]]] = {}
         # ih_hex -> peers seen so far in the traversal currently in flight.
         self._lookup_buffers: dict[str, set[tuple[str, int]]] = {}
-        # Yield-to-foreground state (see module constants). The probe is
-        # injected by main.py after startup — returns True while the node
-        # has foreground activity; None = never busy (announce freely).
-        self._activity_probe: Optional[callable] = None
         self._pace = lambda: 1.0     # load_meter.announce_pace when installed
-        self._deferred_s = 0.0
-        self._trickle_allowance = 0
-        # Serialize sweeps: the startup announce and the 15-min cycle must
-        # not interleave (double traffic on the same choked path).
-        self._announce_lock = asyncio.Lock()
-
-    def set_activity_probe(self, probe: callable) -> None:
-        self._activity_probe = probe
 
     def set_pace_provider(self, fn) -> None:
-        """Multiplier for the announce chunk pause (desktop/p2p/load_meter.py:
-        1× when the node is idle, up to 8× as CPU headroom vanishes) — the
-        activity probe above yields to playback, this one yields to load."""
+        """Multiplier for the drip spacing (desktop/p2p/load_meter.py: 1× when
+        the node is idle, up to 8× as CPU headroom vanishes). It stretches an
+        already-safe rate further under load; it is not what keeps the rate
+        safe."""
         self._pace = fn
-
-    def _is_busy(self) -> bool:
-        if self._activity_probe is None:
-            return False
-        try:
-            return bool(self._activity_probe())
-        except Exception:
-            return False
-
-    async def _hold_while_busy(self) -> None:
-        """Block between announce chunks while foreground activity is on.
-        Coarse checks of an in-process flag (BUSY_CHECK_INTERVAL) — this is
-        backpressure scheduling, not state polling of another component.
-        After MAX_DEFER_SECONDS of continuous busy, grants FORCED_TRICKLE
-        announces so DHT presence survives an all-day listening session."""
-        if not self._is_busy():
-            self._deferred_s = 0.0
-            return
-        if self._trickle_allowance > 0:
-            self._trickle_allowance -= 1
-            return
-        held = False
-        while self._running and self._is_busy():
-            held = True
-            await asyncio.sleep(BUSY_CHECK_INTERVAL)
-            self._deferred_s += BUSY_CHECK_INTERVAL
-            if self._deferred_s >= MAX_DEFER_SECONDS:
-                self._deferred_s = 0.0
-                self._trickle_allowance = FORCED_TRICKLE - 1
-                logger.info(
-                    "DHT: announce deferred %d min under activity — pushing "
-                    "a %d-announce trickle", MAX_DEFER_SECONDS // 60,
-                    FORCED_TRICKLE)
-                return
-        if held:
-            logger.info("DHT: node idle — announcing resumes")
 
     @property
     def is_available(self) -> bool:
@@ -356,36 +305,20 @@ class DHTService:
                                   f"cap:{capability}")
 
     async def announce_artists(self, artist_uuids: list[str]):
-        """Announce the rare-artist tail (see module docstring). The caller
-        decides WHICH artists — this is a bounded set, not the library."""
-        if not self._session:
-            return
+        """Register the rare-artist tail (see module docstring). The caller
+        decides WHICH artists — this is a bounded set, not the library.
 
-        new_uuids = list(set(artist_uuids) - self._announced)
+        Registration only: the drip loop does the announcing. A caller
+        handing us 300 keys must not become 300 traversals right now, which
+        is exactly what the old startup sweep did on every boot."""
+        new_uuids = set(artist_uuids) - self._announced
         if not new_uuids:
-            logger.info("No new tail artists to announce")
             return
 
+        self._announced.update(new_uuids)
         logger.info(
-            f"Announcing {len(new_uuids)} rare artists in DHT "
-            f"(HTTP port {self.http_port})"
-        )
-        async with self._announce_lock:
-            for i, uuid in enumerate(new_uuids):
-                await self._hold_while_busy()
-                if not self._running or not self._session:
-                    return
-                ih = artist_infohash(uuid)
-                sha1 = lt.sha1_hash(ih)
-                self._session.dht_announce(sha1, self.http_port, 0)
-                self._announced.add(uuid)
-                if (i + 1) % ANNOUNCE_CHUNK == 0:
-                    await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE * self._pace())
-                    if not self._running or not self._session:
-                        return
-
-        logger.info(
-            f"DHT: {len(self._announced)} rare artists announced total"
+            f"DHT tail: +{len(new_uuids)} rare artists "
+            f"({len(self._announced)} total)"
         )
 
     async def _lookup(self, infohash: bytes, cache_key: str,
@@ -490,11 +423,13 @@ class DHTService:
         """Keep this node's DHT presence alive — two INDEPENDENT cycles.
 
         They shared one loop until 2026-08-24, and the tail starved the
-        keys: `_hold_while_busy` defers the walk under foreground activity,
-        so a 300-key pass ran 36-59 minutes on the master while the node key
-        — three announces, nothing to pace — waited behind it. A DHT entry
-        lives 15-30 min, so the node dropped out of discovery between passes
-        and the sync walk could not find it at all.
+        keys: a 300-key pass ran 36-59 minutes on the master (the announcer
+        braked under foreground activity back then) while the node key —
+        three announces, nothing to spread out — waited behind it. A DHT
+        entry lives 15-30 min, so the node dropped out of discovery between
+        passes and the sync walk could not find it at all. The keys cost the
+        same three announces whatever the tail is doing; they get their own
+        cycle.
         """
         await asyncio.gather(self._reannounce_keys(), self._reannounce_tail())
 
@@ -533,31 +468,31 @@ class DHTService:
             )
 
     async def _reannounce_tail(self):
-        """The rare-artist tail: hundreds of keys, so paced and yielding to
-        foreground activity. Slow by design — it must never be what a
-        newcomer's discovery depends on."""
-        while self._running:
-            await asyncio.sleep(REANNOUNCE_INTERVAL)
-            if not self._running or not self._session:
-                break
+        """The rare-artist tail as a continuous drip — no sweep, no sleep
+        between passes: the spacing IS the cadence. One key every
+        REANNOUNCE_INTERVAL/len(tail) seconds means a pass lasts exactly one
+        entry lifetime, so every key is refreshed just as it would expire,
+        and the instantaneous rate never exceeds one announce.
 
+        The tail is re-read each pass, so a set that grew or shrank between
+        passes re-spaces itself without any bookkeeping."""
+        while self._running:
             uuids = sorted(self._announced)
-            if not uuids:
+            if not uuids or not self._session:
+                await asyncio.sleep(TAIL_IDLE_RECHECK)
                 continue
-            logger.info(f"Re-announcing {len(uuids)} rare artists in DHT")
-            async with self._announce_lock:
-                for i, uuid in enumerate(uuids):
-                    await self._hold_while_busy()
-                    if not self._running or not self._session:
-                        return
-                    ih = artist_infohash(uuid)
-                    sha1 = lt.sha1_hash(ih)
-                    self._session.dht_announce(sha1, self.http_port, 0)
-                    if (i + 1) % ANNOUNCE_CHUNK == 0:
-                        await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE * self._pace())
-                        if not self._running or not self._session:
-                            return
-            logger.info("DHT tail re-announce complete")
+
+            spacing = max(MIN_ANNOUNCE_SPACING, REANNOUNCE_INTERVAL / len(uuids))
+            logger.info(
+                f"DHT tail pass: {len(uuids)} rare artists, "
+                f"{spacing:.1f}s apart"
+            )
+            for uuid in uuids:
+                if not self._running or not self._session:
+                    return
+                self._session.dht_announce(
+                    lt.sha1_hash(artist_infohash(uuid)), self.http_port, 0)
+                await asyncio.sleep(spacing * self._pace())
 
     async def _poll_alerts(self):
         """Poll libtorrent alerts and dispatch to handlers."""

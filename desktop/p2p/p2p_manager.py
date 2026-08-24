@@ -361,8 +361,8 @@ class P2PManager:
                 # The discovery key — how peers find this node at all.
                 await self._dht_service.announce_node()
 
-                # Rare-artist tail. Paced (dht_service.ANNOUNCE_CHUNK), so it
-                # runs as a background task; awaiting it would stall startup.
+                # Rare-artist tail — registration only; the drip loop in
+                # dht_service announces it at its own spacing.
                 _progress("Querying enriched artists...")
                 enriched = await self._get_enriched_artists()
                 self._lan_discovery.update_enriched_count(len(enriched))
