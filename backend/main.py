@@ -464,18 +464,23 @@ async def lifespan(app: FastAPI):
             # Yield-to-foreground probe: the announcer holds while playback
             # is active on ANY output (HQP / local / DLNA / browser — the
             # audio and control traffic ride the same container->host path
-            # the announce storm chokes) or while an authenticated UI
-            # request happened within the activity window.
+            # the announce storm chokes).
+            #
+            # An open Web UI used to count too, via the last HMAC-verified
+            # request. It was the wrong signal twice over: a rendered page
+            # does not contend for that path the way an audio stream does,
+            # and the page's own SSE plus friend polling kept the window
+            # permanently open, so the node read as busy at playback:false
+            # and headroom 0.92. The hold was sized for a 3175-artist sweep
+            # (~10.6 min); the tail is capped at sync.announce_limit = 300
+            # today, a 61 s pass (measured), which that signal stretched to
+            # three hours.
             def _node_busy() -> bool:
                 try:
                     from playback.manager import manager as _pm
-                    if _pm.latest_status.get("state") in ("playing", "paused"):
-                        return True
+                    return _pm.latest_status.get("state") in ("playing", "paused")
                 except Exception:
-                    pass
-                from auth_hmac import seconds_since_ui_activity
-                from dht_service import ACTIVITY_WINDOW
-                return seconds_since_ui_activity() < ACTIVITY_WINDOW
+                    return False
 
             _dht_service.set_activity_probe(_node_busy)
             if _load_meter is not None:

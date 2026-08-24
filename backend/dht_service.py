@@ -70,15 +70,12 @@ REANNOUNCE_INTERVAL = 15 * 60  # 15 minutes
 
 # Yield-to-foreground announce scheduling (HARDWARE-TIERS / announce-storm
 # history): even the paced sweep degrades the container->host path for its
-# whole ~10-min window — HQPlayer connects time out and the Web UI starves.
-# Discoverability is a *background* value; local playback/UI always wins.
-# The announcer therefore HOLDS between chunks while the node is busy
-# (playback active on any output, or an authenticated UI request within
-# ACTIVITY_WINDOW). To keep an always-listening node from vanishing off the
-# DHT (entries live 15-30 min), a hold longer than MAX_DEFER grants a
-# FORCED_TRICKLE allowance of announces even under activity.
+# whole window — HQPlayer connects time out and audio starves. Playback is
+# a *foreground* value, discoverability a background one, so the announcer
+# HOLDS between chunks while any output is playing. To keep an all-day
+# listening node from vanishing off the DHT (entries live 15-30 min), a
+# hold longer than MAX_DEFER grants a FORCED_TRICKLE allowance anyway.
 BUSY_CHECK_INTERVAL = 15.0
-ACTIVITY_WINDOW = 5 * 60
 MAX_DEFER_SECONDS = 30 * 60
 FORCED_TRICKLE = 50
 
@@ -493,12 +490,11 @@ class DHTService:
         """Keep this node's DHT presence alive — two INDEPENDENT cycles.
 
         They shared one loop until 2026-08-24, and the tail starved the
-        keys: `_hold_while_busy` defers while any authenticated UI request
-        landed inside ACTIVITY_WINDOW, so an open Web UI tab held a 300-key
-        pass for 36-59 minutes (measured on the master) while the node key
+        keys: `_hold_while_busy` defers the walk under foreground activity,
+        so a 300-key pass ran 36-59 minutes on the master while the node key
         — three announces, nothing to pace — waited behind it. A DHT entry
-        lives 15-30 min, so the node dropped out of discovery between
-        passes and the sync walk could not find it at all.
+        lives 15-30 min, so the node dropped out of discovery between passes
+        and the sync walk could not find it at all.
         """
         await asyncio.gather(self._reannounce_keys(), self._reannounce_tail())
 
