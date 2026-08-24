@@ -229,6 +229,7 @@ def _node_signing_key():
             format=serialization.PrivateFormat.Raw,
             encryption_algorithm=serialization.NoEncryption(),
         )
+        _NODE_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
         _NODE_KEY_PATH.write_text(seed.hex())
         os.chmod(_NODE_KEY_PATH, 0o600)
         logger.info("Generated backend node identity (.node_key)")
