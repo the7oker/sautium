@@ -35,10 +35,19 @@ BUNDLE_ID = "net.sautium.launcher"
 VERSION = "0.1.0"
 MIN_MACOS = "12.0"
 
-# python-build-standalone: relocatable CPython with tkinter (Tcl/Tk 9) and its
-# own OpenSSL. Bump both together — the URL embeds each.
-PBS_RELEASE = "20260814"
-PBS_PYTHON = "3.12.14"
+# python-build-standalone: relocatable CPython with tkinter and its own OpenSSL.
+# Bump both together — the URL embeds each.
+#
+# Pinned to the last release built against Tcl/Tk 8.6. CustomTkinter draws its
+# rounded widgets as canvas polygons, and 5.2 does that in a way Tk 9.0 does not
+# survive: from a terminal it raises `expected floating-point number but got
+# "None"` out of canvas coords, and launched through LaunchServices the same
+# state reaches C and segfaults in ConfigurePolygon — the app dies before its
+# window appears. Homebrew's python@3.12 (what the launcher is developed on)
+# carries Tk 8.6, so this pin is also what keeps the shipped app and the
+# maintainer's own runs on the same toolkit.
+PBS_RELEASE = "20251209"
+PBS_PYTHON = "3.12.12"
 
 # What the launcher and the backend import at runtime. `mcp/` is not optional:
 # config_manager points the assistant MCP server at <project_root>/mcp.
@@ -334,8 +343,12 @@ FIRST_LAUNCH_NOTE = """Sautium — first launch on macOS
    folder, "Open Web UI" opens the player (accept the certificate warning
    once — the connection is to your own machine).
 
-Sautium keeps everything in ~/.local/share/Sautium and ~/.config/Sautium.
-Deleting those two folders and the app removes it completely.
+Sautium keeps everything in three folders. Deleting them and the app removes
+it completely:
+
+   ~/.local/share/Sautium    database, logs, the app's own Python
+   ~/.config/Sautium         settings and your account key
+   ~/.sautium                the certificate your browser trusted
 """
 
 

@@ -11,10 +11,10 @@ directory, and is replaced wholesale by the next DMG.
 
 Running from a writable copy also keeps the launcher in the exact shape it was
 written for: `python -m desktop`, `get_project_root()` = that copy,
-`get_backend_python()` = `sys.executable` = the venv beside it. Nothing in the
-launcher needs to know it was started from a bundle.
+`get_backend_python()` = `sys.executable` = the interpreter beside it. Nothing
+in the launcher needs to know it was started from a bundle.
 
-Stdlib only — the venv this builds is where third-party code starts.
+Stdlib only — the runtime this installs is where third-party code starts.
 """
 
 import hashlib
@@ -61,15 +61,20 @@ def data_root() -> Path:
 
 ROOT = data_root()
 APP_DIR = ROOT / "app"
-# The interpreter is COPIED out of the bundle rather than run from it. A venv
-# keeps its stdlib in the base prefix, so a venv built against the bundle would
-# have the launcher, the backend and every child process importing — and
-# bytecode-caching into — a code-signed app that may sit on read-only media.
+# The interpreter is COPIED out of the bundle rather than run from it: a
+# code-signed app may sit on read-only media, and anything running from inside
+# it would bytecode-cache into the seal and break the signature.
+#
+# Packages go into that copy directly, with no venv in between. A venv looks
+# like the tidy answer and is the wrong one here: this interpreter finds Tcl by
+# its own location, so from a venv prefix Tk cannot find init.tcl, and copying
+# the binary in instead (--copies) loses the @rpath to libpython. There is one
+# interpreter on this machine and one set of packages for it; a layer that only
+# separates them from each other buys nothing.
 RUNTIME_DIR = ROOT / "runtime"
 RUNTIME_PYTHON = RUNTIME_DIR / "bin" / "python3"
 RUNTIME_STAMP = "runtime.version"
-VENV_DIR = ROOT / "venv"
-VENV_PYTHON = VENV_DIR / "bin" / "python"
+LEGACY_VENV = ROOT / "venv"
 DEPS_MARKER = ROOT / ".launcher_deps_hash"
 LOG_PATH = ROOT / "bootstrap.log"
 
@@ -114,7 +119,7 @@ def runtime_current() -> bool:
 
 def is_installed() -> bool:
     """True when this exact bundle is already unpacked with its deps in place."""
-    if not VENV_PYTHON.exists() or not runtime_current():
+    if not runtime_current():
         return False
     if installed_build_id() != bundle_build_id():
         return False
@@ -161,21 +166,12 @@ def install_runtime(report: Callable[[str], None]) -> None:
     if runtime_current():
         return
     report("Installing the Python runtime…")
-    # A new interpreter invalidates the wheels compiled against the old one.
-    shutil.rmtree(VENV_DIR, ignore_errors=True)
+    # The packages live inside the runtime, so replacing it takes them with it.
     DEPS_MARKER.unlink(missing_ok=True)
     shutil.rmtree(RUNTIME_DIR, ignore_errors=True)
+    shutil.rmtree(LEGACY_VENV, ignore_errors=True)
     shutil.copytree(BUNDLED_RUNTIME, RUNTIME_DIR, symlinks=True)
     log(f"runtime installed: {(RUNTIME_DIR / RUNTIME_STAMP).read_text().strip()}")
-
-
-def ensure_venv(report: Callable[[str], None]) -> None:
-    if VENV_PYTHON.exists():
-        return
-    report("Creating the Python environment…")
-    shutil.rmtree(VENV_DIR, ignore_errors=True)
-    # --copies, not symlinks: nothing here may break when the .app is replaced.
-    run_streamed([str(RUNTIME_PYTHON), "-m", "venv", "--copies", str(VENV_DIR)], report)
 
 
 def install_deps(report: Callable[[str], None]) -> None:
@@ -183,7 +179,7 @@ def install_deps(report: Callable[[str], None]) -> None:
         return
     report("Installing launcher dependencies…")
     run_streamed(
-        [str(VENV_PYTHON), "-m", "pip", "install", "--disable-pip-version-check",
+        [str(RUNTIME_PYTHON), "-m", "pip", "install", "--disable-pip-version-check",
          "-r", str(APP_DIR / "desktop" / "requirements.txt")],
         report,
     )
@@ -196,8 +192,8 @@ def launch() -> None:
     os.chdir(APP_DIR)
     env = dict(os.environ)
     env["PYTHONNOUSERSITE"] = "1"
-    log(f"exec {VENV_PYTHON} -m desktop")
-    os.execve(str(VENV_PYTHON), [str(VENV_PYTHON), "-m", "desktop"], env)
+    log(f"exec {RUNTIME_PYTHON} -m desktop")
+    os.execve(str(RUNTIME_PYTHON), [str(RUNTIME_PYTHON), "-m", "desktop"], env)
 
 
 # ================================================================
@@ -427,8 +423,6 @@ def start_worker(window: BootstrapWindow) -> None:
                 return
             sync_payload(lambda text: window.post("status", text))
             install_runtime(lambda text: window.post("status", text))
-            ensure_venv(lambda line: window.post("detail", line))
-            window.post("status", "Creating the Python environment…")
             install_deps(lambda line: window.post("detail", line))
             window.post("status", "Starting Sautium…")
             window.post("done", None)
