@@ -155,7 +155,12 @@ The macOS bundle is not a frozen launcher. It carries a private CPython 3.12
 (python-build-standalone, Tk included) plus a snapshot of the git-tracked tree,
 and `Contents/Resources/bootstrap.py` installs both into `~/.local/share/Sautium`
 on first run — after which the launcher runs exactly as it does from a checkout,
-because it is one. Freezing was rejected: the launcher provisions and then RUNS
+because it is one: the tree is cloned from `main`, so **Check for Updates** in
+the launcher pulls, reinstalls changed requirements, runs new migrations and
+restarts the backend, the same path a checkout uses. The bundled snapshot is
+the fallback for an install that cannot reach GitHub. Two consequences: what
+lands on `main` reaches every installed app, and a schema change only travels
+as a NEW numbered migration — editing `001_initial.sql` in place never re-runs. Freezing was rejected: the launcher provisions and then RUNS
 a Python (pip-installing torch, spawning uvicorn and the MCP server), and inside
 a frozen bundle `sys.executable` is the bundle.
 

@@ -237,6 +237,14 @@ The short version of the hard-learned lessons:
 - **The dependency install got an hour, not ten minutes.** The first backend
   start pulls ~1.3 GB of wheels; a 600 s cap is a guess about the builder's
   link speed, and when it expires the node has no backend at all.
+- **The packaged tree is a clone, so updates are the launcher's own.** The
+  bootstrap clones `main` into the data root instead of copying the bundle's
+  snapshot (which stays as the offline fallback), because the update path it
+  needs already exists and is exercised daily: pull, reinstall changed
+  requirements, run new migrations, restart the backend. A clone is then left
+  alone by every later DMG — a disk image must not roll a node back to whatever
+  snapshot it happens to carry. The cost is deliberate and accepted: an install
+  tracks `main` with no release branch between it and a work in progress.
 - **A packaged install cannot pull, and no longer pretends to.** The unpacked
   tree is not a checkout, so the update check returned "no updates" and the UI
   said "You're up to date!" — a guess worn as a fact. Worse, `is_git_repo()`

@@ -32,6 +32,14 @@ RESOURCES = Path(__file__).resolve().parent
 BUNDLED_RUNTIME = RESOURCES / "runtime"
 PAYLOAD = RESOURCES / "payload"
 
+# The tree is a git checkout, not a copy: the launcher already knows how to
+# update one — pull, reinstall changed requirements, run new migrations,
+# restart the backend — and that path is exercised daily on the maintainer's
+# own machine. The bundled payload seeds an install that cannot reach GitHub;
+# once a clone exists, git owns the directory and the DMG stops touching it.
+REPO_URL = "https://github.com/the7oker/ai.djai.git"
+REPO_BRANCH = "main"
+
 BREW_INSTALL_CMD = (
     '/bin/bash -c "$(curl -fsSL '
     'https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
@@ -117,11 +125,20 @@ def runtime_current() -> bool:
     return installed.read_text().strip() == (BUNDLED_RUNTIME / RUNTIME_STAMP).read_text().strip()
 
 
+def tree_is_clone() -> bool:
+    return (APP_DIR / ".git").is_dir()
+
+
 def is_installed() -> bool:
-    """True when this exact bundle is already unpacked with its deps in place."""
+    """True when the tree and its deps are in place for this runtime.
+
+    A clone is never "out of date" as far as the bundle is concerned — the
+    launcher's own update path owns it from then on, and a newer DMG must not
+    silently roll it back to the snapshot it happens to carry.
+    """
     if not runtime_current():
         return False
-    if installed_build_id() != bundle_build_id():
+    if not tree_is_clone() and installed_build_id() != bundle_build_id():
         return False
     return DEPS_MARKER.exists() and DEPS_MARKER.read_text().strip() == requirements_hash()
 
@@ -145,6 +162,13 @@ def run_streamed(cmd: list, report: Callable[[str], None]) -> None:
 
 
 def sync_payload(report: Callable[[str], None]) -> None:
+    """Put the tree in place — as a clone when GitHub is reachable, from the
+    bundle when it is not. A clone is left alone: after the first one, updates
+    are the launcher's job, not the disk image's."""
+    if tree_is_clone():
+        log("tree is a clone — left to the launcher's updater")
+        return
+
     report("Installing application files…")
     # backend/data holds the peer surface's own node key — code is replaced on
     # every update, that identity is not.
@@ -153,13 +177,38 @@ def sync_payload(report: Callable[[str], None]) -> None:
     if keep.exists():
         shutil.rmtree(stash, ignore_errors=True)
         shutil.move(str(keep), str(stash))
-    if APP_DIR.exists():
-        shutil.rmtree(APP_DIR)
-    shutil.copytree(PAYLOAD, APP_DIR, symlinks=True)
+    shutil.rmtree(APP_DIR, ignore_errors=True)
+
+    if not clone_tree(report):
+        shutil.copytree(PAYLOAD, APP_DIR, symlinks=True)
+        log(f"payload copied from the bundle: {bundle_build_id()}")
+
     if stash.exists():
         shutil.rmtree(keep, ignore_errors=True)
         shutil.move(str(stash), str(keep))
-    log(f"payload installed: {bundle_build_id()}")
+
+
+def clone_tree(report: Callable[[str], None]) -> bool:
+    """Clone the repository, or say why not. Not fatal: an install with no
+    network still runs from the bundled copy, and the next launch that can
+    reach GitHub replaces it with a clone."""
+    if not shutil.which("git"):
+        log("git not found — falling back to the bundled copy")
+        return False
+    report("Downloading the latest version…")
+    # No terminal to answer a credential prompt: without this a repository that
+    # stopped being public would hang the setup window forever instead of
+    # falling back to the copy we already have.
+    os.environ["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        run_streamed(["git", "clone", "--branch", REPO_BRANCH, REPO_URL, str(APP_DIR)],
+                     report)
+    except Exception as exc:
+        log(f"clone failed ({exc}) — falling back to the bundled copy")
+        shutil.rmtree(APP_DIR, ignore_errors=True)
+        return False
+    log(f"cloned {REPO_URL} ({REPO_BRANCH})")
+    return True
 
 
 def install_runtime(report: Callable[[str], None]) -> None:
