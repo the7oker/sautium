@@ -102,6 +102,15 @@
 
   const _origFetch = window.fetch.bind(window);
 
+  // App traffic waits until the boot below has settled what this browser can
+  // sign with. The app starts fetching the instant it loads, so without this
+  // the first screens raced the pairing round-trip: they went out unsigned,
+  // or signed with a token that had already died, and the repair was a full
+  // page reload once the real token landed. One awaited promise is what that
+  // reload was standing in for.
+  let _authSettled;
+  const _authReady = new Promise((resolve) => { _authSettled = resolve; });
+
   window.fetch = async function signedFetch(input, init) {
     init = init || {};
     const req = (typeof input === "string" || input instanceof URL)
@@ -118,6 +127,8 @@
     if (url.origin !== location.origin) {
       return _origFetch(input, init);
     }
+
+    await _authReady;
 
     const pathAndQuery = url.pathname + (url.search || "");
     const method = req.method.toUpperCase();
@@ -163,13 +174,16 @@
 
   // -- login surface ---------------------------------------------------------
 
+  // status / login / pair / create-account go out through the ORIGINAL fetch.
+  // They are whitelisted server-side (a client with no token cannot sign), and
+  // the wrapper would make them wait on a boot that is waiting on them.
   window.Sautium = window.Sautium || {};
   window.Sautium.auth = {
     hasToken: () => !!storedToken(),
     forget: () => setToken(""),
-    status: async () => (await fetch("/api/auth/status")).json(),
+    status: async () => (await _origFetch("/api/auth/status")).json(),
     async login(password) {
-      const r = await fetch("/api/auth/login", {
+      const r = await _origFetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),
@@ -179,7 +193,7 @@
       return true;
     },
     async createAccount(username, password) {
-      const r = await fetch("/api/auth/create-account", {
+      const r = await _origFetch("/api/auth/create-account", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
@@ -192,7 +206,7 @@
       } catch { return "Could not create the account."; }
     },
     async pair(code) {
-      const r = await fetch("/api/auth/pair", {
+      const r = await _origFetch("/api/auth/pair", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code }),
@@ -329,12 +343,21 @@
   }
 
   async function bootAuth() {
-    if (storedToken()) return;
-    if (await redeemFragmentCode()) {
-      location.reload();
-      return;
+    try {
+      // The fragment outranks localStorage. It is a credential the host minted
+      // seconds ago for this exact click, while the stored token is a cache
+      // that can be dead — a bumped epoch, a recreated identity, another node
+      // that once answered on this port. Reading storage first turned the
+      // deliberate act ("sign this browser in") into a no-op in precisely the
+      // case it exists for: the page went on signing with the dead token, ate
+      // a 401, and raised the password dialog the button is there to avoid.
+      if (await redeemFragmentCode()) return;
+      if (storedToken()) return;
+      showLoginGate();
+    } finally {
+      // Every exit, gate included — a latch nobody releases hangs the app.
+      _authSettled();
     }
-    showLoginGate();
   }
 
   if (document.readyState === "loading") {

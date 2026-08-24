@@ -352,8 +352,8 @@ async def redeem_pin(code: str) -> bool:
             return True
         if not _pin or time.time() > _pin["expires_at"]:
             return False
-        _pin["attempts"] += 1
         if not hmac.compare_digest(_pin["code"], given):
+            _pin["attempts"] += 1
             if _pin["attempts"] >= MAX_PIN_ATTEMPTS:
                 logger.warning("pairing PIN burned after %d failed attempts",
                                _pin["attempts"])
@@ -361,4 +361,10 @@ async def redeem_pin(code: str) -> bool:
                 _pin_prev = None
                 notify_pin_subscribers()
             return False
+        # Only wrong codes count toward the burn. Guessing is what the limit is
+        # for, and a correct code proves the caller is not guessing — while
+        # ordinary use redeems the same code repeatedly (a second device, the
+        # same one on another address, every load of a URL that carries it),
+        # which used to walk the counter to the edge of the limit for free.
+        _pin["attempts"] = 0
         return True
