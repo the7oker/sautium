@@ -6583,29 +6583,31 @@
       try {
         const page = await fetchFriendsPage('', state.q);
         rememberRows(page);
-        const knownIds = rows =>
-          rows.map(f => f.id).join(',');
         const fresh = [...page.pinned, ...page.items];
         if (patch) {
           // Targeted update: same membership on screen → patch each
           // row's innerHTML in place (status dot, unread badge, name,
-          // star) — no list rebuild, no scroll loss, no flicker
-          // (the _subscribeSyncStream precedent). Deeper Show-more
+          // star) and move the node into its new position — no list
+          // rebuild, no scroll loss, no flicker (the
+          // _subscribeSyncStream precedent). The order is chat recency,
+          // so a message arriving mid-session lifts exactly one row and
+          // must not cost the whole list a repaint. Deeper Show-more
           // pages keep their last-rendered state until re-mount.
-          const onScreen = [...screen.querySelectorAll('.friend-row')]
-            .slice(0, fresh.length);
-          const sameSet = onScreen.length &&
-            knownIds(fresh) === onScreen.map(
-              r => Number(r.dataset.friendId)).join(',');
+          const onScreen = [...screen.querySelectorAll('.friend-row')];
+          const nodeById = new Map(
+            onScreen.map(r => [Number(r.dataset.friendId), r]));
+          const sameSet = onScreen.length === fresh.length &&
+            fresh.every(f => nodeById.has(f.id));
           if (sameSet) {
-            const byId = new Map(fresh.map(f => [f.id, f]));
-            onScreen.forEach(rowEl => {
-              const f = byId.get(Number(rowEl.dataset.friendId));
-              if (f) {
-                rowEl.dataset.friendKey = friendUrlKey(f);
-                rowEl.innerHTML = friendRowInner(f);
-              }
+            const place = (container, rows) => rows.forEach(f => {
+              const rowEl = nodeById.get(f.id);
+              rowEl.dataset.friendKey = friendUrlKey(f);
+              rowEl.innerHTML = friendRowInner(f);
+              container.appendChild(rowEl);   // moves it, never re-creates
             });
+            pinnedEl.hidden = page.pinned.length === 0;
+            place(pinnedEl, page.pinned);
+            place(listEl, page.items);
             return;
           }
         }

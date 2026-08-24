@@ -1416,10 +1416,23 @@ ALTER TABLE friends ADD COLUMN IF NOT EXISTS source_token_id UUID
 ALTER TABLE friends ADD COLUMN IF NOT EXISTS join_token_id UUID;
 ALTER TABLE friends ADD COLUMN IF NOT EXISTS favorite BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- The Friends list is a message list: the row a message just landed on
+-- belongs on top. MAX(timestamp) per friend cannot be indexed and the
+-- keyset page needs a stable key, so recency is denormalized onto the row
+-- and maintained by the message trigger below. Seeded from added_at, so a
+-- friend who never wrote still sorts somewhere honest instead of last.
+ALTER TABLE friends ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ
+    NOT NULL DEFAULT CURRENT_TIMESTAMP;
+UPDATE friends f
+   SET last_activity_at = COALESCE(
+       (SELECT MAX(m.timestamp) FROM p2p_messages m WHERE m.friend_id = f.id),
+       f.added_at, f.last_activity_at);
+
 -- Keyset pagination over the non-pinned list; favorites are fetched whole
 -- (user-curated, small by definition).
-CREATE INDEX IF NOT EXISTS idx_friends_page
-    ON friends ((LOWER(COALESCE(NULLIF(display_name, ''), username))), id)
+DROP INDEX IF EXISTS idx_friends_page;
+CREATE INDEX IF NOT EXISTS idx_friends_recent
+    ON friends (last_activity_at DESC, id DESC)
     WHERE favorite = FALSE;
 
 -- Live-DB drift repair: 001 declares DEFAULT gen_random_uuid() on
@@ -1431,9 +1444,16 @@ UPDATE p2p_messages SET message_uuid = gen_random_uuid() WHERE message_uuid IS N
 
 -- NOTIFY on message insert lives in a trigger so EVERY writer wakes the
 -- SSE listeners — chat_service, the backend routers, and raw psql INSERTs
--- (maintainer replies via Claude Code on the master node) alike.
+-- (maintainer replies via Claude Code on the master node) alike. The
+-- recency bump rides along for the same reason: one writer-agnostic place,
+-- and it only ever moves forward, so importing old history cannot demote
+-- an active chat.
 CREATE OR REPLACE FUNCTION notify_p2p_message() RETURNS trigger AS $$
 BEGIN
+    UPDATE friends
+       SET last_activity_at = NEW.timestamp
+     WHERE id = NEW.friend_id
+       AND last_activity_at < NEW.timestamp;
     PERFORM pg_notify('sautium_chat', 'msg:' || NEW.friend_id || ':' || NEW.direction::text);
     RETURN NEW;
 END;

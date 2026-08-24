@@ -285,13 +285,15 @@ async def set_account_email(req: SetEmailRequest) -> Dict[str, Any]:
 # sync state; the client renders row.is_online and computes nothing.
 ONLINE_WINDOW_MIN = 5
 
-_FRIEND_SORT = "LOWER(COALESCE(NULLIF(f.display_name, ''), f.username))"
+# Chat-recency order: whoever wrote (or was written to) last comes first,
+# so a new message lifts its row to the top. friends.last_activity_at is
+# maintained by the p2p_messages trigger and seeded from added_at.
+_FRIEND_SORT = "f.last_activity_at DESC, f.id DESC"
 
 _FRIENDS_SELECT = f"""
     SELECT f.id, f.username, f.public_key_hex, f.invite_code,
            f.display_name, f.added_at, f.last_seen, f.is_blocked,
-           f.favorite, f.source::text AS source,
-           {_FRIEND_SORT} AS sort_name,
+           f.favorite, f.source::text AS source, f.last_activity_at,
            COALESCE(f.last_seen > NOW() - make_interval(
                mins => {ONLINE_WINDOW_MIN}), FALSE) AS is_online,
            COALESCE(u.unread, 0) AS unread_count,
@@ -320,8 +322,7 @@ _FRIENDS_SELECT = f"""
 
 
 def _friend_row_out(row: dict) -> dict:
-    row.pop("sort_name", None)
-    for k in ("added_at", "last_seen"):
+    for k in ("added_at", "last_seen", "last_activity_at"):
         if row.get(k):
             row[k] = row[k].isoformat()
     return row
@@ -332,7 +333,8 @@ async def list_friends(cursor: str = "", limit: int = 50,
                        q: str = "") -> Dict[str, Any]:
     """Friends list built for scale: pinned favorites fetched whole
     (user-curated, small by definition), the rest keyset-paginated over
-    (sort_name, id) — the home.py cursor pattern on idx_friends_page."""
+    (last_activity_at, id) — the home.py cursor pattern on
+    idx_friends_recent."""
     limit = max(1, min(int(limit), 200))
     search = q.strip()
     q_clause = ""
@@ -343,7 +345,7 @@ async def list_friends(cursor: str = "", limit: int = 50,
 
     pinned = _db_query(
         _FRIENDS_SELECT + f" WHERE f.favorite = TRUE{q_clause}"
-        f" ORDER BY {_FRIEND_SORT}, f.id", q_params)
+        f" ORDER BY {_FRIEND_SORT}", q_params)
 
     after = None
     if cursor:
@@ -357,20 +359,20 @@ async def list_friends(cursor: str = "", limit: int = 50,
     cur_clause = ""
     cur_params: list = []
     if after:
-        cur_clause = f" AND ({_FRIEND_SORT}, f.id) > (%s, %s)"
+        cur_clause = " AND (f.last_activity_at, f.id) < (%s::timestamptz, %s)"
         cur_params = [after[0], int(after[1])]
 
     items = _db_query(
         _FRIENDS_SELECT + f" WHERE f.favorite = FALSE{q_clause}{cur_clause}"
-        f" ORDER BY {_FRIEND_SORT}, f.id LIMIT %s",
+        f" ORDER BY {_FRIEND_SORT} LIMIT %s",
         q_params + cur_params + [limit + 1])
 
     next_cursor = None
     if len(items) > limit:
         items = items[:limit]
         last = items[-1]
-        next_cursor = base64.urlsafe_b64encode(
-            json.dumps([last["sort_name"], last["id"]]).encode()).decode()
+        next_cursor = base64.urlsafe_b64encode(json.dumps(
+            [last["last_activity_at"].isoformat(), last["id"]]).encode()).decode()
 
     total = _db_query_one(
         "SELECT count(*) AS c FROM friends f WHERE TRUE" + q_clause,
