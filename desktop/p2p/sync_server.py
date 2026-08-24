@@ -1607,8 +1607,11 @@ class SyncServer:
         reachable, error = False, None
         import aiohttp as _aiohttp
         try:
+            # Pinned to the prober's key: "reachable" must mean THE PROBER
+            # answers at that address, not whoever squats on the port.
             async with _aiohttp.ClientSession(
-                connector=_aiohttp.TCPConnector(ssl=False),
+                connector=_aiohttp.TCPConnector(
+                    ssl=peer_auth.pinned_ssl_context(pubkey)),
                 timeout=_aiohttp.ClientTimeout(total=3),
             ) as session:
                 async with session.get(

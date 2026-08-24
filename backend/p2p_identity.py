@@ -275,6 +275,17 @@ def proof_path(settings):
     return None if d is None else d / PROOF_FILENAME
 
 
+def tls_binding(settings):
+    """(node_pubkey_hex, sign_fn) for tls_gen.ensure_cert's peer channel
+    binding — None without identity (the cert is then generated unbound and
+    regenerated bound on the first start after an account exists)."""
+    ident = resolve_identity(settings)
+    key = load_signing_key(settings)
+    if not ident or key is None:
+        return None
+    return ident["public_key_hex"].lower(), key.sign
+
+
 def peer_identity(settings):
     """This node as a peer CLIENT (wire format v1, desktop/p2p/peer_auth.py):
     signer, pubkey and a lazy {cert, proof} loader. None without identity."""

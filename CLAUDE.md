@@ -387,7 +387,11 @@ read the secret file and sign as the host.
    (random port 20000–29999, UPnP-mapped) and the Docker peer app
    (`backend/p2p_app.py`, port 8801, `python -m desktop.portmap map 8801`
    or a manual forward; portmap refuses any port serving the secret).
-   Self-signed TLS, per-IP rate limits, and per-endpoint auth: sync
+   Self-signed TLS **pinned to the node key** (the cert carries the
+   node's Ed25519 signature over its own TLS key — `peer_auth`
+   binding extension; peer clients verify it on every handshake, so
+   the channel authenticates the server and `/health` cannot lie
+   about `node_id`), per-IP rate limits, and per-endpoint auth: sync
    pulls are open by design (gated only by `sync.p2p_enabled`), while
    `/api/chat/*` and `/api/relay/*` require an invite-code↔pubkey
    binding plus, on the token/grant/wake/probe paths, an Ed25519

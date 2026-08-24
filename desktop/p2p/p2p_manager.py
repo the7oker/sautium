@@ -25,6 +25,7 @@ from desktop.api_client import BackendAPIClient
 from desktop.mb_slice_client import MBSliceClient
 from desktop.p2p import mb_slice_queries, sync_queries
 from desktop.p2p.addrs import fmt_addr
+from desktop.p2p.peer_auth import pinned_pubkey, pinned_ssl_context
 from desktop.p2p.chat_service import ChatService
 from desktop.p2p.dht_service import DHTService
 from desktop.p2p.lan_discovery import LANDiscovery
@@ -1038,14 +1039,13 @@ class P2PManager:
                     await asyncio.sleep(5)
             return None
 
-        # No scheme — try HTTPS (desktop peers) then HTTP (Docker)
-        for scheme in ("https", "http"):
-            url = f"{scheme}://{peer_addr}"
-            api = BackendAPIClient(url, peer=peer_identity)
-            health = await loop.run_in_executor(None, api.get_health)
-            if health:
-                return api
-        return None
+        # No scheme — HTTPS only: every peer surface serves TLS (uvicorn
+        # or the master's Caddy front), and only TLS can carry the node-key
+        # binding peer clients now require. The old plain-HTTP fallback was
+        # a downgrade an on-path impostor could force.
+        api = BackendAPIClient(f"https://{peer_addr}", peer=peer_identity)
+        health = await loop.run_in_executor(None, api.get_health)
+        return api if health else None
 
     def _peer_identity(self):
         """This node as a peer CLIENT (wire format v1, desktop/p2p/peer_auth.py):
@@ -1230,7 +1230,8 @@ class P2PManager:
                 url = f"https://{fmt_addr(ip, port)}/api/chat/message"
                 try:
                     async with aiohttp.ClientSession(
-                        connector=aiohttp.TCPConnector(ssl=False)
+                        connector=aiohttp.TCPConnector(
+                            ssl=pinned_ssl_context(friend["public_key_hex"]))
                     ) as session:
                         async with session.post(
                             url, json=msg,
@@ -1346,7 +1347,13 @@ class P2PManager:
         for ip, port in peers:
             url = f"https://{fmt_addr(ip, port)}/api/chat/handshake"
             try:
-                async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
+                # No expectation yet — the context still demands a bound
+                # cert and locks onto the candidate's verified node key;
+                # the claimed pubkey is checked against the channel below.
+                channel_ctx = pinned_ssl_context()
+                async with aiohttp.ClientSession(
+                    connector=aiohttp.TCPConnector(ssl=channel_ctx)
+                ) as session:
                     async with session.post(
                         url, json=handshake_data,
                         timeout=aiohttp.ClientTimeout(total=10),
@@ -1356,7 +1363,8 @@ class P2PManager:
                             if result.get("accepted"):
                                 peer_pubkey = self._accepted_pubkey(
                                     result, invite_code)
-                                if not peer_pubkey:
+                                if (not peer_pubkey or peer_pubkey.lower()
+                                        != pinned_pubkey(channel_ctx)):
                                     continue
                                 # Add friend locally, under the invite code
                                 # the user typed — never the one the
@@ -1564,7 +1572,8 @@ class P2PManager:
             url = f"https://{fmt_addr(ip, port)}/api/chat/history"
             try:
                 async with aiohttp.ClientSession(
-                    connector=aiohttp.TCPConnector(ssl=False)
+                    connector=aiohttp.TCPConnector(
+                        ssl=pinned_ssl_context(friend_pubkey))
                 ) as session:
                     async with session.post(
                         url, json=payload,
@@ -1739,8 +1748,9 @@ class P2PManager:
             for ip, port in peers:
                 url = f"https://{fmt_addr(ip, port)}/api/chat/handshake"
                 try:
+                    channel_ctx = pinned_ssl_context()
                     async with aiohttp.ClientSession(
-                        connector=aiohttp.TCPConnector(ssl=False)
+                        connector=aiohttp.TCPConnector(ssl=channel_ctx)
                     ) as session:
                         async with session.post(
                             url, json=per_friend,
@@ -1753,7 +1763,9 @@ class P2PManager:
                                         result, invite,
                                         expect_master=friend.get("source")
                                         == "master")
-                                    if not peer_pubkey:
+                                    if (not peer_pubkey
+                                            or peer_pubkey.lower()
+                                            != pinned_pubkey(channel_ctx)):
                                         continue
                                     self._chat_service.add_friend(
                                         public_key_hex=peer_pubkey,
@@ -2106,18 +2118,22 @@ class P2PManager:
         own = account["public_key_hex"]
         scored: list[tuple[int, str, int, str]] = []
         async with aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(ssl=False),
+            connector=aiohttp.TCPConnector(),
             timeout=aiohttp.ClientTimeout(total=5),
         ) as session:
             for ip, port in candidates[:10]:
                 if len(scored) >= self.PEER_RELAY_K * 3:
                     break
+                channel_ctx = pinned_ssl_context()
                 try:
                     async with session.get(
-                            f"https://{fmt_addr(ip, port)}/health") as r:
+                            f"https://{fmt_addr(ip, port)}/health",
+                            ssl=channel_ctx) as r:
                         node_id = (await r.json()).get("node_id", "")
                 except Exception:
                     continue
+                if not node_id or node_id.lower() != pinned_pubkey(channel_ctx):
+                    continue    # /health lies about the channel owner
                 if (not node_id or node_id == own
                         or node_id == master_pubkey
                         or node_id in self._peer_relay_subs):
@@ -2215,7 +2231,8 @@ class P2PManager:
                             f"&voucher_until={until}&voucher_sig={v_sig}")
                 # sock_read=45 → two missed 15s keepalives = dead stream
                 async with aiohttp.ClientSession(
-                    connector=aiohttp.TCPConnector(ssl=False),
+                    connector=aiohttp.TCPConnector(
+                        ssl=pinned_ssl_context(relay_pubkey)),
                     timeout=aiohttp.ClientTimeout(
                         total=None, connect=10, sock_read=45),
                 ) as session:
@@ -2249,7 +2266,8 @@ class P2PManager:
                             line = raw.decode("utf-8", "replace").strip()
                             if line.startswith("data:"):
                                 await self._handle_relay_frame(
-                                    line[5:], relay_row, ip, port)
+                                    line[5:], relay_row, relay_pubkey,
+                                    ip, port)
                             elif (relay_row
                                     and time.time() - last_bump >= 120):
                                 # Keepalives prove the relay is alive.
@@ -2270,6 +2288,7 @@ class P2PManager:
             backoff = min(backoff * 2, 300.0)
 
     async def _handle_relay_frame(self, data: str, relay: dict,
+                                  relay_pubkey: str,
                                   ip: str, port: int) -> None:
         """One SSE frame from a relay.
 
@@ -2302,7 +2321,7 @@ class P2PManager:
                            envelope.get("from_public_key", "")[:8])
             return
 
-        await self._send_delivery_receipt(envelope, ip, port)
+        await self._send_delivery_receipt(envelope, relay_pubkey, ip, port)
         if result.get("duplicate"):
             return   # already had it; the receipt above is what was missing
 
@@ -2315,6 +2334,7 @@ class P2PManager:
             await self._sync_server._wake_backend_sse()
 
     async def _send_delivery_receipt(self, envelope: dict,
+                                     relay_pubkey: str,
                                      ip: str, port: int) -> None:
         """Sign the receipt the sender verifies. Signing only AFTER
         handle_incoming succeeded is what makes a fabricated envelope
@@ -2340,7 +2360,8 @@ class P2PManager:
         }
         try:
             async with aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(ssl=False),
+                connector=aiohttp.TCPConnector(
+                    ssl=pinned_ssl_context(relay_pubkey)),
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as session:
                 async with session.post(
@@ -2459,7 +2480,8 @@ class P2PManager:
         for ip, mport in peers:
             try:
                 async with aiohttp.ClientSession(
-                    connector=aiohttp.TCPConnector(ssl=False),
+                    connector=aiohttp.TCPConnector(
+                        ssl=pinned_ssl_context(MASTER_PUBKEY_HEX)),
                     timeout=aiohttp.ClientTimeout(total=15),
                 ) as session:
                     async with session.post(
@@ -2676,7 +2698,7 @@ class P2PManager:
         undelivered: list[dict] = []
         import aiohttp
         async with aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(ssl=False),
+            connector=aiohttp.TCPConnector(ssl=pinned_ssl_context(pubkey)),
             timeout=aiohttp.ClientTimeout(total=10),
         ) as session:
             for idx, msg in enumerate(messages):
@@ -2793,7 +2815,7 @@ class P2PManager:
             return
 
         async with aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(ssl=False),
+            connector=aiohttp.TCPConnector(),
             timeout=aiohttp.ClientTimeout(total=FORWARD_TIMEOUT),
         ) as session:
             for relay_pubkey, relay_peers, relay_row in relays:
@@ -2817,6 +2839,7 @@ class P2PManager:
         got a verified receipt (the batch is 'placed' — remaining failures
         retry next cycle through the same resolution)."""
         delivered_any = False
+        relay_ctx = pinned_ssl_context(relay_pubkey)
         for msg in messages:
             try:
                 encrypted = self._chat_service.encrypt_message(
@@ -2846,7 +2869,8 @@ class P2PManager:
             for ip, port in relay_peers:
                 url = f"https://{fmt_addr(ip, port)}/api/relay/forward"
                 try:
-                    async with session.post(url, json=payload) as resp:
+                    async with session.post(url, json=payload,
+                                            ssl=relay_ctx) as resp:
                         if resp.status == 409:
                             # Recipient holds no stream to THIS relay — the
                             # rest of the batch fares no better here.
@@ -2927,7 +2951,7 @@ class P2PManager:
                 hits = []
             import aiohttp
             async with aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(ssl=False),
+                connector=aiohttp.TCPConnector(),
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as session:
                 for ip, port in hits[:6]:
@@ -2956,15 +2980,20 @@ class P2PManager:
         the relay's pubkey, or None when anything fails — a black-hole
         impostor dies here."""
         from desktop.node_identity import verify_signature
+        channel_ctx = pinned_ssl_context()
         try:
-            async with session.get(f"https://{fmt_addr(ip, port)}/health") as r:
+            async with session.get(f"https://{fmt_addr(ip, port)}/health",
+                                   ssl=channel_ctx) as r:
                 node_id = (await r.json()).get("node_id", "")
-            if not node_id or node_id.lower() == friend_pubkey.lower():
-                return None      # the friend itself — direct path territory
+            if (not node_id
+                    or node_id.lower() != pinned_pubkey(channel_ctx)
+                    or node_id.lower() == friend_pubkey.lower()):
+                return None      # impostor — or the friend itself, which
+                                 # is direct path territory
             from urllib.parse import quote
             async with session.get(
                     f"https://{fmt_addr(ip, port)}/api/relay/voucher"
-                    f"?invite={quote(invite)}") as r:
+                    f"?invite={quote(invite)}", ssl=channel_ctx) as r:
                 if r.status != 200:
                     return None
                 v = await r.json()

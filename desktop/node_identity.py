@@ -426,22 +426,41 @@ def verify_signature(message: bytes, signature: bytes, pubkey_hex: str) -> bool:
 
 def ensure_tls_cert() -> tuple[Path, Path]:
     """
-    Generate self-signed TLS certificate if not exists.
+    Generate the peer-surface TLS certificate if missing or unbound.
 
-    Uses ECDSA P-256 for broad TLS compatibility.
-    Embeds the Ed25519 node_id in the certificate CN for identity verification.
+    Uses ECDSA P-256 for broad TLS compatibility. When the node has an
+    identity, the cert carries the channel binding (peer_auth.py: the node
+    pubkey plus its Ed25519 signature over the TLS key's SPKI) — that is
+    what lets peers pin the channel to this node instead of running
+    CERT_NONE blind. An existing cert whose binding is absent or belongs
+    to a previous identity is regenerated.
 
     Returns: (cert_path, key_path)
     """
     if not HAS_CRYPTO:
         raise RuntimeError("cryptography package required")
 
+    from desktop.p2p import peer_auth
+
     d = _identity_dir()
     cert_path = d / "tls_cert.pem"
     key_path = d / "tls_key.pem"
+    node_id = get_node_id()
 
     if cert_path.exists() and key_path.exists():
-        return cert_path, key_path
+        if node_id is None:
+            return cert_path, key_path
+        try:
+            from cryptography import x509
+            der = x509.load_pem_x509_certificate(
+                cert_path.read_bytes()).public_bytes(
+                serialization.Encoding.DER)
+        except Exception:
+            der = b""
+        if peer_auth.tls_bound_pubkey(der) == node_id.lower():
+            return cert_path, key_path
+        logger.info("Peer TLS cert has no binding for the current identity "
+                    "— regenerating")
 
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography import x509
@@ -449,14 +468,13 @@ def ensure_tls_cert() -> tuple[Path, Path]:
     from cryptography.hazmat.primitives import hashes
 
     tls_key = ec.generate_private_key(ec.SECP256R1())
-    node_id = get_node_id() or "sautium-node"
 
     subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, node_id),
+        x509.NameAttribute(NameOID.COMMON_NAME, node_id or "sautium-node"),
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Sautium"),
     ])
 
-    cert = (
+    builder = (
         x509.CertificateBuilder()
         .subject_name(subject)
         .issuer_name(issuer)
@@ -466,8 +484,17 @@ def ensure_tls_cert() -> tuple[Path, Path]:
         .not_valid_after(
             datetime.datetime.utcnow() + datetime.timedelta(days=3650)
         )
-        .sign(tls_key, hashes.SHA256())
     )
+    if node_id is not None:
+        spki = tls_key.public_key().public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo)
+        builder = builder.add_extension(
+            x509.UnrecognizedExtension(
+                x509.ObjectIdentifier(peer_auth.TLS_BINDING_OID),
+                peer_auth.tls_binding_value(sign_message, node_id, spki)),
+            critical=False)
+    cert = builder.sign(tls_key, hashes.SHA256())
 
     key_pem = tls_key.private_bytes(
         encoding=serialization.Encoding.PEM,
@@ -483,7 +510,8 @@ def ensure_tls_cert() -> tuple[Path, Path]:
         pass
     cert_path.write_bytes(cert_pem)
 
-    logger.info(f"Generated TLS certificate (CN={node_id[:16]}...)")
+    logger.info(f"Generated TLS certificate (CN={(node_id or 'sautium-node')[:16]}..., "
+                f"bound={node_id is not None})")
     return cert_path, key_path
 
 
@@ -492,19 +520,5 @@ def get_server_ssl_context() -> ssl.SSLContext:
     cert_path, key_path = ensure_tls_cert()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(str(cert_path), str(key_path))
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    return ctx
-
-
-def get_client_ssl_context() -> ssl.SSLContext:
-    """
-    Create SSL context for connecting to P2P peers.
-
-    Accepts self-signed certificates (verification done at application level
-    via Ed25519 public key matching).
-    """
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     return ctx

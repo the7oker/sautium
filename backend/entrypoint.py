@@ -54,7 +54,13 @@ def _enable_hf_offline_if_cached() -> None:
 
 
 def main() -> int:
-    cert_path, key_path = ensure_cert(DATA_DIR, _parse_extra_ips())
+    # The peer channel binding (node key over the TLS SPKI) rides in this
+    # same cert — it is what the master's Caddy front serves too. Argon2id
+    # for an env-derived identity costs ~1-2 s, once per boot.
+    from config import settings
+    from p2p_identity import tls_binding
+    cert_path, key_path = ensure_cert(DATA_DIR, _parse_extra_ips(),
+                                      binding=tls_binding(settings))
     _enable_hf_offline_if_cached()
     print(f"[entrypoint] TLS cert: {cert_path}", flush=True)
     print(f"[entrypoint] uvicorn HTTPS on {HOST}:{PORT} (reload={RELOAD})", flush=True)

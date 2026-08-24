@@ -12,12 +12,15 @@ Two signing modes, chosen at construction:
   ``X-Sautium-Sig``; see backend/auth_hmac.py.
 - PEER (``peer=PeerIdentity(...)``): Ed25519 by this node's key over the
   wire-format-v1 message (desktop/p2p/peer_auth.py) — headers
-  ``X-Sautium-Peer-Pubkey/-Ts/-Sig`` — bound to the peer's pubkey learned
-  from its ``/health``; the {certificate, proof} bundle rides along as
-  ``X-Sautium-Peer-Cert`` on the first request and whenever the peer
-  answers ``X-Sautium-Peer-Identity: unknown``. Until ``/health`` has been
-  read the request goes out unsigned (the anonymous lane). The local
-  secret is never sent to a peer.
+  ``X-Sautium-Peer-Pubkey/-Ts/-Sig`` — bound to the peer's pubkey, which is
+  the TLS channel's verified node-key binding (peer_auth.pinned_ssl_context;
+  the ``/health`` body must agree with it, it is never trusted on its own).
+  The {certificate, proof} bundle rides along as ``X-Sautium-Peer-Cert`` on
+  the first request and whenever the peer answers
+  ``X-Sautium-Peer-Identity: unknown``. Until the channel identity is known
+  the request goes out unsigned (the anonymous lane), and gate quotes are
+  never paid — work is only ever burned for an authenticated recipient.
+  The local secret is never sent to a peer.
 """
 
 import gzip
@@ -97,7 +100,10 @@ def _read_json_body(resp) -> dict:
 
 
 def _get_ssl_context() -> ssl.SSLContext:
-    """Get or create SSL context that accepts self-signed certificates."""
+    """SSL context for the LOCAL backend only (loopback, HMAC-signed): the
+    self-signed Web UI cert is accepted blind because the far end is this
+    machine. Never use for a peer — peer mode builds a pinned context that
+    verifies the node-key binding (peer_auth.pinned_ssl_context)."""
     global _p2p_ssl_ctx
     if _p2p_ssl_ctx is None:
         _p2p_ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -111,11 +117,22 @@ class BackendAPIClient:
     """HTTP/HTTPS client for the backend API (local) or a peer node."""
 
     def __init__(self, base_url: str = "https://127.0.0.1:8000",
-                 peer: Optional[peer_auth.PeerIdentity] = None):
+                 peer: Optional[peer_auth.PeerIdentity] = None,
+                 expected_pubkey: Optional[str] = None):
         self.base_url = base_url.rstrip("/")
-        self._ssl_ctx = (
-            _get_ssl_context() if self.base_url.startswith("https://") else None
-        )
+        if peer is not None:
+            # A peer channel must authenticate as a node: the pinning
+            # context refuses certs without a valid node-key binding, and
+            # locks onto the first verified key when the caller has no
+            # expectation (DHT-discovered strangers).
+            self._ssl_ctx = (
+                peer_auth.pinned_ssl_context(expected_pubkey)
+                if self.base_url.startswith("https://") else None
+            )
+        else:
+            self._ssl_ctx = (
+                _get_ssl_context() if self.base_url.startswith("https://") else None
+            )
         self._streams: list = []
         self._stream_closed = False
         self.peer = peer
@@ -262,13 +279,25 @@ class BackendAPIClient:
 
     def get_health(self) -> Optional[dict]:
         """Fetch health status from GET /health. For a peer this is also
-        where its pubkey (node_id) is learned — every later request is
-        signed for that recipient."""
+        where its pubkey is learned — every later request is signed for
+        that recipient. The authoritative key is the TLS channel's verified
+        node-key binding; a /health body that claims a different node_id is
+        an impostor (or a relay answering for someone else) and the peer is
+        treated as unreachable."""
         health = self._get_json("/health")
-        if self.peer is not None and health and health.get("node_id"):
-            node_id = str(health["node_id"]).lower()
-            if node_id != self._server_pubkey:
-                self._server_pubkey = node_id
+        if self.peer is not None and health:
+            channel = (peer_auth.pinned_pubkey(self._ssl_ctx)
+                       if self._ssl_ctx is not None else None)
+            node_id = str(health.get("node_id") or "").lower()
+            if channel is None or node_id != channel:
+                logger.warning(
+                    "Peer %s /health claims node_id %s… but the TLS channel "
+                    "belongs to %s… — refusing",
+                    self.base_url, node_id[:16] or "<none>",
+                    (channel or "<unauthenticated>")[:16])
+                return None
+            if channel != self._server_pubkey:
+                self._server_pubkey = channel
                 self._introduced = False
         return health
 

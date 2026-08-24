@@ -167,7 +167,8 @@ def _build_san(extra_ips: list[str]) -> x509.SubjectAlternativeName:
     return x509.SubjectAlternativeName(entries)
 
 
-def _generate_cert(extra_ips: list[str], cert_path: Path, key_path: Path) -> None:
+def _generate_cert(extra_ips: list[str], cert_path: Path, key_path: Path,
+                   binding: tuple | None = None) -> None:
     """Render a self-signed ECDSA P-256 cert + key with random fields.
 
     Browsers refuse to validate Ed25519 server certs (Chrome/Firefox
@@ -176,6 +177,12 @@ def _generate_cert(extra_ips: list[str], cert_path: Path, key_path: Path) -> Non
     is achieved at the storage layer instead — service_manager keeps
     cert + key in a per-account user-profile directory that survives
     the typical reinstall scrub.
+
+    `binding` = (node_pubkey_hex, sign_fn): embeds the peer channel
+    binding (desktop/p2p/peer_auth.py) — the node key's signature over
+    this cert's SPKI — so peers can pin the TLS channel to the node.
+    Browsers ignore the extension; the peer surface (and the master's
+    Caddy front, which serves this same file) is what needs it.
     """
     key = ec.generate_private_key(ec.SECP256R1())
     subject = issuer = x509.Name([
@@ -185,7 +192,7 @@ def _generate_cert(extra_ips: list[str], cert_path: Path, key_path: Path) -> Non
     # Naive UTC works on cryptography 41 and 42; tz-aware emits a deprecation
     # warning on 42 because of the API rename to *_utc().
     now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-    cert = (
+    builder = (
         x509.CertificateBuilder()
         .subject_name(subject)
         .issuer_name(issuer)
@@ -213,8 +220,21 @@ def _generate_cert(extra_ips: list[str], cert_path: Path, key_path: Path) -> Non
             x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
             critical=False,
         )
-        .sign(key, hashes.SHA256())
     )
+    if binding is not None:
+        from desktop.p2p import peer_auth
+        pubkey_hex, sign_fn = binding
+        spki = key.public_key().public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        builder = builder.add_extension(
+            x509.UnrecognizedExtension(
+                x509.ObjectIdentifier(peer_auth.TLS_BINDING_OID),
+                peer_auth.tls_binding_value(sign_fn, pubkey_hex, spki)),
+            critical=False,
+        )
+    cert = builder.sign(key, hashes.SHA256())
 
     cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
     key_path.write_bytes(
@@ -230,12 +250,30 @@ def _generate_cert(extra_ips: list[str], cert_path: Path, key_path: Path) -> Non
         pass
 
 
+def _binding_stale(cert_path: Path, binding: tuple | None) -> bool:
+    """The peer channel binding this node needs is absent or belongs to a
+    previous identity. Without a requested binding nothing is stale — an
+    identity-less caller must not churn an already-accepted cert."""
+    if binding is None:
+        return False
+    from desktop.p2p import peer_auth
+    try:
+        der = x509.load_pem_x509_certificate(
+            cert_path.read_bytes()).public_bytes(serialization.Encoding.DER)
+    except Exception:
+        return True
+    return peer_auth.tls_bound_pubkey(der) != binding[0].lower()
+
+
 def ensure_cert(
     data_dir: Path | str,
     extra_host_ips: list[str] | None = None,
+    binding: tuple | None = None,
 ) -> tuple[Path, Path]:
-    """Ensure a self-signed cert exists in data_dir; regen if SAN is stale.
+    """Ensure a self-signed cert exists in data_dir; regen if the SAN or
+    the peer channel binding is stale.
 
+    `binding` = (node_pubkey_hex, sign_fn) — see _generate_cert.
     Returns (cert_path, key_path).
     """
     data_dir = Path(data_dir)
@@ -272,6 +310,11 @@ def ensure_cert(
                 "Replacing legacy Ed25519 cert at %s with browser-compatible ECDSA",
                 cert_path,
             )
+        elif _binding_stale(cert_path, binding):
+            logger.info(
+                "Regenerating cert: no peer channel binding for the current "
+                "node identity",
+            )
         elif not missing:
             logger.debug("Cert %s already covers IPs: %s", cert_path, needed_ips)
             return cert_path, key_path
@@ -283,7 +326,7 @@ def ensure_cert(
     else:
         logger.info("Generating new cert at %s", cert_path)
 
-    _generate_cert(needed_ips, cert_path, key_path)
+    _generate_cert(needed_ips, cert_path, key_path, binding)
     logger.info(
         "Cert SAN — DNS: %s, IPs: %s",
         list(STATIC_DNS_SAN), list(STATIC_IP_SAN) + needed_ips,

@@ -180,9 +180,11 @@ async def _serve_p2p(port: int) -> None:
             proxy_headers=True, forwarded_allow_ips=gateway,
         )
     else:
+        from p2p_identity import tls_binding
         cert_path, key_path = ensure_cert(
             _Path(os.getenv("SAUTIUM_TLS_DIR", "/app/data/tls")),
             [s.strip() for s in os.getenv("SAUTIUM_HOST_IPS", "").split(",") if s.strip()],
+            binding=tls_binding(settings),
         )
         config = uvicorn.Config(
             peer_app, host="0.0.0.0", port=port, log_level="info",
@@ -1655,9 +1657,11 @@ async def no_cache_static(request, call_next):
 if __name__ == "__main__":
     import uvicorn
 
+    from p2p_identity import tls_binding
     from tls_gen import ensure_cert
 
-    cert_path, key_path = ensure_cert(_Path(__file__).parent / "data" / "tls")
+    cert_path, key_path = ensure_cert(_Path(__file__).parent / "data" / "tls",
+                                      binding=tls_binding(settings))
     uvicorn.run(
         "main:app",
         host="127.0.0.1",

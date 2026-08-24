@@ -47,7 +47,7 @@ BitTorrent DHT.
 | Transport | **HTTP + JSON + gzip** | The same protocol sync already speaks; no custom binary format |
 | Identity | **cryptography** (Ed25519) + **argon2-cffi** | Standard, compact 32-byte keys; Argon2id for deterministic identity |
 | Chat encryption | **PyNaCl** (NaCl Box) | Curve25519 + XSalsa20-Poly1305, simple API |
-| TLS | Self-signed ECDSA P-256 | Node ID in the CN, HTTPS for every P2P connection |
+| TLS | Self-signed ECDSA P-256, **pinned to the node key** | Cert carries the node's Ed25519 signature over its own TLS key (`peer_auth` binding extension); clients verify per-handshake instead of `CERT_NONE` — the channel authenticates the server |
 | Async networking | **asyncio** + **aiohttp** | Already used across the project |
 
 ### Why libtorrent and NOT `kademlia` (pure Python) — a **critical decision**
@@ -286,7 +286,11 @@ Phase 2 & 3: Embeddings + features (lazy, on demand, gzip)
 - Connect/Disconnect kill switch (the user stays in full control)
 - Metadata only (never file paths)
 - Rate limiting on inbound peer requests
-- Self-signed ECDSA P-256 TLS for all P2P traffic
+- Self-signed ECDSA P-256 TLS for all P2P traffic, pinned to the node key
+  (2026-08-24): the cert's binding extension is the node's Ed25519 signature
+  over the TLS key, verified on every client handshake — an impostor cannot
+  answer for another node's pubkey, so quotes/health/vouchers are only ever
+  trusted from the key that owns the channel
 
 ### Phase P4 (Chat)
 - E2E encryption with NaCl Box — passwords/keys never cross the network
