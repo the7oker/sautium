@@ -28,6 +28,23 @@ MAX_ENCRYPTED_CHARS = 90_000
 MAX_PLAINTEXT_CHARS = 10_000
 
 
+def _sender_timestamp(timestamp_iso: str) -> datetime:
+    """The send time a peer claims, made safe to sort a thread by.
+
+    The thread is ordered by this value, so a peer whose clock runs fast —
+    or who simply lies — would otherwise pin its message above everything
+    that follows, forever. A future stamp collapses to now; running behind
+    is left alone, because that is exactly what delayed delivery and
+    history pulls legitimately look like."""
+    try:
+        ts = datetime.fromisoformat(timestamp_iso)
+    except ValueError:
+        return datetime.now(timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return min(ts, datetime.now(timezone.utc))
+
+
 class PeerChatService:
     """Chat crypto + DB operations bound to this node's account identity."""
 
@@ -181,7 +198,7 @@ class PeerChatService:
                            friend.get("username", "?"))
             return None
 
-        ts = datetime.fromisoformat(timestamp_iso)
+        ts = _sender_timestamp(timestamp_iso)
         self.store_message(friend["id"], "in", content, ts,
                            delivered=True, message_uuid=message_uuid)
         self.update_friend_last_seen(sender_public_key)

@@ -646,14 +646,21 @@ async def _accept_invite_on_worker(their_invite_code: str):
 
 @router.get("/friends/{friend_id}/messages")
 async def get_messages(friend_id: int, limit: int = 50) -> List[Dict[str, Any]]:
-    """Get chat messages with a friend."""
+    """Get chat messages with a friend, oldest first.
+
+    Ordered by SEND time, not insertion order: an incoming row carries the
+    sender's own timestamp, so anything that arrived out of order — a relay
+    catching up after an offline stretch, a history pull that lands a week
+    of conversation in one batch — reads as the conversation actually
+    happened. Sorting by id told you when THIS node heard about a message,
+    which is not what a thread is."""
     limit = min(limit, 500)
     rows = _db_query("""
         SELECT id, direction, content, timestamp, delivered, read,
                message_uuid
         FROM p2p_messages
         WHERE friend_id = %s
-        ORDER BY id DESC LIMIT %s
+        ORDER BY timestamp DESC, id DESC LIMIT %s
     """, (friend_id, limit))
     rows.reverse()
     for row in rows:

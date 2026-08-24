@@ -41,6 +41,23 @@ MAX_ENCRYPTED_CHARS = 90_000
 MAX_PLAINTEXT_CHARS = 10_000
 
 
+def _sender_timestamp(timestamp_iso: str) -> datetime:
+    """The send time a peer claims, made safe to sort a thread by.
+
+    The thread is ordered by this value, so a peer whose clock runs fast —
+    or who simply lies — would otherwise pin its message above everything
+    that follows, forever. A future stamp collapses to now; running behind
+    is left alone, because that is exactly what delayed delivery and
+    history pulls legitimately look like."""
+    try:
+        ts = datetime.fromisoformat(timestamp_iso)
+    except ValueError:
+        return datetime.now(timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return min(ts, datetime.now(timezone.utc))
+
+
 def ed25519_to_curve25519_private(ed25519_seed: bytes) -> "PrivateKey":
     """Convert Ed25519 seed (32 bytes) to Curve25519 private key."""
     signing_key = SigningKey(ed25519_seed)
@@ -512,7 +529,7 @@ class ChatService:
 
                     ts = msg["timestamp"]
                     if isinstance(ts, str):
-                        ts = datetime.fromisoformat(ts)
+                        ts = _sender_timestamp(ts)
 
                     # Fallback dedup for old messages (pre-UUID migration):
                     # check by timestamp + direction + content
@@ -704,7 +721,7 @@ class ChatService:
             logger.warning(f"Oversized plaintext from {friend.get('username', '?')} rejected")
             return None
 
-        ts = datetime.fromisoformat(timestamp_iso)
+        ts = _sender_timestamp(timestamp_iso)
         self.store_message(
             friend["id"], "in", content, ts,
             delivered=True, message_uuid=message_uuid,

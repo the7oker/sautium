@@ -1343,7 +1343,12 @@ CREATE TABLE IF NOT EXISTS sent_invites (
 
 CREATE INDEX IF NOT EXISTS idx_friends_invite_code ON friends(invite_code);
 CREATE INDEX IF NOT EXISTS idx_friends_username ON friends(username);
-CREATE INDEX IF NOT EXISTS idx_p2p_messages_friend ON p2p_messages(friend_id, id DESC);
+-- A thread is ordered by SEND time (the sender's own stamp travels with an
+-- incoming message), so late arrivals — a relay catching up, a history pull
+-- landing a week at once — read in the order the conversation happened.
+DROP INDEX IF EXISTS idx_p2p_messages_friend;
+CREATE INDEX IF NOT EXISTS idx_p2p_messages_thread
+    ON p2p_messages(friend_id, timestamp DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_p2p_messages_unread
     ON p2p_messages(friend_id) WHERE direction = 'in' AND read = FALSE;
 CREATE INDEX IF NOT EXISTS idx_p2p_messages_pending
