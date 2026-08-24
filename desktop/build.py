@@ -1,12 +1,13 @@
 """
-PyInstaller build script for Sautium launcher.
+PyInstaller build script for the Sautium launcher — Windows only.
 
-Builds a standalone application:
-  - Windows: dist/Sautium.exe  (single-file)
-  - macOS:   dist/Sautium.app  (.app bundle)
+    python desktop/build.py     ->  dist/Sautium.exe  (single-file)
 
-Usage:
-    python desktop/build.py
+macOS is built by desktop/build_macos.py instead, and deliberately not by
+freezing: the launcher provisions and then RUNS a Python (pip-installing
+torch, spawning uvicorn and the MCP server), and inside a frozen bundle
+sys.executable is the bundle rather than an interpreter that can do any of it.
+The .app carries a real CPython and a copy of the tree instead.
 """
 
 import importlib
@@ -14,11 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-IS_MACOS = sys.platform == "darwin"
-IS_WINDOWS = sys.platform == "win32"
-
-# PyInstaller --add-data separator: `;` on Windows, `:` on macOS/Linux
-SEP = ";" if IS_WINDOWS else ":"
+# PyInstaller --add-data separator
+SEP = ";"
 
 
 def _get_package_path(package_name: str) -> str:
@@ -28,6 +26,9 @@ def _get_package_path(package_name: str) -> str:
 
 
 def build():
+    if sys.platform != "win32":
+        raise SystemExit("Windows only — use desktop/build_macos.py on macOS")
+
     project_root = Path(__file__).parent.parent
     desktop_dir = project_root / "desktop"
 
@@ -84,17 +85,9 @@ def build():
     if assets_dir.exists():
         cmd.extend(["--add-data", f"{assets_dir}{SEP}desktop/assets"])
 
-    # Platform-specific icon
-    if IS_WINDOWS:
-        icon_path = assets_dir / "icon.ico"
-        if icon_path.exists():
-            cmd.extend(["--icon", str(icon_path)])
-    elif IS_MACOS:
-        icon_path = assets_dir / "icon.icns"
-        if icon_path.exists():
-            cmd.extend(["--icon", str(icon_path)])
-        # macOS bundle identifier
-        cmd.extend(["--osx-bundle-identifier", "net.sautium.launcher"])
+    icon_path = assets_dir / "icon.ico"
+    if icon_path.exists():
+        cmd.extend(["--icon", str(icon_path)])
 
     # Bundle libtorrent if installed (C++ extension for DHT)
     try:
@@ -107,7 +100,6 @@ def build():
     cmd.append(str(entry_script))
 
     print("Building Sautium launcher with PyInstaller...")
-    print(f"Platform: {'macOS' if IS_MACOS else 'Windows' if IS_WINDOWS else 'Linux'}")
     print(f"Command: {' '.join(cmd)}")
 
     result = subprocess.run(cmd, cwd=str(project_root))
@@ -116,12 +108,7 @@ def build():
     entry_script.unlink(missing_ok=True)
 
     if result.returncode == 0:
-        if IS_MACOS:
-            print("\nBuild successful! Output: dist/Sautium.app")
-            print("To create a DMG installer: hdiutil create -volname Sautium "
-                  "-srcfolder dist/Sautium.app -ov dist/Sautium.dmg")
-        else:
-            print("\nBuild successful! Output: dist/Sautium.exe")
+        print("\nBuild successful! Output: dist/Sautium.exe")
     else:
         print("Build failed!")
         sys.exit(1)

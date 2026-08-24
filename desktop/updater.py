@@ -36,10 +36,28 @@ def get_project_root() -> Path:
     return _get_root()
 
 
+def installed_build() -> Optional[str]:
+    """The build id of a packaged install (the macOS .app writes it beside the
+    tree it unpacks), or None for a git checkout. A packaged tree has no remote
+    to compare against — it is replaced by the next disk image, not pulled."""
+    stamp = get_project_root() / ".sautium_build"
+    if not stamp.exists():
+        return None
+    return stamp.read_text(encoding="utf-8").strip() or None
+
+
 def is_git_repo() -> bool:
-    """Check if the project is a git repository."""
-    result = _git_cmd(["rev-parse", "--is-inside-work-tree"])
-    return result.returncode == 0 and result.stdout.strip() == "true"
+    """Is OUR tree a checkout — not merely something's work tree.
+
+    `--is-inside-work-tree` answers for the nearest repository ABOVE the
+    directory too, and a packaged install lives under $HOME, which plenty of
+    people keep in git for their dotfiles. Answering "yes" there would point
+    every later git call — `fetch`, and then `pull` — at that repository.
+    """
+    result = _git_cmd(["rev-parse", "--show-toplevel"])
+    if result.returncode != 0:
+        return False
+    return Path(result.stdout.strip()).resolve() == get_project_root().resolve()
 
 
 def check_for_updates() -> Tuple[bool, int, str]:

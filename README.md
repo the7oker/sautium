@@ -139,11 +139,49 @@ docker compose logs -f backend     # wait for "Application startup complete"
 The backend is also reachable from phones/tablets on the same Wi-Fi at
 `https://<host-LAN-IP>:8800/`.
 
-### Native Windows launcher (optional)
+### Desktop launcher (optional)
 
-The desktop launcher bundles backend management, the P2P layer and the account
-system. Build it with `python desktop/build.py` (produces a PyInstaller `.exe`
-and an Inno Setup installer under `desktop/installer/`).
+The launcher runs the whole stack without Docker — PostgreSQL, backend, P2P and
+the account system. From a checkout it is `python -m desktop`; for other people
+it ships as a native app:
+
+- **Windows** — `python desktop/build.py` builds the PyInstaller `.exe`, wrapped
+  by the Inno Setup script in `desktop/installer/`.
+- **macOS** — `python desktop/build_macos.py` builds `Sautium.app` and
+  `dist/Sautium-<version>-<arch>.dmg`. Needs Xcode Command Line Tools (`clang`,
+  `iconutil`) and Pillow.
+
+The macOS bundle is not a frozen launcher. It carries a private CPython 3.12
+(python-build-standalone, Tk included) plus a snapshot of the git-tracked tree,
+and `Contents/Resources/bootstrap.py` installs both into `~/.local/share/Sautium`
+on first run — after which the launcher runs exactly as it does from a checkout,
+because it is one. Freezing was rejected: the launcher provisions and then RUNS
+a Python (pip-installing torch, spawning uvicorn and the MCP server), and inside
+a frozen bundle `sys.executable` is the bundle.
+
+Builds are ad-hoc signed by default. With a Developer ID:
+
+```bash
+python desktop/build_macos.py --sign "Developer ID Application: ..." \
+                              --notarize <keychain-profile>
+```
+
+#### Installing the macOS build
+
+1. Open the DMG, drag **Sautium** onto **Applications**.
+2. An ad-hoc signature is blocked on first launch: open it once, then go to
+   System Settings → Privacy & Security → **Open Anyway**. (Or run
+   `xattr -dr com.apple.quarantine /Applications/Sautium.app` first.) A
+   notarized build skips this step.
+3. The first launch unpacks the app and builds its Python environment, then
+   asks for **Homebrew** if it is missing — PostgreSQL 18, pgvector, ffmpeg,
+   flac, fpcalc and deno all arrive through it.
+4. The setup wizard creates the account and the database. Its MusicBrainz
+   catalogue step is pre-ticked when the disk has room (~21 GB in the
+   background) — untick it for a quick trial. Finishing the wizard starts the
+   backend, which installs the ML stack on first run (~1.3 GB, once).
+5. In the launcher: **Scan Library** picks the music folder, **Open Web UI**
+   opens `https://localhost:18000` (accept the self-signed cert once).
 
 ## Project Structure
 

@@ -73,7 +73,7 @@ class LauncherApp(ctk.CTk):
             self._build_ui()
             self.after(100, self._startup_sequence)
 
-        # Close → minimize to tray
+        # Close → keep running in the background
         self.protocol("WM_DELETE_WINDOW", self._minimize_to_tray)
 
     def _run_wizard(self):
@@ -98,6 +98,16 @@ class LauncherApp(ctk.CTk):
 
     def _build_ui(self):
         """Build the main launcher UI."""
+        if sys.platform == "darwin":
+            # The Dock tile is what the tray icon is on Windows, and Tk hands
+            # us both halves of it: Finder sends ReopenApplication when the
+            # tile is clicked, and Cmd+Q has to reach _quit or the backend and
+            # PostgreSQL outlive the window that started them. Registered here
+            # rather than in __init__ because both handlers drive widgets this
+            # method creates.
+            self.createcommand("::tk::mac::ReopenApplication", self._show_from_tray)
+            self.createcommand("::tk::mac::Quit", self._quit)
+
         # Title
         ctk.CTkLabel(
             self, text="Sautium",
@@ -225,8 +235,16 @@ class LauncherApp(ctk.CTk):
         )
         self._btn_settings.pack(pady=3)
 
+        # A packaged install cannot pull: the button keeps its second job
+        # (refreshing the gear registries) and drops the promise it can't make.
+        from desktop.updater import installed_build
+        packaged = installed_build()
+        if packaged:
+            self.title(f"Sautium {packaged}")
         self._btn_update = ctk.CTkButton(
-            btn_frame, text="Check for Updates", width=200,
+            btn_frame,
+            text="Refresh Registries" if packaged else "Check for Updates",
+            width=200,
             command=self._check_updates,
             fg_color="transparent", border_width=1,
         )
@@ -1195,14 +1213,20 @@ class LauncherApp(ctk.CTk):
         self._btn_update.configure(state="disabled", text="Checking...")
 
         def _check():
-            from desktop.updater import check_for_updates, perform_update
+            from desktop.updater import check_for_updates, installed_build
 
-            has_updates, count, old_hash = check_for_updates()
-
-            if not has_updates:
-                self.ui_call(lambda: self._show_update_result(False, 0))
+            if installed_build():
+                # No remote to compare against — "You're up to date!" would be
+                # a guess worn as a fact. The registry refresh below is the
+                # whole of what this button does on a packaged install.
+                self.ui_call(lambda: self._btn_update.configure(
+                    state="normal", text="Refresh Registries"))
             else:
-                self.ui_call(lambda: self._show_update_dialog(count, old_hash))
+                has_updates, count, old_hash = check_for_updates()
+                if not has_updates:
+                    self.ui_call(lambda: self._show_update_result(False, 0))
+                else:
+                    self.ui_call(lambda: self._show_update_dialog(count, old_hash))
 
             # Same button also freshens the measurement registries —
             # best-effort: needs a running backend, and the server-side
@@ -1237,7 +1261,12 @@ class LauncherApp(ctk.CTk):
         """Background update check at startup."""
         def _check():
             try:
-                from desktop.updater import check_for_updates
+                from desktop.updater import check_for_updates, installed_build
+                if installed_build():
+                    # Also keeps `git` from being invoked at all: on a Mac
+                    # without the command line tools, running it pops the
+                    # Xcode installer at a moment nobody asked for one.
+                    return
                 has_updates, count, _ = check_for_updates()
                 if has_updates:
                     self.ui_call(lambda: self._btn_update.configure(
@@ -1353,8 +1382,15 @@ class LauncherApp(ctk.CTk):
         ).pack(pady=10)
 
     def _minimize_to_tray(self):
-        """Minimize to system tray instead of closing."""
+        """Hide the window instead of closing — the services keep running.
+
+        No tray icon on macOS: pystray's AppKit backend has to own the main
+        thread, which Tk already does, and the Dock tile is the same
+        affordance by another name (see the handlers in _build_ui).
+        """
         self.withdraw()
+        if sys.platform == "darwin":
+            return
         if self.tray is None:
             from desktop.tray import create_tray
             self.tray = create_tray(

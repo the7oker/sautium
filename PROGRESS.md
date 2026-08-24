@@ -201,6 +201,54 @@ The short version of the hard-learned lessons:
   granted friendship. Now both sides must add each other before the handshake
   completes.
 
+### Desktop packaging (macOS)
+
+- **The .app is a carrier, not a frozen launcher.** `desktop/build_macos.py`
+  ships a private CPython (python-build-standalone, Tk included) plus a
+  snapshot of the git-tracked tree; `bootstrap.py` installs both into
+  `~/.local/share/Sautium` on first run and execs the launcher from there.
+  PyInstaller was the obvious answer and the wrong one: the launcher's job is
+  to PROVISION and RUN a Python — pip-installing torch, spawning uvicorn and
+  the MCP server — and inside a frozen bundle `sys.executable` is the bundle,
+  `get_project_root()` is `Contents/MacOS`, and there is no `backend/` to run.
+  Installing into a writable copy also means the launcher keeps the dev-mode
+  shape it was written for, so the bundle needed zero launcher changes.
+- **Nothing may write inside the bundle.** A venv keeps its stdlib in the base
+  prefix, so a venv built against the bundled runtime had the launcher, the
+  backend and every child process importing — and bytecode-caching into — the
+  signed app: 46 `.pyc` files after one run, and `spctl` then reports "a sealed
+  resource is missing or invalid". The runtime is therefore copied out to the
+  data root, and the stub execs `python3 -B`. Same reason an app in
+  `/Applications` must be treated as read-only.
+- **The payload is `git ls-files`, read from the working tree.** Tracking is
+  the filter — everything a build must not ship (`backend/data/.api_secret`,
+  the maintainer's `mcp-windows.json`, pgdata) is already gitignored — while
+  the bytes come from disk so an uncommitted fix still reaches the DMG. A name
+  sweep over the staged payload fails the build if that ever stops holding.
+- **macOS has no tray to minimise into.** pystray's AppKit backend wants the
+  main thread, which Tk owns, so on darwin the close button only hides the
+  window and the Dock tile takes over the role: `::tk::mac::ReopenApplication`
+  brings it back, and `::tk::mac::Quit` routes Cmd+Q into `_quit` so
+  PostgreSQL and the backend are stopped rather than orphaned.
+- **Homebrew stays the macOS dependency.** PostgreSQL 18 + pgvector, ffmpeg,
+  flac, fpcalc and deno all arrive through it (`db_init`), so the bundle asks
+  for brew once — command ready to paste — instead of carrying relocated
+  dylibs it would then have to keep patched.
+- **The dependency install got an hour, not ten minutes.** The first backend
+  start pulls ~1.3 GB of wheels; a 600 s cap is a guess about the builder's
+  link speed, and when it expires the node has no backend at all.
+- **A packaged install cannot pull, and no longer pretends to.** The unpacked
+  tree is not a checkout, so the update check returned "no updates" and the UI
+  said "You're up to date!" — a guess worn as a fact. Worse, `is_git_repo()`
+  asked `--is-inside-work-tree`, which also answers for the nearest repository
+  ABOVE the directory, and the tree now lives under `$HOME` — which plenty of
+  people keep in git for dotfiles. It compares `--show-toplevel` against our
+  own root now, "Check for Updates" becomes "Refresh Registries" (the other,
+  real half of that button), the window title carries the build id, and the
+  startup check does not shell out to `git` at all — on a Mac without the
+  command line tools, invoking it pops the Xcode installer. New builds arrive
+  as a new DMG.
+
 ---
 
 ## Known Gotchas
