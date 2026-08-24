@@ -68,12 +68,20 @@ REANNOUNCE_INTERVAL = 15 * 60  # 15 minutes
 # key at a time, spaced so a full pass takes exactly one entry lifetime, and
 # only ONE traversal is ever in flight.
 #
-# A tail bigger than REANNOUNCE_INTERVAL/MIN_ANNOUNCE_SPACING keys cannot
-# refresh inside one lifetime, and that is fine: its oldest keys expire and
-# reappear on the next pass, so presence degrades smoothly with tail size
-# instead of collapsing. At the shipped sync.announce_limit of 300 the pass
-# is 3 s per key, well inside the window.
-MIN_ANNOUNCE_SPACING = 0.5
+# The floor is the MEASURED-safe rate, not a token minimum: probing the
+# HQPlayer control socket from inside the Docker container while announcing
+# (2026-08-24) gave 60/60 connects at 0.33/s, 20/36 at 5/s (p90 2.1 s) and
+# 0/22 at 25/s. So the announcer never goes faster than one key per 3 s,
+# whatever the tail size — a spacing floor of 0.5 s would have let a tail
+# over ~450 keys drift into the untested range between those points.
+#
+# The cost is that a tail bigger than REANNOUNCE_INTERVAL/3 keys cannot
+# refresh inside one entry lifetime, and that is the right trade: its
+# oldest keys expire and come back on the next pass, so presence degrades
+# smoothly with tail size instead of the announcer taking the audio path
+# down with it. At the shipped sync.announce_limit of 300 a pass is exactly
+# one lifetime and nothing expires at all.
+MIN_ANNOUNCE_SPACING = 3.0
 TAIL_IDLE_RECHECK = 60.0
 
 # How long to wait for DHT bootstrap (seconds)
