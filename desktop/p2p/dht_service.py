@@ -72,8 +72,13 @@ ANNOUNCE_CHUNK_PAUSE = 1.0
 # How long to wait for DHT bootstrap (seconds)
 DHT_BOOTSTRAP_TIMEOUT = 30
 
-# How long to wait for get_peers results (seconds)
-GET_PEERS_TIMEOUT = 30
+# How long to wait for get_peers results, and the collection window a
+# want_all lookup spends gathering replies. 15 s because a traversal runs
+# ~19 s but every reply arrives in its first seconds (measured 2026-08-24:
+# three holders at 0.4, 0.4 and 1.4 s), so the tail of the traversal only
+# costs latency — on an empty key it is pure dead time, which is what the
+# sync walk's rare-artist step used to burn. Matches backend/dht_service.py.
+GET_PEERS_TIMEOUT = 15
 
 # Peer cache TTL (seconds)
 PEER_CACHE_TTL = 30 * 60  # 30 minutes
@@ -153,7 +158,11 @@ class DHTService:
         self._running = False
         self._alert_task: Optional[asyncio.Task] = None
         # Pending lookups: infohash_hex -> list of futures
-        self._pending_lookups: dict[str, list[asyncio.Future]] = {}
+        # ih_hex -> [(future, want_all)]. want_all waits out the collection
+        # window instead of returning on the first fragment; see _lookup.
+        self._pending_lookups: dict[str, list[tuple[asyncio.Future, bool]]] = {}
+        # ih_hex -> peers seen so far in the traversal currently in flight.
+        self._lookup_buffers: dict[str, set[tuple[str, int]]] = {}
 
     @property
     def is_available(self) -> bool:
@@ -302,8 +311,12 @@ class DHTService:
         logger.info(f"DHT: node announced (port {self._announce_port})")
 
     async def lookup_nodes(self) -> list[tuple[str, int]]:
-        """Find Sautium nodes on the discovery key. Returns (ip, port)."""
-        return await self._lookup(node_infohash(), "node")
+        """Find Sautium nodes on the discovery key. Returns (ip, port).
+
+        want_all: this is the sync walk's only organic source of peers, and
+        one holder's fragment of the busiest key in the network is not a
+        sample worth acting on."""
+        return await self._lookup(node_infohash(), "node", want_all=True)
 
     async def announce_capability(self, capability: str):
         """Announce a node capability (e.g. 'mbdump') on its well-known infohash."""
@@ -357,9 +370,23 @@ class DHTService:
             f"DHT: {len(self._announced)} rare artists announced total"
         )
 
-    async def _lookup(self, infohash: bytes, cache_key: str
-                      ) -> list[tuple[str, int]]:
-        """get_peers on an infohash, with the shared peer cache."""
+    async def _lookup(self, infohash: bytes, cache_key: str,
+                      want_all: bool = False) -> list[tuple[str, int]]:
+        """get_peers on an infohash, with the shared peer cache.
+
+        One traversal answers with one alert PER responding node, so the
+        first reply carries one holder's view, not the set (measured
+        2026-08-24 on Sautium-cap:mbdump: three replies, three different
+        holders, 0.4-1.4 s apart). `want_all` therefore waits out the
+        collection window and returns the union — node discovery needs it,
+        because a partial answer there means a peer that exists is simply
+        never contacted, and that path has no second tier to catch it.
+
+        The default stays first-reply: the chat paths run this on the
+        critical path of every message and must not wait, and they do have
+        further tiers. They still profit — every reply lands in the buffer
+        and the cache, so their NEXT call sees the fuller set.
+        """
         cached = self._get_cached_peers(cache_key)
         if cached is not None:
             return cached
@@ -372,20 +399,28 @@ class DHTService:
 
         loop = asyncio.get_event_loop()
         future = loop.create_future()
-        self._pending_lookups.setdefault(ih_hex, []).append(future)
+        waiter = (future, want_all)
+        self._pending_lookups.setdefault(ih_hex, []).append(waiter)
 
         self._session.dht_get_peers(sha1)
 
         try:
             peers = await asyncio.wait_for(future, timeout=GET_PEERS_TIMEOUT)
         except asyncio.TimeoutError:
-            if ih_hex in self._pending_lookups:
-                futures = self._pending_lookups[ih_hex]
-                if future in futures:
-                    futures.remove(future)
-                if not futures:
-                    del self._pending_lookups[ih_hex]
-            logger.debug(f"DHT lookup timeout for {cache_key}")
+            # want_all always lands here — nothing resolves it early, the
+            # timeout IS its collection window.
+            peers = sorted(self._lookup_buffers.get(ih_hex, ()))
+        finally:
+            waiters = self._pending_lookups.get(ih_hex)
+            if waiters and waiter in waiters:
+                waiters.remove(waiter)
+            if waiters is not None and not waiters:
+                del self._pending_lookups[ih_hex]
+            if ih_hex not in self._pending_lookups:
+                self._lookup_buffers.pop(ih_hex, None)
+
+        if not peers:
+            logger.debug(f"DHT lookup found nothing for {cache_key}")
             return []
 
         now = time.time()
@@ -434,8 +469,19 @@ class DHTService:
         return valid
 
     async def periodic_reannounce(self):
-        """Refresh node key, user key, capabilities and the rare-artist tail
-        every REANNOUNCE_INTERVAL seconds (DHT entries live 15-30 min)."""
+        """Keep this node's DHT presence alive — two INDEPENDENT cycles.
+
+        They shared one loop until 2026-08-24, and the tail starved the
+        keys: on the master a 300-key pass ran 36-59 minutes while the node
+        key — three announces, nothing to pace — waited behind it. A DHT
+        entry lives 15-30 min, so the node dropped out of discovery between
+        passes and the sync walk could not find it at all.
+        """
+        await asyncio.gather(self._reannounce_keys(), self._reannounce_tail())
+
+    async def _reannounce_keys(self):
+        """Node, user, relay clients and capabilities: a handful of
+        announces regardless of library size, so no pacing applies."""
         while self._running:
             await asyncio.sleep(REANNOUNCE_INTERVAL)
             if not self._running or not self._session:
@@ -447,29 +493,42 @@ class DHTService:
             self._session.dht_announce(
                 lt.sha1_hash(node_infohash()), self._announce_port, 0)
 
-            # Re-announce user
             if self._user_invite_code:
                 ih = user_infohash(self._user_invite_code)
                 sha1 = lt.sha1_hash(ih)
                 self._session.dht_announce(sha1, self._announce_port, 0)
 
-            # Re-announce relay clients (announce-on-behalf, Phase D) —
-            # bounded by the relay cap, so at most a few dozen keys.
+            # Relay clients (announce-on-behalf, Phase D) — bounded by the
+            # relay cap, so at most a few dozen keys.
             for code in list(self._client_invites):
                 sha1 = lt.sha1_hash(user_infohash(code))
                 self._session.dht_announce(sha1, self._announce_port, 0)
 
-            # Re-announce capabilities
             for cap in list(self._capabilities):
                 sha1 = lt.sha1_hash(capability_infohash(cap))
                 self._session.dht_announce(sha1, self._announce_port, 0)
 
-            # Re-announce artists
             logger.info(
-                f"Re-announcing {len(self._announced)} artists "
-                f"+ user in DHT"
+                f"DHT keys re-announced: node + user + "
+                f"{len(self._client_invites)} clients + "
+                f"{len(self._capabilities)} capabilities"
             )
-            for i, uuid in enumerate(list(self._announced)):
+
+    async def _reannounce_tail(self):
+        """The rare-artist tail: hundreds of keys, so paced. Slow by
+        design — it must never be what a newcomer's discovery depends on."""
+        while self._running:
+            await asyncio.sleep(REANNOUNCE_INTERVAL)
+            if not self._running or not self._session:
+                break
+            if not self._announces_enabled:
+                continue
+
+            uuids = list(self._announced)
+            if not uuids:
+                continue
+            logger.info(f"Re-announcing {len(uuids)} rare artists in DHT")
+            for i, uuid in enumerate(uuids):
                 ih = artist_infohash(uuid)
                 sha1 = lt.sha1_hash(ih)
                 self._session.dht_announce(sha1, self._announce_port, 0)
@@ -477,7 +536,7 @@ class DHTService:
                     await asyncio.sleep(ANNOUNCE_CHUNK_PAUSE * self._pace())
                     if not self._running or not self._session:
                         return
-            logger.info("DHT re-announce complete")
+            logger.info("DHT tail re-announce complete")
 
     async def _poll_alerts(self):
         """Poll libtorrent alerts and dispatch to handlers."""
@@ -511,11 +570,22 @@ class DHTService:
                 f"DHT get_peers reply: {ih_hex[:16]}... "
                 f"→ {len(peers)} peers"
             )
-            # Resolve pending futures
-            futures = self._pending_lookups.pop(ih_hex, [])
-            for fut in futures:
-                if not fut.done():
-                    fut.set_result(peers)
+            buffered = self._lookup_buffers.setdefault(ih_hex, set())
+            buffered.update(peers)
+
+            waiters = self._pending_lookups.get(ih_hex)
+            if not waiters:
+                return
+            snapshot = sorted(buffered)
+            still_waiting = [(fut, want_all) for fut, want_all in waiters
+                             if want_all]
+            for fut, want_all in waiters:
+                if not want_all and not fut.done():
+                    fut.set_result(snapshot)
+            if still_waiting:
+                self._pending_lookups[ih_hex] = still_waiting
+            else:
+                del self._pending_lookups[ih_hex]
 
     def get_dht_stats(self) -> dict:
         """Return DHT statistics for UI display."""

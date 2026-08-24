@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import webbrowser
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from tkinter import filedialog
 from typing import Optional
@@ -1464,9 +1465,24 @@ class LauncherApp(ctk.CTk):
 
 def main():
     """Entry point for the launcher."""
+    # A GUI launch (Finder .app, Explorer shortcut) inherits stdout/stderr on
+    # /dev/null, so every P2P line — the only record of sync, DHT and relay
+    # work, which no other process keeps — used to vanish. The file handler is
+    # the launcher's log; the stream handler still serves a terminal run.
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    try:
+        from desktop.config_manager import get_data_dir
+        handlers.append(RotatingFileHandler(
+            get_data_dir() / "launcher.log",
+            maxBytes=8 * 1024 * 1024, backupCount=3, encoding="utf-8",
+        ))
+    except OSError as e:
+        print(f"launcher.log unavailable: {e}", file=sys.stderr)
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        handlers=handlers,
     )
 
     # Before anything looks for a tool: a GUI launch has no Homebrew on PATH.
