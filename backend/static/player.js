@@ -135,13 +135,26 @@
     location.reload();
   }
 
+  // A stopped output reports no track metadata at all (index 0, empty song)
+  // even when the canonical queue is intact — HQPlayer after a heavy
+  // DSP-filter rebuild, or a browser output whose renderer tab is gone. The
+  // queue still says what Play will start, so answer "what is on the deck"
+  // ONCE, here, where the status becomes the np-update every screen reads.
+  // The mini-player used to patch this in privately, which is exactly why it
+  // could show a track while Now Playing sat blank on the same status.
+  function withQueueFallback(data) {
+    if (data.state !== 'stopped' || data.song) return data;
+    const first = (window.currentPlaylist || [])[0];
+    if (!first) return data;
+    return { ...data, song: first.title, artist: first.artist,
+             album: first.album || '', cover_id: first.cover_id,
+             media_file_id: first.id, cover_url: first.cover_url,
+             provider_cover_url: first.provider_cover_url };
+  }
+
   async function processStatusEvent(data) {
     currentState = data.state;
     if (data.ui_build) maybeReloadForUpdate(data.ui_build);
-    // process_speed is HQPlayer's realtime DSP processing factor (0.0 when
-    // unknown). Carried straight through on the status object so any screen
-    // can read it off window.currentStatus or the np-update detail.
-    window.currentStatus = data;
     // Browser-output renderer lifecycle: THIS tab renders audio only while
     // it holds the sessionStorage claim AND the backend output is browser.
     // Reloads re-attach (same tab claim); switching outputs detaches.
@@ -164,6 +177,13 @@
       try { await fetchPlaylist(); }
       catch (e) { console.warn('fetchPlaylist failed during SSE handling:', e); }
     }
+    // After the playlist settles, so the fallback reads the queue this
+    // status belongs to. process_speed is HQPlayer's realtime DSP factor
+    // (0.0 when unknown) — carried straight through, like everything else
+    // on the status, so any screen can read it off window.currentStatus or
+    // the np-update detail.
+    data = withQueueFallback(data);
+    window.currentStatus = data;
     document.dispatchEvent(new CustomEvent('np-update', { detail: data }));
   }
 
