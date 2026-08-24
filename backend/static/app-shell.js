@@ -8325,7 +8325,7 @@
       if (r.ok) data = await r.json();
     } catch (_) { /* fall through */ }
     if (!data) {
-      root.innerHTML = '<section class="screen"><div class="screen-head"><h2 class="screen-title">System analysis</h2></div><div class="placeholder">Не вдалося завантажити аналіз системи.</div></section>';
+      root.innerHTML = '<section class="screen"><div class="screen-head"><h2 class="screen-title">System analysis</h2></div><div class="placeholder">Could not load the system analysis.</div></section>';
       return;
     }
 
@@ -8444,7 +8444,7 @@
       if (r.ok) data = await r.json();
     } catch (_) { /* fall through */ }
     if (!data) {
-      root.innerHTML = '<section class="screen"><div class="screen-head"><h2 class="screen-title">Upgrade advisor</h2></div><div class="placeholder">Не вдалося завантажити.</div></section>';
+      root.innerHTML = '<section class="screen"><div class="screen-head"><h2 class="screen-title">Upgrade advisor</h2></div><div class="placeholder">Could not load.</div></section>';
       return;
     }
 
@@ -8727,7 +8727,7 @@
     } catch (_) { /* fall through */ }
 
     if (!profile) {
-      root.innerHTML = '<section class="screen"><div class="screen-head"><h2 class="screen-title">Profile</h2></div><div class="placeholder">Не вдалося завантажити профіль.</div></section>';
+      root.innerHTML = '<section class="screen"><div class="screen-head"><h2 class="screen-title">Profile</h2></div><div class="placeholder">Could not load the profile.</div></section>';
       return;
     }
 
@@ -9621,7 +9621,7 @@
     // reachable link (profile, System, Advisor) points at owned/want gear.
     // A hand-typed URL for a model you don't own lands on the fallback.
     if (!detail || !userRow) {
-      const msg = detail ? 'Цей пристрій не у вашому ланцюзі.' : 'Не вдалося завантажити пристрій.';
+      const msg = detail ? 'This device is not in your chain.' : 'Could not load the device.';
       root.innerHTML = `<section class="screen screen-gear-detail"><div class="profile-header"><button class="icon-btn" aria-label="back" data-gear-back>${PROFILE_ICONS.back}</button><h1>Gear</h1><span></span></div><div class="placeholder">${msg}</div></section>`;
       const b = root.querySelector('[data-gear-back]');
       if (b) b.addEventListener('click', () => { if (history.length > 1) history.back(); else navigate('more/profile'); });
@@ -10545,40 +10545,47 @@
     const running = !!job.running;
     const seen = (job.processed || 0) > 0 || running;
     const pct = job.total ? Math.round((job.processed / job.total) * 100) : 0;
+    const noDump = c.mb_dump === false;
+    const tally = `canonized ${job.canonized||0} · skipped ${job.skipped||0} · guard ${job.guard_rejected||0}${job.errors ? ' · errors '+job.errors : ''}`;
     const log = (job.items || []).slice(0, 30).map(it => {
       const rej = it.verdict === 'guard-rejected';
-      return `<div style="display:flex;align-items:baseline;gap:calc(6*var(--px));padding:calc(4*var(--px)) 0;border-top:1px solid var(--color-border);">
-        <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeProfileHtml(it.from)}</span>
-        <span style="color:${rej ? 'var(--color-negative)' : 'var(--color-blue)'};">→</span>
-        <span style="font-size:calc(12.5*var(--px));${rej ? 'text-decoration:line-through;opacity:.6;' : 'color:var(--color-text);'}">${escapeProfileHtml(it.to)}</span>
-        <span style="margin-left:auto;color:var(--color-text-muted);font-size:calc(11*var(--px));font-style:italic;">${escapeProfileHtml(it.why || (rej ? 'guard' : ''))}</span>
+      return `<div class="canon-log-row${rej ? ' rejected' : ''}">
+        <span class="from">${escapeProfileHtml(it.from)}</span>
+        <span class="arrow">→</span>
+        <span class="to">${escapeProfileHtml(it.to)}</span>
+        <span class="why">${escapeProfileHtml(it.why || (rej ? 'guard' : ''))}</span>
       </div>`;
     }).join('');
     return `
-      <div class="form-group" style="margin-top:calc(16*var(--px));">
-        <div style="font-size:calc(12*var(--px));text-transform:uppercase;letter-spacing:0.06em;color:var(--color-text-muted);margin-bottom:calc(8*var(--px));">AI канонізація</div>
+      <div class="profile-group-label">AI canonization</div>
+      <div class="form-group">
         <div class="form-row">
-          <span class="form-label">Увімкнено${c.free ? '' : ' <span style="color:var(--color-text-muted);font-size:calc(11*var(--px));">· платний API</span>'}</span>
-          <button class="toggle ${c.enabled ? 'on' : ''}" data-action="toggle-canon"><span class="knob"></span></button>
+          <span class="form-label">Enabled</span>
+          <button class="toggle ${c.enabled ? 'on' : ''}" data-action="toggle-canon" aria-pressed="${c.enabled ? 'true' : 'false'}"><span class="knob"></span></button>
         </div>
-        <div class="form-row">
-          <span class="form-label">Модель</span>
-          <span class="form-value" style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(12.5*var(--px));">${escapeProfileHtml(job.model || ai.model || 'sonnet')}</span>
+        <div class="form-row stacked">
+          <div class="row-stack-sub">
+            Resolves the artist names the deterministic tiers could not settle, against the local MusicBrainz catalogue.${c.free ? '' : ' Runs on a paid API key — billed per token.'}
+          </div>
         </div>
-        ${c.mb_dump === false ? `
-          <div style="margin-top:calc(8*var(--px));font-size:calc(12*var(--px));color:var(--color-text-muted);">
-            Потрібен локальний дамп MusicBrainz — канонізація резолвить імена проти нього. Завантаж дамп у Sync &amp; P2P.
+        ${noDump ? `
+          <div class="form-row stacked">
+            <div class="row-stack-sub">Needs the local MusicBrainz catalogue — canonization resolves names against it. Download it in <b>Library</b>.</div>
           </div>` : ''}
-        <div class="btn-row single" style="margin-top:calc(10*var(--px));">
-          <button class="btn ${running || c.mb_dump === false ? '' : 'btn-primary'}" data-action="run-canon" ${running || c.mb_dump === false ? 'disabled' : ''}>
-            ${running ? `Виконується… ${job.processed||0}/${job.total||0}` : 'Запустити зараз'}
-          </button>
-        </div>
-        ${seen ? `
-          <div class="enrich-bar" style="margin-top:calc(10*var(--px));"><div class="fill" style="width:${pct}%;"></div></div>
-          <div style="margin-top:calc(6*var(--px));font-size:calc(11.5*var(--px));color:var(--color-text-muted);font-family:var(--font-mono);letter-spacing:0.02em;">канонізовано <span style="color:var(--color-positive);">${job.canonized||0}</span> · пропущено ${job.skipped||0} · гард ${job.guard_rejected||0}${job.errors ? ' · помилок '+job.errors : ''}</div>` : ''}
-        ${log ? `<div style="margin-top:calc(8*var(--px));">${log}</div>` : ''}
       </div>
+      ${running ? `
+        <div class="progress-strip">
+          <div class="head">
+            <span class="label">Canonizing</span>
+            <span class="stats">${job.processed||0} / ${job.total||0}<span class="eta">${tally}</span></span>
+          </div>
+          <div class="bar"><div class="fill" style="width:${pct}%;"></div></div>
+        </div>` : `
+        <div class="btn-row single">
+          <button class="btn ${noDump ? 'btn-secondary' : 'btn-primary'}" data-action="run-canon" ${noDump ? 'disabled' : ''}>Run now</button>
+        </div>
+        ${seen ? `<div class="action-progress">${tally}</div>` : ''}`}
+      ${log ? `<div class="form-group canon-log">${log}</div>` : ''}
     `;
   }
 
@@ -11015,7 +11022,7 @@
       if (r.ok) data = await r.json();
     } catch (_) {}
     if (!data) {
-      root.innerHTML = `<section class="screen screen-settings">${_settingsHeader('Audio output')}<div class="placeholder">Не вдалося завантажити налаштування.</div></section>`;
+      root.innerHTML = `<section class="screen screen-settings">${_settingsHeader('Audio output')}<div class="placeholder">Could not load the settings.</div></section>`;
       _wireBack(root);
       return;
     }
@@ -11517,7 +11524,7 @@
       if (r.ok) lib = await r.json();
     } catch (_) {}
     if (!lib) {
-      root.innerHTML = `<section class="screen screen-settings">${_settingsHeader('Library')}<div class="placeholder">Не вдалося завантажити статистику.</div></section>`;
+      root.innerHTML = `<section class="screen screen-settings">${_settingsHeader('Library')}<div class="placeholder">Could not load the statistics.</div></section>`;
       _wireBack(root);
       return;
     }
@@ -11859,7 +11866,7 @@
       if (r.ok) ai = await r.json();
     } catch (_) {}
     if (!ai) {
-      root.innerHTML = `<section class="screen screen-settings">${_settingsHeader('AI assistant')}<div class="placeholder">Не вдалося завантажити налаштування.</div></section>`;
+      root.innerHTML = `<section class="screen screen-settings">${_settingsHeader('AI assistant')}<div class="placeholder">Could not load the settings.</div></section>`;
       _wireBack(root);
       return;
     }
@@ -11975,7 +11982,7 @@
   async function renderSync(root) {
     const sync = await _fetchSyncState();
     if (!sync) {
-      root.innerHTML = `<section class="screen screen-settings">${_settingsHeader('Sync & P2P')}<div class="placeholder">Не вдалося завантажити налаштування.</div></section>`;
+      root.innerHTML = `<section class="screen screen-settings">${_settingsHeader('Sync & P2P')}<div class="placeholder">Could not load the settings.</div></section>`;
       _wireBack(root);
       return;
     }
