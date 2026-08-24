@@ -356,24 +356,24 @@ class SyncClient:
             existing = self._get_existing_uuids(table, uuid_col)
             missing = available - existing
 
-            # Similars are OWNED-ONLY, mirroring the local enrichment rule
-            # (lastfm.enrich_artist): importing an artist's similars mints a
-            # stub row for every target, those stubs get canonized, their
-            # discographies mint phantom tracks — and the next sync would
-            # then ask for THEIR similars. Each hop multiplies by the ~50
-            # entries of a Last.fm list, so an ungated pull is a breadth-
-            # first walk of all recorded music through this node's disk.
-            # Enrichment learned this the hard way; sync inherited the same
-            # shape without the guard (measured here: 20630 artists asked
-            # about against 3173 owned).
+            # Similars are ENGAGED-ONLY, mirroring the local enrichment rule
+            # (lastfm.backfill_similar): an owned file OR a completed listen.
+            # Importing an artist's similars mints a stub row for every
+            # target, those stubs get canonized, their discographies mint
+            # phantom tracks — and the next sync would then ask for THEIR
+            # similars. Each hop multiplies by the ~50 entries of a Last.fm
+            # list, so an ungated pull is a breadth-first walk of all
+            # recorded music through this node's disk. Engagement keeps the
+            # bound: both signals are linear in human behavior, and a minted
+            # stub only becomes a seed via a new human listen.
             if cat_key == "similar_artists" and missing:
-                owned = self._owned_artist_uuids(missing)
-                skipped = len(missing) - len(owned)
-                missing = owned
+                engaged = self._engaged_artist_uuids(missing)
+                skipped = len(missing) - len(engaged)
+                missing = engaged
                 if skipped:
                     self._progress(
                         f"  similar_artists: {skipped} skipped "
-                        f"(no owned music — blowup guard)")
+                        f"(no engagement — blowup guard)")
 
             if missing:
                 needed[cat_key] = list(missing)
@@ -383,15 +383,20 @@ class SyncClient:
 
         return needed
 
-    def _owned_artist_uuids(self, artist_uuids) -> set:
-        """Of these artists, the ones this node owns a file by."""
+    def _engaged_artist_uuids(self, artist_uuids) -> set:
+        """Of these artists, the ones this node owns a file by OR has a
+        completed, unskipped listen of (streamed phantoms count)."""
         conn = self._get_conn()
         with conn.cursor() as cur:
             cur.execute(
                 """SELECT DISTINCT ta.artist_id::text
                      FROM track_artists ta
-                     JOIN media_files mf ON mf.track_id = ta.track_id
-                    WHERE ta.artist_id = ANY(%s::uuid[])""",
+                    WHERE ta.artist_id = ANY(%s::uuid[])
+                      AND (EXISTS (SELECT 1 FROM media_files mf
+                                    WHERE mf.track_id = ta.track_id)
+                           OR EXISTS (SELECT 1 FROM listening_history lh
+                                       WHERE lh.track_id = ta.track_id
+                                         AND lh.completed AND NOT lh.skipped))""",
                 [list(artist_uuids)])
             return {row[0] for row in cur.fetchall()}
 

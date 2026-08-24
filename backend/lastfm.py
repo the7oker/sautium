@@ -6,7 +6,7 @@ Fetches artist bios, tags, and similar artists, storing in external_metadata tab
 import logging
 import re
 import time
-from typing import Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional, Any
 
 import pylast
 from sqlalchemy import text
@@ -312,6 +312,13 @@ class LastFmService:
             logger.debug(
                 f"Stored {similar_count}/{len(data['similar'])} similar artists for artist {artist_id} ({artist_name})"
             )
+            # Stamp so the engagement-gated backfill (backfill_similar) doesn't
+            # re-ask getSimilar for an artist whose similars just landed here.
+            # Only on a non-empty list: a transient getSimilar failure arrives
+            # as [] (get_artist_info swallows per-section errors), and leaving
+            # it unstamped lets the backfill self-heal it next cycle.
+            db.execute(text("UPDATE artists SET last_similar_sync = NOW() WHERE id = :id"),
+                       {"id": str(artist_id)})
         else:
             stored["similar_artists"] = False
 
@@ -412,8 +419,9 @@ class LastFmService:
         detect_compound_type and each member becomes its own edge; '&'/',' duos
         stay whole — they are real entities with their own discography.
 
-        Phantom artists are never enriched themselves (enrichment only targets
-        artists with tracks), so this never cascades into similar-of-similar.
+        A minted stub only becomes a similar-seed once a human completes a
+        listen on it (backfill_similar's engagement gate), so expansion is
+        linear in listening — no unconditional similar-of-similar cascade.
         Returns the number of new edges stored.
         """
         from uuid_utils import artist_uuid
@@ -632,7 +640,8 @@ class LastFmService:
         Fetch Last.fm data for an artist and store in database.
 
         Bio/tags are always fetched. Similar artists are only fetched for
-        OWNED artists (with a physical file) — prevents similar-of-similar.
+        OWNED artists (with a physical file); listened-but-unowned phantoms
+        get theirs from the engagement-gated backfill_similar step instead.
 
         Returns summary dict with status and stored flags.
         """
@@ -642,6 +651,10 @@ class LastFmService:
         # phantom artists gained track_artists from materialized phantom
         # tracklists, so track_artists no longer means "in catalog". Without
         # the media_files join, ~16k phantoms would fetch similars -> blowup.
+        # Deliberately NOT widened to the listened-phantom predicate: the
+        # engagement-gated step (backfill_similar, run by background_enrichment)
+        # owns that rule as the single choke point, and picks such artists up
+        # within one cycle regardless of bio state.
         is_owned = db.execute(text("""
             SELECT 1 FROM track_artists ta
             JOIN media_files mf ON mf.track_id = ta.track_id
@@ -1226,17 +1239,21 @@ class LastFmService:
 
 
 def backfill_similar(limit: Optional[int] = None, delay: float = 0.2,
-                     force: bool = False) -> Dict[str, int]:
-    """One-shot backfill of Last.fm similar artists for library artists.
+                     force: bool = False,
+                     cancel_flag: Optional[Callable[[], bool]] = None) -> Dict[str, int]:
+    """Fetch Last.fm similars for ENGAGED artists that never had them.
 
-    The pre-phantom code discarded out-of-catalog similars without caching them,
-    so they must be re-fetched once after deploying the phantom-creating
-    ``_store_similar_artists``. Processes library artists (those with track
-    credits) whose ``last_similar_sync`` is unset — oldest/never first — minting
-    phantom rows and splitting collaborations, one commit per artist for
-    resumability. Incremental + idempotent; ``force=True`` re-fetches everyone.
-    New artists need no backfill — their similars are stored on first bio
-    enrichment.
+    Engaged = an owned file (track_artists JOIN media_files) OR at least one
+    completed, unskipped listen (listening_history — covers streamed phantoms,
+    the catalog-less mode). Both signals are linear in human behavior, so the
+    fan-out stays bounded: a minted similar-stub only becomes a seed via a new
+    human listen — no unconditional similar-of-similar recursion.
+
+    This is the shared candidate rule for the background `similar` step and
+    manual runs. Recently-listened first; one commit per artist for
+    resumability; incremental + idempotent. ``force=True`` re-fetches the whole
+    engaged set (also the escape hatch for the permanent not_found stamp —
+    fetch_and_store_similar stamps a dead name once, forever).
     """
     from database import get_db_context
 
@@ -1246,18 +1263,33 @@ def backfill_similar(limit: Optional[int] = None, delay: float = 0.2,
     sql = text(f"""
         SELECT a.id, a.name
         FROM artists a
-        WHERE EXISTS (SELECT 1 FROM track_artists ta
-                      JOIN media_files mf ON mf.track_id = ta.track_id
-                      WHERE ta.artist_id = a.id)
-          {where}
-        ORDER BY a.last_similar_sync NULLS FIRST, a.name
+        WHERE (
+            EXISTS (SELECT 1 FROM track_artists ta
+                    JOIN media_files mf ON mf.track_id = ta.track_id
+                    WHERE ta.artist_id = a.id)
+            OR EXISTS (SELECT 1 FROM track_artists ta
+                       JOIN listening_history lh ON lh.track_id = ta.track_id
+                       WHERE ta.artist_id = a.id
+                         AND lh.completed AND NOT lh.skipped)
+        )
+        {where}
+        ORDER BY a.last_similar_sync NULLS FIRST,
+                 (SELECT MAX(lh.started_at)
+                  FROM listening_history lh
+                  JOIN track_artists ta ON ta.track_id = lh.track_id
+                  WHERE ta.artist_id = a.id
+                    AND lh.completed AND NOT lh.skipped) DESC NULLS LAST,
+                 a.name
         {lim}
     """)
-    stats = {"processed": 0, "stored": 0, "not_found": 0, "errors": 0}
+    stats = {"processed": 0, "stored": 0, "not_found": 0, "errors": 0,
+             "rate_limited": 0}
     with get_db_context() as db:
         rows = db.execute(sql, {"lim": limit} if limit else {}).fetchall()
-    logger.info(f"backfill_similar: {len(rows)} library artists queued")
+    logger.info(f"backfill_similar: {len(rows)} engaged artists queued")
     for row in rows:
+        if cancel_flag and cancel_flag():
+            break
         try:
             with get_db_context() as db:
                 r = svc.fetch_and_store_similar(db, row.id, row.name)
@@ -1265,6 +1297,10 @@ def backfill_similar(limit: Optional[int] = None, delay: float = 0.2,
             stats["stored"] += r["stored"]
             if r["status"] == "not_found":
                 stats["not_found"] += 1
+        except RateLimitExhausted:
+            stats["rate_limited"] += 1
+            logger.info("backfill_similar: Last.fm rate-limited — ending batch")
+            break
         except Exception as e:
             stats["errors"] += 1
             logger.error(f"backfill_similar failed for {row.name}: {e}")

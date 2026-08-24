@@ -10,7 +10,8 @@ Each batch, in order:
   2. Lyrics (lrclib/genius) for tracks missing them
   3. Last.fm artist bios for new artists
   4. Last.fm genre wiki for new genres
-  5. Missing-album reconcile for canonized artists (local MB dump, DB-only)
+  5. Last.fm similars for engaged artists (owned file OR completed listen)
+  6. Missing-album reconcile for canonized artists (local MB dump, DB-only)
 
 Track-stats priority (Tier 1 → 3):
   1. Tracks whose primary artist has the most accumulated listen-time
@@ -61,6 +62,7 @@ _TRACK_STATS_PER_BATCH = 100      # Last.fm track.getInfo calls per batch
 _LYRICS_PER_BATCH = 50            # lrclib/genius calls per batch
 _ARTISTS_PER_BATCH = 30           # Last.fm artist.getInfo calls per batch
 _GENRES_PER_BATCH = 20            # Last.fm tag.getInfo calls per batch
+_SIMILAR_PER_BATCH = 25           # Last.fm artist.getSimilar calls per batch (engaged artists) — the cap that drains a radio-night's phantom qualifications at a bounded rate
 _LASTFM_DELAY_S = 0.2             # ~5 req/sec, the Last.fm published limit
 
 _CANONIZE_PER_BATCH = 50          # uncanonized artists distilled per batch (Layer 2: content + phantom)
@@ -151,6 +153,7 @@ _state: Dict[str, Any] = {
         "lyrics": 0,
         "artists": 0,
         "genres": 0,
+        "similar": 0,
         "discography": 0,
     },
 }
@@ -362,6 +365,21 @@ def _step_missing_genres(limit: int) -> Dict[str, int]:
     return stats
 
 
+def _step_similar_artists(limit: int) -> Dict[str, int]:
+    """Fetch Last.fm similar-artist lists for engaged artists that never had
+    them: owned artists OR phantoms with a completed listen. Delegates to
+    lastfm.backfill_similar — one source of truth for the candidate rule
+    (shared with manual force=True refreshes)."""
+    from lastfm import backfill_similar
+
+    try:
+        return backfill_similar(limit=int(limit), delay=_LASTFM_DELAY_S,
+                                cancel_flag=_cancel_flag)
+    except Exception as e:
+        logger.error(f"Background similar backfill failed: {e}")
+        return {"processed": 0, "stored": 0, "errors": 1}
+
+
 def _step_canonize(limit: int) -> Dict[str, int]:
     """Distill the uncanonized residue (Layer 2 entry point): owned artists via
     content overlap, trackless phantoms via genre overlap. Runs before
@@ -454,8 +472,8 @@ def _step_backfill_name_latin(limit: int) -> Dict[str, int]:
 
 def _run_once() -> Dict[str, Any]:
     """Run one full batch (all steps). Honours cancel between steps."""
-    summary = {"track_stats": {}, "lyrics": {}, "artists": {},
-               "genres": {}, "canonize": {}, "discography": {}, "name_latin": {}}
+    summary = {"track_stats": {}, "lyrics": {}, "artists": {}, "genres": {},
+               "similar": {}, "canonize": {}, "discography": {}, "name_latin": {}}
 
     if _cancel_flag():
         return summary
@@ -487,6 +505,19 @@ def _run_once() -> Dict[str, Any]:
     if not cooling_down('lastfm'):
         summary["genres"] = _step_missing_genres(_GENRES_PER_BATCH)
         _bump("genres", summary["genres"].get("success", 0))
+
+    if _cancel_flag():
+        return summary
+
+    # Engagement-gated similars (owned file OR completed listen) that never
+    # had getSimilar. Runs directly BEFORE canonize so the stubs this step
+    # mints are resolved-or-discarded the same batch, and discography then
+    # shelves the survivors — one cycle from a night's listening to
+    # Discovery-visible similars.
+    _set(current_step="similar")
+    if not cooling_down('lastfm'):
+        summary["similar"] = _step_similar_artists(_SIMILAR_PER_BATCH)
+        _bump("similar", summary["similar"].get("stored", 0))
 
     if _cancel_flag():
         return summary
@@ -572,7 +603,8 @@ def _loop() -> None:
             # created canon work that a dump-less node can only do with
             # peer slices. Tell the launcher now instead of letting the
             # freshly minted names sit out its 6-hour timer.
-            if (batch.get("artists") or {}).get("success"):
+            if ((batch.get("artists") or {}).get("success")
+                    or (batch.get("similar") or {}).get("stored")):
                 try:
                     from db_pool import db_execute
                     db_execute("NOTIFY sautium_enrich_done")

@@ -60,15 +60,17 @@ physical files — locality is enforced by *code*, not constraints:
   `similar_artist_id` FK to `artists(id)`; they require the artist
   **row** to exist, **not** any `media_files`.
 
-**What enforces locality today (the code we relax):**
+**What enforces the bound today (the engagement gates):**
 
-- `backend/lastfm.py:348-356` — a similar artist is stored only if it
-  already has tracks (`JOIN track_artists`); otherwise `skip`.
-- `backend/lastfm.py:519` — `fetch_similar = has_tracks`, so we never
-  even fetch similar artists for non-local artists.
-- `desktop/p2p/sync_queries.py:117` and `backend/routers/sync.py:97`
-  — sync inventory restricts enrichment to artists reachable via
-  `track_artists`, so phantom data is never offered to peers.
+- `backend/lastfm.py` `enrich_artist` — bio-time similars are fetched
+  for OWNED artists only (`track_artists JOIN media_files`).
+- `backend/lastfm.py` `backfill_similar` — the engagement gate: owned
+  file OR a completed, unskipped listen (`listening_history`); run as
+  the background `similar` step, it is how listened phantoms
+  (catalog-less mode) get their similars.
+- `desktop/sync_client.py` `_engaged_artist_uuids` — the sync client
+  filters the similars pull by the same engagement predicate before
+  requesting anything from a peer.
 
 ### Why UUID v5 makes phantom→local seamless
 
@@ -123,9 +125,11 @@ millions of phantom rows and an enormous external-API bill.
   bounded.
 - **Albums/tracks of a phantom are fetched on demand** when the user
   opens that artist's screen, then cached.
-- **Bound the graph to 1 hop**: only enrich phantoms that are
-  `similar` to a *local* artist. No "similar of similar" recursion —
-  that is the combinatorial trap.
+- **Bound the graph to 1 hop from engagement**: similars are fetched
+  only for artists with an owned file or a completed human listen. No
+  *unconditional* recursion — a minted stub becomes a seed only when a
+  human completes a listen on it, so expansion is linear in listening,
+  never combinatorial (that is the trap).
 
 ### D3. External sources
 

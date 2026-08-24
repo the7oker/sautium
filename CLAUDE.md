@@ -218,12 +218,18 @@ See:
 - **Post-import hooks.** After importing data from a peer (sync_client),
   re-run derived classifiers like `_update_artist_gender` and
   `_update_artist_is_vocalist` on the freshly-imported rows only.
-- **Anything that fans out per artist must be gated on OWNED music**
-  (`track_artists JOIN media_files`), never on `track_artists` alone —
-  phantom tracklists made that column meaningless as "in catalog". This is
-  why Last.fm similars, the DHT announce tail and the sync's similars pull
-  all carry the same join. Without it every hop multiplies by ~50 Last.fm
-  entries and the pipeline walks all recorded music.
+- **Anything that fans out per artist must be gated on HUMAN ENGAGEMENT** —
+  an OWNED file (`track_artists JOIN media_files`) or a COMPLETED listen
+  (`listening_history.completed AND NOT skipped`, the scrobble rule) — never
+  on `track_artists` alone: phantom tracklists made that column meaningless
+  as "in catalog". Both signals are linear in user behavior, so a minted
+  similar-stub only becomes a seed via a new human listen — no transitive
+  expansion. Last.fm similars (`lastfm.backfill_similar`, the background
+  `similar` step) and the sync's similars pull (`_engaged_artist_uuids`)
+  carry this gate; the DHT announce tail is gated differently — on held
+  analysis ("serveability", `ANNOUNCE_TAIL_SQL`), which name-only stubs
+  never enter. Without a gate every hop multiplies by ~50 Last.fm entries
+  and the pipeline walks all recorded music.
 - **P2P-facing settings** (all in `user_settings`, defaults in
   `backend/routers/settings.py` `_DEFAULTS`): `sync.announce_limit` (rare
   artist DHT tail), `sync.carry_limit` (foreign TRACKS carried, ~46 KB
@@ -498,9 +504,10 @@ signed **per artist** (`mb_slice_blobs` keeps verified blobs verbatim
 with the ORIGINAL dump node's signature), so any node can re-serve
 names it holds — replicas are asked before dump nodes. Two rules that
 look like details and are not: **a name closes only on a signed
-zero-match**, and **similars are pulled for OWNED artists only** —
-without that gate each hop multiplies by a Last.fm list and the sync
-becomes a breadth-first walk of all recorded music.
+zero-match**, and **similars are pulled for ENGAGED artists only**
+(owned file or completed listen) — without that gate each hop
+multiplies by a Last.fm list and the sync becomes a breadth-first
+walk of all recorded music.
 
 **Before any public release, multi-user deployment, or remote-access
 feature** (Tailscale exposure, "headless mode", reverse proxy), the
