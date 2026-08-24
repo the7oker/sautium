@@ -42,6 +42,12 @@ class LauncherApp(ctk.CTk):
         self.config = load_config()
         self.service_manager = ServiceManager(self.config)
         self.api_client = BackendAPIClient()
+        # The client defaults to port 8000; this node is configured elsewhere.
+        # Waiting for the services-ready event to say so left every earlier
+        # call pointed at a port nothing answers — including the pairing code
+        # behind "Open Web UI", which then opened the page with no credential
+        # in it and the browser asked for a password instead.
+        self.api_client.set_port(self.config.get("ports", {}).get("web", 8000))
         self.p2p_manager = None
         # Set while _start_p2p's background thread is between
         # "thread launched" and "self.p2p_manager assigned". Prevents a
@@ -940,14 +946,22 @@ class LauncherApp(ctk.CTk):
         try:
             resp = self.api_client.request_pairing_code()
         except Exception as e:
-            logger.debug("pairing code unavailable: %s", e)
+            logger.warning("pairing code unavailable: %s", e)
             return ""
         code = (resp or {}).get("code")
         return f"#pair={code}" if code else ""
 
     def _open_web_ui(self):
         port = self.config.get("ports", {}).get("web", 8000)
-        webbrowser.open(f"https://localhost:{port}/{self._pairing_fragment()}")
+        fragment = self._pairing_fragment()
+        if not fragment:
+            # The fragment IS the sign-in. Without it the page falls back to
+            # asking for the account password, and meeting that prompt with no
+            # explanation reads as "the app forgot who I am".
+            self._progress_text.configure(
+                text="No pairing code — the browser will ask for your password")
+            self.after(8000, lambda: self._progress_text.configure(text=""))
+        webbrowser.open(f"https://localhost:{port}/{fragment}")
 
     def _scan_library(self):
         """Open folder picker and scan selected folder."""
