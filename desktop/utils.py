@@ -39,6 +39,34 @@ def get_bundled_node_dir() -> Optional[Path]:
     return None
 
 
+# Where a Mac keeps the tools a launcher shells out to. Homebrew's own prefix
+# first, Intel's second — both are checked because either can be the real one.
+_MACOS_TOOL_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
+
+
+def repair_gui_path() -> None:
+    """Put Homebrew back on PATH when the launcher was started as a GUI app.
+
+    Finder and the Dock hand a process /usr/bin:/bin:/usr/sbin:/sbin — a PATH
+    that has never heard of Homebrew — while a terminal has already sourced a
+    shell profile that puts it there. Every `shutil.which` in this process and
+    every child that inherits this environment therefore answers differently
+    depending on how the app was started, and the .app is the half where the
+    answers are wrong: the wizard reports "Node.js not found" on a machine
+    where node is installed and on PATH for its owner.
+
+    Called once at launcher start, so the fix lands in one place instead of at
+    every lookup that would otherwise have to know about Homebrew.
+    """
+    if sys.platform != "darwin":
+        return
+    current = os.environ.get("PATH", "").split(os.pathsep)
+    missing = [d for d in _MACOS_TOOL_DIRS if os.path.isdir(d) and d not in current]
+    if missing:
+        os.environ["PATH"] = os.pathsep.join(missing + current)
+        logger.info("PATH repaired for GUI launch: added %s", ", ".join(missing))
+
+
 def get_node_executable() -> Optional[Path]:
     """Find a usable Node binary: bundled (Win) → PATH."""
     bundled = get_bundled_node_dir()

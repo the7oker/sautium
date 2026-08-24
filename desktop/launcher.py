@@ -1455,6 +1455,10 @@ def main():
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
+    # Before anything looks for a tool: a GUI launch has no Homebrew on PATH.
+    from desktop.utils import repair_gui_path
+    repair_gui_path()
+
     app = LauncherApp()
     app.mainloop()
 

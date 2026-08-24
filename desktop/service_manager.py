@@ -160,9 +160,10 @@ class ServiceManager:
     def _ensure_backend_deps(self, progress_cb: Optional[Callable] = None) -> bool:
         """Install backend dependencies if missing or out-of-date.
 
-        Skip-fast condition: marker file at <data_dir>/.backend_deps_hash holds
-        the SHA-256 of requirements.txt from the last successful install. If it
-        matches the current file, the venv is up to date and we return immediately.
+        Skip-fast condition: a marker file at <data_dir>/.backend_deps_<env> holds
+        the SHA-256 of requirements.txt from the last successful install into THAT
+        interpreter. If it matches the current file, the environment is up to date
+        and we return immediately.
         Any change to requirements.txt (added/removed/version-bumped package)
         invalidates the marker and forces a `pip install -r requirements.txt`,
         which top-ups whatever is missing.
@@ -182,7 +183,13 @@ class ServiceManager:
         import hashlib
         from desktop.config_manager import get_data_dir
         req_hash = hashlib.sha256(req_file.read_bytes()).hexdigest()
-        marker = get_data_dir() / ".backend_deps_hash"
+        # Keyed by interpreter as well as by requirements. One data root is
+        # shared by every runtime that reads it — a checkout's venv and the
+        # macOS app's own Python both keep their state here — and a marker that
+        # knew only the file hash let one of them vouch for the other: the app
+        # skipped its install and its backend died on "No module named uvicorn".
+        env_key = hashlib.sha256(python.encode()).hexdigest()[:12]
+        marker = get_data_dir() / f".backend_deps_{env_key}"
         if marker.exists() and marker.read_text().strip() == req_hash:
             logger.info("Backend dependencies already up to date")
             return True

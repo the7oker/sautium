@@ -183,6 +183,17 @@ python desktop/build_macos.py --sign "Developer ID Application: ..." \
 5. In the launcher: **Scan Library** picks the music folder, **Open Web UI**
    opens `https://localhost:18000` (accept the self-signed cert once).
 
+#### Testing installs
+
+`scripts/test-node.sh run` starts the installed app against a throwaway data
+root — its own wizard, database and ports, leaving the node this machine
+already runs alone — and `reset` deletes it. It launches the way the Dock does,
+with LANG stripped, because that is where a locale-less PostgreSQL start fails
+and a terminal never will. `wipe --yes` deletes the real node on this machine:
+`~/.config/Sautium` (settings, account key), `~/.local/share/Sautium` (database,
+logs, the app's Python) and `~/.sautium` (the browser certificate). Homebrew
+packages, the pip cache and `~/.cache/huggingface` are left alone.
+
 ## Project Structure
 
 ```

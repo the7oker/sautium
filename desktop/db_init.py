@@ -616,8 +616,22 @@ def _which(name: str) -> Optional[str]:
 
 
 def _get_pg_env() -> dict:
-    """Get environment with PostgreSQL bin/lib in PATH."""
+    """Environment for the PostgreSQL binaries: its own bin/lib on PATH, and a
+    locale that is definitely valid.
+
+    PG 18 aborts at startup with "postmaster became multithreaded during
+    startup" when the process has no usable locale — macOS resolves one through
+    Core Foundation, which spawns a thread, and the postmaster refuses to fork
+    from a multithreaded parent. Only a terminal sets LANG, so this is invisible
+    until the launcher runs as a GUI app started from the Dock, where the whole
+    node then fails at "Starting PostgreSQL...". C is not a fallback here but
+    the right answer: initialize_cluster runs initdb with --locale=C, so the
+    processes and the cluster agree (per-database collation is ICU and
+    unaffected).
+    """
     env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
     sep = os.pathsep
     try:
         pg_bin = get_pg_bin_dir()
