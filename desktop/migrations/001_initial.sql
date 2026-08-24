@@ -1433,11 +1433,19 @@ UPDATE friends f
        (SELECT MAX(m.timestamp) FROM p2p_messages m WHERE m.friend_id = f.id),
        f.added_at, f.last_activity_at);
 
+-- A contact is blocked or it is not; NULL never meant anything here, and
+-- the list order below reads the flag on every row.
+UPDATE friends SET is_blocked = FALSE WHERE is_blocked IS NULL;
+ALTER TABLE friends ALTER COLUMN is_blocked SET DEFAULT FALSE;
+ALTER TABLE friends ALTER COLUMN is_blocked SET NOT NULL;
+
 -- Keyset pagination over the non-pinned list; favorites are fetched whole
--- (user-curated, small by definition).
+-- (user-curated, small by definition). Blocked contacts sink to the bottom,
+-- written as `NOT is_blocked DESC` so all three keys share a direction and
+-- the cursor stays a single tuple comparison.
 DROP INDEX IF EXISTS idx_friends_page;
 CREATE INDEX IF NOT EXISTS idx_friends_recent
-    ON friends (last_activity_at DESC, id DESC)
+    ON friends ((NOT is_blocked) DESC, last_activity_at DESC, id DESC)
     WHERE favorite = FALSE;
 
 -- Live-DB drift repair: 001 declares DEFAULT gen_random_uuid() on

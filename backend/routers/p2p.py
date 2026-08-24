@@ -287,8 +287,11 @@ ONLINE_WINDOW_MIN = 5
 
 # Chat-recency order: whoever wrote (or was written to) last comes first,
 # so a new message lifts its row to the top. friends.last_activity_at is
-# maintained by the p2p_messages trigger and seeded from added_at.
-_FRIEND_SORT = "f.last_activity_at DESC, f.id DESC"
+# maintained by the p2p_messages trigger and seeded from added_at. Blocked
+# contacts sink below everyone else — written as `NOT is_blocked DESC` so
+# all three keys share a direction and the keyset cursor stays one tuple
+# comparison, which is also the shape idx_friends_recent has.
+_FRIEND_SORT = "(NOT f.is_blocked) DESC, f.last_activity_at DESC, f.id DESC"
 
 _FRIENDS_SELECT = f"""
     SELECT f.id, f.username, f.public_key_hex, f.invite_code,
@@ -352,15 +355,16 @@ async def list_friends(cursor: str = "", limit: int = 50,
         try:
             after = json.loads(
                 base64.urlsafe_b64decode(cursor.encode()).decode())
-            assert isinstance(after, list) and len(after) == 2
+            assert isinstance(after, list) and len(after) == 3
         except Exception:
             raise HTTPException(status_code=400, detail="Bad cursor")
 
     cur_clause = ""
     cur_params: list = []
     if after:
-        cur_clause = " AND (f.last_activity_at, f.id) < (%s::timestamptz, %s)"
-        cur_params = [after[0], int(after[1])]
+        cur_clause = (" AND ((NOT f.is_blocked), f.last_activity_at, f.id)"
+                      " < (%s, %s::timestamptz, %s)")
+        cur_params = [bool(after[0]), after[1], int(after[2])]
 
     items = _db_query(
         _FRIENDS_SELECT + f" WHERE f.favorite = FALSE{q_clause}{cur_clause}"
@@ -372,7 +376,8 @@ async def list_friends(cursor: str = "", limit: int = 50,
         items = items[:limit]
         last = items[-1]
         next_cursor = base64.urlsafe_b64encode(json.dumps(
-            [last["last_activity_at"].isoformat(), last["id"]]).encode()).decode()
+            [not last["is_blocked"], last["last_activity_at"].isoformat(),
+             last["id"]]).encode()).decode()
 
     total = _db_query_one(
         "SELECT count(*) AS c FROM friends f WHERE TRUE" + q_clause,

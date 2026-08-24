@@ -3621,6 +3621,9 @@ body.has-miniplayer .ai-fab {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Blocked contacts sort to the bottom of the list; the colour is what
+   tells you why a familiar name ended up down there. */
+.friend-name.blocked { color: var(--color-negative); }
 .friend-status {
   font-size: calc(11.5 * var(--px));
   color: var(--color-text-muted);

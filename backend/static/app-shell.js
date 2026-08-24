@@ -6384,7 +6384,8 @@
         <div class="avatar friend-avatar" style="background: ${ph.bg};">${
           escapeHtml(ph.initials)}</div>
         <div class="friend-meta">
-          <div class="friend-name">${escapeHtml(name)}${chip}${star}</div>
+          <div class="friend-name${friend.is_blocked ? ' blocked' : ''}">${
+            escapeHtml(name)}${chip}${star}</div>
           ${status}
         </div>
         <button class="friend-menu-btn" type="button" data-menu
