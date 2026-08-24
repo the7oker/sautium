@@ -252,7 +252,7 @@ class ServiceManager:
                 index = _CUDA_INDEX if has_nvidia else _CPU_INDEX
                 torch_cmd += ["--index-url", index]
 
-            torch_kwargs = {"capture_output": True, "text": True, "timeout": 600, "env": os.environ.copy()}
+            torch_kwargs = {"capture_output": True, "text": True, "timeout": 3600, "env": os.environ.copy()}
             if sys.platform == "win32":
                 torch_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
             torch_result = subprocess.run(torch_cmd, **torch_kwargs)
@@ -310,7 +310,10 @@ class ServiceManager:
         env["LC_ALL"] = "C"
         env["PGCLIENTENCODING"] = "UTF8"
 
-        kwargs = {"capture_output": True, "text": True, "timeout": 600, "env": env}
+        # An hour, not ten minutes: this is a ~1.3 GB one-time download and the
+        # cap has to clear a slow home link, not a fast office one. A timeout
+        # here fails the whole install and leaves a node with no backend.
+        kwargs = {"capture_output": True, "text": True, "timeout": 3600, "env": env}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 

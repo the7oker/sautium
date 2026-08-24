@@ -1,4 +1,6 @@
-customtkinter>=5.2.0
+# Upper bound on purpose: every launcher screen is verified against 5.2, and
+# a fresh install is the one place a major bump would land untested.
+customtkinter>=5.2.0,<6
 pystray>=0.19.5
 Pillow>=10.0.0
 qrcode>=7.4.0
