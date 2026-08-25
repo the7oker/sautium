@@ -863,7 +863,7 @@ def get_track_info(track_id: str) -> str:
 
 
 # =============================================================================
-# SMART PLAY (6 tools)
+# SMART PLAY (7 tools)
 # =============================================================================
 #
 # Everything here takes canonical UUIDs and routes on what the catalog holds:
@@ -980,11 +980,38 @@ def _queue_outcome(r: dict, verb: str) -> str:
 
 
 @mcp.tool()
+def build_playlist(ids: list[str]) -> str:
+    """Assemble a NEW queue from these tracks and/or albums, in the given order,
+    and leave it ready — NOTHING starts playing.
+
+    THIS is "put her albums together into one playlist" / "collect X into a
+    playlist": the user is curating a set, not asking for sound. The queue that
+    was there is archived to the listening history, so the new one is a playlist
+    of its own rather than a tail on the old one. Mixed lists are fine: entities
+    with no file stream, and they arrive behind their provider lookup.
+
+    Args:
+        ids: Track and/or album UUIDs, in play order (max 50)
+    """
+    try:
+        items = _entity_items(ids)
+        if isinstance(items, str):
+            return items
+        r = _backend_post("/api/player/play-entities",
+                          {"items": items, "autoplay": False}, timeout=120.0)
+        return _queue_outcome(r, "New queue ready (not started)")
+    except Exception as e:
+        return f"Error building the playlist: {e}"
+
+
+@mcp.tool()
 def play_all(ids: list[str]) -> str:
     """Start a NEW queue from these tracks and/or albums, in the given order,
-    and play. THIS is "make me a playlist of X" — the queue that was there is
-    archived to the listening history, not extended. Mixed lists are fine:
-    entities with no file stream, and they arrive behind their provider lookup.
+    and PLAY it. Use this when the user asked to put something on ("play her
+    albums", "start this set"); if they only asked to assemble or collect a
+    playlist, use build_playlist and leave the sound alone.
+
+    The queue that was there is archived to the listening history, not extended.
 
     Args:
         ids: Track and/or album UUIDs, in play order (max 50)
@@ -1003,8 +1030,9 @@ def play_all(ids: list[str]) -> str:
 def add_to_queue(ids: list[str]) -> str:
     """Append tracks and/or albums to the CURRENT queue, in the given order,
     without clearing what is already there — for "add these too". When the user
-    asked for a playlist, or to play something, use play_all instead: this tool
-    leaves whatever is already queued in front of them.
+    asked for a playlist, use build_playlist (or play_all to start it): this
+    tool leaves whatever is already queued in front of them, which buries a
+    freshly assembled set behind the old one.
 
     Args:
         ids: Track and/or album UUIDs, in the order to append (max 50)

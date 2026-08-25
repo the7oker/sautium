@@ -123,6 +123,9 @@ class EntityRef(BaseModel):
 
 class QueueEntitiesRequest(BaseModel):
     items: list[EntityRef] = Field(..., max_length=50)
+    # play-entities only: assembling a playlist is not the same act as putting
+    # one on, and the user says which ("build me a set" vs "play these").
+    autoplay: bool = True
 
 class JumpRequest(BaseModel):
     index: int  # 1-based, matches HQPlayer's select_track convention
@@ -2255,19 +2258,28 @@ def _queue_segments_worker(segments: list, gen: int) -> None:
         _phantom_filler(proxy, tokens, 0, gen)
 
 
-def _play_segments(segments: list, worker_name: str) -> None:
-    """Replace the queue with these segments and start playing. The FIRST item
-    goes in alone — a transcode or a provider fetch must never hold up the first
-    sound — and everything behind it rolls in through the ordered worker. The
-    caller rotates the session BEFORE this (the old queue is archived intact)."""
+def _play_segments(segments: list, worker_name: str, *, play: bool = True) -> None:
+    """Replace the queue with these segments. The FIRST item goes in alone — a
+    transcode or a provider fetch must never hold up the answer — and everything
+    behind it rolls in through the ordered worker. The caller rotates the session
+    BEFORE this (the old queue is archived intact).
+
+    `play=False` assembles the queue without starting it: "put together a
+    playlist" is a curation act, not a play command, and the canonical queue is
+    independent of the output, so it works with nothing attached."""
     head_kind, head_items = segments[0]
     if head_kind == "owned":
-        added = _add_owned([head_items[0]], clear_first=True)
-        gen = manager.queue.generation
+        if play:
+            added = _add_owned([head_items[0]], clear_first=True)
+            gen = manager.queue.generation
+        else:
+            added, gen = manager.replace_queue(
+                queue_mod.items_for_media_ids([head_items[0]["id"]]), play=False)
         head_rest = head_items[1:]
     else:
         from streaming import service as streaming_service
-        _ensure_output_ready()      # a dead renderer costs 2s here, not a whole buffer
+        if play:
+            _ensure_output_ready()  # a dead renderer costs 2s here, not a whole buffer
         chains = _resolve_waterfall(head_items)
         pairs = [(q, ch) for q, ch in zip(head_items, chains) if ch]
         if not pairs:
@@ -2283,7 +2295,7 @@ def _play_segments(segments: list, worker_name: str) -> None:
             raise HTTPException(status_code=502,
                                 detail="The opening track isn\u2019t available to stream right now.")
         item = queue_mod.item_for_proxy_token(tokens[0])
-        added, gen = manager.replace_queue([item] if item else [], play=True)
+        added, gen = manager.replace_queue([item] if item else [], play=play)
         proxy.bind(tokens, gen)
         head_rest = [q for q, _ch in pairs[1:]]
     if not added:
@@ -2339,12 +2351,15 @@ def queue_entities(req: QueueEntitiesRequest):
 
 @router.post("/play-entities")
 def play_entities(req: QueueEntitiesRequest):
-    """Replace the queue with these entities, in order, and play — the
-    assistant's "Play all" against a list of tracks and/or albums.
+    """Replace the queue with these entities, in order — the assistant's
+    "Play all" against a list of tracks and/or albums.
 
     The old queue is archived to the session history first, exactly as the
     album screen's Play all does, so "make me a playlist of her albums" is a
-    NEW queue rather than a tail on whatever was already there."""
+    NEW queue rather than a tail on whatever was already there. With
+    `autoplay=false` the queue is assembled and left waiting, which is what
+    "put together a playlist" asks for — the same thing restoring a queue from
+    the history does."""
     if not req.items:
         raise HTTPException(status_code=400, detail="No entities provided")
     bad = {i.kind for i in req.items} - {"track", "album"}
@@ -2371,12 +2386,12 @@ def play_entities(req: QueueEntitiesRequest):
         seed_track_id=(None if head_kind == "owned" else head_items[0].track_id))
 
     try:
-        _play_segments(segments, "play-entities")
+        _play_segments(segments, "play-entities", play=req.autoplay)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
-    return {"ok": True, "playing": owned + phantom, "queued": owned,
+    return {"ok": True, "playing": req.autoplay, "queued": owned,
             "streaming": phantom, "not_found": missing}
 
 

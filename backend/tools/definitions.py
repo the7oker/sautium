@@ -274,6 +274,18 @@ def _queue_outcome(r: dict, verb: str) -> str:
     return f"{verb}: " + (", ".join(parts) or "nothing") + tail
 
 
+def _h_build_playlist(ids: list) -> str:
+    from routers.player import QueueEntitiesRequest, play_entities
+    items = _entity_items(ids)
+    if isinstance(items, str):
+        return items
+    r, err = _player_call(play_entities,
+                          QueueEntitiesRequest(items=items, autoplay=False))
+    if err:
+        return f"Could not build the playlist: {err}"
+    return _queue_outcome(r, "New queue ready (not started)")
+
+
 def _h_play_all(ids: list) -> str:
     from routers.player import QueueEntitiesRequest, play_entities
     items = _entity_items(ids)
@@ -742,11 +754,23 @@ def register_all():
     ))
 
     REGISTRY.register(ToolDef(
+        name="build_playlist",
+        description="Assemble a NEW queue from these tracks and/or albums, in the given "
+                    "order, and leave it ready — nothing starts playing. This is "
+                    "'put her albums together into one playlist': curation, not a play "
+                    "command. The previous queue is archived to the listening history.",
+        parameters=[
+            ToolParam("ids", "array", "Track and/or album UUIDs, in play order", required=True, items_type="string"),
+        ],
+        handler=_h_build_playlist,
+    ))
+
+    REGISTRY.register(ToolDef(
         name="play_all",
         description="Start a NEW queue from these tracks and/or albums, in the given order, "
-                    "and play. This is 'make me a playlist of X' — the previous queue is "
-                    "archived to the listening history, not extended. Not-owned entities "
-                    "stream in behind their provider lookup.",
+                    "and PLAY it — for 'put these on'. If the user only asked to assemble "
+                    "or collect a playlist, use build_playlist instead. The previous queue "
+                    "is archived to the listening history, not extended.",
         parameters=[
             ToolParam("ids", "array", "Track and/or album UUIDs, in play order", required=True, items_type="string"),
         ],
@@ -756,8 +780,9 @@ def register_all():
     REGISTRY.register(ToolDef(
         name="add_to_queue",
         description="Append tracks AND/OR albums to the CURRENT queue, in the given order, "
-                    "without clearing it — for 'add these too'. For a playlist, or to play "
-                    "something now, use play_all: this leaves whatever is queued in front.",
+                    "without clearing it — for 'add these too'. For a playlist use "
+                    "build_playlist (or play_all to start it): this tool leaves whatever "
+                    "is already queued in front, burying a freshly assembled set.",
         parameters=[
             ToolParam("ids", "array", "Track and/or album UUIDs, in the order to append", required=True, items_type="string"),
         ],
