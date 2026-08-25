@@ -22,9 +22,14 @@ pass itself can make it.
 
 Incremental & idempotent: only records whose signature IS NULL are touched, so
 a re-run signs whatever became signable since. Run it on a daily cadence — one
-batch, one Worker timestamp per run (notary scaling).
+batch, one Worker timestamp per run (notary scaling). A batch is capped at
+MAX_RECORDS_PER_BATCH: every pending record, its Merkle proof and the JSON of
+that proof sit in memory until the batch commits, and a full re-seal after an
+identity migration (930k records on the master, 2026-08-25) took the whole
+VM down with them. A backlog beyond the cap simply takes several runs —
+`--until-done` loops them.
 
-    docker exec sautium-backend python /app/sign_audio.py [--limit N] [--dry-run]
+    docker exec sautium-backend python /app/sign_audio.py [--limit N] [--dry-run] [--until-done]
 """
 
 import argparse
@@ -49,6 +54,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("sign_audio")
 
 WORKER_URL = "https://sautium-verify.sautium.workers.dev"
+
+# Records per batch (audio + enrichment). ~1 GB peak at this size.
+MAX_RECORDS_PER_BATCH = 250_000
 
 # A record signs only when its linked source is signable-classed AND
 # first-hand (imported sources arrived over sync — signing analysis this node
@@ -123,12 +131,16 @@ _ENRICHMENT_SOURCES = {
                gd.summary, gd.content, gd.url
         FROM genre_descriptions gd
         WHERE gd.signature IS NULL AND NOT gd.imported""", "genre_descriptions"),
-    # Carry v3 — the album layer. Only what stands on OWNED analysis-source
-    # material signs: the ~3M MB-minted phantom tracklist rows are derived
-    # from the dump, not observed, and attesting them would sign a copy of
-    # MusicBrainz. RG-anchored albums only — an unanchored album is exactly
-    # the non-canon residue the snapshot must not carry.
-    "album": ("""
+    # Carry v3 — the album layer. Only what stands on this node's OWN
+    # signable analysis signs (_SIGNABLE_SRC: a local rip or a lossless
+    # stream): the ~3M MB-minted phantom tracklist rows nobody analyzed are
+    # derived from the dump, not observed, and attesting them would sign a
+    # copy of MusicBrainz. The gate used to be an owned FILE, which left every
+    # stream-analyzed phantom's tracklist row unsealed — and the carry offer
+    # reads exactly these seals, so first-hand analysis of 1659 phantoms never
+    # left the node (2026-08-25). RG-anchored albums only — an unanchored
+    # album is exactly the non-canon residue the snapshot must not carry.
+    "album": (f"""
         SELECT al.id, al.id::text AS entity, '' AS source,
                al.created_at AS fetched_at,
                al.musicbrainz_id::text AS rg_mbid, al.title,
@@ -137,20 +149,20 @@ _ENRICHMENT_SOURCES = {
         FROM albums al
         WHERE al.signature IS NULL AND NOT al.imported
           AND al.musicbrainz_id IS NOT NULL
-          AND EXISTS (SELECT 1 FROM album_variants av
-                        JOIN media_files mf ON mf.album_variant_id = av.id
-                       WHERE av.album_id = al.id AND mf.is_analysis_source)""",
+          AND EXISTS (SELECT 1 FROM album_tracks at2
+                        JOIN analysis_sources src ON src.track_id = at2.track_id
+                       WHERE at2.album_id = al.id AND {_SIGNABLE_SRC})""",
         "albums"),
-    "album_track": ("""
+    "album_track": (f"""
         SELECT at2.id, at2.track_id::text AS entity, '' AS source,
                at2.created_at AS fetched_at,
                at2.album_id::text AS album_uuid, at2.disc, at2.position,
                at2.length_ms, at2.recording_mbid::text AS recording_mbid
         FROM album_tracks at2
         WHERE at2.signature IS NULL AND NOT at2.imported
-          AND EXISTS (SELECT 1 FROM media_files mf
-                       WHERE mf.track_id = at2.track_id
-                         AND mf.is_analysis_source)""", "album_tracks"),
+          AND EXISTS (SELECT 1 FROM analysis_sources src
+                       WHERE src.track_id = at2.track_id
+                         AND {_SIGNABLE_SRC})""", "album_tracks"),
     "track_mbid": ("""
         SELECT tm.recording_mbid AS id, tm.track_id::text AS entity,
                '' AS source, tm.created_at AS fetched_at,
@@ -166,6 +178,20 @@ _TABLE_PK = {"track_mbids": ("recording_mbid", "uuid"),
              "albums": ("id", "uuid"),
              "album_tracks": ("id", "bigint")}
 
+# The entity uuid each seal's payload binds, as a predicate on the row being
+# sealed. The batch is collected minutes before it commits, and a canon pass
+# (artist split, merge, re-key) running meanwhile moves rows to another uuid;
+# the guard triggers cannot catch a signature that arrives AFTER the change,
+# so the UPDATE asserts what was signed and skips rows that moved — they stay
+# unsigned and the next run signs them under their new uuid. Measured
+# 2026-08-25: 52 segments of tracks split mid-batch verified invalid.
+_TABLE_ENTITY = {"embedding_segments": None,       # via embeddings.track_id, see below
+                 "audio_features": "track_id", "track_stats": "track_id",
+                 "album_tracks": "track_id", "track_mbids": "track_id",
+                 "artist_bios": "artist_id", "artist_tags": "artist_id",
+                 "similar_artists": "artist_id", "genre_descriptions": "genre_id",
+                 "albums": "id"}
+
 
 def _materialize_owned_tracklists(cur) -> int:
     """album_tracks rows for owned analysis-source tracks.
@@ -179,7 +205,8 @@ def _materialize_owned_tracklists(cur) -> int:
     (an MB-minted one outranks a re-derivation). Tracks with no tag number
     are skipped, not invented — a made-up position is not an observation.
     Runs before every signing pass, so a fresh scan's rows are sealed by the
-    same run that notices them."""
+    same run that notices them. Phantom rows need no materializing — the MB
+    mint wrote them — they seal once the track carries signable analysis."""
     cur.execute("""
         INSERT INTO album_tracks
             (album_id, track_id, disc, position, recording_mbid, length_ms)
@@ -196,33 +223,43 @@ def _materialize_owned_tracklists(cur) -> int:
     return cur.rowcount
 
 
-def _collect_enrichment(cur, author, key, pending, chunk=20000) -> int:
-    """Append signed enrichment records to `pending`. Returns how many."""
+def _collect_enrichment(cur, author, key, pending, chunk=20000,
+                        budget=None) -> int:
+    """Append signed enrichment records to `pending`, at most `budget` of
+    them (None = all). Returns how many."""
     added = 0
     for kind, (sql, table) in _ENRICHMENT_SOURCES.items():
+        if budget is not None and added >= budget:
+            break
         cur.execute(sql)
         while True:
             rows = cur.fetchmany(chunk)
             if not rows:
                 break
             for r in rows:
+                if budget is not None and added >= budget:
+                    break
                 content = rs.blake2b_hex(rs.canonical_enrichment_blob(kind, r))
                 payload = rs.enrichment_payload(author, kind, r["entity"],
                                                 r["source"], content,
                                                 r["fetched_at"])
-                pending.append((table, r["id"], rs.sign(payload, key)))
+                pending.append((table, r["id"], rs.sign(payload, key), r["entity"]))
                 added += 1
+            if budget is not None and added >= budget:
+                break
     return added
 
 
-def run(limit=None, dry_run=False):
+def run(limit=None, dry_run=False, max_records=MAX_RECORDS_PER_BATCH) -> int:
+    """One batch. Returns the number of records sealed (0 = nothing left),
+    so a caller can loop until the backlog is gone."""
     key = load_signing_key(settings)
     if key is None:
         # Callable from post-enrichment hooks — a node without an identity
         # just skips signing, it must not kill the worker thread.
         logger.info("no signing identity (P2P_USERNAME/P2P_PASSWORD) — "
                     "signing skipped")
-        return
+        return 0
     author = _pubkey_hex(key)
 
     conn = psycopg2.connect(settings.database_url)
@@ -239,8 +276,11 @@ def run(limit=None, dry_run=False):
     logger.info("signable tracks: %d", len(track_ids))
 
     # pending: (table, pk, signature) collected across all tracks -> one batch
-    pending, tracks_touched = [], 0
+    pending, tracks_touched, capped = [], 0, False
     for tid in track_ids:
+        if max_records and len(pending) >= max_records:
+            capped = True
+            break
         params = {"tid": tid}
         touched = False
 
@@ -262,7 +302,7 @@ def run(limit=None, dry_run=False):
                 seg["duration_seconds"],
                 seg["model"], seg["segment_index"], vh,
                 grid_version=seg["grid_version"])
-            pending.append(("embedding_segments", seg["id"], rs.sign(payload, key)))
+            pending.append(("embedding_segments", seg["id"], rs.sign(payload, key), tid))
             touched = True
 
         cur.execute(f"""
@@ -279,20 +319,23 @@ def run(limit=None, dry_run=False):
                                           feat["chromaprint"],
                                           feat["duration_seconds"],
                                           feat["analysis_version"], fh)
-            pending.append(("audio_features", feat["id"], rs.sign(payload, key)))
+            pending.append(("audio_features", feat["id"], rs.sign(payload, key), tid))
             touched = True
 
         tracks_touched += touched
 
-    enriched = _collect_enrichment(cur, author, key, pending)
+    budget = max(0, max_records - len(pending)) if max_records else None
+    enriched = _collect_enrichment(cur, author, key, pending, budget=budget)
     if enriched:
         logger.info("enrichment records to sign: %d", enriched)
+    if max_records and len(pending) >= max_records:
+        capped = True
 
     if not pending:
         logger.info("nothing to sign")
-        return
+        return 0
 
-    leaves = [rs.record_leaf(sig) for _, _, sig in pending]
+    leaves = [rs.record_leaf(sig) for _, _, sig, _ in pending]
     root, proofs = rs.merkle_tree(leaves)
     logger.info("batch: %d records over %d tracks, root %s",
                 len(pending), tracks_touched, root[:16])
@@ -300,7 +343,7 @@ def run(limit=None, dry_run=False):
     if dry_run:
         conn.rollback()
         logger.info("dry-run — not timestamped or stored")
-        return
+        return len(pending)
 
     ts = _timestamp_root(root)
     if not rs.verify_timestamp(root, ts["date"], ts["ip_hash"], ts["sig"],
@@ -317,26 +360,46 @@ def run(limit=None, dry_run=False):
     # Grouped and batched: a statement per record was fine at audio scale and
     # is not at enrichment scale — the first unified pass seals 300k+ rows.
     by_table: dict = {}
-    for (table, pk, sig), proof in zip(pending, proofs):
+    for (table, pk, sig, entity), proof in zip(pending, proofs):
         by_table.setdefault(table, []).append(
-            (pk, author, sig, root, json.dumps(proof)))
+            (pk, author, sig, root, json.dumps(proof), entity))
     for table, rows in by_table.items():
         pk_col, pk_cast = _TABLE_PK.get(table, ("id", "int"))
-        psycopg2.extras.execute_values(
-            cur,
-            f"""UPDATE {table} AS t
-                SET author_pubkey = v.author, signature = v.sig,
-                    batch_root = v.root, merkle_proof = v.proof::jsonb
-                FROM (VALUES %s) AS v(pk, author, sig, root, proof)
-                WHERE t.{pk_col} = v.pk""",
-            rows,
-            template=f"(%s::{pk_cast}, %s, %s, %s, %s)",
-            page_size=500,
-        )
-        logger.info("sealed %d rows in %s", len(rows), table)
+        entity_col = _TABLE_ENTITY[table]
+        if entity_col is None:
+            entity_sql = ("FROM (VALUES %s) AS v(pk, author, sig, root, proof, entity), "
+                          "embeddings e "
+                          "WHERE t.id = v.pk AND e.id = t.embedding_id "
+                          "AND e.track_id = v.entity")
+        else:
+            entity_sql = (f"FROM (VALUES %s) AS v(pk, author, sig, root, proof, entity) "
+                          f"WHERE t.{pk_col} = v.pk AND t.{entity_col} = v.entity")
+        sealed = 0
+        for i in range(0, len(rows), 500):
+            page = rows[i:i + 500]
+            psycopg2.extras.execute_values(
+                cur,
+                f"""UPDATE {table} AS t
+                    SET author_pubkey = v.author, signature = v.sig,
+                        batch_root = v.root, merkle_proof = v.proof::jsonb
+                    {entity_sql}""",
+                page,
+                template=f"(%s::{pk_cast}, %s, %s, %s, %s, %s::uuid)",
+                page_size=500,
+            )
+            sealed += cur.rowcount
+        if sealed < len(rows):
+            logger.warning("%d of %d %s rows moved to another uuid while the batch "
+                           "was open — left unsigned for the next run",
+                           len(rows) - sealed, len(rows), table)
+        logger.info("sealed %d rows in %s", sealed, table)
     conn.commit()
     logger.info("signed %d records in batch %s @ %s",
                 len(pending), root[:16], ts["date"])
+    if capped:
+        logger.info("batch capped at %d records — run again to continue",
+                    max_records)
+    return len(pending)
 
 
 def verify_all() -> bool:
@@ -490,10 +553,17 @@ if __name__ == "__main__":
     ap.add_argument("--resign", action="store_true",
                     help="re-timestamp existing batches under the current format "
                          "(adds ip_hash); signs no new records")
+    ap.add_argument("--until-done", action="store_true",
+                    help="keep running capped batches until nothing is left to sign")
+    ap.add_argument("--max-records", type=int, default=MAX_RECORDS_PER_BATCH,
+                    help="records per batch (0 = uncapped)")
     a = ap.parse_args()
     if a.verify:
         sys.exit(0 if verify_all() else 1)
     if a.resign:
         resign_timestamps()
         sys.exit(0)
-    run(limit=a.limit, dry_run=a.dry_run)
+    while True:
+        sealed = run(limit=a.limit, dry_run=a.dry_run, max_records=a.max_records)
+        if not a.until_done or a.dry_run or not sealed:
+            break

@@ -461,11 +461,20 @@ fetches). Audio analysis is the opposite: GPU work with no external source.
 
 **What is offered — the full canonized snapshot.** `get_pushable_tracks`:
 sealed segments **AND** a first-hand source (`analysis_sources NOT imported`)
-**AND** a canon primary artist (non-`phantom` MB anchor) **AND** a sealed
-recording binding (`track_mbids`) **AND** a sealed tracklist row under an
-RG-anchored album. Measured: 28023 of 38202 first-hand sealed tracks (73%) —
-the rest are compilations and residue whose canon has not matured; they ride a
-later push. v2 carried only track + analysis and the carried rows were
+**AND** a sealed tracklist row under a sealed RG-anchored album **AND** a
+recording to name the track by — the canon matcher's sealed `track_mbids`
+binding (owned files) OR the sealed tracklist row's own `recording_mbid` (a
+phantom minted from the MB tracklist: its slot IS the binding, the matcher
+never saw it) **AND** a trustworthy identity — a canon primary artist
+(non-`phantom` MB anchor) OR an MB-native recording (the slot's recording under
+an RG-anchored album: MB's own recording needs no artist guess to vouch for it,
+and the stream enricher already refused audio whose length disagreed with
+MB's). Until 2026-08-25 the gate read `track_mbids` and the owned-file seal
+only, so first-hand lossless-stream analysis of 1659 phantoms — the discovery
+tail carry exists for — never entered an offer; 977 of them sat under
+`phantom` anchors. Measured before: 28023 of 38202 first-hand sealed tracks
+(73%) — the rest are compilations and residue whose canon has not matured;
+they ride a later push. v2 carried only track + analysis and the carried rows were
 orphans: without an album the radio pool rejected them on its
 `(media_files OR album_tracks)` condition, Now Playing had no album, no cover
 and no `length_ms` for stream matching, and a future owner's canonization got
@@ -482,9 +491,10 @@ The owned layer lives in `album_variants`, so tracklist rows for owned tracks
 did not exist — `sign_audio` **materializes** them from file tags before every
 signing pass (`_materialize_owned_tracklists`: disc, position, duration,
 recording — this node's first-hand observation, incremental, an MB-minted row
-keeps its slot). Only rows of owned analysis-source tracks are signed; the ~3M
-MB-minted phantom tracklist rows stay unsigned (attesting them would mean
-signing a copy of MusicBrainz).
+keeps its slot). Only rows of tracks with SIGNABLE FIRST-HAND ANALYSIS are
+signed — an owned rip or a lossless stream (`_SIGNABLE_SRC`); the ~3M
+MB-minted phantom tracklist rows nobody analyzed stay unsigned (attesting them
+would mean signing a copy of MusicBrainz).
 
 A trap caught by the re-serve check: `created_at` IS the seal's fetched_at
 slot, so importers PRESERVE the author's `created_at`; a local `DEFAULT now()`

@@ -629,16 +629,30 @@ def get_pushable_tracks(conn, limit: int) -> list[dict]:
       * first-hand source (analysis_sources NOT imported) — re-pushing what
         we pulled from someone else spreads nothing new and burns a
         carrier's budget;
-      * canon primary — the track's primary artist has a non-phantom MB
-        anchor: a phantom anchor is a name guess, and an unsplit
-        "A feat. B" mess has no anchor at all;
-      * canonized track — a sealed track_mbids binding exists: without a
-        recording MBID the offer round cannot even name the track;
       * canonized album — a sealed tracklist row under a sealed RG-anchored
         album: the full-snapshot proof that this node's canon matured
-        around the track, not just its analysis (measured: ~73% of sealed
-        first-hand tracks pass; the rest are compilations and residue whose
-        canon has not matured — they ride a later push).
+        around the track, not just its analysis. sign_audio seals those rows
+        for every track with signable first-hand analysis — an owned rip OR
+        a lossless stream of a phantom;
+      * a recording to name the track by — the offer round speaks MBIDs.
+        Two sources, one per identity path: the canon matcher's sealed
+        track_mbids binding (owned files), or the sealed tracklist row's own
+        recording_mbid (a phantom minted from the MB tracklist — its slot IS
+        the binding; track_mbids is the matcher's output and a phantom never
+        went through the matcher). Before 2026-08-25 only the first counted,
+        and 1659 stream-analyzed phantoms with a recording in album_tracks
+        were invisible to the offer;
+      * a trustworthy identity: either the primary artist has a non-phantom
+        MB anchor (a phantom anchor is a Last.fm-name guess, an unsplit
+        "A feat. B" mess has none), or the recording came off the MB-minted
+        tracklist of an RG-anchored album — MB's own recording under MB's
+        own release-group needs no artist guess to vouch for it, and the
+        stream enricher already refused audio whose length disagreed with
+        MB's.
+
+    Measured 2026-08-25: 28037 of 38719 sealed first-hand tracks passed the
+    old gate (0 of 1659 phantoms); the rest are compilations and residue
+    whose canon has not matured — they ride a later push.
 
     Rarest first (Last.fm listeners of the primary artist, unknown counts
     rarest) for the same reason the DHT tail is: anything popular reaches
@@ -656,28 +670,41 @@ def get_pushable_tracks(conn, limit: int) -> list[dict]:
                                WHERE es.embedding_id = e.id
                                  AND es.signature IS NOT NULL
                                  AND es.batch_root IS NOT NULL)
+           ),
+           snapshot AS (
+               SELECT m.track_id,
+                      bool_or(at2.recording_mbid IS NOT NULL
+                              AND al.musicbrainz_id IS NOT NULL) AS mb_native,
+                      array_remove(array_agg(DISTINCT at2.recording_mbid::text),
+                                   NULL) AS slot_recordings
+                 FROM mine m
+                 JOIN album_tracks at2 ON at2.track_id = m.track_id
+                 JOIN albums al        ON al.id = at2.album_id
+                WHERE at2.signature IS NOT NULL
+                  AND al.signature IS NOT NULL
+                GROUP BY m.track_id
            )
            SELECT t.id::text AS track_uuid,
-                  (SELECT array_agg(tm.recording_mbid::text)
-                     FROM track_mbids tm
-                    WHERE tm.track_id = t.id
-                      AND tm.signature IS NOT NULL) AS recordings
-             FROM mine m
-             JOIN tracks t        ON t.id = m.track_id
+                  (SELECT array_agg(DISTINCT r)
+                     FROM (SELECT tm.recording_mbid::text AS r
+                             FROM track_mbids tm
+                            WHERE tm.track_id = t.id
+                              AND tm.signature IS NOT NULL
+                            UNION ALL
+                           SELECT unnest(sn.slot_recordings)) u) AS recordings
+             FROM snapshot sn
+             JOIN tracks t         ON t.id = sn.track_id
              JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
              LEFT JOIN artist_bios ab ON ab.artist_id = ta.artist_id
-            WHERE EXISTS (SELECT 1 FROM artist_mbids am
-                           WHERE am.artist_id = ta.artist_id
-                             AND am.confidence <> 'phantom')
-              AND EXISTS (SELECT 1 FROM track_mbids tm
-                           WHERE tm.track_id = t.id
-                             AND tm.signature IS NOT NULL)
-              AND EXISTS (SELECT 1 FROM album_tracks at2
-                            JOIN albums al ON al.id = at2.album_id
-                           WHERE at2.track_id = t.id
-                             AND at2.signature IS NOT NULL
-                             AND al.signature IS NOT NULL)
-            GROUP BY t.id
+            WHERE (sn.mb_native
+                   OR EXISTS (SELECT 1 FROM artist_mbids am
+                               WHERE am.artist_id = ta.artist_id
+                                 AND am.confidence <> 'phantom'))
+              AND (cardinality(sn.slot_recordings) > 0
+                   OR EXISTS (SELECT 1 FROM track_mbids tm
+                               WHERE tm.track_id = t.id
+                                 AND tm.signature IS NOT NULL))
+            GROUP BY t.id, sn.slot_recordings
             ORDER BY MAX(ab.listeners) ASC NULLS FIRST
             LIMIT %s""",
         [limit],
