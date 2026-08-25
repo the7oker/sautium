@@ -2255,6 +2255,46 @@ def _queue_segments_worker(segments: list, gen: int) -> None:
         _phantom_filler(proxy, tokens, 0, gen)
 
 
+def _play_segments(segments: list, worker_name: str) -> None:
+    """Replace the queue with these segments and start playing. The FIRST item
+    goes in alone — a transcode or a provider fetch must never hold up the first
+    sound — and everything behind it rolls in through the ordered worker. The
+    caller rotates the session BEFORE this (the old queue is archived intact)."""
+    head_kind, head_items = segments[0]
+    if head_kind == "owned":
+        added = _add_owned([head_items[0]], clear_first=True)
+        gen = manager.queue.generation
+        head_rest = head_items[1:]
+    else:
+        from streaming import service as streaming_service
+        _ensure_output_ready()      # a dead renderer costs 2s here, not a whole buffer
+        chains = _resolve_waterfall(head_items)
+        pairs = [(q, ch) for q, ch in zip(head_items, chains) if ch]
+        if not pairs:
+            raise HTTPException(status_code=503,
+                                detail="None of the opening tracks could be streamed.")
+        proxy = streaming_service.get_proxy()
+        tokens = proxy.start_session(pairs[:1])
+        try:
+            e = proxy.wait_ready(tokens[0])
+        except (TimeoutError, KeyError):
+            e = None
+        if e is None or e.audio is None:
+            raise HTTPException(status_code=502,
+                                detail="The opening track isn\u2019t available to stream right now.")
+        item = queue_mod.item_for_proxy_token(tokens[0])
+        added, gen = manager.replace_queue([item] if item else [], play=True)
+        proxy.bind(tokens, gen)
+        head_rest = [q for q, _ch in pairs[1:]]
+    if not added:
+        raise HTTPException(
+            status_code=503,
+            detail="The playback output did not accept the track — try again.")
+    _exit_radio_mode()
+    _queue_segments_async([s for s in ([(head_kind, head_rest)] + segments[1:]) if s[1]],
+                          gen, worker_name)
+
+
 def _queue_segments_async(segments: list, gen: int, name: str) -> None:
     if segments:
         threading.Thread(target=_queue_segments_worker, args=(segments, gen),
@@ -2297,6 +2337,49 @@ def queue_entities(req: QueueEntitiesRequest):
     return {"ok": True, "queued": owned, "streaming": phantom, "not_found": missing}
 
 
+@router.post("/play-entities")
+def play_entities(req: QueueEntitiesRequest):
+    """Replace the queue with these entities, in order, and play — the
+    assistant's "Play all" against a list of tracks and/or albums.
+
+    The old queue is archived to the session history first, exactly as the
+    album screen's Play all does, so "make me a playlist of her albums" is a
+    NEW queue rather than a tail on whatever was already there."""
+    if not req.items:
+        raise HTTPException(status_code=400, detail="No entities provided")
+    bad = {i.kind for i in req.items} - {"track", "album"}
+    if bad:
+        raise HTTPException(status_code=400, detail=f"invalid kind: {sorted(bad)[0]}")
+
+    segments, missing = _entity_segments(req.items)
+    if not segments:
+        raise HTTPException(status_code=404, detail="Nothing playable in that list")
+    owned = sum(len(p) for k, p in segments if k == "owned")
+    phantom = sum(len(p) for k, p in segments if k == "phantom")
+    if phantom:
+        _ensure_streaming_ready()
+
+    # One album is an album session (it gets the album's title in history);
+    # anything else is a mix.
+    album_ids = [i.id for i in req.items if i.kind == "album"]
+    single_album = album_ids[0] if len(req.items) == 1 and album_ids else None
+    head_kind, head_items = segments[0]
+    sessions.rotate_session(
+        manager.queue, "album" if single_album else "mix",
+        origin_album_id=single_album,
+        seed_media_file_id=(head_items[0]["id"] if head_kind == "owned" else None),
+        seed_track_id=(None if head_kind == "owned" else head_items[0].track_id))
+
+    try:
+        _play_segments(segments, "play-entities")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"ok": True, "playing": owned + phantom, "queued": owned,
+            "streaming": phantom, "not_found": missing}
+
+
 @router.post("/play-similar")
 def play_similar(req: PlaySimilarRequest):
     """Replace the queue with tracks similar to the seed and play.
@@ -2329,47 +2412,13 @@ def play_similar(req: PlaySimilarRequest):
     sessions.rotate_session(manager.queue, 'radio', seed_track_id=req.track_id,
                             seed_media_file_id=(seed_mf or {}).get("id"))
 
-    # The opener plays now, the rest rolls in behind it — one item, so a slow
-    # transcode or a provider fetch never holds up the first sound.
-    head_kind, head_items = segments[0]
     try:
-        if head_kind == "owned":
-            added = _add_owned([head_items[0]], clear_first=True)
-            gen = manager.queue.generation
-        else:
-            from streaming import service as streaming_service
-            _ensure_output_ready()      # a dead renderer costs 2s here, not a whole buffer
-            chains = _resolve_waterfall(head_items)
-            pairs = [(q, ch) for q, ch in zip(head_items, chains) if ch]
-            if not pairs:
-                raise HTTPException(status_code=503,
-                                    detail="None of the similar tracks could be streamed.")
-            proxy = streaming_service.get_proxy()
-            tokens = proxy.start_session(pairs[:1])
-            try:
-                e = proxy.wait_ready(tokens[0])
-            except (TimeoutError, KeyError):
-                e = None
-            if e is None or e.audio is None:
-                raise HTTPException(status_code=502,
-                                    detail="This station\u2019s opening track isn\u2019t available to stream.")
-            item = queue_mod.item_for_proxy_token(tokens[0])
-            added, gen = manager.replace_queue([item] if item else [], play=True)
-            proxy.bind(tokens, gen)
-            head_items = [q for q, _ch in pairs[1:]]
-        if not added:
-            raise HTTPException(
-                status_code=503,
-                detail="The playback output did not accept the track — try again.")
-        _exit_radio_mode()
+        _play_segments(segments, "play-similar")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    rest = ([(head_kind, head_items[1:] if head_kind == "owned" else head_items)]
-            + segments[1:])
-    _queue_segments_async([s for s in rest if s[1]], gen, "play-similar")
     return {
         "ok": True,
         "count": len(rows),

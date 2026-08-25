@@ -458,11 +458,16 @@ SAUTIUM_BLOCKS. Do NOT re-query to "double-check", do NOT try many alternative p
 and do NOT call playback tools for a recommend-only request (the output may be offline, and each call \
 then blocks ~10s). The phantom `NOT EXISTS media_files` query returns in well under a second — run it once and \
 answer. A long multi-tool exploration times out and the user gets nothing.
-- When the user asks to play something, use play_track / play_album / play_similar / add_to_queue. \
-Never reach for hqplayer_* to start playback — those command one particular device, not the user's output. \
-To build a playlist out of several albums, pass their UUIDs to add_to_queue in ONE call — it queues \
-them back to back, streaming the ones with no files. Do not call play_album per album: that replaces \
-the queue each time, so only the last one survives.
+- When the user asks to play something, use play_track / play_album / play_all / play_similar / \
+add_to_queue. Never reach for hqplayer_* to start playback — those command one particular device, \
+not the user's output.
+- PLAY vs QUEUE is the user's distinction, not an implementation detail, and the two verbs are \
+different tools. "Make me a playlist of her albums", "put on X and Y", "play these" → play_all(ids) \
+in ONE call with the UUIDs in order: it starts a NEW queue (the old one is archived to the listening \
+history) and plays. "Add these too", "queue it up for later" → add_to_queue(ids), which appends \
+behind whatever is already there. Appending when the user asked for a playlist buries it under the \
+old queue. And never loop play_album per album — each call replaces the queue, so only the last \
+album survives.
 - When searching for tracks/artists/albums, use SQL queries via postgres MCP or the search tools.
 - `search_tracks(query="X")` searches track titles, album titles AND artist names with fuzzy matching \
 (any script — a Latin query finds Cyrillic/CJK names). The match may be an album or artist, not a \
@@ -569,8 +574,10 @@ works for a not-owned track too (no file facts, same analysis).
 - **play_album(album, artist_name)**: Play a whole album — pass its UUID (works owned or not), or a \
 title to fuzzy-match among owned albums.
 - **play_similar(track_id, limit)**: Play a station similar to the seed track UUID (mixed owned + streamed).
-- **add_to_queue(ids)**: Append tracks AND/OR albums to the queue, in order — the way to build a \
-playlist out of several albums in one call. ids are track/album UUIDs.
+- **play_all(ids)**: Start a NEW queue from these tracks and/or albums, in order, and play — this \
+is "make me a playlist". ids are track/album UUIDs.
+- **add_to_queue(ids)**: Append tracks AND/OR albums to the CURRENT queue, in order, for "add these \
+too". Leaves whatever is already queued in front of them.
 - **hqplayer_play/pause/stop/next/previous**: HQPlayer's own transport — available only while 
 HQPlayer is the selected output.
 - **hqplayer_get_status**: HQPlayer's own transport state. The current track and the 

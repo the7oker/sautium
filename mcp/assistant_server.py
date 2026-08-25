@@ -863,7 +863,7 @@ def get_track_info(track_id: str) -> str:
 
 
 # =============================================================================
-# SMART PLAY (5 tools)
+# SMART PLAY (6 tools)
 # =============================================================================
 #
 # Everything here takes canonical UUIDs and routes on what the catalog holds:
@@ -957,35 +957,64 @@ def play_similar(track_id: str, limit: int = 10) -> str:
         return f"Error playing similar tracks: {e}"
 
 
+def _entity_items(ids: list[str]) -> list[dict] | str:
+    """Canonical UUIDs → the {kind, id} list the player endpoints take, or an
+    explanatory string when nothing usable is left."""
+    valid = _valid_uuids(ids)
+    if not valid:
+        return "No valid UUIDs given. Pass the IDs the search tools returned."
+    kinds = aq.entity_kinds(_db_query, valid)
+    items = [{"kind": kinds[i], "id": i} for i in valid if i in kinds]
+    return items or "None of those IDs exist in the catalog."
+
+
+def _queue_outcome(r: dict, verb: str) -> str:
+    parts = []
+    if r.get("queued"):
+        parts.append(f"{r['queued']} track(s) from the library")
+    if r.get("streaming"):
+        parts.append(f"{r['streaming']} streaming in behind them")
+    missing = len(r.get("not_found") or [])
+    tail = f" ({missing} had nothing playable)" if missing else ""
+    return f"{verb}: " + (", ".join(parts) or "nothing") + tail
+
+
+@mcp.tool()
+def play_all(ids: list[str]) -> str:
+    """Start a NEW queue from these tracks and/or albums, in the given order,
+    and play. THIS is "make me a playlist of X" — the queue that was there is
+    archived to the listening history, not extended. Mixed lists are fine:
+    entities with no file stream, and they arrive behind their provider lookup.
+
+    Args:
+        ids: Track and/or album UUIDs, in play order (max 50)
+    """
+    try:
+        items = _entity_items(ids)
+        if isinstance(items, str):
+            return items
+        r = _backend_post("/api/player/play-entities", {"items": items}, timeout=120.0)
+        return _queue_outcome(r, "Playing a new queue")
+    except Exception as e:
+        return f"Error starting playback: {e}"
+
+
 @mcp.tool()
 def add_to_queue(ids: list[str]) -> str:
-    """Append tracks and/or albums to the current queue, in the given order,
-    without clearing what is already there. This is how a playlist is built:
-    pass ten album UUIDs and they queue back to back.
-
-    Owned entities are queued immediately; not-owned ones stream in behind
-    their provider lookup, so the queue keeps growing after this returns.
+    """Append tracks and/or albums to the CURRENT queue, in the given order,
+    without clearing what is already there — for "add these too". When the user
+    asked for a playlist, or to play something, use play_all instead: this tool
+    leaves whatever is already queued in front of them.
 
     Args:
         ids: Track and/or album UUIDs, in the order to append (max 50)
     """
     try:
-        valid = _valid_uuids(ids)
-        if not valid:
-            return "No valid UUIDs given. Pass the IDs the search tools returned."
-        kinds = aq.entity_kinds(_db_query, valid)
-        items = [{"kind": kinds[i], "id": i} for i in valid if i in kinds]
-        if not items:
-            return "None of those IDs exist in the catalog."
+        items = _entity_items(ids)
+        if isinstance(items, str):
+            return items
         r = _backend_post("/api/player/queue-entities", {"items": items}, timeout=60.0)
-        parts = []
-        if r.get("queued"):
-            parts.append(f"{r['queued']} track(s) from the library")
-        if r.get("streaming"):
-            parts.append(f"{r['streaming']} streaming in behind them")
-        missing = len(r.get("not_found") or [])
-        tail = f" ({missing} had nothing playable)" if missing else ""
-        return "Queued: " + (", ".join(parts) or "nothing") + tail
+        return _queue_outcome(r, "Queued")
     except Exception as e:
         return f"Error adding to queue: {e}"
 

@@ -251,18 +251,19 @@ def _h_play_similar(track_id: str, limit: int = 10) -> str:
             f"Queued {r.get('count', '?')} tracks by acoustic similarity{tail}.")
 
 
-def _h_add_to_queue(ids: list) -> str:
-    from routers.player import EntityRef, QueueEntitiesRequest, queue_entities
+def _entity_items(ids: list):
+    """Canonical UUIDs → EntityRefs, or an explanatory string when nothing
+    usable is left."""
+    from routers.player import EntityRef
     valid = aq.valid_uuids(ids or [])
     if not valid:
         return "No valid UUIDs given. Pass the IDs the search tools returned."
     kinds = aq.entity_kinds(_db_query, valid)
     items = [EntityRef(kind=kinds[i], id=i) for i in valid if i in kinds]
-    if not items:
-        return "None of those IDs exist in the catalog."
-    r, err = _player_call(queue_entities, QueueEntitiesRequest(items=items))
-    if err:
-        return f"Could not queue: {err}"
+    return items or "None of those IDs exist in the catalog."
+
+
+def _queue_outcome(r: dict, verb: str) -> str:
     parts = []
     if r.get("queued"):
         parts.append(f"{r['queued']} track(s) from the library")
@@ -270,7 +271,29 @@ def _h_add_to_queue(ids: list) -> str:
         parts.append(f"{r['streaming']} streaming in behind them")
     missing = len(r.get("not_found") or [])
     tail = f" ({missing} had nothing playable)" if missing else ""
-    return "Queued: " + (", ".join(parts) or "nothing") + tail
+    return f"{verb}: " + (", ".join(parts) or "nothing") + tail
+
+
+def _h_play_all(ids: list) -> str:
+    from routers.player import QueueEntitiesRequest, play_entities
+    items = _entity_items(ids)
+    if isinstance(items, str):
+        return items
+    r, err = _player_call(play_entities, QueueEntitiesRequest(items=items))
+    if err:
+        return f"Could not start playback: {err}"
+    return _queue_outcome(r, "Playing a new queue")
+
+
+def _h_add_to_queue(ids: list) -> str:
+    from routers.player import QueueEntitiesRequest, queue_entities
+    items = _entity_items(ids)
+    if isinstance(items, str):
+        return items
+    r, err = _player_call(queue_entities, QueueEntitiesRequest(items=items))
+    if err:
+        return f"Could not queue: {err}"
+    return _queue_outcome(r, "Queued")
 
 
 # -- HQPlayer control handlers -----------------------------------------------
@@ -719,10 +742,22 @@ def register_all():
     ))
 
     REGISTRY.register(ToolDef(
+        name="play_all",
+        description="Start a NEW queue from these tracks and/or albums, in the given order, "
+                    "and play. This is 'make me a playlist of X' — the previous queue is "
+                    "archived to the listening history, not extended. Not-owned entities "
+                    "stream in behind their provider lookup.",
+        parameters=[
+            ToolParam("ids", "array", "Track and/or album UUIDs, in play order", required=True, items_type="string"),
+        ],
+        handler=_h_play_all,
+    ))
+
+    REGISTRY.register(ToolDef(
         name="add_to_queue",
-        description="Append tracks AND/OR albums to the current queue, in the given order — "
-                    "the way to build a playlist out of several albums in one call. "
-                    "Not-owned entities stream in behind their provider lookup.",
+        description="Append tracks AND/OR albums to the CURRENT queue, in the given order, "
+                    "without clearing it — for 'add these too'. For a playlist, or to play "
+                    "something now, use play_all: this leaves whatever is queued in front.",
         parameters=[
             ToolParam("ids", "array", "Track and/or album UUIDs, in the order to append", required=True, items_type="string"),
         ],
