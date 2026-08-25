@@ -305,6 +305,11 @@ def generate_mcp_config(config: dict, output_path: Path) -> None:
                     "DB_PASSWORD": config.get("postgres_password", "changeme"),
                     "DB_NAME": "sautium",
                     "DB_SSL": "false",
+                    # Per-statement cap (ms): a runaway agent query must fail
+                    # inside the turn so the model can retry lighter, not eat
+                    # the 150s chat wallclock. Explicit, not the package
+                    # default — npx pulls whatever version is current.
+                    "DB_QUERY_TIMEOUT": "30000",
                 },
             },
             "assistant": {

@@ -44,7 +44,7 @@ See:
   monetization and its Cyrillic-only trigger silently skipped
   French/German/CJK queries; torch bf16 GPU serving (5.5 GB VRAM) replaced
   by ct2 int8 2026-07-21
-- **anthropic SDK** for Claude API; Claude Code + MCP tools for the AI assistant (chat); **OpenAI Codex CLI** as the second selectable chat agent (`backend/codex_runner.py` — same MCP servers, `codex exec --json`, assistant prompt via AGENTS.md, auth via `codex login` / minted from `OPENAI_API_KEY`)
+- **anthropic SDK** for Claude API; Claude Code + MCP tools for the AI assistant (chat); **OpenAI Codex CLI** as the second selectable chat agent (`backend/codex_runner.py` — same MCP servers, `codex exec --json`, assistant prompt as `model_instructions_file` replacing codex's built-in prompt and re-read on every spawn, MCP tools forced DIRECT via `features.code_mode.direct_only_tool_namespaces` (never the code-mode `exec` deferral), auth via `codex login` / minted from `OPENAI_API_KEY`)
 - **libtorrent** for DHT (NOT pure-python `kademlia` — incompatible with BT DHT)
 - **CustomTkinter + PyInstaller** for the Windows desktop launcher
 - **aiohttp + PyNaCl + miniupnpc** for the P2P layer

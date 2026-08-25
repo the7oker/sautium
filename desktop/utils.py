@@ -376,7 +376,7 @@ def _codex_native_binary(node_modules: Path) -> Optional[Path]:
 def get_codex_executable() -> Optional[Path]:
     """Prefer the native binary (skips the node shim hop); a shim is an
     acceptable fallback — codex argv stays tiny (the assistant prompt travels
-    as AGENTS.md on disk, not the command line, so cmd.exe's 8191-char
+    as an instructions file on disk, not the command line, so cmd.exe's 8191-char
     cap never bites the way it did for claude). Shim priority: the
     prefix's own node_modules/.bin (survives any future vendor-layout
     change) before whatever is on PATH."""

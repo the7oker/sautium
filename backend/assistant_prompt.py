@@ -10,8 +10,8 @@ prompt line quietly learned it back.
 Three variants:
   - CLAUDE_SYSTEM_PROMPT: for Claude Code (subprocess with MCP tools)
   - API_SYSTEM_PROMPT: for API providers (Anthropic, OpenAI, Groq, etc.)
-  - CODEX_SYSTEM_PROMPT: the Claude text with the library-size slot dropped
-    and the codex tool-discipline block spliced in
+  - CODEX_SYSTEM_PROMPT: the Claude text with the codex harness-discipline
+    block spliced in; it replaces codex's built-in coding-agent prompt
 """
 
 from ensemble_instruments import DEFAULT_THRESHOLD, INSTRUMENT_THRESHOLDS
@@ -474,7 +474,10 @@ only the last album survives.
 - `search_tracks(query="X")` searches track titles, album titles AND artist names with fuzzy matching \
 (any script — a Latin query finds Cyrillic/CJK names). The match may be an album or artist, not a \
 track — use that context. Never say "not found" without trying it, and pass corpus='all' when the \
-user is open to music they do not own.
+user is open to music they do not own. It matches NAMES only: a description ("Uzbek contemporary \
+jazz", "dark ambient with cello") returns nothing there, and that empty result is not evidence of \
+absence — describe-by-words questions go to artist_tags / artist_bios SQL, search_semantic, or your \
+own knowledge (next rules).
 - When the user specifies a genre/style/scene, use artist_tags and similar_artists tables to find \
 and verify candidates. Prefer similar_artists as the primary source for "similar artist" recommendations.
 - Artist/album COMPLETELY absent (not owned, no phantom row): call mb_resolve(artist_name, \
@@ -495,6 +498,15 @@ offer the download. The job runs in background for tens of minutes — never wai
 can ask progress later (mb_dump_status). In user-facing prose never use internal terms like \
 "phantom", "mint", or "SAUTIUM_BLOCKS" — say "artists/albums you can stream" and "the MusicBrainz \
 catalog".
+- A SCENE / REGION / STYLE question ("is there modern jazz in Uzbekistan?", "Norwegian nu-jazz", \
+"who does Berlin School today?") is a discovery request, and the catalog rarely carries a tag for \
+it. In order: (1) ONE SQL over artist_tags / artist_bios (ILIKE on the country and style words) \
+plus similar_artists of anything that hits; (2) if that finds nothing convincing, name 2–3 artists \
+from your OWN music knowledge that fit and verify EACH with mb_resolve — all of them in one \
+parallel round; (3) answer with the ones that resolved, tiled as artist cards, and say plainly \
+which candidates the catalog did not know. Never close with "nothing in your library" while your \
+own knowledge holds candidates you did not check — the user reads that as a dead end, and the \
+catalog behind you exists precisely for this.
 - For DSP/EQ requests: use the hqplayer_* tools (set_convolution, matrix profiles) or \
 generate_eq_preset. These are HQPlayer's own DSP — if HQPlayer is not the selected output they will \
 refuse, and the honest answer is that this DSP belongs to a device the sound is not going to. \
@@ -655,36 +667,33 @@ Do NOT rely solely on audio features — an artist can sound similar but belong 
 # Codex prompt (MCP-based, delivered as AGENTS.md)
 # ---------------------------------------------------------------------------
 
-# Codex has no --disallowed-tools: its built-in shell/file tools can only
-# be fenced by the OS sandbox and by instruction. This block is the
-# instruction fence; codex_runner adds --disable shell_tool and the
-# sandbox on top. The counts rule replaces the {library_size} injection
-# the Claude prompt gets (see below).
+# Codex has no --disallowed-tools: the harness keeps its own exec /
+# apply_patch / plan / question tools in the roster no matter what, and
+# codex_runner can only switch off the shell and the plugin/agent surface.
+# This block is the instruction fence for the rest — and, since this text
+# REPLACES codex's built-in coding-agent prompt, also the style guidance
+# that prompt used to carry.
 _CODEX_TOOL_DISCIPLINE = """\
-- You have NO shell and NO web browsing for this job, and you are NOT \
-working on a code repository — ignore any coding-agent instincts. Your \
-file-patch tool exists in the roster but is STRICTLY FORBIDDEN here: never \
-create, modify or read any file. Do ALL work exclusively through the MCP \
-tools (postgres SQL + assistant search/playback).
-- Library contents drift while this session lives (scans, sync, streaming \
-mints). NEVER state a track/artist/album count from memory or from an \
-earlier turn — when asked about library size or counts, run a fresh SQL \
-COUNT first.
+- You run inside the Codex CLI harness, but you are NOT a coding agent and there is no \
+repository, workspace or task here — ignore any such instincts. Besides the MCP tools \
+(mcp__postgres query + mcp__assistant search/playback) the harness lists exec, apply_patch, \
+update_plan, view_image, wait and request_user_input: NEVER use any of them — no shell, no \
+scripts, no files created, read or modified, no plans, and a question to the user goes in your \
+reply text, not through a tool. Do ALL work through the MCP tools, called directly.
+- Independent tool calls go out in parallel (three mb_resolve checks in one round, not three \
+rounds). Skip running commentary about what you are going to do — the UI shows tool activity \
+on its own; read the results, then write one complete reply.
+- Plain prose with light markdown and no headings, then the SAUTIUM_BLOCKS marker last.
 """
 
 # Same template as Claude Code (both agents drive the same MCP servers),
-# with the discipline block injected at the head of # Rules. Two slots
-# behave differently for codex because AGENTS.md is read at session
-# start and not reliably re-read on `codex exec resume`:
-#   - {player_context} stays in the text but is always erased — the
-#     runner delivers live player state inside the user message;
-#   - the ({library_size}) mention is stripped entirely — a snapshot
-#     baked at session start would go stale as the library grows and a
-#     resumed session would keep quoting it (the counts rule above
-#     sends the model to SQL instead).
+# with the discipline block at the head of # Rules. It becomes codex's
+# BASE instructions (model_instructions_file replaces the built-in prompt)
+# and codex re-reads the file on every spawn, resume included, so the
+# {library_size} count is as fresh as Claude's. {player_context} stays
+# empty here on purpose: the runner puts live player state in the user
+# message so the instructions prefix stays cacheable across turns.
 CODEX_SYSTEM_PROMPT = CLAUDE_SYSTEM_PROMPT.replace(
-    " ({library_size})", "", 1,
-).replace(
     "# Rules\n", "# Rules\n\n" + _CODEX_TOOL_DISCIPLINE, 1,
 )
 
@@ -737,8 +746,5 @@ def get_system_prompt(provider: str, player_context: str | None = None) -> str:
         template = CODEX_SYSTEM_PROMPT
     else:
         template = API_SYSTEM_PROMPT
-    if "{library_size}" in template:
-        # codex has no slot (see CODEX_SYSTEM_PROMPT) — skip the
-        # COUNT query its build would otherwise pay for nothing.
-        template = template.replace("{library_size}", _describe_library_size())
+    template = template.replace("{library_size}", _describe_library_size())
     return template.replace("{player_context}", pc_block)

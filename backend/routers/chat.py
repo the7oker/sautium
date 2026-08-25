@@ -717,9 +717,9 @@ def _build_provider_stream(
     if provider_name == "codex":
         from codex_runner import call_codex_stream
 
-        # The runner owns the system prompt (AGENTS.md) and folds the
-        # volatile player context into the message itself — codex has
-        # no --system-prompt flag.
+        # The runner owns the system prompt (an instructions file codex
+        # re-reads on every spawn) and folds the volatile player context
+        # into the message itself — codex has no --system-prompt flag.
         thread_id = _get_agent_session_id(session_id, "codex")
         return call_codex_stream(
             message=message,

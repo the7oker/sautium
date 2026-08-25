@@ -129,18 +129,45 @@ implementation details live in the code, DB and git history.
   `backend/codex_runner.py` + `codex_cli.py`, provider id `codex`). Mirrors
   the Claude runner shape (150s watchdog, stderr drain, non-root demote,
   same StreamEvent contract) with every difference forced by the CLI:
-  no `--system-prompt` → assistant prompt rides as AGENTS.md in a Sautium-owned
-  `--cd` workdir, volatile player context prefixes the user message
-  (AGENTS.md is not re-read on `exec resume`); no `--mcp-config` → the
+  no `--system-prompt` → assistant prompt is a file in a Sautium-owned
+  workdir passed as `model_instructions_file`, which REPLACES codex's
+  built-in coding-agent prompt (the `--system-prompt` analog) and is
+  re-read on every spawn, `exec resume` included (measured 2026-08-25);
+  volatile player context prefixes the user message so the instructions
+  prefix stays cacheable. Until 2026-08-25 the prompt rode as AGENTS.md
+  and every turn after the first ran WITHOUT it: `exec resume` takes no
+  `--cd`, the process cwd fell back to the backend's (the repo, on the
+  launcher), and codex told the model the AGENTS.md instructions "no
+  longer apply" — the launcher's "codex only searches MusicBrainz when
+  asked" complaint was a prompt-less turn 2. Every spawn now pins Popen
+  cwd to the workdir. Same day: MCP tools forced DIRECT via
+  `features.code_mode.direct_only_tool_namespaces=["mcp__<server>"...]` —
+  codex 0.149 otherwise defers every MCP tool behind its code-mode
+  `exec` JS host, where the model greps `ALL_TOOLS` by regex before it
+  can call anything (the ENABLE_TOOL_SEARCH=false analog); reasoning
+  effort `medium` — at `low` terra ran the tag SQL and gave up without
+  naming one candidate from its own knowledge, at `medium` it named
+  three and verified them in a single parallel mb_resolve round (+4s);
+  agent SQL is capped per statement (30s: `PGOPTIONS=-c statement_timeout`
+  on Docker's `@modelcontextprotocol/server-postgres`, explicit
+  `DB_QUERY_TIMEOUT` on the launcher's `postgres-mcp-server`) — an OR'd-EXISTS
+  join across every tagged artist ran 3+ minutes, ate the whole wallclock and,
+  after the SIGKILL, kept running under an orphaned MCP server; inside the
+  turn the same failure is a tool error the model retries lighter;
+  no `--mcp-config` → the
   SAME mcp-docker/windows.json is translated at spawn into dotted `-c
   mcp_servers.*` overrides + `--ignore-user-config` (analog of
   `--strict-mcp-config`); no `--disallowed-tools`, and no
   sandbox either — under ANY sandbox mode `codex exec` auto-denies every
   MCP tool call ("requires approval, but approval policy is never";
   measured on macOS Seatbelt, upstream openai/codex#24135), so the
-  dangerous bypass is mandatory, not a fallback. Actual fences:
-  `--disable shell_tool` (verified — the model has no shell), web search
-  off by default, prompt-level prohibition. Known residual: the
+  dangerous bypass is mandatory, not a fallback — and it flips codex's
+  default `web_search` to LIVE, so the runner sets `web_search="disabled"`
+  explicitly. Actual fences: `--disable shell_tool` (verified — the model
+  has no shell), `--disable plugins/apps/multi_agent/tool_suggest/goals/
+  image_generation` (each measured to remove roster or prompt noise — the
+  "plugins available but not installed" list alone was 3 KB of Spotify /
+  Apple Music bait per session), prompt-level prohibition. Known residual: the
   apply_patch file tool has no off switch (feature flag unknown,
   include_apply_patch_tool=false inert — both measured) and stays
   reachable behind the prompt fence. Auth is auth.json-ONLY — a bare

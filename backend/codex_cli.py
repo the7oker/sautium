@@ -75,7 +75,7 @@ def get_codex_executable() -> Optional[Path]:
     node shim hop); a shim is an acceptable fallback because codex —
     unlike claude with its ~13.5k-char --system-prompt — never pushes
     argv anywhere near cmd.exe's 8191-char cap (the assistant prompt travels
-    as AGENTS.md on disk). Shim priority: the prefix's own
+    as an instructions file on disk). Shim priority: the prefix's own
     node_modules/.bin before whatever is on PATH."""
     prefix_nm = get_codex_prefix() / "node_modules"
     nm_candidates = [

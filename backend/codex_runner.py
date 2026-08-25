@@ -5,24 +5,50 @@ Codex mirror of `claude_code_runner.py`: spawns `codex exec --json` in
 headless mode with the same MCP tools (PostgreSQL + assistant) and turns
 its JSONL event stream into provider stream events for the chat router.
 
-Differences from the Claude runner, all forced by the CLI surface:
-- No `--system-prompt` flag — the static assistant prompt is written to
-  AGENTS.md inside a Sautium-owned working dir (`--cd`), and the
-  volatile player context is prefixed into the user message each turn
-  (AGENTS.md is read at session start, not reliably re-read on resume).
+Differences from the Claude runner, all forced by the CLI surface
+(every claim below is measured on codex-cli 0.149, not read off docs):
+- No `--system-prompt` flag — the assistant prompt is written to a file
+  in a Sautium-owned workdir and handed over as `model_instructions_file`,
+  which REPLACES codex's built-in coding-agent prompt (the analog of
+  Claude Code's `--system-prompt`, which replaces too). Codex re-reads
+  that file on every spawn, `exec resume` included, so a prompt change
+  reaches sessions already in flight on their next turn. The earlier
+  carrier, AGENTS.md, was a user-role message that codex re-evaluates
+  against the process cwd on every run: `exec resume` takes no `--cd`,
+  the cwd fell back to the backend's own, no AGENTS.md lives there, and
+  codex told the model "the previously provided AGENTS.md instructions
+  no longer apply" — every turn after the first ran with no prompt at
+  all. The volatile player context still prefixes the user message:
+  baked into the instructions it would change the prompt prefix every
+  turn and defeat prompt caching.
+- Every spawn runs with cwd = the workdir (Popen cwd, since `exec
+  resume` rejects `--cd`): the environment context codex shows the
+  model, and the root its file tool would write under, must never be
+  the backend's directory — on the launcher that is the repo.
+- MCP tools are DIRECT function tools. Out of the box codex defers every
+  MCP tool behind its code-mode `exec` JS host: the model has to grep
+  `ALL_TOOLS` by regex before it can call anything (a round trip per
+  turn) and never learns about a tool its regex missed.
+  `features.code_mode.direct_only_tool_namespaces` names our servers as
+  `mcp__<name>` and puts their tools in the roster upfront — the analog
+  of the Claude runner's ENABLE_TOOL_SEARCH=false.
 - No `--mcp-config` — MCP servers are injected per-run as dotted `-c`
   overrides translated from the SAME mcp-docker.json / mcp-windows.json
   the Claude runner uses, so both agents share one MCP source of truth.
   `--ignore-user-config` keeps the user's own ~/.codex/config.toml (and
   any personal MCP connectors in it) out of the run — the codex analog
-  of `--strict-mcp-config`.
+  of `--strict-mcp-config`. Profile files (`-p`) and a project
+  `.codex/config.toml` do not load under it, which is why everything
+  travels as `-c` flags plus one file path.
 - No `--disallowed-tools`, and no sandbox either — under any sandbox
   mode `codex exec` auto-denies every MCP tool call (openai/codex#24135),
-  so the dangerous bypass is mandatory. The fences that remain:
-  `--disable shell_tool` (verified — the model has no shell), web search
-  off by default, and the hard prompt-level prohibition in
-  CODEX_SYSTEM_PROMPT. The apply_patch file tool has no off switch
-  (measured) and stays prompt-fenced only.
+  so the dangerous bypass is mandatory. The bypass also flips codex's
+  default `web_search` from cached to LIVE, hence the explicit
+  `web_search="disabled"`. The fences that remain: `--disable shell_tool`
+  (verified — the model has no shell), the plugin / connector /
+  agent-team / goal / image tools switched off, and the hard
+  prompt-level prohibition in CODEX_SYSTEM_PROMPT on the apply_patch
+  file tool, which has no off switch.
 - Auth is auth.json-only: a bare OPENAI_API_KEY env var is ignored by
   the CLI (measured, 0.149), so when auth.json is missing and a key is
   present the runner mints auth.json via `codex login --with-api-key`
@@ -60,9 +86,27 @@ TITLE_MODEL = "gpt-5.6-luna"
 # Kept below the ~180s at which the browser/LAN drops the streaming
 # connection — same rationale as the Claude runner.
 TIMEOUT_SECONDS = 150
-# Analog of MAX_THINKING_TOKENS=1024: assistant turns are SQL + list-building,
-# reasoning depth buys latency, not quality.
-REASONING_EFFORT = "low"
+# Measured on the launcher's own complaint ("is there modern jazz in
+# Uzbekistan?", terra, 2026-08-25): at "low" the model ran the tag SQL and
+# then gave up without naming a single candidate from its own knowledge
+# (it resolved a festival); at "medium" it named three, checked them in
+# one parallel mb_resolve round and tiled the hit — 32s vs 28s. Discovery
+# is the step reasoning depth buys; "low" stays for the title one-shot.
+REASONING_EFFORT = "medium"
+# The assistant system prompt, as codex's base instructions (see module doc).
+INSTRUCTIONS_FILE = "instructions.md"
+# Codex surface the assistant has no use for, switched off per spawn. Each
+# name was measured to remove real roster/prompt noise: plugins — the
+# "plugins available but not installed" list (Spotify, Apple Music, ...)
+# shown to the model on every session; apps — connector tools of the
+# ChatGPT account; multi_agent — the spawn/wait agent tools (terra keeps
+# injecting the "you are /root, the primary agent in a team" preamble
+# regardless — that one falls to `agents.enabled=false` below);
+# tool_suggest — request_plugin_install; goals and image_generation —
+# their tools. Names come from `codex features list`; an unknown name is
+# a hard CLI error, so check that list before adding one.
+_DISABLED_FEATURES = ("plugins", "apps", "multi_agent", "tool_suggest",
+                      "goals", "image_generation")
 
 CODEX_LOGIN_MSG = (
     "Codex sign-in expired or missing. Run `codex login` in a terminal "
@@ -103,10 +147,14 @@ def _resolve_codex_executable() -> Optional[str]:
 
 
 def _spawn_kwargs(env: dict) -> dict:
-    """Popen setup shared by every codex spawn — non-root demote on
-    Linux/Docker, no console flash on Windows, stdin closed (the CLI
-    reads piped stdin as extra prompt context otherwise)."""
+    """Popen setup shared by every codex spawn — cwd pinned to the
+    Sautium workdir (`exec resume` takes no `--cd`; without this the
+    process inherits the backend's cwd, which on the launcher is the
+    repo), non-root demote on Linux/Docker, no console flash on Windows,
+    stdin closed (the CLI reads piped stdin as extra prompt context
+    otherwise)."""
     kwargs: dict = {
+        "cwd": str(_codex_workdir()),
         "stdin": subprocess.DEVNULL,
         "env": env,
         "text": True,
@@ -154,9 +202,10 @@ def _ensure_auth(codex_exe: str) -> Optional[str]:
 
 
 def _codex_workdir() -> Path:
-    """Sautium-owned working root for assistant sessions: holds AGENTS.md (the
-    system prompt) and nothing else. NOT the repo and NOT the user's
-    own projects — `--cd` points here so codex never walks real files."""
+    """Sautium-owned working root for assistant sessions: holds the
+    instructions file (the system prompt) and nothing else. NOT the repo
+    and NOT the user's own projects — every spawn's cwd is here so codex
+    never walks real files."""
     if sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
         wd = base / "Sautium" / "codex-agent"
@@ -171,20 +220,22 @@ def _codex_workdir() -> Path:
     return wd
 
 
-def _write_agents_md(workdir: Path) -> None:
-    """Atomic refresh of the assistant system prompt. Rewritten on every spawn
-    so NEW sessions always read the current prompt text (rule changes
-    ship with code updates); atomic rename keeps a concurrent spawn
-    from reading a torn file. Deliberately carries NO volatile data —
-    codex reads the file at session start only, so anything live
-    (player state, library size) travels per-turn in the message or is
-    fetched by the model via SQL."""
+def _write_instructions(workdir: Path) -> Path:
+    """Atomic refresh of the assistant system prompt file. Rewritten on
+    every spawn and re-read by codex on every spawn, resume included, so
+    rule changes ship with code updates and reach sessions already in
+    flight; the atomic rename keeps a concurrent spawn from reading a
+    torn file. Player state stays out of it (see module doc). A leftover
+    AGENTS.md from the earlier carrier goes away: codex would inject it
+    as a second, user-role copy of the prompt."""
     from assistant_prompt import get_system_prompt
-    prompt = get_system_prompt("codex", None)
-    tmp = workdir / "AGENTS.md.tmp"
-    tmp.write_text(prompt, encoding="utf-8")
+    path = workdir / INSTRUCTIONS_FILE
+    tmp = workdir / (INSTRUCTIONS_FILE + ".tmp")
+    tmp.write_text(get_system_prompt("codex", None), encoding="utf-8")
     os.chmod(tmp, 0o644)
-    tmp.replace(workdir / "AGENTS.md")
+    tmp.replace(path)
+    (workdir / "AGENTS.md").unlink(missing_ok=True)
+    return path
 
 
 def _mcp_config_overrides() -> List[str]:
@@ -199,11 +250,13 @@ def _mcp_config_overrides() -> List[str]:
     except (OSError, json.JSONDecodeError) as e:
         logger.error(f"MCP config unreadable at {MCP_CONFIG_PATH}: {e}")
         return args
+    names: List[str] = []
     for name, server in (cfg.get("mcpServers") or {}).items():
         base = f"mcp_servers.{name}"
         command = server.get("command")
         if not command:
             continue
+        names.append(name)
         args += ["-c", f"{base}.command={json.dumps(command)}"]
         args += ["-c", f"{base}.args={json.dumps(server.get('args') or [])}"]
         for k, v in (server.get("env") or {}).items():
@@ -216,14 +269,23 @@ def _mcp_config_overrides() -> List[str]:
         # them finish. Align with the chat wallclock — the turn watchdog
         # is the real ceiling either way.
         args += ["-c", f"{base}.tool_timeout_sec={TIMEOUT_SECONDS}"]
+    if names:
+        # Without this every MCP tool sits behind the code-mode `exec`
+        # host: the model greps ALL_TOOLS by regex before it can call one
+        # and never learns about a tool its regex missed. Direct-only puts
+        # them in the roster as ordinary function tools.
+        args += ["-c", "features.code_mode.direct_only_tool_namespaces="
+                 + json.dumps([f"mcp__{n}" for n in names])]
     return args
 
 
 def _base_flags(model: str, effort: str, with_mcp: bool,
-                resume: bool = False) -> List[str]:
-    """`codex exec resume` accepts a NARROWER flag set than `codex exec`
-    (measured, 0.149): no `--cd` — the session's recorded cwd (our
-    workdir) is restored from the rollout.
+                instructions: Optional[Path] = None) -> List[str]:
+    """Flags shared by `codex exec` and `codex exec resume` — the same
+    set once `--cd` is out of the picture (resume rejects it; the cwd
+    comes from Popen instead). `instructions` is the assistant prompt
+    file that replaces codex's built-in prompt; the title one-shot runs
+    without it, on codex's own.
 
     The dangerous bypass is MANDATORY, not a fallback: under ANY
     sandbox mode `codex exec` auto-denies every MCP tool call ("MCP
@@ -232,15 +294,15 @@ def _base_flags(model: str, effort: str, with_mcp: bool,
     non-interactive allow knob exists). The chat IS its MCP tools, so
     sandboxed codex is a chat that cannot answer. What actually fences
     the agent instead: shell_tool disabled (verified — the model
-    reports having no shell), web search off by default, and the
-    prompt-level prohibition in CODEX_SYSTEM_PROMPT. Known residual:
-    the apply_patch file tool cannot be switched off (no feature flag,
-    include_apply_patch_tool=false is inert — both measured) and stays
-    reachable behind the prompt fence only."""
-    flags = ["--json"]
-    if not resume:
-        flags += ["--cd", str(_codex_workdir())]
-    flags += [
+    reports having no shell), web search disabled explicitly (the
+    bypass would otherwise default it to LIVE), the surface in
+    _DISABLED_FEATURES switched off, and the prompt-level prohibition in
+    CODEX_SYSTEM_PROMPT. Known residual: the apply_patch file tool cannot
+    be switched off (no feature flag, include_apply_patch_tool=false is
+    inert — both measured) and stays reachable behind the prompt fence
+    only."""
+    flags = [
+        "--json",
         "--skip-git-repo-check",
         # Clean room: the user's own config.toml (personal MCP
         # connectors, model overrides) must not leak into assistant turns.
@@ -251,7 +313,16 @@ def _base_flags(model: str, effort: str, with_mcp: bool,
         "--disable", "shell_tool",
         "-c", f"model_reasoning_effort={json.dumps(effort)}",
         "-c", 'approval_policy="never"',
+        "-c", 'web_search="disabled"',
+        "-c", "agents.enabled=false",
+        # Every spawn is a fresh process; the CLI's update ping is a
+        # network round trip the chat turn never benefits from.
+        "-c", "check_for_update_on_startup=false",
     ]
+    for feature in _DISABLED_FEATURES:
+        flags += ["--disable", feature]
+    if instructions is not None:
+        flags += ["-c", f"model_instructions_file={json.dumps(str(instructions))}"]
     if with_mcp:
         flags += _mcp_config_overrides()
     flags.append("--dangerously-bypass-approvals-and-sandbox")
@@ -267,8 +338,8 @@ def _spawn_codex(cmd: List[str]):
 
 def _prefix_player_context(message: str, player_context: Optional[str]) -> str:
     """The volatile now-playing/output state rides in the message (the
-    Claude runner bakes it into --system-prompt instead; codex has no
-    such flag and AGENTS.md is not reliably re-read on resume)."""
+    Claude runner bakes it into --system-prompt instead; here it would
+    change the instructions prefix every turn and defeat prompt caching)."""
     if not player_context:
         return message
     return (
@@ -321,9 +392,9 @@ def call_codex_stream(
         return
 
     try:
-        _write_agents_md(_codex_workdir())
+        instructions = _write_instructions(_codex_workdir())
     except OSError as e:
-        logger.error(f"Failed to write codex AGENTS.md: {e}")
+        logger.error(f"Failed to write codex instructions file: {e}")
         yield StreamDone(model=use_model, provider="codex",
                          error=f"Failed to prepare codex workdir: {e}")
         return
@@ -333,7 +404,7 @@ def call_codex_stream(
     if resuming:
         cmd += ["resume", thread_id]
     cmd += _base_flags(use_model, REASONING_EFFORT, with_mcp=True,
-                       resume=resuming)
+                       instructions=instructions)
     cmd += ["--", _prefix_player_context(message, player_context)]
 
     logger.info(
@@ -466,7 +537,11 @@ def call_codex_stream(
                 transient_error = evt.get("message") or transient_error
 
         rc = proc.wait(timeout=TIMEOUT_SECONDS)
-        if not turn_completed and not error_msg:
+        if timed_out.is_set():
+            # The watchdog's kill is the story; stderr at this point is
+            # codex's own log chatter, not a cause.
+            error_msg = error_msg or f"Codex timed out after {TIMEOUT_SECONDS}s"
+        elif not turn_completed and not error_msg:
             stderr_thread.join(timeout=2)
             stderr = "".join(stderr_chunks).strip()
             raw = transient_error or stderr or (
@@ -513,32 +588,19 @@ def call_codex_oneshot(
     model: str = TITLE_MODEL,
     timeout_seconds: int = 25,
 ) -> Optional[str]:
-    """Bare one-shot codex call — no MCP, no assistant workdir (must not inhale
-    AGENTS.md), `--ephemeral` so title generations don't litter session
-    storage. Returns the final agent message text, or None on any
-    failure — callers treat title generation as best-effort."""
+    """Bare one-shot codex call — no MCP, codex's own built-in prompt (no
+    instructions file), `--ephemeral` so title generations don't litter
+    session storage. Returns the final agent message text, or None on
+    any failure — callers treat title generation as best-effort."""
     codex_exe = _resolve_codex_executable()
     if codex_exe is None:
         return None
     if _ensure_auth(codex_exe):
         return None
 
-    import tempfile
-    cmd = [
-        codex_exe, "exec",
-        "--json",
-        "--ephemeral",
-        "--cd", tempfile.gettempdir(),
-        "--skip-git-repo-check",
-        "--ignore-user-config",
-        "--ignore-rules",
-        "-m", model,
-        "--disable", "shell_tool",
-        "-c", 'model_reasoning_effort="low"',
-        "-c", 'approval_policy="never"',
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--", prompt,
-    ]
+    cmd = [codex_exe, "exec", "--ephemeral"]
+    cmd += _base_flags(model, "low", with_mcp=False)
+    cmd += ["--", prompt]
     try:
         env = _codex_env()
         kwargs = _spawn_kwargs(env)
