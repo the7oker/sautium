@@ -199,20 +199,30 @@ def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
     (track normalization). Tens of releases × ~10-15 tracks; one indexed join.
 
     Returns ``[{release_mbid, name, status, tracks: [{title, length_ms,
-    recording_mbid, disc, position}, …]}, …]``, releases best-tracklist-first
-    is the caller's job (``status`` 1 = Official — the canonical-release pick
-    prefers it). ``name`` is the MB release title — the clean label an owned
-    edition adopts once its tracklist matches this release. Local-only (the MB
-    API can't page tracklists of every release cheaply).
+    recording_mbid, disc, position, credit, credit_artist_mbid}, …]}, …]``,
+    releases best-tracklist-first is the caller's job (``status`` 1 = Official
+    — the canonical-release pick prefers it). ``name`` is the MB release title
+    — the clean label an owned edition adopts once its tracklist matches this
+    release. ``credit`` is the track's own artist credit as printed
+    ("Daft Punk feat. Pharrell Williams" — join phrases included, the way a
+    tag would carry it); ``credit_artist_mbid`` is that artist's gid when the
+    credit names exactly one artist, else None. Local-only (the MB API can't
+    page tracklists of every release cheaply).
     """
     rows = db_query("""
         SELECT r.gid::text AS release_mbid, r.name AS release_name, r.status,
                t.name AS title, t.length AS length_ms,
-               rec.gid::text AS recording_mbid, m.position AS disc, t.position AS pos
+               rec.gid::text AS recording_mbid, m.position AS disc, t.position AS pos,
+               ac.name AS credit,
+               CASE WHEN ac.artist_count = 1 THEN ca.gid::text END AS credit_artist_mbid
         FROM mb_release r
         JOIN mb_medium m ON m.release = r.id
         JOIN mb_track t ON t.medium = m.id
         JOIN mb_recording rec ON rec.id = t.recording
+        JOIN mb_artist_credit ac ON ac.id = t.artist_credit
+        LEFT JOIN mb_artist_credit_name acn
+               ON acn.artist_credit = ac.id AND acn.position = 0 AND ac.artist_count = 1
+        LEFT JOIN mb_artist ca ON ca.id = acn.artist
         WHERE r.release_group = (SELECT id FROM mb_release_group WHERE gid = %(rg)s::uuid)
         ORDER BY r.id, m.position, t.position
     """, {"rg": str(rg_mbid)})
@@ -228,5 +238,7 @@ def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
             "recording_mbid": r["recording_mbid"],
             "disc": r["disc"],
             "position": r["pos"],
+            "credit": r["credit"] or "",
+            "credit_artist_mbid": r["credit_artist_mbid"],
         })
     return list(rels.values())

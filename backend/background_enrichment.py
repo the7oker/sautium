@@ -235,17 +235,38 @@ def _step_lyrics(limit: int) -> Dict[str, int]:
 
 
 def _step_missing_artists(limit: int) -> Dict[str, int]:
-    """Fetch Last.fm bios for artists that don't have one yet."""
+    """Fetch Last.fm bios for artists that don't have one yet.
+
+    Per-artist fan-out, so it is gated on what a human or the discovery
+    graph actually touched: an owned file, a completed listen, an MB anchor
+    (canonized), a similar-artist edge, a streaming mint. "Has a track" is
+    not enough since 2026-08-25 — the phantom tracklist mint credits every
+    slot to its own artist (a compilation is ~15 of them), and on a dump
+    node that is a quarter-million name-only stubs nobody asked about; one
+    Last.fm call each is the blowup the engagement rule exists to prevent.
+    """
     from lastfm import LastFmService
 
     stats = {"processed": 0, "success": 0, "not_found": 0, "errors": 0}
     lastfm = LastFmService()
 
     sql = text("""
-        SELECT DISTINCT a.id, a.name
+        SELECT a.id, a.name
         FROM artists a
-        JOIN track_artists ta ON ta.artist_id = a.id
-        WHERE NOT EXISTS (
+        WHERE (
+            EXISTS (SELECT 1 FROM track_artists ta
+                    JOIN media_files mf ON mf.track_id = ta.track_id
+                    WHERE ta.artist_id = a.id)
+            OR EXISTS (SELECT 1 FROM track_artists ta
+                       JOIN listening_history lh ON lh.track_id = ta.track_id
+                       WHERE ta.artist_id = a.id
+                         AND lh.completed AND NOT lh.skipped)
+            OR EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
+            OR EXISTS (SELECT 1 FROM similar_artists sa
+                       WHERE sa.artist_id = a.id OR sa.similar_artist_id = a.id)
+            OR EXISTS (SELECT 1 FROM streaming_mints sm WHERE sm.artist_id = a.id)
+        )
+        AND NOT EXISTS (
             SELECT 1 FROM artist_bios ab
             WHERE ab.artist_id = a.id AND ab.source = 'lastfm'
         )

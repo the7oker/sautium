@@ -48,7 +48,7 @@ from psycopg2.extras import execute_values
 
 from db_pool import db_execute, db_query, db_query_one, get_conn
 from mb_dump_load import MB_LOAD_LOCK_KEY
-from uuid_utils import album_uuid, track_uuid
+from uuid_utils import album_uuid, artist_uuid, normalize, track_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -308,37 +308,114 @@ def _pick_canonical_release(releases: List[dict]) -> Optional[dict]:
     return sorted(pool, key=lambda r: (-len(r["tracks"]), r["release_mbid"]))[0]
 
 
+def _carry_rekeyed_slots(album_id: str, slot_rows: list, slot_artists: dict) -> int:
+    """Slots whose current track is not the one about to claim them: move the
+    old track's data onto the new uuid BEFORE the upsert — a rename, or a
+    merge when the new uuid already exists (the rip the user made since) —
+    so the slot's DO UPDATE is a no-op and nothing analysed, listened to or
+    owned is stranded on a row no tracklist points at. The moved track takes
+    the MB title its new uuid was derived from and exactly the slot's artist
+    as primary (the rename carried the old link along)."""
+    current = {(r["disc"], r["position"]): r["track_id"] for r in db_query("""
+        SELECT disc, position, track_id::text AS track_id
+        FROM album_tracks WHERE album_id = %(al)s::uuid""", {"al": album_id})}
+    moves = [(current[(d, pos)], tid, title)
+             for (_, tid, d, pos, _, _), title in slot_rows
+             if (d, pos) in current and current[(d, pos)] != tid]
+    if not moves:
+        return 0
+    from transliterate import latinize
+    from canon.identity import _update_track_uuid
+    from database import SessionLocal
+    from sqlalchemy import text as _sql
+    db = SessionLocal()
+    try:
+        for old, new, title in moves:
+            _update_track_uuid(db, old, new)
+            db.execute(_sql("UPDATE tracks SET title = :t, title_latin = :tl "
+                            "WHERE id = :id AND title <> :t"),
+                       {"t": title, "tl": latinize(title), "id": new})
+            db.execute(_sql("DELETE FROM track_artists WHERE track_id = :id "
+                            "AND role = 'primary' AND artist_id <> :ar"),
+                       {"id": new, "ar": slot_artists[new]})
+        db.commit()
+    finally:
+        db.close()
+    return len(moves)
+
+
 def _persist_phantom_tracklist(album_id: str, artist_id: str,
                                artist_name: str, rg_mbid: str) -> int:
     """Persist the canonical MB tracklist of one phantom album as
     tracks + track_artists + album_tracks rows — deliberately NO
     media_files (that is the owned/phantom discriminator; a later rip
     collapses onto the same `track_uuid` row and simply gains files).
-    Idempotent: slot upserts on the (album, disc, position) PK; track
-    rows never clobber existing titles. Returns slots written.
+
+    Each slot is keyed the way the scanner keys a correctly tagged rip of
+    the same release: title + the TRACK's own artist credit, not the
+    album's. A credit that is the album artist (same MB gid, or the same
+    name) uses that artist row; any other credit — a compilation entry, an
+    alias, a guest on a split, a collaboration's joint credit — gets its own
+    artist row, name-only. No MB anchor for those: an anchor would put the
+    row into stale_canonized_artists' discography re-derive, and a
+    compilation's fifteen credits times their discographies is the fan-out
+    the engagement rule forbids; the anchor arrives the day the user engages
+    with the artist. Until 2026-08-25 every slot carried the album artist,
+    so a "Various Artists" phantom could never collapse with a rip — 530
+    same-recording pairs on the master lived under two uuids.
+
+    Idempotent: slot upserts on the (album, disc, position) PK; track rows
+    never clobber existing titles. A slot that moves to another uuid (a
+    re-mint after a credit or normalization change, an MB retitle) carries
+    its analysis, listens and files along instead of orphaning them. Returns
+    slots written.
     """
     from transliterate import latinize
     best = _pick_canonical_release(mb.fetch_release_tracklists(rg_mbid))
     if not best:
         return 0
 
-    track_rows, artist_rows, slot_rows = [], [], []
+    album_mbids = {r["mbid"] for r in db_query("""
+        SELECT mbid::text AS mbid FROM album_artists
+        WHERE album_id = %(al)s::uuid AND mbid IS NOT NULL
+        UNION
+        SELECT mbid::text FROM artist_mbids WHERE artist_id = %(ar)s::uuid
+    """, {"al": album_id, "ar": artist_id})}
+    album_key = normalize(artist_name)
+
+    track_rows, artist_rows, credit_rows, slot_rows = [], [], [], []
+    slot_artists: dict = {}
     for tr in best["tracks"]:
         # MB has pathological titles past the column's 500 chars; clamp
         # BEFORE the UUID so identity keys on the stored value.
         title = (tr["title"] or "").strip()[:500]
         if not title:
             continue
-        tid = str(track_uuid(title, artist_name))
+        credit = (tr.get("credit") or "").strip()[:500]
+        if (not credit or tr.get("credit_artist_mbid") in album_mbids
+                or normalize(credit) == album_key):
+            slot_artist_id, slot_artist_name = artist_id, artist_name
+        else:
+            slot_artist_id, slot_artist_name = str(artist_uuid(credit)), credit
+            credit_rows.append((slot_artist_id, credit, latinize(credit)))
+        tid = str(track_uuid(title, slot_artist_name))
         track_rows.append((tid, title, latinize(title)))
-        artist_rows.append((tid, artist_id))
-        slot_rows.append((album_id, tid, tr["disc"] or 1, tr["position"],
-                          tr["recording_mbid"], tr["length_ms"]))
+        artist_rows.append((tid, slot_artist_id))
+        slot_artists[tid] = slot_artist_id
+        slot_rows.append(((album_id, tid, tr["disc"] or 1, tr["position"],
+                           tr["recording_mbid"], tr["length_ms"]), title))
     if not slot_rows:
         return 0
 
+    _carry_rekeyed_slots(album_id, slot_rows, slot_artists)
+
     with get_conn() as conn:
         with conn.cursor() as cur:
+            if credit_rows:
+                execute_values(cur, """
+                    INSERT INTO artists (id, name, name_latin) VALUES %s
+                    ON CONFLICT (id) DO NOTHING
+                """, credit_rows, template="(%s::uuid, %s, %s)")
             execute_values(cur, """
                 INSERT INTO tracks (id, title, title_latin) VALUES %s
                 ON CONFLICT (id) DO NOTHING
@@ -356,9 +433,58 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
                               recording_mbid = EXCLUDED.recording_mbid,
                               length_ms = EXCLUDED.length_ms,
                               updated_at = now()
-            """, slot_rows, template="(%s::uuid, %s::uuid, %s, %s, %s::uuid, %s)")
+            """, [row for row, _ in slot_rows],
+                template="(%s::uuid, %s::uuid, %s, %s, %s::uuid, %s)")
         conn.commit()
     return len(slot_rows)
+
+
+def remint_tracklists(artist_name: Optional[str] = None,
+                      limit: Optional[int] = None) -> Dict[str, int]:
+    """Re-derive the tracklist of every phantom album — optionally only one
+    album artist's ("Various Artists" is the case that motivated it) — under
+    the current mint rules, carrying analysis across re-keyed slots, then
+    drop the old rows nothing points at any more. The one-off that follows
+    a mint-rule or normalization change: the incremental path never revisits
+    an album that already has a tracklist. Per-album isolation, resumable."""
+    from canon.identity import delete_orphan_tracks
+    from database import SessionLocal
+    rows = db_query(f"""
+        SELECT DISTINCT ON (al.id)
+               al.id::text AS album_id, aa.artist_id::text AS artist_id,
+               a.name AS artist_name, al.musicbrainz_id::text AS rg_mbid
+        FROM albums al
+        JOIN album_artists aa ON aa.album_id = al.id AND aa.role = 'primary'
+        JOIN artists a ON a.id = aa.artist_id
+        WHERE al.musicbrainz_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
+          {"AND a.name = %(name)s" if artist_name else ""}
+        ORDER BY al.id, aa.artist_id
+        {f"LIMIT {int(limit)}" if limit else ""}
+    """, {"name": artist_name})
+    totals = {"albums": len(rows), "processed": 0, "slots": 0, "errors": 0}
+    logger.info(f"remint_tracklists: {len(rows)} phantom albums"
+                f"{' of ' + artist_name if artist_name else ''}")
+    for row in rows:
+        try:
+            totals["slots"] += _persist_phantom_tracklist(
+                row["album_id"], row["artist_id"], row["artist_name"], row["rg_mbid"])
+        except Exception as e:
+            totals["errors"] += 1
+            logger.error(f"remint failed for album {row['album_id']} "
+                         f"({row['artist_name']}, rg {row['rg_mbid']}): {e}")
+        totals["processed"] += 1
+        if totals["processed"] % 1000 == 0:
+            logger.info(f"remint_tracklists: {totals['processed']}/{len(rows)} albums, "
+                        f"{totals['slots']} slots, {totals['errors']} errors")
+    db = SessionLocal()
+    try:
+        totals["orphans_deleted"] = delete_orphan_tracks(db)
+        db.commit()
+    finally:
+        db.close()
+    logger.info(f"remint_tracklists done: {totals}")
+    return totals
 
 
 def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
@@ -764,8 +890,16 @@ if __name__ == "__main__":
                         help="re-sync artists older than this (default 30)")
     parser.add_argument("--tracklists", action="store_true",
                         help="persist tracklists for phantom albums lacking one")
+    parser.add_argument("--remint-tracklists", action="store_true",
+                        help="re-derive EVERY phantom tracklist under the current "
+                             "mint rules (one-off after a rule change)")
+    parser.add_argument("--artist", default=None,
+                        help="with --remint-tracklists: only albums of this album "
+                             "artist, e.g. 'Various Artists'")
     args = parser.parse_args()
-    if args.tracklists:
+    if args.remint_tracklists:
+        print(remint_tracklists(artist_name=args.artist, limit=args.limit))
+    elif args.tracklists:
         print(backfill_tracklists(limit=args.limit))
     else:
         print(run_backfill(limit=args.limit, stale_days=args.stale_days))
