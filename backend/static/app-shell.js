@@ -4343,9 +4343,18 @@
         const sub = [(t.artist || ''), (t.album || '')].filter(Boolean).join(' — ');
         const sim = (t.similarity != null)
           ? Number(t.similarity).toFixed(2) : '';
+        // A row with no file streams instead of playing from disk. Same
+        // contract the album screen uses (is-phantom-track + data-track-id),
+        // so wireDetailHandlers routes tap → play-phantom-track and
+        // [+] → queue-phantom-track with no second implementation. Without
+        // it these rows rendered with an empty media-file id and did nothing.
+        const owned = t.is_owned !== false && t.id != null;
+        const attrs = owned
+          ? `class="track-row result-row" data-media-file-id="${escapeHtml(String(t.id))}"`
+          : `class="track-row result-row is-phantom-track"`
+            + ` data-track-id="${escapeHtml(String(t.track_id || ''))}"`;
         return `
-          <button class="track-row result-row" type="button"
-                  data-media-file-id="${escapeHtml(String(t.id || ''))}">
+          <button ${attrs} type="button">
             <div class="result-art"
                  style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${inner}</div>
             <div class="track-info">

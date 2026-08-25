@@ -110,32 +110,74 @@ def hydrate_albums(album_ids: list[str]) -> list[dict]:
     return [by_id[aid] for aid in album_ids if aid in by_id]
 
 
-def hydrate_tracks(media_file_ids: list[int]) -> list[dict]:
-    """Fetch track rows by media_file_id (integer PK). Output shape
-    mirrors `/api/discovery/titles` results: id, title, artist,
-    album, year, duration_seconds, cover_id, plus album_id /
-    artist_id for in-app navigation.
+def hydrate_tracks(refs: list) -> list[dict]:
+    """Fetch track tiles by canonical track UUID. Output shape mirrors the
+    discovery track results: `track_id` (the identity), `id` (media_files.id,
+    None for a track with no file), `is_owned`, plus album_id / artist_id for
+    navigation and cover_url for the not-owned rows that have no cover_id.
+
+    An integer ref (media_files.id) is accepted and resolved to its track — the
+    model reaches that id through any media_files query, and rejecting it would
+    drop a perfectly good tile.
     """
-    if not media_file_ids:
+    if not refs:
         return []
+
+    legacy = [int(r) for r in refs
+              if isinstance(r, int) or (isinstance(r, str) and r.isdigit())]
+    by_media = {}
+    if legacy:
+        by_media = {r["id"]: r["track_id"] for r in db_query(
+            "SELECT id, track_id::text AS track_id FROM media_files WHERE id = ANY(%(ids)s)",
+            {"ids": legacy})}
+
+    wanted, seen = [], set()
+    for r in refs:
+        tid = by_media.get(int(r)) if (isinstance(r, int) or
+                                       (isinstance(r, str) and r.isdigit())) else str(r)
+        if tid and tid not in seen:
+            seen.add(tid)
+            wanted.append(tid)
+    if not wanted:
+        return []
+
     rows = db_query("""
-        SELECT mf.id,
+        SELECT t.id::text AS track_id,
+               own.id,
+               (own.id IS NOT NULL) AS is_owned,
                t.title,
-               a.id::text AS artist_id,
+               ta.artist_id::text AS artist_id,
                a.name AS artist,
-               al.id::text AS album_id,
-               al.title AS album,
-               al.release_year AS year,
-               mf.duration_seconds::float AS duration_seconds,
-               mf.cover_id::text AS cover_id
-        FROM media_files mf
-        JOIN tracks t ON t.id = mf.track_id
-        JOIN track_artists ta ON ta.track_id = t.id
-                              AND ta.role = 'primary'
+               COALESCE(own.album_id, ph.album_id)::text AS album_id,
+               COALESCE(own.album, ph.album) AS album,
+               COALESCE(own.release_year, ph.release_year) AS year,
+               COALESCE(own.duration_seconds, ph.length_ms / 1000.0)::float
+                   AS duration_seconds,
+               own.cover_id::text AS cover_id,
+               ph.cover_url
+        FROM tracks t
+        JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
         JOIN artists a ON a.id = ta.artist_id
-        JOIN album_variants av ON av.id = mf.album_variant_id
-        JOIN albums al ON al.id = av.album_id
-        WHERE mf.id = ANY(%(ids)s)
-    """, {"ids": list(media_file_ids)})
-    by_id = {r["id"]: r for r in rows}
-    return [by_id[mid] for mid in media_file_ids if mid in by_id]
+        LEFT JOIN LATERAL (
+            SELECT mf.id, mf.cover_id, mf.duration_seconds,
+                   al.id AS album_id, al.title AS album, al.release_year
+            FROM media_files mf
+            JOIN album_variants av ON av.id = mf.album_variant_id
+            JOIN albums al ON al.id = av.album_id
+            WHERE mf.track_id = t.id
+            ORDER BY mf.is_analysis_source DESC, mf.id
+            LIMIT 1
+        ) own ON true
+        LEFT JOIN LATERAL (
+            SELECT atr.length_ms, al.id AS album_id, al.title AS album,
+                   al.release_year, al.cover_url
+            FROM album_tracks atr
+            JOIN albums al ON al.id = atr.album_id
+            WHERE atr.track_id = t.id
+            ORDER BY (al.cover_url IS NOT NULL) DESC, al.id
+            LIMIT 1
+        ) ph ON true
+        WHERE t.id::text = ANY(%(ids)s)
+    """, {"ids": wanted})
+    by_id = {r["track_id"]: r for r in rows}
+    return [by_id[tid] for tid in wanted if tid in by_id]

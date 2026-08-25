@@ -1,54 +1,31 @@
 """Register all tools in the global REGISTRY.
 
-Handler functions mirror the MCP server logic (mcp/assistant_server.py),
-but run in-process inside the FastAPI backend.
+The tools the API providers (Anthropic / OpenAI) call. They are the SAME tools
+the MCP server exposes to Claude Code / Codex — same names, same arguments, same
+canonical UUIDs — and they now go through the same code: catalog reads via
+`assistant_queries`, search via the discovery engine (`routers.discovery.
+run_search`), playback via the player router, which owns the canonical queue and
+the user's chosen output. The private copies this module used to carry had
+drifted badly: search called /search/* endpoints deleted in the engine refactor,
+and playback pushed file:// URIs straight at HQPlayer, bypassing both the queue
+and the output choice.
 """
 
+import json
 import logging
-import os
-from typing import Optional
 
-import httpx
-import psycopg2
-import psycopg2.extras
-
-from config import settings
-from ensemble_instruments import present_instruments
-from hqplayer_client import file_path_to_uri
+import assistant_queries as aq
+from db_pool import db_query as _db_query, db_query_one as _db_query_one
 from tools.registry import REGISTRY, ToolDef, ToolParam
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Lazy singletons (same pattern as MCP server)
-# ---------------------------------------------------------------------------
-
-_db_conn: Optional[psycopg2.extensions.connection] = None
 _hqp_client = None
-
-
-def _get_db():
-    global _db_conn
-    if _db_conn is None or _db_conn.closed:
-        _db_conn = psycopg2.connect(settings.database_url)
-        _db_conn.autocommit = True
-    return _db_conn
-
-
-def _db_query(sql, params=None):
-    conn = _get_db()
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, params)
-        return [dict(row) for row in cur.fetchall()]
-
-
-def _db_query_one(sql, params=None):
-    rows = _db_query(sql, params)
-    return rows[0] if rows else None
 
 
 def _get_hqp():
     global _hqp_client
+    from config import settings
     from hqplayer_client import HQPlayerClient
     if _hqp_client is None or not _hqp_client.is_connected():
         _hqp_client = HQPlayerClient(
@@ -65,44 +42,6 @@ def _get_hqp():
     return _hqp_client
 
 
-def _format_track(row: dict) -> str:
-    from hqplayer_client import format_time
-    parts = []
-    if row.get("artist"):
-        parts.append(row["artist"])
-    if row.get("title"):
-        parts.append(row["title"])
-    line = " - ".join(parts) if parts else f"Track #{row.get('id', '?')}"
-
-    extras = []
-    if row.get("album"):
-        extras.append(f"Album: {row['album']}")
-    if row.get("genre"):
-        extras.append(f"Genre: {row['genre']}")
-    if row.get("duration_seconds"):
-        extras.append(f"Duration: {format_time(float(row['duration_seconds']))}")
-    if row.get("is_lossless") is not None:
-        extras.append(f"Quality: {'Lossless' if row['is_lossless'] else 'Lossy'}")
-    if row.get("similarity") is not None:
-        extras.append(f"Similarity: {float(row['similarity']):.2%}")
-    if row.get("id"):
-        extras.append(f"ID: {row['id']}")
-    if extras:
-        line += "\n  " + " | ".join(extras)
-    return line
-
-
-def _format_track_list(rows: list[dict], header: str = "") -> str:
-    if not rows:
-        return header + "\nNo tracks found." if header else "No tracks found."
-    lines = []
-    if header:
-        lines.append(header)
-    for i, row in enumerate(rows, 1):
-        lines.append(f"{i}. {_format_track(row)}")
-    return "\n".join(lines)
-
-
 # ===========================================================================
 # Handler functions
 # ===========================================================================
@@ -112,537 +51,226 @@ def _h_execute_query(sql: str) -> str:
     return execute_query(sql)
 
 
-def _h_search_tracks(
-    query: str = "",
-    artist: str = "",
-    album: str = "",
-    genre: str = "",
-    limit: int = 20,
-) -> str:
+def _h_search_tracks(query: str = "", artist: str = "", album: str = "",
+                     genre: str = "", limit: int = 20, corpus: str = "owned") -> str:
     try:
-        conditions = ["1=1"]
-        params: dict = {"limit": limit}
-        order_scores: list[str] = []
-
-        if query:
-            conditions.append(
-                "(similarity(a.name, %(query)s) > 0.1 "
-                "OR similarity(al.title, %(query)s) > 0.1 "
-                "OR similarity(t.title, %(query)s) > 0.1 "
-                "OR a.name ILIKE %(query_like)s "
-                "OR al.title ILIKE %(query_like)s "
-                "OR t.title ILIKE %(query_like)s)"
-            )
-            params["query"] = query
-            params["query_like"] = f"%{query}%"
-            order_scores.append(
-                "GREATEST(similarity(a.name, %(query)s), "
-                "similarity(al.title, %(query)s), "
-                "similarity(t.title, %(query)s))"
-            )
-        if artist:
-            conditions.append(
-                "(similarity(a.name, %(artist)s) > 0.15 OR a.name ILIKE %(artist_like)s)"
-            )
-            params["artist"] = artist
-            params["artist_like"] = f"%{artist}%"
-            order_scores.append("similarity(a.name, %(artist)s)")
-        if album:
-            conditions.append(
-                "(similarity(al.title, %(album)s) > 0.15 OR al.title ILIKE %(album_like)s)"
-            )
-            params["album"] = album
-            params["album_like"] = f"%{album}%"
-            order_scores.append("similarity(al.title, %(album)s)")
-        if genre:
-            conditions.append("g.name ILIKE %(genre_like)s")
-            params["genre_like"] = f"%{genre}%"
-
-        where = " AND ".join(conditions)
-        score_expr = f"GREATEST({', '.join(order_scores)})" if order_scores else "0"
-
-        sql = f"""
-            SELECT * FROM (
-                SELECT DISTINCT ON (mf.id)
-                       mf.id, t.title, a.name as artist, al.title as album,
-                       (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
-                        WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre,
-                       mf.duration_seconds, mf.track_number,
-                       {score_expr} as _score
-                FROM media_files mf
-                JOIN tracks t ON mf.track_id = t.id
-                JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-                JOIN artists a ON ta.artist_id = a.id
-                JOIN album_variants av ON mf.album_variant_id = av.id
-                JOIN albums al ON av.album_id = al.id
-                WHERE {where}
-                ORDER BY mf.id, _score DESC
-            ) sub
-            ORDER BY _score DESC, artist, album, track_number
-            LIMIT %(limit)s
-        """
-        rows = _db_query(sql, params)
-        return _format_track_list(rows, f"Search results ({len(rows)} tracks):")
+        if not any([query, artist, album, genre]):
+            return "Provide at least one of query / artist / album / genre."
+        rows = aq.search_tracks(_db_query, query=query, artist=artist, album=album,
+                                genre=genre, limit=limit, corpus=corpus)
+        scope = "" if corpus == "all" else " in the library"
+        return aq.format_track_list(rows, f"Search results{scope} ({len(rows)} tracks):")
     except Exception as e:
         return f"Error searching tracks: {e}"
 
 
-def _h_search_similar(track_id: int, limit: int = 15) -> str:
+def _search(target: str, **params) -> list[dict]:
+    from routers.discovery import run_search
+    return run_search(target, **params).get("results", [])
+
+
+def _h_search_similar(track_id: str, limit: int = 15, vocalist: str = "",
+                      gender: str = "", genres: list = None, instruments: list = None,
+                      corpus: str = "owned") -> str:
     try:
-        # First, get the track_id for the given media_file id
-        track_row = _db_query_one("""
-            SELECT track_id FROM media_files WHERE id = %(track_id)s
-        """, {"track_id": track_id})
-        if not track_row:
-            return f"Track with ID {track_id} not found."
-        db_track_id = track_row["track_id"]
-
-        sql = """
-            WITH target AS (
-                SELECT e.vector
-                FROM embeddings e
-                WHERE e.track_id = %(db_track_id)s
-                LIMIT 1
-            )
-            SELECT sub.id, sub.title, sub.artist, sub.album,
-                   sub.genre, sub.duration_seconds, sub.similarity
-            FROM (
-                SELECT DISTINCT ON (t2.id)
-                       t2.id as track_id, t2.title,
-                       1 - (e2.vector <=> (SELECT vector FROM target)) as similarity
-                FROM tracks t2
-                JOIN embeddings e2 ON e2.track_id = t2.id
-                WHERE t2.id != %(db_track_id)s
-                ORDER BY t2.id, e2.vector <=> (SELECT vector FROM target)
-            ) track_matches
-            JOIN LATERAL (
-                SELECT mf.id, mf.duration_seconds,
-                       a.name as artist, al.title as album,
-                       (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
-                        WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre
-                FROM media_files mf
-                JOIN track_artists ta ON track_matches.track_id = ta.track_id AND ta.role = 'primary'
-                JOIN artists a ON ta.artist_id = a.id
-                JOIN album_variants av ON mf.album_variant_id = av.id
-                JOIN albums al ON av.album_id = al.id
-                WHERE mf.track_id = track_matches.track_id
-                ORDER BY mf.id
-                LIMIT 1
-            ) sub ON true
-            ORDER BY track_matches.similarity DESC
-            LIMIT %(limit)s
-        """
-        rows = _db_query(sql, {"db_track_id": db_track_id, "limit": limit})
-
-        source = _db_query_one("""
-            SELECT t.title, a.name as artist
-            FROM media_files mf
-            JOIN tracks t ON mf.track_id = t.id
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            WHERE mf.id = %(track_id)s
-        """, {"track_id": track_id})
-
-        header = f"Tracks similar to: {source['artist']} - {source['title']}" if source else "Similar tracks"
-        return _format_track_list(rows, f"{header} ({len(rows)} results):")
+        seed = aq.valid_uuids([track_id])
+        if not seed:
+            return f"'{track_id}' is not a track UUID. Search first and pass the ID it returned."
+        src = _db_query_one("""
+            SELECT t.title, a.name AS artist,
+                   EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = t.id) AS analysed
+            FROM tracks t
+            JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+            JOIN artists a ON a.id = ta.artist_id
+            WHERE t.id = %(t)s::uuid
+        """, {"t": seed[0]})
+        if not src:
+            return f"Track {track_id} not found."
+        if not src["analysed"]:
+            return (f"{src['artist']} - {src['title']} has no audio analysis yet, "
+                    "so nothing can be matched against it. Use search_semantic instead.")
+        rows = _search("track", seed_track_id=seed[0], limit=limit, vocalist=vocalist,
+                       gender=gender, genres=genres, instruments=instruments, corpus=corpus)
+        return aq.format_track_list(
+            rows, f"Tracks similar to: {src['artist']} - {src['title']} ({len(rows)} results):")
     except Exception as e:
         return f"Error finding similar tracks: {e}"
 
 
-def _h_search_semantic(query: str, limit: int = 15) -> str:
+def _h_search_semantic(query: str, limit: int = 15, vocalist: str = "", gender: str = "",
+                       genres: list = None, instruments: list = None,
+                       bpm_min: float = None, bpm_max: float = None,
+                       corpus: str = "owned") -> str:
     try:
-        backend_url = os.getenv("BACKEND_URL", "https://localhost:8000")
-        with httpx.Client(base_url=backend_url, timeout=30.0, verify=False) as client:
-            resp = client.post("/search/text", params={"query": query, "limit": limit})
-            resp.raise_for_status()
-            data = resp.json()
-        rows = data.get("results", [])
-        return _format_track_list(rows, f"Semantic search for '{query}' ({len(rows)} results):")
-    except httpx.ConnectError:
-        return "Error: Cannot connect to backend for semantic search."
+        rows = _search("track", sound=query, limit=limit, vocalist=vocalist, gender=gender,
+                       genres=genres, instruments=instruments, bpm_min=bpm_min,
+                       bpm_max=bpm_max, corpus=corpus)
+        return aq.format_track_list(
+            rows, f"Semantic search for '{query}' ({len(rows)} results):")
     except Exception as e:
         return f"Error in semantic search: {e}"
 
 
 def _h_search_lyrics(query: str, limit: int = 15) -> str:
     try:
-        import os
-        backend_url = os.getenv("BACKEND_URL", "https://localhost:8000")
-        with httpx.Client(base_url=backend_url, timeout=30.0, verify=False) as client:
-            resp = client.get("/search/lyrics", params={"query": query, "limit": limit})
-            resp.raise_for_status()
-            data = resp.json()
-        rows = data.get("results", [])
-        return _format_track_list(rows, f"Lyrics search for '{query}' ({len(rows)} results):")
-    except httpx.ConnectError:
-        return "Error: Cannot connect to backend for lyrics search."
+        rows = _search("track", lyrics=query, limit=limit)
+        return aq.format_track_list(
+            rows, f"Lyrics search for '{query}' ({len(rows)} results):")
     except Exception as e:
         return f"Error in lyrics search: {e}"
 
 
-def _h_search_artists(query: str, limit: int = 10) -> str:
+def _h_search_artists(query: str, limit: int = 10, by_bio: bool = False) -> str:
     try:
-        backend_url = os.getenv("BACKEND_URL", "https://localhost:8000")
-        with httpx.Client(base_url=backend_url, timeout=30.0, verify=False) as client:
-            resp = client.get("/search/artists", params={"query": query, "limit": limit})
-            resp.raise_for_status()
-            data = resp.json()
-        rows = data.get("results", [])
-        lines = [f"Artist search for '{query}' ({len(rows)} results):"]
-        for r in rows:
-            gender_tag = f" [{r['gender']}]" if r.get('gender') and r['gender'] != 'unknown' else ""
-            line = f"  {r['similarity']:.4f} | {r['artist']}{gender_tag} ({r['track_count']} tracks)"
-            if r.get("sample_tracks"):
-                line += f" — {r['sample_tracks']}"
-            lines.append(line)
-        return "\n".join(lines) if rows else f"No artists found for '{query}'"
-    except httpx.ConnectError:
-        return "Error: Cannot connect to backend."
+        rows = _search("artist", q=query, limit=limit,
+                       **({"scope": "bio"} if by_bio else {}))
+        return aq.format_artist_list(
+            rows, f"Artist search for '{query}' ({len(rows)} results):")
     except Exception as e:
         return f"Error in artist search: {e}"
 
 
 def _h_search_albums(query: str, limit: int = 10) -> str:
     try:
-        backend_url = os.getenv("BACKEND_URL", "https://localhost:8000")
-        with httpx.Client(base_url=backend_url, timeout=30.0, verify=False) as client:
-            resp = client.get("/search/albums", params={"query": query, "limit": limit})
-            resp.raise_for_status()
-            data = resp.json()
-        rows = data.get("results", [])
-        lines = [f"Album search for '{query}' ({len(rows)} results):"]
-        for r in rows:
-            year_str = f" ({r['year']})" if r.get("year") else ""
-            line = f"  {r['similarity']:.4f} | {r['artist']} — {r['album']}{year_str} ({r['track_count']} tracks)"
-            lines.append(line)
-        return "\n".join(lines) if rows else f"No albums found for '{query}'"
-    except httpx.ConnectError:
-        return "Error: Cannot connect to backend."
+        rows = _search("album", q=query, limit=limit)
+        return aq.format_album_list(
+            rows, f"Album search for '{query}' ({len(rows)} results):")
     except Exception as e:
         return f"Error in album search: {e}"
 
 
 def _h_search_genres(query: str, limit: int = 10) -> str:
     try:
-        backend_url = os.getenv("BACKEND_URL", "https://localhost:8000")
-        with httpx.Client(base_url=backend_url, timeout=30.0, verify=False) as client:
-            resp = client.get("/search/genres", params={"query": query, "limit": limit})
-            resp.raise_for_status()
-            data = resp.json()
-        rows = data.get("results", [])
-        lines = [f"Genre search for '{query}' ({len(rows)} results):"]
-        for r in rows:
-            line = f"  {r['similarity']:.4f} | {r['genre']} ({r['track_count']} tracks)"
-            if r.get("sample_artists"):
-                line += f" — {r['sample_artists']}"
-            lines.append(line)
-        return "\n".join(lines) if rows else f"No genres found for '{query}'"
-    except httpx.ConnectError:
-        return "Error: Cannot connect to backend."
+        rows = _search("genre", q=query, limit=limit)
+        return aq.format_genre_list(
+            rows, f"Genre search for '{query}' ({len(rows)} results):")
     except Exception as e:
         return f"Error in genre search: {e}"
 
 
-def _h_get_lyrics(track_id: int) -> str:
-    row = _db_query_one("""
-        SELECT t.title, a.name as artist, tl.source, tl.plain_lyrics, tl.instrumental
-        FROM media_files mf
-        JOIN tracks t ON mf.track_id = t.id
-        JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
-        JOIN artists a ON a.id = ta.artist_id
-        LEFT JOIN track_lyrics tl ON tl.track_id = t.id
-        WHERE mf.id = %(track_id)s
-        ORDER BY CASE tl.source WHEN 'lrclib' THEN 1 WHEN 'genius' THEN 2 ELSE 3 END
-        LIMIT 1
-    """, {"track_id": str(track_id)})
-
-    if not row:
-        return f"Track {track_id} not found."
-    if row.get("instrumental"):
-        return f"{row['artist']} - {row['title']}: instrumental track (no lyrics)."
-    if not row.get("plain_lyrics"):
-        return f"{row['artist']} - {row['title']}: lyrics not available."
-
-    return (
-        f"{row['artist']} - {row['title']} [source: {row['source']}]\n\n"
-        f"{row['plain_lyrics']}"
-    )
-
-
-def _h_get_track_info(track_id: int) -> str:
+def _h_get_lyrics(track_id: str) -> str:
     try:
-        from hqplayer_client import format_time
-        row = _db_query_one("""
-            SELECT mf.id, t.title, mf.track_number, mf.disc_number,
-                   mf.duration_seconds, mf.sample_rate, mf.bit_depth,
-                   mf.file_path, mf.is_lossless,
-                   a.name as artist, al.title as album,
-                   al.release_year,
-                   (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
-                    WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre
-            FROM media_files mf
-            JOIN tracks t ON mf.track_id = t.id
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            JOIN album_variants av ON mf.album_variant_id = av.id
-            JOIN albums al ON av.album_id = al.id
-            WHERE mf.id = %(track_id)s
-        """, {"track_id": track_id})
-
+        tid = aq.valid_uuids([track_id])
+        if not tid:
+            return f"'{track_id}' is not a track UUID."
+        row = aq.track_lyrics(_db_query, tid[0])
         if not row:
-            return f"Track with ID {track_id} not found."
+            return f"Track {track_id} not found."
+        if row.get("instrumental"):
+            return f"{row['artist']} - {row['title']}: instrumental track (no lyrics)."
+        if not row.get("plain_lyrics"):
+            return f"{row['artist']} - {row['title']}: lyrics not available."
+        return (f"{row['artist']} - {row['title']} [source: {row['source']}]\n\n"
+                f"{row['plain_lyrics']}")
+    except Exception as e:
+        return f"Error getting lyrics: {e}"
 
-        lines = [
-            f"{row['artist']} - {row['title']}",
-            f"Album: {row['album']}",
-        ]
-        if row.get("release_year"):
-            lines.append(f"Year: {row['release_year']}")
-        if row.get("genre"):
-            lines.append(f"Genre: {row['genre']}")
-        if row.get("track_number"):
-            disc = f" (Disc {row['disc_number']})" if row.get("disc_number") and row["disc_number"] > 1 else ""
-            lines.append(f"Track: #{row['track_number']}{disc}")
-        if row.get("duration_seconds"):
-            lines.append(f"Duration: {format_time(float(row['duration_seconds']))}")
-        if row.get("is_lossless") is not None:
-            lines.append(f"Quality: {'Lossless' if row['is_lossless'] else 'Lossy'}")
-        if row.get("sample_rate"):
-            lines.append(f"Sample rate: {row['sample_rate']} Hz / {row.get('bit_depth', '?')}-bit")
-        lines.append(f"ID: {row['id']}")
 
-        af = _db_query_one("""
-            SELECT bpm, key, mode, energy_db, danceability, vocal_instrumental, instruments
-            FROM audio_features WHERE track_id = (SELECT track_id FROM media_files WHERE id = %(track_id)s)
-        """, {"track_id": track_id})
-
-        if af:
-            lines.append("")
-            lines.append("Audio Features:")
-            if af.get("bpm"):
-                lines.append(f"  BPM: {float(af['bpm']):.1f}")
-            if af.get("key"):
-                lines.append(f"  Key: {af['key']} {af.get('mode', '')}")
-            if af.get("energy_db") is not None:
-                lines.append(f"  Energy: {float(af['energy_db']):.1f} dB")
-            if af.get("danceability") is not None:
-                lines.append(f"  Danceability: {float(af['danceability']):.2f}")
-            if af.get("vocal_instrumental"):
-                lines.append(f"  Type: {af['vocal_instrumental']}")
-            if af.get("instruments"):
-                # storage is the raw top-20 score distribution — show only
-                # labels above their read thresholds
-                instr = present_instruments(af["instruments"])
-                top = sorted(instr.items(), key=lambda x: -x[1])[:5]
-                if top:
-                    lines.append(
-                        "  Instruments: " + ", ".join(f"{k} ({v:.2f})" for k, v in top)
-                    )
-
-        return "\n".join(lines)
+def _h_get_track_info(track_id: str) -> str:
+    try:
+        tid = aq.valid_uuids([track_id])
+        if not tid:
+            return f"'{track_id}' is not a track UUID."
+        row = aq.track_info(_db_query, tid[0])
+        if not row:
+            return f"Track {track_id} not found."
+        return aq.format_track_info(row, aq.track_features(_db_query, tid[0]))
     except Exception as e:
         return f"Error getting track info: {e}"
 
 
 # -- Playback handlers -------------------------------------------------------
+#
+# Thin wrappers over the player router: it owns the canonical queue, the output
+# the user picked, and the owned/streamed routing. Anything that talks to a
+# device directly from here plays to the wrong room and leaves the queue lying.
 
-def _h_play_track(track_id: int) -> str:
+def _player_call(fn, req):
+    from fastapi import HTTPException
     try:
-        row = _db_query_one("""
-            SELECT mf.file_path, t.title, a.name as artist, al.title as album
-            FROM media_files mf
-            JOIN tracks t ON mf.track_id = t.id
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            JOIN album_variants av ON mf.album_variant_id = av.id
-            JOIN albums al ON av.album_id = al.id
-            WHERE mf.id = %(track_id)s
-        """, {"track_id": track_id})
-        if not row:
-            return f"Track with ID {track_id} not found."
-
-        uri = file_path_to_uri(row["file_path"])
-        hqp = _get_hqp()
-        hqp.stop()
-        hqp.playlist_add(uri, clear=True)
-        hqp.select_track(0)
-        hqp.play()
-        return f"Now playing: {row['artist']} - {row['title']}\nAlbum: {row['album']}"
+        return fn(req), None
+    except HTTPException as e:
+        detail = e.detail
+        if isinstance(detail, dict):
+            detail = detail.get("message") or str(detail)
+        return None, str(detail)
     except Exception as e:
-        return f"Error playing track: {e}"
+        return None, str(e)
 
 
-def _h_play_album(album_name: str, artist_name: str = "") -> str:
-    try:
-        match_conditions = [
-            "(similarity(al.title, %(album)s) > 0.15 OR al.title ILIKE %(album_like)s)"
-        ]
-        match_params: dict = {"album": album_name, "album_like": f"%{album_name}%"}
-        order_parts = ["similarity(al.title, %(album)s)"]
-
-        if artist_name:
-            match_conditions.append(
-                "(similarity(a.name, %(artist)s) > 0.15 OR a.name ILIKE %(artist_like)s)"
-            )
-            match_params["artist"] = artist_name
-            match_params["artist_like"] = f"%{artist_name}%"
-            order_parts.append("similarity(a.name, %(artist)s)")
-
-        match_where = " AND ".join(match_conditions)
-        order_expr = " + ".join(order_parts)
-
-        best_album = _db_query_one(f"""
-            SELECT DISTINCT al.id, al.title as album, a.name as artist
-            FROM albums al
-            JOIN album_variants av ON av.album_id = al.id
-            JOIN media_files mf ON mf.album_variant_id = av.id
-            JOIN tracks t ON mf.track_id = t.id
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            WHERE {match_where}
-            ORDER BY {order_expr} DESC
-            LIMIT 1
-        """, match_params)
-
-        if not best_album:
-            return f"Album '{album_name}' not found."
-
-        rows = _db_query("""
-            SELECT mf.id, mf.file_path, t.title, mf.track_number,
-                   a.name as artist, al.title as album
-            FROM media_files mf
-            JOIN tracks t ON mf.track_id = t.id
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            JOIN album_variants av ON mf.album_variant_id = av.id
-            JOIN albums al ON av.album_id = al.id
-            WHERE al.id = %(album_id)s
-            ORDER BY mf.disc_number, mf.track_number
-        """, {"album_id": best_album["id"]})
-
-        if not rows:
-            return f"Album '{album_name}' not found."
-
-        hqp = _get_hqp()
-        hqp.stop()
-        first_uri = file_path_to_uri(rows[0]["file_path"])
-        hqp.playlist_add(first_uri, clear=True)
-        for row in rows[1:]:
-            uri = file_path_to_uri(row["file_path"])
-            hqp.playlist_add(uri)
-        hqp.select_track(0)
-        hqp.play()
-
-        album_title = rows[0]["album"]
-        artist = rows[0]["artist"]
-        track_list = "\n".join(
-            f"  {r.get('track_number', i+1)}. {r['title']}" for i, r in enumerate(rows)
-        )
-        return f"Playing album: {artist} - {album_title} ({len(rows)} tracks)\n{track_list}"
-    except Exception as e:
-        return f"Error playing album: {e}"
+def _h_play_track(track_id: str) -> str:
+    from routers.player import (PlayPhantomTrackRequest, PlayTrackRequest,
+                                play_phantom_track, play_track)
+    tid = aq.valid_uuids([track_id])
+    if not tid:
+        return f"'{track_id}' is not a track UUID. Search first and pass the ID it returned."
+    mf = aq.owned_media_file(_db_query, tid[0])
+    if mf is not None:
+        r, err = _player_call(play_track, PlayTrackRequest(track_id=mf))
+        if err:
+            return f"Could not play track: {err}"
+        return f"Now playing: {r['artist']} - {r['title']}\nAlbum: {r['album']}"
+    r, err = _player_call(play_phantom_track, PlayPhantomTrackRequest(track_id=tid[0]))
+    if err:
+        return f"Could not play track: {err}"
+    if not r.get("track_count"):
+        return "No streaming provider has that track, so it cannot be played."
+    return (f"Now streaming: {r.get('artist')} - {r.get('title')}\n"
+            f"Album: {r.get('album')} | via {r.get('provider')}")
 
 
-def _h_play_similar(track_id: int, limit: int = 10) -> str:
-    try:
-        # First, get the track_id for the given media_file id
-        track_row = _db_query_one("""
-            SELECT track_id FROM media_files WHERE id = %(track_id)s
-        """, {"track_id": track_id})
-        if not track_row:
-            return f"Track with ID {track_id} not found."
-        db_track_id = track_row["track_id"]
-
-        sql = """
-            WITH target AS (
-                SELECT e.vector
-                FROM embeddings e
-                WHERE e.track_id = %(db_track_id)s
-                LIMIT 1
-            )
-            SELECT sub.id, sub.file_path, sub.title, sub.artist, sub.album, sub.similarity
-            FROM (
-                SELECT DISTINCT ON (t2.id)
-                       t2.id as track_id, t2.title,
-                       1 - (e2.vector <=> (SELECT vector FROM target)) as similarity
-                FROM tracks t2
-                JOIN embeddings e2 ON e2.track_id = t2.id
-                WHERE t2.id != %(db_track_id)s
-                ORDER BY t2.id, e2.vector <=> (SELECT vector FROM target)
-            ) track_matches
-            JOIN LATERAL (
-                SELECT mf.id, mf.file_path,
-                       a.name as artist, al.title as album
-                FROM media_files mf
-                JOIN track_artists ta ON track_matches.track_id = ta.track_id AND ta.role = 'primary'
-                JOIN artists a ON ta.artist_id = a.id
-                JOIN album_variants av ON mf.album_variant_id = av.id
-                JOIN albums al ON av.album_id = al.id
-                WHERE mf.track_id = track_matches.track_id
-                ORDER BY mf.id
-                LIMIT 1
-            ) sub ON true
-            ORDER BY track_matches.similarity DESC
-            LIMIT %(limit)s
-        """
-        rows = _db_query(sql, {"db_track_id": db_track_id, "limit": limit})
-        if not rows:
-            return "No similar tracks found."
-
-        hqp = _get_hqp()
-        hqp.stop()
-        first_uri = file_path_to_uri(rows[0]["file_path"])
-        hqp.playlist_add(first_uri, clear=True)
-        for row in rows[1:]:
-            uri = file_path_to_uri(row["file_path"])
-            hqp.playlist_add(uri)
-        hqp.select_track(0)
-        hqp.play()
-
-        source = _db_query_one("""
-            SELECT t.title, a.name as artist
-            FROM media_files mf
-            JOIN tracks t ON mf.track_id = t.id
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            WHERE mf.id = %(track_id)s
-        """, {"track_id": track_id})
-
-        header = f"Playing {len(rows)} tracks similar to: {source['artist']} - {source['title']}" if source else f"Playing {len(rows)} similar tracks"
-        track_list = "\n".join(
-            f"  {i+1}. {r['artist']} - {r['title']} ({float(r['similarity']):.0%})"
-            for i, r in enumerate(rows)
-        )
-        return f"{header}\n{track_list}"
-    except Exception as e:
-        return f"Error playing similar tracks: {e}"
+def _h_play_album(album: str, artist_name: str = "") -> str:
+    from routers.player import PlayAlbumRequest, play_album
+    aid = aq.valid_uuids([album])
+    req = (PlayAlbumRequest(album_id=aid[0]) if aid
+           else PlayAlbumRequest(album_name=album, artist_name=artist_name))
+    r, err = _player_call(play_album, req)
+    if err:
+        return f"Could not play album: {err}"
+    if r.get("provider"):
+        missing = len(r.get("missing") or [])
+        tail = f" ({missing} track(s) no provider has)" if missing else ""
+        return (f"Now streaming the album via {r['provider']}: "
+                f"{r.get('track_count', '?')} tracks{tail}")
+    return (f"Now playing album: {r.get('artist')} - {r.get('album')}"
+            f" ({r.get('track_count', '?')} tracks)")
 
 
-def _h_add_to_queue(track_ids: list[int]) -> str:
-    try:
-        if not track_ids:
-            return "No track IDs provided."
-        placeholders = ", ".join(str(int(tid)) for tid in track_ids)
-        rows = _db_query(f"""
-            SELECT mf.id, mf.file_path, t.title, a.name as artist
-            FROM media_files mf
-            JOIN tracks t ON mf.track_id = t.id
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            WHERE mf.id IN ({placeholders})
-            ORDER BY array_position(ARRAY[{placeholders}]::int[], mf.id)
-        """)
-        if not rows:
-            return "None of the specified tracks were found."
-        hqp = _get_hqp()
-        added = []
-        for row in rows:
-            uri = file_path_to_uri(row["file_path"])
-            hqp.playlist_add(uri)
-            added.append(f"{row['artist']} - {row['title']}")
-        return f"Added {len(added)} tracks to queue:\n" + "\n".join(f"  {i+1}. {t}" for i, t in enumerate(added))
-    except Exception as e:
-        return f"Error adding to queue: {e}"
+def _h_play_similar(track_id: str, limit: int = 10) -> str:
+    from routers.player import PlaySimilarRequest, play_similar
+    tid = aq.valid_uuids([track_id])
+    if not tid:
+        return f"'{track_id}' is not a track UUID."
+    r, err = _player_call(play_similar, PlaySimilarRequest(track_id=tid[0], limit=limit))
+    if err:
+        return f"Could not start similar playback: {err}"
+    tracks = r.get("tracks") or [{}]
+    streamed = sum(1 for t in tracks if t.get("is_owned") is False)
+    tail = f" ({streamed} of them streamed)" if streamed else ""
+    return (f"Now playing: {tracks[0].get('artist')} - {tracks[0].get('title')}\n"
+            f"Queued {r.get('count', '?')} tracks by acoustic similarity{tail}.")
+
+
+def _h_add_to_queue(ids: list) -> str:
+    from routers.player import EntityRef, QueueEntitiesRequest, queue_entities
+    valid = aq.valid_uuids(ids or [])
+    if not valid:
+        return "No valid UUIDs given. Pass the IDs the search tools returned."
+    kinds = aq.entity_kinds(_db_query, valid)
+    items = [EntityRef(kind=kinds[i], id=i) for i in valid if i in kinds]
+    if not items:
+        return "None of those IDs exist in the catalog."
+    r, err = _player_call(queue_entities, QueueEntitiesRequest(items=items))
+    if err:
+        return f"Could not queue: {err}"
+    parts = []
+    if r.get("queued"):
+        parts.append(f"{r['queued']} track(s) from the library")
+    if r.get("streaming"):
+        parts.append(f"{r['streaming']} streaming in behind them")
+    missing = len(r.get("not_found") or [])
+    tail = f" ({missing} had nothing playable)" if missing else ""
+    return "Queued: " + (", ".join(parts) or "nothing") + tail
 
 
 # -- HQPlayer control handlers -----------------------------------------------
@@ -907,8 +535,7 @@ def _h_hqplayer_get_dsp_state() -> str:
 
 def _h_generate_eq_preset(name: str, filters_json: str, description: str = "") -> str:
     try:
-        import json as _json
-        filters = _json.loads(filters_json)
+        filters = json.loads(filters_json)
         if not isinstance(filters, list) or not filters:
             return "Error: filters_json must be a non-empty JSON array."
         for i, f in enumerate(filters):
@@ -941,35 +568,51 @@ def register_all():
 
     REGISTRY.register(ToolDef(
         name="search_tracks",
-        description="Search music library by metadata (artist, album, genre, or free text query). "
-                    "All parameters are optional. Tolerant to typos (fuzzy trigram matching).",
+        description="Search the catalog by metadata (artist, album, genre, or free text query). "
+                    "All parameters are optional. Tolerant to typos (fuzzy trigram matching) "
+                    "and to script (a Latin query finds Cyrillic/CJK names). "
+                    "Returns each track's canonical UUID — the id every other tool takes.",
         parameters=[
             ToolParam("query", "string", "Free text search across artist, album, and track title", required=False, default=""),
             ToolParam("artist", "string", "Filter by artist name (fuzzy match)", required=False, default=""),
             ToolParam("album", "string", "Filter by album name (fuzzy match)", required=False, default=""),
             ToolParam("genre", "string", "Filter by genre (partial match)", required=False, default=""),
             ToolParam("limit", "integer", "Maximum number of results (default 20)", required=False, default=20),
+            ToolParam("corpus", "string", "'owned' (default, files on disk) or 'all' (adds not-owned tracks, which stream)", required=False, default="owned", enum=["owned", "all"]),
         ],
         handler=_h_search_tracks,
     ))
 
     REGISTRY.register(ToolDef(
         name="search_similar",
-        description="Find tracks with similar sound/audio to a given track using AI audio embeddings (CLAP).",
+        description="Find tracks with similar sound to a given track (CLAP audio embeddings), "
+                    "optionally narrowed by hard filters in the same query.",
         parameters=[
-            ToolParam("track_id", "integer", "The ID of the source track", required=True),
+            ToolParam("track_id", "string", "Track UUID of the source track", required=True),
             ToolParam("limit", "integer", "Maximum number of similar tracks to return (default 15)", required=False, default=15),
+            ToolParam("vocalist", "string", "'vocal' or 'instrumental'", required=False, default="", enum=["vocal", "instrumental"]),
+            ToolParam("gender", "string", "'male', 'female' or 'mixed'", required=False, default="", enum=["male", "female", "mixed"]),
+            ToolParam("genres", "array", "Genre names to require (OR within the list)", required=False, items_type="string"),
+            ToolParam("instruments", "array", "Broad instrument names to require", required=False, items_type="string"),
+            ToolParam("corpus", "string", "'owned' (default) or 'all' (adds not-owned tracks, which stream)", required=False, default="owned", enum=["owned", "all"]),
         ],
         handler=_h_search_similar,
     ))
 
     REGISTRY.register(ToolDef(
         name="search_semantic",
-        description="Search music library by natural language description using AI semantic understanding. "
-                    "Uses CLAP text-to-audio embeddings. E.g. 'energetic rock', 'calm piano music'.",
+        description="Search tracks by a SOUND description (CLAP text-to-audio), optionally with "
+                    "hard filters. E.g. 'energetic rock', 'calm piano music'. NOT a name search.",
         parameters=[
             ToolParam("query", "string", "Natural language description of the music you want", required=True),
             ToolParam("limit", "integer", "Maximum number of results (default 15)", required=False, default=15),
+            ToolParam("vocalist", "string", "'vocal' or 'instrumental'", required=False, default="", enum=["vocal", "instrumental"]),
+            ToolParam("gender", "string", "'male', 'female' or 'mixed'", required=False, default="", enum=["male", "female", "mixed"]),
+            ToolParam("genres", "array", "Genre names to require (OR within the list)", required=False, items_type="string"),
+            ToolParam("instruments", "array", "Broad instrument names to require", required=False, items_type="string"),
+            ToolParam("bpm_min", "number", "Lower BPM bound", required=False),
+            ToolParam("bpm_max", "number", "Upper BPM bound", required=False),
+            ToolParam("corpus", "string", "'owned' (default) or 'all' (adds not-owned tracks, which stream)", required=False, default="owned", enum=["owned", "all"]),
         ],
         handler=_h_search_semantic,
     ))
@@ -988,23 +631,23 @@ def register_all():
 
     REGISTRY.register(ToolDef(
         name="search_artists",
-        description="Search artists by biography/background. Returns artists (not tracks). "
-                    "Use for queries about artist origin, style, era, or background. "
-                    "E.g. 'British rock band from the 70s', 'female jazz vocalist', 'German electronic producer'.",
+        description="Search artists by NAME (default) or by biography description (by_bio=true). "
+                    "Returns artists, not tracks, each with its canonical UUID. "
+                    "E.g. 'Madonna', or by_bio: 'British rock band from the 70s'.",
         parameters=[
-            ToolParam("query", "string", "Description to search for in artist biographies", required=True),
+            ToolParam("query", "string", "Artist name, or (with by_bio) a description of the artist", required=True),
             ToolParam("limit", "integer", "Maximum number of artists (default 10)", required=False, default=10),
+            ToolParam("by_bio", "boolean", "Search biographies instead of names", required=False, default=False),
         ],
         handler=_h_search_artists,
     ))
 
     REGISTRY.register(ToolDef(
         name="search_albums",
-        description="Search albums by description. Returns albums (not tracks). "
-                    "Use for queries about album concept, style, or context. "
-                    "E.g. 'concept album about war', 'live recording', 'debut album with orchestral arrangements'.",
+        description="Search albums by title or description. Returns albums (not tracks) with their "
+                    "canonical UUIDs — the ids play_album and add_to_queue take.",
         parameters=[
-            ToolParam("query", "string", "Description to search for in album descriptions", required=True),
+            ToolParam("query", "string", "Album title or description to search for", required=True),
             ToolParam("limit", "integer", "Maximum number of albums (default 10)", required=False, default=10),
         ],
         handler=_h_search_albums,
@@ -1012,11 +655,10 @@ def register_all():
 
     REGISTRY.register(ToolDef(
         name="search_genres",
-        description="Search genres by description. Returns genres (not tracks). "
-                    "Use for queries about music characteristics or style. "
-                    "E.g. 'heavy distorted guitars', 'African rhythms', 'minimalist repetitive compositions'.",
+        description="Search genres by name or description. Returns genres, not tracks. "
+                    "E.g. 'heavy distorted guitars', 'African rhythms'.",
         parameters=[
-            ToolParam("query", "string", "Description to search for in genre descriptions", required=True),
+            ToolParam("query", "string", "Genre name or description to search for", required=True),
             ToolParam("limit", "integer", "Maximum number of genres (default 10)", required=False, default=10),
         ],
         handler=_h_search_genres,
@@ -1028,44 +670,49 @@ def register_all():
                     "Use this when the user asks what a song is about, to quote lyrics, "
                     "or to analyze lyrical content of a specific track.",
         parameters=[
-            ToolParam("track_id", "integer", "The track ID from the database", required=True),
+            ToolParam("track_id", "string", "Track UUID", required=True),
         ],
         handler=_h_get_lyrics,
     ))
 
     REGISTRY.register(ToolDef(
         name="get_track_info",
-        description="Get full details about a specific track including audio features.",
+        description="Get full details about a specific track including audio features. "
+                    "Works for a not-owned track too (no file facts, same analysis).",
         parameters=[
-            ToolParam("track_id", "integer", "The track ID from the database", required=True),
+            ToolParam("track_id", "string", "Track UUID", required=True),
         ],
         handler=_h_get_track_info,
     ))
 
     REGISTRY.register(ToolDef(
         name="play_track",
-        description="Play a specific track by its database ID on HQPlayer.",
+        description="Play one track on the output the user chose (replaces the queue). "
+                    "A track with no file in the library plays too — it streams.",
         parameters=[
-            ToolParam("track_id", "integer", "The track ID from the database", required=True),
+            ToolParam("track_id", "string", "Track UUID", required=True),
         ],
         handler=_h_play_track,
     ))
 
     REGISTRY.register(ToolDef(
         name="play_album",
-        description="Find an album and play all its tracks on HQPlayer. Tolerant to typos (fuzzy matching).",
+        description="Play a whole album on the output the user chose (replaces the queue). "
+                    "Pass the album UUID (works owned or not), or a title to fuzzy-match "
+                    "among owned albums.",
         parameters=[
-            ToolParam("album_name", "string", "Album name (fuzzy match, typo-tolerant)", required=True),
-            ToolParam("artist_name", "string", "Optional artist name to narrow the search", required=False, default=""),
+            ToolParam("album", "string", "Album UUID, or an album title to fuzzy-match", required=True),
+            ToolParam("artist_name", "string", "Optional artist name to narrow a title match", required=False, default=""),
         ],
         handler=_h_play_album,
     ))
 
     REGISTRY.register(ToolDef(
         name="play_similar",
-        description="Find tracks similar to the given track and play them on HQPlayer.",
+        description="Play a station of tracks acoustically similar to the seed track "
+                    "(replaces the queue). Results mix owned files with streamed tracks.",
         parameters=[
-            ToolParam("track_id", "integer", "Source track ID to find similar tracks for", required=True),
+            ToolParam("track_id", "string", "Track UUID of the seed", required=True),
             ToolParam("limit", "integer", "Number of similar tracks to queue (default 10)", required=False, default=10),
         ],
         handler=_h_play_similar,
@@ -1073,9 +720,11 @@ def register_all():
 
     REGISTRY.register(ToolDef(
         name="add_to_queue",
-        description="Add tracks to the current HQPlayer playlist/queue by their IDs.",
+        description="Append tracks AND/OR albums to the current queue, in the given order — "
+                    "the way to build a playlist out of several albums in one call. "
+                    "Not-owned entities stream in behind their provider lookup.",
         parameters=[
-            ToolParam("track_ids", "array", "List of track IDs to add to the queue", required=True, items_type="integer"),
+            ToolParam("ids", "array", "Track and/or album UUIDs, in the order to append", required=True, items_type="string"),
         ],
         handler=_h_add_to_queue,
     ))

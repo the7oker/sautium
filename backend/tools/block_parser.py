@@ -14,7 +14,7 @@ Schema accepted by `extract_blocks`:
       {"kind": "album",
        "items": [{"album_id": "<uuid>"}, ...]},
       {"kind": "tracks",
-       "items": [{"id": <media_file_id:int>}, ...]}
+       "items": [{"track_id": "<uuid>"}, ...]}
     ]
 
 `kind` is canonicalized — singular "artist"/"album"/"track" and plural
@@ -82,13 +82,13 @@ def _normalize_block(b: Any) -> dict | None:
             if aid:
                 items.append({"album_id": str(aid)})
         elif kind == "tracks":
-            tid = it.get("id") or it.get("media_file_id") or it.get("track_id")
-            try:
-                tid_int = int(tid) if tid is not None else None
-            except (TypeError, ValueError):
-                tid_int = None
-            if tid_int:
-                items.append({"id": tid_int})
+            # Canonical identity is the track UUID — the one id an owned file
+            # and a streamable not-owned row both carry, so the block can hold
+            # either. An integer (media_files.id) still parses: hydration maps
+            # it back to its track.
+            tid = it.get("track_id") or it.get("id") or it.get("media_file_id")
+            if tid is not None and str(tid).strip():
+                items.append({"track_id": str(tid).strip()})
 
     if not items:
         return None
@@ -149,12 +149,7 @@ def extract_blocks_with_fallback(text: str) -> tuple[list[dict], str]:
     legacy = extract_tracks(clean)
     clean = strip_tracks_marker(clean)
     if legacy:
-        ids: list[dict] = []
-        for t in legacy:
-            try:
-                ids.append({"id": int(t["id"])})
-            except (TypeError, ValueError, KeyError):
-                continue
+        ids = [{"track_id": str(t["id"])} for t in legacy if t.get("id")]
         if ids:
             return [{"kind": "tracks", "items": ids}], clean
     return [], clean

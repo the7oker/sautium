@@ -446,8 +446,46 @@ def discovery_search(
     score 1.0 — so a block cut at its first page is not "the matches", it is an
     arbitrary tenth of them.
     """
+    return run_search(
+        target=target, q=q, scope=scope, sound=sound, lyrics=lyrics, limit=limit,
+        offset=offset, bpm_min=bpm_min, bpm_max=bpm_max, key=key, mode=mode,
+        vocalist=vocalist, gender=gender, danceable=danceable, energy=energy,
+        instruments=instruments, genres=genres, seed_track_id=seed_track_id,
+        artists=artists, corpus=corpus)
+
+
+def run_search(
+    target: str,
+    q: Optional[str] = None,
+    scope: str = "names",
+    sound: Optional[str] = None,
+    lyrics: Optional[str] = None,
+    limit: int = 10,
+    offset: int = 0,
+    bpm_min: Optional[float] = None,
+    bpm_max: Optional[float] = None,
+    key: Optional[str] = None,
+    mode: Optional[str] = None,
+    vocalist: Optional[str] = None,
+    gender: Optional[str] = None,
+    danceable: Optional[str] = None,
+    energy: Optional[str] = None,
+    instruments: Optional[list] = None,
+    genres: Optional[list] = None,
+    seed_track_id: Optional[str] = None,
+    artists: Optional[list] = None,
+    corpus: str = "all",
+) -> dict[str, Any]:
+    """The search itself, callable in-process. The assistant's tool surface runs
+    the SAME engine query the Discovery screen does instead of private SQL of its
+    own — two search implementations is how one of them goes stale (the API-
+    provider tools spent months calling /search/* endpoints that no longer
+    existed)."""
     from discovery_engine import build
 
+    instruments = list(instruments or [])
+    genres = list(genres or [])
+    artists = list(artists or [])
     active: dict = {}
     if q and q.strip():
         # `scope` routes q to exactly ONE relevance tool: names (lexical

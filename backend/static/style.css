@@ -1962,6 +1962,24 @@ body.has-miniplayer .ai-fab {
   color: var(--color-text-dim);
 }
 
+/* Phantom (out-of-library) row in a MIXED track list — Discovery results and AI
+   chat blocks put owned files and streamable rows side by side, so the row has
+   to say which it is. A phantom-album screen is uniformly not-owned and dims
+   nothing, hence the .result-row scope. */
+.track-row.result-row.is-phantom-track .result-art {
+  opacity: 0.55;
+  transition: opacity var(--dur-fast) var(--ease-standard);
+}
+.track-row.result-row.is-phantom-track:active .result-art {
+  opacity: 0.8;
+}
+.track-row.result-row.is-phantom-track .track-title-line {
+  color: var(--color-text-muted);
+}
+.track-row.result-row.is-phantom-track .track-artist-line {
+  color: var(--color-text-dim);
+}
+
 /* Phantom (unowned but canonized) artist tile — surfaced from out-of-catalog
    similar/discovery data. Dimmed like an unowned album so it reads as "not in
    your library" beside the solid owned artists. Mirrors .album-tile.is-unowned. */

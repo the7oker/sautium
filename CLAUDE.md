@@ -154,9 +154,15 @@ See:
 - **PostgreSQL ENUM over VARCHAR+CHECK** for constrained string columns
   (e.g. `artist_gender`, `artist_vocalist`). Type-level enforcement,
   smaller on-disk footprint, self-documenting schema.
-- **Playback uses `media_files.id` (SERIAL)**, not `tracks.id` (UUID).
-  The track UUID is for logical identity; the media_file id is for the
-  physical audio file on disk.
+- **`media_files.id` (SERIAL) identifies a FILE; `tracks.id` (UUID) identifies
+  the MUSIC.** An owned file is reached by its media_file id, but everything
+  above the file speaks the UUID — the canonical queue (`QueueItem.track_id`),
+  play tracking, and the whole AI surface (search tools return it, play/queue
+  tools take it, `[SAUTIUM_BLOCKS]` carries it). That is what makes not-owned
+  ("phantom") music playable through the same tools: it has a track UUID and no
+  file, so the player streams it. Never make an AI-facing or queue-facing API
+  take a media_file id — that is the mistake that left the assistant unable to
+  play anything the user did not own (fixed 2026-08-25).
 - **CUE images = N virtual `media_files` rows on one `file_path`**, bounded
   by `cue_start_seconds`/`cue_end_seconds` (NULL for regular files, end NULL
   = to EOF; `UNIQUE NULLS NOT DISTINCT (file_path, cue_start_seconds)`).
@@ -769,7 +775,8 @@ responsibility).
 | `desktop/p2p/chat_service.py` | NaCl Box encryption, friend CRUD |
 | `desktop/p2p/email_verify.py` | Signed email verification + invite delivery |
 | `desktop/migrations/001_initial.sql` | Canonical schema (all types, tables, indexes, triggers) |
-| `mcp/assistant_server.py` | MCP server exposing 37 tools to Claude Code (search, playback, MB catalog, HQP device) |
+| `mcp/assistant_server.py` | MCP server exposing the assistant tools to Claude Code / Codex (search, playback, MB catalog, HQP device) |
+| `backend/assistant_queries.py` | Catalog queries + result formatting SHARED by both assistant tool surfaces (MCP + `backend/tools/definitions.py`) — one copy, so neither drifts owned-only |
 | `worker/verify.js` | Cloudflare Worker (email CA, signed invites) |
 
 ---

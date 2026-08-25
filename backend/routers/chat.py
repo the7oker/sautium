@@ -190,7 +190,7 @@ def _hydrate_blocks(blocks: list[dict]) -> list[dict]:
             ids = [it.get("album_id") for it in items if it.get("album_id")]
             hydrated = hydrate_albums(ids)
         elif kind == "tracks":
-            ids = [it.get("id") for it in items if it.get("id")]
+            ids = [it.get("track_id") for it in items if it.get("track_id")]
             hydrated = hydrate_tracks(ids)
         else:
             continue
@@ -902,11 +902,14 @@ async def send_message(session_id: int, req: ChatMessageRequest):
             tracks = _tracks_from_blocks(blocks)
             tracks_data = [
                 {
-                    "id": t.get("id"),
+                    "id": t.get("id"),                    # media_files.id, None when not owned
+                    "track_id": t.get("track_id"),
+                    "is_owned": t.get("is_owned"),
                     "title": t.get("title"),
                     "artist": t.get("artist"),
                     "album": t.get("album"),
                     "cover_id": t.get("cover_id"),
+                    "cover_url": t.get("cover_url"),
                 }
                 for t in tracks
             ] if tracks else None

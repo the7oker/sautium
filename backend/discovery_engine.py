@@ -92,12 +92,20 @@ ENTITIES: dict[str, EntityDef] = {
                         "AND mf.cover_id IS NOT NULL LIMIT 1) AS cover_id, "
                         "(SELECT al.cover_url FROM album_tracks atr JOIN albums al ON al.id=atr.album_id "
                         "WHERE atr.track_id=t.id AND al.cover_url IS NOT NULL LIMIT 1) AS cover_url, "
-                        "(SELECT mf.duration_seconds FROM media_files mf WHERE mf.track_id=t.id LIMIT 1) "
-                        "AS duration_seconds, "
-                        "(SELECT al.title FROM media_files mf JOIN album_variants av ON av.id=mf.album_variant_id "
-                        "JOIN albums al ON al.id=av.album_id WHERE mf.track_id=t.id LIMIT 1) AS album, "
-                        "(SELECT al.release_year FROM media_files mf JOIN album_variants av ON av.id=mf.album_variant_id "
-                        "JOIN albums al ON al.id=av.album_id WHERE mf.track_id=t.id LIMIT 1) AS year"),
+                        # album / year / duration fall back to the tracklist row: a
+                        # not-owned track has no media_file to read them from, and a
+                        # result tile with no album and no length reads as broken.
+                        "COALESCE((SELECT mf.duration_seconds FROM media_files mf WHERE mf.track_id=t.id LIMIT 1), "
+                        "(SELECT atr.length_ms/1000.0 FROM album_tracks atr WHERE atr.track_id=t.id "
+                        "AND atr.length_ms IS NOT NULL LIMIT 1)) AS duration_seconds, "
+                        "COALESCE((SELECT al.title FROM media_files mf JOIN album_variants av ON av.id=mf.album_variant_id "
+                        "JOIN albums al ON al.id=av.album_id WHERE mf.track_id=t.id LIMIT 1), "
+                        "(SELECT al.title FROM album_tracks atr JOIN albums al ON al.id=atr.album_id "
+                        "WHERE atr.track_id=t.id ORDER BY (al.cover_url IS NOT NULL) DESC, al.id LIMIT 1)) AS album, "
+                        "COALESCE((SELECT al.release_year FROM media_files mf JOIN album_variants av ON av.id=mf.album_variant_id "
+                        "JOIN albums al ON al.id=av.album_id WHERE mf.track_id=t.id LIMIT 1), "
+                        "(SELECT al.release_year FROM album_tracks atr JOIN albums al ON al.id=atr.album_id "
+                        "WHERE atr.track_id=t.id AND al.release_year IS NOT NULL ORDER BY al.id LIMIT 1)) AS year"),
 }
 
 

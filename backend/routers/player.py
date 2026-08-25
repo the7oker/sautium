@@ -16,7 +16,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import track_similarity
 from config import settings
@@ -94,11 +94,17 @@ class PlayTrackRequest(BaseModel):
     track_id: int
 
 class PlayAlbumRequest(BaseModel):
-    album_name: str
+    # A caller holding the canonical album UUID (the AI assistant, which reads
+    # the catalog, not the filesystem) sends album_id — owned or phantom, the
+    # endpoint routes it. The fuzzy name path stays for callers that only have
+    # what the user said, and stays OWNED-only: a trigram scan of 3M phantom
+    # titles is the seq-scan the discovery engine exists to avoid.
+    album_id: Optional[str] = None
+    album_name: str = ""
     artist_name: str = ""
 
 class PlaySimilarRequest(BaseModel):
-    track_id: int
+    track_id: str          # canonical track UUID — owned or phantom seed
     limit: int = 15
 
 class PlayTracksRequest(BaseModel):
@@ -110,6 +116,13 @@ class PlayTracksRequest(BaseModel):
 
 class QueueTracksRequest(BaseModel):
     track_ids: list[int]
+
+class EntityRef(BaseModel):
+    kind: str              # 'track' | 'album'
+    id: str                # canonical UUID — owned or phantom, caller needn't know
+
+class QueueEntitiesRequest(BaseModel):
+    items: list[EntityRef] = Field(..., max_length=50)
 
 class JumpRequest(BaseModel):
     index: int  # 1-based, matches HQPlayer's select_track convention
@@ -1453,7 +1466,22 @@ def play_track(req: PlayTrackRequest):
 
 @router.post("/play-album")
 def play_album(req: PlayAlbumRequest):
-    """Fuzzy-match album, load all tracks, play."""
+    """Play a whole album — by canonical UUID (owned or phantom) or fuzzy name.
+
+    An album with no rip has nothing to load from disk, so it is handed to the
+    streaming path: the same thing the album page does when the user presses
+    Play on a not-owned release."""
+    if req.album_id:
+        best_album = _db_query_one(
+            "SELECT al.id, al.title AS album FROM albums al WHERE al.id = %(id)s::uuid",
+            {"id": req.album_id})
+        if not best_album:
+            raise HTTPException(status_code=404, detail="Album not found")
+        return _play_album_rows(best_album)
+
+    if not req.album_name:
+        raise HTTPException(status_code=400, detail="album_id or album_name required")
+
     match_conditions = [
         "(similarity(al.title, %(album)s) > 0.15 OR al.title ILIKE %(album_like)s)"
     ]
@@ -1488,6 +1516,12 @@ def play_album(req: PlayAlbumRequest):
     if not best_album:
         raise HTTPException(status_code=404, detail=f"Album '{req.album_name}' not found")
 
+    return _play_album_rows(best_album)
+
+
+def _play_album_rows(best_album: dict):
+    """Replace the queue with one album's tracks and play. Owned files load from
+    disk; an album with none is streamed instead."""
     rows = _db_query("""
         SELECT mf.id, mf.file_path, t.title, mf.track_number,
                a.name as artist, al.title as album
@@ -1502,7 +1536,7 @@ def play_album(req: PlayAlbumRequest):
     """, {"album_id": best_album["id"]})
 
     if not rows:
-        raise HTTPException(status_code=404, detail="Album has no tracks")
+        return play_phantom_album(PlayPhantomAlbumRequest(album_id=str(best_album["id"])))
 
     sessions.rotate_session(
         manager.queue,
@@ -1740,11 +1774,17 @@ def _artist_alts(name: str) -> tuple:
     return tuple(mb.artist_alt_names(name))
 
 
-def _phantom_track_query(track_id: str):
-    """Build a TrackQuery for one phantom track from album_tracks, or None."""
+def _phantom_track_queries(track_ids: list[str]) -> dict:
+    """TrackQuery per phantom track UUID, from album_tracks — keyed by id, ids
+    with no tracklist row absent. Batched: a similar-tracks set is a dozen
+    phantoms at once and one query per track is a dozen round-trips."""
     from streaming.base import TrackQuery
-    row = _db_query_one("""
-        SELECT t.title, atr.length_ms, al.title AS album, al.cover_url,
+    if not track_ids:
+        return {}
+    rows = _db_query("""
+        SELECT DISTINCT ON (t.id)
+               t.id::text AS track_id, t.title, atr.length_ms,
+               al.title AS album, al.cover_url,
                (SELECT ar.name FROM track_artists ta
                   JOIN artists ar ON ar.id = ta.artist_id
                 WHERE ta.track_id = t.id
@@ -1752,17 +1792,24 @@ def _phantom_track_query(track_id: str):
         FROM tracks t
         JOIN album_tracks atr ON atr.track_id = t.id
         JOIN albums al ON al.id = atr.album_id
-        WHERE t.id = %(tid)s::uuid
-        ORDER BY (al.cover_url IS NOT NULL) DESC, (atr.length_ms IS NOT NULL) DESC, al.id
-        LIMIT 1
-    """, {"tid": track_id})
-    if not row or not row["title"]:
-        return None
-    return TrackQuery(
-        artist=row["artist"] or "", title=row["title"], album=row["album"],
-        artist_alts=_artist_alts(row["artist"]),
-        duration=(float(row["length_ms"]) / 1000.0 if row["length_ms"] else None),
-        track_id=track_id, cover_url=row["cover_url"])
+        WHERE t.id = ANY(CAST(%(ids)s AS uuid[]))
+        ORDER BY t.id, (al.cover_url IS NOT NULL) DESC,
+                 (atr.length_ms IS NOT NULL) DESC, al.id
+    """, {"ids": list(track_ids)})
+    alts = {n: _artist_alts(n) for n in {r["artist"] for r in rows if r["artist"]}}
+    return {
+        r["track_id"]: TrackQuery(
+            artist=r["artist"] or "", title=r["title"], album=r["album"],
+            artist_alts=alts.get(r["artist"], ()),
+            duration=(float(r["length_ms"]) / 1000.0 if r["length_ms"] else None),
+            track_id=r["track_id"], cover_url=r["cover_url"])
+        for r in rows if r["title"]
+    }
+
+
+def _phantom_track_query(track_id: str):
+    """Build a TrackQuery for one phantom track from album_tracks, or None."""
+    return _phantom_track_queries([track_id]).get(track_id)
 
 
 def _phantom_album_queries(album_id: str) -> list:
@@ -2030,7 +2077,8 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
                 status_code=503,
                 detail="The playback output did not accept the preview — try again.")
         return {"ok": True, "provider": e.provider.manifest.id, "track_count": 1,
-                "requested": 1, "missing": [], "artist": q.artist, "album": q.album}
+                "requested": 1, "missing": [], "title": q.title,
+                "artist": q.artist, "album": q.album}
     except HTTPException:
         raise
     except Exception as e:
@@ -2115,84 +2163,229 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
             "missing": missing_payload}
 
 
+# -- Mixed (owned + phantom) queueing -----------------------------------------
+#
+# One ordered list of CANONICAL entities — tracks and albums, owned files and
+# phantom tracklists freely mixed. This is what a caller that speaks the
+# catalog rather than the filesystem needs: the AI assistant holds UUIDs and
+# has no business knowing which of them happen to have a file on disk.
+#
+# Owned rows append at once; a phantom segment has to resolve on a provider and
+# buffer first (minutes for a set of albums — never inside a request). So the
+# work runs in ONE background worker walking the segments IN ORDER, awaiting
+# each phantom filler inline: that inline await is what keeps a later segment
+# from overtaking an earlier one still fetching.
+
+
+def _album_media_rows(album_id: str) -> list[dict]:
+    """Owned media files of an album in play order, one row per track — a second
+    variant of the same album must not duplicate its tracklist."""
+    return _db_query("""
+        SELECT id FROM (
+            SELECT DISTINCT ON (mf.track_id)
+                   mf.id, mf.disc_number, mf.track_number
+            FROM media_files mf
+            JOIN album_variants av ON av.id = mf.album_variant_id
+            WHERE av.album_id = %(album_id)s::uuid
+            ORDER BY mf.track_id, mf.is_analysis_source DESC, mf.id
+        ) picked
+        ORDER BY disc_number NULLS FIRST, track_number
+    """, {"album_id": album_id})
+
+
+def _push_segment(segments: list, kind: str, items: list) -> None:
+    """Extend the run when the kind repeats — consecutive owned tracks belong in
+    one append, consecutive phantoms in one resolve pass."""
+    if not items:
+        return
+    if segments and segments[-1][0] == kind:
+        segments[-1][1].extend(items)
+    else:
+        segments.append((kind, list(items)))
+
+
+def _entity_segments(refs: list) -> tuple[list, list]:
+    """Expand canonical refs into consecutive ('owned', [media rows]) /
+    ('phantom', [TrackQuery]) segments, preserving the caller's order.
+    Returns (segments, ids that resolved to nothing playable)."""
+    segments: list[tuple[str, list]] = []
+    missing: list[str] = []
+    for ref in refs:
+        if ref.kind == "album":
+            rows = _album_media_rows(ref.id)
+            kind, items = ("owned", rows) if rows else ("phantom", _phantom_album_queries(ref.id))
+        else:
+            row = _db_query_one("""
+                SELECT mf.id FROM media_files mf
+                WHERE mf.track_id = %(tid)s::uuid
+                ORDER BY mf.is_analysis_source DESC, mf.id
+                LIMIT 1
+            """, {"tid": ref.id})
+            if row:
+                kind, items = "owned", [row]
+            else:
+                q = _phantom_track_query(ref.id)
+                kind, items = "phantom", ([q] if q else [])
+        if not items:
+            missing.append(ref.id)
+            continue
+        _push_segment(segments, kind, items)
+    return segments, missing
+
+
+def _queue_segments_worker(segments: list, gen: int) -> None:
+    """Append segments to the queue in order: owned items go straight in, a
+    phantom segment resolves, buffers and rolls in through the same filler the
+    album endpoints use — awaited here so the next segment cannot overtake it.
+    Stops the moment the user starts another queue (generation)."""
+    from streaming import service as streaming_service
+    for kind, payload in segments:
+        if manager.queue.generation != gen:
+            return
+        if kind == "owned":
+            _owned_filler(queue_mod.items_for_media_ids([r["id"] for r in payload]), gen)
+            continue
+        chains = _resolve_waterfall(payload)
+        pairs = [(q, ch) for q, ch in zip(payload, chains) if ch]
+        if not pairs:
+            continue                    # nothing on any provider — on to the next
+        proxy = streaming_service.get_proxy()
+        tokens = proxy.add_tracks(pairs)
+        proxy.bind(tokens, gen)
+        _phantom_filler(proxy, tokens, 0, gen)
+
+
+def _queue_segments_async(segments: list, gen: int, name: str) -> None:
+    if segments:
+        threading.Thread(target=_queue_segments_worker, args=(segments, gen),
+                         daemon=True, name=name).start()
+
+
+@router.post("/queue-entities")
+def queue_entities(req: QueueEntitiesRequest):
+    """Append canonical entities — tracks and/or albums, owned or phantom — to
+    the queue in the given order.
+
+    The answer reports what was SCHEDULED, not what is already audible: the
+    leading owned run is queued inside the request, everything behind it (and
+    every phantom, which must resolve on a provider first) rolls in from the
+    background worker. That is the same contract the phantom album endpoints
+    have, for the same reason — fetching is sequential and unbounded."""
+    if not req.items:
+        raise HTTPException(status_code=400, detail="No entities provided")
+    bad = {i.kind for i in req.items} - {"track", "album"}
+    if bad:
+        raise HTTPException(status_code=400, detail=f"invalid kind: {sorted(bad)[0]}")
+
+    segments, missing = _entity_segments(req.items)
+    if not segments:
+        raise HTTPException(status_code=404, detail="Nothing playable in that list")
+    owned = sum(len(p) for k, p in segments if k == "owned")
+    phantom = sum(len(p) for k, p in segments if k == "phantom")
+    if phantom:
+        _ensure_streaming_ready()
+
+    gen = manager.queue.generation
+    # An all-owned call is instant — queue it in-request so it is done when it
+    # answers. With anything behind it the whole list goes to the worker: it
+    # appends strictly in order, and _add_owned's own rolling filler would race
+    # that ordering for a set that needs transcoding (m4a, CUE cuts).
+    if len(segments) == 1 and segments[0][0] == "owned":
+        _add_owned(segments[0][1], clear_first=False, position="end")
+    else:
+        _queue_segments_async(segments, gen, "queue-entities")
+    return {"ok": True, "queued": owned, "streaming": phantom, "not_found": missing}
+
+
 @router.post("/play-similar")
 def play_similar(req: PlaySimilarRequest):
-    """Find similar tracks via pgvector cosine search, queue and play."""
-    # Get track_id from the media_file
-    source = _db_query_one("""
-        SELECT mf.id, t.id as db_track_id
-        FROM media_files mf
-        JOIN tracks t ON mf.track_id = t.id
-        WHERE mf.id = %(track_id)s
-    """, {"track_id": req.track_id})
+    """Replace the queue with tracks similar to the seed and play.
 
-    if not source:
-        raise HTTPException(status_code=404, detail="Track not found")
-
-    rows = _db_query("""
-        WITH target AS (
-            SELECT e.vector
-            FROM embeddings e
-            WHERE e.track_id = %(db_track_id)s
-        )
-        SELECT mf_rep.id, mf_rep.file_path, t.title, a.name as artist,
-               mf_rep.album_title as album,
-               1 - (e.vector <=> (SELECT vector FROM target)) as similarity
-        FROM tracks t
-        JOIN embeddings e ON e.track_id = t.id
-        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-        JOIN artists a ON ta.artist_id = a.id
-        JOIN LATERAL (
-            SELECT mf.id, mf.file_path, mf.duration_seconds, mf.track_number,
-                   mf.sample_rate, mf.bit_depth, mf.is_lossless,
-                   al.title as album_title
-            FROM media_files mf
-            JOIN album_variants av ON mf.album_variant_id = av.id
-            JOIN albums al ON av.album_id = al.id
-            WHERE mf.track_id = t.id
-            ORDER BY mf.is_analysis_source DESC, mf.id
-            LIMIT 1
-        ) mf_rep ON true
-        WHERE t.id != %(db_track_id)s
-        ORDER BY e.vector <=> (SELECT vector FROM target)
-        LIMIT %(limit)s
-    """, {"db_track_id": source["db_track_id"], "limit": req.limit})
-
+    Seed and results are both source-agnostic: the two-tier scorer (the one
+    radio and the Now Playing shelf drift on) takes a track UUID, so a streamed
+    phantom seeds a station as well as an owned file does, and its results mix
+    owned files with streamable phantoms."""
+    rows = track_similarity.similar_tracks(req.track_id, limit=req.limit)
     if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="No similar tracks found — the seed may not be analysed yet.")
+
+    queries = _phantom_track_queries([r["track_id"] for r in rows if not r["is_owned"]])
+    segments: list[tuple[str, list]] = []
+    for r in rows:
+        if r["is_owned"]:
+            _push_segment(segments, "owned", [{"id": r["media_file_id"]}])
+        elif r["track_id"] in queries:
+            _push_segment(segments, "phantom", [queries[r["track_id"]]])
+    if not segments:
         raise HTTPException(status_code=404, detail="No similar tracks found")
+    if any(k == "phantom" for k, _p in segments):
+        _ensure_streaming_ready()
 
-    sessions.rotate_session(manager.queue, 'radio',
-                            seed_media_file_id=req.track_id)
+    seed_mf = _db_query_one("""
+        SELECT mf.id FROM media_files mf WHERE mf.track_id = %(tid)s::uuid LIMIT 1
+    """, {"tid": req.track_id})
+    sessions.rotate_session(manager.queue, 'radio', seed_track_id=req.track_id,
+                            seed_media_file_id=(seed_mf or {}).get("id"))
 
+    # The opener plays now, the rest rolls in behind it — one item, so a slow
+    # transcode or a provider fetch never holds up the first sound.
+    head_kind, head_items = segments[0]
     try:
-        items = queue_mod.items_for_media_ids([r["id"] for r in rows])
-        added, _gen = manager.replace_queue(items, play=True)
-        _exit_radio_mode()
-
-        if added < len(rows):
+        if head_kind == "owned":
+            added = _add_owned([head_items[0]], clear_first=True)
+            gen = manager.queue.generation
+        else:
+            from streaming import service as streaming_service
+            _ensure_output_ready()      # a dead renderer costs 2s here, not a whole buffer
+            chains = _resolve_waterfall(head_items)
+            pairs = [(q, ch) for q, ch in zip(head_items, chains) if ch]
+            if not pairs:
+                raise HTTPException(status_code=503,
+                                    detail="None of the similar tracks could be streamed.")
+            proxy = streaming_service.get_proxy()
+            tokens = proxy.start_session(pairs[:1])
+            try:
+                e = proxy.wait_ready(tokens[0])
+            except (TimeoutError, KeyError):
+                e = None
+            if e is None or e.audio is None:
+                raise HTTPException(status_code=502,
+                                    detail="This station\u2019s opening track isn\u2019t available to stream.")
+            item = queue_mod.item_for_proxy_token(tokens[0])
+            added, gen = manager.replace_queue([item] if item else [], play=True)
+            proxy.bind(tokens, gen)
+            head_items = [q for q, _ch in pairs[1:]]
+        if not added:
             raise HTTPException(
                 status_code=503,
-                detail=f"HQPlayer added {added} of {len(rows)} tracks "
-                       "(connection unstable). Try again.",
-            )
-        return {
-            "ok": True,
-            "count": len(rows),
-            "tracks": [
-                {
-                    "id": r["id"],
-                    "title": r["title"],
-                    "artist": r["artist"],
-                    "album": r["album"],
-                    "similarity": round(float(r["similarity"]), 3),
-                }
-                for r in rows
-            ],
-        }
+                detail="The playback output did not accept the track — try again.")
+        _exit_radio_mode()
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+    rest = ([(head_kind, head_items[1:] if head_kind == "owned" else head_items)]
+            + segments[1:])
+    _queue_segments_async([s for s in rest if s[1]], gen, "play-similar")
+    return {
+        "ok": True,
+        "count": len(rows),
+        "tracks": [
+            {
+                "track_id": r["track_id"],
+                "id": r["media_file_id"],
+                "title": r["title"],
+                "artist": r["artist"],
+                "album": r["album"],
+                "is_owned": bool(r["is_owned"]),
+                "similarity": float(r["similarity"]) if r["similarity"] is not None else None,
+            }
+            for r in rows
+        ],
+    }
 
 
 @router.post("/play-tracks")

@@ -7,6 +7,9 @@ dependencies = [
     "mcp[cli]>=1.0.0",
     "psycopg2-binary>=2.9.0",
     "httpx>=0.24.0",
+    # query-side transliteration for the cross-script lexical search shared with
+    # the backend (backend/transliterate.py)
+    "anyascii>=0.3.0",
 ]
 
 [project.scripts]
