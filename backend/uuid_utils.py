@@ -13,15 +13,61 @@ import uuid
 # Fixed namespace for Sautium — uuid5(NAMESPACE_DNS, "sautium"). Never change!
 NAMESPACE = uuid.UUID('adc1ec0b-2c81-5e26-9938-a369c6f7a5e1')
 
+# Version of the identity rule (normalize / normalize_key below). Bump it with
+# every change to either: backend/db_migrate.py re-normalizes a node's
+# existing rows at startup when its recorded rule is older (marker row
+# identity_rule_v{N} in _schema_migrations), so no node ever mints on one
+# rule beside rows minted on another.
+IDENTITY_RULE = 2
+
+# Apostrophe-like marks are DROPPED, not spaced: "don’t" / "don't" / "dont"
+# are one title. Every other character that is neither a letter, a digit, a
+# combining mark nor whitespace becomes a space and runs collapse. Marks stay
+# word characters because str.isalnum() rejects them and a Devanagari or
+# Arabic title would otherwise shatter at every vowel sign.
+_APOSTROPHES = re.compile("['’‘‚‛`´ʼʹ]")
+_HAS_NON_WORD = re.compile(r"[^\w\s]|_")
+_WS = re.compile(r"\s+")
+
+
+def normalize_key(text: str) -> str:
+    """Identifier keys: NFC, lower, trimmed, single spaces — nothing else.
+
+    For strings whose punctuation is structure, not typography: a model
+    name (`laion/clap-htsat-unfused`), a spec attribute key (`impedance_ohm`),
+    a registry source. This is also the pre-2026-08-25 `normalize`, the rule
+    every human-name entity was minted with before v2 below.
+    """
+    return _WS.sub(' ', unicodedata.normalize('NFC', text.strip().lower()))
+
+
+def _is_word_char(ch: str) -> bool:
+    return ch.isalnum() or ch.isspace() or unicodedata.category(ch).startswith('M')
+
 
 def normalize(text: str) -> str:
-    """Normalize text for deterministic UUID generation.
+    """Human names (titles, artists, albums, genres, tags, gear) → identity key.
 
-    - NFC unicode normalization
-    - strip + lowercase
-    - collapse whitespace
+    v2 (2026-08-25): on top of normalize_key, apostrophe-like marks are
+    dropped and every other non-word character becomes a space, so
+    typography stops forking identities — `Hello Dolly!` / `Hello Dolly`,
+    `See - Line Woman` / `See-Line Woman`, `Don’t` / `Don't` / `Dont` are one
+    UUID each. Measured on the master before the rule: 197 of the 1701
+    same-recording track pairs differed by nothing else. A name that folds
+    to nothing (`!!!`, `†††`, `¥$`) keeps its key form — those are distinct
+    artists, not typography.
+
+    Changing this function is an identity migration: every node must rewrite
+    its UUIDs under the same rule at once (`canon.migrations --renormalize`)
+    — a scan on one rule next to rows minted on the other forks every entity.
     """
-    return re.sub(r'\s+', ' ', unicodedata.normalize('NFC', text.strip().lower()))
+    base = normalize_key(text)
+    if not _HAS_NON_WORD.search(base):
+        return base
+    folded = _APOSTROPHES.sub('', base)
+    folded = ''.join(ch if _is_word_char(ch) else ' ' for ch in folded)
+    folded = _WS.sub(' ', folded).strip()
+    return folded or base
 
 
 def artist_uuid(name: str) -> uuid.UUID:
@@ -54,8 +100,8 @@ def tag_uuid(name: str) -> uuid.UUID:
 
 
 def embedding_model_uuid(name: str) -> uuid.UUID:
-    """Generate deterministic UUID for an embedding model."""
-    return uuid.uuid5(NAMESPACE, f"embedding_model:{normalize(name)}")
+    """Deterministic UUID for an embedding model — a key, not a name."""
+    return uuid.uuid5(NAMESPACE, f"embedding_model:{normalize_key(name)}")
 
 
 def gear_brand_uuid(name: str) -> uuid.UUID:
@@ -74,13 +120,13 @@ def gear_model_uuid(brand_name: str, model: str, category: str) -> uuid.UUID:
 
 
 def gear_spec_attribute_uuid(key: str) -> uuid.UUID:
-    """Deterministic UUID for an EAV spec attribute (`impedance_ohm`…)."""
-    return uuid.uuid5(NAMESPACE, f"gear_spec_attribute:{normalize(key)}")
+    """Deterministic UUID for an EAV spec attribute (`impedance_ohm`…) — a key."""
+    return uuid.uuid5(NAMESPACE, f"gear_spec_attribute:{normalize_key(key)}")
 
 
 def gear_technology_uuid(key: str) -> uuid.UUID:
-    """Deterministic UUID for a proprietary technology entry."""
-    return uuid.uuid5(NAMESPACE, f"gear_technology:{normalize(key)}")
+    """Deterministic UUID for a proprietary technology entry — a key."""
+    return uuid.uuid5(NAMESPACE, f"gear_technology:{normalize_key(key)}")
 
 
 def gear_caveat_uuid(gear_model_id: str, text: str) -> uuid.UUID:

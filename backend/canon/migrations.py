@@ -13,11 +13,12 @@ from typing import List, Tuple, Optional, Dict
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from uuid_utils import artist_uuid, track_uuid, album_uuid
+from uuid_utils import (artist_uuid, track_uuid, album_uuid, genre_uuid, tag_uuid,
+                        gear_brand_uuid, gear_model_uuid, gear_caveat_uuid, gear_pair_uuid)
 from canon.identity import (
-    _clean_artist_name, _filter_parts, _ensure_artist,
+    _SEAL_NULL, _clean_artist_name, _filter_parts, _ensure_artist,
     _update_track_uuid, _update_album_uuid, _merge_album_variants,
-    recanonicalize_artist,
+    delete_orphan_tracks, recanonicalize_artist,
 )
 from canon.split import detect_compound_type, normalize_compound_artist
 
@@ -471,6 +472,456 @@ def normalize_artists(
     return stats
 
 
+# ---------------------------------------------------------------------------
+# Identity re-normalization — the one-off after a uuid_utils.normalize change
+# ---------------------------------------------------------------------------
+
+_SEALED_TABLES = ("embedding_segments", "audio_features", "artist_bios", "artist_tags",
+                  "similar_artists", "track_stats", "genre_descriptions", "albums",
+                  "album_tracks", "track_mbids")
+_TRACK_BATCH = 100_000
+
+
+def _collision_groups(plan) -> Dict[str, list]:
+    """plan: iterable of (old_id, new_id[, ...]) → {new: [members]} with 2+."""
+    groups = defaultdict(list)
+    for row in plan:
+        groups[row[1]].append(row)
+    return {new: members for new, members in groups.items() if len(members) > 1}
+
+
+def _survivor(new: str, members: list, score) -> tuple:
+    """The row that keeps its data in a merge: the one already sitting at the
+    final uuid if any (renaming another onto it would collide), else the
+    best-scoring one — score() returns a sortable tuple, larger = better."""
+    for m in members:
+        if m[0] == new:
+            return m
+    return max(members, key=lambda m: score(m[0]))
+
+
+def _renormalize_artists(db: Session, dry_run: bool) -> Dict:
+    rows = db.execute(text("SELECT id::text, name FROM artists")).fetchall()
+    plan = [(i, str(artist_uuid(n)), n) for i, n in rows]
+    changed = [r for r in plan if r[0] != r[1]]
+    groups = _collision_groups(plan)
+    stats = {"total": len(rows), "changing": len(changed),
+             "collision_groups": len(groups), "merged": 0, "renamed": 0}
+    if dry_run:
+        for new, members in list(groups.items())[:30]:
+            logger.info("  artist collision: %s", " | ".join(m[2] for m in members))
+        return stats
+
+    def score(aid):
+        return tuple(db.execute(text("""
+            SELECT (SELECT count(*) FROM track_artists ta JOIN media_files mf ON mf.track_id = ta.track_id
+                     WHERE ta.artist_id = :a),
+                   (SELECT count(*) FROM track_artists ta JOIN embeddings e ON e.track_id = ta.track_id
+                     WHERE ta.artist_id = :a),
+                   (SELECT count(*) FROM track_artists ta JOIN listening_history lh ON lh.track_id = ta.track_id
+                     WHERE ta.artist_id = :a AND lh.completed),
+                   (SELECT count(*) FROM artist_mbids WHERE artist_id = :a),
+                   (SELECT count(*) FROM track_artists WHERE artist_id = :a),
+                   -extract(epoch FROM (SELECT created_at FROM artists WHERE id = :a))
+        """), {"a": aid}).fetchone())
+
+    done = set()
+    for new, members in groups.items():
+        sid, _, sname = _survivor(new, members, score)
+        if sid != new:
+            db.execute(text("UPDATE artists SET id = :new WHERE id = :old"),
+                       {"new": new, "old": sid})
+        for mid, _, _ in members:
+            if mid != sid:
+                # merges tracks/albums under the survivor's name (recomputed
+                # on the current rule) and repoints every association
+                recanonicalize_artist(db, mid, sname)
+                stats["merged"] += 1
+        done.update(m[0] for m in members)
+    for old, new, _ in changed:
+        if old in done:
+            continue
+        db.execute(text("UPDATE artists SET id = :new WHERE id = :old"),
+                   {"new": new, "old": old})
+        stats["renamed"] += 1
+    db.commit()
+    return stats
+
+
+def _renormalize_albums(db: Session, dry_run: bool) -> Dict:
+    rows = db.execute(text("""
+        SELECT al.id::text, al.title, a.name, count(*) OVER (PARTITION BY al.id) AS nprim
+        FROM albums al
+        JOIN album_artists aa ON aa.album_id = al.id AND aa.role = 'primary'
+        JOIN artists a ON a.id = aa.artist_id""")).fetchall()
+    # A multi-primary album's uuid was minted from the compound credit
+    # string ("A & B") that nothing stores; albums are local-only, canon
+    # re-merges any duplicate by release-group, so they keep their id.
+    single = [(i, str(album_uuid(t, n)), t) for i, t, n, np in rows if np == 1]
+    changed = [r for r in single if r[0] != r[1]]
+    groups = _collision_groups(single)
+    stats = {"total": len({r[0] for r in rows}), "single_primary": len(single),
+             "skipped_multi_primary": len({r[0] for r in rows if r[3] > 1}),
+             "changing": len(changed), "collision_groups": len(groups),
+             "merged": 0, "renamed": 0}
+    if dry_run:
+        for new, members in list(groups.items())[:30]:
+            logger.info("  album collision: %s", " | ".join(m[2] for m in members))
+        return stats
+
+    def score(aid):
+        return tuple(db.execute(text("""
+            SELECT (SELECT count(*) FROM album_variants WHERE album_id = :a),
+                   (SELECT count(*) FROM albums WHERE id = :a AND musicbrainz_id IS NOT NULL),
+                   (SELECT count(*) FROM album_tracks WHERE album_id = :a),
+                   -extract(epoch FROM (SELECT created_at FROM albums WHERE id = :a))
+        """), {"a": aid}).fetchone())
+
+    done = set()
+    for new, members in groups.items():
+        sid, _, _ = _survivor(new, members, score)
+        for mid, _, _ in members:
+            if mid != sid:
+                _update_album_uuid(db, mid, sid)
+                stats["merged"] += 1
+        if sid != new:
+            _update_album_uuid(db, sid, new)
+        done.update(m[0] for m in members)
+    for old, new, _ in changed:
+        if old in done:
+            continue
+        _update_album_uuid(db, old, new)
+        stats["renamed"] += 1
+    db.commit()
+    return stats
+
+
+def _renormalize_named(db: Session, table: str, uuid_fn, merge, dry_run: bool) -> Dict:
+    """genres / tags: name-keyed, ON UPDATE CASCADE children."""
+    rows = db.execute(text(f"SELECT id::text, name FROM {table}")).fetchall()
+    plan = [(i, str(uuid_fn(n)), n) for i, n in rows]
+    changed = [r for r in plan if r[0] != r[1]]
+    groups = _collision_groups(plan)
+    stats = {"total": len(rows), "changing": len(changed),
+             "collision_groups": len(groups), "merged": 0, "renamed": 0}
+    if dry_run:
+        for new, members in list(groups.items())[:20]:
+            logger.info("  %s collision: %s", table, " | ".join(m[2] for m in members))
+        return stats
+    done = set()
+    for new, members in groups.items():
+        sid, _, _ = _survivor(new, members, lambda i: (0,))
+        for mid, _, _ in members:
+            if mid != sid:
+                merge(db, mid, sid)
+                stats["merged"] += 1
+        if sid != new:
+            db.execute(text(f"UPDATE {table} SET id = :new WHERE id = :old"),
+                       {"new": new, "old": sid})
+        done.update(m[0] for m in members)
+    for old, new, _ in changed:
+        if old in done:
+            continue
+        db.execute(text(f"UPDATE {table} SET id = :new WHERE id = :old"),
+                   {"new": new, "old": old})
+        stats["renamed"] += 1
+    db.commit()
+    return stats
+
+
+def _merge_genre(db: Session, old: str, new: str) -> None:
+    p = {"old": old, "new": new}
+    db.execute(text("""
+        INSERT INTO album_genres (album_id, genre_id, source, count)
+        SELECT album_id, :new, source, count FROM album_genres WHERE genre_id = :old
+        ON CONFLICT DO NOTHING"""), p)
+    db.execute(text("""
+        UPDATE genre_descriptions gd SET genre_id = :new WHERE gd.genre_id = :old
+          AND NOT EXISTS (SELECT 1 FROM genre_descriptions x
+                           WHERE x.genre_id = :new AND x.source = gd.source)"""), p)
+    db.execute(text("""
+        UPDATE genre_desc_embeddings ge SET genre_id = :new WHERE ge.genre_id = :old
+          AND NOT EXISTS (SELECT 1 FROM genre_desc_embeddings x
+                           WHERE x.genre_id = :new AND x.model_id = ge.model_id
+                             AND x.chunk_index = ge.chunk_index)"""), p)
+    db.execute(text("DELETE FROM genres WHERE id = :old"), p)
+
+
+def _merge_tag(db: Session, old: str, new: str) -> None:
+    p = {"old": old, "new": new}
+    db.execute(text("""
+        UPDATE artist_tags at2 SET tag_id = :new WHERE at2.tag_id = :old
+          AND NOT EXISTS (SELECT 1 FROM artist_tags x
+                           WHERE x.artist_id = at2.artist_id AND x.tag_id = :new
+                             AND x.source = at2.source)"""), p)
+    db.execute(text("DELETE FROM tags WHERE id = :old"), p)
+
+
+def _cascade_gear_fks(db: Session) -> int:
+    """Every FK onto gear_brands / gear_models gets ON UPDATE CASCADE (the
+    rule every other uuid5 entity already follows; 001_initial.sql carries
+    the same change). Idempotent — constraints already cascading are left."""
+    rows = db.execute(text("""
+        SELECT conrelid::regclass::text AS child, conname, pg_get_constraintdef(oid) AS def
+        FROM pg_constraint
+        WHERE contype = 'f'
+          AND confrelid IN ('gear_brands'::regclass, 'gear_models'::regclass)""")).fetchall()
+    n = 0
+    for child, conname, definition in rows:
+        if "ON UPDATE CASCADE" in definition:
+            continue
+        new_def = definition.replace(" ON DELETE", " ON UPDATE CASCADE ON DELETE") \
+            if " ON DELETE" in definition else definition + " ON UPDATE CASCADE"
+        db.execute(text(f'ALTER TABLE {child} DROP CONSTRAINT "{conname}"'))
+        db.execute(text(f'ALTER TABLE {child} ADD CONSTRAINT "{conname}" {new_def}'))
+        n += 1
+    return n
+
+
+def _renormalize_gear(db: Session, dry_run: bool) -> Dict:
+    """Brands and models are names; caveats and pair notes derive from the
+    model ids and follow. Spec attributes, technologies and registry rows
+    are keys (normalize_key) — untouched by the rule. Collisions here would
+    be a data error, not typography: the run aborts before mutating."""
+    brands = db.execute(text("SELECT id::text, name FROM gear_brands")).fetchall()
+    b_plan = [(i, str(gear_brand_uuid(n)), n) for i, n in brands]
+    models = db.execute(text("""
+        SELECT m.id::text, b.name, m.model, m.category::text
+        FROM gear_models m JOIN gear_brands b ON b.id = m.brand_id""")).fetchall()
+    m_plan = [(i, str(gear_model_uuid(b, m, c)), f"{b} {m}") for i, b, m, c in models]
+    stats = {"brands_changing": sum(1 for r in b_plan if r[0] != r[1]),
+             "models_changing": sum(1 for r in m_plan if r[0] != r[1]),
+             "collision_groups": len(_collision_groups(b_plan)) + len(_collision_groups(m_plan))}
+    if stats["collision_groups"]:
+        raise RuntimeError(f"gear identity collision — resolve by hand first: "
+                           f"{_collision_groups(b_plan)} {_collision_groups(m_plan)}")
+    if dry_run:
+        return stats
+    stats["fks_cascaded"] = _cascade_gear_fks(db)
+    for old, new, _ in b_plan:
+        if old != new:
+            db.execute(text("UPDATE gear_brands SET id = :new WHERE id = :old"),
+                       {"new": new, "old": old})
+    # A pair note stores (model_a < model_b); a cascaded model id can land
+    # on either side of that order, so the check rests while the ids move
+    # and the pairs are re-canonicalized before it is put back.
+    db.execute(text("ALTER TABLE gear_pair_notes DROP CONSTRAINT gear_pair_notes_check"))
+    for old, new, _ in m_plan:
+        if old != new:
+            db.execute(text("UPDATE gear_models SET id = :new WHERE id = :old"),
+                       {"new": new, "old": old})
+    db.execute(text("UPDATE gear_pair_notes SET model_a = model_b, model_b = model_a "
+                    "WHERE model_a > model_b"))
+    db.execute(text("ALTER TABLE gear_pair_notes ADD CONSTRAINT gear_pair_notes_check "
+                    "CHECK (model_a < model_b)"))
+    caveats = db.execute(text(
+        "SELECT id::text, gear_model_id::text, text FROM gear_measured_caveats")).fetchall()
+    for old, mid, txt in caveats:
+        new = str(gear_caveat_uuid(mid, txt))
+        if new != old:
+            db.execute(text("DELETE FROM gear_measured_caveats WHERE id = :new"), {"new": new})
+            db.execute(text("UPDATE gear_measured_caveats SET id = :new WHERE id = :old"),
+                       {"new": new, "old": old})
+    pairs = db.execute(text(
+        "SELECT id::text, model_a::text, model_b::text FROM gear_pair_notes")).fetchall()
+    for old, a, b in pairs:
+        new = str(gear_pair_uuid(a, b))
+        if new != old:
+            db.execute(text("DELETE FROM gear_pair_notes WHERE id = :new"), {"new": new})
+            db.execute(text("UPDATE gear_pair_notes SET id = :new WHERE id = :old"),
+                       {"new": new, "old": old})
+    db.commit()
+    return stats
+
+
+def _renormalize_tracks(db: Session, dry_run: bool) -> Dict:
+    """The bulk. Every track's new uuid goes into a temp map (COPY, a few
+    million rows in seconds); collision groups merge through
+    _update_track_uuid one by one; everything else is renamed in batched
+    UPDATEs whose ON UPDATE CASCADE carries the fifteen child tables."""
+    import io
+    import psycopg2
+    from config import settings
+    raw = psycopg2.connect(settings.database_url)
+    raw.autocommit = False
+    try:
+        cur = raw.cursor()
+        cur.execute("CREATE TEMP TABLE _tmap (old uuid PRIMARY KEY, new uuid NOT NULL)")
+        src = raw.cursor(name="renorm_tracks")
+        src.itersize = 50_000
+        src.execute("""
+            SELECT t.id::text, t.title, a.name
+            FROM tracks t
+            JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+            JOIN artists a ON a.id = ta.artist_id""")
+        buf, n = io.StringIO(), 0
+        for tid, title, name in src:
+            buf.write(f"{tid}\t{track_uuid(title, name)}\n")
+            n += 1
+            if n % 250_000 == 0:
+                buf.seek(0)
+                cur.copy_from(buf, "_tmap", columns=("old", "new"))
+                buf = io.StringIO()
+                logger.info("  track map: %d rows", n)
+        buf.seek(0)
+        cur.copy_from(buf, "_tmap", columns=("old", "new"))
+        src.close()
+        cur.execute("CREATE INDEX ON _tmap (new)")
+        cur.execute("ANALYZE _tmap")
+        cur.execute("SELECT count(*) FILTER (WHERE old <> new) FROM _tmap")
+        changing = cur.fetchone()[0]
+        cur.execute("""SELECT new::text, array_agg(old::text) FROM _tmap
+                       GROUP BY new HAVING count(*) > 1""")
+        groups = cur.fetchall()
+        raw.commit()
+        stats = {"total": n, "changing": changing, "collision_groups": len(groups),
+                 "tracks_in_collisions": sum(len(g[1]) for g in groups),
+                 "merged": 0, "renamed": 0}
+        if dry_run:
+            return stats
+
+        def score(tid):
+            return tuple(db.execute(text("""
+                SELECT (SELECT count(*) FROM media_files WHERE track_id = :t),
+                       (SELECT coalesce(max(CASE s.origin::text WHEN 'local' THEN 2
+                                            WHEN 'deezer' THEN 1 WHEN 'youtube' THEN 0
+                                            ELSE -1 END), -2)
+                          FROM embeddings e LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
+                         WHERE e.track_id = :t),
+                       (SELECT count(*) FROM listening_history WHERE track_id = :t),
+                       (SELECT count(*) FROM album_tracks WHERE track_id = :t),
+                       -extract(epoch FROM (SELECT created_at FROM tracks WHERE id = :t))
+            """), {"t": tid}).fetchone())
+
+        for k, (new, olds) in enumerate(groups, 1):
+            sid = new if new in olds else max(olds, key=score)
+            for old in olds:
+                if old != sid:
+                    _update_track_uuid(db, old, sid)
+                    stats["merged"] += 1
+            if sid != new:
+                _update_track_uuid(db, sid, new)
+            if k % 500 == 0:
+                db.commit()
+                logger.info("  track collisions: %d/%d groups", k, len(groups))
+        db.commit()
+
+        # Two plain statements — an OR'd IN-subquery over the same table
+        # planned as a per-row subplan (measured: 3M × aggregate, never
+        # finished). Collision rows are done above; unchanged rows stay.
+        cur.execute("""CREATE TEMP TABLE _coll AS
+                       SELECT new FROM _tmap GROUP BY new HAVING count(*) > 1""")
+        cur.execute("DELETE FROM _tmap m USING _coll c WHERE m.new = c.new")
+        cur.execute("DELETE FROM _tmap WHERE old = new")
+        cur.execute("""CREATE TEMP TABLE _tb AS
+                       SELECT old, new, (row_number() OVER (ORDER BY old) - 1) / %s AS batch
+                       FROM _tmap""", (_TRACK_BATCH,))
+        cur.execute("CREATE INDEX ON _tb (batch)")
+        cur.execute("SELECT coalesce(max(batch), -1) + 1 FROM _tb")
+        nb = cur.fetchone()[0]
+        raw.commit()
+        for b in range(nb):
+            cur.execute("UPDATE tracks t SET id = m.new FROM _tb m "
+                        "WHERE t.id = m.old AND m.batch = %s", (b,))
+            stats["renamed"] += cur.rowcount
+            raw.commit()
+            logger.info("  track rename batch %d/%d (%d rows so far)", b + 1, nb, stats["renamed"])
+        return stats
+    finally:
+        raw.close()
+
+
+def _shed_all_seals(db: Session) -> Dict:
+    """Every seal payload binds an entity uuid; after the rewrite none of
+    them verifies. Null them all (imported ones included — a foreign seal on
+    a re-keyed row is just as dead, and unsealed rows never travel) and drop
+    the now-unreferenced batches; sign_audio re-seals first-hand material in
+    one batch. Authorship dates restart at that batch — accepted while the
+    network has one live node."""
+    out = {}
+    for t in _SEALED_TABLES:
+        res = db.execute(text(f"UPDATE {t} SET {_SEAL_NULL} WHERE signature IS NOT NULL"))
+        out[t] = res.rowcount
+    out["signing_batches"] = db.execute(text("DELETE FROM signing_batches")).rowcount
+    db.commit()
+    return out
+
+
+def _verify_identities(db: Session) -> Dict:
+    """Post-check: id == uuid(current rule) for every artist, single-primary
+    album, genre, tag and track. Nonzero drift = the run must not be trusted."""
+    out = {}
+    out["artists"] = sum(1 for i, n in db.execute(text("SELECT id::text, name FROM artists"))
+                         if str(artist_uuid(n)) != i)
+    out["genres"] = sum(1 for i, n in db.execute(text("SELECT id::text, name FROM genres"))
+                        if str(genre_uuid(n)) != i)
+    out["tags"] = sum(1 for i, n in db.execute(text("SELECT id::text, name FROM tags"))
+                      if str(tag_uuid(n)) != i)
+    out["albums_single_primary"] = sum(
+        1 for i, t, n, np in db.execute(text("""
+            SELECT al.id::text, al.title, a.name, count(*) OVER (PARTITION BY al.id)
+            FROM albums al JOIN album_artists aa ON aa.album_id = al.id AND aa.role = 'primary'
+            JOIN artists a ON a.id = aa.artist_id"""))
+        if np == 1 and str(album_uuid(t, n)) != i)
+    drift = 0
+    for i, t, n in db.execute(text("""
+            SELECT t.id::text, t.title, a.name FROM tracks t
+            JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+            JOIN artists a ON a.id = ta.artist_id""").execution_options(yield_per=50_000)):
+        if str(track_uuid(t, n)) != i:
+            drift += 1
+    out["tracks"] = drift
+    return out
+
+
+def renormalize_identities(db: Session, dry_run: bool = False) -> Dict:
+    """Rewrite every uuid5 identity under the CURRENT uuid_utils rules — the
+    one-off that must follow a normalize() change on a live node (2026-08-25,
+    v2: punctuation folding). Order matters: artists first (track and album
+    uuids embed the primary artist's name), then albums, genres, tags, gear,
+    and tracks last — the bulk. Rows whose new uuid collides merge (the
+    survivor is whichever holds more: files, analysis, listens); the rest are
+    renamed through ON UPDATE CASCADE. Every seal is shed at the end — the
+    payloads bind the uuids — and sign_audio re-seals in one batch.
+
+    Run with the backend STOPPED: a scan or a stream enrich landing mid-way
+    mints on one rule next to rows still on the other. Dry-run reports the
+    plan (counts, collision samples) and touches nothing."""
+    stats: Dict = {}
+    logger.info("=== artists ===")
+    stats["artists"] = _renormalize_artists(db, dry_run)
+    logger.info("%s", stats["artists"])
+    logger.info("=== albums ===")
+    stats["albums"] = _renormalize_albums(db, dry_run)
+    logger.info("%s", stats["albums"])
+    logger.info("=== genres ===")
+    stats["genres"] = _renormalize_named(db, "genres", genre_uuid, _merge_genre, dry_run)
+    logger.info("%s", stats["genres"])
+    logger.info("=== tags ===")
+    stats["tags"] = _renormalize_named(db, "tags", tag_uuid, _merge_tag, dry_run)
+    logger.info("%s", stats["tags"])
+    logger.info("=== gear ===")
+    stats["gear"] = _renormalize_gear(db, dry_run)
+    logger.info("%s", stats["gear"])
+    logger.info("=== tracks ===")
+    stats["tracks"] = _renormalize_tracks(db, dry_run)
+    logger.info("%s", stats["tracks"])
+    if dry_run:
+        return stats
+    # An album merge keeps the survivor's slot where both filled it; the
+    # loser's track in that slot is left holding nothing — drop such rows.
+    stats["orphan_tracks_deleted"] = delete_orphan_tracks(db)
+    db.commit()
+    logger.info("orphan tracks deleted: %d", stats["orphan_tracks_deleted"])
+    logger.info("=== seals ===")
+    stats["seals_shed"] = _shed_all_seals(db)
+    logger.info("%s", stats["seals_shed"])
+    logger.info("=== verify ===")
+    stats["drift"] = _verify_identities(db)
+    logger.info("%s", stats["drift"])
+    return stats
+
+
 if __name__ == "__main__":
     import sys
 
@@ -482,6 +933,17 @@ if __name__ == "__main__":
     dry_run = '--dry-run' in sys.argv
 
     from database import get_db_context
+
+    if '--renormalize' in sys.argv:
+        with get_db_context() as db:
+            logger.info("=== Re-normalize identities (uuid_utils rules) ===")
+            if dry_run:
+                logger.info("[DRY RUN MODE]")
+            stats = renormalize_identities(db, dry_run=dry_run)
+            print("\n=== Results ===")
+            for key, value in stats.items():
+                print(f"  {key}: {value}")
+        sys.exit(0)
 
     if '--unsplit' in sys.argv:
         with get_db_context() as db:

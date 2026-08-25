@@ -1549,7 +1549,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- detailed praise / criticism terms live in gear_sentiment_terms.
 CREATE TABLE IF NOT EXISTS gear_models (
     id                     UUID PRIMARY KEY,
-    brand_id               UUID NOT NULL REFERENCES gear_brands(id) ON DELETE RESTRICT,
+    brand_id               UUID NOT NULL REFERENCES gear_brands(id) ON UPDATE CASCADE ON DELETE RESTRICT,
     model                  VARCHAR(300) NOT NULL,
     category               gear_category NOT NULL,
     research_state         gear_research_state NOT NULL DEFAULT 'queued',
@@ -1775,7 +1775,7 @@ ON CONFLICT (key) DO NOTHING;
 -- as text so unit / value_type from the attribute remain authoritative);
 -- raw_value preserves the AI's original string for audit.
 CREATE TABLE IF NOT EXISTS gear_specs (
-    gear_model_id  UUID NOT NULL REFERENCES gear_models(id) ON DELETE CASCADE,
+    gear_model_id  UUID NOT NULL REFERENCES gear_models(id) ON UPDATE CASCADE ON DELETE CASCADE,
     attribute_id   UUID NOT NULL REFERENCES gear_spec_attributes(id) ON DELETE CASCADE,
     value_text     TEXT NOT NULL,
     raw_value      TEXT,
@@ -1793,7 +1793,7 @@ CREATE TABLE IF NOT EXISTS gear_technologies (
     key               VARCHAR(80) UNIQUE NOT NULL,
     label             VARCHAR(150) NOT NULL,
     description       TEXT NOT NULL,
-    brand_id          UUID REFERENCES gear_brands(id) ON DELETE SET NULL,
+    brand_id          UUID REFERENCES gear_brands(id) ON UPDATE CASCADE ON DELETE SET NULL,
     patent_or_source  TEXT,
     introduced_year   INTEGER,
     applies_to        TEXT[] NOT NULL,
@@ -1810,7 +1810,7 @@ DO $$ BEGIN CREATE TRIGGER trg_gear_technologies_updated_at BEFORE UPDATE ON gea
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 CREATE TABLE IF NOT EXISTS gear_model_technologies (
-    gear_model_id  UUID NOT NULL REFERENCES gear_models(id) ON DELETE CASCADE,
+    gear_model_id  UUID NOT NULL REFERENCES gear_models(id) ON UPDATE CASCADE ON DELETE CASCADE,
     technology_id  UUID NOT NULL REFERENCES gear_technologies(id) ON DELETE CASCADE,
     PRIMARY KEY (gear_model_id, technology_id)
 );
@@ -1821,7 +1821,7 @@ CREATE INDEX IF NOT EXISTS idx_gear_model_technologies_tech ON gear_model_techno
 -- (model, polarity, term). Searchable across catalog ("which gear
 -- gets 'organic timbre' praise?").
 CREATE TABLE IF NOT EXISTS gear_sentiment_terms (
-    gear_model_id  UUID NOT NULL REFERENCES gear_models(id) ON DELETE CASCADE,
+    gear_model_id  UUID NOT NULL REFERENCES gear_models(id) ON UPDATE CASCADE ON DELETE CASCADE,
     polarity       gear_polarity NOT NULL,
     term           VARCHAR(80) NOT NULL,
     weight         REAL,
@@ -1838,7 +1838,7 @@ CREATE INDEX IF NOT EXISTS idx_gear_sentiment_term_lookup ON gear_sentiment_term
 -- transducer | NULL (model-wide).
 CREATE TABLE IF NOT EXISTS gear_measured_caveats (
     id             UUID PRIMARY KEY,
-    gear_model_id  UUID NOT NULL REFERENCES gear_models(id) ON DELETE CASCADE,
+    gear_model_id  UUID NOT NULL REFERENCES gear_models(id) ON UPDATE CASCADE ON DELETE CASCADE,
     role           VARCHAR(20),
     severity       gear_caveat_severity NOT NULL DEFAULT 'warn',
     -- optional machine-readable condition: caveat applies only when
@@ -1861,8 +1861,8 @@ CREATE INDEX IF NOT EXISTS idx_gear_caveats_model ON gear_measured_caveats(gear_
 -- deterministic id. model_a/model_b are canonically ordered (a < b).
 CREATE TABLE IF NOT EXISTS gear_pair_notes (
     id              UUID PRIMARY KEY,
-    model_a         UUID NOT NULL REFERENCES gear_models(id) ON DELETE CASCADE,
-    model_b         UUID NOT NULL REFERENCES gear_models(id) ON DELETE CASCADE,
+    model_a         UUID NOT NULL REFERENCES gear_models(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    model_b         UUID NOT NULL REFERENCES gear_models(id) ON UPDATE CASCADE ON DELETE CASCADE,
     research_state  gear_research_state NOT NULL DEFAULT 'queued',
     summary         TEXT,
     terms           TEXT[],
@@ -1888,7 +1888,7 @@ CREATE TABLE IF NOT EXISTS gear_registry_entries (
     source           VARCHAR(60) NOT NULL,
     category         gear_category NOT NULL,
     model_name       TEXT NOT NULL,
-    gear_model_id    UUID REFERENCES gear_models(id) ON DELETE SET NULL,
+    gear_model_id    UUID REFERENCES gear_models(id) ON UPDATE CASCADE ON DELETE SET NULL,
     dev_sub_bass_db  REAL,
     dev_bass_db      REAL,
     dev_mids_db      REAL,

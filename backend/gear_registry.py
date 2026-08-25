@@ -25,7 +25,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 from db_pool import db_execute, db_query, db_query_one
-from uuid_utils import NAMESPACE, normalize
+from uuid_utils import NAMESPACE, normalize, normalize_key
 import uuid as _uuid
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,8 @@ TARGET_BASS_SHELF = {"dev_sub_bass_db": 5.86, "dev_bass_db": 2.82, "dev_mids_db"
 
 
 def registry_entry_uuid(source: str, model_name: str) -> _uuid.UUID:
-    return _uuid.uuid5(NAMESPACE, f"gear_registry:{normalize(source)}:{normalize(model_name)}")
+    """Import key of a dataset row — source and model_name are keys, not names."""
+    return _uuid.uuid5(NAMESPACE, f"gear_registry:{normalize_key(source)}:{normalize_key(model_name)}")
 
 
 # ── import guardrails ───────────────────────────────────────────────────────

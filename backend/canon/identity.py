@@ -103,10 +103,78 @@ def elect_analysis_source(db: Session, track_id) -> None:
     """), {"tid": track_id})
 
 
+# Mirrors provenance.ORIGIN_RANK: a local rip beats a lossless stream beats a
+# lossy one; an unlinked (legacy) analysis ranks below all of them.
+_ORIGIN_RANK_SQL = ("CASE s.origin::text WHEN 'local' THEN 2 WHEN 'deezer' THEN 1 "
+                    "WHEN 'youtube' THEN 0 ELSE -1 END")
+
+_SEAL_NULL = "author_pubkey = NULL, signature = NULL, batch_root = NULL, merkle_proof = NULL"
+
+
+def _analysis_rank(db: Session, track_id: str) -> int:
+    """Best provenance rank among a track's embeddings rows; -2 = none."""
+    best = db.execute(text(f"""
+        SELECT MAX({_ORIGIN_RANK_SQL}) FROM embeddings e
+        LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
+        WHERE e.track_id = :tid"""), {"tid": track_id}).scalar()
+    return -2 if best is None else int(best)
+
+
+def _shed_track_seals(db: Session, track_id: str) -> None:
+    """Null the audio/stat seals of a track whose uuid just changed hands.
+
+    Every seal payload binds the track uuid (segment_payload / features_payload
+    / the track_stat entity), so after a rename or a merge the stored
+    signatures verify against a uuid the row no longer carries — the
+    album_tracks / track_mbids guards shed theirs on the cascaded track_id
+    change, these tables have no track_id in their guard. sign_audio
+    re-seals on its next pass; nothing travels unsigned in between."""
+    db.execute(text(f"""
+        UPDATE embedding_segments es SET {_SEAL_NULL}
+        FROM embeddings e
+        WHERE e.id = es.embedding_id AND e.track_id = :tid
+          AND es.signature IS NOT NULL"""), {"tid": track_id})
+    db.execute(text(f"UPDATE audio_features SET {_SEAL_NULL} "
+                    "WHERE track_id = :tid AND signature IS NOT NULL"),
+               {"tid": track_id})
+    db.execute(text(f"UPDATE track_stats SET {_SEAL_NULL} "
+                    "WHERE track_id = :tid AND signature IS NOT NULL"),
+               {"tid": track_id})
+
+
+def _move_analysis(db: Session, old: str, new: str) -> None:
+    """Re-home the old track's analysis (sources, embeddings + segments,
+    features) onto ``new``, which holds none. A same-pcm_hash source already
+    on the target is the same audio: the moving rows re-point at it and the
+    duplicate source is dropped (UNIQUE (track_id, pcm_hash))."""
+    p = {"old": old, "new": new}
+    for tbl in ("embeddings", "audio_features"):
+        db.execute(text(f"""
+            UPDATE {tbl} x SET analysis_source_id = t.id
+            FROM analysis_sources o
+            JOIN analysis_sources t ON t.track_id = :new AND t.pcm_hash = o.pcm_hash
+            WHERE x.analysis_source_id = o.id AND o.track_id = :old"""), p)
+    db.execute(text("""
+        DELETE FROM analysis_sources o WHERE o.track_id = :old
+          AND EXISTS (SELECT 1 FROM analysis_sources t
+                       WHERE t.track_id = :new AND t.pcm_hash = o.pcm_hash)"""), p)
+    db.execute(text("UPDATE analysis_sources SET track_id = :new WHERE track_id = :old"), p)
+    db.execute(text("UPDATE embeddings SET track_id = :new WHERE track_id = :old"), p)
+    db.execute(text("UPDATE audio_features SET track_id = :new WHERE track_id = :old"), p)
+
+
 def _update_track_uuid(db: Session, old_id, new_id) -> str:
     """
     Update track UUID via ON UPDATE CASCADE, or merge if target exists.
     Returns the final track UUID.
+
+    Merge moves EVERYTHING the old row holds that the target lacks — files,
+    listens, play stats, tracklist slots, recording bindings, stats, lyrics,
+    text embeddings, session rows — and the better-provenance analysis of
+    the two (a phantom's sealed lossless-stream analysis merging into an
+    owned track that was never analyzed moves rather than dies: GPU work
+    nobody re-derives without the audio). Seals of whatever changed uuid are
+    shed; sign_audio re-seals.
     """
     old_str = str(old_id)
     new_str = str(new_id)
@@ -124,11 +192,56 @@ def _update_track_uuid(db: Session, old_id, new_id) -> str:
             text("UPDATE tracks SET id = :new_id WHERE id = :old_id"),
             {"new_id": new_str, "old_id": old_str},
         )
+        _shed_track_seals(db, new_str)
     else:
-        # Merge: move per-user data to target track, delete old. Drop the moving
-        # files' analysis-source flag first — the target keeps its own single
-        # source, so the repoint can't trip uq_media_files_analysis_source with
-        # two TRUE rows on one track_id (the crash this guards against).
+        p = {"new": new_str, "old": old_str}
+        # Analysis: keep the better provenance, move it if it is the old
+        # row's (its seals are shed below — the payload binds the uuid).
+        if _analysis_rank(db, old_str) > _analysis_rank(db, new_str):
+            db.execute(text("DELETE FROM embeddings WHERE track_id = :new"), p)
+            db.execute(text("DELETE FROM audio_features WHERE track_id = :new"), p)
+            _move_analysis(db, old_str, new_str)
+            _shed_track_seals(db, new_str)
+        # Structure. Slots: the (album, disc, position) PK can't collide —
+        # two tracks never share a slot. Recording bindings: keyed by the
+        # recording itself, so they simply follow. Both guards shed the seal
+        # on the track_id change.
+        db.execute(text("UPDATE album_tracks SET track_id = :new WHERE track_id = :old"), p)
+        db.execute(text("UPDATE track_mbids SET track_id = :new WHERE track_id = :old"), p)
+        db.execute(text("""
+            INSERT INTO track_artists (track_id, artist_id, role)
+            SELECT :new, artist_id, role FROM track_artists WHERE track_id = :old
+            ON CONFLICT DO NOTHING"""), p)
+        # One-per-(track, key) tables: move what the target lacks; a moved
+        # stats row carries the old uuid in its seal payload — shed it.
+        db.execute(text(f"""
+            UPDATE track_stats ts SET track_id = :new, {_SEAL_NULL}
+            WHERE ts.track_id = :old
+              AND NOT EXISTS (SELECT 1 FROM track_stats x
+                               WHERE x.track_id = :new AND x.source = ts.source)"""), p)
+        db.execute(text("""
+            UPDATE track_lyrics tl SET track_id = :new
+            WHERE tl.track_id = :old
+              AND NOT EXISTS (SELECT 1 FROM track_lyrics x
+                               WHERE x.track_id = :new AND x.source = tl.source)"""), p)
+        db.execute(text("""
+            UPDATE text_embeddings te SET track_id = :new
+            WHERE te.track_id = :old
+              AND NOT EXISTS (SELECT 1 FROM text_embeddings x
+                               WHERE x.track_id = :new AND x.model_id = te.model_id)"""), p)
+        db.execute(text("""
+            UPDATE lyrics_embeddings le SET track_id = :new
+            WHERE le.track_id = :old
+              AND NOT EXISTS (SELECT 1 FROM lyrics_embeddings x
+                               WHERE x.track_id = :new AND x.model_id = le.model_id
+                                 AND x.chunk_index = le.chunk_index)"""), p)
+        db.execute(text("UPDATE session_tracks SET track_id = :new WHERE track_id = :old"), p)
+        db.execute(text("UPDATE listening_sessions SET seed_track_id = :new "
+                        "WHERE seed_track_id = :old"), p)
+        # Per-user data. Drop the moving files' analysis-source flag first —
+        # the target keeps its own single source, so the repoint can't trip
+        # uq_media_files_analysis_source with two TRUE rows on one track_id
+        # (the crash this guards against).
         db.execute(
             text("UPDATE media_files SET is_analysis_source = false "
                  "WHERE track_id = :old AND is_analysis_source"),
@@ -164,7 +277,8 @@ def _update_track_uuid(db: Session, old_id, new_id) -> str:
                 updated_at = CURRENT_TIMESTAMP
         """), {"new": new_str, "old": old_str})
         db.execute(text("DELETE FROM local_play_stats WHERE track_id = :old"), {"old": old_str})
-        # CASCADE deletes old associations, embeddings, features, stats, lyrics
+        # CASCADE takes whatever lost the merge: the weaker analysis, duplicate
+        # stats/lyrics/embeddings, the old associations.
         db.execute(text("DELETE FROM tracks WHERE id = :old"), {"old": old_str})
         # Re-elect one analysis source across the merged files (best quality
         # wins; a better rip that moved in schedules re-analysis via the
@@ -230,13 +344,65 @@ def _update_album_uuid(db: Session, old_id, new_id) -> str:
             text("UPDATE albums SET id = :new_id WHERE id = :old_id"),
             {"new_id": new_str, "old_id": old_str},
         )
+        # The album seal's entity is the uuid; the tracklist rows shed theirs
+        # on the cascaded album_id change (guard), this one has no guard for id.
+        db.execute(text(f"UPDATE albums SET {_SEAL_NULL} "
+                        "WHERE id = :id AND signature IS NOT NULL"), {"id": new_str})
     else:
-        # Merge: move album variants to target (folding same-directory siblings),
-        # delete old.
+        # Merge: move album variants to target (folding same-directory
+        # siblings), then everything else the target lacks — tracklist slots
+        # (a slot the target already fills is the target's), artist links,
+        # genres, streaming mints, session origins; fill blank canon fields
+        # from the old row — then delete old.
         _merge_album_variants(db, new_str, from_album=old_str)
+        p = {"new": new_str, "old": old_str}
+        db.execute(text("""
+            UPDATE album_tracks at2 SET album_id = :new
+            WHERE at2.album_id = :old
+              AND NOT EXISTS (SELECT 1 FROM album_tracks x
+                               WHERE x.album_id = :new AND x.disc = at2.disc
+                                 AND x.position = at2.position)"""), p)
+        db.execute(text("""
+            INSERT INTO album_artists (album_id, artist_id, role, mbid)
+            SELECT :new, artist_id, role, mbid FROM album_artists WHERE album_id = :old
+            ON CONFLICT DO NOTHING"""), p)
+        db.execute(text("""
+            INSERT INTO album_genres (album_id, genre_id, source, count)
+            SELECT :new, genre_id, source, count FROM album_genres WHERE album_id = :old
+            ON CONFLICT DO NOTHING"""), p)
+        db.execute(text("UPDATE streaming_mints SET album_id = :new WHERE album_id = :old"), p)
+        db.execute(text("UPDATE listening_sessions SET origin_album_id = :new "
+                        "WHERE origin_album_id = :old"), p)
+        db.execute(text("""
+            UPDATE albums n SET
+                musicbrainz_id = COALESCE(n.musicbrainz_id, o.musicbrainz_id),
+                mb_match_confidence = COALESCE(n.mb_match_confidence, o.mb_match_confidence),
+                release_year = COALESCE(n.release_year, o.release_year),
+                cover_url = COALESCE(n.cover_url, o.cover_url)
+            FROM albums o WHERE n.id = :new AND o.id = :old"""), p)
         db.execute(text("DELETE FROM albums WHERE id = :old"), {"old": old_str})
 
     return new_str
+
+
+def delete_orphan_tracks(db: Session) -> int:
+    """Drop track rows nothing refers to any more — no file, no tracklist
+    slot, no analysis, no listen, no lyrics, no session. A re-keyed phantom
+    slot (the mint moved it to another uuid) leaves such a row behind; a
+    track that carries anything at all is not an orphan and stays."""
+    res = db.execute(text("""
+        DELETE FROM tracks t
+         WHERE NOT EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
+           AND NOT EXISTS (SELECT 1 FROM album_tracks at2 WHERE at2.track_id = t.id)
+           AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = t.id)
+           AND NOT EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = t.id)
+           AND NOT EXISTS (SELECT 1 FROM listening_history lh WHERE lh.track_id = t.id)
+           AND NOT EXISTS (SELECT 1 FROM local_play_stats lp WHERE lp.track_id = t.id)
+           AND NOT EXISTS (SELECT 1 FROM session_tracks st WHERE st.track_id = t.id)
+           AND NOT EXISTS (SELECT 1 FROM listening_sessions ls WHERE ls.seed_track_id = t.id)
+           AND NOT EXISTS (SELECT 1 FROM track_lyrics tl WHERE tl.track_id = t.id)
+    """))
+    return res.rowcount
 
 
 def recanonicalize_artist(db: Session, source_id, canonical_name: str) -> str:

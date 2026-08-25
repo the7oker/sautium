@@ -34,6 +34,32 @@ implementation details live in the code, DB and git history.
   EmbeddingModel all use `uuid5(NAMESPACE, "entity:{normalize(...)}")` so the
   same data on different nodes collapses to the same ID. Namespace is
   `adc1ec0b-2c81-5e26-9938-a369c6f7a5e1` (in `backend/uuid_utils.py`).
+- **`normalize` v2 folds typography (2026-08-25)**. The identity key drops
+  apostrophe-like marks and turns every other non-word character into a
+  space (`Hello Dolly!` = `Hello Dolly`, `See - Line` = `See-Line`,
+  `Don’t` = `Don't` = `Dont`); a name that folds to nothing (`!!!`, `†††`)
+  keeps its key form. Measured before the change: of 1701 pairs where an
+  owned track and an MB-minted phantom shared a recording under two uuids,
+  197 differed by punctuation alone. Identifier-like keys (embedding model
+  names, gear spec attribute keys, registry sources) stay on `normalize_key`
+  — their punctuation is structure. A formula change is an identity
+  migration, never a code-only change: `canon.migrations --renormalize`
+  rewrote 1.35M track uuids, merged the collisions (survivor = whoever holds
+  files/analysis/listens), shed every seal (payloads bind the uuids) and
+  `sign_audio` re-sealed in one batch; the scanner minting on one rule next
+  to rows on the other would fork every entity.
+- **Phantom tracklist slots carry the TRACK's artist credit**. The MB mint
+  keys each slot the way the scanner keys a tagged rip: title + the track's
+  own credit (`mb_artist_credit.name`, join phrases included), not the
+  album's artist — a "Various Artists" phantom keyed on the compilation
+  could never collapse with a rip (530 same-recording pairs on the master).
+  Credits that are not the album artist get a name-only artist row, no MB
+  anchor: an anchor would enrol them in the discography re-derive, and a
+  compilation's fifteen credits times their discographies is the fan-out the
+  engagement rule forbids. Per-artist fan-outs (Last.fm bios included, since
+  the same day) gate on engagement, never on "has a track" — a dump node
+  minted ~250k such stubs. A slot that moves to another uuid carries its
+  analysis/listens/files along (`_update_track_uuid` rename-or-merge).
 - **Album has no artist_id**. Artists derived via `track_artists` — handles
   compilations, features, collaborations without awkward joins or nullable FKs.
 - **Genre is a track property, not album**. Many-to-many via `track_genres`.
