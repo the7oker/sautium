@@ -237,6 +237,13 @@ async def lifespan(app: FastAPI):
         logger.info("Database connection successful")
     except Exception as e:
         logger.error(f"Database connection failed: {e}")
+    else:
+        # Bring the schema and the data to this code's version before
+        # anything writes: pending desktop/migrations/NNN_*.sql deltas and
+        # the Python data migrations (identity rule). One place for every
+        # node — Docker or launcher-run — see backend/db_migrate.py.
+        import db_migrate
+        db_migrate.apply_pending()
 
     # Resolve the hardware profile (full/standard/lite — HARDWARE-TIERS.md).
     # Drives the pre-warm set below plus pool sizes, phantom minting and

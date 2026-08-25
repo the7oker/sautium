@@ -145,7 +145,15 @@ See:
   must collapse to the same ID. Namespace
   `adc1ec0b-2c81-5e26-9938-a369c6f7a5e1` (in `backend/uuid_utils.py`).
   Formula: `uuid5(NAMESPACE, "entity_type:{normalize(identifier)}")`.
-  Covers: Artist, Album, Track, Genre, Tag, EmbeddingModel.
+  Covers: Artist, Album, Track, Genre, Tag, EmbeddingModel. `normalize`
+  (v2, 2026-08-25) folds typography: apostrophes dropped, every other
+  non-word character → space, collapsed — `Hello Dolly!`/`Hello Dolly`,
+  `Don’t`/`Don't`/`Dont` are one id; a name that folds to nothing (`!!!`)
+  keeps its key form. Identifier-like keys (model names, spec attribute
+  keys, registry sources) use `normalize_key` (NFC/lower/trim only).
+  **Changing either is an identity migration** — run
+  `python -m canon.migrations --renormalize` with the backend stopped on
+  every live node; the seals bind the uuids and get re-signed.
 - **Album has no `artist_id`.** Artists derived via `track_artists` —
   compilations, features and collaborations work without nullable FKs.
 - **Genre is a track property**, not album. Many-to-many via `track_genres`.
@@ -179,16 +187,36 @@ See:
 
 ## Migration & DB Workflow
 
-- **Schema lives in `desktop/migrations/001_initial.sql`.** It's the single
-  source of truth for a fresh install, and the ONLY migration file: while the
-  product is pre-release, the Docker DB is the one live instance that gets
-  ALTERed by hand, and every other install is dropped and recreated on schema
-  change — so numbered follow-ups carry no value. Fold the change into 001 and
-  apply the equivalent DDL to Docker.
-- **Temporary migrations go to `/tmp/*.sql`**, never into the repo.
-  Use `docker exec -i sautium-postgres psql -U musicai -d music_ai < /tmp/foo.sql`
-  to apply, then delete the tmp file and stage the equivalent change in
-  `001_initial.sql`.
+- **Schema = `desktop/migrations/001_initial.sql` + numbered deltas.** 001
+  is the fresh-install baseline and the single readable source of truth —
+  fold every schema change into it. Since 2026-08-25 there are external
+  nodes to support (the first appeared that night, schema from 001, no
+  data yet), so every schema change ALSO ships as `NNN_<change>.sql`, an
+  IDEMPOTENT delta (`IF NOT EXISTS`, `DROP CONSTRAINT IF EXISTS` + `ADD`,
+  `DO $$ … EXCEPTION WHEN duplicate_object`) for databases that already ran
+  the earlier files — the same DDL as the 001 block it mirrors
+  (`002_invite_tokens.sql`, `003_gear_fk_cascade.sql` are the pattern). A
+  fresh node runs 001 and then every delta, so a delta must be a no-op on
+  the schema 001 just created. Never ALTER a node by hand.
+- **One runner, every node.** `desktop/db_init.apply_migrations` applies
+  pending files in name order and records them in `_schema_migrations`.
+  The launcher calls it at service start and after an update
+  (`updater.has_new_migrations` = an added `migrations/*.sql` in the
+  pulled range); the backend calls `backend/db_migrate.apply_pending()` in
+  its lifespan before anything serves — Docker included, so the master no
+  longer needs hand-applied DDL (it adopted 001 as its baseline on
+  2026-08-25; `adopt_baseline` does that for any pre-runner database). A
+  node only receives a delta once it is committed and pushed.
+- **Data migrations are Python steps in `backend/db_migrate.py`**, keyed
+  by marker rows in the same table (`identity_rule_v{N}`): the identity
+  rule (`uuid_utils.IDENTITY_RULE`) is re-normalized at startup when the
+  recorded rule is older than the code's. Bump the constant with every
+  change to `normalize`/`normalize_key`; never change the rule without it.
+- **Trying DDL out** happens on the rehearsal database, not the live one:
+  restore the latest `data/backup/*.dump` into `music_ai_test`
+  (`pg_restore -L` without the `mb_*` data), run the delta there, then
+  commit it as `NNN_*.sql` and let the runner apply it (restart the
+  backend).
 - **PostgreSQL ENUM type changes** require this exact sequence (a straight
   `ALTER TYPE` fails):
   ```

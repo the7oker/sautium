@@ -110,3 +110,6 @@ scripts/master-front/*.zip
 scripts/master-front/*.download
 scripts/master-front/caddy.unzip/
 scripts/master-front/*.log
+
+# pre-migration pg_dump snapshots (multi-GB)
+data/backup/

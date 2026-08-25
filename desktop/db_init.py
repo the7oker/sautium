@@ -1076,16 +1076,50 @@ def create_database(
         conn.close()
 
 
-def run_migrations(
-    password: str,
-    port: int = 5432,
-    progress_cb: Optional[Callable] = None,
-) -> int:
-    """
-    Run pending SQL migrations from desktop/migrations/.
+def ensure_migrations_table(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {MIGRATIONS_TABLE} (
+                id SERIAL PRIMARY KEY,
+                filename VARCHAR(255) NOT NULL UNIQUE,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    conn.commit()
 
-    Migrations are numbered files: 001_initial.sql, 002_add_feature.sql, etc.
-    Tracks applied migrations in _schema_migrations table.
+
+def adopt_baseline(conn) -> bool:
+    """A database that got its schema before this surface ran the runner
+    (the Docker master applied 001_initial.sql by hand) has the tables but
+    no tracking table: record 001 as applied so only the deltas run. Returns
+    True if it adopted. A database with neither is a fresh install — 001
+    runs like any other migration."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass(%s), to_regclass('public.tracks')",
+                    (f"public.{MIGRATIONS_TABLE}",))
+        has_table, has_schema = cur.fetchone()
+    if has_table or not has_schema:
+        return False
+    ensure_migrations_table(conn)
+    with conn.cursor() as cur:
+        cur.execute(f"INSERT INTO {MIGRATIONS_TABLE} (filename) VALUES ('001_initial.sql')")
+    conn.commit()
+    logger.info("Adopted existing schema as 001_initial.sql baseline")
+    return True
+
+
+def apply_migrations(conn, progress_cb: Optional[Callable] = None) -> int:
+    """
+    Apply pending SQL migrations from desktop/migrations/ on an open,
+    non-autocommit connection.
+
+    Migrations are numbered files: 001_initial.sql (the fresh-install
+    baseline, kept current) and NNN_<change>.sql deltas for databases that
+    already ran earlier files. A fresh install runs 001 and then every
+    delta, so a delta must be idempotent — a no-op on the schema 001 just
+    created. Applied files are tracked in _schema_migrations; the same
+    runner serves the launcher (service start, post-update) and the backend
+    (backend/db_migrate.py at startup, Docker included).
 
     Returns the number of migrations applied.
     """
@@ -1100,6 +1134,53 @@ def run_migrations(
         logger.info("No migration files found")
         return 0
 
+    ensure_migrations_table(conn)
+    with conn.cursor() as cur:
+        # Get already applied migrations
+        cur.execute(f"SELECT filename FROM {MIGRATIONS_TABLE}")
+        applied = {row[0] for row in cur.fetchall()}
+
+        applied_count = 0
+        for migration_file in migration_files:
+            filename = migration_file.name
+            if filename in applied:
+                continue
+
+            logger.info(f"Applying migration: {filename}")
+            if progress_cb:
+                progress_cb(f"Running migration: {filename}")
+
+            sql = migration_file.read_text(encoding="utf-8")
+
+            try:
+                cur.execute(sql)
+                cur.execute(
+                    f"INSERT INTO {MIGRATIONS_TABLE} (filename) VALUES (%s)",
+                    (filename,),
+                )
+                conn.commit()
+                applied_count += 1
+                logger.info(f"Migration {filename} applied successfully")
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Migration {filename} failed: {e}")
+                raise
+
+        if applied_count == 0:
+            logger.info("All migrations are up to date")
+        else:
+            logger.info(f"Applied {applied_count} migration(s)")
+
+        return applied_count
+
+
+def run_migrations(
+    password: str,
+    port: int = 5432,
+    progress_cb: Optional[Callable] = None,
+) -> int:
+    """Launcher entry point: apply pending migrations on the launcher's
+    bundled PostgreSQL (see apply_migrations)."""
     conn = psycopg2.connect(
         host="localhost",
         port=port,
@@ -1108,55 +1189,8 @@ def run_migrations(
         dbname="sautium",
     )
     conn.autocommit = False
-
     try:
-        with conn.cursor() as cur:
-            # Ensure migrations tracking table exists
-            cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS {MIGRATIONS_TABLE} (
-                    id SERIAL PRIMARY KEY,
-                    filename VARCHAR(255) NOT NULL UNIQUE,
-                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            conn.commit()
-
-            # Get already applied migrations
-            cur.execute(f"SELECT filename FROM {MIGRATIONS_TABLE}")
-            applied = {row[0] for row in cur.fetchall()}
-
-            applied_count = 0
-            for migration_file in migration_files:
-                filename = migration_file.name
-                if filename in applied:
-                    continue
-
-                logger.info(f"Applying migration: {filename}")
-                if progress_cb:
-                    progress_cb(f"Running migration: {filename}")
-
-                sql = migration_file.read_text(encoding="utf-8")
-
-                try:
-                    cur.execute(sql)
-                    cur.execute(
-                        f"INSERT INTO {MIGRATIONS_TABLE} (filename) VALUES (%s)",
-                        (filename,),
-                    )
-                    conn.commit()
-                    applied_count += 1
-                    logger.info(f"Migration {filename} applied successfully")
-                except Exception as e:
-                    conn.rollback()
-                    logger.error(f"Migration {filename} failed: {e}")
-                    raise
-
-            if applied_count == 0:
-                logger.info("All migrations are up to date")
-            else:
-                logger.info(f"Applied {applied_count} migration(s)")
-
-            return applied_count
+        return apply_migrations(conn, progress_cb)
     finally:
         conn.close()
 
