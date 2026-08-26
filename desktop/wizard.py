@@ -1043,6 +1043,7 @@ class SetupWizard(ctk.CTkToplevel):
             )
             return
 
+        self._diag_spool("agent.signin_opened", {"agent": "claude"})
         self._claude_signin_status.configure(
             text="Waiting for sign-in (poll every 2s for 5 min)...",
             text_color="gray",
@@ -1085,6 +1086,8 @@ class SetupWizard(ctk.CTkToplevel):
         """Self-rescheduling timer that checks for credentials."""
         if claude_authenticated():
             self._claude_poll_after_id = None
+            self._diag_spool("agent.state_changed",
+                             {"agent": "claude", "from": "not_authed", "to": "ready"})
             # Fresh credentials just landed — re-probe them instead of
             # trusting a pre-login verdict.
             self._claude_verified = None
@@ -1092,6 +1095,7 @@ class SetupWizard(ctk.CTkToplevel):
             return
         if time.monotonic() >= self._claude_poll_deadline:
             self._claude_poll_after_id = None
+            self._diag_spool("agent.signin_timeout", {"agent": "claude"})
             self._claude_signin_status.configure(
                 text="Sign-in not detected. Click Refresh after authorizing.",
                 text_color="orange",
@@ -1297,6 +1301,7 @@ class SetupWizard(ctk.CTkToplevel):
             )
             return
 
+        self._diag_spool("agent.signin_opened", {"agent": "codex"})
         self._codex_signin_status.configure(
             text="Waiting for sign-in (poll every 2s for 5 min)...",
             text_color="gray",
@@ -1331,17 +1336,28 @@ class SetupWizard(ctk.CTkToplevel):
     def _poll_codex_auth(self):
         if codex_authenticated():
             self._codex_poll_after_id = None
+            self._diag_spool("agent.state_changed",
+                             {"agent": "codex", "from": "not_authed", "to": "ready"})
             self._codex_verified = None
             self._render_codex_state_ui()  # transitions to verifying → ready
             return
         if time.monotonic() >= self._codex_poll_deadline:
             self._codex_poll_after_id = None
+            self._diag_spool("agent.signin_timeout", {"agent": "codex"})
             self._codex_signin_status.configure(
                 text="Sign-in not detected. Click Refresh after authorizing.",
                 text_color="orange",
             )
             return
         self._codex_poll_after_id = self.after(2000, self._poll_codex_auth)
+
+    def _diag_spool(self, kind: str, detail: dict) -> None:
+        """Support diagnostics before a database exists: the wizard runs
+        first, so its sign-in outcomes wait in the spool the launcher
+        drains at its first successful start. An abandoned sign-in is the
+        silent failure support most needs to see."""
+        from desktop.p2p import diag_events
+        diag_events.spool(get_data_dir(), kind, {**detail, "source": "wizard"})
 
     def _cancel_codex_poll(self):
         if self._codex_poll_after_id is not None:

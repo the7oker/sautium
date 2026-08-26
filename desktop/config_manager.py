@@ -117,6 +117,13 @@ def get_data_dir() -> Path:
     return data_dir
 
 
+def local_db_dsn(config: dict) -> str:
+    """DSN of the launcher's bundled PostgreSQL."""
+    ports = config.get("ports", {})
+    password = config.get("postgres_password", "changeme")
+    return f"postgresql://sautium:{password}@localhost:{ports.get('postgres', 15432)}/sautium"
+
+
 def load_config() -> dict:
     """Load config from disk, merging with defaults for any missing keys."""
     config_path = get_config_path()

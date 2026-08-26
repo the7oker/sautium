@@ -768,3 +768,78 @@ the load meter and the gate's backstops remain the node-wide protection.
 `docker compose up -d backend`; re-add `netsh interface portproxy add v4tov4
 listenport=8801 listenaddress=0.0.0.0 connectport=8801 connectaddress=<WSL VM
 IP>`.
+
+### Support diagnostics — SHIPPED 2026-08-26
+
+Every identity auto-friends the master as its support contact, but a
+chat message is only part of a problem report: the diagnosis needs logs,
+the AI-assistant dialogs, the machine, the build, the P2P state — none of
+which fit a chat. Two mechanisms, both **silent** (no dialogs; a
+`support.diagnostics_enabled` toggle, on by default, and a "Support" row
+in the P2P card that says what went out when):
+
+**Warrants (master → node → master).** The maintainer, from Claude Code
+(`mcp/support_server.py` → `/api/support/*` on the master's 8800), issues a
+WARRANT: `{v, id, issuer, target, issued_at, expires_at, scopes, since,
+sig}`, Ed25519-signed by the master node key over
+`sautium-diag-warrant:v1:{id}:{issuer}:{target}:{issued_at}:{expires_at}:{scopes}:{since}`
+(`desktop/p2p/diag_protocol.py`). It travels as a `diag_warrant` frame
+down the node's OWN wake stream to the master (relay #0 —
+`_master_wake_loop`), which every launcher node holds anyway: no
+discovery, no relay hop, works behind CGNAT. A node that is offline gets
+it parked (`support_warrants.dispatched_at IS NULL`) and pushed the moment
+it subscribes (`peer_chat.set_subscribe_hook` →
+`peer_diag.on_wake_subscribed`), re-pushed on every subscribe until the
+bundle lands. The node (`P2PManager._diag_worker`) accepts the frame only
+on the master subscription, then `verify_warrant`: issuer is the pinned
+master, target is itself, not expired, scopes ⊆ the fixed enum, signature
+good. `diag_warrants.id` (PRIMARY KEY, `INSERT … ON CONFLICT DO NOTHING
+RETURNING`) decides first receipt; a re-delivery resumes an unfinished
+upload and a finished one is a no-op — **single-use and retry-safe with
+one row**. `desktop/diag_bundle.py` collects the scopes — `system`,
+`settings`, `p2p`, `jobs`, `events`, `logs`, `chat` — each a fixed
+collector over fixed sources with allowlists (never `ai.api_key`, Last.fm
+sessions, config.json `api_keys`/`postgres_password`, keys, `.api_secret`,
+the agents' auth files, and never `p2p_messages`: friends' E2E chat is not
+the master's to read; log tails go through `scrub_secrets`). The tar.gz
+is boxed (NaCl Box, Curve25519 from the node keys — the chat
+construction) to the master and POSTed to `/api/diag/bundle?warrant=<id>`
+on the master's peer surface with a wire-format-v1 signature, 32 MiB cap,
+stored as received in `support_bundles`. `support_open_bundle` decrypts and
+unpacks it under `data/support/<pubkey16>/<bundle>/` (a bind mount) —
+plaintext leaves the database only on that call.
+
+**Why a captured warrant is worthless.** The bundle's destination is not
+in the warrant — it is the pinned master, reached over the node's own
+pinned TLS. Replaying a warrant to its target re-delivers a bundle to the
+master or does nothing; presenting it to another node fails the target
+check; forging one needs the master key. A warrant names scopes, never
+paths, tables or queries — the node runs its own collectors, whatever
+the wire says.
+
+**Reports (node → master, proactive).** The node keeps its own durable
+incident log, `diag_events` (`desktop/p2p/diag_events.py`), written by
+every runtime: `node.started` (build/commit, OS, hardware profile, agent
+auth states, unclean-shutdown from a session marker), `service.start_failed`,
+`p2p.start_failed`, `backend.crashed/restarted/gave_up` (the launcher's
+watchdog), `agent.signin_opened/signin_timeout/state_changed` (the Web
+UI's sign-in endpoints and the wizard — the abandoned sign-in nobody
+reported is exactly this), `chat.error`, `sync.failed`, `update.failed`.
+Before a database exists (wizard, a PostgreSQL that did not start) events
+wait in `<data_dir>/diag/spool.jsonl` and are drained at the next start.
+The insert trigger NOTIFYs `sautium_diag`; the launcher's worker boxes
+the unreported rows — content-free: `LOCAL_ONLY_FIELDS` (log tails) never
+leave the node — and POSTs `/api/diag/report` (256 KiB, 30/h per node,
+friend-only). They land decrypted in `support_reports`, which is what
+`support_nodes` reads: last start, version, agents, unresolved sign-ins,
+problem count. Reachability is the trigger for retries: a master
+reconnect resumes staged uploads and unshipped reports — no timers.
+
+**Limits, on purpose.** Non-master Docker nodes have no wake client to
+the master, so they record `diag_events` but neither answer warrants nor
+report (v1 is for the launcher, where the users are). A node with the
+toggle off is silent — no "declined" signal, because that would disclose
+the toggle. `backend.log` is now rotated to `backend.log.1` on every
+backend start so the previous run's crash survives into the `logs`
+scope. Retention: 90 d locally, 180 d reports / 30 d bundles on the
+master (swept once per start).

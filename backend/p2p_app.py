@@ -434,6 +434,10 @@ app.include_router(router)
 app.include_router(mb_router)
 
 from routers.peer_chat import chat_router, relay_router  # noqa: E402
+from routers.peer_diag import diag_router  # noqa: E402
 
 app.include_router(chat_router)
 app.include_router(relay_router)
+# Support diagnostics ingress — answers only for warrants this node issued,
+# so the router is inert on every node but the master.
+app.include_router(diag_router)

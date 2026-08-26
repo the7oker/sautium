@@ -446,6 +446,13 @@ async def lifespan(app: FastAPI):
                 peer_port=settings.p2p_announce_port or settings.p2p_sync_port)
             _mailbox_task = asyncio.create_task(_mailbox.run(lambda: not _identity_stop.is_set()))
             logger.info("master mailbox: wake socket task started")
+            # The support desk (routers/support, routers/peer_diag): parked
+            # warrants go down a node's wake stream the moment it subscribes;
+            # old reports and bundles are swept once per start.
+            from routers import peer_chat, peer_diag, support
+            peer_chat.set_subscribe_hook(peer_diag.on_wake_subscribed)
+            await asyncio.to_thread(support.sweep_retention)
+            logger.info("support desk: warrant dispatch armed")
     except Exception as e:
         logger.warning(f"master mailbox init failed: {e}")
 
@@ -1631,6 +1638,9 @@ app.include_router(gear_models_router)
 
 from routers.settings import router as settings_router
 app.include_router(settings_router)
+
+from routers.support import router as support_router
+app.include_router(support_router)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

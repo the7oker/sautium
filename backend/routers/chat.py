@@ -747,6 +747,23 @@ def _build_provider_stream(
     )
 
 
+def _record_chat_error(session_id: int, final: StreamDone) -> None:
+    """Support diagnostics: a provider that failed before producing a token
+    is the commonest 'the AI does not work' complaint — the error string is
+    recorded, never the conversation. Subordinate to the persist path: a
+    diagnostics hiccup must not lose the user's reply."""
+    from db_pool import get_conn
+    from desktop.p2p import diag_events
+    try:
+        with get_conn() as conn:
+            diag_events.record(conn, "chat.error", {
+                "provider": final.provider, "model": final.model,
+                "error": str(final.error)[:500], "session_id": session_id,
+            })
+    except Exception as e:
+        logger.warning(f"diag: chat.error not recorded — {e}")
+
+
 @router.post("/sessions/{session_id}/messages")
 async def send_message(session_id: int, req: ChatMessageRequest):
     """Stream the assistant's reply as Server-Sent Events.
@@ -896,6 +913,7 @@ async def send_message(session_id: int, req: ChatMessageRequest):
             # history reloads.
             if not clean_text and final and final.error:
                 clean_text = f"⚠️ {final.error}"
+                _record_chat_error(session_id, final)
                 act = getattr(final, "error_action", None)
                 if isinstance(act, dict) and act.get("url") and act.get("label"):
                     clean_text += f"\n\n[{act['label']}]({act['url']})"

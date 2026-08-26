@@ -46,6 +46,25 @@ def installed_build() -> Optional[str]:
     return stamp.read_text(encoding="utf-8").strip() or None
 
 
+def current_commit() -> Optional[str]:
+    """HEAD of our checkout, no network — the build identity a support
+    report carries. None for a packaged tree (see installed_build)."""
+    try:
+        result = _git_cmd(["rev-parse", "--short=12", "HEAD"])
+    except (OSError, subprocess.TimeoutExpired):
+        return None                      # no git on a packaged install
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _update_failed(config: dict, step: str, error: str) -> None:
+    """Support diagnostics: a failed update is exactly the moment a node
+    goes quiet — recorded before the services come back."""
+    from desktop.config_manager import get_data_dir, local_db_dsn
+    from desktop.p2p import diag_events
+    diag_events.record_or_spool(local_db_dsn(config), get_data_dir(), "update.failed",
+                                {"step": step, "error": str(error)[:500]})
+
+
 def is_git_repo() -> bool:
     """Is OUR tree a checkout — not merely something's work tree.
 
@@ -203,6 +222,7 @@ def perform_update(
 
     success, old_hash = pull_updates()
     if not success:
+        _update_failed(config, "pull", "git pull failed")
         # Restart services even if pull failed
         service_manager.start_backend(progress_cb)
         service_manager.start_tracker(progress_cb)
@@ -214,6 +234,7 @@ def perform_update(
     if requirements_changed(old_hash):
         if not install_requirements(progress_cb):
             logger.warning("pip install failed, continuing anyway")
+            _update_failed(config, "pip", "pip install failed")
 
     # Check for new migrations
     if has_new_migrations(old_hash):
@@ -226,6 +247,7 @@ def perform_update(
             run_migrations(password, port=port, progress_cb=progress_cb)
         except Exception as e:
             logger.error(f"Migration after update failed: {e}")
+            _update_failed(config, "migration", str(e))
 
     # Restart services
     if progress_cb:

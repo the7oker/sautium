@@ -45,6 +45,8 @@ data/cache/*
 data/tls/
 data/authority/
 data/node_identity/
+# Support desk — bundles user nodes sent, unpacked on demand (master only)
+data/support/
 # Claude Code session storage — bind-mounted so chat history survives rebuilds
 data/claude_sessions/
 # MusicBrainz dump (~7GB tarball + extracted TSVs) — re-downloadable, loaded into pg

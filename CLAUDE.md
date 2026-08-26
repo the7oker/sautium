@@ -267,7 +267,10 @@ See:
   sync's whole point is not doing the work twice), `p2p.gate_mode`
   (`off|shadow|enforce`, default `shadow` — the admission gate prices
   strangers' requests in 64 MiB tasks; arming is a release decision, see
-  P2P-SYNC-INTEGRITY.md § "Pricing formula v1").
+  P2P-SYNC-INTEGRITY.md § "Pricing formula v1"), `support.diagnostics_enabled`
+  (default on: answer the master's signed diagnostic warrants and send
+  content-free event reports — silent by design, the switch and the
+  "Support" row are the disclosure; P2P_NETWORK.md § "Support diagnostics").
 
 ---
 
@@ -358,6 +361,14 @@ UPnP, or the peer surface. The hard rules below bind with or without it.
    HMAC window). The peer surface may write ONLY to P2P domain tables
    (friends, p2p_messages, invite-token tables) behind that gating —
    it must never gain a route that reveals a secret or configuration.
+   `/api/diag/*` (support diagnostics, `backend/routers/peer_diag.py`)
+   follows the same rule: per-request Ed25519 via `verify_request`,
+   friend-only, its own body caps, NaCl-boxed payloads the master alone
+   can read, writes to `support_*` tables only, and it answers a bundle
+   only for a warrant this node issued to that signer. A node never
+   serves a diag route — it receives warrants solely on its own wake
+   stream to the master and honours only the fixed scope enum
+   (P2P_NETWORK.md § "Support diagnostics").
    Do not move backend endpoints into the peer surface, or vice
    versa, without redoing the auth story.
 5. **No `Bearer` / cookie / `request.client.host` auth in Docker
@@ -446,6 +457,12 @@ break the design language. Use `window.notifyDialog()` and
 | `desktop/p2p/identity_registry.py` | `p2p_identities` registry + lazy `IdentityGate` (one-time proof verification, bans) |
 | `desktop/p2p/peer_auth.py` | Wire format v1: peer request signatures, cert introduction, lanes |
 | `backend/routers/sync.py` | Backend sync endpoints (P2P protocol) |
+| `desktop/p2p/diag_protocol.py` | Support diagnostics wire protocol: signed node-bound warrants, boxed bundles/reports, scope enum, log scrubbing |
+| `desktop/p2p/diag_events.py` | Node-local incident log (`diag_events`), pre-DB spool + session marker, the per-warrant state machine |
+| `desktop/diag_bundle.py` | Launcher bundle collector — fixed collectors per scope with settings/config allowlists |
+| `backend/routers/peer_diag.py` | Master peer-surface ingress (`/api/diag/report`, `/api/diag/bundle`) + warrant dispatch down wake streams |
+| `backend/routers/support.py` | The support desk on 8800 (`/api/support/*`, master-only): nodes overview, reports, warrants, bundle open/delete |
+| `mcp/support_server.py` | MCP server for the support desk — how the maintainer works support from Claude Code |
 | `backend/routers/p2p.py` | Web UI Friends/Chat/invite-token endpoints |
 | `backend/p2p_app.py` | Docker peer surface (8801): sync + chat/relay |
 | `backend/routers/peer_chat.py` | Peer chat + `/api/relay/*` (mirrors sync_server) |

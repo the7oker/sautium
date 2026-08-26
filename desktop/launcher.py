@@ -308,7 +308,13 @@ class LauncherApp(ctk.CTk):
         self.service_manager.on_backend_event = self._on_backend_event
 
         def _start():
+            from desktop.config_manager import get_data_dir
+            from desktop.p2p import diag_events
             self._set_status("starting", "Starting services...")
+            data_dir = get_data_dir()
+            # Left behind by a session that never reached _shutdown → the
+            # previous run ended uncleanly; node.started carries that.
+            previous_session = diag_events.write_session_marker(data_dir)
 
             def progress(msg):
                 self.ui_call(lambda: self._progress_text.configure(text=msg))
@@ -317,20 +323,53 @@ class LauncherApp(ctk.CTk):
                 success = self.service_manager.start_all(progress_cb=progress)
             except Exception as e:
                 logger.error(f"Startup failed: {e}", exc_info=True)
+                diag_events.spool(data_dir, "service.start_failed",
+                                  {"step": "start_all", "error": str(e)[:500]})
                 err_msg = str(e)[:200]
                 self.ui_call(lambda: self._set_status("error", "Startup failed"))
                 self.ui_call(lambda: self._progress_text.configure(text=err_msg))
                 return
 
             if success:
+                self._record_node_started(data_dir, previous_session)
                 self.ui_call(self._on_services_ready)
             else:
+                diag_events.spool(data_dir, "service.start_failed",
+                                  {"step": "start_all", "error": "a service did not start"})
                 self.ui_call(lambda: self._set_status("error", "Failed to start services"))
 
         threading.Thread(target=_start, daemon=True).start()
 
         # Check for updates in background (non-blocking)
         self._check_updates_background()
+
+    def _record_node_started(self, data_dir: Path, previous_session: Optional[dict]) -> None:
+        """Support diagnostics: the node's start-of-life note — build,
+        machine, agent states, whether the last session ended cleanly —
+        plus whatever the wizard or a failed start left in the spool. The
+        launcher's diag worker ships it to the master once P2P is up."""
+        import psycopg2
+
+        from desktop import diag_bundle
+        from desktop.p2p import diag_events
+        try:
+            conn = psycopg2.connect(self._get_local_db_dsn(), connect_timeout=5)
+        except psycopg2.Error as e:
+            logger.warning(f"diag: node.started not recorded — {e}")
+            return
+        try:
+            conn.autocommit = True
+            spooled = diag_events.drain_spool(conn, data_dir)
+            detail = diag_bundle.system_facts(self.config, conn)
+            detail["unclean_shutdown"] = previous_session is not None
+            detail["previous_session"] = previous_session
+            detail["spooled_events"] = spooled
+            diag_events.record(conn, "node.started", detail)
+            diag_events.prune(conn)
+        except Exception as e:
+            logger.warning(f"diag: node.started failed — {e}")
+        finally:
+            conn.close()
 
     def _on_backend_event(self, state: str, message: str):
         """Watchdog callback (backend-watchdog thread) — marshal to Tk."""
@@ -751,6 +790,11 @@ class LauncherApp(ctk.CTk):
                     state="normal"))
             except Exception as e:
                 logger.error(f"P2P startup failed: {e}", exc_info=True)
+                from desktop.config_manager import get_data_dir
+                from desktop.p2p import diag_events
+                diag_events.record_or_spool(
+                    self._get_local_db_dsn(), get_data_dir(), "p2p.start_failed",
+                    {"error": str(e)[:500]})
                 # Enable Sync anyway — it will show a clear error
                 self.ui_call(lambda: self._btn_sync.configure(
                     state="normal"))
@@ -1117,10 +1161,8 @@ class LauncherApp(ctk.CTk):
 
     def _get_local_db_dsn(self) -> str:
         """Build DSN for the launcher's local PostgreSQL."""
-        ports = self.config.get("ports", {})
-        pw = self.config.get("postgres_password", "changeme")
-        port = ports.get("postgres", 15432)
-        return f"postgresql://sautium:{pw}@localhost:{port}/sautium"
+        from desktop.config_manager import local_db_dsn
+        return local_db_dsn(self.config)
 
     def _sync_library(self):
         """Sync enrichment data purely via P2P (LAN discovery + DHT)."""
@@ -1438,6 +1480,9 @@ class LauncherApp(ctk.CTk):
                 except Exception as e:
                     logger.debug(f"P2P stop error: {e}")
             self.service_manager.stop_all()
+            from desktop.config_manager import get_data_dir
+            from desktop.p2p import diag_events
+            diag_events.clear_session_marker(get_data_dir())
             self.ui_call(self._final_quit)
 
         threading.Thread(target=_shutdown, daemon=True).start()

@@ -16,6 +16,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from functools import partial
+from pathlib import Path
 from typing import Callable, Optional
 
 import psycopg2
@@ -23,7 +24,7 @@ import psycopg2.extensions
 
 from desktop.api_client import BackendAPIClient
 from desktop.mb_slice_client import MBSliceClient
-from desktop.p2p import mb_slice_queries, sync_queries
+from desktop.p2p import diag_protocol, mb_slice_queries, sync_queries
 from desktop.p2p.addrs import fmt_addr
 from desktop.p2p.peer_auth import pinned_pubkey, pinned_ssl_context
 from desktop.p2p.chat_service import ChatService
@@ -93,6 +94,7 @@ class P2PManager:
         self._history_synced_friends: set[int] = set()
         self._master_wake_task: Optional[asyncio.Task] = None
         self._peer_relay_task: Optional[asyncio.Task] = None
+        self._diag_task: Optional[asyncio.Task] = None
         # Live peer-relay subscriptions: relay_pubkey -> asyncio.Task
         self._peer_relay_subs: dict[str, asyncio.Task] = {}
         self._peer_relay_addrs: dict[str, tuple] = {}
@@ -299,6 +301,12 @@ class P2PManager:
         self._sync_lock = asyncio.Lock()
         self._mb_slice_lock = asyncio.Lock()
         self._mb_probe_lock = asyncio.Lock()
+        # Support diagnostics: one sequential worker fed by the master's
+        # wake stream (warrants), its reconnects (resume) and LISTEN
+        # sautium_diag (reports) — see _diag_worker.
+        self._diag_queue: asyncio.Queue = asyncio.Queue()
+        self._master_addr = None
+        self._diag_sent: list = []
 
         def _progress(msg):
             logger.info(msg)
@@ -421,6 +429,8 @@ class P2PManager:
                 self._peer_relay_task = asyncio.create_task(
                     self._peer_relay_manager()
                 )
+                self._diag_task = asyncio.create_task(self._diag_worker())
+                self._diag_queue.put_nowait(("report",))
             self._reachability_task = asyncio.create_task(
                 self._reachability_loop()
             )
@@ -573,7 +583,7 @@ class P2PManager:
                      self._sync_request_listen_task, self._sync_request_task,
                      self._auto_sync_task, self._mb_slice_task,
                      self._upnp_renewal_task, self._master_wake_task,
-                     self._peer_relay_task,
+                     self._peer_relay_task, self._diag_task,
                      *self._peer_relay_subs.values(),
                      self._reachability_task):
             if task:
@@ -2259,6 +2269,10 @@ class P2PManager:
                             # offline — only meaningful with a friend.
                             await self._sync_chat_history(
                                 relay_row, [(ip, port)])
+                            # The master is reachable again: retry staged
+                            # support bundles and unshipped reports.
+                            self._master_addr = (ip, port)
+                            self._diag_queue.put_nowait(("resume", (ip, port)))
                         last_bump = time.time()
                         async for raw in resp.content:
                             if not self._running:
@@ -2302,6 +2316,16 @@ class P2PManager:
             frame = json.loads(data)
         except ValueError:
             frame = {}
+        if frame.get("type") == diag_protocol.FRAME_TYPE:
+            # A support warrant rides ONLY the master's own stream; a peer
+            # relay carrying one is ignored. Queued, not handled inline —
+            # collecting a bundle must not stall the stream that delivers
+            # chat. verify_warrant runs in the worker.
+            from desktop.p2p.master_node import MASTER_PUBKEY_HEX
+            if relay_pubkey == MASTER_PUBKEY_HEX:
+                self._diag_queue.put_nowait(
+                    ("warrant", frame.get("warrant") or {}, (ip, port)))
+            return
         if frame.get("type") != "deliver":
             if relay:
                 await self._sync_chat_history(relay, [(ip, port)])
@@ -3011,10 +3035,12 @@ class P2PManager:
             return None
 
     async def _listen_for_db_notifications(self):
-        """Listen for PostgreSQL NOTIFY on 'sautium_chat' channel.
+        """Listen for PostgreSQL NOTIFY on the 'sautium_chat' and
+        'sautium_diag' channels.
 
-        Wakes up ``_sync_chat_histories`` instantly when the backend
-        inserts a new outgoing message (NOTIFY sautium_chat).
+        sautium_chat wakes ``_sync_chat_histories`` instantly when the
+        backend inserts a new outgoing message; sautium_diag (the
+        diag_events insert trigger) wakes the support-report shipper.
         """
         while self._running:
             conn = None
@@ -3025,6 +3051,7 @@ class P2PManager:
                 )
                 with conn.cursor() as cur:
                     cur.execute("LISTEN sautium_chat")
+                    cur.execute("LISTEN sautium_diag")
 
                 while self._running:
                     # Block up to 5 s waiting for data on the socket
@@ -3034,10 +3061,13 @@ class P2PManager:
                     )
                     if ready[0]:
                         conn.poll()
+                        channels = set()
                         while conn.notifies:
-                            conn.notifies.pop(0)
-                        if self._chat_notify:
+                            channels.add(conn.notifies.pop(0).channel)
+                        if "sautium_chat" in channels and self._chat_notify:
                             self._chat_notify.set()
+                        if "sautium_diag" in channels:
+                            self._diag_queue.put_nowait(("report",))
             except Exception as e:
                 logger.debug(f"DB LISTEN error: {e}")
                 await asyncio.sleep(5)
@@ -3271,6 +3301,9 @@ class P2PManager:
             except Exception as e:
                 logger.error(f"P2P sync failed: {e}", exc_info=True)
                 stats = {"error": str(e)}
+                await asyncio.get_event_loop().run_in_executor(
+                    None, self._diag_record, "sync.failed",
+                    {"trigger": trigger, "error": str(e)[:500]})
 
             items = sum(v for v in stats.values() if isinstance(v, int))
             await asyncio.get_event_loop().run_in_executor(
@@ -3590,6 +3623,236 @@ class P2PManager:
                 await loop.run_in_executor(None, last_client.finalize)
                 logger.info(f"MB slice run done: {total}")
             return total
+
+    # ------------------------------------------------------------------
+    # Support diagnostics (desktop/p2p/diag_protocol.py)
+    # ------------------------------------------------------------------
+
+    def _diag_record(self, kind: str, detail: dict) -> None:
+        """Executor-safe: one event on a short-lived connection."""
+        from desktop.config_manager import get_data_dir
+        from desktop.p2p import diag_events
+        diag_events.record_or_spool(self.db_dsn, get_data_dir(), kind, detail)
+
+    def _diag_db(self, fn, *args):
+        """Run fn(conn, *args) on a short-lived autocommit connection —
+        the diag_events primitives from an executor thread."""
+        conn = psycopg2.connect(self.db_dsn)
+        try:
+            conn.autocommit = True
+            return fn(conn, *args)
+        finally:
+            conn.close()
+
+    def _diag_allowed(self) -> bool:
+        """The node speaks to support only while the user lets it: the
+        toggle, the master contact still present and not blocked — and
+        never when this node IS the master."""
+        from desktop.node_identity import get_account_info
+        from desktop.p2p.master_node import MASTER_PUBKEY_HEX, master_configured
+        if not master_configured() or not self._chat_service:
+            return False
+        account = get_account_info()
+        if not account or account["public_key_hex"] == MASTER_PUBKEY_HEX:
+            return False
+        if (self._read_setting("support.diagnostics_enabled") is False
+                or self._read_setting("p2p.master_removed")):
+            return False
+        master = self._chat_service.get_friend_by_public_key(MASTER_PUBKEY_HEX)
+        return bool(master) and not master.get("is_blocked")
+
+    async def _diag_worker(self) -> None:
+        """One sequential worker for everything support-related: warrants
+        from the master's wake stream, upload/report retries when the
+        master is reachable again, event reports woken by LISTEN
+        sautium_diag. Sequential on purpose — a warrant re-delivered while
+        its first copy is still collecting lands behind it and becomes
+        the no-op the state machine makes of it. A job that fails leaves
+        its state in the database (diag_warrants.error, unreported rows);
+        the worker itself lives on."""
+        while self._running:
+            job = await self._diag_queue.get()
+            try:
+                if not self._diag_allowed():
+                    continue
+                if job[0] == "warrant":
+                    await self._diag_handle_warrant(job[1], job[2])
+                elif job[0] == "resume":
+                    await self._diag_resume(job[1])
+                    await self._diag_report()
+                elif job[0] == "report":
+                    await self._diag_report()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("diag worker: %s job failed: %s", job[0], e,
+                               exc_info=True)
+
+    async def _diag_handle_warrant(self, warrant: dict, addr) -> None:
+        from desktop import diag_bundle
+        from desktop.config_manager import get_data_dir
+        from desktop.node_identity import get_account_info, get_private_key_raw
+        from desktop.p2p import diag_events
+        from desktop.p2p.master_node import MASTER_PUBKEY_HEX
+
+        own = get_account_info()["public_key_hex"]
+        ok, reason = diag_protocol.verify_warrant(warrant, own)
+        if not ok:
+            logger.warning("Support warrant rejected: %s", reason)
+            return
+        loop = asyncio.get_event_loop()
+        short = warrant["id"][:8]
+        state = await loop.run_in_executor(
+            None, self._diag_db, diag_events.receive_warrant, warrant)
+        if state["uploaded_at"] or state["error"]:
+            logger.info("Support warrant %s… already %s", short,
+                        "fulfilled" if state["uploaded_at"] else "failed")
+            return
+        stage = diag_events.diag_dir(get_data_dir()) / f"{warrant['id']}.box"
+        if state["collected_at"] is None or not stage.exists():
+            logger.info("Support warrant %s… accepted: scopes=%s", short,
+                        ",".join(warrant["scopes"]))
+            extra = {"p2p_status": self.get_status(),
+                     "reachability": self._reachability_status}
+            try:
+                tar = await loop.run_in_executor(None, partial(
+                    diag_bundle.collect, db_dsn=self.db_dsn, data_dir=get_data_dir(),
+                    config=self.config, warrant=warrant, node_pubkey=own, extra=extra))
+            except Exception as e:
+                logger.error("Support bundle %s… collection failed: %s", short, e,
+                             exc_info=True)
+                await loop.run_in_executor(
+                    None, self._diag_db, diag_events.mark_failed, warrant["id"],
+                    f"collect: {e}")
+                return
+            boxed = diag_protocol.encrypt_to(get_private_key_raw(), MASTER_PUBKEY_HEX, tar)
+            stage.write_bytes(boxed)
+            await loop.run_in_executor(
+                None, self._diag_db, diag_events.mark_collected, warrant["id"], len(boxed))
+        await self._diag_upload(warrant["id"], stage, addr)
+
+    async def _diag_upload(self, warrant_id: str, stage: Path, addr) -> bool:
+        """POST the staged box to the master's peer surface. A refusal
+        that cannot change (403/404/409/410/413) closes the warrant; a
+        network failure leaves the stage for the next reconnect."""
+        import aiohttp
+        from desktop.node_identity import get_account_info, sign_message
+        from desktop.p2p import diag_events, peer_auth
+        from desktop.p2p.master_node import MASTER_PUBKEY_HEX
+
+        loop = asyncio.get_event_loop()
+        body = stage.read_bytes()
+        own = get_account_info()["public_key_hex"]
+        target = f"/api/diag/bundle?warrant={warrant_id}"
+        headers = peer_auth.sign_headers(sign_message, own, MASTER_PUBKEY_HEX,
+                                         "POST", target, body)
+        headers["Content-Type"] = "application/octet-stream"
+        ip, port = addr
+        try:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(ssl=pinned_ssl_context(MASTER_PUBKEY_HEX)),
+                timeout=aiohttp.ClientTimeout(total=300, connect=10),
+            ) as session:
+                async with session.post(f"https://{fmt_addr(ip, port)}{target}",
+                                        data=body, headers=headers) as resp:
+                    status = resp.status
+                    text = await resp.text()
+        except Exception as e:
+            logger.info("Support bundle %s… upload deferred: %s", warrant_id[:8], e)
+            return False
+        if status == 200:
+            await loop.run_in_executor(
+                None, self._diag_db, diag_events.mark_uploaded, warrant_id)
+            stage.unlink(missing_ok=True)
+            await loop.run_in_executor(None, self._write_settings_blocking, {
+                "support.last_bundle_at": datetime.now(timezone.utc).isoformat()})
+            await loop.run_in_executor(None, self._notify_blocking, "sautium_identity")
+            logger.info("Support bundle %s… delivered (%d bytes)", warrant_id[:8], len(body))
+            return True
+        if status in (403, 404, 409, 410, 413):
+            await loop.run_in_executor(
+                None, self._diag_db, diag_events.mark_failed, warrant_id,
+                f"HTTP {status}: {text[:200]}")
+            stage.unlink(missing_ok=True)
+            logger.warning("Support bundle %s… refused by the master: HTTP %s %s",
+                           warrant_id[:8], status, text[:200])
+            return False
+        logger.info("Support bundle %s… upload deferred: HTTP %s", warrant_id[:8], status)
+        return False
+
+    async def _diag_resume(self, addr) -> None:
+        from desktop.config_manager import get_data_dir
+        from desktop.p2p import diag_events
+
+        loop = asyncio.get_event_loop()
+        pending = await loop.run_in_executor(
+            None, self._diag_db, diag_events.resumable_warrants)
+        stage_dir = diag_events.diag_dir(get_data_dir())
+        for warrant_id in pending:
+            stage = stage_dir / f"{warrant_id}.box"
+            if not stage.exists():
+                await loop.run_in_executor(
+                    None, self._diag_db, diag_events.mark_failed, warrant_id,
+                    "staged bundle missing")
+                continue
+            await self._diag_upload(warrant_id, stage, addr)
+
+    async def _diag_report(self) -> None:
+        """Ship unreported events to the master — content-free (encode_report
+        strips the local-only fields), boxed, capped per hour. Whatever
+        stays behind rides the next wake."""
+        import aiohttp
+        from desktop.node_identity import (get_account_info, get_private_key_raw,
+                                           sign_message)
+        from desktop.p2p import diag_events, peer_auth
+        from desktop.p2p.master_node import MASTER_PUBKEY_HEX
+
+        loop = asyncio.get_event_loop()
+        now = time.time()
+        self._diag_sent = [t for t in self._diag_sent if now - t < 3600]
+        if len(self._diag_sent) >= diag_protocol.REPORT_MAX_PER_HOUR:
+            return
+        events = await loop.run_in_executor(
+            None, self._diag_db, diag_events.drain_unreported)
+        if not events:
+            return
+        addr = self._master_addr
+        if addr is None:
+            master = self._chat_service.get_friend_by_public_key(MASTER_PUBKEY_HEX)
+            peers = await self._find_friend_peers(master) if master else []
+            if not peers:
+                return
+            addr = peers[0]
+        own = get_account_info()["public_key_hex"]
+        body = diag_protocol.encrypt_to(get_private_key_raw(), MASTER_PUBKEY_HEX,
+                                        diag_protocol.encode_report(events))
+        headers = peer_auth.sign_headers(sign_message, own, MASTER_PUBKEY_HEX,
+                                         "POST", "/api/diag/report", body)
+        headers["Content-Type"] = "application/octet-stream"
+        ip, port = addr
+        try:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(ssl=pinned_ssl_context(MASTER_PUBKEY_HEX)),
+                timeout=aiohttp.ClientTimeout(total=30, connect=10),
+            ) as session:
+                async with session.post(f"https://{fmt_addr(ip, port)}/api/diag/report",
+                                        data=body, headers=headers) as resp:
+                    status = resp.status
+        except Exception as e:
+            logger.debug("diag report deferred: %s", e)
+            return
+        self._diag_sent.append(now)
+        if status != 200:
+            logger.info("diag report refused by the master: HTTP %s", status)
+            return
+        await loop.run_in_executor(
+            None, self._diag_db, diag_events.mark_reported, [e["id"] for e in events])
+        await loop.run_in_executor(None, self._write_settings_blocking, {
+            "support.last_report_at": datetime.now(timezone.utc).isoformat()})
+        await loop.run_in_executor(None, self._notify_blocking, "sautium_identity")
+        logger.info("diag report delivered: %d event(s)", len(events))
+        if len(events) >= diag_protocol.REPORT_MAX_EVENTS:
+            self._diag_queue.put_nowait(("report",))     # more is waiting
 
     def _write_sync_status(self, started: datetime, items: int) -> None:
         """Persist sync.last_at + items_received, fire sautium_sync_done."""

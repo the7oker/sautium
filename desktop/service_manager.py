@@ -493,11 +493,20 @@ class ServiceManager:
         if self.ports.get("p2p_sync"):
             self._ensure_firewall_rule(self.ports["p2p_sync"])
 
-        # Log backend output to file instead of PIPE (PIPE can block on Windows)
+        # Log backend output to file instead of PIPE (PIPE can block on Windows).
+        # The previous run's log survives as backend.log.1: a crash tail has
+        # to outlive the restart that follows it, or support never sees it.
+        # The old handle is closed first — Windows refuses to rename an open
+        # file.
         from desktop.config_manager import get_data_dir
         log_dir = get_data_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         backend_log = log_dir / "backend.log"
+        previous_handle = getattr(self, "_backend_log_file", None)
+        if previous_handle:
+            previous_handle.close()
+        if backend_log.exists():
+            backend_log.replace(log_dir / "backend.log.1")
         self._backend_log_file = open(backend_log, "w", encoding="utf-8")
 
         kwargs = {
@@ -547,26 +556,37 @@ class ServiceManager:
         if self._backend_stopping or proc is not self.backend_proc:
             return
         uptime = time.time() - self._backend_started_at
+        tail = self._read_backend_log_tail()
         logger.error(
             f"Backend died unexpectedly (exit {proc.returncode}, "
-            f"uptime {uptime:.0f}s). Log tail:\n{self._read_backend_log_tail()}")
+            f"uptime {uptime:.0f}s). Log tail:\n{tail}")
         if uptime >= _STABLE_UPTIME_SECONDS:
             self._crash_restarts = 0
         self._crash_restarts += 1
+        crash = {"rc": proc.returncode, "uptime_s": int(uptime),
+                 "restarts": self._crash_restarts, "log_tail": tail}
         if self._crash_restarts > _MAX_CRASH_RESTARTS:
             self._notify_backend_event(
                 "gave_up", f"Backend crashed {self._crash_restarts} times in "
-                "a row — not restarting, see backend.log")
+                "a row — not restarting, see backend.log", **crash)
             return
         self._notify_backend_event(
-            "crashed", f"Backend crashed (exit {proc.returncode}) — restarting...")
+            "crashed", f"Backend crashed (exit {proc.returncode}) — restarting...",
+            **crash)
         if self.start_backend():
             self._notify_backend_event("restarted", "Backend restarted after crash")
         else:
             self._notify_backend_event(
-                "gave_up", "Backend restart failed — see backend.log")
+                "gave_up", "Backend restart failed — see backend.log", **crash)
 
-    def _notify_backend_event(self, state: str, message: str) -> None:
+    def _notify_backend_event(self, state: str, message: str, **detail) -> None:
+        """Tray + support diagnostics. The log tail stays a LOCAL detail
+        (diag_protocol.LOCAL_ONLY_FIELDS): a report says the backend died,
+        the bundle the master then asks for says why."""
+        from desktop.config_manager import get_data_dir, local_db_dsn
+        from desktop.p2p import diag_events
+        diag_events.record_or_spool(local_db_dsn(self.config), get_data_dir(),
+                                    f"backend.{state}", {"message": message, **detail})
         if self.on_backend_event is not None:
             self.on_backend_event(state, message)
 

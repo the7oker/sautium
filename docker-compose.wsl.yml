@@ -135,6 +135,7 @@ services:
       - ./data/generated_eq:/app/generated_eq
       - ./data/tls:/app/data/tls
       - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)
+      - ./data/support:/app/data/support # support desk — bundles user nodes sent, unpacked on demand (master only)
       - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro
       # Claude Code OAuth credentials from WSL home — refreshed by `claude`
       # running inside WSL. We can't use ${HOME} here: when compose is

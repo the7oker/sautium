@@ -122,7 +122,7 @@ def _find_friend_for_handshake(invite_code: str, pubkey: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 class _WakeSub:
-    __slots__ = ("evt", "loop", "kinds", "envelopes", "closed", "ip")
+    __slots__ = ("evt", "loop", "kinds", "envelopes", "frames", "closed", "ip")
 
     def __init__(self, evt, loop, ip):
         self.evt = evt
@@ -131,6 +131,9 @@ class _WakeSub:
         # Envelopes to push down this stream. A queue, not a set: each one
         # is a distinct message, and order is the sender's.
         self.envelopes: deque = deque()
+        # Typed frames beyond deliver/wake — today the support warrant
+        # (routers/peer_diag). Queued by push_frame, sent first by gen().
+        self.frames: deque = deque()
         self.closed = False
         self.ip = ip
 
@@ -203,6 +206,31 @@ def ping_wake_by_friend_id(friend_id: int, kind: str = "message") -> None:
         "SELECT public_key_hex FROM friends WHERE id = %s", (friend_id,))
     if row:
         ping_wake(row["public_key_hex"], kind)
+
+
+def push_frame(pubkey: str, frame: dict) -> bool:
+    """Thread-safe: queue one typed frame for a subscriber's stream. False
+    when nobody with that key holds a stream right now — the caller keeps
+    the payload and pushes again when the node subscribes
+    (set_subscribe_hook)."""
+    with _wake_lock:
+        sub = _wake_subs.get(pubkey)
+        if sub is None or sub.closed:
+            return False
+        sub.frames.append(frame)
+        sub.loop.call_soon_threadsafe(sub.evt.set)
+    return True
+
+
+_subscribe_hook = None
+
+
+def set_subscribe_hook(cb) -> None:
+    """`await cb(pubkey)` runs on the serving loop right after a wake
+    stream is registered — the moment payloads parked for that node can
+    be pushed (routers/peer_diag.on_wake_subscribed)."""
+    global _subscribe_hook
+    _subscribe_hook = cb
 
 
 def _register_wake(pubkey: str, ip: str) -> Optional[_WakeSub]:
@@ -580,6 +608,11 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
             yield ": connected\n\n"
             if bump_presence:
                 svc.update_friend_last_seen(pubkey)
+            if _subscribe_hook is not None:
+                try:
+                    await _subscribe_hook(pubkey)
+                except Exception as e:
+                    logger.warning("subscribe hook failed for %s…: %s", pubkey[:8], e)
             cycles = 0
             while not sub.closed:
                 try:
@@ -591,8 +624,12 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
                         kinds, sub.kinds = sub.kinds, set()
                         envelopes = list(sub.envelopes)
                         sub.envelopes.clear()
-                    # Envelopes first: a forwarded message is the payload,
-                    # a wake is only a hint to go looking.
+                        frames = list(sub.frames)
+                        sub.frames.clear()
+                    # Typed frames first (an instruction), then envelopes
+                    # (the payload), then wakes (only a hint to go looking).
+                    for frame in frames:
+                        yield "data: %s\n\n" % json.dumps(frame, ensure_ascii=False)
                     for envelope in envelopes:
                         yield "data: %s\n\n" % json.dumps(
                             {"type": "deliver", "envelope": envelope},

@@ -110,6 +110,7 @@ services:
       - ./data/cache:/root/.cache
       - ./data/generated_eq:/app/generated_eq
       - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)
+      - ./data/support:/app/data/support # support desk — bundles user nodes sent, unpacked on demand (master only)
       # Mount music library as read-only
       # Mac path example: /Users/username/Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/Users/Shared/Music}:/music:ro

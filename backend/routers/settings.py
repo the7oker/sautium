@@ -28,7 +28,7 @@ from sqlalchemy import text
 
 from config import settings as app_settings
 from database import get_db_context
-from db_pool import db_execute, db_query, db_query_one
+from db_pool import db_execute, db_query, db_query_one, get_conn
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +288,13 @@ _DEFAULTS: Dict[str, Any] = {
     "p2p.identity":              None,   # {status, detail, method, attempts, difficulty, p_done, …}
     "p2p.load":                  None,   # {profile, ceiling, cpu_frac, headroom, dormant, playback, pace, …}
     "p2p.gate_mode":             "shadow",   # off | shadow | enforce — arming is a release decision
+    # Support diagnostics (P2P_NETWORK.md § "Support diagnostics"): the
+    # node answers the master's signed warrants with a boxed bundle and
+    # sends content-free event reports on its own. Silent by design, so
+    # the switch is here and the "Support" row says what went out when.
+    "support.diagnostics_enabled": True,
+    "support.last_report_at":    None,
+    "support.last_bundle_at":    None,
     # MusicBrainz local dump — optional auxiliary layer for artist
     # canonicalization. version/last-update written by the loader.
     "musicbrainz.auto_update":   False,
@@ -596,7 +603,9 @@ def _ai_state() -> Dict[str, Any]:
             # Docker and disabled the AI-canon tier there.)
             try:
                 import claude_code
-                if claude_code.get_state() == "ready":
+                state = claude_code.get_state()
+                _diag_observe_agent("claude", state)
+                if state == "ready":
                     auth_state = "oauth_signed_in"
             except Exception:
                 logger.exception("claude_code auth-state check failed")
@@ -607,7 +616,9 @@ def _ai_state() -> Dict[str, Any]:
             # surfaces as the OAuth-style state, not api_key_set.
             try:
                 import codex_cli
-                if codex_cli.get_state() == "ready":
+                state = codex_cli.get_state()
+                _diag_observe_agent("codex", state)
+                if state == "ready":
                     auth_state = "oauth_signed_in"
             except Exception:
                 logger.exception("codex auth-state check failed")
@@ -721,7 +732,35 @@ def _sync_state() -> Dict[str, Any]:
         "identity":                _read("p2p.identity"),
         "load":                    _read("p2p.load"),
         "gate":                    _gate_snapshot(),
+        "support":                 _support_state(),
     }
+
+
+def _support_state() -> Dict[str, Any]:
+    from desktop.p2p import diag_events
+    with get_conn() as conn:
+        pending = diag_events.pending_count(conn)
+    return {
+        "enabled":        bool(_read("support.diagnostics_enabled")),
+        "last_report_at": _read("support.last_report_at"),
+        "last_bundle_at": _read("support.last_bundle_at"),
+        "pending_events": pending,
+    }
+
+
+def _diag_observe_agent(agent: str, state: str) -> None:
+    """Support diagnostics: agent auth state, observed on the reads the UI
+    already makes — a change becomes an `agent.state_changed` event."""
+    from desktop.p2p import diag_events
+    with get_conn() as conn:
+        diag_events.observe_agent_state(conn, agent, state)
+
+
+def _diag_signin_opened(agent: str, state: str) -> None:
+    from desktop.p2p import diag_events
+    with get_conn() as conn:
+        diag_events.record(conn, "agent.signin_opened",
+                           {"agent": agent, "state": state, "source": "settings"})
 
 
 def _gate_snapshot() -> Optional[Dict[str, Any]]:
@@ -1093,6 +1132,7 @@ def get_claude_state() -> Dict[str, Any]:
         is_launcher_mode,
     )
     state = get_state()
+    _diag_observe_agent("claude", state)
     if state == "ready":
         from providers import reset as _reset_providers
         _reset_providers()
@@ -1170,6 +1210,8 @@ def post_claude_signin() -> Dict[str, Any]:
         launch_signin_terminal()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    from claude_code import get_state
+    _diag_signin_opened("claude", get_state())
     return {"opened": True}
 
 
@@ -1232,6 +1274,7 @@ def get_codex_state() -> Dict[str, Any]:
     import codex_cli
     from claude_code import detect_node_version, is_launcher_mode
     state = codex_cli.get_state()
+    _diag_observe_agent("codex", state)
     if state == "ready":
         from providers import reset as _reset_providers
         _reset_providers()
@@ -1307,6 +1350,7 @@ def post_codex_signin() -> Dict[str, Any]:
         codex_cli.launch_signin_terminal()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    _diag_signin_opened("codex", codex_cli.get_state())
     return {"opened": True}
 
 
@@ -1545,6 +1589,7 @@ class SyncPrefs(BaseModel):
     background_enrichment:   Optional[bool] = None
     reanalyze_imported:      Optional[bool] = None
     relay_enabled:           Optional[bool] = None
+    diagnostics_enabled:     Optional[bool] = None
 
 
 @router.put("/sync")
@@ -1567,6 +1612,8 @@ def put_sync_prefs(req: SyncPrefs) -> Dict[str, Any]:
         _write("enrichment.reanalyze_imported", bool(req.reanalyze_imported))
     if req.relay_enabled is not None:
         _write("p2p.relay_enabled", bool(req.relay_enabled))
+    if req.diagnostics_enabled is not None:
+        _write("support.diagnostics_enabled", bool(req.diagnostics_enabled))
     if req.background_enrichment is not None:
         want = bool(req.background_enrichment)
         _write("enrichment.background_enabled", want)

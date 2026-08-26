@@ -10897,6 +10897,10 @@
           <span class="form-label">Relay for others</span>
           <button class="toggle ${sync.relay_enabled ? 'on' : ''}" data-action="toggle-relay"><span class="knob"></span></button>
         </div>
+        <div class="form-row">
+          <span class="form-label">Share diagnostics with support</span>
+          <button class="toggle ${sync.support && sync.support.enabled ? 'on' : ''}" data-action="toggle-support"><span class="knob"></span></button>
+        </div>
         ${sync.relay_enabled && sync.relay_clients ? `<div class="form-row">
           <span class="form-label">Relaying for</span>
           <span class="form-value mono">${fmtNum(sync.relay_clients)} node${sync.relay_clients === 1 ? '' : 's'}</span>
@@ -10934,11 +10938,34 @@
           <span class="form-label">Market</span>
           <span class="form-value mono" title="${escapeProfileHtml(gateDetail(sync.gate))}">${escapeProfileHtml(gateLabel(sync.gate))}</span>
         </div>
+        <div class="form-row">
+          <span class="form-label">Support</span>
+          <span class="form-value mono" title="${escapeProfileHtml(supportDetail(sync.support))}">${escapeProfileHtml(supportLabel(sync.support))}</span>
+        </div>
       </div>
       <div class="btn-row single">
         <button class="btn btn-secondary" data-action="force-sync"${_syncInFlight ? ' disabled' : ''}>${_syncInFlight ? 'Syncing…' : 'Force sync now'}</button>
       </div>
     `;
+  }
+
+  // Support diagnostics: what left this node for the Sautium master and
+  // when — user_settings support.* (P2P_NETWORK.md § Support diagnostics).
+  // Silent by design, hence a row that says so.
+  function supportLabel(s) {
+    if (!s) return '—';
+    if (!s.enabled) return 'off';
+    const parts = [s.last_report_at ? `report ${fmtRelative(s.last_report_at)}` : 'no report yet'];
+    if (s.last_bundle_at) parts.push(`bundle ${fmtRelative(s.last_bundle_at)}`);
+    return parts.join(' · ');
+  }
+  function supportDetail(s) {
+    if (!s) return '';
+    const parts = [s.enabled
+      ? 'Event reports and signed diagnostic requests from Sautium support are answered silently'
+      : 'Nothing is sent to Sautium support'];
+    if (s.pending_events) parts.push(`${fmtNum(s.pending_events)} event${s.pending_events === 1 ? '' : 's'} waiting`);
+    return parts.join(' · ');
   }
 
   // Identity certificate + proof state published by the node's proof worker
@@ -12018,6 +12045,7 @@
     onAction('[data-action="toggle-bg-enrich"]', () => putSync({ background_enrichment: !sync.background_enrichment }));
     onAction('[data-action="toggle-reanalyze"]', () => putSync({ reanalyze_imported: !sync.reanalyze_imported }));
     onAction('[data-action="toggle-relay"]', () => putSync({ relay_enabled: !sync.relay_enabled }));
+    onAction('[data-action="toggle-support"]', () => putSync({ diagnostics_enabled: !(sync.support && sync.support.enabled) }));
     onAction('[data-action="pick-interval"]', async () => {
       const id = await openSettingsPicker({ title: 'Auto-sync interval', options: AUTO_SYNC_OPTIONS, currentId: sync.auto_interval_min || 0 });
       if (id != null) await putSync({ auto_interval_min: Number(id) });
