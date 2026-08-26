@@ -21,10 +21,7 @@ See:
 ## Tech Stack
 
 - **Python 3.11+** (best ML library support)
-- **FastAPI** backend (async)
 - **PostgreSQL 18 + pgvector 0.8** (vector similarity + relational data; image `pgvector/pgvector:pg18` — the data volume is a PG18 datadir, keep the major)
-- **SQLAlchemy** ORM + `psycopg2` for raw SQL and batch operations
-- **Docker + Docker Compose** (WSL2 on Windows, native on macOS)
 - **NVIDIA RTX 4090** for GPU work (CLAP embeddings, BGE-M3 text encoding)
 - **librosa** + CLAP zero-shot for audio feature extraction (no essentia)
 - **CLAP** (`laion/clap-htsat-unfused`) — 512-d audio embeddings
@@ -46,8 +43,6 @@ See:
   by ct2 int8 2026-07-21
 - **anthropic SDK** for Claude API; Claude Code + MCP tools for the AI assistant (chat); **OpenAI Codex CLI** as the second selectable chat agent (`backend/codex_runner.py` — same MCP servers, `codex exec --json`, assistant prompt as `model_instructions_file` replacing codex's built-in prompt and re-read on every spawn, MCP tools forced DIRECT via `features.code_mode.direct_only_tool_namespaces` (never the code-mode `exec` deferral), auth via `codex login` / minted from `OPENAI_API_KEY`)
 - **libtorrent** for DHT (NOT pure-python `kademlia` — incompatible with BT DHT)
-- **CustomTkinter + PyInstaller** for the Windows desktop launcher
-- **aiohttp + PyNaCl + miniupnpc** for the P2P layer
 - **Inno Setup** for the Windows installer (`desktop/installer/sautium.iss`)
 
 ---
@@ -299,86 +294,10 @@ See:
 
 ## Security Posture (read before touching network/auth)
 
-**Current state (as of 2026-08-21):** the backend on port 8800 has
-**HMAC-SHA256 request signing** (`backend/auth_hmac.py`) and serves
-**HTTPS only** with a self-signed cert (`backend/tls_gen.py`).
-`backend/static/auth.js` monkey-patches `window.fetch` to sign every
-request as `hex(HMAC-SHA256(key, METHOD\nPATH\nTS\nsha256(body)))`
-with a 60s replay window.
-
-The key is a **per-browser device token**, not a shared secret. The
-page carries no key at all: a browser earns its token once, with the
-account password (checked by re-deriving the identity — there is no
-password hash anywhere) or a pairing PIN shown on the host, and keeps
-it in `localStorage`, which is bound to an origin. The server never
-stores tokens; it derives them as
-`HMAC(server secret, "sautium-device:v1:{epoch}:{node pubkey}")`, so
-bumping `auth.token_epoch` ("log out everywhere") invalidates every
-copy at once, and a **different node cannot mint the same token** —
-that is what the node pubkey is doing in there. Deleting a node and
-creating another one therefore revokes access, which it did NOT
-before 2026-08-21: both inputs used to be node-independent, so a
-recreated node handed every previously paired browser full access on
-a page refresh.
-
-The **server secret** (`<p2p_identity_dir>/.api_secret`, 0600) sits
-beside the identity because it is part of who the node is, not of the
-code it runs — it used to live in `backend/data/` inside the checkout,
-where it outlived every uninstall and was SHARED by the launcher and
-Docker nodes on one machine (compose bind-mounts `./backend`). It is
-still accepted as a signing key on its own, for callers that already
-live on the host and read the file (launcher, MCP server): whoever can
-read it has the host anyway. Four readers, all resolving the same
-path — `main`, `media_urls`, `desktop/api_client`, `mcp/assistant_server`.
-
-Unsigned requests are accepted only on the whitelist
-(`WHITELIST_EXACT`/`WHITELIST_PREFIX` in `auth_hmac.py`): the page and
-its static assets, `/health`, the credential checks themselves
-(`/api/auth/status|login|pair|create-account` — a client with no token
-cannot sign, so these defend themselves: Argon2id under a semaphore,
-five PIN attempts under a lock, account creation only while the node
-has no identity), and the routes that carry their own signatures
-(`/api/player/media/` query params, the peer `/api/sync/` surface).
-
-HTTPS is required because browsers gate `crypto.subtle` (the API
-auth.js needs to compute HMAC) behind secure contexts — over plain
-HTTP from a phone on LAN nothing can sign and the Web UI dies silently
-with 401s. **HTTPS is the only listening protocol** — uvicorn binds
-with `--ssl-keyfile`/`--ssl-certfile`, no HTTP fallback.
-
-The defence layer is still the network: backend is reachable on the
-LAN (so phones/tablets can use the Web UI), but **never exposed to
-the public internet**. Device tokens raise the bar for hostile LAN
-devices — they now have to pass the password or PIN check — but they
-are not a substitute for network isolation: the self-signed cert
-protects transport only, and any process running as this user can
-read the secret file and sign as the host.
-
-**The threat model we defend against right now:**
-
-- ✅ Random internet scanners / "young hackers" probing the public
-  IP — blocked because nothing forwards 8800 outside the router.
-- ⚠️ Other devices on the same LAN — they can load the page, and
-  that is all: it carries no key, so they must pass the account
-  password or a PIN read off the host screen to earn a token. What
-  is left is the strength of that password and the window in which
-  a PIN is live. Accepted: this is a single-user home appliance,
-  the bar is "no random scanner", not "no targeted LAN attacker".
-- ✅ DNS rebinding — a page on a hostile domain whose name resolves
-  to this node, talking to us from the victim's own browser. Signed
-  routes never fell to it (the device token is in localStorage, bound
-  to an origin the attacker lacks), but the whitelist did, and that is
-  where create-account/login/pair live. `_host_allowed` in
-  `auth_hmac.py` runs BEFORE the whitelist and accepts only addresses
-  that are OURS — own interfaces, `SAUTIUM_HOST_IPS` (names resolved
-  once at startup), `SAUTIUM_ALLOWED_HOSTS`, loopback. NOT "is it
-  private": that says yes to any RFC1918 name an attacker points at
-  us and no to 100.64/10, which is how a phone reaches this node over
-  Tailscale. Nothing ever resolves a client-supplied name. The peer
-  surface (8801) has no such guard and must not get one — it answers
-  to whatever Host a UPnP-mapped port produces.
-- ❌ Malicious browser extensions / processes on the host machine —
-  also out of scope.
+The full picture — what is deployed today, the threat model, the Docker
+peer surface, and the master/relay/carry topology — lives in the
+`security-posture` skill: invoke it before touching ports, auth, TLS,
+UPnP, or the peer surface. The hard rules below bind with or without it.
 
 **Hard rules — do not break without asking Valerii first:**
 
@@ -478,71 +397,6 @@ read the secret file and sign as the host.
    are isolated and have separate certs — phone accepts one warning
    per mode, then both stick.
 
-**A Docker node is a full peer on its own** (since the peer-port
-split, 2026-07-27). libtorrent IS installed in the image
-(`backend/Dockerfile`), DHT announce/lookup runs from
-`backend/dht_service.py`, and `backend/p2p_app.py` serves sync, MB
-slices and — since the invite-token work — the chat/relay protocol
-(`backend/routers/peer_chat.py`) on 8801. What Docker still lacks is
-UPnP (SSDP multicast doesn't survive the bridge), so reaching it from
-the internet needs `python -m desktop.portmap map 8801` from the host
-or a manual router forward. On Windows a plain `netsh portproxy` +
-firewall pair (rule #3's note) gets the port through, but Docker
-Desktop's user-space hops then show every peer as the bridge gateway
-— no addr/subnet axes, a per-address backstop that is really global,
-a probe-connect calling back the wrong host. The master therefore
-runs the **trusted front** instead (`scripts/master-front/`: Caddy as
-a Windows service owns :8801, terminates the peer TLS and forwards
-plain HTTP + X-Forwarded-For to the loopback-only upstream
-`127.0.0.1:18801`; `.env` carries `P2P_SYNC_PUBLISH=127.0.0.1:18801`
-+ `P2P_TRUSTED_FRONT=1`). Native-Linux Docker (iptables DNAT) sees
-real addresses and needs none of this. See P2P_NETWORK.md § "Master
-behind a trusted front".
-
-**Master node + reachability.** The maintainer's Docker node ships as
-a contact in every install: `master_node.py` (mirrored
-`desktop/p2p/` ↔ `backend/`) pins its invite code, full pubkey and
-public support-token UUID; `P2PManager._ensure_master_contact` seeds
-it as a pending friend at start (silently — deleting it sets
-`p2p.master_removed` and it never comes back on its own). Nodes that
-cannot accept inbound connections (CGNAT) hold an outbound SSE
-subscription to `/api/relay/wake-stream` and pull chat history when
-pinged, and they **suppress their own DHT announces**
-(`DHTService.set_announces_enabled`) — a dead address in the DHT
-helps nobody. The reachability verdict lives in `user_settings`
-(`p2p.reachability`) and comes from the router WAN address, the
-DHT-observed external IP, `/api/relay/probe-connect` (the relay
-connects back to the request's source address, BT-tracker style) and
-passive inbound traffic.
-
-**Any reachable node is a relay** (phase D, 2026-08-06) — the master
-is only relay #0, and it carries clients **under the same cap as
-everyone else**. A CGNAT client registers with K=2 peer relays on top
-of the master by presenting a **voucher** (its own signature over
-`sautium-relay-voucher:v1:{client}:{relay}:{until}`); the relay then
-announces `Sautium-user:{invite}` on its behalf (BT DHT does not
-verify infohash ownership — that is the feature) and serves the same
-voucher at `GET /api/relay/voucher` as proof, so a sender verifies
-authority before forwarding a byte. Announce lifetime = subscription
-lifetime. A friend's bare subscription carries no voucher, costs no
-cap slot and produces no announce — that is the phase-A wake channel,
-a different thing living on the same endpoint. Details and the
-adaptive-cap rule: `P2P_NETWORK.md` § "D: Peer-relays".
-
-**Carry and MB slices are the two push/replicate paths** (see
-`P2P_NETWORK.md`). Carry pushes SEALED audio analysis to a reachable
-carrier; the offer round speaks recording MBIDs and the carrier
-answers with its OWN existing track uuids, so its phantom catalogue
-acts as the taste filter and nothing is minted remotely. MB slices are
-signed **per artist** (`mb_slice_blobs` keeps verified blobs verbatim
-with the ORIGINAL dump node's signature), so any node can re-serve
-names it holds — replicas are asked before dump nodes. Two rules that
-look like details and are not: **a name closes only on a signed
-zero-match**, and **similars are pulled for ENGAGED artists only**
-(owned file or completed listen) — without that gate each hop
-multiplies by a Last.fm list and the sync becomes a breadth-first
-walk of all recorded music.
-
 **Before any public release, multi-user deployment, or remote-access
 feature** (Tailscale exposure, "headless mode", reverse proxy), the
 rules above are no longer sufficient. HMAC + HTTPS as currently
@@ -563,204 +417,16 @@ it that way — we rejected a React migration in favour of this
 simplicity, and Claude Design's handoff format is plain HTML anyway
 (see `docs/design/reference/claude-design-bundle/README.md`).
 
-### Design tokens
+The conventions — design tokens (`backend/static/tokens.css`), the
+locked design-pixel scaling model, typography, the reference-first
+workflow for implementing a screen, navigation, and the view-layer
+split (`app-shell.js` / `player.js`) — live in
+`backend/static/CLAUDE.md`, loaded whenever you touch that directory.
 
-`backend/static/tokens.css` is the canonical design-system source. It
-exposes colours, typography, spacing, radii, shadows, motion, and
-safe-area tokens as CSS custom properties. Load it first on every new
-page: `<link rel="stylesheet" href="/static/tokens.css">`.
-
-The palette and type scale are **locked** per
-`docs/design/POSITIONING.md §"Colour palette (v1)"`. Do not introduce
-new colour tokens — use existing ones, or raise the question first.
-
-### Scaling model — locked design-pixels at and above baseline
-
-The root font-size is driven by viewport width, with a single `--base`
-knob:
-
-```css
-:root {
-  --base: 13;
-  --design-viewport: 360;
-  --px: calc(1rem / var(--base));
-  font-size: calc(100vw / 360 * 13 * 1px);   /* fluid below 360 */
-}
-@media (min-width: 360px) {
-  :root { font-size: calc(var(--base) * 1px); }   /* locked at 13px */
-}
-```
-
-Below 360px the root size scales fluidly so a tiny screen gets a
-proportionally smaller copy of the design. **At and above 360px the
-root size locks at 13px**, so design-pixel tokens (`19 * --px`,
-`16 * --px`, etc.) render at exactly the same actual-pixel values on
-any phone width — a 19px design title is 19px on a 360 device, on a
-390 device, on a 430 device, and on a 768+ desktop. Containers
-(`width: 100%`, `aspect-ratio: 1/1`, etc.) still expand naturally
-with the viewport, so wider phones get more breathing room around the
-same-sized typography and controls.
-
-At ≥ 768px the body is centred at ~468px (`360 × 1.3`) so the design
-does not float in a sea of empty desktop background.
-
-**Why not pure fluid scaling?** Fluid scaling at all widths inflates
-the design on phones wider than the 360 baseline (a 19px reference
-title becomes ~23px on a 443px viewport), which contradicts pixel-
-perfect parity with the reference HTML and pushes meta-row content
-past the screen edge. Locking the size keeps both the typography
-spec and horizontal layout predictable.
-
-### How to write sizes
-
-- **Never write raw `px` for layout.** Use `calc(N * var(--px))` for
-  ad-hoc values or a pre-built `--space-*` / `--text-*` / `--radius-*`
-  token.
-- Raw `px` is acceptable only for true 1px hairlines where crispness
-  matters, or for absolute anchor points (e.g., `max-width: 768px` in
-  a media query — media queries must use `px`).
-- Durations (`--dur-*`) and easing curves (`--ease-*`) are time-based
-  and do not scale.
-- Line-heights are unitless so they multiply with font-size; tracking
-  uses `em` so it follows local font-size.
-
-### Typography
-
-Two font families, loaded via `<link>` in `<head>`:
-
-- **Inter Tight** (sans) — all UI prose, titles, labels.
-- **JetBrains Mono** — numeric readouts only: BPM, sample rate, bit
-  depth, durations, cosine-similarity scores. The mono+blue combo is
-  the signature "technical precision" token — do not use mono for
-  prose.
-
-The cool blue `#4A7FA7` accent is **reserved for technical numeric
-data and focus states**. Never for brand, CTA, or decoration — that's
-amber's job.
-
-### Implementing a screen — reference-first workflow
-
-**Mandatory** before writing any screen markup or styles:
-
-1. **Open the reference HTML** for that screen under
-   `docs/design/reference/claude-design-bundle/project/`. For Now
-   Playing it's `Now Playing v4.html`; sessions cover the rest.
-   Read the file **top to bottom** — DOM structure, every CSS class,
-   every dimension, every colour. Do not implement from memory of
-   what the design "felt like". The reference is pixel-perfect
-   ground truth; producing anything looser is a process failure.
-2. **Translate, do not paraphrase.** Each reference rule maps to our
-   DS as: raw `px` → `calc(N * var(--px))`; `--color-*` and `--text-*`
-   tokens stay; sizes that match an existing token use that token,
-   sizes that don't get the explicit `calc()` form. Class names should
-   stay close to the reference for grep-back-to-source.
-3. **Inventory expected elements** before claiming "done". A list
-   like "drag handle · chevron · menu · scrim · cover · lyrics btn ·
-   title · artist · album+year (dim) · meta-row with divider above ·
-   q-badge svg+H · key pill F + min · BPM num+label · energy +
-   dots · progress 3px + circle head + halo · times mono blue ·
-   total muted · repeat icon · transport prev 56 · play 68 · next 56
-   · similar block with header divider · sim-rows with cover 44 +
-   meta + score 0.94 + add btn" — every item must be present and
-   styled, not paraphrased away.
-4. **Cross-check tokens vs reference values.** When the reference
-   uses `15px` and our DS has `--text-body: calc(15 * var(--px))`,
-   prefer the token. When the reference uses `19px` (no token),
-   write `calc(19 * var(--px))` explicitly — do not silently snap
-   to the nearest token.
-5. **Visual verify before declaring done.** Open both screens in
-   browser at 360px viewport, compare side by side. The user
-   expects pixel-perfect parity; "approximately right" is a bug.
-
-This rule exists because building from memory produced a Now
-Playing screen that missed eight visible elements (lyrics btn,
-divider line, scrim, repeat icon, similar block, etc.) and got
-proportions wrong on most of the others. Reference HTML is
-non-negotiable input.
-
-### Reference bundle
-
-`docs/design/reference/claude-design-bundle/` preserves the latest
-Claude Design handoff covering the full MVP screen set: Design
-System v1 HTML, all four Session HTML files (Session 1: shell +
-Home + Now Playing mini/expanded · Session 2 v3: Discovery + Artist
-+ Album + Queue + Genre · Session 3 v2: AI sheet + More + Profile +
-Settings + HQPlayer · Session 4: Friends + chat thread), plus the
-canonical Now Playing v4 iteration and the cover/artist assets used
-across mockups. Treat it as **reference for visual intent**, not
-source to paste — recreate visual output in our tokens-based vanilla
-stack.
-
-### Navigation and screen architecture
-
-`docs/design/INFORMATION-ARCHITECTURE.md` is the source of truth for
-how the UI is laid out: the 4-tab bottom nav (Home · Discovery ·
-Friends · More), the AI FAB overlay, the mini-player bar, the Now
-Playing sheet state machine, URL hash routing, per-screen contents,
-Play-vs-Queue action semantics, and the queue-history concept. Read
-it before touching UI routing or screen layout.
-
-### View-layer architecture
-
-The top-down rebuild against the new design system and information
-architecture is **done**, and the legacy single-file prototype
-`app.js` is **gone**. The frontend is now three files in
-`backend/static/`, loaded by `index.html` in this order:
-
-- **`auth.js`** — HMAC `fetch` monkey-patch (see Security Posture).
-- **`app-shell.js`** — the bulk of the app: hash routing (`render`,
-  `navigateToEntity`, `registerScreen`), every screen renderer (Home,
-  Discovery, Artist/Album/Genre detail, Friends, chat, Now Playing,
-  Queue sheet), the AI overlay, and most screen-scoped `fetch` calls.
-- **`player.js`** — transport/SSE primitives shared across screens:
-  the `/api/player/status/stream` subscription plus `window.playerCmd`,
-  `window.playTrack`, `window.togglePlayPause`, `window.fetchPlaylist`,
-  `window.currentPlaylist`.
-
-Keep transport primitives in `player.js` and screen logic in
-`app-shell.js` — don't reintroduce a third catch-all module. The view
-layer proper is `index.html` + `style.css` (+ `tokens.css`). Older
-notes or commits that say `app.js` mean "now `app-shell.js` +
-`player.js`".
-
-### Native dialogs are an anti-pattern
-
-**Never call `alert()`, `confirm()`, or `prompt()`.** Browsers
-render them with the OS chrome (white panel, default sans-serif,
-"localhost says" prefix on Chrome), which breaks the design
-language the rest of the UI is built in — colour palette, type
-scale, dark theme, terracotta accents all disappear the moment one
-of these fires. They also block the JS event loop, can't be styled
-or animated, can't carry rich content (icons, formatting, links),
-and on mobile they're an interaction trap.
-
-Use the HTML equivalents wired into the design system instead:
-
-- **`window.notifyDialog({ title, message, kind })`** — replaces
-  `alert()`. Single primary button, `kind` is `'error' | 'success'
-  | 'info'` and tints the title via `.confirm-title.<kind>`.
-  Returns `Promise<void>`.
-- **`window.confirmDestructive({ title, message, confirmText,
-  cancelText })`** — replaces `confirm()` for irreversible actions
-  (delete friend, drop scan, reset key). Returns `Promise<boolean>`.
-- **For text input** (`prompt()` replacement) build a small overlay
-  in the `add-gear-sheet` style — see `openEmailVerifyFlow` and
-  `openHqpConnectionEditor` in `app-shell.js` for the pattern.
-
-Both dialogs live in `app-shell.js` and share the `.confirm-overlay
-/ .confirm-sheet` shell in `style.css`. The `kind` accent and the
-`.confirm-actions.single` modifier are the extension points — add
-to those rather than minting parallel dialog systems.
-
-Native dialogs are acceptable **only** when no HTML equivalent is
-reachable — e.g. inside a Web Worker, or before `app-shell.js` has
-loaded. In those rare cases, leave a `// native dialog: <reason>`
-comment next to the call so future readers see it was deliberate.
-
-Always escape user-controlled data with `window.escapeProfileHtml()`
-before passing into `message` (both dialogs render `message` as
-HTML so a `<b>highlight</b>` works — XSS is the caller's
-responsibility).
+One rule is binding everywhere, so it stays here: **never call
+`alert()`, `confirm()`, or `prompt()`** — they render in OS chrome and
+break the design language. Use `window.notifyDialog()` and
+`window.confirmDestructive()` instead.
 
 ---
 
@@ -768,15 +434,10 @@ responsibility).
 
 | File | Purpose |
 |------|---------|
-| `backend/main.py` | FastAPI entry point |
 | `backend/playback/` | Output-backend abstraction: PlaybackManager + canonical queue, HQPlayer backend, play tracker, listening sessions (HARDWARE-TIERS §2.6) |
-| `backend/models.py` | SQLAlchemy ORM models |
-| `backend/uuid_utils.py` | UUID v5 generators + normalization |
 | `backend/lastfm.py` | Last.fm enrichment + bio-derived classifiers |
-| `backend/search.py` | Hybrid audio + text semantic search |
 | `backend/assistant_prompt.py` | System prompt + schema description for Claude Code + API variants |
 | `backend/ensemble_instruments.py` | AST + PaSST instrument multi-label tagger (replaces CLAP zero-shot) |
-| `backend/static/tokens.css` | Canonical design-system tokens (colours, type, spacing, scaling) |
 | `docs/design/POSITIONING.md` | Product positioning + UI design principles (source of truth) |
 | `docs/design/INFORMATION-ARCHITECTURE.md` | Navigation model, screen inventory, state flows (source of truth for UI layout) |
 | `docs/design/reference/claude-design-bundle/` | Claude Design handoff bundle — visual-intent reference |
@@ -791,7 +452,6 @@ responsibility).
 | `backend/master_node.py` | Shipped master identity pins (mirrored in desktop/p2p/) |
 | `backend/invite_tokens.py` | Invite tokens + signed grants (mirrored in desktop/p2p/) |
 | `backend/dht_service.py` | Docker backend libtorrent DHT integration |
-| `desktop/launcher.py` | Windows launcher (CustomTkinter) |
 | `desktop/node_identity.py` | Ed25519 identity + account system (Argon2id) |
 | `desktop/sync_client.py` | Sync client + the seal-verifying import gate (`import_pushed` for carry); post-import classifiers |
 | `desktop/p2p/sync_queries.py` | Shared SQL logic (pull handlers, carry offer/wanted, DHT announce tail) |
@@ -802,10 +462,8 @@ responsibility).
 | `desktop/p2p/p2p_manager.py` | Orchestration (asyncio in background thread) |
 | `desktop/p2p/chat_service.py` | NaCl Box encryption, friend CRUD |
 | `desktop/p2p/email_verify.py` | Signed email verification + invite delivery |
-| `desktop/migrations/001_initial.sql` | Canonical schema (all types, tables, indexes, triggers) |
 | `mcp/assistant_server.py` | MCP server exposing the assistant tools to Claude Code / Codex (search, playback, MB catalog, HQP device) |
 | `backend/assistant_queries.py` | Catalog queries + result formatting SHARED by both assistant tool surfaces (MCP + `backend/tools/definitions.py`) — one copy, so neither drifts owned-only |
-| `worker/verify.js` | Cloudflare Worker (email CA, signed invites) |
 
 ---
 
