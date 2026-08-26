@@ -43,7 +43,11 @@ try:
     HAS_LIBTORRENT = True
 except ImportError:
     HAS_LIBTORRENT = False
-    logger.warning("libtorrent not installed — DHT disabled")
+    # Only a fact here — whether it matters is the lifespan's call: a
+    # launcher-mode backend (P2P_SYNC_PORT=0) has no libtorrent by design,
+    # the launcher's own process runs the DHT. A warning at import time
+    # sent readers hunting a phantom install bug (support bundle, 2026-08-26).
+    logger.debug("libtorrent not importable in this interpreter")
 
 
 # Prefix for infohash computation

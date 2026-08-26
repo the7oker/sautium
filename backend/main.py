@@ -533,15 +533,17 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"DHT startup failed: {e}")
             _dht_service = None
-    elif settings.p2p_enabled and not HAS_LIBTORRENT:
-        logger.warning("P2P enabled but libtorrent not installed — DHT disabled")
-    elif settings.p2p_enabled:
+    elif settings.p2p_enabled and not settings.p2p_sync_port:
         # P2P_SYNC_PORT=0 is how the launcher says "my own sync server owns
         # the peer surface and the DHT" — announcing a port we do not serve
-        # would publish a dead address. Not a fault; the old message blamed
-        # libtorrent for it and sent readers hunting a phantom install bug.
+        # would publish a dead address. Not a fault, and it must be tested
+        # BEFORE the libtorrent check: a launcher-mode backend has no
+        # libtorrent by design, and the old order blamed that first, sending
+        # readers hunting a phantom install bug (support bundle, 2026-08-26).
         logger.info("Backend peer surface off (P2P_SYNC_PORT=0) — DHT owned "
                     "by the launcher's sync server")
+    elif settings.p2p_enabled:
+        logger.warning("P2P enabled but libtorrent not installed — DHT disabled")
 
     # Pre-warm search models so Discovery's first query doesn't hit a
     # ~30-60s cold-load. Fired as background tasks; uvicorn reports
@@ -815,11 +817,17 @@ async def health_check() -> Dict[str, Any]:
 
     # P2P / DHT status
     if _dht_service:
-        health_status["checks"]["dht"] = _dht_service.get_dht_stats()
+        health_status["checks"]["dht"] = {"owner": "backend", **_dht_service.get_dht_stats()}
     else:
+        # Launcher mode (P2P_SYNC_PORT=0): the DHT lives in the launcher's
+        # own process — this backend never runs one, so reporting its own
+        # libtorrent here described a DHT nobody uses (support bundle,
+        # 2026-08-26). The launcher's sync server /health is the real one.
+        launcher_owned = bool(settings.p2p_enabled and not settings.p2p_sync_port)
         health_status["checks"]["dht"] = {
-            "available": HAS_LIBTORRENT,
-            "running": False,
+            "owner": "launcher" if launcher_owned else "backend",
+            "available": None if launcher_owned else HAS_LIBTORRENT,
+            "running": None if launcher_owned else False,
             "enabled": settings.p2p_enabled,
         }
 

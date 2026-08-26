@@ -49,8 +49,14 @@ EVENT_KINDS = frozenset({
     "agent.state_changed",
     "chat.error",
     "sync.failed",
+    "sync.import_failed",
     "update.failed",
 })
+# What a report may call an event: `family.name`. EVENT_KINDS is the
+# vocabulary nodes emit today; the master accepts any well-formed kind so a
+# node one release ahead never has a whole report refused over one new name.
+_KIND_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
+KIND_MAX_CHARS = 64
 
 BUNDLE_MAX_BYTES = 32 * 1024 * 1024   # boxed tar.gz the master accepts
 REPORT_MAX_BYTES = 256 * 1024         # boxed report the master accepts
@@ -203,7 +209,7 @@ def encode_report(events: Iterable[dict]) -> bytes:
 
 def decode_report(raw: bytes) -> list:
     """Validate a decrypted report on the master; ValueError on anything
-    that is not a well-formed list of known event kinds."""
+    that is not a well-formed, size-bounded list of events."""
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as e:
@@ -215,8 +221,10 @@ def decode_report(raw: bytes) -> list:
         raise ValueError("report event count out of range")
     out = []
     for e in events:
-        if not isinstance(e, dict) or e.get("kind") not in EVENT_KINDS:
-            raise ValueError("unknown event kind")
+        kind = e.get("kind") if isinstance(e, dict) else None
+        if (not isinstance(kind, str) or len(kind) > KIND_MAX_CHARS
+                or not _KIND_RE.match(kind)):
+            raise ValueError("malformed event kind")
         ts = e.get("ts")
         detail = e.get("detail")
         if not isinstance(ts, str) or not isinstance(detail, dict):

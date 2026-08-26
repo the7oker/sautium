@@ -386,6 +386,11 @@ class ServiceManager:
         # click-to-mint slice fetch on dump-less nodes.
         env["PYTHONPATH"] = os.pathsep.join(
             [str(self._backend_dir), str(self._project_root)])
+        # backend.log is opened as UTF-8 by us but written by the child
+        # through its console encoding — on Windows that is a legacy code
+        # page, and every em dash in a log line reached the support bundle
+        # as U+FFFD. UTF-8 mode makes the child's stdout match the file.
+        env["PYTHONUTF8"] = "1"
         # Ensure the media binaries (ffmpeg/fpcalc/flac/deno) resolve for the
         # backend even when the launcher was started as a GUI .app (minimal
         # PATH without Homebrew/bundled bins). The audio pipeline shells out

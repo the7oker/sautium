@@ -824,7 +824,10 @@ auth states, unclean-shutdown from a session marker), `service.start_failed`,
 `p2p.start_failed`, `backend.crashed/restarted/gave_up` (the launcher's
 watchdog), `agent.signin_opened/signin_timeout/state_changed` (the Web
 UI's sign-in endpoints and the wizard — the abandoned sign-in nobody
-reported is exactly this), `chat.error`, `sync.failed`, `update.failed`.
+reported is exactly this), `chat.error`, `sync.failed`, `sync.import_failed`
+(one category that never lands — the run's totals read "0 items" and hide
+it), `update.failed`. The master accepts any well-formed `family.name`, so
+a node one release ahead is never refused a whole report over a new kind.
 Before a database exists (wizard, a PostgreSQL that did not start) events
 wait in `<data_dir>/diag/spool.jsonl` and are drained at the next start.
 The insert trigger NOTIFYs `sautium_diag`; the launcher's worker boxes

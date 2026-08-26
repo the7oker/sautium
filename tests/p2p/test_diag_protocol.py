@@ -104,11 +104,17 @@ def test_decode_report_rejects_bad_input():
     good = {"v": 1, "events": [{"kind": "sync.failed", "ts": "2026-08-26T10:00:00+00:00",
                                 "detail": {"error": "boom"}}]}
     assert dp.decode_report(json.dumps(good).encode())[0]["kind"] == "sync.failed"
+    # A kind this build has never heard of still lands — forward compatibility
+    # for a node one release ahead of the master.
+    future = json.dumps({"v": 1, "events": [dict(good["events"][0], kind="future.kind_2")]})
+    assert dp.decode_report(future.encode())[0]["kind"] == "future.kind_2"
     bad = [
         b"not json",
         json.dumps({"v": 2, "events": []}).encode(),
         json.dumps({"v": 1, "events": []}).encode(),
-        json.dumps({"v": 1, "events": [dict(good["events"][0], kind="rm.rf")]}).encode(),
+        json.dumps({"v": 1, "events": [dict(good["events"][0], kind="not a kind")]}).encode(),
+        json.dumps({"v": 1, "events": [dict(good["events"][0], kind="a.b.c")]}).encode(),
+        json.dumps({"v": 1, "events": [dict(good["events"][0], kind="x." + "y" * 70)]}).encode(),
         json.dumps({"v": 1, "events": [dict(good["events"][0], ts="yesterday")]}).encode(),
         json.dumps({"v": 1, "events": [dict(good["events"][0], detail="str")]}).encode(),
         json.dumps({"v": 1, "events": good["events"] * (dp.REPORT_MAX_EVENTS + 1)}).encode(),
