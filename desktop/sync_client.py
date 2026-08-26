@@ -489,6 +489,14 @@ class SyncClient:
         except Exception as e:
             conn.rollback()
             logger.error(f"Import {category} failed: {e}")
+            # Support diagnostics: a category that never lands is invisible in
+            # the run's totals ("0 items" reads as "nothing new"), so the
+            # failure is recorded here, where it is caught.
+            from desktop.config_manager import get_data_dir
+            from desktop.p2p import diag_events
+            diag_events.record_or_spool(
+                self.db_dsn, get_data_dir(), "sync.import_failed",
+                {"category": category, "error": str(e)[:500]})
             return 0
 
     # -- Seal verification (verify-on-import) -------------------------------
@@ -1130,34 +1138,51 @@ class SyncClient:
         return len(items)
 
     def _reconcile_named(self, cur, table: str, pairs: list[tuple]) -> dict:
-        """Get-or-create content-addressed (id, name) rows; return name -> local id.
+        """Get-or-create content-addressed (id, name) rows; return wire name -> local id.
 
-        tags/genres are content-addressed by name (UNIQUE name), so a peer may
-        hold the same name under a different id — legacy pre-v5 rows, or a
-        divergent enrichment history. Trusting the wire id with ON CONFLICT (id)
-        crashes the whole batch on the name index, and even skipping that insert
-        would leave the child row (artist_tags / genre_descriptions) pointing at
-        an id this node lacks. Resolve each name to the LOCAL row's id instead:
-        reuse the existing row when the name is present, else insert the wire id.
-        `table` is a trusted literal from the caller, never user input.
+        tags/genres are unique on BOTH axes — id (uuid5 of the folded name)
+        and name (the raw spelling) — and a peer can differ from us on either:
+        the same name under a different id (legacy pre-v5 rows, a divergent
+        enrichment history), or — since identity normalize v2 folds case and
+        punctuation — the same id under a different spelling ("hip hop" here,
+        "Hip-Hop" there). An INSERT that guards one axis crashes the whole
+        batch on the other (tags_pkey, launcher stand 2026-08-26), and even
+        skipping it would leave the child row (artist_tags /
+        genre_descriptions) pointing at an id this node lacks. So: resolve by
+        id first (the folded identity — the local row wins, however it is
+        spelled), then by name, and insert only what neither axis knows, ON
+        CONFLICT DO NOTHING covering a race on either constraint. `table` is
+        a trusted literal from the caller, never user input.
         """
         by_name = {name: wid for wid, name in pairs if name}   # dedup, last wins
         if not by_name:
             return {}
-        names = list(by_name)
-        cur.execute(f"SELECT name, id::text FROM {table} WHERE name = ANY(%s)", (names,))
-        local = dict(cur.fetchall())
-        missing = [(by_name[n], n) for n in names if n not in local]
+        resolved: dict = {}
+
+        def lookup(subset: dict) -> None:
+            cur.execute(
+                f"SELECT id::text, name FROM {table} "
+                f"WHERE id = ANY(%s::uuid[]) OR name = ANY(%s)",
+                (list(set(subset.values())), list(subset)))
+            rows = cur.fetchall()
+            local_by_id = {i: n for i, n in rows}
+            local_by_name = {n: i for i, n in rows}
+            for name, wid in subset.items():
+                if wid in local_by_id:
+                    resolved[name] = wid
+                elif name in local_by_name:
+                    resolved[name] = local_by_name[name]
+
+        lookup(by_name)
+        missing = {n: w for n, w in by_name.items() if n not in resolved}
         if missing:
             psycopg2.extras.execute_values(
                 cur,
-                f"INSERT INTO {table} (id, name) VALUES %s ON CONFLICT (name) DO NOTHING",
-                missing, template="(%s, %s)",
+                f"INSERT INTO {table} (id, name) VALUES %s ON CONFLICT DO NOTHING",
+                [(w, n) for n, w in missing.items()], template="(%s, %s)",
             )
-            cur.execute(f"SELECT name, id::text FROM {table} WHERE name = ANY(%s)",
-                        ([n for _, n in missing],))
-            local.update(dict(cur.fetchall()))
-        return local
+            lookup(missing)
+        return resolved
 
     def _import_artist_tags(self, conn, items: list[dict]) -> int:
         with conn.cursor() as cur:
