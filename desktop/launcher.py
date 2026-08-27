@@ -318,8 +318,19 @@ class LauncherApp(ctk.CTk):
         except Exception:
             pass                       # Tcl interp already torn down
 
+    def _show_pending_changelog(self):
+        """An update that restarted the launcher left its changelog behind
+        (_restart_self) — this process is the one with a window to show it
+        in. Cleared as it is read, so it appears exactly once."""
+        changelog = self.config.get("_pending_changelog")
+        if not changelog:
+            return
+        self.config = update_config({"_pending_changelog": None})
+        self._show_changelog(changelog)
+
     def _startup_sequence(self):
         """Start all services in a background thread."""
+        self._show_pending_changelog()
         self.service_manager.on_backend_event = self._on_backend_event
 
         def _start():
@@ -1424,6 +1435,8 @@ class LauncherApp(ctk.CTk):
             dialog, text="OK", width=100,
             command=dialog.destroy,
         ).pack(pady=10)
+        dialog.after(50, dialog.lift)
+        dialog.after(50, dialog.focus_force)
 
     def _minimize_to_tray(self):
         """Hide the window instead of closing — the services keep running.
@@ -1498,6 +1511,10 @@ class LauncherApp(ctk.CTk):
         there but changes nothing until the exe itself is replaced."""
         if changelog:
             logger.info("Update applied: %s", "; ".join(changelog))
+            # The successor is the one that can show it: a dialog here would
+            # hold the node down — services already stopped — until somebody
+            # walked back and clicked OK.
+            self.config = update_config({"_pending_changelog": changelog})
         self._shutting_down = True
         self.api_client.close_streams()
         self._set_status("updating", "Restarting Sautium...")
