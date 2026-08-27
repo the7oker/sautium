@@ -6508,37 +6508,23 @@
       // still work, the worker is the source of truth for delivery.
     }
 
-    // SSE live updates: PG NOTIFY sautium_chat fires on incoming
-    // messages, friend additions, and presence (last_seen) bumps;
-    // backend forwards via /api/p2p/chat/stream as periodic
-    // heartbeats. We refetch on each event so the list reflects
-    // online/offline transitions without a manual reload.
-    //
-    // window.sseStream (auth.js) — not native EventSource. The
-    // stream endpoint is HMAC-protected and EventSource can't add
-    // a signature header, so the project ships a fetch-based
-    // drop-in that goes through the signed-fetch monkey-patch.
-    // Returns an AbortController; .abort() closes the stream.
-    let sseCtrl = null;
-    if (typeof window.sseStream === 'function') {
-      sseCtrl = window.sseStream(
-        '/api/p2p/chat/stream',
-        () => {
-          if (!document.contains(listEl)) {
-            if (sseCtrl) { sseCtrl.abort(); sseCtrl = null; }
-            return;
-          }
-          refreshFriends(true);
-        },
-        () => { /* sseStream auto-reconnects; nothing to do here */ },
-      );
-    }
-    const onHashChange = () => {
-      if (!document.contains(listEl)) {
-        if (sseCtrl) { sseCtrl.abort(); sseCtrl = null; }
-        window.removeEventListener('hashchange', onHashChange);
-      }
+    // PG NOTIFY sautium_chat fires on incoming messages, friend additions
+    // and presence (last_seen) bumps. It reaches us as 'sautium:chat-changed'
+    // over the ONE /api/events stream this tab holds (player.js) — refetch
+    // per event, so the list reflects online/offline transitions without a
+    // manual reload and without a second connection to the origin.
+    const detach = () => {
+      window.removeEventListener('sautium:chat-changed', onChat);
+      window.removeEventListener('hashchange', onHashChange);
     };
+    const onChat = () => {
+      if (!document.contains(listEl)) return detach();
+      refreshFriends(true);
+    };
+    const onHashChange = () => {
+      if (!document.contains(listEl)) detach();
+    };
+    window.addEventListener('sautium:chat-changed', onChat);
     window.addEventListener('hashchange', onHashChange);
 
     // Friends list: pinned favorites whole + first page, further pages
@@ -7267,30 +7253,23 @@
     await loadMessages();
     markRead();
 
-    // SSE wakes us on incoming messages, send confirmations, and
-    // presence bumps — same channel as the Friends list.
-    let sseCtrl = null;
-    if (typeof window.sseStream === 'function') {
-      sseCtrl = window.sseStream(
-        '/api/p2p/chat/stream',
-        () => {
-          if (!document.contains(threadEl)) {
-            if (sseCtrl) { sseCtrl.abort(); sseCtrl = null; }
-            return;
-          }
-          loadMessages();
-          loadFriend();          // status may have changed
-          markRead();
-        },
-        () => { /* sseStream handles reconnect */ },
-      );
-    }
-    const onHashChange = () => {
-      if (!document.contains(threadEl)) {
-        if (sseCtrl) { sseCtrl.abort(); sseCtrl = null; }
-        window.removeEventListener('hashchange', onHashChange);
-      }
+    // Incoming messages, send confirmations and presence bumps arrive as
+    // 'sautium:chat-changed' — same channel as the Friends list, same one
+    // stream per tab.
+    const detach = () => {
+      window.removeEventListener('sautium:chat-changed', onChat);
+      window.removeEventListener('hashchange', onHashChange);
     };
+    const onChat = () => {
+      if (!document.contains(threadEl)) return detach();
+      loadMessages();
+      loadFriend();            // status may have changed
+      markRead();
+    };
+    const onHashChange = () => {
+      if (!document.contains(threadEl)) detach();
+    };
+    window.addEventListener('sautium:chat-changed', onChat);
     window.addEventListener('hashchange', onHashChange);
   }
 
@@ -12141,6 +12120,26 @@
   registerScreen('friends', renderFriends);
   registerScreen('more', renderMore);
 
+  // Unread mail is only obvious once you open Friends — the tab itself has
+  // to say it. Repaints on a chat event, never on a timer; the count is one
+  // indexed COUNT server-side.
+  async function refreshChatBadge() {
+    const el = document.getElementById('friendsNavBadge');
+    if (!el) return;
+    let n = 0;
+    try {
+      const r = await fetch('/api/p2p/chat/unread');
+      if (!r.ok) return;             // keep the last painted state
+      n = Number((await r.json()).unread) || 0;
+    } catch (_) {
+      return;                        // offline: the next event repaints
+    }
+    el.textContent = n > 99 ? '99+' : String(n);
+    el.hidden = n === 0;
+    const tab = el.closest('.nav-tab');
+    if (tab) tab.setAttribute('aria-label', n ? `Friends, ${n} unread` : 'Friends');
+  }
+
   function attachNavListeners() {
     document.querySelectorAll('.nav-tab').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -12160,6 +12159,8 @@
 
   function init() {
     attachNavListeners();
+    refreshChatBadge();
+    window.addEventListener('sautium:chat-changed', refreshChatBadge);
     mp.init();
     sheet.init();
     ai.init();

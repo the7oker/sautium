@@ -863,7 +863,7 @@ async def events_stream():
     """The ONE SSE connection a web-UI tab holds.
 
     Multiplexes every push channel — player status, phantom-preview pings,
-    gear-research transitions — as typed JSON messages {"t": kind, "d":
+    gear-research transitions, chat wakeups — as typed JSON messages {"t": kind, "d":
     payload}. Browsers cap an HTTP/1.1 origin at 6 connections for the
     WHOLE browser; three parallel streams per tab meant two tabs starved
     every other fetch into (pending) forever (observed 2026-08-11). New
@@ -875,12 +875,14 @@ async def events_stream():
     from routers.discovery import mb_sse_register, mb_sse_unregister
     from routers.gear_models import (research_sse_register,
                                      research_sse_unregister)
+    from routers.p2p import chat_sse_register, chat_sse_unregister
     from streaming.events import preview_events
 
     loop = asyncio.get_event_loop()
     status_evt = asyncio.Event()
     research_evt = asyncio.Event()
     mb_evt = asyncio.Event()
+    chat_evt = asyncio.Event()
 
     async def event_generator():
         last_version = -1
@@ -888,6 +890,7 @@ async def events_stream():
         manager.sse_register(status_evt, loop)
         research_sse_register(research_evt, loop)
         mb_sse_register(mb_evt, loop)
+        chat_sse_register(chat_evt, loop)
         try:
             yield ("data: "
                    + json.dumps({"t": "status", "d": manager.latest_status})
@@ -898,6 +901,7 @@ async def events_stream():
                     asyncio.create_task(status_evt.wait()): "status",
                     asyncio.create_task(research_evt.wait()): "research",
                     asyncio.create_task(mb_evt.wait()): "mb",
+                    asyncio.create_task(chat_evt.wait()): "chat",
                     asyncio.create_task(preview_q.get()): "preview",
                 }
                 done, pending = await asyncio.wait(
@@ -927,6 +931,9 @@ async def events_stream():
                 if "research" in kinds:
                     research_evt.clear()
                     yield 'data: {"t": "research"}\n\n'
+                if "chat" in kinds:
+                    chat_evt.clear()
+                    yield 'data: {"t": "chat"}\n\n'
                 if "mb" in kinds:
                     mb_evt.clear()
                     yield ("data: "
@@ -938,6 +945,7 @@ async def events_stream():
             manager.sse_unregister(status_evt)
             research_sse_unregister(research_evt, loop)
             mb_sse_unregister(mb_evt, loop)
+            chat_sse_unregister(chat_evt, loop)
             preview_events.unsubscribe(preview_q)
 
     return StreamingResponse(

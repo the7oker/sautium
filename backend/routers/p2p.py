@@ -71,6 +71,22 @@ def _wake_chat_sse_clients():
             loop.call_soon_threadsafe(evt.set)
 
 
+def chat_sse_register(evt: asyncio.Event, loop) -> None:
+    """Chat wakeups for the multiplexed /api/events channel — the standalone
+    /chat/stream endpoint is gone (a browser caps an origin at 6 connections
+    for the whole browser, and the web UI holds exactly one)."""
+    with _chat_sse_lock:
+        _chat_sse_clients.append((evt, loop))
+
+
+def chat_sse_unregister(evt: asyncio.Event, loop) -> None:
+    with _chat_sse_lock:
+        try:
+            _chat_sse_clients.remove((evt, loop))
+        except ValueError:
+            pass
+
+
 def _chat_db_listener():
     """Background thread: LISTEN for PostgreSQL chat notifications."""
     while _chat_listener_running:
@@ -685,7 +701,12 @@ async def mark_messages_read(friend_id: int) -> Dict[str, Any]:
                 SET read = TRUE
                 WHERE friend_id = %s AND direction = 'in' AND read = FALSE
             """, (friend_id,))
-            return {"ok": True, "updated": cur.rowcount}
+            updated = cur.rowcount
+    # After the commit, not inside it: a woken client re-reads the count
+    # and must not see the rows it is being told about as still unread.
+    if updated:
+        _wake_chat_sse_clients()
+    return {"ok": True, "updated": updated}
 
 
 @router.post("/friends/{friend_id}/send")
@@ -1071,43 +1092,11 @@ async def chat_wake() -> Dict[str, str]:
     return {"ok": "true"}
 
 
-@router.get("/chat/stream")
-async def chat_stream():
-    """SSE endpoint: pushes chat update notifications in real-time."""
-    loop = asyncio.get_event_loop()
-    evt = asyncio.Event()
-
-    async def event_generator():
-        try:
-            with _chat_sse_lock:
-                _chat_sse_clients.append((evt, loop))
-
-            # Initial ping so the client knows the connection is live
-            yield "data: {}\n\n"
-
-            while True:
-                try:
-                    await asyncio.wait_for(evt.wait(), timeout=15.0)
-                    evt.clear()
-                except asyncio.TimeoutError:
-                    yield ": keepalive\n\n"
-                    continue
-
-                yield f"data: {{\"ts\":{int(datetime.now(timezone.utc).timestamp())}}}\n\n"
-        except asyncio.CancelledError:
-            pass
-        finally:
-            with _chat_sse_lock:
-                _chat_sse_clients[:] = [
-                    (e, l) for e, l in _chat_sse_clients if e is not evt
-                ]
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+@router.get("/chat/unread")
+async def chat_unread() -> Dict[str, int]:
+    """Unread incoming messages across every thread — what the Friends tab
+    badge paints. One count over idx_p2p_messages_unread, so a repaint on
+    every chat event costs nothing and needs no per-friend fan-out."""
+    row = _db_query_one("SELECT count(*) AS c FROM p2p_messages"
+                        " WHERE direction = 'in' AND read = FALSE")
+    return {"unread": int(row["c"]) if row else 0}

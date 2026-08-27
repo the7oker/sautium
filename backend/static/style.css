@@ -340,6 +340,7 @@ body.no-fab.has-miniplayer #app {
 }
 
 .nav-tab {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -3670,6 +3671,31 @@ body.has-miniplayer .ai-fab {
   cursor: pointer;
   padding: 0;
 }
+/* The tab-bar twin of .unread-badge: unread mail has to be visible from
+   any screen, not only after opening Friends. Sits over the icon's top
+   right corner; [hidden] needs the explicit none because display:grid
+   would otherwise win over the UA rule. */
+.nav-badge {
+  position: absolute;
+  top: calc(4 * var(--px));
+  left: 50%;
+  margin-left: calc(2 * var(--px));
+  min-width: calc(15 * var(--px));
+  height: calc(15 * var(--px));
+  padding: 0 calc(4 * var(--px));
+  border-radius: calc(8 * var(--px));
+  background: var(--color-amber);
+  color: #1B1714;
+  font-size: calc(9 * var(--px));
+  font-weight: 700;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.nav-badge[hidden] { display: none; }
+
 .unread-badge {
   position: absolute;
   top: calc(6 * var(--px));

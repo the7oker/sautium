@@ -58,7 +58,8 @@
   // ONE stream per tab. /api/events multiplexes every push channel as
   // typed messages {t, d}: 'status' (player state), 'preview' (phantom
   // preview changed — the open screen re-fetches its own snapshot),
-  // 'research' (gear research transition). Browsers cap an HTTP/1.1
+  // 'research' (gear research transition), 'chat' (a message arrived, a
+  // thread was read, a friend came online). Browsers cap an HTTP/1.1
   // origin at 6 connections for the whole browser; the previous three
   // parallel streams per tab meant two tabs starved every other fetch
   // into (pending) forever. Never open another standalone SSE here —
@@ -80,6 +81,10 @@
           window.dispatchEvent(new CustomEvent('sautium:preview-changed'));
         } else if (msg.t === 'research') {
           window.dispatchEvent(new CustomEvent('sautium:research-changed'));
+        } else if (msg.t === 'chat') {
+          // Payload-free: the Friends tab badge re-reads the one count and
+          // an open friends list / thread re-fetches its own snapshot.
+          window.dispatchEvent(new CustomEvent('sautium:chat-changed'));
         } else if (msg.t === 'mb') {
           // MB-scope capability changed (dump loaded, dump peers
           // found/lost) — payload carries the fresh mb-status shape.
