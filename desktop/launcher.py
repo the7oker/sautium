@@ -1507,6 +1507,8 @@ class LauncherApp(ctk.CTk):
             self._stop_everything()
             cmd = ([sys.executable, *sys.argv[1:]] if getattr(sys, "frozen", False)
                    else [sys.executable, "-m", "desktop"])
+            logger.info("Relaunching: %s (cwd=%s)", " ".join(cmd),
+                        get_project_root())
             try:
                 subprocess.Popen(cmd, cwd=str(get_project_root()),
                                  start_new_session=True)
