@@ -81,10 +81,6 @@ class HardwareProfile:
         return "trickle"
 
     @property
-    def phantom_minting(self) -> bool:
-        return self.name != "lite"
-
-    @property
     def translation_available(self) -> bool:
         """MADLAD ct2-int8 (~3GB RAM, CPU-only runtime): full pre-warms it,
         standard lazy-loads on the first non-ASCII sound query, lite never
@@ -145,7 +141,6 @@ class HardwareProfile:
                 "prewarm": list(self.prewarm_keys),
                 "local_analysis": self.local_analysis,
                 "stream_enrich_mode": self.stream_enrich_mode,
-                "phantom_minting": self.phantom_minting,
                 "io_workers": self.io_workers,
             },
         }

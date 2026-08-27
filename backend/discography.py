@@ -41,7 +41,7 @@ synced from the other side only gains an `album_artists` link).
 import logging
 import re
 import unicodedata
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import mb_backend as mb  # module-attr access only — refresh() rebinds the source
 from psycopg2.extras import execute_values
@@ -562,16 +562,21 @@ def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
     """, {"id": artist_id})
 
 
-def prune_phantom_layer(cancel_flag=None) -> Dict[str, int]:
-    """Delete the MB-derived phantom album/track layer — lite-profile
-    cleanup (HARDWARE-TIERS §6.14). ~3M phantom track rows + album_tracks
-    cost ~2.5 GB of heap+index the lite tier promises not to carry.
+def prune_phantom_layer(cancel_flag=None, progress_cb=None) -> Dict[str, Any]:
+    """Delete the MB-derived phantom album/track layer. This is the owner's
+    explicit "Remove phantom layer" action (Settings › Library) and nothing
+    else starts it — a hardware profile governs compute, never retention.
+    ~3.1M phantom track rows + album_tracks cost ~3.6 GB of heap+index on
+    the reference library.
 
     Spares: owned rows, streaming mints (explicit user intent), and
     analysis-carrying phantoms (the node's own streamed-enrichment
-    contribution). Everything deleted is re-derivable — a later
-    full-profile boot re-mints from the MB dump / Last.fm. Per-artist
-    commits: resumable and error-isolated."""
+    contribution). Similar-artist stubs stay — `similar_artists` edges hang
+    off them. Everything deleted is re-derivable from the MB dump / Last.fm,
+    at the cost of hours. Per-artist commits: resumable and error-isolated.
+    `progress_cb(done, total)` fires every 250 artists and at the end; the
+    planner statistics are refreshed afterwards so the Settings footprint
+    row reads the new size at once."""
     artists = db_query("""
         SELECT DISTINCT aa.artist_id
         FROM album_artists aa
@@ -579,13 +584,20 @@ def prune_phantom_layer(cancel_flag=None) -> Dict[str, int]:
         WHERE NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
           AND NOT EXISTS (SELECT 1 FROM streaming_mints sm WHERE sm.album_id = al.id)
     """)
-    stats = {"artists": 0}
+    total = len(artists)
+    stats = {"artists": 0, "total": total, "cancelled": False}
     for row in artists:
         if cancel_flag and cancel_flag():
+            stats["cancelled"] = True
             break
         _reconcile_phantoms(str(row["artist_id"]), [])
         stats["artists"] += 1
-    logger.info("phantom prune: reconciled %d artists", stats["artists"])
+        if progress_cb and (stats["artists"] % 250 == 0 or stats["artists"] == total):
+            progress_cb(stats["artists"], total)
+    if stats["artists"]:
+        db_execute("ANALYZE tracks, albums, album_tracks")
+    logger.info("phantom prune: reconciled %d/%d artists%s", stats["artists"], total,
+                " (cancelled)" if stats["cancelled"] else "")
     return stats
 
 
@@ -603,10 +615,11 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
     stats = {"status": "success", "found": 0, "new": 0, "skipped_owned": 0,
              "tracks": 0}
 
-    from hardware_profile import resolve as _hw
-    if not _hw().phantom_minting:
-        # Lite nodes skip the phantom layer entirely (~2.5 GB of heap+index
-        # on the reference library) — the shelf stays owned-albums-only.
+    from routers.settings import _read as _read_setting
+    if not bool(_read_setting("discovery.phantom_layer")):
+        # The owner switched the phantom layer off: nothing new is minted
+        # and what exists stays until they remove it — the shelf shows
+        # owned albums only.
         stats["status"] = "disabled"
         return stats
 

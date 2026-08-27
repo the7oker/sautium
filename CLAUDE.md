@@ -96,6 +96,14 @@ See:
   re-check what the ORM, framework or internal caller already enforced.
 - **No feature flags or back-compat shims** for code the single maintainer
   controls end-to-end. Change it, migrate the data, move on.
+- **A hardware profile governs compute, never retention.** `full/standard/
+  lite` decides what the node derives locally (analysis, pre-warm, thread
+  caps); it never decides what the node stores. Rows the owner can see are
+  deleted only by an explicit, confirmed user action (Settings › Library ›
+  "Remove phantom layer") — no startup job, boot-streak counter or tier
+  heuristic may drop them. The phantom layer's growth is the owner's switch
+  (`discovery.phantom_layer`, default on). The lite phantom prune of
+  2026-07-10 broke this rule and was removed 2026-08-27.
 - **No mocking the database or external enrichment APIs in tests** that are
   supposed to verify DB behavior. Integration tests that run against a real
   pgvector DB catch migration-and-query mismatches that mocks hide.

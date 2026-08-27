@@ -5852,7 +5852,7 @@ select.add-gear-input {
   0%   { transform: translateX(-110%); }
   100% { transform: translateX(275%); }
 }
-.action-progress.mb-error { color: var(--color-negative, #C46552); }
+.action-progress.failed { color: var(--color-negative, #C46552); }
 
 /* In-flight scan / enrichment progress strip — replaces the primary
    action button while the worker is running. */

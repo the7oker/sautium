@@ -238,8 +238,12 @@ Selection is **automatic** (Valerii, 2026-07-10: no manual picker — detection
 must be good enough on its own; `SAUTIUM_PROFILE` env stays as the diagnostics
 override). Auto-detection via `mem_get_info`/psutil at backend startup:
 - NVIDIA ≥8 GB or Apple Silicon ≥24 GB unified → **full**
-- NVIDIA/Apple Silicon with less, or ≥16 GB RAM CPU-only → **standard**
-- else → **lite**
+- NVIDIA/Apple Silicon with less → **standard**
+- else → **lite** — every CPU-only machine, whatever its RAM. (`standard`
+  there would switch on bulk local analysis, and CLAP on CPU takes days for
+  a 35k library. This doc used to promise `standard` to ≥16 GB CPU-only
+  boxes; the code never did, and since the phantom layer left the tier
+  matrix — see §6.14 — `lite` costs no data, so the code's rule stands.)
 
 A small resolver (`hardware_profile.py`) expands the profile into effective
 flags consumed at the existing seams (most gates already exist — this is mostly
@@ -252,7 +256,7 @@ wiring, not new machinery):
 | Instruments (AST+PaSST) | on | on + call `unload()` after each run | off |
 | `embedding_segments` (local computation) | balanced K | balanced K | none — no local analysis; imported segments arrive once segment sync ships (import default per profile, see §2.4) |
 | Stream enrichment (`streaming_preview_analyze`) | on (GPU, as today) | on (GPU) / trickle (CPU-only) | **trickle** (§2.7) — off only by user switch or below floor |
-| Phantom minting (similars / missing albums) | on | capped | off |
+| Phantom layer (similars / missing albums) | **owner's switch, on in all profiles** — `discovery.phantom_layer` (off = nothing new minted, existing rows stay); removal only by the explicit Settings action, never by tier | | |
 | Background enrichment | on | on | manual button |
 | Player status loop | owned by the active output backend (§2.6) — no configured output, no loop | | |
 | torch threads / I/O pool | default / 16 | cores−2 / min(8,cores) | max(2,cores/2) / min(4,cores) |
@@ -276,7 +280,9 @@ take minutes even on NTFS SSD); no GPU; broadband (first run downloads ~6–8 GB
 Works: library, player/HQPlayer, metadata enrichment, P2P sync/chat, text +
 semantic search (first semantic query warms the encoder for 1–3 min), similarity
 /radio over imported embeddings; stream enrichment in CPU trickle mode (§2.7 —
-the node still contributes phantom analysis to the network). Not available:
+the node still contributes phantom analysis to the network); phantom discovery
+(the layer is the owner's switch, `discovery.phantom_layer`, sized by what they
+listen to — never by tier). Not available:
 bulk local library analysis (P2P import instead; an explicit opt-in with a
 bench-estimated ETA can stay for small libraries); segment search — until
 segment sync ships. MB dump technically possible but infeasible at this disk
@@ -354,13 +360,18 @@ cards, so the standard-tier VRAM floor deliberately stays at ≥5.5 GB until
     `PG_MAINTENANCE_WORK_MEM:-512MB`, `PG_WORK_MEM:-16MB`; weak hosts
     override via .env); embedded PG gets RAM-tiered values written by
     `db_init._pg_memory_tier()` (≥24GB / ≥15GB / stock below).
-14. ✅ Phantom prune for lite (SHIPPED 2026-07-10): startup background job
-    reuses `_reconcile_phantoms(artist, [], spare_analyzed=True)` per
-    artist — spares owned rows, streaming mints, and analysis-carrying
-    phantoms (the node's own streamed-enrichment contribution). Guarded by
-    a **3-consecutive-lite-boots streak** (`hardware.lite_streak`) so a GPU
-    node that transiently loses CUDA (driver-update WSL failure mode) never
-    auto-nukes 3M re-derivable-but-hours-to-re-mint rows.
+14. ❌ Phantom prune for lite (SHIPPED 2026-07-10, **REMOVED 2026-08-27**):
+    a startup job pruned the phantom layer after a 3-consecutive-lite-boots
+    streak (`hardware.lite_streak`). It measured the wrong thing — `lite`
+    means "no CUDA", not "small disk": a 32-core / 16 GB laptop switched
+    to iGPU-only mode would have lost 3.09M phantom tracks + 288k albums
+    on its third start, and on a genuinely lite node the deletion is
+    one-way (the re-mint needs the MB dump it cannot hold). Rule now
+    (CLAUDE.md): **a hardware profile governs compute, never retention.**
+    The layer is the owner's switch `discovery.phantom_layer` (default on,
+    every tier; off = no minting, existing rows stay) and removal is the
+    explicit, confirmed "Remove phantom layer" job in Settings › Library
+    (`prune_phantom_layer` with progress over the library SSE channel).
 15. ✅ UPnP lease renewal (SHIPPED 2026-07-10): `renew_ports()` re-adds each
     mapping at 75% of the 1h lease from a p2p_manager task; falls back to
     full re-discover on failure and pushes a changed external port into the

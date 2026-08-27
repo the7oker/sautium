@@ -256,33 +256,6 @@ async def lifespan(app: FastAPI):
         torch.set_num_threads(_profile.torch_cpu_threads)
         logger.info(f"torch CPU threads capped at {_profile.torch_cpu_threads}")
 
-    # Lite phantom prune — but only after lite resolved on 3 CONSECUTIVE
-    # boots. A GPU node that transiently loses CUDA (Windows driver update
-    # until `wsl --shutdown` — a known failure mode) resolves lite for a
-    # boot or two; auto-pruning 3M re-derivable-but-hours-to-re-mint rows
-    # on that hiccup would be destructive. A genuinely lite machine crosses
-    # the streak on its third launch.
-    try:
-        from routers.settings import _read as _read_setting, _write as _write_setting
-        streak = int(_read_setting("hardware.lite_streak") or 0)
-        if _profile.phantom_minting:
-            if streak:
-                _write_setting("hardware.lite_streak", 0)
-        else:
-            streak += 1
-            _write_setting("hardware.lite_streak", streak)
-            if streak >= 3:
-                def _prune_worker():
-                    from discography import prune_phantom_layer
-                    try:
-                        prune_phantom_layer()
-                    except Exception as e:
-                        logger.error(f"Phantom prune failed: {e}", exc_info=True)
-                threading.Thread(target=_prune_worker, daemon=True,
-                                 name="phantom-prune").start()
-    except Exception as e:
-        logger.warning(f"Lite-streak bookkeeping failed: {e}")
-
     # Overlay Last.fm credentials from user_settings (Pydantic Settings
     # only reads .env at startup; the OAuth callback persists to DB).
     _load_lastfm_from_db()

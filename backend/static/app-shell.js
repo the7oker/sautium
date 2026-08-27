@@ -11451,7 +11451,7 @@
       <div class="action-progress" data-progress-for="mb">${escapeProfileHtml(progress || 'Working…')}</div>
       <div class="enrich-bar${pct == null ? ' indeterminate' : ''}" data-mb-bar><div class="fill"${pct == null ? '' : ` style="width:${pct}%;"`}></div></div>
     ` : `
-      ${err ? `<div class="action-progress mb-error">${escapeProfileHtml('Failed: ' + err)}</div>` : ''}
+      ${err ? `<div class="action-progress failed">${escapeProfileHtml('Failed: ' + err)}</div>` : ''}
       <div class="btn-row${mb.loaded ? '' : ' single'}">
         <button class="btn ${mb.loaded ? 'btn-secondary' : 'btn-primary'}" data-action="mb-update">${mb.loaded ? 'Update' : 'Download'}</button>
         ${mb.loaded ? `<button class="btn btn-secondary" data-action="mb-delete">Delete catalogue</button>` : ''}
@@ -11521,6 +11521,86 @@
       btn.classList.toggle('on', want);                 // optimistic flip, no render
       btn.setAttribute('aria-pressed', want ? 'true' : 'false');
       await fetch('/api/settings/musicbrainz', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auto_update: want }) });
+    });
+  }
+
+  // Phantom layer block — the owner's switch and the explicit, confirmed
+  // removal. Same in-place contract as the MB block: no full render() on a
+  // click, a toggle or job completion. Nothing on the backend removes the
+  // layer on its own (CLAUDE.md: a hardware profile governs compute, never
+  // retention), so this block is the only place it can go.
+  function _phantomBlockHTML(ph) {
+    ph = ph || {};
+    const job = ph.prune || {};
+    const running = !!job.running;
+    const cancelling = running && !!job.cancel_requested;
+    const progress = String(job.progress || '');
+    const pct = typeof job.pct === 'number' ? job.pct : null;
+    const err = (!running && job.error) ? job.error : '';
+    const empty = !((ph.albums || 0) > 0 || (ph.tracks || 0) > 0);
+    const actions = running ? `
+      <div class="btn-row single">
+        <button class="btn btn-danger" data-action="phantom-cancel" ${cancelling ? 'disabled' : ''}>${cancelling ? 'Cancelling…' : 'Cancel'}</button>
+      </div>
+      <div class="action-progress" data-progress-for="phantoms">${escapeProfileHtml(cancelling ? 'Finishing the current artist… cancel takes effect at the next one.' : (progress || 'Working…'))}</div>
+      <div class="enrich-bar${pct == null ? ' indeterminate' : ''}" data-phantom-bar><div class="fill"${pct == null ? '' : ` style="width:${pct}%;"`}></div></div>
+    ` : `
+      ${err ? `<div class="action-progress failed">${escapeProfileHtml('Failed: ' + err)}</div>` : ''}
+      ${empty ? '' : `<div class="btn-row single"><button class="btn btn-secondary" data-action="phantom-prune">Remove phantom layer</button></div>`}`;
+    return `
+      <div class="profile-group-label">Phantom layer</div>
+      <div class="form-group">
+        <div class="form-row stacked"><div class="row-stack-sub">Albums and tracks you don't have — MusicBrainz discographies and Last.fm neighbours — browsable and streamable next to your library. Grows with what you listen to; never removed on its own.</div></div>
+        <div class="form-row"><span class="form-label">Size</span><span class="form-value">${empty ? 'Empty' : `≈ ${fmtNum(ph.albums)} albums · ${fmtNum(ph.tracks)} tracks · ${escapeProfileHtml(fmtBytes(ph.size_bytes))}`}</span></div>
+        <div class="form-row"><span class="form-label">Discover new</span><button class="toggle ${ph.enabled ? 'on' : ''}" data-action="phantom-toggle" aria-pressed="${ph.enabled ? 'true' : 'false'}"><span class="knob"></span></button></div>
+        <div class="form-row stacked"><div class="row-stack-sub">Off: nothing new is added; what is here stays until you remove it.</div></div>
+      </div>
+      <div data-phantom-actions>${actions}</div>`;
+  }
+
+  // Latest phantoms payload from /api/settings/library — the confirm dialog
+  // quotes its numbers. Set by renderLibrary and every SSE refresh.
+  let _phantomsLast = null;
+
+  // One delegated listener on the block: its inner HTML is swapped in place
+  // (progress UI, completion re-render) and stays wired without re-binding.
+  function _wirePhantoms(root) {
+    const block = root.querySelector('[data-phantom-block]');
+    if (!block || block.dataset.wired) return;
+    block.dataset.wired = '1';
+    block.addEventListener('click', async (e) => {
+      const el = e.target.closest('[data-action]');
+      if (!el || !block.contains(el)) return;
+      const action = el.getAttribute('data-action');
+      if (action === 'phantom-toggle') {
+        const want = !el.classList.contains('on');
+        el.classList.toggle('on', want);                 // optimistic flip, no render
+        el.setAttribute('aria-pressed', want ? 'true' : 'false');
+        await fetch('/api/settings/phantoms', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: want }) });
+      } else if (action === 'phantom-prune') {
+        const ph = _phantomsLast || {};
+        const ok = await window.confirmDestructive({
+          title: 'Remove the phantom layer?',
+          message: `Deletes ≈ <b>${fmtNum(ph.albums)}</b> albums and <b>${fmtNum(ph.tracks)}</b> tracks you don't have (${escapeProfileHtml(fmtBytes(ph.size_bytes))}). `
+                 + 'Kept: everything you own, albums you streamed from a provider tile, phantom tracks that carry audio analysis, and similar-artist entries. '
+                 + 'Bringing the layer back later needs the MusicBrainz catalogue or Last.fm and takes hours.',
+          confirmText: 'Remove',
+        });
+        if (!ok) return;
+        const wrap = block.querySelector('[data-phantom-actions]');
+        if (wrap) wrap.innerHTML = `<div class="btn-row single"><button class="btn btn-danger" data-action="phantom-cancel">Cancel</button></div><div class="action-progress" data-progress-for="phantoms">Starting…</div><div class="enrich-bar indeterminate" data-phantom-bar><div class="fill"></div></div>`;
+        const r = await fetch('/api/settings/phantoms/prune', { method: 'POST' });
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          await window.notifyDialog({ title: 'Could not start', kind: 'error',
+            message: escapeProfileHtml(d.detail || 'Unknown error') });
+          block.innerHTML = _phantomBlockHTML(ph);
+        }
+      } else if (action === 'phantom-cancel') {
+        el.disabled = true;
+        el.textContent = 'Cancelling…';
+        await fetch('/api/settings/phantoms/prune/cancel', { method: 'POST' });
+      }
     });
   }
 
@@ -11622,6 +11702,7 @@
     // respective sections (scan under Library, enrich under
     // Enrichment) — so no end-of-screen action block is emitted.
     const actions = '';
+    _phantomsLast = lib.phantoms || null;
 
     root.innerHTML = `
       <section class="screen screen-settings">
@@ -11655,6 +11736,7 @@
         ${libraryStats}
         <div data-hw-block></div>
         <div data-mb-block>${_mbBlockHTML(lib.musicbrainz)}</div>
+        <div data-phantom-block>${_phantomBlockHTML(lib.phantoms)}</div>
         ${emptyState}
         ${actions}
       </section>
@@ -11669,6 +11751,7 @@
     onAction('[data-cancel-scan]',         async () => { await fetch('/api/settings/library/scan/cancel',   { method: 'POST' }); render(); });
     onAction('[data-cancel-enrich]',       async () => { await fetch('/api/settings/library/enrich/cancel', { method: 'POST' }); render(); });
     _wireMb(root);
+    _wirePhantoms(root);
 
     _subscribeLibraryStream(root);
   }
@@ -11730,6 +11813,21 @@
         else { mbBar.classList.remove('indeterminate'); if (fill) fill.style.width = pct + '%'; }
       }
 
+      const ph = lib.phantoms || {};
+      _phantomsLast = ph;
+      const phJob = ph.prune || {};
+      const phRunning = !!phJob.running;
+      const phProgress = String(phJob.progress || '');
+      const phLine = root.querySelector('[data-progress-for="phantoms"]');
+      if (phLine && phProgress && !phJob.cancel_requested && phLine.textContent !== phProgress) phLine.textContent = phProgress;
+      const phBar = root.querySelector('[data-phantom-bar]');
+      if (phBar) {
+        const pct = typeof phJob.pct === 'number' ? phJob.pct : null;
+        const fill = phBar.querySelector('.fill');
+        if (pct == null) { phBar.classList.add('indeterminate'); if (fill) fill.style.width = ''; }
+        else { phBar.classList.remove('indeterminate'); if (fill) fill.style.width = pct + '%'; }
+      }
+
       // Completion. Scan/enrich finishing → full re-render (flips the Cancel
       // row back). MB finishing → re-render only its block IN PLACE so the page
       // doesn't scroll to the top.
@@ -11741,6 +11839,10 @@
         if (mbBlockEl && root.querySelector('[data-progress-for="mb"]') && !mbRunning) {
           mbBlockEl.innerHTML = _mbBlockHTML(mb);
           _wireMb(root);
+        }
+        const phBlockEl = root.querySelector('[data-phantom-block]');
+        if (phBlockEl && root.querySelector('[data-progress-for="phantoms"]') && !phRunning) {
+          phBlockEl.innerHTML = _phantomBlockHTML(ph);   // delegated listener survives the swap
         }
       }
     }

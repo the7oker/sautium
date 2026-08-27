@@ -427,12 +427,13 @@ class LastFmService:
         from uuid_utils import artist_uuid
         from canon.split import detect_compound_type
         from transliterate import latinize
-        from hardware_profile import resolve as _hw
+        from routers.settings import _read as _read_setting
 
-        # Lite profile keeps the phantom layer off: edges are stored only
-        # between artists that already exist; unknown similars are dropped
-        # instead of minted (FK requires the row).
-        mint_phantoms = _hw().phantom_minting
+        # The phantom layer is the owner's switch (discovery.phantom_layer),
+        # never the hardware profile's. Off: edges are stored only between
+        # artists that already exist; unknown similars are dropped instead
+        # of minted (FK requires the row).
+        mint_phantoms = bool(_read_setting("discovery.phantom_layer"))
 
         seed = str(artist_id)
         seen: set = set()   # sids already handled this batch — pending db.add()s

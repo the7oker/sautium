@@ -266,6 +266,13 @@ _DEFAULTS: Dict[str, Any] = {
     # poison detector). Read by embeddings.py / audio_analysis.py pending
     # queries.
     "enrichment.reanalyze_imported": False,
+    # The phantom layer — albums and tracks the owner does not have (MB
+    # discographies, Last.fm neighbours), browsable and streamable next to
+    # the library. Its size is the OWNER's call, never the hardware
+    # profile's: on = keep minting, off = nothing new is minted and what
+    # exists stays. Removal is the explicit Settings action
+    # (POST /phantoms/prune) — no startup job ever drops it.
+    "discovery.phantom_layer":   True,
     # Provider/model default to None so the first-run UI shows
     # "Not selected" instead of pretending Claude is picked when the
     # wizard offered an explicit "no AI" option.
@@ -515,6 +522,76 @@ def maybe_auto_update() -> None:
 
 
 # ============================================================
+# Phantom layer — the owner's switch + the explicit removal job
+# ============================================================
+
+# In-memory progress for the (single) running removal. Surfaced in the
+# Library payload and woken over the shared library SSE channel, like the
+# MB job above.
+_phantom_state: Dict[str, Any] = {"running": False, "cancel_requested": False,
+                                  "progress": "", "pct": None, "error": None}
+_phantom_lock = threading.Lock()
+
+
+def _phantom_worker() -> None:
+    try:
+        from discography import prune_phantom_layer
+
+        def progress(done: int, total: int) -> None:
+            _phantom_state["pct"] = int(done * 100 / total) if total else 100
+            _phantom_state["progress"] = f"Removing… {done:,} / {total:,} artists"
+            notify_library_subscribers()
+
+        stats = prune_phantom_layer(
+            cancel_flag=lambda: _phantom_state["cancel_requested"],
+            progress_cb=progress)
+        _phantom_state["pct"] = 100
+        _phantom_state["progress"] = "Cancelled" if stats["cancelled"] else "Removed"
+        logger.info(f"Phantom layer removal finished: {stats}")
+    except Exception as e:
+        _phantom_state["error"] = str(e)
+        _phantom_state["progress"] = f"Failed: {e}"
+        logger.error(f"Phantom layer removal failed: {e}", exc_info=True)
+    finally:
+        _phantom_state["running"] = False
+        notify_library_subscribers()
+
+
+def _phantom_section() -> Dict[str, Any]:
+    """Footprint + switch + live job state for the Phantom layer block.
+    Counts are planner estimates minus the owned rows — instant on 3M rows,
+    and ≈ is all the row needs (the removal job re-ANALYZEs so the estimate
+    follows it). The byte figure is the phantom-bearing tables whole; the
+    owned share is ~1 %."""
+    row = db_query_one("""
+        SELECT GREATEST(t.est - o.tracks, 0)::bigint AS tracks,
+               GREATEST(a.est - o.albums, 0)::bigint AS albums,
+               pg_total_relation_size('tracks') + pg_total_relation_size('album_tracks')
+             + pg_total_relation_size('albums') + pg_total_relation_size('track_artists')
+             + pg_total_relation_size('album_artists') AS size_bytes
+        FROM (SELECT GREATEST(reltuples, 0)::bigint AS est
+              FROM pg_class WHERE oid = 'tracks'::regclass) t,
+             (SELECT GREATEST(reltuples, 0)::bigint AS est
+              FROM pg_class WHERE oid = 'albums'::regclass) a,
+             (SELECT (SELECT count(DISTINCT track_id) FROM media_files) AS tracks,
+                     (SELECT count(DISTINCT album_id) FROM album_variants) AS albums) o
+    """)
+    return {
+        "enabled":    bool(_read("discovery.phantom_layer")),
+        "tracks":     int(row["tracks"]),
+        "albums":     int(row["albums"]),
+        "size_bytes": int(row["size_bytes"]),
+        "prune": {
+            "running":          bool(_phantom_state["running"]),
+            "cancel_requested": bool(_phantom_state["cancel_requested"]),
+            "progress":         _phantom_state["progress"],
+            "pct":              _phantom_state["pct"],
+            "error":            _phantom_state["error"],
+        },
+    }
+
+
+# ============================================================
 # Reads
 # ============================================================
 
@@ -569,6 +646,7 @@ async def _library_state() -> Dict[str, Any]:
         "scan":               scan,
         "enrich":             enrich,
         "musicbrainz":        _mb_section(),
+        "phantoms":           _phantom_section(),
     }
 
 
@@ -1697,6 +1775,43 @@ def mb_update(force: bool = False) -> Dict[str, Any]:
         _mb_state.update(running=True, phase="checking",
                          progress="Starting…", pct=None, error=None)
     threading.Thread(target=_mb_worker, args=(bool(force),), daemon=True).start()
+    notify_library_subscribers()
+    return {"success": True}
+
+
+class PhantomPrefs(BaseModel):
+    enabled: bool
+
+
+@router.put("/phantoms")
+def put_phantom_prefs(req: PhantomPrefs) -> Dict[str, Any]:
+    _write("discovery.phantom_layer", bool(req.enabled))
+    return _phantom_section()
+
+
+@router.post("/phantoms/prune")
+def phantom_prune() -> Dict[str, Any]:
+    """Remove the phantom album/track layer in the background — the owner's
+    explicit, confirmed action; nothing else ever starts it."""
+    with _phantom_lock:
+        if _phantom_state["running"]:
+            raise HTTPException(status_code=409,
+                                detail="Phantom layer removal already running")
+        _phantom_state.update(running=True, cancel_requested=False,
+                              progress="Starting…", pct=None, error=None)
+    threading.Thread(target=_phantom_worker, daemon=True,
+                     name="phantom-prune").start()
+    notify_library_subscribers()
+    return {"success": True}
+
+
+@router.post("/phantoms/prune/cancel")
+def phantom_prune_cancel() -> Dict[str, Any]:
+    with _phantom_lock:
+        if not _phantom_state["running"]:
+            raise HTTPException(status_code=409,
+                                detail="No phantom layer removal running")
+        _phantom_state["cancel_requested"] = True
     notify_library_subscribers()
     return {"success": True}
 

@@ -35,7 +35,7 @@ from desktop.p2p.master_node import MASTER_INVITE_CODE, MASTER_PUBKEY_HEX
 logger = logging.getLogger(__name__)
 
 SETTINGS_KEY_PREFIXES = ("sync.", "p2p.", "enrichment.", "output.", "albums.",
-                         "musicbrainz.", "library.", "hardware.", "support.")
+                         "musicbrainz.", "library.", "discovery.", "support.")
 SETTINGS_KEYS = ("ai.provider", "ai.model", "ai.canonization_enabled",
                  "hqplayer.host", "hqplayer.port", "ui.language")
 CONFIG_KEYS = ("version", "music_path", "provider", "hqplayer", "ports",
@@ -45,8 +45,7 @@ CONFIG_P2P_KEYS = ("node_name", "listen_port", "docker_ports", "chat_enabled")
 LOG_FILES = ("launcher.log", "backend.log", "backend.log.1", "pgdata/server.log")
 CHAT_MAX_MESSAGES = 5000
 SYSTEM_SETTINGS_KEYS = ("p2p.reachability", "p2p.reachability_detail", "p2p.identity",
-                        "sync.last_at", "sync.last_items_received", "hardware.lite_streak",
-                        "ui.language")
+                        "sync.last_at", "sync.last_items_received", "ui.language")
 
 
 def _json(obj) -> str:

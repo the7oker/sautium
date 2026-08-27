@@ -523,9 +523,10 @@ a signature. Analysis lands in a ready socket — the same "best case" measured
 earlier (15/15 radio-eligible with zero canon work). The pusher serves the
 wanted uuids through the ordinary pull handlers, which naturally return only
 what it holds. An empty carrier (a fresh node before discovery) takes nothing —
-honestly so; its profile will grow. A lite node without phantom_minting is not
-a carrier. The master with its dump (2.9M phantoms) is a de-facto broad
-carrier, the network's safety anchor.
+honestly so; its profile will grow. A node whose owner switched the phantom
+layer off (`discovery.phantom_layer`) or removed it is not a carrier. The
+master with its dump (2.9M phantoms) is a de-facto broad carrier, the
+network's safety anchor.
 
 **The "don't send what they already have" filter** is the offer/answer round:
 16 bytes per recording to ask against ~46 KB to send blind. **Budget** is

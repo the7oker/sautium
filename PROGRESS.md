@@ -89,6 +89,18 @@ implementation details live in the code, DB and git history.
   are computed per-slice, so a slice's content address equals a properly split
   rip of the same disc — cross-rip P2P anchors converge; grid stays v1
   (windows are material-relative).
+- **A hardware profile governs compute, never retention (2026-08-27)**. The
+  lite tier used to auto-delete the phantom album/track layer after three
+  consecutive lite boots (`hardware.lite_streak`, shipped 2026-07-10 as a
+  disk saving for small machines). The trigger measured the wrong thing:
+  `lite` means "no CUDA", not "small disk" — a 32-core / 16 GB laptop
+  switched to iGPU-only mode would have lost 3.09M phantom tracks and 288k
+  albums on its third start, and on a genuinely lite node the deletion is
+  one-way (re-minting needs the MB dump it cannot hold). Now the layer is
+  the owner's setting (`discovery.phantom_layer`, default on everywhere —
+  off stops minting and keeps what exists) and removal is the explicit,
+  confirmed "Remove phantom layer" job in Settings › Library. Nothing
+  tier-driven deletes rows.
 
 ### Embeddings & search
 
