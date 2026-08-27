@@ -21,7 +21,8 @@ import customtkinter as ctk
 from desktop.api_client import BackendAPIClient
 from desktop.config_manager import load_config, save_config, update_config
 from desktop.service_manager import ServiceManager
-from desktop.utils import get_local_ip, get_tailscale_ip, generate_qr_ctk
+from desktop.utils import (get_local_ip, get_project_root, get_tailscale_ip,
+                           generate_qr_ctk)
 
 logger = logging.getLogger(__name__)
 
@@ -730,33 +731,6 @@ class LauncherApp(ctk.CTk):
         except Exception as e:
             logger.warning(f"OpenSSL DLL fix failed: {e}")
 
-    @staticmethod
-    def _reload_p2p_modules():
-        """Reload P2P modules after git pull so new code takes effect.
-
-        The backend runs as a subprocess (gets new code on restart),
-        but P2P modules run in the launcher process — Python's import
-        cache keeps the old code in memory after git pull.
-        """
-        import importlib
-        module_names = [
-            "desktop.p2p.sync_queries",
-            "desktop.p2p.chat_service",
-            "desktop.p2p.lan_discovery",
-            "desktop.p2p.dht_service",
-            "desktop.p2p.upnp_service",
-            "desktop.p2p.sync_server",
-            "desktop.p2p.p2p_manager",
-            "desktop.node_identity",
-            "desktop.sync_client",
-        ]
-        for name in module_names:
-            if name in sys.modules:
-                try:
-                    importlib.reload(sys.modules[name])
-                except Exception as e:
-                    logger.debug(f"Reload {name}: {e}")
-
     def _start_p2p(self):
         """Start P2P services unconditionally: sync server, DHT + LAN
         discovery, chat, MB slice loop. A privacy connect/disconnect
@@ -1408,20 +1382,19 @@ class LauncherApp(ctk.CTk):
             def progress(msg):
                 self.ui_call(lambda: self._progress_text.configure(text=msg))
 
-            success, changelog = perform_update(
+            success, changelog, relaunch = perform_update(
                 self.service_manager, self.config, progress_cb=progress,
                 p2p_manager=self.p2p_manager,
             )
             self.p2p_manager = None
 
-            if success:
-                # Reload P2P modules so new code takes effect
-                # (backend is a separate process, but P2P runs in-process)
-                self._reload_p2p_modules()
+            if not success:
+                self.ui_call(lambda: self._set_status("error", "Update failed"))
+            elif relaunch:
+                self.ui_call(lambda: self._restart_self(changelog))
+            else:
                 self.ui_call(lambda: self._show_changelog(changelog))
                 self.ui_call(self._on_services_ready)
-            else:
-                self.ui_call(lambda: self._set_status("error", "Update failed"))
 
         threading.Thread(target=_update, daemon=True).start()
 
@@ -1488,18 +1461,66 @@ class LauncherApp(ctk.CTk):
         self.update()
 
         def _shutdown():
-            if self.p2p_manager:
-                try:
-                    self.p2p_manager.stop()
-                except Exception as e:
-                    logger.debug(f"P2P stop error: {e}")
-            self.service_manager.stop_all()
-            from desktop.config_manager import get_data_dir
-            from desktop.p2p import diag_events
-            diag_events.clear_session_marker(get_data_dir())
+            self._stop_everything()
             self.ui_call(self._final_quit)
 
         threading.Thread(target=_shutdown, daemon=True).start()
+
+    def _stop_everything(self) -> None:
+        """Stop P2P and every service, then clear the session marker so the
+        next start does not report an unclean shutdown. Worker-thread only —
+        both quitting and the update relaunch go through it."""
+        if self.p2p_manager:
+            try:
+                self.p2p_manager.stop()
+            except Exception as e:
+                logger.debug(f"P2P stop error: {e}")
+        self.service_manager.stop_all()
+        from desktop.config_manager import get_data_dir
+        from desktop.p2p import diag_events
+        diag_events.clear_session_marker(get_data_dir())
+
+    def _restart_self(self, changelog: Optional[list] = None) -> None:
+        """Come back as a NEW process — the only way launcher-side code from
+        an update takes effect. Python cannot swap the module a live object
+        was built from, and the object that would have to do the swapping is
+        this app: importlib.reload only ever reached a hand-written list of
+        P2P modules, never launcher.py itself, and silently missed anything
+        the list forgot.
+
+        Stop first. That releases the sync and media ports and clears the
+        session marker, so the successor starts clean and its node.started
+        does not report an unclean shutdown; by the time it reaches Tk and
+        binds anything, this process is long gone.
+
+        A packaged Windows install runs a frozen exe whose launcher code is
+        baked in at build time (desktop/build.py) — the relaunch is harmless
+        there but changes nothing until the exe itself is replaced."""
+        if changelog:
+            logger.info("Update applied: %s", "; ".join(changelog))
+        self._shutting_down = True
+        self.api_client.close_streams()
+        self._set_status("updating", "Restarting Sautium...")
+        self.update()
+
+        def _relaunch():
+            self._stop_everything()
+            cmd = ([sys.executable, *sys.argv[1:]] if getattr(sys, "frozen", False)
+                   else [sys.executable, "-m", "desktop"])
+            try:
+                subprocess.Popen(cmd, cwd=str(get_project_root()),
+                                 start_new_session=True)
+            except OSError as e:
+                logger.error(f"Relaunch failed: {e}")
+                self.service_manager.start_backend()
+                self.service_manager.start_tracker()
+                self._shutting_down = False
+                self.ui_call(lambda: self._set_status(
+                    "error", "Restart failed — the update applies on the next start"))
+                return
+            self.ui_call(self._final_quit)
+
+        threading.Thread(target=_relaunch, daemon=True).start()
 
     def _final_quit(self):
         if self._qr_timer:

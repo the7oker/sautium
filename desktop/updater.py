@@ -134,6 +134,23 @@ def has_new_migrations(old_hash: str) -> bool:
     return any("migrations/" in f and f.endswith(".sql") for f in added_files)
 
 
+def has_launcher_changes(old_hash: str) -> bool:
+    """Whether the pulled range touched code that runs INSIDE the launcher
+    process. The backend is a subprocess and picks new code up when it is
+    restarted below; desktop/ runs in this process, and Python cannot swap
+    the module a live object was built from — the launcher has to come back
+    as a new process (LauncherApp._restart_self).
+
+    Deliberately coarse: a migration or a backend-only helper under desktop/
+    counts too. An extra restart costs seconds; a missed one leaves the node
+    running code the user believes was updated."""
+    result = _git_cmd(["diff", "--name-only", old_hash, "HEAD"])
+    if result.returncode != 0:
+        return False
+    changed = result.stdout.strip().split("\n")
+    return any(f.startswith("desktop/") for f in changed)
+
+
 def pull_updates() -> Tuple[bool, str]:
     """
     Pull updates from origin/main.
@@ -197,10 +214,11 @@ def perform_update(
     2. git pull
     3. pip install if requirements changed
     4. Run migrations if new ones exist
-    5. Restart backend + tracker (P2P restarted by caller)
+    5. Restart backend + tracker — UNLESS the launcher itself has to come
+       back as a new process, which starts them on its own
 
     Returns:
-        (success, changelog_lines)
+        (success, changelog_lines, relaunch_launcher)
     """
     if progress_cb:
         progress_cb("Stopping services for update...")
@@ -226,7 +244,7 @@ def perform_update(
         # Restart services even if pull failed
         service_manager.start_backend(progress_cb)
         service_manager.start_tracker(progress_cb)
-        return False, []
+        return False, [], False
 
     changelog = get_update_changelog(old_hash)
 
@@ -249,7 +267,14 @@ def perform_update(
             logger.error(f"Migration after update failed: {e}")
             _update_failed(config, "migration", str(e))
 
-    # Restart services
+    if has_launcher_changes(old_hash):
+        # The launcher is about to be replaced by a successor process that
+        # starts the services itself — bringing them up here would only be
+        # to stop them again a second later.
+        if progress_cb:
+            progress_cb("Update complete — restarting Sautium...")
+        return True, changelog, True
+
     if progress_cb:
         progress_cb("Restarting services...")
 
@@ -259,4 +284,4 @@ def perform_update(
     if progress_cb:
         progress_cb("Update complete!")
 
-    return True, changelog
+    return True, changelog, False
