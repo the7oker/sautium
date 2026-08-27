@@ -25,6 +25,9 @@ from desktop.utils import get_local_ip, get_tailscale_ip, generate_qr_ctk
 
 logger = logging.getLogger(__name__)
 
+WINDOW_WIDTH, WINDOW_HEIGHT = 480, 900
+WINDOW_SIZE = f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}"
+
 # Appearance
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -37,8 +40,7 @@ class LauncherApp(ctk.CTk):
         super().__init__()
 
         self.title("Sautium")
-        self.geometry("480x900")
-        self.resizable(False, False)
+        self._pin_window_size()
 
         self.config = load_config()
         self.service_manager = ServiceManager(self.config)
@@ -71,6 +73,7 @@ class LauncherApp(ctk.CTk):
         if not self.config.get("first_run_complete"):
             # On macOS, move offscreen instead of withdraw — withdrawn parent hides transient children
             if sys.platform == "darwin":
+                self.minsize(1, 1)   # the pin's floor would clamp the offscreen shrink
                 self.geometry("1x1+9999+9999")
                 self.overrideredirect(True)
             else:
@@ -83,6 +86,15 @@ class LauncherApp(ctk.CTk):
         # Close → keep running in the background
         self.protocol("WM_DELETE_WINDOW", self._minimize_to_tray)
 
+    def _pin_window_size(self):
+        """Lock the launcher to its design size — min/max, not just the
+        resizable flag: Aqua drops the flag on window rebuilds, the size
+        constraints survive."""
+        self.geometry(WINDOW_SIZE)
+        self.resizable(False, False)
+        self.minsize(WINDOW_WIDTH, WINDOW_HEIGHT)
+        self.maxsize(WINDOW_WIDTH, WINDOW_HEIGHT)
+
     def _run_wizard(self):
         from desktop.wizard import SetupWizard
 
@@ -92,7 +104,9 @@ class LauncherApp(ctk.CTk):
             if sys.platform == "darwin":
                 self.overrideredirect(False)
             self.deiconify()
-            self.geometry("480x900")
+            # Toggling overrideredirect makes Aqua rebuild the window with
+            # default WM attributes, so the size pin has to be reapplied.
+            self._pin_window_size()
             self._build_ui()
             self.lift()
             self.focus_force()
