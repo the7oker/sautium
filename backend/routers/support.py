@@ -144,6 +144,7 @@ def _started_summary(detail: Optional[dict]) -> Optional[dict]:
         "build": detail.get("build"),
         "app_version": detail.get("app_version"),
         "os": detail.get("os"),
+        "language": (detail.get("locale") or {}).get("effective"),
         "profile": hardware.get("profile"),
         "gpu": (detail.get("gpu") or {}).get("name"),
         "agents": detail.get("agents"),

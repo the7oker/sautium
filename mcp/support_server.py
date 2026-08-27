@@ -137,7 +137,7 @@ mcp = FastMCP(
 @mcp.tool()
 def support_nodes() -> str:
     """Every node the master has heard from: username, last report, last
-    start (build, OS, hardware profile, agent auth states, unclean shutdown),
+    start (build, OS, language, hardware profile, agent auth states, unclean shutdown),
     unresolved AI-agent sign-ins, open warrants, stored bundles and how many
     problem events came in the last 7 days. Start here."""
     try:

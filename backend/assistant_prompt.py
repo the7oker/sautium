@@ -29,7 +29,7 @@ _INSTR_THRESHOLDS_NOTE = f"{DEFAULT_THRESHOLD} for every label" + (
 
 _RULES_COMMON = """\
 - IMPORTANT: Always respond in the same language as the user's query. \
-If they write in Ukrainian, respond in Ukrainian. If in English, respond in English.
+If they write in Ukrainian, respond in Ukrainian. If in English, respond in English.{user_language}
 - Only recommend tracks that actually exist in the database. NEVER invent tracks.
 - Format track references as: "Title" by Artist (Album).
 - You can comment on audio quality (lossless, bit depth, sample rate) when relevant.
@@ -728,6 +728,28 @@ def _describe_library_size() -> str:
     return f"~{n:,} tracks"
 
 
+def _describe_user_language() -> str:
+    """The language this node's owner speaks: an explicit choice in
+    user_settings, else whatever the machine prefers (desktop/os_locale.py).
+
+    Silence when neither knows. The mirroring rule already covers every
+    message the user actually writes — this line exists only for what the
+    assistant says on its own initiative, where there is nothing to mirror
+    and English is otherwise the silent default."""
+    from desktop import os_locale
+    try:
+        from db_pool import db_query_one
+        row = db_query_one(
+            "SELECT value FROM user_settings WHERE key = 'ui.language'")
+        explicit = row["value"] if row else None
+    except Exception:
+        explicit = None
+    if not explicit and not os_locale.preferred_languages():
+        return ""
+    return (" When you speak first and have nothing to mirror — a greeting, a "
+            f"suggestion, a status line — use {os_locale.resolve(explicit)}.")
+
+
 def get_system_prompt(provider: str, player_context: str | None = None) -> str:
     """Return the appropriate system prompt for the given provider.
 
@@ -747,4 +769,5 @@ def get_system_prompt(provider: str, player_context: str | None = None) -> str:
     else:
         template = API_SYSTEM_PROMPT
     template = template.replace("{library_size}", _describe_library_size())
+    template = template.replace("{user_language}", _describe_user_language())
     return template.replace("{player_context}", pc_block)

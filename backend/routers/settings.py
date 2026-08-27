@@ -281,6 +281,11 @@ _DEFAULTS: Dict[str, Any] = {
     # a_z. UI exposes this through a bottom-sheet picker on the
     # Albums section header.
     "albums.sort":               "release_year",
+    # The language this node speaks. None = never chosen, so the machine
+    # answers instead (desktop/os_locale.py) and keeps answering after the
+    # owner switches the system language. A value here is a human's explicit
+    # choice and always wins — nothing auto-detected is ever written back.
+    "ui.language":               None,
     # last sync metadata — written by the sync runner when a cycle
     # completes; surfaced in the "Last sync · N new items" row.
     "sync.last_at":              None,

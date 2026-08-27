@@ -23,6 +23,7 @@ from typing import Optional, Tuple
 
 import psycopg2
 
+from desktop import os_locale
 from desktop.api_client import BackendAPIClient
 from desktop.p2p import contact_log, diag_events
 from desktop.p2p.diag_protocol import (
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 SETTINGS_KEY_PREFIXES = ("sync.", "p2p.", "enrichment.", "output.", "albums.",
                          "musicbrainz.", "library.", "hardware.", "support.")
 SETTINGS_KEYS = ("ai.provider", "ai.model", "ai.canonization_enabled",
-                 "hqplayer.host", "hqplayer.port")
+                 "hqplayer.host", "hqplayer.port", "ui.language")
 CONFIG_KEYS = ("version", "music_path", "provider", "hqplayer", "ports",
                "claude_code_available", "codex_available", "first_run_complete",
                "sync", "mb_slice")
@@ -44,7 +45,8 @@ CONFIG_P2P_KEYS = ("node_name", "listen_port", "docker_ports", "chat_enabled")
 LOG_FILES = ("launcher.log", "backend.log", "backend.log.1", "pgdata/server.log")
 CHAT_MAX_MESSAGES = 5000
 SYSTEM_SETTINGS_KEYS = ("p2p.reachability", "p2p.reachability_detail", "p2p.identity",
-                        "sync.last_at", "sync.last_items_received", "hardware.lite_streak")
+                        "sync.last_at", "sync.last_items_received", "hardware.lite_streak",
+                        "ui.language")
 
 
 def _json(obj) -> str:
@@ -118,6 +120,8 @@ def system_facts(config: dict, conn=None) -> dict:
     if conn is not None:
         facts["settings"] = _settings_values(conn, SYSTEM_SETTINGS_KEYS)
         facts["schema_head"] = _schema_head(conn)
+    facts["locale"] = os_locale.describe(
+        (facts.get("settings") or {}).get("ui.language"))
     return facts
 
 
