@@ -190,7 +190,8 @@ def p2p_facts(conn, config: dict, extra: Optional[dict] = None) -> dict:
         "mb_slice_fetches": slice_fetches,
         "settings": _settings_values(conn, (
             "p2p.reachability", "p2p.reachability_detail", "p2p.reachability_checked_at",
-            "p2p.identity", "p2p.load", "p2p.gate", "p2p.gate_mode", "p2p.relay_enabled",
+            "p2p.identity", "p2p.bound_identity", "p2p.load", "p2p.gate",
+            "p2p.gate_mode", "p2p.relay_enabled",
             "p2p.relay_pubkeys", "p2p.master_removed", "sync.last_at",
             "sync.last_items_received", "sync.announce_limit", "sync.carry_limit")),
         "sync": client._get_json("/api/settings/sync"),

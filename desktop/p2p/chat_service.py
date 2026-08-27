@@ -207,6 +207,29 @@ class ChatService:
         finally:
             self._return_db(conn)
 
+    def unbind_friendships(self) -> int:
+        """Put every resolved friendship back to `pending:<invite_code>` and
+        return how many were reset.
+
+        For when THIS node's own key changed: the peer still binds our invite
+        code to the key it accepted, so the friendship is one-sided until we
+        introduce ourselves again. `pending:` is the state the resolver
+        already knows how to repair, and reclaiming a row is not
+        trust-on-first-use — an invite code carries a digest of the peer's
+        public key, so only that peer can resolve it back."""
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE friends
+                       SET public_key_hex = 'pending:' || invite_code
+                     WHERE public_key_hex NOT LIKE 'pending:%'
+                       AND invite_code <> ''
+                """)
+                return cur.rowcount
+        finally:
+            self._return_db(conn)
+
     def get_friends(self) -> list[dict]:
         """Get all friends."""
         conn = self._get_db()

@@ -405,6 +405,10 @@ class P2PManager:
             # (works via LAN even without DHT)
             if self._chat_service:
                 try:
+                    await self._reintroduce_after_identity_change()
+                except Exception as e:
+                    logger.error(f"Identity re-introduction check failed: {e}")
+                try:
                     await self._ensure_master_contact()
                 except Exception as e:
                     # A shipped-contact hiccup must never take P2P down —
@@ -1986,6 +1990,40 @@ class P2PManager:
                                       friend["id"], grant)
             logger.info("Friendship grant stored for %s",
                         result.get("username", "?"))
+
+    async def _reintroduce_after_identity_change(self) -> None:
+        """Every friendship this node holds is built on its own key: the peer
+        bound our invite code to the key it accepted, and re-checks it on
+        every friend-gated request. create_account() can replace that key in
+        place — a new account through the wizard — and nothing else moves.
+        The rows here still read as resolved, the resolver only ever walks
+        rows marked `pending:`, so the node never introduces itself again
+        and every peer answers 403 to chat, relay and support diagnostics
+        while the retries keep looking healthy in the log.
+
+        So the identity those rows were bound under is recorded beside them.
+        A mismatch means our friends know a key we no longer hold: the rows
+        go back to `pending:` and the resolver introduces us again, carrying
+        the invite token that made the friendship in the first place. The
+        check sits here, at the observation point, rather than in each way a
+        key can change — a future rotation path (signed by the old key, so
+        it announces instead of re-introducing) updates the marker itself.
+        """
+        from desktop.node_identity import get_account_info
+        account = get_account_info()
+        if not account or not self._chat_service:
+            return
+        ours = account["public_key_hex"]
+        bound = self._read_setting("p2p.bound_identity")
+        if bound == ours:
+            return
+        if bound is not None:
+            reset = self._chat_service.unbind_friendships()
+            logger.warning(
+                "Identity changed (%s… → %s…): %d friendship(s) queued for "
+                "re-introduction", bound[:16], ours[:16], reset)
+        await asyncio.get_running_loop().run_in_executor(
+            None, self._write_settings_blocking, {"p2p.bound_identity": ours})
 
     async def _ensure_master_contact(self) -> None:
         """Seed the shipped master contact as a pending friend — the
