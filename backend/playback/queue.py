@@ -54,6 +54,7 @@ class QueueItem:
     title: str = ""
     artist: str = ""
     album: str = ""
+    album_id: Optional[str] = None   # albums.id this slot came from; see TrackQuery.album_id
     track_number: Optional[int] = None
     duration_seconds: Optional[float] = None
     cover_id: Optional[str] = None
@@ -217,7 +218,8 @@ _MEDIA_ITEM_SQL = """
     SELECT mf.id, mf.file_path, mf.file_format, t.id::text AS track_uuid,
            t.title, mf.track_number, mf.duration_seconds,
            mf.cue_start_seconds, mf.cue_end_seconds,
-           mf.cover_id::text AS cover_id, a.name AS artist, al.title AS album
+           mf.cover_id::text AS cover_id, a.name AS artist, al.title AS album,
+           al.id::text AS album_id
     FROM media_files mf
     JOIN tracks t ON mf.track_id = t.id
     JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
@@ -244,6 +246,7 @@ def _item_from_media_row(r: dict) -> QueueItem:
         title=r["title"],
         artist=r["artist"],
         album=r.get("album") or "",
+        album_id=r.get("album_id"),
         track_number=r["track_number"],
         duration_seconds=(float(r["duration_seconds"])
                           if r["duration_seconds"] is not None else None),
@@ -295,6 +298,7 @@ def item_for_proxy_token(token: str) -> Optional[QueueItem]:
         title=meta.get("title") or "",
         artist=meta.get("artist") or "",
         album=meta.get("album") or "",
+        album_id=meta.get("album_id"),
         duration_seconds=meta.get("duration"),
         cover_url=meta.get("cover_url"),
         preview=True,

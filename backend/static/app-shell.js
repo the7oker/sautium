@@ -948,6 +948,10 @@
       // refresh (key/BPM/similar land after analysis, not on the track change).
       this._npPreviewTid = data.preview ? (data.preview_track_id || null) : null;
       this._npProvider = data.preview ? (data.provider || null) : null;
+      // The album the slot was queued from. A canonical track sits on every
+      // album that lists it, so without this the screen picks one and links
+      // the listener to a reissue they never played.
+      this._npAlbumId = data.album_id || null;
       if (data.media_file_id && this.lastDetailFetchedMfId !== data.media_file_id) {
         this.tryFetchDetail(data.media_file_id);
       } else if (this._npPreviewTid
@@ -962,6 +966,7 @@
       try {
         const params = new URLSearchParams({ track_id: tid });
         if (provider) params.set('provider', provider);
+        if (this._npAlbumId) params.set('album_id', this._npAlbumId);
         const resp = await fetch('/api/player/now-playing-detail?' + params);
         if (!resp.ok) return;
         const detail = await resp.json();

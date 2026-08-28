@@ -461,7 +461,8 @@ class MediaProxy:
         if e is None:
             return None
         return {"artist": e.query.artist, "title": e.query.title,
-                "album": e.query.album, "provider": e.provider.manifest.id,
+                "album": e.query.album, "album_id": e.query.album_id,
+                "provider": e.provider.manifest.id,
                 "track_id": e.query.track_id, "cover_url": e.query.cover_url,
                 "duration": e.query.duration, "media_file_id": e.query.media_file_id}
 

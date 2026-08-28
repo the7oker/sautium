@@ -416,6 +416,9 @@ class PlaybackManager:
             # Universal track UUID (owned + phantom) — Discovery's
             # similar-to-now-playing seed reads it off currentStatus.
             "track_id": item.track_id if item else None,
+            # The album this slot was queued FROM — Now Playing cannot re-derive
+            # it, a canonical track belongs to every album that lists it.
+            "album_id": item.album_id if item else None,
             "cover_id": item.cover_id if item else None,
             "cover_url": item.cover_url if item else None,
             "provider_cover_url": (resolved_artwork.get(item.track_id)
@@ -587,6 +590,7 @@ class PlaybackManager:
             "playlist_version": self.queue.version,
             "radio_mode": self.radio_mode,
             "preview": bool(first.preview),
+            "album_id": first.album_id,
             "provider": first.provider if first.preview else None,
             "output": self.output_info,
             "ui_build": ui_build(),

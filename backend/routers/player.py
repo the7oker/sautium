@@ -1022,12 +1022,19 @@ def _stream_quality(provider_id: Optional[str]) -> str:
     return "lossy"
 
 
-def _preview_now_playing_detail(track_id: str, provider: Optional[str]) -> dict:
+def _preview_now_playing_detail(track_id: str, provider: Optional[str],
+                                album_id: Optional[str] = None) -> dict:
     """Now Playing detail for a streamed phantom track (no media_file). Same shape
     as the owned path, sourced by track_id: MB tracklist metadata + CAA cover +
     whatever audio_features the preview enrichment has produced so far (key/BPM/
-    energy fill in live as the stream is analysed). Album is the track's first
-    release that carries art; quality is the stream source, not a file bit-depth."""
+    energy fill in live as the stream is analysed). Quality is the stream source,
+    not a file bit-depth.
+
+    `album_id` is the album the QUEUE SLOT came from, carried down from the
+    enqueue. It has to be: a canonical track belongs to every album whose
+    tracklist names it, so a compilation or a later reissue would otherwise
+    win the screen over the album the listener actually pressed play on. The
+    ORDER BY below is the fallback for slots with no album context at all."""
     row = _db_query_one("""
         SELECT t.id::text AS track_id, t.title,
                al.id::text AS album_id, al.title AS album_title,
@@ -1039,9 +1046,14 @@ def _preview_now_playing_detail(track_id: str, provider: Optional[str]) -> dict:
         JOIN albums al ON al.id = atr.album_id
         LEFT JOIN audio_features af ON af.track_id = t.id
         WHERE t.id = %(tid)s::uuid
+          AND (%(aid)s::uuid IS NULL OR al.id = %(aid)s::uuid)
         ORDER BY (al.cover_url IS NOT NULL) DESC, al.id
         LIMIT 1
-    """, {"tid": track_id})
+    """, {"tid": track_id, "aid": album_id})
+    if not row and album_id:
+        # The slot names an album this track is no longer on (a re-mint moved
+        # the tracklist under it) — fall back rather than 404 the screen.
+        return _preview_now_playing_detail(track_id, provider)
     if not row:
         raise HTTPException(status_code=404, detail="track not found")
     row["media_file_id"] = None
@@ -1069,7 +1081,7 @@ def _preview_now_playing_detail(track_id: str, provider: Optional[str]) -> dict:
 
 @router.get("/now-playing-detail")
 def now_playing_detail(media_file_id: int = None, track_id: str = None,
-                       provider: str = None):
+                       provider: str = None, album_id: str = None):
     """Aggregated rich payload for the Now Playing screen.
 
     Combines media-file metadata (format, sample rate, bit depth, cover),
@@ -1080,7 +1092,7 @@ def now_playing_detail(media_file_id: int = None, track_id: str = None,
     quality badge) and served the same shape via _preview_now_playing_detail.
     """
     if track_id:
-        return _preview_now_playing_detail(track_id, provider)
+        return _preview_now_playing_detail(track_id, provider, album_id)
     if not media_file_id:
         raise HTTPException(status_code=400, detail="media_file_id or track_id required")
     row = _db_query_one("""
@@ -1795,7 +1807,7 @@ def _phantom_track_queries(track_ids: list[str]) -> dict:
     rows = _db_query("""
         SELECT DISTINCT ON (t.id)
                t.id::text AS track_id, t.title, atr.length_ms,
-               al.title AS album, al.cover_url,
+               al.title AS album, al.id::text AS album_id, al.cover_url,
                (SELECT ar.name FROM track_artists ta
                   JOIN artists ar ON ar.id = ta.artist_id
                 WHERE ta.track_id = t.id
@@ -1813,7 +1825,8 @@ def _phantom_track_queries(track_ids: list[str]) -> dict:
             artist=r["artist"] or "", title=r["title"], album=r["album"],
             artist_alts=alts.get(r["artist"], ()),
             duration=(float(r["length_ms"]) / 1000.0 if r["length_ms"] else None),
-            track_id=r["track_id"], cover_url=r["cover_url"])
+            track_id=r["track_id"], cover_url=r["cover_url"],
+            album_id=r["album_id"])
         for r in rows if r["title"]
     }
 
@@ -1845,7 +1858,7 @@ def _phantom_album_queries(album_id: str) -> list:
             artist=r["artist"] or "", title=r["title"], album=r["album"],
             artist_alts=alts.get(r["artist"], ()),
             duration=(float(r["length_ms"]) / 1000.0 if r["length_ms"] else None),
-            track_id=r["track_id"], cover_url=r["cover_url"])
+            track_id=r["track_id"], cover_url=r["cover_url"], album_id=album_id)
         for r in rows if r["title"]
     ]
 
