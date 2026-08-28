@@ -482,9 +482,12 @@ Top to bottom:
 - **Audio chain (My setup)** — header with Add button, item list,
   empty-state copy ("Add your audio chain. Search by brand or model —
   we'll fill in details.").
-- **Sociability** — placeholder for MVP: toggle "Open to meet other
-  audiophiles" (disabled with tooltip), soft completion hint ("Your
-  profile is 60% complete · finish to discover others").
+
+The Sociability placeholder — a disabled "Open to meet other audiophiles"
+toggle and a profile-completion bar — was **removed from the screen**: a
+control nobody can operate is furniture, and the completion score existed
+only to fill its bar. `users.open_to_meet` and the `/api/profile` field
+stay, so Phase 2 has its state waiting when discovery is built.
 
 ### Audio-chain item flow
 
@@ -747,7 +750,7 @@ All Genre blocks roll up into a single `(new endpoint)` GET
 | Account (email, password, Last.fm, scrobbling) | existing flows (email-verify worker, Argon2id password, Last.fm OAuth) | — |
 | Hardware profile | `/api/settings/hardware` — auto-detected tier, read-only | — |
 | Audio chain (gear list) | `user_gear` table **(new)** joined to `gear_models` **(new)** + `(new endpoint)` GET/POST/DELETE `/api/profile/gear` | + per-item privacy granularity |
-| Sociability placeholder | static stub in MVP | + Phase 2 active feature |
+| ~~Sociability placeholder~~ | removed from the screen; `users.open_to_meet` kept for Phase 2 | + Phase 2 active feature, when discovery exists |
 
 ### Profile (viewing other)
 

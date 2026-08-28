@@ -8770,11 +8770,6 @@
           </div>
         `).join('');
 
-    const filled = ['display_name', 'city', 'bio'].filter(k => (profile[k] || '').trim().length > 0).length
-      + (gear.length ? 1 : 0)
-      + (profile.avatar_cover_id ? 1 : 0);
-    const pct = Math.round((filled / 5) * 100);
-
     root.innerHTML = `
       <section class="screen screen-profile">
         <div class="profile-header">
@@ -8879,22 +8874,6 @@
           </span>
         </button>` : ''}
 
-        <div class="profile-group-label">Sociability</div>
-        <div class="sociability">
-          <div class="soc-row">
-            <div>
-              <div class="soc-label">Open to meet other audiophiles</div>
-              <div class="soc-hint">Phase 2 — discovery is not active yet.</div>
-            </div>
-            <button class="toggle ${profile.open_to_meet ? 'on' : ''} disabled" disabled><span class="knob"></span></button>
-          </div>
-          <div class="soc-progress">
-            <div class="soc-prose">
-              Profile is <span class="pct">${pct}%</span> complete — finish to unlock discovery when it launches.
-            </div>
-            <div class="soc-bar"><div class="fill" style="width:${pct}%"></div></div>
-          </div>
-        </div>
       </section>
     `;
 

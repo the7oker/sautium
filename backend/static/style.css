@@ -5090,54 +5090,6 @@ body.has-miniplayer .more-overlay .drawer {
   line-height: 1.5;
 }
 
-/* Sociability */
-.sociability {
-  margin: 0 calc(16 * var(--px));
-  padding: calc(14 * var(--px)) calc(16 * var(--px));
-  background: var(--color-surface);
-  border-radius: var(--radius-md);
-}
-.soc-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: calc(12 * var(--px));
-}
-.soc-label {
-  font-size: calc(13.5 * var(--px));
-  font-weight: 500;
-  color: var(--color-text);
-}
-.soc-hint {
-  margin-top: calc(6 * var(--px));
-  font-size: calc(11.5 * var(--px));
-  color: var(--color-text-muted);
-  line-height: 1.4;
-}
-.soc-progress {
-  margin-top: calc(12 * var(--px));
-  padding-top: calc(12 * var(--px));
-  border-top: 1px solid var(--color-divider);
-}
-.soc-prose {
-  font-size: calc(12 * var(--px));
-  color: var(--color-text-muted);
-  line-height: 1.5;
-}
-.soc-prose .pct {
-  color: var(--color-blue);
-  font-family: var(--font-mono);
-  letter-spacing: 0.02em;
-}
-.soc-bar {
-  margin-top: calc(8 * var(--px));
-  height: calc(3 * var(--px));
-  background: var(--color-divider);
-  border-radius: calc(2 * var(--px));
-  overflow: hidden;
-}
-.soc-bar .fill { height: 100%; background: var(--color-amber); }
-
 /* Viewing-other-profile cards */
 .match-card {
   margin: 0 calc(16 * var(--px)) calc(12 * var(--px));
