@@ -6447,7 +6447,6 @@
       <div class="group-label">Friends</div>
       <input class="text-field friends-search" type="search"
              autocomplete="off" placeholder="Search friends" name="fsearch">
-      <div class="friends-list" id="friendsPinned" hidden></div>
       <div class="friends-list" id="friendsList">
         <div class="friends-empty">Loading…</div>
       </div>
@@ -6527,10 +6526,11 @@
     window.addEventListener('sautium:chat-changed', onChat);
     window.addEventListener('hashchange', onHashChange);
 
-    // Friends list: pinned favorites whole + first page, further pages
+    // Friends list: favorites first, then the first page, further pages
     // via Show more (the Discovery Tracks pattern — a self-growing
-    // vertical list would push everything below away forever).
-    const pinnedEl = screen.querySelector('#friendsPinned');
+    // vertical list would push everything below away forever). One card:
+    // the pinned/items split is the server's paging strategy, not a
+    // section break, and rendering it as two made a seam mid-list.
     const moreEl = screen.querySelector('#friendsMore');
     const searchEl = screen.querySelector('.friends-search');
     const state = {q: '', cursor: null, byId: new Map()};
@@ -6584,27 +6584,22 @@
           const sameSet = onScreen.length === fresh.length &&
             fresh.every(f => nodeById.has(f.id));
           if (sameSet) {
-            const place = (container, rows) => rows.forEach(f => {
+            fresh.forEach(f => {
               const rowEl = nodeById.get(f.id);
               rowEl.dataset.friendKey = friendUrlKey(f);
               rowEl.innerHTML = friendRowInner(f);
-              container.appendChild(rowEl);   // moves it, never re-creates
+              listEl.appendChild(rowEl);   // moves it, never re-creates
             });
-            pinnedEl.hidden = page.pinned.length === 0;
-            place(pinnedEl, page.pinned);
-            place(listEl, page.items);
             return;
           }
         }
-        pinnedEl.hidden = page.pinned.length === 0;
-        renderInto(pinnedEl, page.pinned);
         if (fresh.length === 0) {
           listEl.innerHTML = `<div class="friends-empty">
             ${state.q ? 'No friends match the search.'
                       : 'No friends yet. Share your invite code or send an email.'}
           </div>`;
         } else {
-          renderInto(listEl, page.items);
+          renderInto(listEl, fresh);
         }
         state.cursor = page.next_cursor;
         renderShowMore();
@@ -6637,7 +6632,6 @@
       }
       navigateToEntity('chat', key);
     }
-    pinnedEl.addEventListener('click', onRowClick);
     listEl.addEventListener('click', onRowClick);
 
     let searchTimer = null;

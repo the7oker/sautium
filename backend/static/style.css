@@ -3360,11 +3360,13 @@ body.has-miniplayer .ai-fab {
    colours map onto our existing palette. .screen's default
    flex/gap/padding don't apply: each block carries its own
    spacing (group-label padding, identity-card margin, etc.) per
-   reference, and #app already reserves space for the nav-bar /
-   mini-player / FAB / safe-area at the bottom. */
+   reference. #app clears the nav-bar / mini-player / FAB / safe-area,
+   but it reserves exactly their heights — clearance, not breathing room —
+   so the bottom padding stays here: without it the last friend row ends
+   flush against the nav's top edge. */
 .friends-screen {
   display: block;
-  padding: 0;
+  padding: 0 0 var(--space-5);
   gap: 0;
 }
 .friends-screen .screen-head {
