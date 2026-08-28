@@ -527,7 +527,11 @@
     const npOpen = sheet && sheet.isOpen;
     const aiOpen = ai && ai.isOpen;
     const drawerOpen = typeof moreDrawer !== 'undefined' && moreDrawer.isOpen;
-    fab.hidden = !routeHasFab || !!(npOpen || aiOpen || drawerOpen);
+    // Discovery's advanced filters end in a sticky Apply bar pinned to
+    // the same corner the FAB floats in. Read the panel itself rather
+    // than mirroring its open state in a flag that can outlive the screen.
+    const filtersOpen = !!document.querySelector('#discoveryFiltersPanel:not([hidden])');
+    fab.hidden = !routeHasFab || !!(npOpen || aiOpen || drawerOpen || filtersOpen);
   }
 
   async function refreshAiAvailability() {
@@ -3412,6 +3416,7 @@
         panel.hidden = !open;
         toggle.setAttribute('aria-expanded', String(open));
         toggle.classList.toggle('is-open', open);
+        updateFabVisibility(currentRoute);
       });
     }
 
