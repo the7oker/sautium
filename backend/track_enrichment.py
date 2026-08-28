@@ -32,6 +32,7 @@ except ImportError:
 from api_cooldown import cooling_down
 from config import settings
 from database import get_db_context
+from sql_queries import ARTIST_ENGAGED
 from models import (
     Track, MediaFile, Album, AlbumVariant, Artist, TrackArtist,
     AudioFeature, Embedding, SimilarArtist, ArtistBio,
@@ -184,12 +185,16 @@ def run_parallel_enrichment(
         start_time = time.time()
 
         with get_db_context() as db:
-            # --- Enrich artists (only library artists with tracks) ---
-            artist_sql = """
-                SELECT DISTINCT a.id, a.name
+            # --- Enrich artists the human actually touched ---
+            # One Last.fm call per artist, so the candidate set carries the
+            # engagement gate. "Has a track_artists row" would queue every
+            # phantom tracklist credit — 224k names on a dump node, ~12 days
+            # of API calls for artists nobody asked about.
+            artist_sql = f"""
+                SELECT a.id, a.name
                 FROM artists a
-                JOIN track_artists ta ON ta.artist_id = a.id
-                WHERE NOT EXISTS (
+                WHERE {ARTIST_ENGAGED}
+                AND NOT EXISTS (
                     SELECT 1 FROM artist_bios ab
                     WHERE ab.artist_id = a.id AND ab.source = 'lastfm'
                 )

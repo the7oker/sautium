@@ -15,6 +15,7 @@ from decimal import Decimal
 
 from config import settings
 from photo_fetch import TransientFetchError
+from sql_queries import ARTIST_ENGAGED
 from models import (
     ExternalMetadata, Artist, SimilarArtist, Genre, GenreDescription,
     ArtistBio, Tag, ArtistTag, Album, TrackArtist
@@ -1264,15 +1265,7 @@ def backfill_similar(limit: Optional[int] = None, delay: float = 0.2,
     sql = text(f"""
         SELECT a.id, a.name
         FROM artists a
-        WHERE (
-            EXISTS (SELECT 1 FROM track_artists ta
-                    JOIN media_files mf ON mf.track_id = ta.track_id
-                    WHERE ta.artist_id = a.id)
-            OR EXISTS (SELECT 1 FROM track_artists ta
-                       JOIN listening_history lh ON lh.track_id = ta.track_id
-                       WHERE ta.artist_id = a.id
-                         AND lh.completed AND NOT lh.skipped)
-        )
+        WHERE {ARTIST_ENGAGED}
         {where}
         ORDER BY a.last_similar_sync NULLS FIRST,
                  (SELECT MAX(lh.started_at)

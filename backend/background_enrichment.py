@@ -35,6 +35,7 @@ from sqlalchemy import text
 
 from api_cooldown import cooling_down
 from database import get_db_context
+from sql_queries import ARTIST_ENGAGED
 
 logger = logging.getLogger(__name__)
 
@@ -250,17 +251,11 @@ def _step_missing_artists(limit: int) -> Dict[str, int]:
     stats = {"processed": 0, "success": 0, "not_found": 0, "errors": 0}
     lastfm = LastFmService()
 
-    sql = text("""
+    sql = text(f"""
         SELECT a.id, a.name
         FROM artists a
         WHERE (
-            EXISTS (SELECT 1 FROM track_artists ta
-                    JOIN media_files mf ON mf.track_id = ta.track_id
-                    WHERE ta.artist_id = a.id)
-            OR EXISTS (SELECT 1 FROM track_artists ta
-                       JOIN listening_history lh ON lh.track_id = ta.track_id
-                       WHERE ta.artist_id = a.id
-                         AND lh.completed AND NOT lh.skipped)
+            {ARTIST_ENGAGED}
             OR EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
             OR EXISTS (SELECT 1 FROM similar_artists sa
                        WHERE sa.artist_id = a.id OR sa.similar_artist_id = a.id)

@@ -865,6 +865,7 @@ async def get_stats() -> Dict[str, Any]:
     """Get library statistics including enrichment coverage."""
     from sqlalchemy import text
     from database import get_db_context
+    from sql_queries import ARTIST_ENGAGED
 
     defaults = {
         "total_artists": 0, "total_albums": 0, "total_tracks": 0,
@@ -888,7 +889,7 @@ async def get_stats() -> Dict[str, Any]:
                 row = {}
 
             # Enrichment coverage stats
-            enrichment_sql = """
+            enrichment_sql = f"""
             SELECT
                 -- Owned tracks only, like every other coverage figure — see
                 -- library_stats. A raw table count includes phantoms and
@@ -897,10 +898,18 @@ async def get_stats() -> Dict[str, Any]:
                   WHERE EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
                     AND EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = t.id)
                 ) as tracks_with_features,
-                (SELECT COUNT(DISTINCT ta.artist_id) FROM track_artists ta) as library_artists,
-                (SELECT COUNT(DISTINCT a.id) FROM artists a
-                 JOIN track_artists ta ON ta.artist_id = a.id
-                 WHERE EXISTS (SELECT 1 FROM artist_bios ab WHERE ab.artist_id = a.id AND ab.source = 'lastfm')
+                -- Engaged artists only, for the same reason the track figures
+                -- are owned-only: a raw track_artists count is dominated by
+                -- phantom tracklist credits, which the Last.fm pipeline will
+                -- never call. Numerator and denominator must name the SAME
+                -- population or the ratio is meaningless.
+                (SELECT COUNT(*) FROM artists a
+                  WHERE {ARTIST_ENGAGED}
+                ) as library_artists,
+                (SELECT COUNT(*) FROM artists a
+                  WHERE {ARTIST_ENGAGED}
+                    AND EXISTS (SELECT 1 FROM artist_bios ab
+                                 WHERE ab.artist_id = a.id AND ab.source = 'lastfm')
                 ) as artists_with_lastfm,
                 (SELECT COUNT(DISTINCT av.album_id) FROM album_variants av
                  JOIN media_files mf ON mf.album_variant_id = av.id

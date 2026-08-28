@@ -167,3 +167,32 @@ VALIDATE_TRACKS_FROM = """\
     JOIN artists a ON ta.artist_id = a.id
     JOIN album_variants av ON mf.album_variant_id = av.id
     JOIN albums al ON av.album_id = al.id"""
+
+# ---------------------------------------------------------------------------
+# Human engagement gate
+# ---------------------------------------------------------------------------
+# Anything that fans out per artist — one Last.fm call each — must be gated on
+# a signal linear in human behaviour, and so must every coverage figure that
+# reports on it. `track_artists` alone is not such a signal: the phantom
+# tracklist mint credits every slot to its own artist, so on a dump node that
+# column names a quarter-million stubs nobody asked about.
+#
+# Owned file OR completed, unskipped listen (the scrobble rule) — the listen
+# arm is what makes streamed phantoms count in the catalog-less mode.
+#
+# Written as a set, not as correlated EXISTS on `artists`: both arms are driven
+# from the small side (media_files, listening_history), so it costs one pass
+# instead of one index probe per artist row — 63 ms against 5.3 s here.
+
+ARTIST_ENGAGED_SET = """\
+        SELECT ta.artist_id FROM track_artists ta
+          JOIN media_files mf ON mf.track_id = ta.track_id
+        UNION
+        SELECT ta.artist_id FROM track_artists ta
+          JOIN listening_history lh ON lh.track_id = ta.track_id
+         WHERE lh.completed AND NOT lh.skipped"""
+
+# WHERE-clause form, for candidate queries that select FROM artists a.
+ARTIST_ENGAGED = f"""a.id IN (
+{ARTIST_ENGAGED_SET}
+    )"""
