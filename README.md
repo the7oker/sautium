@@ -287,7 +287,7 @@ source of truth for a fresh install (all types, tables, indexes and triggers).
 It is auto-applied on first container start. Highlights:
 
 - **Normalized multi-source metadata** (`artist_bios`, `artist_tags`,
-  `similar_artists`, `album_info`, `track_stats`) with a `source` column for
+  `similar_artists`, `album_descriptions`, `track_stats`) with a `source` column for
   provenance — not JSONB blobs.
 - **Deterministic UUID v5** for all shareable entities (Artist, Album, Track,
   Genre, Tag, EmbeddingModel) so the same data on different nodes collapses to

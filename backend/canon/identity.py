@@ -352,8 +352,8 @@ def _update_album_uuid(db: Session, old_id, new_id) -> str:
         # Merge: move album variants to target (folding same-directory
         # siblings), then everything else the target lacks — tracklist slots
         # (a slot the target already fills is the target's), artist links,
-        # genres, streaming mints, session origins; fill blank canon fields
-        # from the old row — then delete old.
+        # genres, descriptions, streaming mints, session origins; fill blank
+        # canon fields from the old row — then delete old.
         _merge_album_variants(db, new_str, from_album=old_str)
         p = {"new": new_str, "old": old_str}
         db.execute(text("""
@@ -370,6 +370,11 @@ def _update_album_uuid(db: Session, old_id, new_id) -> str:
             INSERT INTO album_genres (album_id, genre_id, source, count)
             SELECT :new, genre_id, source, count FROM album_genres WHERE album_id = :old
             ON CONFLICT DO NOTHING"""), p)
+        db.execute(text("""
+            UPDATE album_descriptions ad SET album_id = :new
+            WHERE ad.album_id = :old
+              AND NOT EXISTS (SELECT 1 FROM album_descriptions x
+                               WHERE x.album_id = :new AND x.source = ad.source)"""), p)
         db.execute(text("UPDATE streaming_mints SET album_id = :new WHERE album_id = :old"), p)
         db.execute(text("UPDATE listening_sessions SET origin_album_id = :new "
                         "WHERE origin_album_id = :old"), p)

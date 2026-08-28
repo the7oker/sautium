@@ -53,7 +53,7 @@ physical files — locality is enforced by *code*, not constraints:
 - `tracks` (`:73-78`) is referenced *by* `media_files.track_id`, not
   the reverse — a track with no file is legal.
 - All enrichment tables — `artist_bios`, `artist_tags`,
-  `similar_artists`, `album_info`, `track_stats` — FK only to the
+  `similar_artists`, `album_descriptions`, `track_stats` — FK only to the
   logical entity, never to a file, and all carry a `source` column
   for provenance.
 - `similar_artists` (`:307-317`): both `artist_id` and
@@ -138,7 +138,7 @@ millions of phantom rows and an enormous external-API bill.
 | Bio / summary           | Last.fm            | Already integrated; good prose. |
 | Albums + tracklists     | **Deezer**         | Already integrated (`routers/covers.py`), public JSON API, no OAuth, normalized titles, album art. |
 | Canonical release IDs   | MusicBrainz        | Release groups distinguish an album from its reissues/deluxe editions; free, no auth. |
-| Listening counts        | Last.fm            | `track_stats` / `album_info` already model this. |
+| Listening counts        | Last.fm            | `track_stats` already models this. |
 
 Last.fm tags/tracklists are noisy and duplicated — **do not** use
 Last.fm for tracklists. Spotify is intentionally **not** a

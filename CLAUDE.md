@@ -141,9 +141,11 @@ See:
 
 - **Normalized schemas, not JSONB blobs.** External metadata (Last.fm,
   MusicBrainz) lives in normalized tables (`artist_bios`, `artist_tags`,
-  `similar_artists`, `album_info`, `track_stats`) with a `source` column
-  for provenance. We migrated away from JSONB — functions on JSONB get
-  unreadable fast and can't be indexed cleanly.
+  `similar_artists`, `album_descriptions`, `track_stats`) with a `source`
+  column for provenance. We migrated away from JSONB — functions on JSONB
+  get unreadable fast and can't be indexed cleanly. `album_descriptions`
+  is the LOCAL-ONLY one: albums never sync by UUID, so it carries no seal
+  columns and stays out of the sync contour, exactly like `album_genres`.
 - **UUID v5 for all shareable entities.** Same data on different nodes
   must collapse to the same ID. Namespace
   `adc1ec0b-2c81-5e26-9938-a369c6f7a5e1` (in `backend/uuid_utils.py`).

@@ -2,8 +2,8 @@
 Album detail endpoint.
 
 Aggregates album-level metadata (title, year, primary artist, format
-quality), top genre chips, and the full tracklist with per-track
-audio features (key, mode, BPM) into a single roundtrip.
+quality), top genre chips, the album description, and the full tracklist
+with per-track audio features (key, mode, BPM) into a single roundtrip.
 
 When an album has more than one variant (multiple rips/encodings/
 masters of the same logical release), callers can pick a specific
@@ -21,6 +21,36 @@ from genre_queries import album_genre_chips
 
 
 router = APIRouter(prefix="/api/albums", tags=["albums"])
+
+
+def _album_description(album_id: str) -> dict:
+    """Album prose for the detail page, keyed per album but resolved across the
+    release group: a remaster and its original are separate `albums` rows for
+    one record, so a description written against either serves both. The
+    album's own row wins when both exist; between equal-tier rows (several
+    sources) the freshest does. Returns {} when there is nothing to show."""
+    row = db_query_one("""
+        WITH own AS (
+            SELECT 0 AS tier, ad.summary, ad.content, ad.updated_at
+            FROM album_descriptions ad
+            WHERE ad.album_id = %(id)s::uuid
+        ), sibling AS (
+            SELECT 1 AS tier, ad.summary, ad.content, ad.updated_at
+            FROM album_descriptions ad
+            JOIN albums al ON al.id = ad.album_id
+            WHERE al.musicbrainz_id = (SELECT musicbrainz_id
+                                       FROM albums WHERE id = %(id)s::uuid)
+              AND al.id <> %(id)s::uuid
+        )
+        SELECT summary, content
+        FROM (SELECT * FROM own UNION ALL SELECT * FROM sibling) c
+        ORDER BY tier, updated_at DESC
+        LIMIT 1
+    """, {"id": album_id})
+    return {
+        "description": (row["content"] if row else None),
+        "description_summary": (row["summary"] if row else None),
+    }
 
 
 def _phantom_album(album_id: str) -> dict:
@@ -42,6 +72,7 @@ def _phantom_album(album_id: str) -> dict:
         raise HTTPException(status_code=404, detail="album not found")
 
     album["is_owned"] = False
+    album.update(_album_description(album_id))
     album["cover_id"] = None
     album["media_file_id"] = None
     album["quality"] = None
@@ -282,6 +313,7 @@ def get_album(
     """, {"id": album_id})
     album["selected_variant_id"] = variant_id
     album["is_owned"] = True
+    album.update(_album_description(album_id))
 
     return album
 

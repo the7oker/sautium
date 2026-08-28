@@ -736,6 +736,25 @@ CREATE TABLE IF NOT EXISTS genre_descriptions (
     CONSTRAINT chk_has_description CHECK (summary IS NOT NULL OR content IS NOT NULL)
 );
 
+-- Album prose, same shape as artist_bios / genre_descriptions. LOCAL-ONLY for
+-- the same reason album_genres is: albums never sync by UUID, so this carries
+-- no seal columns and stays out of the sync contour. Not embedded for search
+-- either — it is display text, not a retrieval signal. Readers resolve it with
+-- a release-group fallback (albums.musicbrainz_id) so a remaster shows the
+-- description written against another edition of the same record.
+CREATE TABLE IF NOT EXISTS album_descriptions (
+    id SERIAL PRIMARY KEY,
+    album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    source VARCHAR(50) NOT NULL,
+    summary TEXT,
+    content TEXT,
+    url TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_album_descriptions UNIQUE (album_id, source),
+    CONSTRAINT chk_has_album_description CHECK (summary IS NOT NULL OR content IS NOT NULL)
+);
+
 -- Generic key/value store for app-level user preferences. Keys are
 -- dotted strings (e.g. 'hqplayer.favorite_filters') and the value
 -- carries whatever JSON the feature needs. Single-row-per-key by
@@ -1068,6 +1087,7 @@ CREATE INDEX IF NOT EXISTS idx_similar_artists_similar ON similar_artists(simila
 CREATE INDEX IF NOT EXISTS idx_similar_artists_source ON similar_artists(source);
 CREATE INDEX IF NOT EXISTS idx_similar_artists_match ON similar_artists(match_score);
 CREATE INDEX IF NOT EXISTS idx_genre_descriptions_source ON genre_descriptions(source);
+CREATE INDEX IF NOT EXISTS idx_album_descriptions_source ON album_descriptions(source);
 CREATE INDEX IF NOT EXISTS idx_track_stats_source ON track_stats(source);
 CREATE INDEX IF NOT EXISTS idx_track_stats_listeners ON track_stats(listeners);
 CREATE INDEX IF NOT EXISTS idx_track_stats_playcount ON track_stats(playcount);
@@ -1246,6 +1266,10 @@ DO $$ BEGIN CREATE TRIGGER trg_similar_artists_updated_at BEFORE UPDATE ON simil
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN CREATE TRIGGER trg_genre_descriptions_updated_at BEFORE UPDATE ON genre_descriptions
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN CREATE TRIGGER trg_album_descriptions_updated_at BEFORE UPDATE ON album_descriptions
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 

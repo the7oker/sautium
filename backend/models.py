@@ -202,6 +202,7 @@ class Album(Base):
     variants = relationship("AlbumVariant", back_populates="album", cascade="all, delete-orphan")
     artist_associations = relationship("AlbumArtist", back_populates="album", cascade="all, delete-orphan")
     genre_associations = relationship("AlbumGenre", back_populates="album", cascade="all, delete-orphan")
+    descriptions = relationship("AlbumDescription", back_populates="album", cascade="all, delete-orphan")
 
     __table_args__ = (
         CheckConstraint("user_rating >= 0 AND user_rating <= 5", name="check_album_rating"),
@@ -931,6 +932,34 @@ class GenreDescription(Base):
 
     def __repr__(self):
         return f"<GenreDescription(genre_id={self.genre_id}, source='{self.source}')>"
+
+
+class AlbumDescription(Base):
+    """Album prose from multiple sources. LOCAL-ONLY — albums never sync, so
+    unlike artist_bios / genre_descriptions this carries no seal columns."""
+    __tablename__ = "album_descriptions"
+
+    id = Column(Integer, primary_key=True)
+    album_id = Column(UUID(as_uuid=True), ForeignKey("albums.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    source = Column(String(50), nullable=False)
+
+    summary = Column(Text)
+    content = Column(Text)
+    url = Column(Text)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    album = relationship("Album", back_populates="descriptions")
+
+    __table_args__ = (
+        Index("idx_album_descriptions_source", "source"),
+        UniqueConstraint("album_id", "source", name="uq_album_descriptions"),
+        CheckConstraint("summary IS NOT NULL OR content IS NOT NULL", name="chk_has_album_description"),
+    )
+
+    def __repr__(self):
+        return f"<AlbumDescription(album_id={self.album_id}, source='{self.source}')>"
 
 
 # ───────────────────────────────────────────────────────────────────────────

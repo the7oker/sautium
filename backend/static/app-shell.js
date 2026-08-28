@@ -4493,6 +4493,33 @@
     return text.trim();
   }
 
+  /* Prose block shared by the artist bio and the album description: the
+     summary up front, the full text behind "See more". Callers pass text
+     already run through stripHtml + trimLastFmTail. */
+  function proseBlockHtml(summary, full) {
+    const initial = summary || full;
+    if (!initial) return '';
+    const hasMore = full && summary && full.length > summary.length;
+    return `<p class="bio"><span class="bio-text">${escapeHtml(initial)}</span>${
+      hasMore ? '<span class="see-more"> See more&nbsp;▾</span>' : ''
+    }</p>`;
+  }
+
+  function wireProseBlock(root, summary, full) {
+    const textSpan = root.querySelector('.bio .bio-text');
+    const seeMore = root.querySelector('.bio .see-more');
+    if (!textSpan || !seeMore) return;
+    let expanded = false;
+    seeMore.addEventListener('click', e => {
+      e.stopPropagation();
+      expanded = !expanded;
+      textSpan.textContent = expanded ? full : summary;
+      seeMore.innerHTML = expanded
+        ? ' See less&nbsp;▴'
+        : ' See more&nbsp;▾';
+    });
+  }
+
   const SVG_BACK = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>';
   const SVG_KEBAB = '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>';
   const SVG_PLUS = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
@@ -4734,13 +4761,7 @@
 
     const bioSummary = trimLastFmTail(stripHtml(d.bio_summary || ''));
     const bioFull = trimLastFmTail(stripHtml(d.bio || ''));
-    const initialBio = bioSummary || bioFull;
-    const hasMoreBio = bioFull && bioSummary && bioFull.length > bioSummary.length;
-    const bioHtml = initialBio
-      ? `<p class="bio"><span class="bio-text">${escapeHtml(initialBio)}</span>${
-          hasMoreBio ? '<span class="see-more"> See more&nbsp;▾</span>' : ''
-        }</p>`
-      : '';
+    const bioHtml = proseBlockHtml(bioSummary, bioFull);
 
     // Albums header differs by mode: the dominant/normal page carries the sort
     // picker; the lean page just states the owned count.
@@ -4822,22 +4843,7 @@
         <div style="height: calc(24 * var(--px));"></div>`;
     }
 
-    if (hasMoreBio) {
-      const bioP = screen.querySelector('.bio');
-      const textSpan = bioP && bioP.querySelector('.bio-text');
-      const seeMore = bioP && bioP.querySelector('.see-more');
-      if (textSpan && seeMore) {
-        let expanded = false;
-        seeMore.addEventListener('click', e => {
-          e.stopPropagation();
-          expanded = !expanded;
-          textSpan.textContent = expanded ? bioFull : bioSummary;
-          seeMore.innerHTML = expanded
-            ? ' See less&nbsp;▴'
-            : ' See more&nbsp;▾';
-        });
-      }
-    }
+    wireProseBlock(screen, bioSummary, bioFull);
 
     const sortBtn = screen.querySelector('[data-action="albums-sort"]');
     if (sortBtn) {
@@ -5162,6 +5168,12 @@
       const artistId = d.primary_artist ? d.primary_artist.id : '';
       const totalDuration = fmtDurationLong(d.total_duration);
 
+      // Album prose, rendered where the artist page puts the bio: after the
+      // identity block, before the content it describes.
+      const descSummary = trimLastFmTail(stripHtml(d.description_summary || ''));
+      const descFull = trimLastFmTail(stripHtml(d.description || ''));
+      const descHtml = proseBlockHtml(descSummary, descFull);
+
       // Variant selector — render only when >1 variant. variants[] is
       // pre-sorted by the API (lossless/highest-resolution first), so
       // variants[0] is the natural default when no variant is pinned.
@@ -5217,6 +5229,7 @@
             </button>
           `}
         </div>
+        ${descHtml}
         <div class="album-tracklist">${tracksHtml}</div>
         <div class="album-similar" data-similar-slot hidden></div>
         <div style="height: calc(24 * var(--px));"></div>
@@ -5234,6 +5247,8 @@
           });
         });
       }
+
+      wireProseBlock(screen, descSummary, descFull);
 
       wireDetailHandlers(screen, {
         albumId, tracks: d.tracks,

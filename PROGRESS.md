@@ -27,7 +27,7 @@ implementation details live in the code, DB and git history.
 
 - **Normalized multi-source metadata**. Last.fm/Spotify/MusicBrainz data lives
   in separate normalized tables (`artist_bios`, `artist_tags`, `similar_artists`,
-  `album_info`, `track_stats`), not JSONB blobs. Allows per-source re-fetch and
+  `album_descriptions`, `track_stats`), not JSONB blobs. Allows per-source re-fetch and
   provenance tracking. First iteration used JSONB in `external_metadata`, that
   was scrapped because PostgreSQL functions on JSONB get unreadable fast.
 - **Canonical UUID v5 for shareable entities**. Artist/Album/Track/Genre/Tag/
