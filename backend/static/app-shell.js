@@ -7132,7 +7132,8 @@
           <div class="chat-header-name" id="chatName">…</div>
           <div class="chat-header-status" id="chatStatus"></div>
         </div>
-        <button class="icon-btn" type="button" aria-label="more">
+        <button class="icon-btn" type="button" data-action="menu"
+                aria-label="friend options">
           ${SVG_KEBAB_DOT}
         </button>
       </div>
@@ -7166,18 +7167,26 @@
       navigate('friends');
     });
 
+    // The header's ⋮ opens the same sheet a row in the friends list does —
+    // rename, pin, block, delete. Acting on the person you are talking to
+    // should not require walking back to the list to find their row.
+    screen.querySelector('[data-action="menu"]').addEventListener('click', () => {
+      openFriendActions(friend, () => loadFriend());
+    });
+
     // Friend identity (name, avatar, online dot). The initial fetch
     // above already populated `friend`; loadFriend re-pulls on SSE
     // events so status updates without a full screen rebuild.
     async function loadFriend() {
       try {
-        friend = await findFriend(f => f.id === fid) || friend;
+        const fresh = await findFriend(f => f.id === fid);
+        // Absent from the list means deleted — from this screen's own
+        // actions sheet, or from another device. Blocking does not remove
+        // the row, so this is unambiguous; a network failure throws rather
+        // than returning null, and keeps the stale object below.
+        if (!fresh) { navigate('friends'); return; }
+        friend = fresh;
       } catch (_) { /* keep stale friend object on error */ }
-      if (!friend) {
-        nameEl.textContent = 'Unknown friend';
-        statusEl.textContent = '';
-        return;
-      }
       const dn = friend.display_name || friend.username || friend.invite_code;
       nameEl.textContent = dn;
       const ph = avatarPlaceholder(dn);
