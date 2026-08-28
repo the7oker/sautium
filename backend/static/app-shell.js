@@ -7293,6 +7293,7 @@
     if (sub === 'gear-advisor') return renderGearAdvisor(root);
     if (sub === 'gear') return renderGearDetail(root, segs[2]);
     if (sub === 'library') return renderLibrary(root);
+    if (sub === 'phantoms') return renderPhantoms(root);
     if (sub === 'ai')      return renderAI(root);
     if (sub === 'sync')    return renderSync(root);
     // Bare #more — nothing to render here; the drawer is the UI.
@@ -7415,6 +7416,14 @@
           <circle cx="6" cy="17" r="3"/>
           <circle cx="17" cy="15" r="3"/>
         </svg>`;
+      const ICON_PHANTOM = `
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <path d="M9 17V5l11-2v12" stroke-dasharray="3 2.5"/>
+          <circle cx="6" cy="17" r="3" stroke-dasharray="3 2.5"/>
+          <circle cx="17" cy="15" r="3" stroke-dasharray="3 2.5"/>
+        </svg>`;
       const ICON_AI = `
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
              stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
@@ -7469,6 +7478,12 @@
             <button class="more-row" type="button" data-go="more/library">
               <span class="more-icon">${ICON_LIBRARY}</span>
               <span class="more-label">Library</span>
+              <span class="more-hint"></span>
+              <span class="more-chev">${CHEV}</span>
+            </button>
+            <button class="more-row" type="button" data-go="more/phantoms">
+              <span class="more-icon">${ICON_PHANTOM}</span>
+              <span class="more-label">Streaming library</span>
               <span class="more-hint"></span>
               <span class="more-chev">${CHEV}</span>
             </button>
@@ -8841,6 +8856,8 @@
           })()}
         </div>
 
+        <div data-hw-block></div>
+
         <div class="profile-section-head">
           <h3>My setup</h3>
           <button class="add-btn" data-add-gear><span class="plus">+</span>Add gear</button>
@@ -8880,6 +8897,8 @@
         </div>
       </section>
     `;
+
+    _loadHwBlock(root);
 
     root.querySelector('[data-back]').addEventListener('click', () => {
       if (history.length > 1) history.back();
@@ -11438,9 +11457,15 @@
     });
   }
 
-  /* ============ Library screen — #more/library ============ */
-  // MusicBrainz block — extracted so it can be re-rendered IN PLACE (no full
-  // render() → no scroll jump) on click / toggle / job completion.
+  /* ====== Streaming library screen — #more/phantoms ======
+     "Streaming library" is the name the user reads; "phantom" is the internal
+     term for the same thing and stays in the route, the API, the settings key
+     and the CSS. Rename copy, not identifiers. */
+  // MusicBrainz block. It lives with the phantom layer, not the library: the
+  // dump is what mints phantom discographies, and deleting it stops them
+  // updating while touching nothing the user owns. Extracted so it can be
+  // re-rendered IN PLACE (no full render() → no scroll jump) on click /
+  // toggle / job completion.
   function _mbBlockHTML(mb) {
     mb = mb || {};
     const running = !!(mb.update && mb.update.running);
@@ -11468,7 +11493,7 @@
       <div data-mb-actions>${actions}</div>`;
   }
 
-  /* Hardware profile block (Library screen) — read-only info. Selection is
+  /* Hardware profile block (Profile screen) — read-only info. Selection is
      automatic (backend auto-detects full/standard/lite; SAUTIUM_PROFILE env
      is the only override, for diagnostics). Loads itself after render. */
   async function _loadHwBlock(root) {
@@ -11524,11 +11549,16 @@
     });
   }
 
-  // Phantom layer block — the owner's switch and the explicit, confirmed
-  // removal. Same in-place contract as the MB block: no full render() on a
-  // click, a toggle or job completion. Nothing on the backend removes the
-  // layer on its own (CLAUDE.md: a hardware profile governs compute, never
-  // retention), so this block is the only place it can go.
+  // The catalog the node knows but does not own: MusicBrainz discographies
+  // and Last.fm neighbours, streamable next to the library — which is what
+  // the user-facing name says.
+  // Its own screen because it is its own catalog — the same Library /
+  // Enrichment shape, plus the owner's switch and the one explicit removal.
+  // Nothing on the backend removes it (CLAUDE.md: a hardware profile governs
+  // compute, never retention), so this screen is the only place it can go.
+  //
+  // In-place contract, same as the MB block: no full render() on a click, a
+  // toggle or job completion — the delegated listener survives the swap.
   function _phantomBlockHTML(ph) {
     ph = ph || {};
     const job = ph.prune || {};
@@ -11538,6 +11568,7 @@
     const pct = typeof job.pct === 'number' ? job.pct : null;
     const err = (!running && job.error) ? job.error : '';
     const empty = !((ph.albums || 0) > 0 || (ph.tracks || 0) > 0);
+    const enr = ph.enrichment || {};
     const actions = running ? `
       <div class="btn-row single">
         <button class="btn btn-danger" data-action="phantom-cancel" ${cancelling ? 'disabled' : ''}>${cancelling ? 'Cancelling…' : 'Cancel'}</button>
@@ -11546,20 +11577,44 @@
       <div class="enrich-bar${pct == null ? ' indeterminate' : ''}" data-phantom-bar><div class="fill"${pct == null ? '' : ` style="width:${pct}%;"`}></div></div>
     ` : `
       ${err ? `<div class="action-progress failed">${escapeProfileHtml('Failed: ' + err)}</div>` : ''}
-      ${empty ? '' : `<div class="btn-row single"><button class="btn btn-secondary" data-action="phantom-prune">Remove phantom layer</button></div>`}`;
+      ${empty ? '' : `<div class="btn-row single"><button class="btn btn-secondary" data-action="phantom-prune">Remove streaming library</button></div>`}`;
+
+    const stats = empty ? '' : `
+      <div class="profile-group-label">Library</div>
+      <div class="form-group">
+        <div class="stats-grid">
+          ${_statCell('Tracks',  fmtNum(ph.tracks))}
+          ${_statCell('Artists', fmtNum(ph.artists))}
+          ${_statCell('Albums',  fmtNum(ph.albums))}
+          ${_statCell('Genres',  fmtNum(ph.genres))}
+        </div>
+      </div>
+
+      <div class="profile-group-label">Enrichment</div>
+      <div class="form-group">
+        <div class="stats-grid">
+          ${_statCell('Embeddings', fmtNum(enr.embeddings))}
+          ${_statCell('Features',   fmtNum(enr.features))}
+          ${_statCell('Last.fm',    fmtNum(enr.lastfm))}
+          ${_statCell('Lyrics',     fmtNum(enr.lyrics))}
+        </div>
+        <div class="form-row stacked"><div class="row-stack-sub">Counts, not coverage. A track here has no file, so audio analysis can only arrive from peers who own it; bios and lyrics are fetched for what discovery actually reached. There is no total to complete.</div></div>
+      </div>`;
+
     return `
-      <div class="profile-group-label">Phantom layer</div>
+      ${stats}
+      <div class="profile-group-label">Footprint</div>
       <div class="form-group">
         <div class="form-row stacked"><div class="row-stack-sub">Albums and tracks you don't have — MusicBrainz discographies and Last.fm neighbours — browsable and streamable next to your library. Grows with what you listen to; never removed on its own.</div></div>
-        <div class="form-row"><span class="form-label">Size</span><span class="form-value">${empty ? 'Empty' : `≈ ${fmtNum(ph.albums)} albums · ${fmtNum(ph.tracks)} tracks · ${escapeProfileHtml(fmtBytes(ph.size_bytes))}`}</span></div>
+        <div class="form-row"><span class="form-label">Storage</span><span class="form-value mono">${empty ? 'Empty' : escapeProfileHtml(fmtBytes(ph.size_bytes))}</span></div>
         <div class="form-row"><span class="form-label">Discover new</span><button class="toggle ${ph.enabled ? 'on' : ''}" data-action="phantom-toggle" aria-pressed="${ph.enabled ? 'true' : 'false'}"><span class="knob"></span></button></div>
         <div class="form-row stacked"><div class="row-stack-sub">Off: nothing new is added; what is here stays until you remove it.</div></div>
       </div>
       <div data-phantom-actions>${actions}</div>`;
   }
 
-  // Latest phantoms payload from /api/settings/library — the confirm dialog
-  // quotes its numbers. Set by renderLibrary and every SSE refresh.
+  // Latest phantoms payload — the confirm dialog quotes its numbers.
+  // Set by renderPhantoms and every SSE refresh.
   let _phantomsLast = null;
 
   // One delegated listener on the block: its inner HTML is swapped in place
@@ -11580,9 +11635,9 @@
       } else if (action === 'phantom-prune') {
         const ph = _phantomsLast || {};
         const ok = await window.confirmDestructive({
-          title: 'Remove the phantom layer?',
-          message: `Deletes ≈ <b>${fmtNum(ph.albums)}</b> albums and <b>${fmtNum(ph.tracks)}</b> tracks you don't have (${escapeProfileHtml(fmtBytes(ph.size_bytes))}). `
-                 + 'Kept: everything you own, albums you streamed from a provider tile, phantom tracks that carry audio analysis, and similar-artist entries. '
+          title: 'Remove the streaming library?',
+          message: `Deletes up to <b>${fmtNum(ph.albums)}</b> albums and <b>${fmtNum(ph.tracks)}</b> tracks you don't have (${escapeProfileHtml(fmtBytes(ph.size_bytes))}). `
+                 + 'Kept: everything you own, albums you streamed from a provider tile, tracks that carry audio analysis, and similar-artist entries. '
                  + 'Bringing the layer back later needs the MusicBrainz catalogue or Last.fm and takes hours.',
           confirmText: 'Remove',
         });
@@ -11604,6 +11659,110 @@
     });
   }
 
+  async function _fetchPhantoms() {
+    try {
+      const r = await fetch('/api/settings/phantoms');
+      if (r.ok) return await r.json();
+    } catch (_) {}
+    return null;
+  }
+
+  async function renderPhantoms(root) {
+    const ph = await _fetchPhantoms();
+    if (!ph) {
+      root.innerHTML = `<section class="screen screen-settings">${_settingsHeader('Streaming library')}<div class="placeholder">Could not load the statistics.</div></section>`;
+      _wireBack(root);
+      return;
+    }
+    _phantomsLast = ph;
+    root.innerHTML = `
+      <section class="screen screen-settings">
+        ${_settingsHeader('Streaming library')}
+        <div data-mb-block>${_mbBlockHTML(ph.musicbrainz)}</div>
+        <div data-phantom-block>${_phantomBlockHTML(ph)}</div>
+      </section>
+    `;
+    _wireBack(root);
+    _wirePhantoms(root);
+    _wireMb(root);
+    _subscribePhantomStream(root);
+  }
+
+  /* Live prune progress. Rides the same wake channel as the Library screen —
+     the prune worker already calls notify_library_subscribers() — and pulls
+     its own endpoint on each wake. */
+  let _phantomStreamCtrl = null;
+  let _phantomStreamDebounce = null;
+  function _subscribePhantomStream(root) {
+    if (_phantomStreamCtrl) { _phantomStreamCtrl.abort(); _phantomStreamCtrl = null; }
+    if (_phantomStreamDebounce) { clearTimeout(_phantomStreamDebounce); _phantomStreamDebounce = null; }
+
+    async function refresh() {
+      if (!parseHash().startsWith('more/phantoms')) {
+        _phantomStreamCtrl && _phantomStreamCtrl.abort();
+        _phantomStreamCtrl = null;
+        return;
+      }
+      const ph = await _fetchPhantoms();
+      if (!ph) return;
+      _phantomsLast = ph;
+      const job = ph.prune || {};
+      const running = !!job.running;
+      const progress = String(job.progress || '');
+
+      const line = root.querySelector('[data-progress-for="phantoms"]');
+      if (line && progress && !job.cancel_requested && line.textContent !== progress) {
+        line.textContent = progress;
+      }
+      const bar = root.querySelector('[data-phantom-bar]');
+      if (bar) {
+        const pct = typeof job.pct === 'number' ? job.pct : null;
+        const fill = bar.querySelector('.fill');
+        if (pct == null) { bar.classList.add('indeterminate'); if (fill) fill.style.width = ''; }
+        else { bar.classList.remove('indeterminate'); if (fill) fill.style.width = pct + '%'; }
+      }
+      const mb = ph.musicbrainz || {};
+      const mbRunning  = !!(mb.update && mb.update.running);
+      const mbProgress = String((mb.update && mb.update.progress) || '');
+      const mbLine = root.querySelector('[data-progress-for="mb"]');
+      if (mbLine && mbProgress && mbLine.textContent !== mbProgress) mbLine.textContent = mbProgress;
+      const mbBar = root.querySelector('[data-mb-bar]');
+      if (mbBar) {
+        const pct = (mb.update && typeof mb.update.pct === 'number') ? mb.update.pct : null;
+        const fill = mbBar.querySelector('.fill');
+        if (pct == null) { mbBar.classList.add('indeterminate'); if (fill) fill.style.width = ''; }
+        else { mbBar.classList.remove('indeterminate'); if (fill) fill.style.width = pct + '%'; }
+      }
+
+      // Either job finishing → re-render its own block IN PLACE, so the counts
+      // and the action row catch up without scrolling the page back to the top.
+      const block = root.querySelector('[data-phantom-block]');
+      if (block && !running && root.querySelector('[data-progress-for="phantoms"]')) {
+        block.innerHTML = _phantomBlockHTML(ph);   // delegated listener survives the swap
+      }
+      const mbBlockEl = root.querySelector('[data-mb-block]');
+      if (mbBlockEl && root.querySelector('[data-progress-for="mb"]') && !mbRunning) {
+        mbBlockEl.innerHTML = _mbBlockHTML(mb);
+        _wireMb(root);
+      }
+    }
+
+    const scheduleRefresh = () => {
+      if (_phantomStreamDebounce) return;
+      _phantomStreamDebounce = setTimeout(() => {
+        _phantomStreamDebounce = null;
+        refresh();
+      }, 200);
+    };
+
+    _phantomStreamCtrl = window.sseStream('/api/settings/library/stream', () => {
+      scheduleRefresh();
+    }, (_err) => {
+      // sseStream auto-reconnects with backoff; nothing to do here.
+    });
+  }
+
+  /* ============ Library screen — #more/library ============ */
   async function renderLibrary(root) {
     let lib = null;
     try {
@@ -11702,7 +11861,6 @@
     // respective sections (scan under Library, enrich under
     // Enrichment) — so no end-of-screen action block is emitted.
     const actions = '';
-    _phantomsLast = lib.phantoms || null;
 
     root.innerHTML = `
       <section class="screen screen-settings">
@@ -11734,15 +11892,11 @@
         </div>
 
         ${libraryStats}
-        <div data-hw-block></div>
-        <div data-mb-block>${_mbBlockHTML(lib.musicbrainz)}</div>
-        <div data-phantom-block>${_phantomBlockHTML(lib.phantoms)}</div>
         ${emptyState}
         ${actions}
       </section>
     `;
     _wireBack(root);
-    _loadHwBlock(root);
 
     const onAction = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
     onAction('[data-action="scan"]',       async () => { await fetch('/api/settings/library/scan',          { method: 'POST' }); render(); });
@@ -11750,8 +11904,6 @@
     onAction('[data-action="enrich"]',     async () => { await fetch('/api/settings/library/enrich',        { method: 'POST' }); render(); });
     onAction('[data-cancel-scan]',         async () => { await fetch('/api/settings/library/scan/cancel',   { method: 'POST' }); render(); });
     onAction('[data-cancel-enrich]',       async () => { await fetch('/api/settings/library/enrich/cancel', { method: 'POST' }); render(); });
-    _wireMb(root);
-    _wirePhantoms(root);
 
     _subscribeLibraryStream(root);
   }
@@ -11800,50 +11952,10 @@
       _refreshEnrichRow(root, 'lastfm',     lib.lastfm_done,     lib.lastfm_total);
       _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.total_tracks);
 
-      const mb = lib.musicbrainz || {};
-      const mbRunning  = !!(mb.update && mb.update.running);
-      const mbProgress = String((mb.update && mb.update.progress) || '');
-      const mbLine = root.querySelector('[data-progress-for="mb"]');
-      if (mbLine && mbProgress && mbLine.textContent !== mbProgress) mbLine.textContent = mbProgress;
-      const mbBar = root.querySelector('[data-mb-bar]');
-      if (mbBar) {
-        const pct = (mb.update && typeof mb.update.pct === 'number') ? mb.update.pct : null;
-        const fill = mbBar.querySelector('.fill');
-        if (pct == null) { mbBar.classList.add('indeterminate'); if (fill) fill.style.width = ''; }
-        else { mbBar.classList.remove('indeterminate'); if (fill) fill.style.width = pct + '%'; }
-      }
-
-      const ph = lib.phantoms || {};
-      _phantomsLast = ph;
-      const phJob = ph.prune || {};
-      const phRunning = !!phJob.running;
-      const phProgress = String(phJob.progress || '');
-      const phLine = root.querySelector('[data-progress-for="phantoms"]');
-      if (phLine && phProgress && !phJob.cancel_requested && phLine.textContent !== phProgress) phLine.textContent = phProgress;
-      const phBar = root.querySelector('[data-phantom-bar]');
-      if (phBar) {
-        const pct = typeof phJob.pct === 'number' ? phJob.pct : null;
-        const fill = phBar.querySelector('.fill');
-        if (pct == null) { phBar.classList.add('indeterminate'); if (fill) fill.style.width = ''; }
-        else { phBar.classList.remove('indeterminate'); if (fill) fill.style.width = pct + '%'; }
-      }
-
-      // Completion. Scan/enrich finishing → full re-render (flips the Cancel
-      // row back). MB finishing → re-render only its block IN PLACE so the page
-      // doesn't scroll to the top.
+      // Scan/enrich finishing → full re-render, which flips the Cancel row back.
       const scanEnrichWasRunning = !!root.querySelector('[data-cancel-scan], [data-cancel-enrich]');
       if (scanEnrichWasRunning && !scanRunning && !enrichRunning) {
         if (parseHash().startsWith('more/library')) render();
-      } else {
-        const mbBlockEl = root.querySelector('[data-mb-block]');
-        if (mbBlockEl && root.querySelector('[data-progress-for="mb"]') && !mbRunning) {
-          mbBlockEl.innerHTML = _mbBlockHTML(mb);
-          _wireMb(root);
-        }
-        const phBlockEl = root.querySelector('[data-phantom-block]');
-        if (phBlockEl && root.querySelector('[data-progress-for="phantoms"]') && !phRunning) {
-          phBlockEl.innerHTML = _phantomBlockHTML(ph);   // delegated listener survives the swap
-        }
       }
     }
 

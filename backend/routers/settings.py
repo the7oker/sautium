@@ -29,6 +29,7 @@ from sqlalchemy import text
 from config import settings as app_settings
 from database import get_db_context
 from db_pool import db_execute, db_query, db_query_one, get_conn
+from sql_queries import ARTIST_OWNED
 
 logger = logging.getLogger(__name__)
 
@@ -558,29 +559,71 @@ def _phantom_worker() -> None:
 
 
 def _phantom_section() -> Dict[str, Any]:
-    """Footprint + switch + live job state for the Phantom layer block.
-    Counts are planner estimates minus the owned rows — instant on 3M rows,
-    and ≈ is all the row needs (the removal job re-ANALYZEs so the estimate
-    follows it). The byte figure is the phantom-bearing tables whole; the
-    owned share is ~1 %."""
-    row = db_query_one("""
-        SELECT GREATEST(t.est - o.tracks, 0)::bigint AS tracks,
-               GREATEST(a.est - o.albums, 0)::bigint AS albums,
+    """Footprint + switch + live job state for the Streaming library screen
+    ("phantom" is the internal term for the same thing, and stays),
+    plus the MusicBrainz catalogue block: the dump is what mints phantom
+    discographies in the first place, so its status belongs with the layer
+    it produces, not with the files the user owns.
+
+    Every count is exact. The track figure is total-minus-owned rather than
+    a correlated NOT EXISTS over 3M rows: the two agree exactly (media_files
+    .track_id is NOT NULL and FK-valid) but the subtraction is a pair of
+    aggregates at 0.13 s against ~2 s. It used to be a planner estimate,
+    which drifted 4.4 % low here — the layer grows faster than autovacuum
+    refreshes reltuples, and a 7-digit number nobody can round is a bad
+    place to be approximate. The byte figure is the phantom-bearing tables
+    whole; the owned share is ~1 %.
+
+    Enrichment here is a count, never a ratio. A phantom track has no file,
+    so no local pipeline can ever derive its embedding or features — those
+    arrive over P2P as sealed foreign analysis. A progress bar against 3M
+    would read 0 % forever and promise work that will never happen."""
+    row = db_query_one(f"""
+        SELECT GREATEST(t.total - o.tracks, 0)::bigint AS tracks,
+               (SELECT count(*) FROM artists a WHERE NOT {ARTIST_OWNED})    AS artists,
+               (SELECT count(*) FROM albums al
+                 WHERE NOT EXISTS (SELECT 1 FROM album_variants av
+                                     JOIN media_files mf ON mf.album_variant_id = av.id
+                                    WHERE av.album_id = al.id))              AS albums,
+               (SELECT count(*) FROM genres g
+                 WHERE NOT EXISTS (SELECT 1 FROM album_genres ag
+                                     JOIN album_variants av ON av.album_id = ag.album_id
+                                     JOIN media_files mf ON mf.album_variant_id = av.id
+                                    WHERE ag.genre_id = g.id))               AS genres,
+               (SELECT count(*) FROM embeddings e
+                 WHERE NOT EXISTS (SELECT 1 FROM media_files mf
+                                    WHERE mf.track_id = e.track_id))         AS embeddings,
+               (SELECT count(*) FROM audio_features f
+                 WHERE NOT EXISTS (SELECT 1 FROM media_files mf
+                                    WHERE mf.track_id = f.track_id))         AS features,
+               (SELECT count(*) FROM track_lyrics l
+                 WHERE NOT EXISTS (SELECT 1 FROM media_files mf
+                                    WHERE mf.track_id = l.track_id))         AS lyrics,
+               (SELECT count(*) FROM artists a
+                 WHERE NOT {ARTIST_OWNED}
+                   AND EXISTS (SELECT 1 FROM artist_bios ab
+                                WHERE ab.artist_id = a.id AND ab.source = 'lastfm'))
+                                                                             AS lastfm,
                pg_total_relation_size('tracks') + pg_total_relation_size('album_tracks')
              + pg_total_relation_size('albums') + pg_total_relation_size('track_artists')
              + pg_total_relation_size('album_artists') AS size_bytes
-        FROM (SELECT GREATEST(reltuples, 0)::bigint AS est
-              FROM pg_class WHERE oid = 'tracks'::regclass) t,
-             (SELECT GREATEST(reltuples, 0)::bigint AS est
-              FROM pg_class WHERE oid = 'albums'::regclass) a,
-             (SELECT (SELECT count(DISTINCT track_id) FROM media_files) AS tracks,
-                     (SELECT count(DISTINCT album_id) FROM album_variants) AS albums) o
+        FROM (SELECT count(*) AS total FROM tracks) t,
+             (SELECT count(DISTINCT track_id) AS tracks FROM media_files) o
     """)
     return {
         "enabled":    bool(_read("discovery.phantom_layer")),
+        "musicbrainz": _mb_section(),
         "tracks":     int(row["tracks"]),
+        "artists":    int(row["artists"]),
         "albums":     int(row["albums"]),
+        "genres":     int(row["genres"]),
         "size_bytes": int(row["size_bytes"]),
+        "enrichment": {
+            "embeddings": int(row["embeddings"]),
+            "features":   int(row["features"]),
+            "lastfm":     int(row["lastfm"]),
+            "lyrics":     int(row["lyrics"]),
+        },
         "prune": {
             "running":          bool(_phantom_state["running"]),
             "cancel_requested": bool(_phantom_state["cancel_requested"]),
@@ -645,8 +688,6 @@ async def _library_state() -> Dict[str, Any]:
         "last_scan_at":       _read("library.last_scan_at"),
         "scan":               scan,
         "enrich":             enrich,
-        "musicbrainz":        _mb_section(),
-        "phantoms":           _phantom_section(),
     }
 
 
@@ -1781,6 +1822,15 @@ def mb_update(force: bool = False) -> Dict[str, Any]:
 
 class PhantomPrefs(BaseModel):
     enabled: bool
+
+
+@router.get("/phantoms")
+def get_phantom_state() -> Dict[str, Any]:
+    """Read for the Streaming library screen. Its own endpoint rather than a
+    field on /library: the counts cost ~0.4 s and the library screen wakes on
+    every scan/enrich progress tick, which would pay for them a hundred times
+    over for blocks that no longer live there."""
+    return _phantom_section()
 
 
 @router.put("/phantoms")

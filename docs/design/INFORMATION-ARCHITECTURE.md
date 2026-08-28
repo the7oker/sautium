@@ -118,7 +118,16 @@ A **bottom-up sheet** with a vertical list of entries:
   directive; a closed renderer tab reports the output stopped after a
   short grace, and the queue survives for any output to pick up.
 - DSP / Signal Chain (filter, matrix, dither, digital attenuation)
-- Profile (identity, account, Last.fm, audio chain)
+- Profile (identity, account, hardware profile, audio chain)
+- Library (`#more/library`) — music path, owned counts, enrichment
+  coverage, scan/enrich actions
+- Streaming library (`#more/phantoms`) — the catalog the node knows but
+  does not own; its own screen because it is its own catalog, with the
+  owner's `discovery.phantom_layer` switch, the one explicit removal,
+  and the MusicBrainz catalogue that mints the discographies.
+  **"Streaming library" is the user-facing name only** — "phantom" stays
+  the internal term in the route, the API, the settings key and the CSS,
+  and everywhere else in the docs
 - About / version
 
 Sheet is dismissed with drag-down or tap-outside. Detail screens
@@ -152,6 +161,8 @@ back/forward and refresh work natively:
 #more/dsp                    → DSP / Signal Chain screen
 #more/profile                → Profile (own — identity, account, audio chain)
 #more/profile/gear/<id>      → Gear item detail (sheet within Profile)
+#more/library                → Library (owned counts, enrichment, scan)
+#more/phantoms               → Streaming library (phantom counts, enrichment, MB)
 #profile/<pubkey-prefix>     → Profile (viewing other, read-only)
 #queue                       → Full queue editor
 #queue/history/<id>          → Specific historical queue restore
@@ -464,6 +475,10 @@ Top to bottom:
 - **Account** — email + verification badge (✓ / ⚠), change password,
   Last.fm connect/disconnect, scrobbling toggle (enabled only when
   Last.fm is connected).
+- **Hardware profile** — read-only: the auto-detected tier
+  (full/standard/lite) and what the machine was measured at. Sits with
+  the account because it describes THIS node, not the library; it
+  governs compute only, never retention (see CLAUDE.md).
 - **Audio chain (My setup)** — header with Add button, item list,
   empty-state copy ("Add your audio chain. Search by brand or model —
   we'll fill in details.").
@@ -720,6 +735,9 @@ All Genre blocks roll up into a single `(new endpoint)` GET
 | HQPlayer status | existing HQP state poll | — |
 | HQPlayer config (host/port) | existing settings persistence | + save profiles per location |
 | DSP / Signal Chain | existing HQP filter / matrix / dither endpoints | + per-genre auto-profile |
+| Library | `/api/settings/library` — owned counts + enrichment coverage over the ENGAGED artist set (`sql_queries.ARTIST_ENGAGED`), so the ratio names the same population the pipeline queues | — |
+| Streaming library | `/api/settings/phantoms` — its own endpoint: the counts cost ~0.4 s and the library screen wakes on every scan/enrich tick. Enrichment there is a COUNT, never a ratio: a phantom track has no file, so audio analysis only arrives over P2P and there is no total to complete | + per-source breakdown (MB vs Last.fm vs streaming mint) |
+| MusicBrainz catalogue | `/api/settings/musicbrainz/*` — status, auto-update toggle, download/update/delete. Sits on the Phantom screen because the dump is what mints phantom discographies; deleting it stops them updating and touches nothing owned | — |
 
 ### Profile (own)
 
@@ -727,6 +745,7 @@ All Genre blocks roll up into a single `(new endpoint)` GET
 |-------|------------|-----------|
 | Identity (avatar, name, login, invite, city, bio) | `users` table extensions (`display_name`, `city`, `bio`, `avatar_cover_id`) **(new)** + `(new endpoint)` GET/PUT `/api/profile` | + avatar upload via existing covers pipeline |
 | Account (email, password, Last.fm, scrobbling) | existing flows (email-verify worker, Argon2id password, Last.fm OAuth) | — |
+| Hardware profile | `/api/settings/hardware` — auto-detected tier, read-only | — |
 | Audio chain (gear list) | `user_gear` table **(new)** joined to `gear_models` **(new)** + `(new endpoint)` GET/POST/DELETE `/api/profile/gear` | + per-item privacy granularity |
 | Sociability placeholder | static stub in MVP | + Phase 2 active feature |
 

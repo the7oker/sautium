@@ -196,3 +196,15 @@ ARTIST_ENGAGED_SET = """\
 ARTIST_ENGAGED = f"""a.id IN (
 {ARTIST_ENGAGED_SET}
     )"""
+
+# ---------------------------------------------------------------------------
+# Owned vs phantom (correlates against an `artists` row aliased `a`)
+# ---------------------------------------------------------------------------
+# The product's definition of a phantom artist, mirroring the `is_owned`
+# expression the artist/discovery surfaces already ship: any owned file
+# crediting them in ANY role. A featured artist on a track you own is owned —
+# the UI shows them undimmed — so `role = 'primary'` is the wrong line here.
+
+ARTIST_OWNED = """EXISTS (SELECT 1 FROM track_artists ta
+                    JOIN media_files mf ON mf.track_id = ta.track_id
+                   WHERE ta.artist_id = a.id)"""
