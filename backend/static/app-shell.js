@@ -5168,8 +5168,9 @@
       const artistId = d.primary_artist ? d.primary_artist.id : '';
       const totalDuration = fmtDurationLong(d.total_duration);
 
-      // Album prose, rendered where the artist page puts the bio: after the
-      // identity block, before the content it describes.
+      // Album prose sits where the artist page puts the bio: straight after
+      // the genre chips, above the actions — the pitch is what decides whether
+      // you press play, so it cannot come after the button.
       const descSummary = trimLastFmTail(stripHtml(d.description_summary || ''));
       const descFull = trimLastFmTail(stripHtml(d.description || ''));
       const descHtml = proseBlockHtml(descSummary, descFull);
@@ -5213,6 +5214,7 @@
           </div>
           ${genresHtml ? `<div class="tag-row" style="padding: calc(12 * var(--px)) 0 0;">${genresHtml}</div>` : ''}
         </div>
+        ${descHtml}
         <div class="album-actions${isPhantom ? ' is-phantom' : ''}">
           ${isPhantom ? `
             <button class="btn-primary" type="button" data-action="play-phantom">${SVG_PLAY} Stream all</button>
@@ -5229,7 +5231,6 @@
             </button>
           `}
         </div>
-        ${descHtml}
         <div class="album-tracklist">${tracksHtml}</div>
         <div class="album-similar" data-similar-slot hidden></div>
         <div style="height: calc(24 * var(--px));"></div>

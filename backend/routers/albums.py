@@ -28,7 +28,8 @@ def _album_description(album_id: str) -> dict:
     release group: a remaster and its original are separate `albums` rows for
     one record, so a description written against either serves both. The
     album's own row wins when both exist; between equal-tier rows (several
-    sources) the freshest does. Returns {} when there is nothing to show."""
+    sources) the freshest does. `description` is the full text and opens with
+    `description_summary` — the screen expands one into the other in place."""
     row = db_query_one("""
         WITH own AS (
             SELECT 0 AS tier, ad.summary, ad.content, ad.updated_at

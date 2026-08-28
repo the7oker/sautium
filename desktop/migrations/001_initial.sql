@@ -742,6 +742,11 @@ CREATE TABLE IF NOT EXISTS genre_descriptions (
 -- either — it is display text, not a retrieval signal. Readers resolve it with
 -- a release-group fallback (albums.musicbrainz_id) so a remaster shows the
 -- description written against another edition of the same record.
+--
+-- summary/content follow artist_bios' contract, which the UI depends on:
+-- content is the FULL text and MUST START with summary verbatim. The reader
+-- renders summary and swaps in content in place behind "See more", so two
+-- independently written texts read as the prose being replaced mid-sentence.
 CREATE TABLE IF NOT EXISTS album_descriptions (
     id SERIAL PRIMARY KEY,
     album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,

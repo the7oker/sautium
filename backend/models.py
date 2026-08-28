@@ -936,7 +936,10 @@ class GenreDescription(Base):
 
 class AlbumDescription(Base):
     """Album prose from multiple sources. LOCAL-ONLY — albums never sync, so
-    unlike artist_bios / genre_descriptions this carries no seal columns."""
+    unlike artist_bios / genre_descriptions this carries no seal columns.
+
+    content is the full text and must start with summary verbatim: the UI
+    expands one into the other in place."""
     __tablename__ = "album_descriptions"
 
     id = Column(Integer, primary_key=True)
