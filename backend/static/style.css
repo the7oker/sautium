@@ -5829,6 +5829,22 @@ select.add-gear-input {
   white-space: nowrap;
 }
 .enrich-line .val .of { color: var(--color-text-dim); }
+/* MusicBrainz value line — the one settings sub-line that sells rather than
+   explains, so it takes the brand amber instead of the dim grey the rest of
+   the group uses. Amber, not the sage --color-positive: this is an invitation,
+   not a completed state. */
+.mb-pitch {
+  margin: calc(12 * var(--px)) calc(14 * var(--px));
+  padding: calc(10 * var(--px)) calc(12 * var(--px));
+  border-left: calc(2 * var(--px)) solid var(--color-amber);
+  border-radius: var(--radius-sm);
+  background: var(--color-amber-stripe);
+  font-size: calc(11.5 * var(--px));
+  line-height: 1.45;
+  color: var(--color-amber);
+}
+.mb-pitch b { font-weight: 600; }
+
 .enrich-bar {
   margin-top: calc(6 * var(--px));
   height: calc(3 * var(--px));

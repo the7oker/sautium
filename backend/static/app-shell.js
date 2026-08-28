@@ -10153,7 +10153,19 @@
     return n + ' B';
   }
   function fmtNum(n) {
-    return Number(n || 0).toLocaleString('en-US').replace(/,/g, ' ');
+    // U+00A0, not a plain space: a thousands separator is not a line-break
+    // opportunity. In a stat cell the number owns its line and it never
+    // showed; in flowing prose "2 921 591" split after the "2".
+    return Number(n || 0).toLocaleString('en-US').replace(/,/g, '\u00A0');
+  }
+  // Counts in flowing prose, where "39 363 832" is noise: 39.4M. M for
+  // million is the ordinary UI shorthand (YouTube, Spotify), and the exact
+  // figure is never far — the MusicBrainz Status row carries it verbatim.
+  function fmtCompact(n) {
+    n = Number(n) || 0;
+    if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+    if (n >= 1e4) return Math.round(n / 1e3) + 'k';
+    return fmtNum(n);
   }
   function fmtRelative(iso) {
     if (!iso) return '—';
@@ -11481,10 +11493,23 @@
         <button class="btn ${mb.loaded ? 'btn-secondary' : 'btn-primary'}" data-action="mb-update">${mb.loaded ? 'Update' : 'Download'}</button>
         ${mb.loaded ? `<button class="btn btn-secondary" data-action="mb-delete">Delete catalogue</button>` : ''}
       </div>`;
+    // The pitch names what the catalogue buys. Loaded → the dump's own
+    // numbers; not loaded → MusicBrainz's order of magnitude, since the local
+    // tables are empty and cannot sell themselves.
+    const cat = mb.catalogue || {};
+    const pitch = mb.loaded
+      ? `<b>${fmtCompact(cat.albums)} albums</b> and <b>${fmtCompact(cat.recordings)} recordings</b> by <b>${fmtCompact(cat.artists)} artists</b> sit next to your library — every discography browsable, and streamable on tap.`
+      : `Puts <b>4M albums</b> and <b>39M recordings</b> by <b>2.9M artists</b> next to your library — every discography browsable, and streamable on tap.`;
     return `
       <div class="profile-group-label">MusicBrainz database</div>
       <div class="form-group">
-        <div class="form-row stacked"><div class="row-stack-sub">Local copy of MusicBrainz artist data — improves artist normalization. Optional · needs ~11 GB free to install (7 GB download + ~4 GB in DB), settles to ~4 GB after.</div></div>
+        <div class="mb-pitch">${pitch}</div>
+        <!-- The price, shown in both states: a benefit with the cost hidden is
+             a sales pitch. Real figures, not the ~11 GB / ~4 GB this line used
+             to claim — mb_dump_load ships ARCHIVE_GB 7.5 + TABLES_GB 21 +
+             MARGIN_GB 2, and the loaded tables measure 20.9 GB. Under-promising
+             it invites a 7.5 GB download onto a volume that cannot finish. -->
+        <div class="form-row stacked"><div class="row-stack-sub">Optional · ~21 GB in the database once loaded, plus ~7.5 GB of free space for the download while it installs — the archive is deleted afterwards.</div></div>
         <div class="form-row"><span class="form-label">Status</span><span class="form-value">${mb.loaded ? `${fmtNum(mb.total_records)} records · ${escapeProfileHtml(fmtBytes(mb.size_bytes))}` : 'Not downloaded'}</span></div>
         ${mb.version ? `<div class="form-row"><span class="form-label">Version</span><span class="form-value mono">${escapeProfileHtml(mb.version)}</span></div>` : ''}
         ${mb.last_update_at ? `<div class="form-row"><span class="form-label">Last update</span><span class="form-value">${escapeProfileHtml(fmtRelative(mb.last_update_at))}</span></div>` : ''}

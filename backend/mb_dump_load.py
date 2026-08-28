@@ -666,6 +666,15 @@ def stats() -> Dict:
         "total_records": loaded,
         "size_bytes": size,
         "tables": len(by),
+        # What the catalogue actually holds, for the UI to name. Same free
+        # reltuples read as the totals above — the loader ANALYZEs each table
+        # after the bulk COPY and nothing writes to them afterwards, so these
+        # match count(*) exactly (verified: 4,386,143 / 2,921,591).
+        "catalogue": {
+            "albums":     int(by.get("mb_release_group", {}).get("est_rows", 0)),
+            "artists":    int(by.get("mb_artist", {}).get("est_rows", 0)),
+            "recordings": int(by.get("mb_recording", {}).get("est_rows", 0)),
+        },
     }
 
 

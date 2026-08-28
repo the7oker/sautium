@@ -479,6 +479,7 @@ def _mb_section() -> Dict[str, Any]:
         st = {"loaded": False, "version": None, "total_records": 0, "size_bytes": 0}
     return {
         "loaded":          bool(st.get("loaded")),
+        "catalogue":       st.get("catalogue") or {},
         "version":         st.get("version"),
         "total_records":   st.get("total_records", 0),
         "size_bytes":      st.get("size_bytes", 0),
