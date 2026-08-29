@@ -1692,7 +1692,7 @@ def _parallel_resolve(provider, queries: list) -> list:
 
     if not queries:
         return []
-    with ThreadPoolExecutor(max_workers=min(8, len(queries)),
+    with ThreadPoolExecutor(max_workers=min(provider.resolve_workers, len(queries)),
                             thread_name_prefix="resolve") as ex:
         return list(ex.map(one, queries))
 

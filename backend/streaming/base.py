@@ -158,6 +158,15 @@ class StreamProvider(ABC):
     # tracks in the UI. Providers expose this for free by implementing the
     # internal `_resolve` (query -> source id, raising ProviderError) and
     # `_download` (source id -> audio); fetch() == download(_resolve(query)).
+    # How many resolves the host may run against this catalog at once. The
+    # fan-out exists for YouTube — a yt-dlp search is ~1.4 s of process and
+    # network, eight abreast is the difference between a minute and eight for
+    # an album. A JSON API answers in ~150 ms and meters requests per address:
+    # measured 2026-08-29, Deezer at one thread runs 161 ms/track, at two 136,
+    # at eight 130 — the extra threads buy nothing and burn the quota. Each
+    # provider states what it can use.
+    resolve_workers: int = 8
+
     @property
     def supports_resolve(self) -> bool:
         return callable(getattr(self, "_resolve", None)) and \
