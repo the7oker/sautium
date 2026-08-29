@@ -376,18 +376,16 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
     media_files (that is the owned/phantom discriminator; a later rip
     collapses onto the same `track_uuid` row and simply gains files).
 
-    Each slot is keyed the way a correctly tagged rip of the same release
-    ends up keyed after canon: title + the HEAD of the track's own artist
-    credit, not the album's. The printed credit is split exactly as Pass 1
-    splits a rip's tag — on the separators no band name uses (feat./ft./
-    vs./pres./aka/meets, canon.split.SAFE_SEPARATORS) — so the head is the
-    slot's artist and the rest ride as featured credits, and there is no
-    compound artist row for a later pass to dissolve. '&' stays whole here
-    as it does there: the identity must follow from the string alone (a
-    node without the dump derives the same uuid), and '&' names a duo as
-    often as a collaboration. Until 2026-08-29 the slot carried the whole
-    printed credit — 19k phantom "X feat. Y" artist rows that only a
-    scan-triggered Pass 1 would have split, and never did.
+    Each slot is keyed by title + the PRIMARY artist of the track's own
+    credit, taken from the catalog's structure: MB keeps a credit as an
+    ordered list of artists with join phrases and merely renders the
+    string, so the first member is the primary whatever phrase follows it
+    — "feat.", "&", ";" alike — and the others ride as featured credits.
+    This is the canonical form; canon's job is to bring a rip's tag — a
+    lossy, composed copy of it — to this form with heuristics, and the
+    mint, born from the source, applies none of them. Until 2026-08-29 the
+    slot carried the whole printed credit: 19k phantom "X feat. Y" artist
+    rows that only a scan-triggered Pass 1 would have split, and never did.
 
     A head that is the album artist (same MB gid, or the same name) uses
     that artist row; any other head — a compilation entry, an alias, a guest
@@ -406,7 +404,6 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
     slots written.
     """
     from transliterate import latinize
-    from canon.split import detect_compound_type
     best = _pick_canonical_release(mb.fetch_release_tracklists(rg_mbid))
     if not best:
         return 0
@@ -428,11 +425,15 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
         if not title:
             continue
         credit = (tr.get("credit") or "").strip()[:500]
-        compound = detect_compound_type(credit) if credit else None
-        head, featured = ((compound[2][0], compound[2][1:]) if compound
-                          else (credit, []))
-        if (not head or tr.get("credit_artist_mbid") in album_mbids
-                or normalize(head) == album_key):
+        members = tr.get("credit_names") or []
+        if members:
+            head = (members[0].get("name") or "").strip()[:500]
+            head_gid = members[0].get("gid")
+            featured = [n for n in ((m.get("name") or "").strip()[:500]
+                                    for m in members[1:]) if n]
+        else:
+            head, head_gid, featured = credit, tr.get("credit_artist_mbid"), []
+        if (not head or head_gid in album_mbids or normalize(head) == album_key):
             slot_artist_id, slot_artist_name = artist_id, artist_name
         else:
             slot_artist_id, slot_artist_name = str(artist_uuid(head)), head
@@ -467,6 +468,20 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
                 INSERT INTO track_artists (track_id, role, artist_id) VALUES %s
                 ON CONFLICT DO NOTHING
             """, artist_rows, template="(%s::uuid, %s::credit_role, %s::uuid)")
+            # The credit is the whole of a slot's featured list: a featured row
+            # the catalog no longer names (an earlier mint rule's compound, a
+            # retired credit) comes off, or it would outlive every re-mint.
+            featured_rows = [(t, a) for t, r, a in artist_rows if r == "featured"]
+            cur.execute("""
+                DELETE FROM track_artists ta
+                WHERE ta.role = 'featured'
+                  AND ta.track_id = ANY(%(tids)s::uuid[])
+                  AND NOT EXISTS (
+                      SELECT 1 FROM unnest(%(ftids)s::uuid[], %(fids)s::uuid[]) AS f(track_id, artist_id)
+                      WHERE f.track_id = ta.track_id AND f.artist_id = ta.artist_id)
+            """, {"tids": [t for t, _, _ in track_rows],
+                  "ftids": [t for t, _ in featured_rows],
+                  "fids": [a for _, a in featured_rows]})
             execute_values(cur, """
                 INSERT INTO album_tracks
                     (album_id, track_id, disc, position, recording_mbid, length_ms)

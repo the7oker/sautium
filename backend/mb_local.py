@@ -199,22 +199,35 @@ def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
     (track normalization). Tens of releases × ~10-15 tracks; one indexed join.
 
     Returns ``[{release_mbid, name, status, tracks: [{title, length_ms,
-    recording_mbid, disc, position, credit, credit_artist_mbid}, …]}, …]``,
-    releases best-tracklist-first is the caller's job (``status`` 1 = Official
-    — the canonical-release pick prefers it). ``name`` is the MB release title
-    — the clean label an owned edition adopts once its tracklist matches this
-    release. ``credit`` is the track's own artist credit as printed
-    ("Daft Punk feat. Pharrell Williams" — join phrases included, the way a
-    tag would carry it); ``credit_artist_mbid`` is that artist's gid when the
-    credit names exactly one artist, else None. Local-only (the MB API can't
-    page tracklists of every release cheaply).
+    recording_mbid, disc, position, credit, credit_artist_mbid,
+    credit_names}, …]}, …]``, releases best-tracklist-first is the caller's
+    job (``status`` 1 = Official — the canonical-release pick prefers it).
+    ``name`` is the MB release title — the clean label an owned edition
+    adopts once its tracklist matches this release. ``credit`` is the track's
+    own artist credit as printed ("Daft Punk feat. Pharrell Williams" — join
+    phrases included, the way a tag would carry it); ``credit_artist_mbid``
+    is that artist's gid when the credit names exactly one artist, else
+    None. ``credit_names`` is the credit's STRUCTURE — MB keeps a credit as
+    an ordered list of artists with join phrases and renders the string from
+    it: ``[{name, gid, credited_as, join}, …]`` in credit order, ``name`` the
+    artist's canonical MB name (``credited_as`` when the member's artist row
+    is not in a partial slice). The first member is the recording's primary
+    by the catalog's own account, whatever phrase follows it. Local-only
+    (the MB API can't page tracklists of every release cheaply).
     """
     rows = db_query("""
         SELECT r.gid::text AS release_mbid, r.name AS release_name, r.status,
                t.name AS title, t.length AS length_ms,
                rec.gid::text AS recording_mbid, m.position AS disc, t.position AS pos,
                ac.name AS credit,
-               CASE WHEN ac.artist_count = 1 THEN ca.gid::text END AS credit_artist_mbid
+               CASE WHEN ac.artist_count = 1 THEN ca.gid::text END AS credit_artist_mbid,
+               (SELECT json_agg(json_build_object(
+                           'name', COALESCE(ma.name, acn2.name), 'gid', ma.gid::text,
+                           'credited_as', acn2.name, 'join', acn2.join_phrase)
+                       ORDER BY acn2.position)
+                  FROM mb_artist_credit_name acn2
+                  LEFT JOIN mb_artist ma ON ma.id = acn2.artist
+                 WHERE acn2.artist_credit = t.artist_credit) AS credit_names
         FROM mb_release r
         JOIN mb_medium m ON m.release = r.id
         JOIN mb_track t ON t.medium = m.id
@@ -240,5 +253,6 @@ def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
             "position": r["pos"],
             "credit": r["credit"] or "",
             "credit_artist_mbid": r["credit_artist_mbid"],
+            "credit_names": r["credit_names"] or [],
         })
     return list(rels.values())
