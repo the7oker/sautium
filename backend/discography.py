@@ -297,16 +297,37 @@ def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
 _MB_RELEASE_STATUS_OFFICIAL = 1
 
 
+def _release_date_key(release: dict) -> tuple:
+    """Sortable (year, month, day) for a release, unknown parts and undated
+    releases last."""
+    date = release.get("release_date") or []
+    return tuple((date[i] if i < len(date) and date[i] is not None else 9999)
+                 for i in range(3))
+
+
 def _pick_canonical_release(releases: List[dict]) -> Optional[dict]:
-    """The release whose tracklist represents the phantom album: Official
-    first, then the most complete tracklist, then lowest gid (determinism —
-    a re-sync must pick the same release)."""
-    if not releases:
+    """The release whose tracklist represents the phantom album.
+
+    Official releases only when there are any. Among them the tracklist
+    length shared by the MOST releases wins: reissues mirror the original
+    edition, deluxe and box editions are the outliers — Master of Puppets
+    is 65 official releases of 8 tracks, three of 137 and one box of 196,
+    and Kind of Blue is decades of 5-track vinyl, cassette and CD against a
+    handful of Legacy editions at 6..21. Until 2026-08-29 the rule was "the
+    most complete tracklist", which picked that box. Ties on the count go to
+    the earliest-dated release (the original edition), then the shorter
+    tracklist, then the lowest gid — deterministic, so a re-sync picks the
+    same release. Releases with no tracks never win.
+    """
+    pool = [r for r in releases if r.get("tracks")]
+    if not pool:
         return None
-    official = [r for r in releases
-                if r.get("status") == _MB_RELEASE_STATUS_OFFICIAL]
-    pool = official or releases
-    return sorted(pool, key=lambda r: (-len(r["tracks"]), r["release_mbid"]))[0]
+    official = [r for r in pool if r.get("status") == _MB_RELEASE_STATUS_OFFICIAL]
+    pool = official or pool
+    votes = Counter(len(r["tracks"]) for r in pool)
+    top = max(votes.values())
+    return min((r for r in pool if votes[len(r["tracks"])] == top),
+               key=lambda r: (_release_date_key(r), len(r["tracks"]), r["release_mbid"]))
 
 
 def _carry_rekeyed_slots(album_id: str, slot_rows: list, slot_artists: dict) -> int:
@@ -400,8 +421,10 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
     Idempotent: slot upserts on the (album, disc, position) PK; track rows
     never clobber existing titles. A slot that moves to another uuid (a
     re-mint after a credit or normalization change, an MB retitle) carries
-    its analysis, listens and files along instead of orphaning them. Returns
-    slots written.
+    its analysis, listens and files along instead of orphaning them. Slots
+    the picked release does not name are removed — the tracklist is the
+    pick's, exactly; a track left with no slot keeps its row if it carries
+    analysis (delete_orphan_tracks spares it). Returns slots written.
     """
     from transliterate import latinize
     best = _pick_canonical_release(mb.fetch_release_tracklists(rg_mbid))
@@ -493,6 +516,15 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
                               updated_at = now()
             """, [row for row, _ in slot_rows],
                 template="(%s::uuid, %s::uuid, %s, %s, %s::uuid, %s)")
+            cur.execute("""
+                DELETE FROM album_tracks atr
+                WHERE atr.album_id = %(al)s::uuid
+                  AND NOT EXISTS (
+                      SELECT 1 FROM unnest(%(discs)s::int[], %(positions)s::int[]) AS s(disc, position)
+                      WHERE s.disc = atr.disc AND s.position = atr.position)
+            """, {"al": album_id,
+                  "discs": [row[2] for row, _ in slot_rows],
+                  "positions": [row[3] for row, _ in slot_rows]})
         conn.commit()
     return len(slot_rows)
 

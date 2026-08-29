@@ -198,10 +198,13 @@ def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
     fingerprint for release-ID (name-independent) + per-track recording MBID
     (track normalization). Tens of releases × ~10-15 tracks; one indexed join.
 
-    Returns ``[{release_mbid, name, status, tracks: [{title, length_ms,
-    recording_mbid, disc, position, credit, credit_artist_mbid,
+    Returns ``[{release_mbid, name, status, release_date, tracks: [{title,
+    length_ms, recording_mbid, disc, position, credit, credit_artist_mbid,
     credit_names}, …]}, …]``, releases best-tracklist-first is the caller's
     job (``status`` 1 = Official — the canonical-release pick prefers it).
+    ``release_date`` is the earliest date MB records for the release, as
+    ``[year, month, day]`` with the unknown parts None, or None when MB has
+    no date at all — the pick's tie-break toward the original edition.
     ``name`` is the MB release title — the clean label an owned edition
     adopts once its tracklist matches this release. ``credit`` is the track's
     own artist credit as printed ("Daft Punk feat. Pharrell Williams" — join
@@ -217,6 +220,14 @@ def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
     """
     rows = db_query("""
         SELECT r.gid::text AS release_mbid, r.name AS release_name, r.status,
+               (SELECT ARRAY[d.y, d.m, d.d] FROM (
+                    SELECT rc.date_year AS y, rc.date_month AS m, rc.date_day AS d
+                    FROM mb_release_country rc WHERE rc.release = r.id
+                    UNION ALL
+                    SELECT ru.date_year, ru.date_month, ru.date_day
+                    FROM mb_release_unknown_country ru WHERE ru.release = r.id
+                ) d WHERE d.y IS NOT NULL
+                ORDER BY d.y, d.m NULLS LAST, d.d NULLS LAST LIMIT 1) AS release_date,
                t.name AS title, t.length AS length_ms,
                rec.gid::text AS recording_mbid, m.position AS disc, t.position AS pos,
                ac.name AS credit,
@@ -244,7 +255,8 @@ def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
         rel = rels.setdefault(r["release_mbid"],
                               {"release_mbid": r["release_mbid"],
                                "name": r["release_name"] or "",
-                               "status": r["status"], "tracks": []})
+                               "status": r["status"],
+                               "release_date": r["release_date"], "tracks": []})
         rel["tracks"].append({
             "title": r["title"] or "",
             "length_ms": r["length_ms"],
