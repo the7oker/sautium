@@ -577,7 +577,6 @@ def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
             WHERE al.id = aa.album_id
               AND aa.artist_id = %(id)s::uuid
               AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
-              AND NOT EXISTS (SELECT 1 FROM streaming_mints sm WHERE sm.album_id = al.id)
               {analyzed_guard}
               AND (al.musicbrainz_id IS NULL
                    OR NOT (al.musicbrainz_id::text = ANY(%(rgs)s)))
@@ -589,7 +588,6 @@ def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
             WHERE al.id = aa.album_id
               AND aa.artist_id = %(id)s::uuid
               AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
-              AND NOT EXISTS (SELECT 1 FROM streaming_mints sm WHERE sm.album_id = al.id)
               {analyzed_guard}
         """, {"id": artist_id})
 
@@ -643,7 +641,6 @@ def prune_phantom_layer(cancel_flag=None, progress_cb=None) -> Dict[str, Any]:
         FROM album_artists aa
         JOIN albums al ON al.id = aa.album_id
         WHERE NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
-          AND NOT EXISTS (SELECT 1 FROM streaming_mints sm WHERE sm.album_id = al.id)
     """)
     total = len(artists)
     stats = {"artists": 0, "total": total, "cancelled": False}

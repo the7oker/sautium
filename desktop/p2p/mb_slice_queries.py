@@ -566,19 +566,15 @@ def pending_slice_names(conn, limit: int = 200) -> list:
                       AND (ar.last_mb_sync IS NULL OR mf.created_at > ar.last_mb_sync))
                 UNION ALL
                 SELECT a.name,
-                       CASE WHEN EXISTS (SELECT 1 FROM streaming_mints sm
-                                          WHERE sm.artist_id = a.id) THEN 1
-                            WHEN EXISTS (SELECT 1 FROM similar_artists sa
+                       CASE WHEN EXISTS (SELECT 1 FROM similar_artists sa
                                           JOIN listened l ON l.artist_id = sa.artist_id
-                                         WHERE sa.similar_artist_id = a.id) THEN 2
-                            ELSE 3 END AS tier
+                                         WHERE sa.similar_artist_id = a.id) THEN 1
+                            ELSE 2 END AS tier
                 FROM artists a
-                WHERE ((EXISTS (SELECT 1 FROM similar_artists sa
-                                WHERE sa.similar_artist_id = a.id)
-                        AND NOT EXISTS (SELECT 1 FROM track_artists ta
-                                        WHERE ta.artist_id = a.id))
-                       OR EXISTS (SELECT 1 FROM streaming_mints sm
-                                  WHERE sm.artist_id = a.id))
+                WHERE EXISTS (SELECT 1 FROM similar_artists sa
+                              WHERE sa.similar_artist_id = a.id)
+                  AND NOT EXISTS (SELECT 1 FROM track_artists ta
+                                  WHERE ta.artist_id = a.id)
                   AND NOT EXISTS (SELECT 1 FROM artist_mbids am
                                   WHERE am.artist_id = a.id)
             )

@@ -6,10 +6,9 @@ to verify against. Resolve by exact name against MusicBrainz instead:
   * 0 exact-name namesakes  -> leave it (not in MB by exact name; a tile, no shelf)
   * 1 namesake              -> take that MBID
   * >=2 namesakes           -> disambiguate deterministically: first by the
-                              phantom's own linked album titles (a streaming
-                              mint carries the album the user clicked, which
-                              belongs to exactly one namesake's discography),
-                              then by MB-genre overlap with the phantom's
+                              phantom's own linked album titles (an album a
+                              phantom is credited on belongs to exactly one
+                              namesake's discography), then by MB-genre overlap with the phantom's
                               library seeds (the artists it is "similar to").
                               A unique non-zero winner wins, otherwise leave it.
 
@@ -41,20 +40,15 @@ def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False
     stats = {"phantoms": 0, "not_in_mb": 0, "unambiguous": 0, "album_matched": 0,
              "disambiguated": 0, "inconclusive": 0, "canonized": 0, "discarded": 0}
 
-    # Candidates: classic similar-artist stubs (track-less by construction) PLUS
-    # streaming-minted artists — a Deezer mint has tracks (its minted album) and
-    # no similar_artists edge, so neither original condition admits it, leaving
-    # it permanently uncanonized. Once resolved here, the regular
-    # stale_canonized_artists → missing-albums pipeline fills its MB discography;
-    # the MB phantom of an already-minted album lands on the SAME uuid5 row and
-    # simply gains its rg MBID.
+    # Candidates: similar-artist stubs (track-less by construction) with no MB
+    # anchor yet. Once resolved here, the regular stale_canonized_artists →
+    # missing-albums pipeline fills the artist's MB discography.
     lim = "LIMIT %(lim)s" if limit else ""
     phantoms = db_query(f"""
         SELECT a.id::text AS id, a.name
         FROM artists a
-        WHERE ((EXISTS (SELECT 1 FROM similar_artists sa WHERE sa.similar_artist_id = a.id)
-                AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = a.id))
-               OR EXISTS (SELECT 1 FROM streaming_mints sm WHERE sm.artist_id = a.id))
+        WHERE EXISTS (SELECT 1 FROM similar_artists sa WHERE sa.similar_artist_id = a.id)
+          AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = a.id)
           AND NOT EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
         ORDER BY a.name
         {lim}
@@ -106,12 +100,12 @@ def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False
 
     amb_ids = [i for i in ph_ids if len(name_gids.get(lname(i), [])) >= 2]
 
-    # Channel 1 — linked-album titles. A streaming mint has no similar_artists
-    # edge (so the genre channel below never fires for it), but it carries a
-    # stronger signal: the album the user actually clicked. Its release_match_key
-    # against each namesake's release-group/release titles picks the namesake
-    # whose discography contains that album. Only phantoms that HAVE linked
-    # albums pay for the title fetch — similar-artist stubs have none.
+    # Channel 1 — linked-album titles: an album a phantom is credited on is
+    # the strongest signal there is, its release_match_key against each
+    # namesake's release-group/release titles picks the namesake whose
+    # discography contains it. Only phantoms that HAVE linked albums pay for
+    # the title fetch — a similar-artist stub has none, so today this channel
+    # mostly idles; it stays for any phantom source that links albums.
     album_keys = defaultdict(set)           # ph_id -> linked-album match keys
     rg_keys = defaultdict(set)              # gid -> namesake's release title keys
     if amb_ids:
@@ -257,9 +251,6 @@ def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False
                 WHERE a.id = ANY(%s::uuid[])
                   AND NOT EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
                   AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = a.id)
-                  -- streaming-minted phantoms carry explicit user intent (a clicked
-                  -- provider search tile) — never swept, MB-resolvable or not
-                  AND NOT EXISTS (SELECT 1 FROM streaming_mints sm WHERE sm.artist_id = a.id)
             """, (ph_ids,))
             stats["discarded"] = cur.rowcount
     logger.info("phantom canon: %s", stats)

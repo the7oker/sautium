@@ -259,7 +259,6 @@ def _step_missing_artists(limit: int) -> Dict[str, int]:
             OR EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
             OR EXISTS (SELECT 1 FROM similar_artists sa
                        WHERE sa.artist_id = a.id OR sa.similar_artist_id = a.id)
-            OR EXISTS (SELECT 1 FROM streaming_mints sm WHERE sm.artist_id = a.id)
         )
         AND NOT EXISTS (
             SELECT 1 FROM artist_bios ab

@@ -739,7 +739,7 @@ All Genre blocks roll up into a single `(new endpoint)` GET
 | HQPlayer config (host/port) | existing settings persistence | + save profiles per location |
 | DSP / Signal Chain | existing HQP filter / matrix / dither endpoints | + per-genre auto-profile |
 | Library | `/api/settings/library` — owned counts + enrichment coverage over the ENGAGED artist set (`sql_queries.ARTIST_ENGAGED`), so the ratio names the same population the pipeline queues | — |
-| Streaming library | `/api/settings/phantoms` — its own endpoint: the counts cost ~0.4 s and the library screen wakes on every scan/enrich tick. Enrichment there is a COUNT, never a ratio: a phantom track has no file, so audio analysis only arrives over P2P and there is no total to complete | + per-source breakdown (MB vs Last.fm vs streaming mint) |
+| Streaming library | `/api/settings/phantoms` — its own endpoint: the counts cost ~0.4 s and the library screen wakes on every scan/enrich tick. Enrichment there is a COUNT, never a ratio: a phantom track has no file, so audio analysis only arrives over P2P and there is no total to complete | + per-source breakdown (MB vs Last.fm) |
 | MusicBrainz catalogue | `/api/settings/musicbrainz/*` — status, auto-update toggle, download/update/delete. Sits on the Phantom screen because the dump is what mints phantom discographies; deleting it stops them updating and touches nothing owned | — |
 
 ### Profile (own)
