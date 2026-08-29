@@ -3105,20 +3105,6 @@ body.has-miniplayer .ai-fab {
 .discovery-screen .d-show-more:active { background: var(--color-surface-hi); }
 .discovery-screen .d-show-more:disabled { opacity: 0.5; cursor: default; }
 
-/* Streaming supplement tail under a results block */
-.discovery-screen .d-streaming-tail {
-  margin-top: calc(8 * var(--px));
-  border-top: 1px solid var(--color-divider);
-  padding-top: calc(8 * var(--px));
-}
-.discovery-screen .d-streaming-head {
-  padding: 0 var(--space-4) calc(6 * var(--px));
-  font-size: calc(11 * var(--px));
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--color-text-dim);
-}
 .discovery-screen .is-minting { opacity: 0.4; pointer-events: none; }
 
 /* MusicBrainz scope */

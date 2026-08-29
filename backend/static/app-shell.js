@@ -3941,16 +3941,6 @@
               }
               empty.hidden = false;
             }
-            // Streaming supplement: names-scope searches also ask the provider
-            // (Deezer) — AFTER the local blocks settled, so the tail append
-            // can't be wiped by a local render. Filters active → skip (the
-            // provider can't honour our gates); AI scopes → skip (Deezer
-            // matches names, not descriptions).
-            if (query && (filters.scope || 'names') === 'names'
-                && !hasActiveFilters(filters)) {
-              fetchStreamingTail(screen, query, queryId, getActiveId,
-                                 () => { empty.hidden = true; });
-            }
           }
         });
     });
@@ -4088,82 +4078,6 @@
           message: 'Could not import this MusicBrainz entity.' });
       })
       .finally(() => el.classList.remove('is-minting'));
-  }
-
-  function fetchStreamingTail(screen, query, queryId, getActiveId, onAnyResults) {
-    setTimeout(() => {
-      if (queryId !== getActiveId()) return;
-      const params = new URLSearchParams({ q: query, limit: '6' });
-      fetch('/api/discovery/streaming-search?' + params)
-        .then(r => r.ok ? r.json() : Promise.reject(r.status))
-        .then(data => {
-          if (queryId !== getActiveId()) return;
-          if (!data.available) return;
-          renderStreamingTail(screen, data.albums || []);
-          if ((data.albums || []).length) onAnyResults();
-        })
-        .catch(err => console.warn('streaming search failed:', err));
-    }, 300);
-  }
-
-  // Provider ALBUM rows under the local Albums block: a phantom-dim tail with a
-  // "From Deezer" header. Albums only — a bare minted artist landed on an empty
-  // page; an artist-name query answers with the artist's albums to pick and
-  // play (the backend merges the top artist's discography in). A click MINTS
-  // the phantom album + tracklist (deterministic UUID — an existing MB phantom
-  // is reused) and navigates to its page, which can stream and enrich.
-  function renderStreamingTail(screen, items) {
-    if (!items.length) return;
-    const blk = screen.querySelector('#dBlock-albums');
-    const body = screen.querySelector('#dBody-albums');
-    if (!blk || !body) return;
-
-    const tail = document.createElement('div');
-    tail.className = 'd-streaming-tail';
-    tail.innerHTML = `<div class="d-streaming-head">From Deezer</div>`
-      + `<div class="shuffle-row d-album-row">${items.map(a => {
-          const c = coverPlaceholderColors(a.title || '');
-          const cover = a.cover
-            ? `<img src="${escapeHtml(a.cover)}" alt="" loading="lazy" onerror="this.style.display='none'">`
-            : '';
-          return `
-            <button class="mosaic-tile is-phantom" type="button"
-                    data-sprovider-id="${escapeHtml(a.provider_id)}">
-              <div class="mosaic-cover"
-                   style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}</div>
-              <div class="mosaic-title">${escapeHtml(a.title || '')}</div>
-              <div class="mosaic-artist">${escapeHtml(a.artist || '')}</div>
-            </button>`;
-        }).join('')}</div>`;
-
-    tail.querySelectorAll('[data-sprovider-id]').forEach(el => {
-      el.addEventListener('click', () => mintStreamingTile(el));
-    });
-    body.appendChild(tail);
-    blk.hidden = false;
-  }
-
-  function mintStreamingTile(el) {
-    if (el.classList.contains('is-minting')) return;
-    el.classList.add('is-minting');
-    fetch('/api/discovery/streaming-mint', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'album', provider_id: el.getAttribute('data-sprovider-id') }),
-    })
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then(data => {
-        if (data.album_id) navigateToEntity('album', data.album_id);
-      })
-      .catch(err => {
-        el.classList.remove('is-minting');
-        window.notifyDialog({
-          title: 'Streaming import failed',
-          message: 'Could not import this item from the provider. Try again in a moment.',
-          kind: 'error',
-        });
-        console.warn('streaming mint failed:', err);
-      });
   }
 
   // layout → the batch renderer that owns its markup. Page 1 and every page

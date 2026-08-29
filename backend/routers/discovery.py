@@ -305,40 +305,6 @@ _SHAPERS = {"artist": _artist_results, "album": _album_results,
             "track": _track_results, "genre": _genre_results}
 
 
-@router.get("/streaming-search")
-def streaming_search(q: str = Query(..., min_length=2, max_length=100),
-                     limit: int = Query(6, ge=1, le=12)):
-    """Streaming-provider supplement for a text search (no advanced filters —
-    the provider can't honour our gates). Rows are deduped against the local DB;
-    a tile the user clicks gets minted via /streaming-mint. Provider errors are
-    the tail's problem, not the search's — the endpoint answers empty."""
-    from streaming import search as provider_search
-    if not provider_search.available():
-        return {"available": False, "albums": []}
-    try:
-        res = provider_search.search(q.strip(), limit=limit)
-    except Exception as e:
-        logger.warning("streaming search failed: %s", e)
-        return {"available": True, "albums": []}
-    return {"available": True, **res}
-
-
-@router.post("/streaming-mint")
-def streaming_mint(body: dict = Body(...)):
-    """Mint a clicked streaming album tile as a phantom (artist + album + full
-    tracklist) and answer the local UUID to navigate to. Deterministic identity:
-    re-minting is a no-op, an existing MB phantom is reused."""
-    from streaming import search as provider_search
-    provider_id = str(body.get("provider_id") or "")
-    if body.get("type") != "album" or not provider_id:
-        raise HTTPException(status_code=422, detail="type must be album with provider_id")
-    try:
-        return {"album_id": provider_search.mint_album(provider_id)}
-    except Exception as e:
-        logger.error("streaming mint failed (album %s): %s", provider_id, e)
-        raise HTTPException(status_code=502, detail=f"mint failed: {e}")
-
-
 @router.get("/mb-status")
 def mb_status():
     """Live MB-scope capability: 'local' | 'remote' | 'searching' | 'none'
