@@ -1676,12 +1676,19 @@ def _parallel_resolve(provider, queries: list) -> list:
     pass, no downloads). Returns a list parallel to `queries` of ResolvedSource
     / None (None = not found on this provider)."""
     from concurrent.futures import ThreadPoolExecutor
+    from streaming.base import ProviderUnavailable
 
     def one(q):
         try:
             return provider.resolve(q)
-        except Exception:
-            return None
+        except ProviderUnavailable as e:
+            return e                    # no answer — the caller must not cache a miss
+        except Exception as e:
+            # A provider bug is not "the track is nowhere": surface it, and keep
+            # it out of the chain cache like any other non-answer.
+            logger.warning("%s resolve crashed for %s — %s: %s",
+                           provider.manifest.id, q.artist, q.title, e)
+            return ProviderUnavailable(str(e))
 
     if not queries:
         return []
@@ -1710,8 +1717,12 @@ def _resolve_waterfall(queries: list) -> list:
     can't serve in FLAC (region/licensing) still streams from YouTube instead of
     just dropping. An empty chain == no provider resolved it (truly unavailable).
     Cached per track (see _chain_cache) — including the empty chain, or every
-    play would re-search every provider for a track known to be nowhere."""
+    play would re-search every provider for a track known to be nowhere. A
+    track some provider could not ANSWER for (timeout, quota) is not cached:
+    its chain is built from the providers that did answer, and the next
+    resolve asks the silent one again."""
     from streaming import service as streaming_service
+    from streaming.base import ProviderUnavailable
 
     provs = streaming_service.providers_preferred()
     order = tuple(p.manifest.id for p in provs)
@@ -1731,6 +1742,8 @@ def _resolve_waterfall(queries: list) -> list:
 
     best = {}                               # index -> index into provs that resolved
     sids, durs, arts = {}, {}, {}
+    unanswered = set()                      # a provider gave no answer — not a miss
+    silence = {}                            # provider id -> the first reason it gave none
     unresolved = list(pending)
     for pi, prov in enumerate(provs):
         if not unresolved:
@@ -1740,11 +1753,27 @@ def _resolve_waterfall(queries: list) -> list:
         res = _parallel_resolve(prov, [queries[i] for i in unresolved])
         still = []
         for i, r in zip(unresolved, res):
-            if r is not None:
+            if isinstance(r, ProviderUnavailable):
+                unanswered.add(i)
+                still.append(i)
+                silence.setdefault(prov.manifest.id, str(r))
+            elif r is not None:
                 best[i], sids[i], durs[i], arts[i] = pi, r.source_id, r.duration, r.artwork_url
             else:
                 still.append(i)
         unresolved = still
+
+    if pending:
+        # One line per pass, so a catalog that quietly stops answering (quota,
+        # a stale yt-dlp) or a gate that rejects everything is visible in the
+        # log instead of inferred from what the queue ended up holding.
+        got = ", ".join(
+            f"{prov.manifest.id} {sum(1 for i in pending if best.get(i) == pi)}"
+            for pi, prov in enumerate(provs) if prov.supports_resolve)
+        logger.info("resolve pass: %d tracks — %s; nowhere %d; unanswered %d%s",
+                    len(pending), got, sum(1 for i in pending if i not in best),
+                    len(unanswered),
+                    "".join(f"; {k}: {v}" for k, v in silence.items()))
 
     for i in pending:
         q, d, art = queries[i], durs.get(i), arts.get(i)
@@ -1762,7 +1791,7 @@ def _resolve_waterfall(queries: list) -> list:
         else:
             chain = [(p, None) for p in provs if not p.supports_resolve]
         chains[i] = chain
-        if q.track_id:
+        if q.track_id and i not in unanswered:
             _chain_cache[(q.track_id, order)] = (now, chain)
     return chains
 
@@ -1797,6 +1826,26 @@ def _artist_alts(name: str) -> tuple:
     return tuple(mb.artist_alt_names(name))
 
 
+def _credit_alts(credit: str, album_artists: tuple = ()) -> tuple:
+    """Names a catalog may file the credited recording under, beyond the MB
+    aliases: the head of a collaboration credit — catalogs carry the guest in
+    the title, so "Sarathy Korwar feat. Photay" is filed under Sarathy Korwar
+    and a channel gate on the full credit matches nothing — then the album's
+    own artist when the slot is credited to someone else. The head goes first
+    among the additions: a provider's one retry searches under alts[0]."""
+    from canon.split import detect_compound_type
+    from streaming.base import norm_key
+    alts = list(_artist_alts(credit))
+    compound = detect_compound_type(credit)
+    if compound:
+        head = compound[2][0]
+        alts.append(head)
+        alts.extend(_artist_alts(head))
+    alts.extend(a for a in album_artists if a)
+    own = norm_key(credit)
+    return tuple(dict.fromkeys(a for a in alts if a and norm_key(a) != own))
+
+
 def _phantom_track_queries(track_ids: list[str]) -> dict:
     """TrackQuery per phantom track UUID, from album_tracks — keyed by id, ids
     with no tracklist row absent. Batched: a similar-tracks set is a dozen
@@ -1804,10 +1853,18 @@ def _phantom_track_queries(track_ids: list[str]) -> dict:
     from streaming.base import TrackQuery
     if not track_ids:
         return {}
+    # No album context here, so the query vouches for EVERY length the
+    # catalog lists the track at (`lengths`): the track sits on each album
+    # that names it, and editions name it at their own lengths — a studio cut
+    # and its live takes share one uuid. The DISTINCT ON row is only the
+    # display edition; holding the provider to its length alone rejected the
+    # Kind of Blue "All Blues" for being longer than a compilation's.
     rows = _db_query("""
         SELECT DISTINCT ON (t.id)
                t.id::text AS track_id, t.title, atr.length_ms,
                al.title AS album, al.id::text AS album_id, al.cover_url,
+               (SELECT array_agg(DISTINCT x.length_ms) FROM album_tracks x
+                 WHERE x.track_id = t.id AND x.length_ms IS NOT NULL) AS lengths_ms,
                (SELECT ar.name FROM track_artists ta
                   JOIN artists ar ON ar.id = ta.artist_id
                 WHERE ta.track_id = t.id
@@ -1819,12 +1876,13 @@ def _phantom_track_queries(track_ids: list[str]) -> dict:
         ORDER BY t.id, (al.cover_url IS NOT NULL) DESC,
                  (atr.length_ms IS NOT NULL) DESC, al.id
     """, {"ids": list(track_ids)})
-    alts = {n: _artist_alts(n) for n in {r["artist"] for r in rows if r["artist"]}}
+    alts = {n: _credit_alts(n) for n in {r["artist"] for r in rows if r["artist"]}}
     return {
         r["track_id"]: TrackQuery(
             artist=r["artist"] or "", title=r["title"], album=r["album"],
             artist_alts=alts.get(r["artist"], ()),
             duration=(float(r["length_ms"]) / 1000.0 if r["length_ms"] else None),
+            lengths=tuple(float(ms) / 1000.0 for ms in (r["lengths_ms"] or [])),
             track_id=r["track_id"], cover_url=r["cover_url"],
             album_id=r["album_id"])
         for r in rows if r["title"]
@@ -1852,7 +1910,11 @@ def _phantom_album_queries(album_id: str) -> list:
         WHERE atr.album_id = %(album_id)s
         ORDER BY atr.disc, atr.position
     """, {"album_id": album_id})
-    alts = {n: _artist_alts(n) for n in {r["artist"] for r in rows if r["artist"]}}
+    album_artists = tuple(r["name"] for r in _db_query("""
+        SELECT ar.name FROM album_artists aa JOIN artists ar ON ar.id = aa.artist_id
+        WHERE aa.album_id = %(album_id)s AND aa.role = 'primary'
+    """, {"album_id": album_id}))
+    alts = {n: _credit_alts(n, album_artists) for n in {r["artist"] for r in rows if r["artist"]}}
     return [
         TrackQuery(
             artist=r["artist"] or "", title=r["title"], album=r["album"],

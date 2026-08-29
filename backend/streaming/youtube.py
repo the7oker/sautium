@@ -32,14 +32,11 @@ import subprocess
 import sys
 import tempfile
 
-from .base import (FetchedAudio, ProviderError, ProviderManifest, ResolvedSource,
-                   StreamProvider, TrackQuery)
+from .base import (FetchedAudio, ProviderError, ProviderManifest, ProviderUnavailable,
+                   ResolvedSource, StreamProvider, TrackQuery, attested_lengths,
+                   fits_length, length_offset, norm_key)
 
 logger = logging.getLogger(__name__)
-
-
-def _norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
 
 # A download that dies on the signed URL — the failure shape of a yt-dlp that
@@ -90,12 +87,12 @@ class YouTubeProvider(StreamProvider):
         # gate wipe-out retries the search ONCE under the canonical name; still
         # nothing → the real recording isn't on YouTube — reject rather than
         # stream a cover.
-        gates = [g for g in (_norm(a) for a in (query.artist, *query.artist_alts)) if g]
-        matched = ([c for c in cands if any(g in _norm(c["channel"]) for g in gates)]
+        gates = [g for g in (norm_key(a) for a in (query.artist, *query.artist_alts)) if g]
+        matched = ([c for c in cands if any(g in norm_key(c["channel"]) for g in gates)]
                    if gates else cands)
         if not matched and query.artist_alts:
             alt = self._flat_search(f"{query.artist_alts[0]} {query.title}".strip())
-            matched = [c for c in alt if any(g in _norm(c["channel"]) for g in gates)]
+            matched = [c for c in alt if any(g in norm_key(c["channel"]) for g in gates)]
             cands = cands or alt
         if not cands:
             raise ProviderError(f"youtube: no results for {search!r}")
@@ -104,15 +101,20 @@ class YouTubeProvider(StreamProvider):
                 f"youtube: no artist match for {search!r} "
                 f"(top hit channel {cands[0]['channel']!r})")
 
-        best = max(matched, key=lambda c: self._score(c, query))
-        # Known length but even the best is >50% off (different recording / DJ
-        # mix / truncation) → no clean match; skip rather than stream the wrong
-        # thing. The endpoint drops the track from the queue.
-        if (query.duration and best["duration"]
-                and abs(best["duration"] - query.duration) > 0.5 * query.duration):
+        # Length gates the pool before anything is ranked: a listing whose
+        # length is not the catalog's is a different recording (an edit, a live
+        # take, the wrong song under a shared title) however well its title and
+        # channel read, and it must not out-score a plain listing at the right
+        # length. A listing with no length cannot be checked here — the
+        # enrichment guard measures the audio — so it stays, ranked last.
+        fit = [c for c in matched if fits_length(query, c["duration"])]
+        if not fit:
+            nearest = min(matched, key=lambda c: abs(c["duration"] - query.duration))
             raise ProviderError(
-                f"youtube: no length match for {search!r} "
-                f"(want ~{query.duration:.0f}s, best {best['duration']:.0f}s)")
+                f"youtube: no length match for {search!r} (catalog "
+                f"{'/'.join(f'{w:.0f}s' for w in attested_lengths(query))}, "
+                f"nearest {nearest['duration']:.0f}s)")
+        best = max(fit, key=lambda c: self._score(c, query))
         logger.info("youtube resolve %r -> %s (%ss, %s)",
                     search, best["id"], best["duration"], best["channel"])
         return ResolvedSource(
@@ -127,9 +129,11 @@ class YouTubeProvider(StreamProvider):
             out = subprocess.run(cmd, check=True, timeout=self._timeout,
                                  capture_output=True, text=True).stdout
         except subprocess.TimeoutExpired as e:
-            raise ProviderError(f"youtube search timeout: {search!r}") from e
+            raise ProviderUnavailable(f"youtube search timeout: {search!r}") from e
         except subprocess.CalledProcessError as e:
-            raise ProviderError(f"youtube search failed for {search!r}") from e
+            # An empty search exits 0 with no lines; a non-zero exit is the
+            # search itself failing, which says nothing about the track.
+            raise ProviderUnavailable(f"youtube search failed for {search!r}") from e
 
         cands = []
         for line in out.splitlines():
@@ -144,25 +148,22 @@ class YouTubeProvider(StreamProvider):
         return cands
 
     def _score(self, c: dict, query: TrackQuery) -> float:
+        # The pool already fits the catalog length (_resolve); length here only
+        # orders the survivors — the closest verified listing first, one with
+        # no length last. Title, artist and channel signals break the ties.
         s = 0.0
-        if query.duration and c["duration"]:
-            delta = abs(c["duration"] - query.duration)
-            tol = max(7.0, 0.06 * query.duration)
-            if delta <= tol:
-                s += 100 - (delta / tol) * 15      # tight length match dominates
-            elif delta <= 0.5 * query.duration:
-                s += 50 - (delta - tol) * 0.5       # plausible but off
-            else:
-                s -= 200                            # mix / truncation / wrong
-        title_l = query.title.lower()
-        names_l = [a.lower() for a in (query.artist, *query.artist_alts) if a]
-        ct = (c["title"] or "").lower()
-        if title_l and title_l in ct:
+        off = length_offset(query, c["duration"])
+        if off is not None:
+            s += 100 - off * 15
+        title_k = norm_key(query.title)
+        names_k = [k for k in (norm_key(a) for a in (query.artist, *query.artist_alts)) if k]
+        ct = norm_key(c["title"])
+        if title_k and title_k in ct:
             s += 20
-        if any(a in ct for a in names_l):
+        if any(a in ct for a in names_k):
             s += 12
-        ch = (c["channel"] or "").lower()
-        if ch.endswith("- topic") or "vevo" in ch or any(a in ch for a in names_l):
+        ch = norm_key(c["channel"])
+        if ch.endswith("topic") or "vevo" in ch or any(a in ch for a in names_k):
             s += 12                                 # official Art Track / channel
         return s
 

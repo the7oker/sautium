@@ -72,18 +72,19 @@ def init(settings) -> bool:
     # duration). The proxy stays CLAP-agnostic — it just fires the hook.
     global _enricher, _lyrics_enricher
     if getattr(settings, "streaming_preview_analyze", False):
+        from .base import attested_lengths
         from .enrichment import PreviewEnricher, PreviewLyricsEnricher
         _enricher = PreviewEnricher()
         _lyrics_enricher = PreviewLyricsEnricher()
 
         def _on_track_ready(e):
-            # Audio features (GPU, gated on a known MB duration) + lyrics text and
-            # its embedding (network/text, metadata-derived, ungated — see the
-            # enricher docstrings for the gating rationale).
+            # Audio features (GPU, gated on a known catalog length) + lyrics text
+            # and its embedding (network/text, metadata-derived, ungated — see
+            # the enricher docstrings for the gating rationale).
             _enricher.submit(
                 e.query.track_id,
                 e.audio.data if e.audio else None,
-                e.query.duration,
+                attested_lengths(e.query),
                 e.audio.lossless if e.audio else False,   # ACTUAL fetch quality (may be a degraded tier)
                 e.provider.manifest.id if e.provider else None,  # provenance origin
             )

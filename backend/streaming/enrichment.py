@@ -14,10 +14,12 @@ claiming possession of any local rip (tier 3 in P2P-SYNC-INTEGRITY.md). The
 origin rank (local > deezer > youtube) means an owned rip later OVERWRITES a
 preview analysis, and a preview never overwrites a real-file one.
 
-GATE: only tracks with a known duration (TrackQuery.duration, i.e. local
-album_tracks.length_ms) are enriched. Without it the YouTube match isn't
-length-verified, so the audio may be the wrong recording and its features would
-poison similarity search.
+GATE: only tracks with a known catalog length (TrackQuery.duration / .lengths,
+i.e. local album_tracks.length_ms) are enriched. Without it the provider match
+isn't length-verified, so the audio may be the wrong recording and its features
+would poison similarity search. The test is base.same_recording — the one the
+host's resolve() already applied to the provider's listing, now applied to the
+audio that actually arrived.
 
 Full-track methodology, same as owned scans (balanced-grid segments, whole-track
 amplitude block), so vectors land in the same embedding space.
@@ -34,6 +36,7 @@ from typing import Optional
 
 import numpy as np
 
+from .base import attested_lengths, same_recording
 from .events import preview_events
 
 logger = logging.getLogger(__name__)
@@ -71,15 +74,15 @@ class PreviewEnricher:
         self._idle_timer: Optional[threading.Timer] = None
 
     def submit(self, track_id: Optional[str], flac: Optional[bytes],
-               duration: Optional[float], lossless: bool = False,
+               lengths: tuple, lossless: bool = False,
                provider_id: Optional[str] = None) -> None:
-        """Queue a previewed track for enrichment. No-ops without a track_id, a
-        duration (unverified match — see GATE) or audio, or if already queued.
-        In trickle mode a full backlog drops the track instead of queueing.
-        ``lossless`` is the ACTUAL fetch quality (Deezer FLAC=True, degraded
-        tiers/YouTube=False); ``provider_id`` (manifest id, 'deezer'|'youtube')
-        becomes the provenance origin."""
-        if not track_id or not duration or not flac:
+        """Queue a previewed track for enrichment. No-ops without a track_id,
+        catalog lengths (unverified match — see GATE) or audio, or if already
+        queued. In trickle mode a full backlog drops the track instead of
+        queueing. ``lossless`` is the ACTUAL fetch quality (Deezer FLAC=True,
+        degraded tiers/YouTube=False); ``provider_id`` (manifest id,
+        'deezer'|'youtube') becomes the provenance origin."""
+        if not track_id or not lengths or not flac:
             return
         with self._lock:
             if track_id in self._inflight:
@@ -93,14 +96,14 @@ class PreviewEnricher:
             if self._idle_timer is not None:
                 self._idle_timer.cancel()
                 self._idle_timer = None
-        self._pool.submit(self._run, track_id, flac, duration, lossless,
+        self._pool.submit(self._run, track_id, flac, lengths, lossless,
                           provider_id)
 
     # ---- worker ----------------------------------------------------------
-    def _run(self, track_id: str, flac: bytes, duration: float, lossless: bool,
+    def _run(self, track_id: str, flac: bytes, lengths: tuple, lossless: bool,
              provider_id: Optional[str]) -> None:
         try:
-            self._enrich(track_id, flac, duration, lossless, provider_id)
+            self._enrich(track_id, flac, lengths, lossless, provider_id)
         except Exception:
             logger.exception("preview enrichment failed for %s", track_id)
         finally:
@@ -128,7 +131,7 @@ class PreviewEnricher:
             self._empty_cache()
             logger.info("preview enrich idle — instrument models released")
 
-    def _enrich(self, track_id: str, flac: bytes, duration: float,
+    def _enrich(self, track_id: str, flac: bytes, lengths: tuple,
                 lossless: bool, provider_id: Optional[str]) -> None:
         import librosa
         from config import settings
@@ -145,21 +148,18 @@ class PreviewEnricher:
         # the scanner uses, so the embedding is comparable to owned tracks.
         audio, _ = librosa.load(io.BytesIO(flac), sr=48000, mono=True)
 
-        # Poison guard (before loading models / GPU work): the provider resolve matches by
-        # metadata + a loose ±50% duration gate, so a known-MB-duration track can
-        # still stream the WRONG recording (cover / remix / live) that merely passed
-        # that gate. Features from the wrong audio would poison the shared pool, and
-        # unlike an owned track there is no real-file analysis shielding this slot.
-        # Verify the fetched audio's actual length against the MB duration and bail
-        # on divergence — tight (~5%) vs the resolve's loose gate, so a real master
-        # variance still enriches but a different recording does not. Tunable.
+        # Poison guard (before loading models / GPU work): the resolve held the
+        # provider's LISTING to the catalog length; this holds the audio that
+        # arrived to it, against every length the catalog attests. A listing
+        # can lie (a mislabelled upload, a source with no length to check),
+        # and features from the wrong audio would poison the shared pool with
+        # no real-file analysis shielding this slot.
         actual = len(audio) / 48000.0
-        tol = max(7.0, 0.05 * duration)
-        if abs(actual - duration) > tol:
+        if not any(same_recording(actual, want) for want in lengths):
             logger.warning(
-                "preview enrich SKIP %s: fetched audio %.0fs vs MB %.0fs (>%.0fs "
-                "tolerance) — likely a different recording, not enriching",
-                track_id, actual, duration, tol)
+                "preview enrich SKIP %s: fetched audio %.0fs vs catalog %s — "
+                "not the recording, not enriching",
+                track_id, actual, "/".join(f"{w:.0f}s" for w in lengths))
             return
 
         embedder, analyzer = self._models()
