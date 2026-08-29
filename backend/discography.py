@@ -376,18 +376,28 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
     media_files (that is the owned/phantom discriminator; a later rip
     collapses onto the same `track_uuid` row and simply gains files).
 
-    Each slot is keyed the way the scanner keys a correctly tagged rip of
-    the same release: title + the TRACK's own artist credit, not the
-    album's. A credit that is the album artist (same MB gid, or the same
-    name) uses that artist row; any other credit — a compilation entry, an
-    alias, a guest on a split, a collaboration's joint credit — gets its own
-    artist row, name-only. No MB anchor for those: an anchor would put the
-    row into stale_canonized_artists' discography re-derive, and a
-    compilation's fifteen credits times their discographies is the fan-out
-    the engagement rule forbids; the anchor arrives the day the user engages
-    with the artist. Until 2026-08-25 every slot carried the album artist,
-    so a "Various Artists" phantom could never collapse with a rip — 530
-    same-recording pairs on the master lived under two uuids.
+    Each slot is keyed the way a correctly tagged rip of the same release
+    ends up keyed after canon: title + the HEAD of the track's own artist
+    credit, not the album's. The printed credit is split exactly as Pass 1
+    splits a rip's tag — on the separators no band name uses (feat./ft./
+    vs./pres./aka/meets, canon.split.SAFE_SEPARATORS) — so the head is the
+    slot's artist and the rest ride as featured credits, and there is no
+    compound artist row for a later pass to dissolve. '&' stays whole here
+    as it does there: the identity must follow from the string alone (a
+    node without the dump derives the same uuid), and '&' names a duo as
+    often as a collaboration. Until 2026-08-29 the slot carried the whole
+    printed credit — 19k phantom "X feat. Y" artist rows that only a
+    scan-triggered Pass 1 would have split, and never did.
+
+    A head that is the album artist (same MB gid, or the same name) uses
+    that artist row; any other head — a compilation entry, an alias, a guest
+    on a split — gets its own artist row, name-only. No MB anchor for those:
+    an anchor would put the row into stale_canonized_artists' discography
+    re-derive, and a compilation's fifteen credits times their discographies
+    is the fan-out the engagement rule forbids; the anchor arrives the day
+    the user engages with the artist. Until 2026-08-25 every slot carried the
+    album artist, so a "Various Artists" phantom could never collapse with a
+    rip — 530 same-recording pairs on the master lived under two uuids.
 
     Idempotent: slot upserts on the (album, disc, position) PK; track rows
     never clobber existing titles. A slot that moves to another uuid (a
@@ -396,6 +406,7 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
     slots written.
     """
     from transliterate import latinize
+    from canon.split import detect_compound_type
     best = _pick_canonical_release(mb.fetch_release_tracklists(rg_mbid))
     if not best:
         return 0
@@ -417,15 +428,22 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
         if not title:
             continue
         credit = (tr.get("credit") or "").strip()[:500]
-        if (not credit or tr.get("credit_artist_mbid") in album_mbids
-                or normalize(credit) == album_key):
+        compound = detect_compound_type(credit) if credit else None
+        head, featured = ((compound[2][0], compound[2][1:]) if compound
+                          else (credit, []))
+        if (not head or tr.get("credit_artist_mbid") in album_mbids
+                or normalize(head) == album_key):
             slot_artist_id, slot_artist_name = artist_id, artist_name
         else:
-            slot_artist_id, slot_artist_name = str(artist_uuid(credit)), credit
-            credit_rows.append((slot_artist_id, credit, latinize(credit)))
+            slot_artist_id, slot_artist_name = str(artist_uuid(head)), head
+            credit_rows.append((slot_artist_id, head, latinize(head)))
         tid = str(track_uuid(title, slot_artist_name))
         track_rows.append((tid, title, latinize(title)))
-        artist_rows.append((tid, slot_artist_id))
+        artist_rows.append((tid, "primary", slot_artist_id))
+        for name in featured:
+            fid = str(artist_uuid(name))
+            credit_rows.append((fid, name, latinize(name)))
+            artist_rows.append((tid, "featured", fid))
         slot_artists[tid] = slot_artist_id
         slot_rows.append(((album_id, tid, tr["disc"] or 1, tr["position"],
                            tr["recording_mbid"], tr["length_ms"]), title))
@@ -448,7 +466,7 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
             execute_values(cur, """
                 INSERT INTO track_artists (track_id, role, artist_id) VALUES %s
                 ON CONFLICT DO NOTHING
-            """, artist_rows, template="(%s::uuid, 'primary', %s::uuid)")
+            """, artist_rows, template="(%s::uuid, %s::credit_role, %s::uuid)")
             execute_values(cur, """
                 INSERT INTO album_tracks
                     (album_id, track_id, disc, position, recording_mbid, length_ms)
