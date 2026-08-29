@@ -39,6 +39,7 @@ synced from the other side only gains an `album_artists` link).
 """
 
 import logging
+from collections import Counter
 import re
 import unicodedata
 from typing import Any, Dict, List, Optional
@@ -324,6 +325,30 @@ def _carry_rekeyed_slots(album_id: str, slot_rows: list, slot_artists: dict) -> 
              if (d, pos) in current and current[(d, pos)] != tid]
     if not moves:
         return 0
+    # Only a row this album holds ALONE is this album's to rename.
+    # _update_track_uuid renames the ROW, and every slot that points at it
+    # follows by cascade — so renaming a row that other slots still reference
+    # (another album's, an owned album's, or a slot of this album bound for
+    # a different uuid) drags all of them onto a uuid derived from THIS
+    # slot's credit. That is how the 2026-08-25 "Various Artists" re-mint
+    # turned one compilation slot's "Pictures of You" into Joy Electric's
+    # uuid and took 112 other recordings — The Cure's own among them — with
+    # it. A shared row keeps its data and its other slots; the slot simply
+    # re-points to its own row in the upsert below.
+    wanted: dict = {}
+    for old, new, _ in moves:
+        wanted.setdefault(old, set()).add(new)
+    refs = {r["track_id"]: r["n"] for r in db_query("""
+        SELECT track_id::text AS track_id, count(*) AS n
+        FROM album_tracks WHERE track_id = ANY(CAST(%(olds)s AS uuid[]))
+        GROUP BY track_id""", {"olds": list(wanted)})}
+    leaving = Counter(old for old, _, _ in moves)
+    exclusive = {old for old, news in wanted.items()
+                 if len(news) == 1 and refs.get(old, 0) == leaving[old]}
+    moves = list({(old, new): (old, new, title) for old, new, title in moves
+                  if old in exclusive}.values())
+    if not moves:
+        return 0
     from transliterate import latinize
     from canon.identity import _update_track_uuid
     from database import SessionLocal
@@ -440,13 +465,15 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
 
 
 def remint_tracklists(artist_name: Optional[str] = None,
-                      limit: Optional[int] = None) -> Dict[str, int]:
+                      limit: Optional[int] = None,
+                      album_ids: Optional[List[str]] = None) -> Dict[str, int]:
     """Re-derive the tracklist of every phantom album — optionally only one
-    album artist's ("Various Artists" is the case that motivated it) — under
-    the current mint rules, carrying analysis across re-keyed slots, then
-    drop the old rows nothing points at any more. The one-off that follows
-    a mint-rule or normalization change: the incremental path never revisits
-    an album that already has a tracklist. Per-album isolation, resumable."""
+    album artist's ("Various Artists" is the case that motivated it), or an
+    explicit set of albums — under the current mint rules, carrying analysis
+    across re-keyed slots, then drop the old rows nothing points at any
+    more. The one-off that follows a mint-rule or normalization change: the
+    incremental path never revisits an album that already has a tracklist.
+    Per-album isolation, resumable."""
     from canon.identity import delete_orphan_tracks
     from database import SessionLocal
     rows = db_query(f"""
@@ -459,9 +486,10 @@ def remint_tracklists(artist_name: Optional[str] = None,
         WHERE al.musicbrainz_id IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
           {"AND a.name = %(name)s" if artist_name else ""}
+          {"AND al.id = ANY(CAST(%(ids)s AS uuid[]))" if album_ids is not None else ""}
         ORDER BY al.id, aa.artist_id
         {f"LIMIT {int(limit)}" if limit else ""}
-    """, {"name": artist_name})
+    """, {"name": artist_name, "ids": list(album_ids or [])})
     totals = {"albums": len(rows), "processed": 0, "slots": 0, "errors": 0}
     logger.info(f"remint_tracklists: {len(rows)} phantom albums"
                 f"{' of ' + artist_name if artist_name else ''}")
