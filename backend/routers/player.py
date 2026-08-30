@@ -1671,12 +1671,32 @@ def _phantom_insert_next(proxy, tokens: list, gen: int) -> None:
                 cursor = item   # a track the mirror dropped can't anchor the run
 
 
-def _parallel_resolve(provider, queries: list) -> list:
-    """Resolve every query on a provider concurrently (the fast availability
-    pass, no downloads). Returns a list parallel to `queries` of ResolvedSource
-    / None (None = not found on this provider)."""
+def _parallel_resolve(provider, queries: list, wanted: list) -> list:
+    """Resolve the `wanted` indices of `queries` on a provider (the fast
+    availability pass, no downloads). Returns a list parallel to `wanted` of
+    ResolvedSource / None (not on this provider) / ProviderUnavailable (no
+    answer — the caller must not cache a miss).
+
+    The rest of `queries` is the albums the wanted tracks sit on. A provider
+    that declares `resolve_batch` reads all of it: a tracklist corroborates
+    what a single track cannot — Deezer lines the album up against the
+    catalog's, YouTube gates an unnamed channel on the album vouching for it.
+    Acceptance stays here either way — a batch result is held to the same
+    length test `resolve()` applies."""
     from concurrent.futures import ThreadPoolExecutor
-    from streaming.base import ProviderUnavailable
+    from streaming.base import ProviderUnavailable, fits_length
+
+    if not wanted:
+        return []
+    batch = getattr(provider, "resolve_batch", None)
+    if callable(batch):
+        try:
+            res = batch(queries, wanted)
+        except ProviderUnavailable as e:
+            return [e] * len(wanted)
+        return [r if (r is None or isinstance(r, ProviderUnavailable)
+                      or fits_length(queries[i], r.duration)) else None
+                for i, r in zip(wanted, res)]
 
     def one(q):
         try:
@@ -1690,11 +1710,24 @@ def _parallel_resolve(provider, queries: list) -> list:
                            provider.manifest.id, q.artist, q.title, e)
             return ProviderUnavailable(str(e))
 
-    if not queries:
-        return []
-    with ThreadPoolExecutor(max_workers=min(provider.resolve_workers, len(queries)),
+    with ThreadPoolExecutor(max_workers=min(provider.resolve_workers, len(wanted)),
                             thread_name_prefix="resolve") as ex:
-        return list(ex.map(one, queries))
+        return list(ex.map(one, [queries[i] for i in wanted]))
+
+
+def _album_context(queries: list, pending: list) -> list:
+    """The rest of every album a pending query sits on — its tracklist rows
+    that are not among `queries` — appended to a resolve pass as EVIDENCE for
+    the providers' batch tier, never as work: a Deezer album lookup lines a
+    whole tracklist up against the catalog's, and a YouTube archive channel
+    is vouched for by the album's other tracks. Nothing here is returned or
+    cached; a context row resolves on its own request, with its own album."""
+    albums = {queries[i].album_id for i in pending if queries[i].album_id}
+    if not albums:
+        return []
+    have = {(q.album_id, q.track_id) for q in queries}
+    return [q for aid in albums for q in _phantom_album_queries(aid)
+            if (aid, q.track_id) not in have]
 
 
 # Resolved-source cache: (track_id, provider order) -> (timestamp, chain). One
@@ -1740,6 +1773,9 @@ def _resolve_waterfall(queries: list) -> list:
         else:
             pending.append(i)
 
+    # Every provider sees the albums the pending tracks sit on (the rows
+    # `queries` lacks come from the catalog); only `unresolved` is asked for.
+    pool = queries + _album_context(queries, pending) if pending else queries
     best = {}                               # index -> index into provs that resolved
     sids, durs, arts = {}, {}, {}
     unanswered = set()                      # a provider gave no answer — not a miss
@@ -1750,7 +1786,7 @@ def _resolve_waterfall(queries: list) -> list:
             break
         if not prov.supports_resolve:
             continue                        # can't pre-resolve; appears only as a lazy fallback
-        res = _parallel_resolve(prov, [queries[i] for i in unresolved])
+        res = _parallel_resolve(prov, pool, unresolved)
         still = []
         for i, r in zip(unresolved, res):
             if isinstance(r, ProviderUnavailable):
@@ -1846,6 +1882,64 @@ def _credit_alts(credit: str, album_artists: tuple = ()) -> tuple:
     return tuple(dict.fromkeys(a for a in alts if a and norm_key(a) != own))
 
 
+def _album_primary_artists(album_ids: list) -> dict:
+    """The primary artists per album id."""
+    if not album_ids:
+        return {}
+    rows = _db_query("""
+        SELECT aa.album_id::text AS album_id, ar.name
+        FROM album_artists aa JOIN artists ar ON ar.id = aa.artist_id
+        WHERE aa.album_id = ANY(CAST(%(ids)s AS uuid[])) AND aa.role = 'primary'
+        ORDER BY aa.album_id, ar.name
+    """, {"ids": album_ids})
+    out: dict = {}
+    for r in rows:
+        out.setdefault(r["album_id"], []).append(r["name"])
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def _album_barcodes(album_ids: list) -> dict:
+    """MB barcodes per album id — those of the release group's editions that
+    carry exactly this many tracks, i.e. the tracklist the phantom shows. A
+    catalog that answers to a barcode (Deezer's /album/upc:) then names the
+    edition outright, with no search to second-guess. Digital editions first:
+    that is the one a streaming catalog stocks (Deezer's Protection is MB's
+    Digital Media release, barcode for barcode). Empty without the local MB
+    dump (optional layer), or for an album MB never barcoded."""
+    import mb_backend as mb
+    if not album_ids or not mb.LOCAL_DUMP:
+        return {}
+    rows = _db_query("""
+        WITH ours AS (
+            SELECT a.id AS album_id, rg.id AS rg_id,
+                   (SELECT count(*) FROM album_tracks x WHERE x.album_id = a.id) AS n
+            FROM albums a JOIN mb_release_group rg ON rg.gid = a.musicbrainz_id
+            WHERE a.id = ANY(CAST(%(ids)s AS uuid[]))
+        ), editions AS (
+            SELECT o.album_id, o.n, r.id AS release_id, r.barcode,
+                   bool_or(f.name = 'Digital Media') AS digital,
+                   sum(m.track_count) AS tracks
+            FROM ours o
+            JOIN mb_release r ON r.release_group = o.rg_id
+            JOIN mb_medium m ON m.release = r.id
+            LEFT JOIN mb_medium_format f ON f.id = m.format
+            WHERE r.barcode IS NOT NULL AND r.barcode <> ''
+            GROUP BY o.album_id, o.n, r.id, r.barcode
+        )
+        SELECT album_id::text AS album_id, barcode,
+               bool_or(digital) AS digital, min(release_id) AS first_id
+        FROM editions WHERE tracks = n
+        GROUP BY album_id, barcode
+        ORDER BY album_id, digital DESC, first_id
+    """, {"ids": album_ids})
+    out: dict = {}
+    for r in rows:
+        codes = out.setdefault(r["album_id"], [])
+        if len(codes) < 3:
+            codes.append(r["barcode"])
+    return {k: tuple(v) for k, v in out.items()}
+
+
 def _phantom_track_queries(track_ids: list[str]) -> dict:
     """TrackQuery per phantom track UUID, from album_tracks — keyed by id, ids
     with no tracklist row absent. Batched: a similar-tracks set is a dozen
@@ -1876,15 +1970,20 @@ def _phantom_track_queries(track_ids: list[str]) -> dict:
         ORDER BY t.id, (al.cover_url IS NOT NULL) DESC,
                  (atr.length_ms IS NOT NULL) DESC, al.id
     """, {"ids": list(track_ids)})
-    alts = {n: _credit_alts(n) for n in {r["artist"] for r in rows if r["artist"]}}
+    album_ids = list({r["album_id"] for r in rows})
+    owners = _album_primary_artists(album_ids)
+    codes = _album_barcodes(album_ids)
+    alts = {(r["artist"], r["album_id"]): _credit_alts(r["artist"], owners.get(r["album_id"], ()))
+            for r in rows if r["artist"]}
     return {
         r["track_id"]: TrackQuery(
             artist=r["artist"] or "", title=r["title"], album=r["album"],
-            artist_alts=alts.get(r["artist"], ()),
+            artist_alts=alts.get((r["artist"], r["album_id"]), ()),
             duration=(float(r["length_ms"]) / 1000.0 if r["length_ms"] else None),
             lengths=tuple(float(ms) / 1000.0 for ms in (r["lengths_ms"] or [])),
             track_id=r["track_id"], cover_url=r["cover_url"],
-            album_id=r["album_id"])
+            album_id=r["album_id"], album_artists=owners.get(r["album_id"], ()),
+            barcodes=codes.get(r["album_id"], ()))
         for r in rows if r["title"]
     }
 
@@ -1923,17 +2022,16 @@ def _phantom_album_queries(album_id: str, track_id: Optional[str] = None) -> lis
           AND (%(track_id)s::uuid IS NULL OR atr.track_id = %(track_id)s::uuid)
         ORDER BY atr.disc, atr.position
     """, {"album_id": album_id, "track_id": track_id})
-    album_artists = tuple(r["name"] for r in _db_query("""
-        SELECT ar.name FROM album_artists aa JOIN artists ar ON ar.id = aa.artist_id
-        WHERE aa.album_id = %(album_id)s AND aa.role = 'primary'
-    """, {"album_id": album_id}))
+    album_artists = _album_primary_artists([album_id]).get(album_id, ())
+    barcodes = _album_barcodes([album_id]).get(album_id, ())
     alts = {n: _credit_alts(n, album_artists) for n in {r["artist"] for r in rows if r["artist"]}}
     return [
         TrackQuery(
             artist=r["artist"] or "", title=r["title"], album=r["album"],
             artist_alts=alts.get(r["artist"], ()),
             duration=(float(r["length_ms"]) / 1000.0 if r["length_ms"] else None),
-            track_id=r["track_id"], cover_url=r["cover_url"], album_id=album_id)
+            track_id=r["track_id"], cover_url=r["cover_url"], album_id=album_id,
+            album_artists=album_artists, barcodes=barcodes)
         for r in rows if r["title"]
     ]
 

@@ -31,6 +31,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 from .base import (FetchedAudio, ProviderError, ProviderManifest, ProviderUnavailable,
                    ResolvedSource, StreamProvider, TrackQuery, attested_lengths,
@@ -45,6 +47,14 @@ logger = logging.getLogger(__name__)
 _STALE_BUILD_RE = re.compile(r"HTTP Error 403|nsig|signature", re.I)
 
 
+class _GateWipeout(ProviderError):
+    """The channel gate admitted nothing — the one miss an album can still
+    overturn (resolve_batch), so it is told apart from a length miss."""
+
+
+_WIPEOUT = object()
+
+
 class YouTubeProvider(StreamProvider):
     manifest = ProviderManifest(
         id="youtube", name="YouTube", kind="direct_url", lossless=False,
@@ -55,6 +65,8 @@ class YouTubeProvider(StreamProvider):
         self._ytdlp = [sys.executable, "-m", "yt_dlp"]
         self._ffmpeg_location = ffmpeg_location
         self._timeout = timeout
+        self._searches: dict = {}          # search string -> (ts, candidates)
+        self._search_lock = threading.Lock()
         # Advisory only — yt-dlp decides at run time; this just surfaces a
         # degraded install at boot instead of one cryptic 403 per track.
         if not shutil.which("deno"):
@@ -62,18 +74,148 @@ class YouTubeProvider(StreamProvider):
                            "extraction runs on the deprecated runtime-less path "
                            "and breaks whenever YouTube moves")
 
-    SEARCH_N = 5    # candidates to score before downloading one
+    # Candidates to score before downloading one. Deep enough that an archive
+    # channel holding a whole album surfaces on SEVERAL of its tracks — that
+    # recurrence is the evidence _album_consensus is built on, and at 5 the
+    # top hits of a track are crowded out by live takes and full-album rips.
+    SEARCH_N = 10
+    TITLE_CAP = 100  # YouTube's hard limit on a video title
+    # Distinct tracks of one album a channel must carry before its uploads
+    # count as that album's rip. One length-exact title match is a coincidence
+    # a generic title ("Sleep") can produce; two on the same tracklist is a
+    # rip. Raising it costs whole 2-track albums, lowering it buys guesses.
+    ALBUM_CONSENSUS = 2
 
     def fetch(self, query: TrackQuery) -> FetchedAudio:
         return self._download(self._resolve(query).source_id)
 
     def _resolve(self, query: TrackQuery) -> ResolvedSource:
-        """Pick the best video via a flat (no-download) search. We prefer the
-        candidate whose length matches the MusicBrainz duration — this rejects
-        remixes, extended/edited cuts and wrong tracks that the bare top hit
-        would otherwise grab. Title and official-channel signals break ties."""
+        """Pick the best video for ONE track, on the channel gate alone. A
+        single track carries no album to corroborate an unattested upload
+        against, so the consensus tier is out of reach here — resolve_batch is
+        where a tracklist earns it."""
+        return self._pick(query, self._flat_search(
+            f"{query.artist} {query.title}".strip()), frozenset())
+
+    def resolve_batch(self, queries: list, wanted: list) -> list:
+        """Resolve the `wanted` indices of `queries`; the rest of the list is
+        the albums those tracks sit on — evidence for the consensus tier, never
+        work of its own. Returns a list parallel to `wanted`: ResolvedSource,
+        None (no match) or a ProviderUnavailable (no answer — not a miss).
+
+        Lazy on purpose: a track the channel gate admits costs its album no
+        search; only a wipe-out on a track WITH an album searches that album's
+        other rows. So a lone click on such a band's track still reaches the
+        consensus tier, at the price of one album's searches — and an artist
+        with a channel of their own never pays it."""
+        searched: dict = {}                 # index -> candidates | ProviderUnavailable
+
+        def search(idxs):
+            need = [i for i in idxs if i not in searched]
+            for i, cs in zip(need, self._search_all([queries[i] for i in need])):
+                searched[i] = cs
+
+        search(wanted)
+        results = {i: self._try_pick(queries[i], searched[i], frozenset()) for i in wanted}
+        albums = {queries[i].album_id for i, r in results.items()
+                  if r is _WIPEOUT and queries[i].album_id}
+        if albums:
+            search([j for j, q in enumerate(queries) if q.album_id in albums])
+            trusted = self._album_consensus(queries, searched)
+            for i, r in results.items():
+                if r is _WIPEOUT:
+                    vouched = trusted.get(queries[i].album_id, frozenset())
+                    results[i] = (self._try_pick(queries[i], searched[i], vouched)
+                                  if vouched else None)
+        return [None if results[i] is _WIPEOUT else results[i] for i in wanted]
+
+    def _try_pick(self, query: TrackQuery, cands, trusted: frozenset):
+        """_pick as a value: the source, None for no match, the
+        ProviderUnavailable a search raised, or _WIPEOUT — the channel gate
+        admitted nothing, and the album may yet vouch for a channel."""
+        if isinstance(cands, ProviderUnavailable):
+            return cands
+        try:
+            return self._pick(query, cands, trusted)
+        except _GateWipeout:
+            return _WIPEOUT
+        except ProviderUnavailable as e:
+            return e
+        except ProviderError:
+            return None
+
+    def _search_all(self, queries: list) -> list:
+        """One flat search per query, concurrently. An entry is the candidate
+        list, or the ProviderUnavailable that search raised."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(q):
+            try:
+                return self._flat_search(f"{q.artist} {q.title}".strip())
+            except ProviderUnavailable as e:
+                return e
+        if not queries:
+            return []
+        with ThreadPoolExecutor(max_workers=min(self.resolve_workers, len(queries)),
+                                thread_name_prefix="yt-search") as ex:
+            return list(ex.map(one, queries))
+
+    def _album_consensus(self, queries: list, searched: dict) -> dict:
+        """Per album_id, the channels that carry this album — `{album_id:
+        {channel_key, ...}}` — read off every search made so far.
+
+        A band outside the distributor layer has no channel to gate on: no
+        "- Topic" Art Tracks, no VEVO, no channel of its own, so every copy of
+        its catalog sits on a listener's archive channel and the name gate
+        wipes out the whole discography (Godspeed You! Black Emperor: ten
+        albums unavailable while a length-exact rip sat at the top of every
+        search). The evidence that replaces the name is STRUCTURAL: a channel
+        that answers ALBUM_CONSENSUS different tracks of one tracklist, each
+        under that track's own title and each at its catalog length, is
+        holding a rip of that album — a coincidence no cover, no live take and
+        no same-title stranger reproduces across a tracklist. It is corroboration,
+        never a relaxation: a channel vouched for by nothing but its own search
+        ranking is exactly what this refuses to trust.
+        """
+        votes: dict = {}
+        for i, cs in searched.items():
+            q = queries[i]
+            if isinstance(cs, ProviderUnavailable) or not q.album_id:
+                continue
+            gates = [g for g in (norm_key(a) for a in (q.artist, *q.artist_alts)) if g]
+            for c in self._title_attested(q, cs, gates):
+                if fits_length(q, c["duration"]):
+                    (votes.setdefault(q.album_id, {})
+                          .setdefault(norm_key(c["channel"]), set()).add(q.track_id or q.title))
+        return {aid: frozenset(ch for ch, tracks in by_ch.items()
+                               if len(tracks) >= self.ALBUM_CONSENSUS)
+                for aid, by_ch in votes.items()}
+
+    def _title_attested(self, query: TrackQuery, cands: list, gates: list) -> list:
+        """Candidates whose TITLE stands for this track: it is the work and
+        nothing else (an album rip names the track alone), it names the artist
+        beside the work, or — for a work whose own title outruns YouTube's
+        100-character cap — it is our title cut off there. Length is not tested
+        here; the caller does that, because the two readers weigh it
+        differently (a vote must fit, a pick is ranked by how well it fits)."""
+        title_k = norm_key(query.title)
+        if not title_k:
+            return []
+        out = []
+        for c in cands:
+            if not c["duration"]:
+                continue
+            t = norm_key(c["title"])
+            if (t == title_k
+                    or (len(c["title"]) >= self.TITLE_CAP and title_k.startswith(t))
+                    or (title_k in t and any(g in t for g in gates))):
+                out.append(c)
+        return out
+
+    def _pick(self, query: TrackQuery, cands: list, trusted: frozenset) -> ResolvedSource:
+        """Choose the source among one track's candidates. `trusted` = channels
+        this track's album has vouched for (empty for a lone track)."""
         search = f"{query.artist} {query.title}".strip()
-        cands = self._flat_search(search)
 
         # Artist gate on the CHANNEL: YouTube full-text search returns wrong-artist
         # covers and same-title different songs for obscure artists; with duration-
@@ -84,20 +226,33 @@ class YouTubeProvider(StreamProvider):
         # in their title, e.g. a "Duo Diamanti" upload titled "Musica Nuda - Lunedì").
         # Any MB-canonical alternate satisfies the gate — YouTube channels a band
         # under its canonical name even when our credit is a lineup variant. A
-        # gate wipe-out retries the search ONCE under the canonical name; still
-        # nothing → the real recording isn't on YouTube — reject rather than
-        # stream a cover.
+        # gate wipe-out retries the search ONCE under the canonical name.
         gates = [g for g in (norm_key(a) for a in (query.artist, *query.artist_alts)) if g]
         matched = ([c for c in cands if any(g in norm_key(c["channel"]) for g in gates)]
                    if gates else cands)
         if not matched and query.artist_alts:
             alt = self._flat_search(f"{query.artist_alts[0]} {query.title}".strip())
             matched = [c for c in alt if any(g in norm_key(c["channel"]) for g in gates)]
-            cands = cands or alt
+            seen = {c["id"] for c in cands}
+            cands = cands + [c for c in alt if c["id"] not in seen]
         if not cands:
             raise ProviderError(f"youtube: no results for {search!r}")
+        if not matched and trusted:
+            # No channel names the artist, but this track's ALBUM has vouched
+            # for one (_album_consensus): a channel holding the tracklist under
+            # its own titles at its own lengths. Its upload for this track is
+            # admissible — under the same title test, and the length gate below
+            # still decides. Corroborated, never merely plausible: with `trusted`
+            # empty (a lone track, or an album that vouched for nobody) this
+            # tier does not exist and the resolve fails instead of guessing.
+            matched = [c for c in self._title_attested(query, cands, gates)
+                       if norm_key(c["channel"]) in trusted]
+            if matched:
+                logger.info("youtube: no channel carries %s — %r admitted on the "
+                            "album's rip channel %r", query.artist, query.title,
+                            matched[0]["channel"])
         if not matched:
-            raise ProviderError(
+            raise _GateWipeout(
                 f"youtube: no artist match for {search!r} "
                 f"(top hit channel {cands[0]['channel']!r})")
 
@@ -109,10 +264,14 @@ class YouTubeProvider(StreamProvider):
         # enrichment guard measures the audio — so it stays, ranked last.
         fit = [c for c in matched if fits_length(query, c["duration"])]
         if not fit:
-            nearest = min(matched, key=lambda c: abs(c["duration"] - query.duration))
+            # Every survivor carries a length here (one without would have fit),
+            # and so does the catalog — measure against the nearest attested one:
+            # `duration` alone is blank whenever the display edition left it out.
+            lens = attested_lengths(query)
+            nearest = min(matched, key=lambda c: min(abs(c["duration"] - w) for w in lens))
             raise ProviderError(
                 f"youtube: no length match for {search!r} (catalog "
-                f"{'/'.join(f'{w:.0f}s' for w in attested_lengths(query))}, "
+                f"{'/'.join(f'{w:.0f}s' for w in lens)}, "
                 f"nearest {nearest['duration']:.0f}s)")
         best = max(fit, key=lambda c: self._score(c, query))
         logger.info("youtube resolve %r -> %s (%ss, %s)",
@@ -121,7 +280,17 @@ class YouTubeProvider(StreamProvider):
             source_id=best["id"], duration=best["duration"],
             artwork_url=f"https://i.ytimg.com/vi/{best['id']}/hqdefault.jpg")
 
+    _SEARCH_TTL_S = 3600.0
+
     def _flat_search(self, search: str) -> list[dict]:
+        # Remembered for the chain's lifetime: the consensus tier re-reads an
+        # album's searches on every row of it a listener clicks, and each
+        # search is a yt-dlp process.
+        now = time.time()
+        with self._search_lock:
+            hit = self._searches.get(search)
+        if hit and now - hit[0] < self._SEARCH_TTL_S:
+            return hit[1]
         cmd = [*self._ytdlp, f"ytsearch{self.SEARCH_N}:{search}", "--flat-playlist",
                "--no-warnings", "--quiet",
                "--print", "%(id)s\t%(title)s\t%(duration)s\t%(channel)s"]
@@ -145,6 +314,11 @@ class YouTubeProvider(StreamProvider):
             except ValueError:
                 dur = None
             cands.append({"id": p[0], "title": p[1], "duration": dur, "channel": p[3]})
+        with self._search_lock:
+            for k, (ts, _c) in list(self._searches.items()):
+                if now - ts >= self._SEARCH_TTL_S:
+                    self._searches.pop(k, None)
+            self._searches[search] = (now, cands)
         return cands
 
     def _score(self, c: dict, query: TrackQuery) -> float:

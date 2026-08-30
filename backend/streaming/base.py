@@ -11,6 +11,7 @@ unified). See the ``project_spotify_preview`` design notes.
 from __future__ import annotations
 
 import logging
+import re
 import unicodedata
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -64,6 +65,68 @@ def length_offset(query: "TrackQuery", actual_s: Optional[float]) -> Optional[fl
         return None
     return min(abs(actual_s - want) / recording_tolerance(want) for want in lengths)
 
+
+# A listing's version suffix — "(2011 Remastered)", "(feat. Tracey Thorn)",
+# "(Karaoke Version)", "(UNKLE Situation)" — says WHICH recording it is. The
+# words a catalog spends on the release recording itself are few and stable;
+# the words for another recording (a live take, a remixer's name, a
+# re-recording's "Taylor's Version") are without end. So a suffix is read by
+# its safe words: every word of it must be one, or the listing claims a
+# recording the query does not — the direction that fails closed. A credit
+# ("feat. X", "from Y") says nothing about the recording and swallows what
+# follows it. An unknown word is logged by the caller, so the list grows from
+# evidence, never from a guess.
+_SAFE_VERSION_WORDS = frozenset("""
+    remaster remastered remastering remasterised remasterized remasterisé
+    remasterisée master masters digital album original version versions explicit clean bonus
+    track mono stereo deluxe édition edition expanded anniversary single lp
+    main full length uk us international japanese japan european europe
+    """.split())
+_CREDIT_WORDS = frozenset(("feat", "featuring", "ft", "with", "from", "avec"))
+
+
+def version_claims_same(version: Optional[str], title: str) -> bool:
+    """Whether a listing's version suffix can still be the query's recording.
+    A word the query's own title carries is claimed on both sides and never
+    disqualifies: "Light My Fire (live)" against "(Live From United
+    Kingdom/1994)" is one recording described twice."""
+    ver = " ".join((version or "").casefold().split())
+    if not ver:
+        return True
+    claimed = title_tokens(title)
+    for word in re.findall(r"[^\W\d_]+", ver.replace("original mix", "original")):
+        if word in _CREDIT_WORDS:
+            return True
+        if word not in _SAFE_VERSION_WORDS and word not in claimed:
+            return False
+    return True
+
+
+# An album title has no version field — the qualifier is the title's own
+# words. These, in a catalog's album title and absent from the query's, name
+# another album of the same songs: another recording of them.
+_OTHER_ALBUM_WORDS = re.compile(
+    r"\b(karaoke|tribute|live|remix|remixes|remixed|instrumental|instrumentals|"
+    r"acoustic|unplugged|demo|demos|cover|covers|session|sessions|backing tracks?|"
+    r"in the style of|originally performed|made famous)\b")
+
+
+def other_recording_words(title: str) -> frozenset:
+    return frozenset(_OTHER_ALBUM_WORDS.findall(" ".join((title or "").casefold().split())))
+
+
+def title_tokens(s: str) -> frozenset:
+    return frozenset(re.findall(r"\w+", unicodedata.normalize("NFKC", s or "").casefold()))
+
+
+def tokens_shared(a: str, b: str) -> float:
+    """Jaccard overlap of two titles' words — for titles no key equality
+    survives (a catalog fronting a classical movement with its work, or its
+    composer), where an album whose lengths and order already line up leaves
+    the shared words to say the rest."""
+    ta, tb = title_tokens(a), title_tokens(b)
+    return len(ta & tb) / len(ta | tb) if ta and tb else 0.0
+
 # Bump only on breaking changes to TrackQuery / FetchedAudio / fetch(). External
 # modules declare the version they were built against so the host can warn.
 CONTRACT_VERSION = 1
@@ -106,6 +169,12 @@ class TrackQuery:
                                        # re-derive it — it has to ride along from the enqueue.
     media_file_id: Optional[int] = None  # set for an OWNED file transcoded on play (m4a) —
                                          # makes Now Playing / queue render it as owned, not preview
+    album_artists: tuple = ()          # the album's own primary artists — what a provider's
+                                       # album-level lookup searches under, and one more name
+                                       # a catalog may file the slot's recording under
+    barcodes: tuple = ()               # MB barcodes of the editions carrying this very
+                                       # tracklist — the release itself, where a catalog answers
+                                       # to a barcode (Deezer /album/upc:); no search to second-guess
 
 
 @dataclass
