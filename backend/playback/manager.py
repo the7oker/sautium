@@ -612,11 +612,10 @@ class PlaybackManager:
             return result
 
     def jump(self, index: int) -> bool:
-        backend = self.ensure_active()
-        ok = backend.select(index)
-        if ok:
-            backend.play()
-        return ok
+        # select() loads AND plays the slot (PlayerBackend contract). The
+        # play() that used to follow raced the DLNA load: it resumed the
+        # OLD track for the seconds the new one took to buffer.
+        return self.ensure_active().select(index)
 
     def clear_for_radio(self) -> int:
         """Radio start: clear everything after the playing slot (the seed

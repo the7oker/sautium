@@ -21,7 +21,7 @@ import threading
 import time
 from datetime import timedelta
 from typing import Optional
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from config import settings
 
@@ -272,7 +272,16 @@ class DlnaBackend(PlayerBackend):
         # 0-based on that stream — the real track position is offset + rel.
         self._pos_offset = 0.0
         self._length = 0.0
+        # A Play we issued that the renderer has not been seen acting on.
+        # Until it reports PLAYING/PAUSED for this load, everything it says
+        # is still about the PREVIOUS track: KANN sits in STOPPED for
+        # seconds while it opens the new stream, and its last position
+        # reading (246 of 248) read as the new track finishing at 99% —
+        # the poll died, the backend went deaf, the renderer played on.
+        self._awaiting_play = False
         self._poll_task: Optional[asyncio.Task] = None
+        self._preload_task: Optional[asyncio.Task] = None   # SetNext, once the next buffer is in hand
+        self._art_misses: set = set()   # cover URLs that answered "no art" — not re-asked per track
         self._error: Optional[str] = None
         # Track-change SOAP sequence in flight → status reports `loading`
         # (the UI shows a transition spinner on the tapped track).
@@ -392,14 +401,30 @@ class DlnaBackend(PlayerBackend):
             await self._dmr.async_subscribe_services(auto_resubscribe=True)
         except Exception as e:
             # Some renderers/firewalls reject eventing — degrade to the
-            # position poll (it already carries transport state).
+            # position poll (it already carries transport state) and try
+            # again on the next track load (_resubscribe).
             logger.warning("GENA subscribe failed (%s) — poll-only mode", e)
         await self._dmr.async_update()
         self._emit_now("stopped")
 
+    async def _resubscribe(self) -> None:
+        """A rejected GENA subscription is not forever: KANN's UPnP stack
+        answered SUBSCRIBE with 500 while it was throwing NPEs at every
+        action, and worked again minutes later — but the backend stayed
+        poll-only for the whole session, blind to play/stop from the
+        device's own screen. Retried off the load path, at the user's next
+        track load (the renderer is awake and answering then)."""
+        try:
+            await self._dmr.async_subscribe_services(auto_resubscribe=True)
+            logger.info("GENA subscription established on retry")
+        except Exception as e:
+            logger.info("GENA subscribe retry failed (%s) — still poll-only", e)
+
     async def _async_shutdown(self) -> None:
         if self._poll_task:
             self._poll_task.cancel()
+        if self._preload_task:
+            self._preload_task.cancel()
         try:
             if self._dmr:
                 # Unsubscribe is HTTP to the renderer — a powered-off or
@@ -426,9 +451,10 @@ class DlnaBackend(PlayerBackend):
             # the zombie and the live backend flap the status (observed:
             # track_index oscillating between two slots, even paused).
             return
-        if state is None and self._loading:
+        if state is None and (self._loading or self._awaiting_play):
             # Poll/GENA ticks that land mid-track-change would report the
-            # OLD track's transport state against the NEW index.
+            # OLD track's transport state against the NEW index — and so
+            # would ticks before the renderer has started on our Play.
             state = "loading"
         extra = {}
         if self._error:
@@ -459,12 +485,22 @@ class DlnaBackend(PlayerBackend):
             # and its `loading` status must not be overwritten.
             return
         state = self._state_name()
+        if self._settle_pending_play(state):
+            return
+        cur = getattr(self._dmr, "current_track_uri", None)
+        if cur and self._next_url and cur == self._next_url:
+            # The renderer moved to the armed NextURI on its own — a gapless
+            # boundary, or the device's own "next". Whatever transport state
+            # rides on this event belongs to the new track.
+            self._advanced_to_next(restart_poll=True)
+            return
+        if cur and cur != self._current_url:
+            # Something we never handed over (media picked on the device
+            # itself): not this queue's business, and nothing to attribute.
+            logger.debug("GENA event for a foreign URI %s — ignored", cur)
+            return
         if state == "playing":
             self._ensure_poll()
-            # Renderer may have auto-advanced to the SetNext URI on its own.
-            cur = getattr(self._dmr, "current_track_uri", None)
-            if cur and self._next_url and cur == self._next_url:
-                self._advanced_to_next()
         elif state == "stopped":
             self._stop_poll()
             finished = (self._length > 0
@@ -481,6 +517,46 @@ class DlnaBackend(PlayerBackend):
         self._position = pos
         self._wall_base = pos
         self._wall_t0 = time.monotonic()
+
+    def _settle_pending_play(self, state: str) -> Optional[str]:
+        """Reconcile one transport observation with a Play still awaiting
+        the renderer. None: nothing pending, or the renderer just confirmed
+        it — the observation is about the current track. 'starting': the
+        renderer is still idle on its way to playing; status stays
+        `loading` and nothing it reports may be attributed to this track.
+        'failed': it reported ERROR_OCCURRED — a stream it could not open."""
+        if not self._awaiting_play:
+            return None
+        if state in ("playing", "paused"):
+            cur = getattr(self._dmr, "current_track_uri", None)
+            if cur and cur != self._current_url:
+                # Still on the previous URI: the renderer works through our
+                # Stop/SetAVTransportURI/Play asynchronously, and KANN sat
+                # PAUSED on the old track for a tick after all three — read
+                # as confirmation, that adopted the old position and opened
+                # a play session the real start then closed as a 0% skip.
+                self._emit_now("loading")
+                return "starting"
+            self._awaiting_play = False
+            return None
+        if self._transport_error():
+            self._awaiting_play = False
+            self._error = (f"'{self.label}' could not play this track — "
+                           "the renderer reported an error")
+            logger.warning("DLNA renderer reported ERROR_OCCURRED starting "
+                           "slot %d", self._index)
+            self._emit_now("stopped")
+            return "failed"
+        self._emit_now("loading")
+        return "starting"
+
+    def _transport_error(self) -> bool:
+        """CurrentTransportStatus from GetTransportInfo: ERROR_OCCURRED is
+        the renderer's word for "the last transport action failed" — a
+        stream it could not open, a format it cannot decode."""
+        var = self._dmr._state_variable("AVT", "TransportStatus")
+        return bool(var is not None and var.value
+                    and str(var.value).upper() == "ERROR_OCCURRED")
 
     def _ensure_poll(self) -> None:
         if self._closed:
@@ -508,7 +584,6 @@ class DlnaBackend(PlayerBackend):
         (documented boundary exception, §2.6). Also our track-end detector:
         some renderers under-report the final GENA STOPPED."""
         misses = 0
-        first_pos_logged = False
         logger.info("position poll started (slot %d)", self._index)
         try:
             while True:
@@ -538,23 +613,40 @@ class DlnaBackend(PlayerBackend):
                         self._emit_now("stopped")
                         return
                     continue
-                dur = self._dmr.media_duration
+                state = self._state_name()
+                pending = self._settle_pending_play(state)
+                if pending == "failed":
+                    return
+                if pending:
+                    continue
+                cur = getattr(self._dmr, "current_track_uri", None)
+                if cur and self._next_url and cur == self._next_url:
+                    # Gapless boundary: this very reading (URI, duration,
+                    # RelTime 0) is the next track's — adopt the slot first.
+                    self._advanced_to_next(restart_poll=False)
+                # async_update re-polls GetPositionInfo only while PLAYING or
+                # PAUSED; in any other state CurrentTrackDuration and
+                # RelativeTimePosition still hold the last reading taken —
+                # across a track change, the previous track's. And a reading
+                # that names another URI is another track's however fresh.
+                fresh = (self._dmr.transport_state in (
+                    TransportState.PLAYING, TransportState.PAUSED_PLAYBACK)
+                    and (not cur or cur == self._current_url))
+                dur = self._dmr.media_duration if fresh else None
                 if dur:
                     self._length = float(dur)
-                state = self._state_name()
                 # Position: trust the renderer's RelTime when it advances, but
                 # some renderers (KANN on VBR Opus, live) play fine yet report
                 # RelTime 00:00:00 forever. So keep a wall-clock estimate and
                 # snap to RelTime whenever it gives a real value — FLAC and
                 # software renderers self-correct every tick; the frozen ones
                 # ride the clock instead of a stuck slider.
-                rel = self._dmr.media_position
-                now = time.monotonic()
+                rel = self._dmr.media_position if fresh else None
                 if rel is not None and rel > 0.5:
                     # RelTime is 0-based on the (possibly offset) stream.
                     self._rebaseline(self._pos_offset + float(rel))
                 elif state == "playing":
-                    est = self._wall_base + (now - self._wall_t0)
+                    est = self._wall_base + (time.monotonic() - self._wall_t0)
                     self._position = min(est, self._length) if self._length else est
                 if state == "stopped":
                     finished = (self._length > 0 and
@@ -566,16 +658,13 @@ class DlnaBackend(PlayerBackend):
                     else:
                         self._emit_now("stopped")
                     return
-                cur = getattr(self._dmr, "current_track_uri", None)
-                if cur and self._next_url and cur == self._next_url:
-                    self._advanced_to_next()
                 self._emit_now(state)
         except asyncio.CancelledError:
             logger.info("position poll exit: cancelled")
 
     # -- queue walking -----------------------------------------------------------
 
-    def _url_for(self, item: QueueItem) -> Optional[str]:
+    def _url_for(self, item: QueueItem, *, qs: Optional[str] = None) -> Optional[str]:
         from streaming import service as streaming_service
         src = item.source
         host = media_host(self._peer_host)
@@ -583,7 +672,8 @@ class DlnaBackend(PlayerBackend):
         # transcodes to Opus for the remote/bandwidth tiers. HQPlayer's own
         # _url_for equivalent never appends this, so its previews (same
         # /preview route) stay lossless.
-        qs = self._quality_suffix()
+        if qs is None:
+            qs = self._quality_suffix()
         if src["kind"] == "file":
             proxy = streaming_service.ensure_proxy()
             path = settings.translate_to_local_path(src["path"])
@@ -632,44 +722,87 @@ class DlnaBackend(PlayerBackend):
         return meta
 
     @staticmethod
+    def _to_jpeg(data: bytes, label: str) -> Optional[bytes]:
+        """Any image → JPEG bytes: hi-fi renderers rarely decode webp."""
+        try:
+            import io
+            from PIL import Image
+            img = Image.open(io.BytesIO(data)).convert("RGB")
+            out = io.BytesIO()
+            img.save(out, format="JPEG", quality=85)
+            return out.getvalue()
+        except Exception as e:
+            logger.debug("cover convert failed for %s: %s", label, e)
+            return None
+
+    @staticmethod
     def _load_cover_jpeg(cover_id: str) -> Optional[bytes]:
-        """Cover bytes from the covers table, converted webp→JPEG — hi-fi
-        renderers rarely decode webp. Runs in a worker thread (blocking DB +
-        PIL)."""
+        """Cover bytes from the covers table as JPEG. Runs in a worker
+        thread (blocking DB + PIL)."""
         from db_pool import db_query_one
         row = db_query_one("SELECT data FROM covers WHERE id = %(id)s::uuid",
                            {"id": cover_id})
         if not row or not row["data"]:
             return None
+        return DlnaBackend._to_jpeg(bytes(row["data"]), cover_id)
+
+    @staticmethod
+    def _fetch_cover_jpeg(url: str) -> Optional[bytes]:
+        """A phantom's provider/CAA cover as JPEG, fetched by the backend:
+        renderers were handed the external URL and showed nothing — it is
+        HTTPS, and Cover Art Archive answers with a 307 to archive.org on
+        top, neither of which a DAP's UPnP stack follows. Runs in a worker
+        thread (blocking HTTP + PIL)."""
+        import httpx
         try:
-            import io
-            from PIL import Image
-            img = Image.open(io.BytesIO(bytes(row["data"]))).convert("RGB")
-            out = io.BytesIO()
-            img.save(out, format="JPEG", quality=85)
-            return out.getvalue()
-        except Exception as e:
-            logger.debug("cover convert failed for %s: %s", cover_id, e)
+            with httpx.Client(timeout=8.0, follow_redirects=True) as client:
+                resp = client.get(url)
+                resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            # Cover Art Archive 404s for every release group nobody has
+            # uploaded art for — the ordinary case for a phantom, not a fault.
+            logger.debug("no cover at %s: %s", url, e.response.status_code)
             return None
+        except Exception as e:
+            logger.warning("phantom cover fetch failed %s: %s", url, e)
+            return None
+        return DlnaBackend._to_jpeg(resp.content, url) if resp.content else None
 
     async def _art_url(self, item: QueueItem) -> Optional[str]:
-        """Renderer-fetchable cover URL: owned art is re-served as JPEG on
-        the plain-http proxy (/art/{token}); phantom art passes through its
-        external provider/CAA URL."""
+        """Renderer-fetchable cover URL: art is re-served as JPEG on the
+        plain-http proxy (/art/{token}) — owned covers from the covers table,
+        phantom covers fetched once from their provider/CAA URL (which stays
+        the fallback when that fetch fails)."""
+        from streaming import service as streaming_service
+        proxy = streaming_service.ensure_proxy()
         if item.cover_id:
-            from streaming import service as streaming_service
-            proxy = streaming_service.ensure_proxy()
-            tok = proxy.blob_token_for(item.cover_id)
-            if tok is None:
-                data = await asyncio.to_thread(self._load_cover_jpeg, item.cover_id)
-                if data is None:
-                    return None
-                tok = proxy.register_blob(item.cover_id, data, "image/jpeg")
-            return f"http://{media_host(self._peer_host)}:{proxy.port}/art/{tok}"
-        if item.preview:
+            sources = [(item.cover_id, self._load_cover_jpeg)]
+            fallback = None
+        elif item.preview:
             from playback.queue import resolved_artwork
-            return resolved_artwork.get(item.track_id) or item.cover_url
-        return None
+            # Same order as the web UI's coverUrl(): the queued album's own
+            # art first, the provider's matched release only as a fallback.
+            # Deezer resolves a track to whichever release carries it — a
+            # compilation, another edition — so its cover can be the same
+            # artist's OTHER album (seen live: renderer and Now Playing
+            # disagreeing on the first two tracks of a streamed queue).
+            urls = [u for u in (item.cover_url, resolved_artwork.get(item.track_id))
+                    if u and u not in self._art_misses]
+            sources = [(u, self._fetch_cover_jpeg) for u in urls]
+            fallback = urls[0] if urls else None
+        else:
+            return None
+        for key, loader in sources:
+            tok = proxy.blob_token_for(key)
+            if tok is None:
+                data = await asyncio.to_thread(loader, key)
+                if data is None:
+                    if loader is self._fetch_cover_jpeg:
+                        self._art_misses.add(key)
+                    continue
+                tok = proxy.register_blob(key, data, "image/jpeg")
+            return f"http://{media_host(self._peer_host)}:{proxy.port}/art/{tok}"
+        return fallback
 
     async def _transport_meta(self, url: str, item: QueueItem) -> str:
         """DIDL with the class FORCED to musicTrack: the library derives the
@@ -728,15 +861,22 @@ class DlnaBackend(PlayerBackend):
         mint rows that travel to peers as a side effect of pressing play."""
         root = (settings.music_host_path or settings.music_library_path or "")
         norm = lambda p: p.replace("\\", "/").rstrip("/").lower()
-        inside = outside = 0
+        inside = outside = streamed = 0
         for i in range(skipped):
             item = self._queue.item_at(self._index + i)
-            uri = (item.source or {}).get("uri", "") if item else ""
+            src = (item.source or {}) if item else {}
+            if src.get("kind") == "proxy":
+                streamed += 1
+                continue
+            uri = src.get("uri", "")
             path = unquote(uri[8:] if uri.startswith("file:///") else uri)
             if root and norm(path).startswith(norm(root) + "/"):
                 inside += 1
             else:
                 outside += 1
+        if streamed and not (inside or outside):
+            return (f"{streamed} streamed track(s) could not be fetched from "
+                    "their provider, and nothing else is left in the queue.")
         if inside and not outside:
             return (f"{inside} queued item(s) are in your library folder but "
                     "have not been scanned yet, so they cannot be streamed to a "
@@ -748,8 +888,9 @@ class DlnaBackend(PlayerBackend):
                     "from the library to replace the queue.")
         return (f"None of the {skipped} queued item(s) can be sent to this "
                 f"renderer: {inside} not scanned yet, {outside} outside the "
-                "library folder. Play something from the library to replace "
-                "the queue.")
+                f"library folder, {streamed} not fetchable from their "
+                "provider. Play something from the library to replace the "
+                "queue.")
 
     async def _load_seq(self, index: int, *, play: bool = True, ss: float = 0.0,
                         url_override: Optional[str] = None,
@@ -789,8 +930,16 @@ class DlnaBackend(PlayerBackend):
         self._position = ss     # so the loading state shows the seek target
         self._length = item.duration_seconds or 0.0
         self._error = None      # something in the queue is playable after all
+        self._awaiting_play = False   # a new load supersedes an unconfirmed Play
         if play:
             self._emit_now("loading")
+        if not self._dmr.is_subscribed:
+            asyncio.ensure_future(self._resubscribe(), loop=self._loop)
+        if self._preload_task is not None:
+            self._preload_task.cancel()   # its "next" is not this load's next
+        if not await self._serve_ready(item, url, front=True):
+            return await self._load_seq(index + 1, play=play,
+                                        skipped=skipped + 1)
         # Disarm the gapless auto-advance detector: a manual jump to the
         # very track that SetNext armed makes CurrentURI == _next_url and
         # looked exactly like an auto-advance — the index bumped one PAST
@@ -816,12 +965,73 @@ class DlnaBackend(PlayerBackend):
         if play:
             await self._avt("Play", Speed="1")
             self._rebaseline(ss)      # clock starts at the offset (0 for a fresh track)
+            # Accepted is not started: the renderer confirms by reporting
+            # PLAYING (poll/GENA clear this), and until then the track is
+            # `loading` — not "playing at 0:00", which opened a play session
+            # and a Last.fm now-playing for a track the renderer may yet
+            # refuse, and made its first idle tick read as a stop.
+            self._awaiting_play = True
             self._ensure_poll()
-        await self._preload_next()
-        # Explicit state: _loading is still set here, and the default
-        # resolution would keep reporting "loading" after the work is done.
-        self._emit_now("playing" if play else self._state_name())
+        self._arm_preload()
+        # Explicit state: _loading is still set here, and a load that did
+        # not ask to play must report the renderer's actual state.
+        self._emit_now("loading" if play else self._state_name())
         return True
+
+    async def _serve_ready(self, item: QueueItem, url: str, *,
+                           front: bool) -> bool:
+        """Wait (off the loop) until the proxy can serve `url` at once —
+        the preview fetched, and the CUE cut / Opus tier the URL's ?q and
+        ?ss ask for produced on disk. False when it never will (provider
+        failure, expired token, a cut that cannot be made).
+
+        KANN probes the URI INSIDE SetAVTransportURI, and its control channel
+        answers nothing until the probe returns: a preview still being fetched
+        (the proxy holds the GET for up to prepare_timeout), a dead token
+        (KANN retries a 404 for 10+ s) or a first-GET Opus transcode (tens of
+        seconds for a long mix) froze every SOAP call — read as "3 poll misses
+        → renderer left the network", then a re-attach into a stack that was
+        throwing NPEs (observed live). A renderer is only ever handed a URL
+        the proxy can serve immediately; the wait shows as `loading` here,
+        the previous track still playing meanwhile."""
+        from streaming import service as streaming_service
+        proxy = streaming_service.get_proxy()
+        if proxy is None:
+            return False
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
+        q = query.get("q", [None])[0]
+        try:
+            ss = float(query.get("ss", ["0"])[0])
+        except ValueError:
+            ss = 0.0
+        route, _, tok = parsed.path.rpartition("/")
+
+        def materialize() -> None:
+            if route.endswith("/preview"):
+                e = proxy.wait_ready(tok, front=front)
+                if e.error or e.audio is None:
+                    raise RuntimeError(e.error or "no audio")
+                proxy.materialize_preview(tok, q, ss)
+            else:
+                proxy.materialize_file(tok, q, ss)
+
+        try:
+            await asyncio.to_thread(materialize)
+        except (KeyError, TimeoutError, RuntimeError, OSError) as ex:
+            logger.warning("DLNA: stream for %s — %s unavailable: %s",
+                           item.artist, item.title, ex)
+            return False
+        return True
+
+    def _arm_preload(self) -> None:
+        """SetNextAVTransportURI runs as its own task: it waits for the next
+        track's buffer, which must hold neither the load lock nor the
+        `loading` state of a track that is already playing."""
+        if self._preload_task is not None:
+            self._preload_task.cancel()
+        self._preload_task = asyncio.ensure_future(self._preload_next(),
+                                                   loop=self._loop)
 
     async def _preload_next(self) -> None:
         """SetNextAVTransportURI where supported — the renderer transitions
@@ -829,6 +1039,8 @@ class DlnaBackend(PlayerBackend):
         self._next_url = None
         nxt = self._queue.item_at(self._index + 1)
         url = self._url_for(nxt) if nxt is not None else None
+        if url is not None and not await self._serve_ready(nxt, url, front=False):
+            url = None      # a next the proxy cannot serve is disarmed, not handed over
         if url is None:
             # DISARM, don't just skip: the renderer still holds the last
             # armed NextURI — e.g. a track the user just REMOVED from the
@@ -850,11 +1062,27 @@ class DlnaBackend(PlayerBackend):
         except Exception as e:
             logger.debug("SetNextAVTransportURI unsupported/failed: %s", e)
 
-    def _advanced_to_next(self) -> None:
-        """Renderer moved to the preloaded next URI by itself."""
-        self._index += 1
-        self._current_url = self._next_url
+    def _slot_of(self, url: Optional[str]) -> Optional[int]:
+        """Queue slot whose media URL is `url` (file tokens are idempotent
+        per path, preview tokens stable — URLs survive queue edits)."""
+        if not url:
+            return None
+        qs = self._quality_suffix()
+        for i, it in enumerate(self._queue.snapshot(), start=1):
+            if self._url_for(it, qs=qs) == url:
+                return i
+        return None
+
+    def _advanced_to_next(self, *, restart_poll: bool) -> None:
+        """Renderer moved to the preloaded next URI by itself. The slot is
+        found by that URL, not assumed to be index+1: a queue edit between
+        arming SetNext and the boundary (insert-next, reorder) leaves the
+        renderer playing the track that WAS next, and the display must show
+        what plays — assuming index+1 showed the wrong track, one behind."""
+        played = self._next_url
         self._next_url = None
+        self._current_url = played
+        self._index = self._slot_of(played) or self._index + 1
         item = self._queue.item_at(self._index)
         self._length = (item.duration_seconds or 0.0) if item else 0.0
         self._pos_offset = 0.0    # a gapless auto-advance is always a fresh track
@@ -865,9 +1093,11 @@ class DlnaBackend(PlayerBackend):
         # deaf: position frozen at 0, and the poll-side track-end backstop
         # (which caught radio's queue walking when GENA went quiet) never
         # fires again. Observed live: radio died at the end of the first
-        # auto-advanced track.
-        self._ensure_poll()
-        asyncio.ensure_future(self._preload_next(), loop=self._loop)
+        # auto-advanced track. From inside the poll itself there is nothing
+        # to restart — calling it there spawned a second, duplicate poll.
+        if restart_poll:
+            self._ensure_poll()
+        self._arm_preload()
         self._emit_now("playing")
 
     async def _advance(self) -> None:
@@ -890,7 +1120,7 @@ class DlnaBackend(PlayerBackend):
             raise RuntimeError(f"renderer lacks AVTransport/{name}")
         return await action.async_call(InstanceID=0, **kwargs)
 
-    def _cmd_failed(self, e: Exception) -> None:
+    def _cmd_failed(self, e: Exception, what: str) -> None:
         if isinstance(e, (TimeoutError, OSError)):
             # Connection-level failure (hang / refused / unreachable) —
             # the doze signature. Mark the instance so the next play
@@ -899,14 +1129,26 @@ class DlnaBackend(PlayerBackend):
         reason = str(e).strip() or type(e).__name__
         # Surface it: a silently swallowed command is how "next" looked
         # like it worked while the renderer kept playing the old track.
-        self._error = (f"'{self.label}' command failed ({reason}) — "
-                       "the renderer may be asleep")
-        logger.warning("DLNA command failed: %s", reason)
+        # A SOAP fault is the renderer answering — KANN refuses a URI it
+        # cannot fetch with a 500 at SetAVTransportURI — so only the
+        # connection-level failures get the doze hint.
+        self._error = f"'{self.label}' {what} failed ({reason})" + (
+            " — the renderer may be asleep" if self._gone else "")
+        logger.warning("DLNA %s failed: %s", what, reason)
         self._emit_now()
+
+    @staticmethod
+    def _what(coro) -> str:
+        """The backend method a command coroutine belongs to, for the log
+        ("pause", "seek", "_load_and_play") — `DlnaBackend.pause.<locals>._p`
+        says nothing at 2 a.m."""
+        parts = getattr(coro, "__qualname__", "").split(".")
+        return parts[1] if len(parts) > 1 else (parts[0] or "command")
 
     def _call(self, coro) -> bool:
         if self._loop is None:
             return False
+        what = self._what(coro)
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
             fut.result(timeout=_CMD_TIMEOUT)
@@ -914,7 +1156,7 @@ class DlnaBackend(PlayerBackend):
                 self._error = None   # a command went through — device is back
             return True
         except Exception as e:
-            self._cmd_failed(e)
+            self._cmd_failed(e, what)
             return False
 
     def _call_async(self, coro) -> bool:
@@ -924,6 +1166,7 @@ class DlnaBackend(PlayerBackend):
         the `loading` state; failures land in the status error field."""
         if self._loop is None:
             return False
+        what = self._what(coro)
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
 
         def _done(f):
@@ -932,7 +1175,7 @@ class DlnaBackend(PlayerBackend):
                 if self._error:
                     self._error = None
             except Exception as e:
-                self._cmd_failed(e)
+                self._cmd_failed(e, what)
         fut.add_done_callback(_done)
         return True
 
@@ -940,11 +1183,25 @@ class DlnaBackend(PlayerBackend):
         async def _p():
             if self._current_url is None:
                 await self._load_and_play(self._index if self._index >= 1 else 1)
-            else:
+                return
+            # Serialized behind any track load: a Play that ran alongside one
+            # saw the OLD track's URL and resumed it — audible for the seconds
+            # the new track took to buffer, then the load's Stop cut it off
+            # (the "track 1 plays for a moment before track 2" report). Once
+            # the load is through, its own Play is still pending and this
+            # intent is already met.
+            async with self._load_lock:
+                if self._awaiting_play:
+                    return
+                # From PAUSED the renderer holds the media and plays at once;
+                # from STOPPED (a finished or refused track, still loaded)
+                # this is a fresh start it has yet to confirm.
+                fresh_start = self._state_name() != "paused"
                 await self._avt("Play", Speed="1")
                 self._rebaseline(self._position)   # resume from where we are
+                self._awaiting_play = fresh_start
                 self._ensure_poll()
-                self._emit_now("playing")
+                self._emit_now("loading" if fresh_start else "playing")
         return self._call_async(_p())
 
     def pause(self) -> bool:
@@ -956,6 +1213,7 @@ class DlnaBackend(PlayerBackend):
     def stop(self) -> bool:
         async def _s():
             self._stop_poll()
+            self._awaiting_play = False
             await self._avt("Stop")
             self._emit_now("stopped")
         return self._call(_s())
@@ -1029,11 +1287,9 @@ class DlnaBackend(PlayerBackend):
             # path, preview tokens stable — URLs survive mutations), then
             # refresh the preloaded next. A removed current item keeps
             # playing on the renderer until its natural end.
-            if self._current_url is not None:
-                for i, it in enumerate(self._queue.snapshot(), start=1):
-                    if self._url_for(it) == self._current_url:
-                        self._index = i
-                        break
-            await self._preload_next()
+            slot = self._slot_of(self._current_url)
+            if slot is not None:
+                self._index = slot
+            self._arm_preload()
             self._emit_now()
         self._call(_resync())

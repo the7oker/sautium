@@ -586,8 +586,13 @@ class HqpBackend(PlayerBackend):
         return ok
 
     def select(self, index: int) -> bool:
+        """Load AND play the slot (PlayerBackend contract): HQPlayer's
+        SelectTrack alone leaves a STOPPED player stopped, so the Play that
+        jump() used to send from the manager follows here, same order."""
         self._resume_index = None    # explicit navigation overrides resume
         ok = _hqp_cmd(lambda h: h.select_track(index))
+        if ok:
+            ok = _hqp_cmd(lambda h: h.play())
         self.poke()
         return ok
 

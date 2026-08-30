@@ -119,7 +119,10 @@ class PlayerBackend(ABC):
 
     @abstractmethod
     def select(self, index: int) -> bool:
-        """Move the playhead to queue slot `index` (1-based), without play."""
+        """Play queue slot `index` (1-based): load it and start it in ONE
+        step. Every backend owns that atomically — a caller-side play()
+        after select() raced the DLNA load and resumed the previous track
+        while the new one buffered."""
 
     def seek(self, seconds: int) -> bool:
         return False

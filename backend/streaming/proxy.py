@@ -442,6 +442,58 @@ class MediaProxy:
                        and not e.evicted
                        for e in self._entries.values())
 
+    # ---- materialization: what a GET would have to produce ----------------
+    def materialize_file(self, token: str, q: Optional[str],
+                         ss: float = 0.0) -> tuple[str, str, int]:
+        """The on-disk resource ``/file/{token}?q=&ss=`` serves — the raw
+        file, the cached CUE cut, or the cached Opus of either — produced NOW
+        when not cached yet. Returns (path, mime, size); KeyError for an
+        unknown token, RuntimeError when a CUE cut cannot be made (a cut has
+        no lossless fallback — the raw image would play the whole disc).
+
+        The DLNA backend calls this before a URL is handed to a renderer:
+        KANN probes the URI inside SetAVTransportURI and its control channel
+        is frozen until the probe returns, so a first-GET transcode of a long
+        track (tens of seconds for a DJ mix) froze every SOAP call and read as
+        the renderer leaving the network. The GET handler still materializes
+        for consumers that come unannounced (HQPlayer, the browser)."""
+        import os
+        fe = self.file_entry(token)
+        if fe is None:
+            raise KeyError(token)
+        path, mime, size = fe.path, fe.mime, fe.size
+        if fe.start is not None:
+            path = transcode.flac_slice_path_for_file(
+                fe.path, fe.start, fe.end, fe.tags or {})
+            mime, size = transcode.FLAC_MIME, os.path.getsize(path)
+        if transcode.wants_opus(q):
+            try:
+                # For a slice `path` is already the cut, so the Opus tier
+                # chains off it with slice-relative ?ss for free.
+                opus = transcode.opus_path_for_file(path, q, ss=ss)
+                if opus:
+                    path, mime, size = opus, transcode.MIME, os.path.getsize(opus)
+            except Exception as e:
+                logger.warning("opus transcode failed %s — lossless: %s", path, e)
+        return path, mime, size
+
+    def materialize_preview(self, token: str, q: Optional[str],
+                            ss: float = 0.0) -> Optional[str]:
+        """Cached Opus path for a FETCHED preview buffer when ?q asks for it
+        (produced now when missing), else None — the lossless bytes are
+        served from RAM. Callers wait_ready() first."""
+        if not transcode.wants_opus(q):
+            return None
+        e = self._peek(token)
+        if e is None or e.audio is None:
+            raise KeyError(token)
+        try:
+            return transcode.opus_path_for_bytes(token, e.audio.data, q, ss=ss)
+        except Exception as ex:
+            logger.warning("opus transcode failed for preview %s — lossless: %s",
+                           token, ex)
+            return None
+
     def url_for(self, token: str) -> str:
         return f"http://{self._advertised_host}:{self.port}/preview/{token}"
 
@@ -645,33 +697,17 @@ def _make_handler(proxy: MediaProxy):
                 pass
             return None
 
-        def _serve_file(self, fe, *, body: bool):
-            import os
-            path, mime, size = fe.path, fe.mime, fe.size
-            if fe.start is not None:
-                # CUE slice: the cached FLAC cut IS the resource — the raw
-                # image would play the whole disc, so there is no lossless
-                # fallback on failure here, only an error.
-                try:
-                    path = transcode.flac_slice_path_for_file(
-                        fe.path, fe.start, fe.end, fe.tags or {})
-                except Exception as e:
-                    logger.error("flac slice failed %s [%s, %s): %s",
-                                 fe.path, fe.start, fe.end, e)
-                    self.send_error(500)
-                    return
-                mime, size = transcode.FLAC_MIME, os.path.getsize(path)
-            q = self._q()
-            if transcode.wants_opus(q):
-                try:
-                    # For a slice `path` is already the cut, so the Opus tier
-                    # chains off it with slice-relative ?ss for free.
-                    opus = transcode.opus_path_for_file(path, q, ss=self._ss())
-                    if opus:
-                        path, mime, size = opus, transcode.MIME, os.path.getsize(opus)
-                except Exception as e:
-                    logger.warning("opus transcode failed %s — lossless: %s",
-                                   path, e)
+        def _serve_file(self, token: str, *, body: bool):
+            try:
+                path, mime, size = proxy.materialize_file(
+                    token, self._q(), self._ss())
+            except KeyError:
+                self.send_error(404, "unknown token")
+                return
+            except Exception as e:
+                logger.error("flac slice failed for token %s: %s", token, e)
+                self.send_error(500)
+                return
             self._serve_disk_file(path, mime, size, body=body)
 
         def _serve_disk_file(self, path: str, mime: str, size: int, *, body: bool):
@@ -706,19 +742,10 @@ def _make_handler(proxy: MediaProxy):
             except OSError as e:
                 logger.error("file serve failed %s: %s", path, e)
 
-        def _opus_for_preview(self, token, e) -> Optional[str]:
+        def _opus_for_preview(self, token) -> Optional[str]:
             """Cached Opus path for a phantom buffer when ?q asks for it, else
             None (serve the lossless in-memory bytes)."""
-            q = self._q()
-            if not transcode.wants_opus(q):
-                return None
-            try:
-                return transcode.opus_path_for_bytes(token, e.audio.data, q,
-                                                     ss=self._ss())
-            except Exception as ex:
-                logger.warning("opus transcode failed for preview %s — lossless: %s",
-                               token, ex)
-                return None
+            return proxy.materialize_preview(token, self._q(), self._ss())
 
         def _art_token(self) -> Optional[str]:
             if not self.path.startswith("/art/"):
@@ -746,11 +773,7 @@ def _make_handler(proxy: MediaProxy):
                 return
             ftok = self._file_token()
             if ftok is not None:
-                fe = proxy.file_entry(ftok)
-                if fe is None:
-                    self.send_error(404, "unknown token")
-                    return
-                self._serve_file(fe, body=False)
+                self._serve_file(ftok, body=False)
                 return
             # HQPlayer HEAD-probes each URI synchronously when it is ADDED and
             # needs Content-Length to accept it (the FLAC size is only known
@@ -770,7 +793,7 @@ def _make_handler(proxy: MediaProxy):
             if e.error or e.audio is None:
                 self.send_error(502, "provider could not fetch this track")
                 return
-            opus = self._opus_for_preview(tok, e)
+            opus = self._opus_for_preview(tok)
             if opus:
                 import os
                 self._serve_disk_file(opus, transcode.MIME,
@@ -790,11 +813,7 @@ def _make_handler(proxy: MediaProxy):
                 return
             ftok = self._file_token()
             if ftok is not None:
-                fe = proxy.file_entry(ftok)
-                if fe is None:
-                    self.send_error(404, "unknown token")
-                    return
-                self._serve_file(fe, body=True)
+                self._serve_file(ftok, body=True)
                 return
             tok = self._token()
             if tok is None:
@@ -811,7 +830,7 @@ def _make_handler(proxy: MediaProxy):
                 self.send_error(502, "provider could not fetch this track")
                 return
             proxy._advance(e.index)
-            opus = self._opus_for_preview(tok, e)
+            opus = self._opus_for_preview(tok)
             if opus:
                 import os
                 self._serve_disk_file(opus, transcode.MIME,

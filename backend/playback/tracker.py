@@ -220,20 +220,30 @@ def track_play_event(state_name: str, position: float, length: float,
     listen — detected by the position falling back to the start."""
     global _play_session
 
+    ident = _play_identity(item)
+    same_track = (_play_session is not None and ident is not None
+                  and ident["track_id"] == _play_session.track_id)
     if state_name != "playing":
+        if _play_session is not None and (
+                state_name == "paused"
+                or (state_name == "loading" and same_track)):
+            # Interruptions, not the end of the listen: a pause, or a seek
+            # that reloads the same track (Opus streams re-encode from the
+            # offset). Closing the session here wrote a "skipped" history
+            # row and a skip_count per pause, and the resume re-opened one
+            # that re-counted the prefix and re-sent Last.fm now-playing
+            # with the resume as its start time.
+            return
         if _play_session is not None:
             _save_play_session(_play_session)
             _play_session = None
         return
 
-    ident = _play_identity(item)
     if ident is None:
         if _play_session is not None:
             _play_session.update_position(position)
         return
 
-    same_track = (_play_session is not None
-                  and ident["track_id"] == _play_session.track_id)
     restarted = (same_track and position < 5.0
                  and _play_session.max_position > 30.0)
     if not same_track or restarted:
