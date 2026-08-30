@@ -223,11 +223,14 @@ def _snapshot_pairs_for(cur, active: dict, old_pairs: list[tuple[str, Optional[i
     return old_pairs
 
 
-def _cover_for_track(cur, track_id: Optional[str], media_file_id: Optional[int]
+def _cover_for_track(cur, track_id: Optional[str], media_file_id: Optional[int],
+                     album_id: Optional[str] = None
                      ) -> tuple[Optional[str], Optional[str]]:
     """(cover_id, cover_url) for a snapshot track — owned art is a covers(id)
     via media_files; a phantom track's art is its album's CAA cover_url. The
-    session card renders cover_id (owned) OR cover_url (phantom)."""
+    session card renders cover_id (owned) OR cover_url (phantom). `album_id`
+    is the session's origin album: a phantom track sits on every album that
+    lists it, so its art is that album's, not the first cover-bearing one."""
     if media_file_id is not None:
         cur.execute("SELECT cover_id::text AS c FROM media_files WHERE id = %s",
                     (media_file_id,))
@@ -238,8 +241,9 @@ def _cover_for_track(cur, track_id: Optional[str], media_file_id: Optional[int]
         cur.execute(
             "SELECT al.cover_url FROM album_tracks atk "
             "JOIN albums al ON al.id = atk.album_id "
-            "WHERE atk.track_id = %s::uuid AND al.cover_url IS NOT NULL LIMIT 1",
-            (track_id,))
+            "WHERE atk.track_id = %s::uuid AND al.cover_url IS NOT NULL "
+            "ORDER BY (al.id = %s::uuid) DESC NULLS LAST, al.id LIMIT 1",
+            (track_id, album_id))
         r = cur.fetchone()
         if r:
             return (None, r["cover_url"])
@@ -278,7 +282,8 @@ def _compute_session_card(cur, active: dict, snapshot: list[tuple[str, Optional[
             FROM albums al WHERE al.id = %s::uuid
         """, (active["origin_album_id"],))
         r = cur.fetchone()
-        cover_id, cover_url = _cover_for_track(cur, first[0], first[1])
+        cover_id, cover_url = _cover_for_track(cur, first[0], first[1],
+                                               active["origin_album_id"])
         return (
             r["title"] if r else "Album",
             r["artist"] if r else None,

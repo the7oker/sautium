@@ -1889,13 +1889,25 @@ def _phantom_track_queries(track_ids: list[str]) -> dict:
     }
 
 
-def _phantom_track_query(track_id: str):
-    """Build a TrackQuery for one phantom track from album_tracks, or None."""
+def _phantom_track_query(track_id: str, album_id: Optional[str] = None):
+    """TrackQuery for one phantom track, or None. `album_id` is the album the
+    row was clicked on: the query is then that album's own — the one its
+    Stream all builds — so the slot carries the same edition, length, art and
+    album_id, and Now Playing never lands on a reissue the listener didn't
+    press (a canonical track sits on every album that lists it). No context,
+    or an album that no longer lists the track: the display edition."""
+    if album_id:
+        own = _phantom_album_queries(album_id, track_id=track_id)
+        if own:
+            return own[0]
     return _phantom_track_queries([track_id]).get(track_id)
 
 
-def _phantom_album_queries(album_id: str) -> list:
-    """Ordered TrackQuery list for a phantom album's tracklist (album_tracks)."""
+def _phantom_album_queries(album_id: str, track_id: Optional[str] = None) -> list:
+    """Ordered TrackQuery list for a phantom album's tracklist (album_tracks) —
+    or, with `track_id`, just that track's row on this album: the query a
+    single row's click shares with the album's Stream all (empty when the
+    album no longer lists the track)."""
     from streaming.base import TrackQuery
     rows = _db_query("""
         SELECT t.id::text AS track_id, t.title, al.title AS album, al.cover_url,
@@ -1908,8 +1920,9 @@ def _phantom_album_queries(album_id: str) -> list:
         JOIN tracks t ON t.id = atr.track_id
         JOIN albums al ON al.id = atr.album_id
         WHERE atr.album_id = %(album_id)s
+          AND (%(track_id)s::uuid IS NULL OR atr.track_id = %(track_id)s::uuid)
         ORDER BY atr.disc, atr.position
-    """, {"album_id": album_id})
+    """, {"album_id": album_id, "track_id": track_id})
     album_artists = tuple(r["name"] for r in _db_query("""
         SELECT ar.name FROM album_artists aa JOIN artists ar ON ar.id = aa.artist_id
         WHERE aa.album_id = %(album_id)s AND aa.role = 'primary'
@@ -2117,6 +2130,8 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
 
 class PlayPhantomTrackRequest(BaseModel):
     track_id: str             # UUID of a phantom (not-owned) track
+    album_id: Optional[str] = None   # the album the row was clicked on = the slot's
+                                     # album; None = no album context (a similar/search row)
     position: str = "end"     # queue endpoint only: 'next' | 'end'
 
 
@@ -2131,7 +2146,7 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
     _ensure_streaming_ready()
     _ensure_output_ready()
 
-    q = _phantom_track_query(req.track_id)
+    q = _phantom_track_query(req.track_id, req.album_id)
     if q is None:
         raise HTTPException(status_code=404, detail="Phantom track not found")
     missing = [{"track_id": req.track_id, "title": q.title}]
@@ -2181,7 +2196,7 @@ def queue_phantom_track(req: PlayPhantomTrackRequest):
     from streaming import service as streaming_service
     _ensure_streaming_ready()
 
-    q = _phantom_track_query(req.track_id)
+    q = _phantom_track_query(req.track_id, req.album_id)
     if q is None:
         raise HTTPException(status_code=404, detail="Phantom track not found")
     chain = _resolve_waterfall([q])[0]        # Deezer lossless first, YouTube fallback

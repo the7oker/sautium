@@ -601,8 +601,8 @@
     lastTrackKey: null,
     lastDetailFetchedMfId: null,
     inflightMfId: null,
-    lastDetailFetchedTid: null,
-    inflightTid: null,
+    lastDetailFetchedKey: null,   // preview detail identity — see _previewDetailKey
+    inflightKey: null,
     _npPreviewTid: null,
     _npProvider: null,
     lastDetail: null,
@@ -965,14 +965,24 @@
       if (data.media_file_id && this.lastDetailFetchedMfId !== data.media_file_id) {
         this.tryFetchDetail(data.media_file_id);
       } else if (this._npPreviewTid
-                 && this.lastDetailFetchedTid !== this._npPreviewTid) {
+                 && this.lastDetailFetchedKey !== this._previewDetailKey()) {
         this.tryFetchDetailByTrack(this._npPreviewTid, this._npProvider);
       }
     },
 
+    // A preview detail is identified by the track AND the album it was queued
+    // from: the same canonical track re-queued from another album is a new
+    // screen (other cover, other album link), so a track-only key kept the
+    // previous album up.
+    _previewDetailKey() {
+      return this._npPreviewTid
+        ? this._npPreviewTid + '|' + (this._npAlbumId || '') : null;
+    },
+
     async tryFetchDetailByTrack(tid, provider) {
-      if (!tid || this.inflightTid === tid) return;
-      this.inflightTid = tid;
+      const key = this._previewDetailKey();
+      if (!tid || !key || this.inflightKey === key) return;
+      this.inflightKey = key;
       try {
         const params = new URLSearchParams({ track_id: tid });
         if (provider) params.set('provider', provider);
@@ -980,16 +990,16 @@
         const resp = await fetch('/api/player/now-playing-detail?' + params);
         if (!resp.ok) return;
         const detail = await resp.json();
-        if (this._npPreviewTid !== tid) return;   // moved on while fetching
+        if (this._previewDetailKey() !== key) return;   // moved on while fetching
         this.lastDetail = detail;
-        this.lastDetailFetchedTid = tid;
+        this.lastDetailFetchedKey = key;
         this.renderDetail(detail);
         this.fetchSimilarByTrack(tid);
         document.dispatchEvent(new CustomEvent('np-detail', { detail }));
       } catch (err) {
         console.warn('preview now-playing-detail failed:', err);
       } finally {
-        if (this.inflightTid === tid) this.inflightTid = null;
+        if (this.inflightKey === key) this.inflightKey = null;
       }
     },
 
@@ -1020,7 +1030,7 @@
     refreshPreviewDetail() {
       const tid = this._npPreviewTid;
       if (!tid) return;
-      this.lastDetailFetchedTid = null;
+      this.lastDetailFetchedKey = null;
       this.tryFetchDetailByTrack(tid, this._npProvider);
     },
 
@@ -5054,14 +5064,17 @@
           trackParts.push(`<div class="disc-header">Disc ${t.disc_number}</div>`);
         }
         if (isPhantom) {
-          // No local audio → display-only row (no play/add). Key/BPM appear once
-          // a preview has streamed and the enricher analysed the track.
+          // No local audio → the row streams. Key/BPM appear once a preview has
+          // streamed and the enricher analysed the track. data-album-id names
+          // the album the row is listed under: the click sends it so the queue
+          // slot (and Now Playing) is THIS album, not another the track sits on.
           const psub = [
             t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
             t.bpm ? Math.round(t.bpm) + ' bpm' : null,
           ].filter(Boolean).join(' · ');
           trackParts.push(`
-            <div class="track-row is-phantom-track" data-track-id="${escapeHtml(t.track_id || '')}">
+            <div class="track-row is-phantom-track" data-track-id="${escapeHtml(t.track_id || '')}"
+                 data-album-id="${escapeHtml(albumId)}">
               <span class="track-rank">${t.track_number || ''}</span>
               <div class="track-info">
                 <div class="track-title-line">${escapeHtml(t.title || '')}</div>
@@ -5333,6 +5346,7 @@
     // album screen's phantom path — so Play/Queue route through play-phantom.
     const phantomAlbumId = (d.origin === 'album' && d.origin_album_id
                             && anyPhantom && !anyOwned) ? d.origin_album_id : null;
+    const rowAlbumId = (d.origin === 'album' && d.origin_album_id) ? d.origin_album_id : null;
     // Tag the screen so the global preview-events listener refreshes these rows'
     // buffering + key·bpm by track_id — same mechanism the album page uses, so a
     // whole-album Play's optimistic "Buffering…" lines clear as each track lands.
@@ -5349,8 +5363,11 @@
       // Phantom (streamed) rows carry is-phantom-track + data-track-id so the
       // shared handlers route them (click → play-phantom-track, [+] → queue);
       // owned rows keep data-media-file-id. Same dim styling as other surfaces.
+      // data-album-id is the album the rows are listed under (album-origin
+      // sessions), so a click queues THIS album's edition of the track.
       const attrs = t.is_phantom
         ? `class="track-row is-phantom-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`
+          + (rowAlbumId ? ` data-album-id="${escapeHtml(rowAlbumId)}"` : '')
         : `class="track-row" data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}"`;
       trackParts.push(`
         <button ${attrs} type="button">
@@ -5797,6 +5814,8 @@
     // Phantom track row → stream + play that single track (mirrors clicking an
     // owned track). Display-only rows carry data-track-id (no media_file_id) and
     // stream via play-phantom-track; "Buffering…" shows under the title meanwhile.
+    // data-album-id (album/session screens) rides along: the track sits on every
+    // album that lists it, and the slot must be the album the row was clicked on.
     screen.querySelectorAll('.track-row.is-phantom-track[data-track-id]').forEach(row => {
       row.addEventListener('click', (e) => {
         if (e.target.closest('.track-add')) return;   // queue button handles its own
@@ -5807,7 +5826,7 @@
           setTrackBuffering(screen, tid, true);
           const resp = await fetch('/api/player/play-phantom-track', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ track_id: tid }),
+            body: JSON.stringify({ track_id: tid, album_id: row.dataset.albumId || null }),
           }).catch(() => null);
           let body = null;
           try { body = resp ? await resp.json() : null; } catch (_) {}
@@ -6074,7 +6093,7 @@
       setTrackBuffering(screen, tid, true);
       const resp = await fetch('/api/player/queue-phantom-track', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ track_id: tid, position }),
+        body: JSON.stringify({ track_id: tid, album_id: row.dataset.albumId || null, position }),
       }).catch(() => null);
       let body = null;
       try { body = resp ? await resp.json() : null; } catch (_) {}
