@@ -431,13 +431,24 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
     if not best:
         return 0
 
-    album_mbids = {r["mbid"] for r in db_query("""
-        SELECT mbid::text AS mbid FROM album_artists
-        WHERE album_id = %(al)s::uuid AND mbid IS NOT NULL
+    # The album's artists by MB gid and by normalized name. A credit head that
+    # IS one of them uses THAT artist's row — not the row of whichever
+    # artist's discography sync happens to be minting: a three-way album
+    # credit (Floating Points, Pharoah Sanders & the London Symphony
+    # Orchestra) minted from the orchestra's discography keyed every slot
+    # under the orchestra, which then sat as primary and featured at once.
+    album_rows = db_query("""
+        SELECT a.id::text AS id, a.name, aa.mbid::text AS mbid
+        FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
+        WHERE aa.album_id = %(al)s::uuid
         UNION
-        SELECT mbid::text FROM artist_mbids WHERE artist_id = %(ar)s::uuid
-    """, {"al": album_id, "ar": artist_id})}
-    album_key = normalize(artist_name)
+        SELECT a.id::text, a.name, am.mbid::text
+        FROM artist_mbids am JOIN artists a ON a.id = am.artist_id
+        WHERE am.artist_id = %(ar)s::uuid
+    """, {"al": album_id, "ar": artist_id})
+    album_by_mbid = {r["mbid"]: (r["id"], r["name"]) for r in album_rows if r["mbid"]}
+    album_by_key = {normalize(r["name"]): (r["id"], r["name"]) for r in album_rows}
+    album_by_key.setdefault(normalize(artist_name), (artist_id, artist_name))
 
     track_rows, artist_rows, credit_rows, slot_rows = [], [], [], []
     slot_artists: dict = {}
@@ -456,8 +467,12 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
                                     for m in members[1:]) if n]
         else:
             head, head_gid, featured = credit, tr.get("credit_artist_mbid"), []
-        if (not head or head_gid in album_mbids or normalize(head) == album_key):
+        own = (album_by_mbid.get(head_gid) if head_gid else None) \
+            or album_by_key.get(normalize(head)) if head else None
+        if not head:
             slot_artist_id, slot_artist_name = artist_id, artist_name
+        elif own:
+            slot_artist_id, slot_artist_name = own
         else:
             slot_artist_id, slot_artist_name = str(artist_uuid(head)), head
             credit_rows.append((slot_artist_id, head, latinize(head)))
